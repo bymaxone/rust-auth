@@ -1,0 +1,166 @@
+# ============================================
+# Dependencies
+# ============================================
+node_modules/
+.pnpm-store/
+
+# ============================================
+# Rust / Cargo (workspace build artefacts)
+# ============================================
+/target/
+**/target/
+**/*.rs.bk
+# Cargo.lock IS committed on purpose — this repo ships binaries/examples plus a
+# published library, so the lockfile is part of the supply-chain posture
+# (spec §4 / §19 / §21). Do NOT add Cargo.lock here.
+
+# ============================================
+# Coverage (cargo-llvm-cov) & Mutation (cargo-mutants)
+# ============================================
+*.profraw
+*.profdata
+lcov.info
+mutants.out/
+mutants.out.old/
+
+# ============================================
+# Fuzzing (cargo-fuzz / libFuzzer)
+# ============================================
+fuzz/target/
+fuzz/corpus/
+fuzz/artifacts/
+fuzz/coverage/
+
+# ============================================
+# WASM build output (wasm-pack / wasm-bindgen)
+# ============================================
+# wasm-pack output dir for the edge binding (regenerated at release).
+/bindings/bymax-auth-wasm/pkg/
+# The release build emits the WASM bundle into the npm package; it is never
+# hand-committed. (The ts-rs-generated types under
+# packages/rust-auth/src/shared ARE committed and drift-gated — do not ignore them.)
+/packages/rust-auth/wasm/
+
+# ============================================
+# Release artefacts (CycloneDX SBOM)
+# ============================================
+*.cdx.json
+
+# ============================================
+# Cryptographic Material
+# ============================================
+*.pem
+*.key
+*.p12
+*.pfx
+*.crt
+*.cer
+secrets/
+
+# ============================================
+# Environment Variables
+# ============================================
+.env
+.env.*
+!.env.example
+.env.local
+.env.*.local
+
+# ============================================
+# Build Outputs
+# ============================================
+dist/
+build/
+.next/
+*.tgz
+
+# ============================================
+# TypeScript
+# ============================================
+*.tsbuildinfo
+
+# ============================================
+# Testing & Coverage
+# ============================================
+coverage/
+coverage.json
+.nyc_output
+
+# ============================================
+# Logs
+# ============================================
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# ============================================
+# Cache Directories
+# ============================================
+.eslintcache
+.stylelintcache
+
+# ============================================
+# Package Manager Files
+# ============================================
+package-lock.json
+yarn.lock
+.yarn/cache
+.yarn/unplugged
+.yarn/build-state.yml
+.yarn/install-state.gz
+.yarn-integrity
+.pnp.*
+.npm
+
+# ============================================
+# IDEs and Editors
+# ============================================
+.idea/
+*.swp
+*.swo
+*~
+.project
+.classpath
+.c9/
+*.launch
+.settings/
+*.sublime-workspace
+.vscode-test
+# Ignore machine-specific VS Code state, but VERSION the shareable workspace config.
+# Use `.vscode/*` (not `.vscode/`) so the negations below can re-include files —
+# a dir-level ignore would block re-inclusion entirely.
+.vscode/*
+!.vscode/settings.json
+!.vscode/extensions.json
+!.vscode/launch.json
+!.vscode/tasks.json
+!.vscode/*.code-snippets
+
+# ============================================
+# OS Generated Files
+# ============================================
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# ============================================
+# Runtime & Temporary Files
+# ============================================
+pids
+*.pid
+*.pid.lock
+*.seed
+tmp/
+temp/
+
+# ============================================
+# Claude Code
+# ============================================
+.claude/
