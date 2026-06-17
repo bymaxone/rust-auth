@@ -18,7 +18,7 @@ When P1 is done, `bymax-auth-crypto` builds native and `wasm32` across its featu
 
 1. **RustCrypto only.** No `ring`, no OpenSSL, no C/C++ crypto bindings on any target. Mandatory deps: `hmac`, `sha2`, `subtle`, `rand`/`getrandom`. Hashers: `scrypt` (`scrypt` feature), `argon2` (`argon2` feature), `password-hash` (PHC). MFA-only: `aes-gcm`, `sha1`, `data-encoding` — all behind the `mfa` feature.
 2. **`#![forbid(unsafe_code)]`** stays; `#![deny(missing_docs)]` stays — every public item is documented with a rustdoc example where it clarifies usage.
-3. **Must compile to `wasm32-unknown-unknown`.** Where randomness is used, `getrandom` must be configured with the `js` feature for the wasm target so browser/edge RNG works.
+3. **Must compile to `wasm32-unknown-unknown`.** The crate depends on `getrandom` but, per `getrandom`'s library guidance, does **not** enable the `wasm_js` backend itself — it still compiles cleanly for `wasm32` without it. The `wasm_js` feature (which routes RNG to Web Crypto) is selected by the `bymax-auth-wasm` binding (Phase 11) and by this crate's own wasm tests.
 4. **Constant-time for every secret comparison** via `subtle::ConstantTimeEq` — never `==` on secret/derived bytes.
 5. **Typed errors only** (`CryptoError` via `thiserror`); no `unwrap`/`expect`/`panic!` on library paths; crypto failures collapse to opaque errors that never leak which step failed.
 6. **Hashing is synchronous here**; this crate exposes sync `hash`/`verify`. Document that callers (the engine, P4) must wrap them in `tokio::task::spawn_blocking` — this crate must not depend on Tokio.
@@ -29,7 +29,7 @@ When P1 is done, `bymax-auth-crypto` builds native and `wasm32` across its featu
 
 ## Reference docs
 
-- [`docs/technical_specification.md`](../technical_specification.md) — § 17 "Cryptography & Security Model" (crate-by-crate choices; always-compiled vs feature-gated; `secrecy`/`zeroize`; AES-GCM IV/tag; `subtle`; `getrandom` js; Base32). § 5.1.3 "Password configuration" (scrypt/Argon2id params + OWASP floors + PHC). § 7.2 "PasswordService" (rehash-on-verify flow; `spawn_blocking`; legacy `scrypt:hex:hex` compatibility).
+- [`docs/technical_specification.md`](../technical_specification.md) — § 17 "Cryptography & Security Model" (crate-by-crate choices; always-compiled vs feature-gated; `secrecy`/`zeroize`; AES-GCM IV/tag; `subtle`; `getrandom` `wasm_js`; Base32). § 5.1.3 "Password configuration" (scrypt/Argon2id params + OWASP floors + PHC). § 7.2 "PasswordService" (rehash-on-verify flow; `spawn_blocking`; legacy `scrypt:hex:hex` compatibility).
 - [`docs/development_plan.md`](../development_plan.md) — § P1, § "Global conventions".
 - `/bymax-workflow:standards` skill — universal coding rules (Rust-adapted).
 
@@ -59,12 +59,12 @@ When P1 is done, `bymax-auth-crypto` builds native and `wasm32` across its featu
 
 #### Description
 
-Wire the crate's dependencies and feature flags (`scrypt`, `argon2`, `mfa`), define the shared `CryptoError`, lay out the module skeleton, and configure `getrandom`'s `js` feature for the `wasm32` target.
+Wire the crate's dependencies and feature flags (`scrypt`, `argon2`, `mfa`), define the shared `CryptoError`, lay out the module skeleton, and depend on `getrandom` for the `wasm32` target **without** enabling its `wasm_js` backend in this reusable library (the leaf `bymax-auth-wasm` binding and this crate's wasm tests select it).
 
 #### Acceptance criteria
 
 - [ ] `Cargo.toml` declares mandatory deps (`hmac`, `sha2`, `subtle`, `rand`, `getrandom`, `password-hash`, `thiserror`, `secrecy` (carries `zeroize`), `zeroize`) and feature-gated deps: `scrypt` (`scrypt`), `argon2` (`argon2`), `aes-gcm` + `sha1` + `data-encoding` (`mfa`); `default = ["scrypt"]`.
-- [ ] `getrandom` is configured with the `js` feature for `cfg(target_arch = "wasm32")`.
+- [ ] `getrandom` is a dependency but its `wasm_js` backend is **not** enabled by this crate (per `getrandom`'s library guidance); the crate still builds for `wasm32-unknown-unknown` without it. The `wasm_js` backend is enabled downstream by the `bymax-auth-wasm` binding (Phase 11) and by this crate's own wasm tests.
 - [ ] `src/lib.rs` contains a `compile_error!` that fires at build time when neither the `scrypt` nor the `argon2` feature is enabled (at least one hasher is required); `cargo build -p bymax-auth-crypto --no-default-features` FAILS with that error.
 - [ ] `CryptoError` (thiserror) exists with opaque variants (e.g. `Hash`, `Verify`, `Decrypt`, `InvalidParams`, `Encoding`) that never reveal internal step detail.
 - [ ] Module skeleton exists: `compare`, `mac`, `token`, `password` (always), `aead` + `totp` (`#[cfg(feature = "mfa")]`).
@@ -99,13 +99,15 @@ PRECONDITIONS
 
 REQUIRED READING (only these sections — do not load more):
 - `docs/technical_specification.md` § 17 "Cryptography & Security Model" — the RustCrypto crate
-  list, the always-compiled vs `mfa`-gated split, and the `getrandom` js-feature requirement.
+  list, the always-compiled vs `mfa`-gated split, and the `getrandom` `wasm_js` rule (the
+  reusable crate does not enable it; the leaf `bymax-auth-wasm` binding and the wasm tests do).
 - `docs/technical_specification.md` § 19 "Dependencies & Feature Flags" — the per-crate dep
   classification and the feature matrix (for the crypto crate's `scrypt`/`argon2`/`mfa` features).
 
 TASK
-Set up the crate's dependencies, feature flags, error type, wasm/getrandom config, and an empty
-module skeleton. No primitive implementations yet — only the scaffolding the next tasks fill in.
+Set up the crate's dependencies, feature flags, error type, the `getrandom` dependency (without
+enabling its `wasm_js` backend in this reusable library), and an empty module skeleton. No
+primitive implementations yet — only the scaffolding the next tasks fill in.
 
 DELIVERABLES
 
@@ -121,13 +123,16 @@ DELIVERABLES
      argon2 = ["dep:argon2"]
      mfa = ["dep:aes-gcm", "dep:sha1", "dep:data-encoding"]
      ```
-   - The `js`-feature wiring for wasm randomness:
+   - Depend on `getrandom` but do **not** enable its `wasm_js` backend here — per `getrandom`'s
+     library guidance, enabling `wasm_js` in a reusable crate breaks non-Web wasm targets and bloats
+     `Cargo.lock`; the leaf `bymax-auth-wasm` binding (Phase 11) and this crate's own wasm tests
+     select it instead. A plain dependency is enough:
      ```toml
-     [target.'cfg(target_arch = "wasm32")'.dependencies]
-     getrandom = { version = "0.2", features = ["js"] }
+     getrandom = "0.4"
      ```
-     (Match the `getrandom` major version to what `rand` pulls; if `rand` is on `getrandom` 0.3,
-     use the equivalent 0.3 wasm-js config.)
+     (Match the `getrandom` major version to what `rand` pulls. The `wasm_js` feature is the 0.3/0.4
+     replacement for the old 0.2 `js` feature — it routes `wasm32-unknown-unknown` randomness to the
+     Web Crypto `getRandomValues` API via `wasm-bindgen`, and is enabled by the leaf wasm artifact.)
    - `[lints] workspace = true`.
    - `[dev-dependencies]`: `proptest`, `hex` (for known-answer vectors).
 
@@ -300,7 +305,7 @@ Implement CSPRNG-backed secure token generation used for refresh tokens, passwor
 
 - [ ] `token::generate_secure_token(byte_len: usize) -> String` draws `byte_len` bytes from a CSPRNG (`rand`/`getrandom`) and hex-encodes them; documents the entropy (`byte_len * 8` bits).
 - [ ] A `token::random_bytes(n: usize) -> Vec<u8>` (or fixed-size array variant) primitive backs it.
-- [ ] Works on `wasm32-unknown-unknown` (via `getrandom`'s `js` feature from Task 1.1).
+- [ ] Compiles for `wasm32-unknown-unknown` (the crate does not enable `getrandom`'s `wasm_js` backend itself; the leaf `bymax-auth-wasm` binding and the wasm tests supply it at runtime).
 - [ ] 100% coverage including a `proptest` asserting output length = `2 * byte_len` hex chars, charset is `[0-9a-f]`, and two successive tokens differ.
 
 #### Files to create / modify
@@ -318,12 +323,12 @@ crypto crate. Edition 2024.
 CURRENT PHASE: 1 (bymax-auth-crypto) — Task 1.3 of 6 (MIDDLE)
 
 PRECONDITIONS
-- Task 1.1 is done: the crate has `rand`/`getrandom` deps (with the wasm `js` feature) and an
-  empty `token.rs`.
+- Task 1.1 is done: the crate has `rand`/`getrandom` deps (the `wasm_js` backend is NOT enabled by
+  this crate — the leaf `bymax-auth-wasm` binding and the wasm tests select it) and an empty `token.rs`.
 
 REQUIRED READING (only these):
 - `docs/technical_specification.md` § 17 "Cryptography & Security Model" — secure token
-  generation (CSPRNG) and the wasm `getrandom` js requirement.
+  generation (CSPRNG) and the wasm `getrandom` `wasm_js` rule (enabled by the leaf binding, not here).
 - `docs/technical_specification.md` § 13 "JWT & Token Strategy" — what opaque tokens are used for
   (refresh tokens, reset/invite tokens, OAuth state, WS ticket) and their entropy expectations.
 

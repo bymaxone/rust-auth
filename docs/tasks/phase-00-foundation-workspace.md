@@ -16,7 +16,7 @@ Phase 0 produces a **building, fully-gated, empty workspace**: a Cargo workspace
 
 ## Rules-of-phase
 
-1. **Edition 2024**, with a pinned MSRV declared in `[workspace.package].rust-version` and `rust-toolchain.toml`.
+1. **Edition 2024**, with a pinned MSRV (the support floor) in `[workspace.package].rust-version` and a pinned toolchain (latest stable) in `rust-toolchain.toml` — they are intentionally distinct; the `msrv` CI job builds on the floor.
 2. **`#![forbid(unsafe_code)]`** on every first-party crate — the **sole exception** is `bymax-auth-wasm`, which confines `wasm-bindgen`'s generated `unsafe` under `#![deny(unsafe_op_in_unsafe_fn)]` with a documented justification.
 3. **`#![deny(missing_docs)]`** on every public crate; each crate carries a crate-level `//!` doc.
 4. **`cargo fmt --check`** and **`cargo clippy --workspace -- -D warnings`** are clean.
@@ -110,8 +110,8 @@ DELIVERABLES
 
 1. `Cargo.toml` (workspace root):
    - `[workspace]` with `resolver = "3"` and `members = ["crates/*", "bindings/*"]`.
-   - `[workspace.package]` with `edition = "2024"`, `rust-version = "1.85"` (pick a recent
-     stable as MSRV and keep it consistent with Task 0.2), `license = "MIT"`,
+   - `[workspace.package]` with `edition = "2024"`, `rust-version = "1.90"` (a recent-stable MSRV floor; the toolchain in Task 0.2
+     tracks the latest stable and the `msrv` CI job builds on this floor), `license = "MIT"`,
      `repository = "https://github.com/bymaxone/rust-auth"`, `authors = ["Bymax One"]`.
    - A `[workspace.dependencies]` section (may start empty or with shared internal-crate
      version pins) so member crates can use `workspace = true` later.
@@ -123,7 +123,7 @@ DELIVERABLES
 
    [workspace.package]
    edition = "2024"
-   rust-version = "1.85"
+   rust-version = "1.90"
    license = "MIT"
    repository = "https://github.com/bymaxone/rust-auth"
    authors = ["Bymax One"]
@@ -238,7 +238,7 @@ DELIVERABLES
 1. `rust-toolchain.toml`:
    ```toml
    [toolchain]
-   channel = "1.85"            # keep equal to [workspace.package].rust-version (MSRV)
+   channel = "1.96"            # latest stable for dev/CI; the MSRV floor (rust-version = 1.90) is lower and enforced by the dedicated `msrv` CI job
    components = ["rustfmt", "clippy", "llvm-tools-preview"]
    targets = ["wasm32-unknown-unknown"]
    ```

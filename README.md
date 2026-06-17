@@ -526,7 +526,7 @@ When integrating `bymax-auth` in production, verify each of the following:
   <img src="https://img.shields.io/badge/Axum-0.8-000000?style=flat-square&logo=rust&logoColor=white" alt="Axum" />
   <img src="https://img.shields.io/badge/RustCrypto-pure--rust-000000?style=flat-square&logo=rust&logoColor=white" alt="RustCrypto" />
   <img src="https://img.shields.io/badge/WebAssembly-edge-654FF0?style=flat-square&logo=webassembly&logoColor=white" alt="WebAssembly" />
-  <img src="https://img.shields.io/badge/Redis-7%2B-DC382D?style=flat-square&logo=redis&logoColor=white" alt="Redis" />
+  <img src="https://img.shields.io/badge/Redis-8-DC382D?style=flat-square&logo=redis&logoColor=white" alt="Redis" />
   <img src="https://img.shields.io/badge/React-19-61DAFB?style=flat-square&logo=react&logoColor=black" alt="React" />
   <img src="https://img.shields.io/badge/Next.js-16-000000?style=flat-square&logo=next.js&logoColor=white" alt="Next.js" />
   <img src="https://img.shields.io/badge/TypeScript-strict-3178C6?style=flat-square&logo=typescript&logoColor=white" alt="TypeScript" />
@@ -541,7 +541,7 @@ Authentication is critical infrastructure, so the suite is held to a bar beyond 
 - ✅ **100% line + region coverage** — enforced as a release gate via [`cargo-llvm-cov`](https://github.com/taiki-e/cargo-llvm-cov) across the full `cargo-hack` feature matrix
 - ✅ **Near-100% mutation score** — verified with [`cargo-mutants`](https://mutants.rs/): faults are seeded into the source and the suite must catch them
 - ✅ **Property tests + fuzzing** — `proptest` round-trips and `cargo-fuzz` smoke runs over the trust-boundary parsers (JWT, PHC, base32)
-- ✅ **Real-Redis E2E** — atomic Lua, rotation/grace, and revocation proven against `redis:7` via [`testcontainers`](https://github.com/testcontainers/testcontainers-rs)
+- ✅ **Real-Redis E2E** — atomic Lua, rotation/grace, and revocation proven against `redis:8` via [`testcontainers`](https://github.com/testcontainers/testcontainers-rs)
 - ✅ **Edge parity** — `wasm-bindgen-test` confirms the WASM verifier accepts a token signed by the backend
 - ✅ **Supply chain** — `cargo-deny` (advisories/licenses/bans/sources), `cargo-vet`, a dependency budget, and `cargo-public-api` + `cargo-semver-checks` on every PR
 

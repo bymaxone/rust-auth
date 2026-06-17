@@ -5142,11 +5142,11 @@ pub fn constant_time_eq(a: &[u8], b: &[u8]) -> bool; // wraps subtle::ConstantTi
 
 Length mismatch may short-circuit (it leaks only length); to avoid even that, secret comparisons are performed over fixed-length SHA-256 digests rather than raw values, exactly as in nest-auth.
 
-#### Randomness — `rand` + `getrandom` (with the `js` feature on wasm)
+#### Randomness — `rand` + `getrandom` (with the `wasm_js` feature on wasm)
 
 All randomness — password salts, AES IVs, TOTP secrets, opaque tokens, OTP digits, OAuth state, JTIs — comes from the OS CSPRNG via `getrandom`, surfaced through `rand`'s `OsRng`. `Math.random`-class non-cryptographic generators are banned.
 
-> **WASM RNG.** On `wasm32-unknown-unknown` in a browser/edge runtime there is no OS RNG syscall; `getrandom` must be built with its **`js`** feature so it routes to the Web Crypto `crypto.getRandomValues`. This is required for any edge code path that generates randomness. (The edge proxy primarily *verifies* JWTs and generates little to no secret material, but the feature is enabled to keep the crypto crate uniformly buildable for wasm.)
+> **WASM RNG.** On `wasm32-unknown-unknown` in a browser/edge runtime there is no OS RNG syscall; `getrandom` must be built with its **`wasm_js`** feature so it routes to the Web Crypto `crypto.getRandomValues`. Per `getrandom`'s guidance, a reusable library must **not** enable `wasm_js` unconditionally (it would break non-Web wasm targets and bloat the lock file): `bymax-auth-crypto` therefore depends on `getrandom` but leaves the backend unselected, and still compiles cleanly for `wasm32` without it. The `wasm_js` backend is instead enabled by the **leaf wasm artifact** — the `bymax-auth-wasm` binding (the browser/edge `cdylib`) — and by this crate's own wasm tests; that leaf selects the runtime RNG for any edge code path that generates randomness. (The edge proxy primarily *verifies* JWTs and generates little to no secret material.)
 
 #### TOTP (RFC 6238, `mfa` feature) — hand-rolled over `hmac`+`sha1`+`subtle`, base32 via `data-encoding`
 
@@ -5195,7 +5195,7 @@ These are the Rust equivalents of nest-auth's "node:crypto only / `timingSafeEqu
 1. **RustCrypto only.** No `ring`, no OpenSSL, no C/C++ crypto bindings on any target. The HS256 primitive is one implementation (`bymax-auth-jwt`) shared by server and edge; the password/AES/TOTP primitives live in `bymax-auth-crypto`. Both crates are `#![forbid(unsafe_code)]`. The **single documented exception** is `bymax-auth-wasm`, where `wasm-bindgen` emits generated `unsafe` glue: that crate cannot `forbid` it and instead confines `unsafe` to the bindgen boundary under `#![deny(unsafe_op_in_unsafe_fn)]` (justified in §19.4). RustCrypto-only and the hand-rolled pure-Rust HS256 are equally **dependency-minimization** choices — they keep the crypto/JWT crates free of C/C++ bindings and heavy transitive trees (supply-chain rationale: §19.6). `#![forbid(unsafe_code)]` constrains only *first-party* code; to keep visibility into the *transitive* tree a **non-blocking `cargo-geiger` scan runs at release** (§19.6, §21), reporting `unsafe` reachable through dependencies. It gates nothing on its own, but a jump in transitive `unsafe` is reviewed before publishing.
 2. **Constant-time secret comparison, always.** No `==` on secret bytes anywhere; `subtle`/constant-time verifiers are the only sanctioned path.
 3. **HS256 pinned.** Verification never honors the token's `alg`; non-HS256 and `none` are rejected before signature math.
-4. **CSPRNG for all secret material.** `getrandom`/`OsRng` only (with the `js` feature on wasm); no `Math.random`-class generators; AES-GCM IVs are unique per encryption.
+4. **CSPRNG for all secret material.** `getrandom`/`OsRng` only (with the `wasm_js` feature on wasm); no `Math.random`-class generators; AES-GCM IVs are unique per encryption.
 5. **Secrets encrypted/hashed at rest.** TOTP secrets AES-256-GCM-encrypted; passwords scrypt/Argon2id-hashed (PHC, rehash-on-verify); recovery codes keyed-HMAC-SHA-256-hashed; high-entropy tokens SHA-256-hashed; low-entropy identifiers (and recovery codes) HMAC-keyed; keys zeroized in memory.
 6. **Secrets never logged.** Diagnostics use codes, `jti`, and truncated SHA-256 of identifiers — never tokens, passwords, OTPs, or TOTP secrets.
 7. **HttpOnly + Secure-by-default cookies, scoped paths.** Token cookies are HttpOnly; `Secure` defaults on outside development; refresh cookie is `SameSite=Strict` + path-scoped; `SameSite=None` is rejected without `Secure` (§14).
@@ -5597,8 +5597,9 @@ export function verify_totp(secret_b32: string, code: string, window: number): b
   bundler's `server-only` guard should catch it.
 - **Algorithm pinning:** only HS256 is accepted; `RS256`/`ES256`/`none` are
   rejected inside Rust, closing the algorithm-confusion vector at the source.
-- **`getrandom` `js` feature:** any randomness on the WASM target routes through
-  the Web Crypto `getRandomValues` shim (`getrandom`'s `js` backend). HS256
+- **`getrandom` `wasm_js` feature:** any randomness on the WASM target routes through
+  the Web Crypto `getRandomValues` shim (`getrandom`'s `wasm_js` backend, enabled by
+  this leaf binding). HS256
   verification itself needs no RNG; the optional (non-shipped) password/TOTP
   surface does.
 - **No std-net, no filesystem, no tokio:** the wasm subset is pure compute.
@@ -5877,7 +5878,7 @@ crate the WASM target and the server target both depend on for shapes.
 | `scrypt`          | default (`scrypt`) | Default password KDF (parity with nest-auth scrypt N=2^15,r=8,p=1) |
 | `hmac` + `sha2`   | mandatory         | HMAC-SHA256 (brute-force identifier), SHA-256 (token/recovery hashing) |
 | `subtle`          | mandatory         | Constant-time comparison (replaces `crypto.timingSafeEqual`)     |
-| `rand` / `getrandom` | mandatory      | CSPRNG for salts, secrets, secure tokens; `getrandom` `js` feature on wasm |
+| `rand` / `getrandom` | mandatory      | CSPRNG for salts, secrets, secure tokens; `getrandom` `wasm_js` feature on wasm |
 | `secrecy`         | mandatory         | Wraps the AES/MFA key (same wrapper used for the JWT secret) — redacting, zeroize-on-drop |
 | `zeroize`         | mandatory         | Wipe residual key/secret buffers after use (also the base `secrecy` builds on) |
 | `argon2`          | feature `argon2`  | Alternative password KDF (configurable; see §19.3)               |
@@ -5973,7 +5974,7 @@ browser client stays TS (§18).
 | `wasm-bindgen`    | JS ↔ WASM bindings                                                   |
 | `bymax-auth-jwt`  | the verification code itself                                        |
 | `bymax-auth-crypto` (optional, `wasm-extra`) | password/TOTP edge surface           |
-| `getrandom` (with `js`) | RNG via Web Crypto on the wasm target                         |
+| `getrandom` (with `wasm_js`) | RNG via Web Crypto on the wasm target                    |
 | `serde` + `serde_json` (+ `serde-wasm-bindgen`) | marshal claims out as JS values     |
 | `console_error_panic_hook` (dev) | readable panics in the browser console               |
 
@@ -6028,8 +6029,11 @@ ships inside the `axum` adapter. `ts-rs` generation is a build-time feature on t
 **wasm-safe subset (what `wasm` and `bymax-auth-wasm` may use):** only
 `bymax-auth-types`, `bymax-auth-jwt`, and — under `wasm-extra` —
 `bymax-auth-crypto`. The `wasm` feature **must not** transitively enable `tokio`,
-`reqwest`, `redis`, `axum`, or `mio`/std-net. `getrandom` is configured with its
-`js` feature on `wasm32-unknown-unknown` so any RNG resolves to Web Crypto. A CI
+`reqwest`, `redis`, `axum`, or `mio`/std-net. `getrandom`'s `wasm_js` feature
+(which resolves RNG to Web Crypto on `wasm32-unknown-unknown`) is enabled by the
+`bymax-auth-wasm` leaf binding, **not** baked unconditionally into the reusable
+`bymax-auth-crypto` library — per `getrandom`'s guidance the library leaves the
+backend unselected and still compiles for `wasm32` without it. A CI
 job builds `-p bymax-auth-wasm --target wasm32-unknown-unknown --no-default-features --features wasm`
 to prove the subset stays wasm-clean (§20, §21).
 
@@ -6181,7 +6185,7 @@ below **and** the `cargo-vet` audit set.
 | `hmac` (RustCrypto) | mandatory-core | HS256 signing + HMAC-SHA256 keyed identifiers | always | a bespoke HMAC would be unaudited; banned by the crypto policy | MIT/Apache-2.0 | RustCrypto, audited | Yes |
 | `sha2` (RustCrypto) | mandatory-core | SHA-256 (token/recovery hashing) + HS256 digest | always | same audited-primitive rationale | MIT/Apache-2.0 | RustCrypto, audited | Yes |
 | `subtle` | mandatory-core | constant-time compare of secrets/tags | always | `==` on secret bytes is a timing oracle; banned by lint | BSD-3-Clause | tiny, dalek-maintained | Yes |
-| `rand` / `getrandom` | mandatory-core | CSPRNG for salts, IVs, tokens, OTPs | always; `getrandom` `js` on wasm | non-CSPRNG generators banned; OS entropy required | MIT/Apache-2.0 | widely used; `js` feature → Web Crypto on wasm | Yes |
+| `rand` / `getrandom` | mandatory-core | CSPRNG for salts, IVs, tokens, OTPs | always; `getrandom` `wasm_js` on wasm | non-CSPRNG generators banned; OS entropy required | MIT/Apache-2.0 | widely used; `wasm_js` feature → Web Crypto on wasm | Yes |
 | `base64` | mandatory-core | base64url for JWT segments (in `bymax-auth-jwt`) | always (via jwt) | hand-rolled base64url is error-prone; `data-encoding` kept MFA-only to keep the JWT/wasm path lean | MIT/Apache-2.0 | tiny, pure-Rust | Yes |
 | `async-trait` | mandatory-core | object-safe `Arc<dyn _>` plugin traits (repo/email/store/oauth/`HttpClient`) | always (core) | native async-in-trait not yet object-safe for these call sites (§3.7) | MIT/Apache-2.0 | tiny, proc-macro only | Not in wasm subset |
 | `tracing` | mandatory-core | structured diagnostics (replaces Nest `Logger`) | always (core) | `log` lacks the spans/structured fields auth auditing needs | MIT | widely used | Not in wasm subset |
@@ -6367,7 +6371,7 @@ nest-auth used for its in-memory fakes:
      hermetic and fast — the equivalent of nest-auth's `ioredis-mock`.
   2. **Fidelity tier:** **`testcontainers`-driven real Redis** integration tests
      that exercise the actual Lua scripts and `deadpool-redis` pooling against a
-     live `redis:7` container. These run in CI (and on demand locally) to prove
+     live `redis:8` container. These run in CI (and on demand locally) to prove
      the Lua/atomicity behaviour the in-memory fake only simulates.
 
 ### 20.3 Property-based testing (`proptest`)
@@ -6421,7 +6425,7 @@ executable documentation for docs.rs.
   asserting `verify_jwt_hs256` / `decode_jwt` / `extract_claims` behave
   **identically to the native `bymax-auth-jwt` tests** — the same fixtures fed
   to both targets, proving server/edge parity. Native coverage covers the shared
-  logic; the wasm tests cover the bindgen boundary and the `getrandom` `js` path.
+  logic; the wasm tests cover the bindgen boundary and the `getrandom` `wasm_js` path.
 
 ### 20.6 Mutation testing — `cargo-mutants` (PRE-RELEASE gate, near-100%)
 
@@ -6957,7 +6961,7 @@ These should be resolved during foundation work (early roadmap phases); each car
 
 - **Parity source of truth** — `@bymax-one/nest-auth`: repository at `~/Documents/MyApps/nest-auth`; its `docs/technical_specification.md`, `docs/guidelines/`, and `docs/mutation_testing_{plan,results}.md`.
 - **Bymax standards** — `@bymax-one/*` Library Standards (README/badges, packaging, mutation testing, CI/CD, dogfood); Bymax Rust stack conventions and gotchas; Bymax GitHub-Actions conventions (least-privilege, OIDC trusted publishing, workflow set).
-- **Rust ecosystem** — Axum (0.8, native-async `FromRequestParts`); the RustCrypto crates (`scrypt`, `argon2`, `aes-gcm`, `hmac`, `sha2`, `sha1`, `subtle`); `rand`/`getrandom` (`js` feature for wasm); `data-encoding`; `redis`/`deadpool-redis`/`fred`; `reqwest` (optional, behind `oauth-reqwest`/`client`); `oauth2`; `serde`/`garde`; `thiserror`; `tracing`; `async-trait`.
+- **Rust ecosystem** — Axum (0.8, native-async `FromRequestParts`); the RustCrypto crates (`scrypt`, `argon2`, `aes-gcm`, `hmac`, `sha2`, `sha1`, `subtle`); `rand`/`getrandom` (`wasm_js` feature for wasm); `data-encoding`; `redis`/`deadpool-redis`/`fred`; `reqwest` (optional, behind `oauth-reqwest`/`client`); `oauth2`; `serde`/`garde`; `thiserror`; `tracing`; `async-trait`.
 - **Packaging & quality** — `ts-rs`/`typeshare` (Rust→TS types); `wasm-bindgen` + `wasm-pack` (npm WASM); `cargo-llvm-cov` (coverage); `cargo-mutants` (mutation); `proptest` + `cargo-fuzz` (property/fuzz); `criterion` (benchmarks); `cargo-deny` + `cargo-audit` (supply chain); `release-plz`/`cargo-release`; crates.io and npm OIDC Trusted Publishing; CodeQL (Rust support); TypeDoc (npm API docs); docs.rs (Rust API docs).
 - **Supply-chain provenance** — `cargo-vet` (Mozilla dependency-audit ledger, <https://mozilla.github.io/cargo-vet/>); **CycloneDX** SBOM standard (<https://cyclonedx.org/>) via `cargo-cyclonedx`; **GitHub Artifact Attestations** (<https://docs.github.com/actions/security-guides/using-artifact-attestations-to-establish-provenance-for-builds>) with `gh attestation verify`; OpenSSF Scorecard (<https://github.com/ossf/scorecard>); crates.io Trusted Publishing (OIDC) and npm Trusted Publishing / provenance.
 
@@ -7087,7 +7091,7 @@ sign-off — never a silent edit.
 
 16. **CSPRNG for all secret material.** Refresh/reset/invite tokens, OAuth
     `state`, OTPs, recovery codes, MFA secrets, and AES-GCM IVs come only from
-    `getrandom`/`OsRng` (the `js` feature on wasm); no predictable generator is
+    `getrandom`/`OsRng` (the `wasm_js` feature on wasm); no predictable generator is
     ever used, and AES-GCM IVs are unique per encryption. *Enforced in:* §17.1,
     §17.3 (item 4).
 

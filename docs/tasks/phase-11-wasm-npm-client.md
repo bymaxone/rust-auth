@@ -66,7 +66,7 @@ When P11 is done, the npm package builds dual ESM+CJS with a `.d.ts` per subpath
 
 #### Description
 
-Implement the `bindings/bymax-auth-wasm` cdylib: the wasm-bindgen edge surface (`decode_jwt`, `verify_jwt_hs256` with secret zeroization, `extract_claims`) over the wasm-safe subset of `bymax-auth-jwt`, built via `wasm-pack --target bundler`, HS256-pinned, `getrandom` `js` backend.
+Implement the `bindings/bymax-auth-wasm` cdylib: the wasm-bindgen edge surface (`decode_jwt`, `verify_jwt_hs256` with secret zeroization, `extract_claims`) over the wasm-safe subset of `bymax-auth-jwt`, built via `wasm-pack --target bundler`, HS256-pinned, `getrandom` `wasm_js` backend.
 
 #### Acceptance criteria
 
@@ -75,7 +75,7 @@ Implement the `bindings/bymax-auth-wasm` cdylib: the wasm-bindgen edge surface (
 - [ ] `decode_jwt(token) -> String` returns the JSON header+payload with **no** signature check (decode-only, non-authoritative); `extract_claims(token)` returns the typed claims projection.
 - [ ] Only HS256 is accepted — `RS256`/`ES256`/`none` are rejected inside Rust (algorithm-confusion closed at the source).
 - [ ] The optional password/TOTP surface is gated behind a `wasm-extra` Cargo feature and **excluded** from the npm-distributed build (`wasm-pack build … --target bundler --release` without `--features wasm-extra`).
-- [ ] The crate is `crate-type = ["cdylib", "rlib"]` (`rlib` so `wasm-pack test` can link the crate as a library), depends directly on `bymax-auth-jwt` + `bymax-auth-types` (optionally `bymax-auth-crypto`), uses `getrandom`'s `js` backend, and pulls no `tokio`/`reqwest`/std-net; it is **not** reachable through the `bymax-auth` facade.
+- [ ] The crate is `crate-type = ["cdylib", "rlib"]` (`rlib` so `wasm-pack test` can link the crate as a library), depends directly on `bymax-auth-jwt` + `bymax-auth-types` (optionally `bymax-auth-crypto`), enables `getrandom`'s `wasm_js` backend (`getrandom = { version = "0.4", features = ["wasm_js"] }`) so randomness routes to Web Crypto, and pulls no `tokio`/`reqwest`/std-net; it is **not** reachable through the `bymax-auth` facade.
 - [ ] `wasm-pack test --headless` passes (verify/decode round-trip, expiry rejection, `alg` rejection); `#![deny(unsafe_op_in_unsafe_fn)]` (the bindgen glue's only allowance).
 - [ ] A concrete size budget is set for the emitted `*_bg.wasm` so the CI `check-size` gate (§21.1) is real, not a placeholder — a documented-as-adjustable gzipped ceiling of **≤ 350 KB** (the npm JWT-only build, without `wasm-extra`); the number may be revised as `wasm-opt` output settles, but the gate must always enforce a fixed value.
 
@@ -105,7 +105,7 @@ PRECONDITIONS
 REQUIRED READING (only these):
 - `docs/technical_specification.md` § 18.2 "bymax-auth-wasm — edge JWT as the single source of truth"
   (§18.2.1 JS surface, §18.2.2 build, §18.2.3 consumption) — the three exports, secret zeroization,
-  the server/edge-only rule, HS256 pinning, `getrandom` `js`, the `wasm-extra` excluded surface.
+  the server/edge-only rule, HS256 pinning, `getrandom` `wasm_js`, the `wasm-extra` excluded surface.
 - `docs/technical_specification.md` § 13.2 "One pure-Rust HS256 implementation, server + edge".
 - `docs/technical_specification.md` § 13.6 "Lifetimes, rotation, grace window, clock skew" — the edge
   `leeway_secs` (the edge build accepts a small configurable leeway; the native server runs with `0`).
@@ -117,7 +117,7 @@ build it with `wasm-pack --target bundler`.
 DELIVERABLES
 
 1. `bindings/bymax-auth-wasm/Cargo.toml` — `crate-type = ["cdylib", "rlib"]` (`rlib` so `wasm-pack test`
-   links the crate); deps `bymax-auth-jwt`, `bymax-auth-types`, `wasm-bindgen`, `getrandom` (`js`),
+   links the crate); deps `bymax-auth-jwt`, `bymax-auth-types`, `wasm-bindgen`, `getrandom = { version = "0.4", features = ["wasm_js"] }`,
    `zeroize`, `serde`/`serde_json` (+ `serde-wasm-bindgen` to marshal claims out as JS values),
    `console_error_panic_hook` (dev, readable panics in the browser console); a `wasm-extra` feature for
    the optional password/TOTP surface (NOT enabled in the npm build).
