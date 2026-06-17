@@ -190,7 +190,7 @@ CI gate, and supply-chain scaffolding so all later phases build on green, reprod
 - Password hashing over RustCrypto: `scrypt` (default feature, the always-compiled writer) and `argon2`/Argon2id (the `argon2` feature); self-describing **PHC** strings (`$scrypt$…` / `$argon2id$…`) with a 16-byte random salt and 32-byte output; a compatibility parser for the legacy `scrypt:hex:hex` corpus that always reports as stale.
 - `verify` is total — malformed/unknown hashes return `false`, never an error (uniform error-path timing); rehash-detection inputs (`needs_rehash`-style parse of algorithm + parameters) so a caller can compare a stored hash to current params.
 - Constant-time comparison wrapper over `subtle` (the only sanctioned secret comparison), short-circuiting only on length mismatch over fixed-length digests.
-- CSPRNG secure-token generation (opaque tokens, salts, IVs, OTP digits) via `rand`/`getrandom` (`OsRng`), with `getrandom`'s `js` feature on `wasm32`.
+- CSPRNG secure-token generation (opaque tokens, salts, IVs, OTP digits) via `rand`/`getrandom` (`OsRng`), with `getrandom`'s `wasm_js` backend on `wasm32` (enabled by the WASM leaf binding in P11, not the crypto crate itself).
 - Mandatory hashing helpers: SHA-256 (high-entropy secret → key suffix) and keyed HMAC-SHA-256 (low-entropy identifier and recovery-code hashing).
 - In-memory secret handling: `secrecy`/`zeroize`, with transient key bytes held in `Zeroizing` buffers.
 - MFA-gated set (behind this crate's `mfa` feature): AES-256-GCM encrypt/decrypt (`aes-gcm`, wire `base64(iv):base64(tag):base64(ciphertext)`, fresh 12-byte IV per call, 16-byte tag), TOTP per RFC 6238/4226 over `hmac`+`sha1`, and Base32 via `data-encoding` for `otpauth://` URIs (`generate_totp_secret`, `build_totp_uri`, `verify_totp`).
@@ -363,7 +363,7 @@ CI gate, and supply-chain scaffolding so all later phases build on green, reprod
 - Anything wasm/edge — this crate is never linked into the `wasm32` build.
 
 **Definition of Done**
-- Stores pass integration tests against a real Redis via `testcontainers` (`redis:7`).
+- Stores pass integration tests against a real Redis via `testcontainers` (`redis:8`).
 - Lua atomicity is verified: rotation cannot double-spend a refresh token; revoke is ownership-checked (no cross-user revoke); the brute-force window starts at the first failure and does not slide; `otp_verify` bumps attempts preserving residual TTL and consumes on success; the WS ticket is single-use via `GETDEL`.
 - Every key is namespaced; no raw secret or PII is ever resident as a key (hashed/HMAC); every key carries a TTL.
 - Stored JSON is camelCase and round-trips with the shared DTOs in `bymax-auth-types`.
@@ -600,7 +600,7 @@ Build the Axum adapter that exposes every engine capability over HTTP — the co
 Publish the edge/frontend surface — the WASM edge JWT verifier, the four-subpath npm package, and the native Rust client — and prove a React app and a Next.js middleware authenticate against the running Rust backend with zero type drift.
 
 **Scope — In**
-- `bindings/bymax-auth-wasm` (`cdylib`): the wasm-bindgen edge surface (`decode_jwt`, `verify_jwt_hs256` with secret zeroization, `extract_claims`) over the wasm-safe subset of `bymax-auth-jwt`, built via `wasm-pack --target bundler` (npm-only, never crates.io); HS256 pinned, `getrandom` `js` backend.
+- `bindings/bymax-auth-wasm` (`cdylib`): the wasm-bindgen edge surface (`decode_jwt`, `verify_jwt_hs256` with secret zeroization, `extract_claims`) over the wasm-safe subset of `bymax-auth-jwt`, built via `wasm-pack --target bundler` (npm-only, never crates.io); HS256 pinned, `getrandom` `wasm_js` backend (`features = ["wasm_js"]`).
 - The npm package `@bymax-one/rust-auth` (`packages/rust-auth`) with `./shared` (ts-rs-generated types + constants, plus the hand-written `AuthClientError` and `buildAuthRefreshSkipSuffixes`), `./client` (native-`fetch` single-flight client), `./react` (`AuthProvider` / `useAuth` / `useSession` / `useAuthStatus`), and `./nextjs` (`createAuthProxy` + route handlers + the WASM-backed `verifyJwtToken`).
 - Dual ESM+CJS build per subpath with the scoped `sideEffects` array and the bundled `wasm/` asset; no `.` root export.
 - The Rust `crates/bymax-auth-client` crate (`reqwest`, `client` feature) — the native typed auth client for Rust consumers.
