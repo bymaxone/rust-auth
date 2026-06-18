@@ -72,7 +72,7 @@ jobs:
           # that specific empty-workspace state (emitting an empty report); any other
           # failure fails the job. This becomes a normal coverage gate the moment the
           # crates gain functions and tests.
-          if cargo llvm-cov --workspace --all-features --lcov --output-path lcov.info 2> "$cov_err"; then
+          if cargo llvm-cov --workspace --all-features --locked --lcov --output-path lcov.info 2> "$cov_err"; then
             cat "$cov_err" >&2 || true
           elif grep -q 'no coverage data found' "$cov_err"; then
             cat "$cov_err" >&2
@@ -126,4 +126,4 @@ jobs:
         with:
           target: wasm32-unknown-unknown
       # The edge binding must compile wasm-clean — no tokio / std-net leakage.
-      - run: cargo build -p bymax-auth-wasm --target wasm32-unknown-unknown
+      - run: cargo build -p bymax-auth-wasm --target wasm32-unknown-unknown --locked
