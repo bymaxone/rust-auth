@@ -1,0 +1,3 @@
+set -e
+cargo fmt --all --check
+cargo test --workspace

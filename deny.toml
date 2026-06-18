@@ -1,0 +1,52 @@
+# Supply-chain policy for the workspace, enforced by `cargo deny check` in CI
+# (advisories + licenses + bans + sources). See the technical specification §19.6
+# for the rationale behind each rule.
+
+[graph]
+# Resolve with every feature enabled so the gate sees the full dependency graph,
+# not just the default-feature subset.
+all-features = true
+
+[advisories]
+# A new RustSec advisory against the committed Cargo.lock fails CI. Vulnerability
+# and unsound advisories are always denied by cargo-deny and cannot be weakened
+# here, so only the configurable knobs are set: `unmaintained = "all"` flags every
+# unmaintained crate (not just workspace-direct ones), and yanked versions are
+# errors. `ignore` records intentional, reviewed exceptions (none yet).
+unmaintained = "all"
+yanked = "deny"
+ignore = []
+
+[licenses]
+# Permissive licenses only. Every copyleft family (GPL/AGPL/LGPL/MPL) is denied by
+# omission, and an unlisted license fails closed.
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-DFS-2016",
+    "Unicode-3.0",
+]
+confidence-threshold = 0.9
+
+[bans]
+# Graph bloat is a supply-chain smell: a second semver-major copy of any crate fails.
+multiple-versions = "deny"
+# A `*` version requirement is too imprecise for a security-sensitive graph.
+wildcards = "deny"
+deny = [
+    { crate = "openssl", reason = "TLS is rustls; no OpenSSL on any path (spec §19.6 ban-list)." },
+    { crate = "openssl-sys", reason = "C OpenSSL bindings are banned — preserves the zero-native-binding posture." },
+    { crate = "ring", reason = "ring breaks the wasm32 edge build and is non-RustCrypto; RustCrypto is the crypto policy (spec §19.6)." },
+]
+# No duplicate-version exceptions are needed on the current graph.
+skip = []
+skip-tree = []
+
+[sources]
+# crates.io only — no git dependencies, no vendored or unknown registries.
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

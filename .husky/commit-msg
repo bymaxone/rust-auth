@@ -1,0 +1,2 @@
+set -e
+npx --no -- commitlint --edit "$1"

@@ -1,6 +1,6 @@
 # Phase 0 — Foundation: workspace, toolchain & CI skeleton
 
-> **Status**: 📋 ToDo · **Progress**: 0 / 6 tasks · **Last updated**: 2026-06-17
+> **Status**: ✅ Done · **Progress**: 6 / 6 tasks · **Last updated**: 2026-06-17
 > **Source roadmap**: [`docs/development_plan.md`](../development_plan.md) § P0
 > **Source spec**: [`docs/technical_specification.md`](../technical_specification.md)
 
@@ -42,12 +42,12 @@ Phase 0 produces a **building, fully-gated, empty workspace**: a Cargo workspace
 
 | ID | Task | Status | Priority | Size | Depends on |
 |---|---|---|---|---|---|
-| 0.1 | Cargo workspace + crate skeletons | 📋 ToDo | P0 | M | — |
-| 0.2 | Toolchain pinning, workspace lints & formatting | 📋 ToDo | P0 | S | 0.1 |
-| 0.3 | Facade feature taxonomy, hasher guard & docs.rs metadata | 📋 ToDo | P0 | M | 0.1 |
-| 0.4 | Supply-chain configuration (deny / vet / audit) | 📋 ToDo | P0 | M | 0.1 |
-| 0.5 | CI skeleton workflow | 📋 ToDo | P0 | M | 0.1, 0.2, 0.3, 0.4 |
-| 0.6 | Repo governance & docs files | 📋 ToDo | P1 | S | 0.1 |
+| 0.1 | Cargo workspace + crate skeletons | ✅ Done | P0 | M | — |
+| 0.2 | Toolchain pinning, workspace lints & formatting | ✅ Done | P0 | S | 0.1 |
+| 0.3 | Facade feature taxonomy, hasher guard & docs.rs metadata | ✅ Done | P0 | M | 0.1 |
+| 0.4 | Supply-chain configuration (deny / vet / audit) | ✅ Done | P0 | M | 0.1 |
+| 0.5 | CI skeleton workflow | ✅ Done | P0 | M | 0.1, 0.2, 0.3, 0.4 |
+| 0.6 | Repo governance & docs files | ✅ Done | P1 | S | 0.1 |
 
 ---
 
@@ -55,7 +55,7 @@ Phase 0 produces a **building, fully-gated, empty workspace**: a Cargo workspace
 
 ### Task 0.1 — Cargo workspace + crate skeletons
 
-- **Status**: 📋 ToDo
+- **Status**: ✅ Done
 - **Priority**: P0
 - **Size**: M
 - **Depends on**: —
@@ -66,12 +66,12 @@ Create the Cargo workspace root and a skeleton crate for every workspace member 
 
 #### Acceptance criteria
 
-- [ ] `cargo build --workspace` succeeds.
-- [ ] Root `Cargo.toml` declares `[workspace]` members and a `[workspace.package]` with `edition = "2024"`, a `rust-version` MSRV, `license = "MIT"`, `repository`, and `authors`.
-- [ ] Crates exist at `crates/bymax-auth`, `crates/bymax-auth-{types,crypto,jwt,core,redis,axum,client}`, and `bindings/bymax-auth-wasm`, each with `Cargo.toml` + `src/lib.rs`.
-- [ ] Every first-party crate carries `#![forbid(unsafe_code)]` except `bymax-auth-wasm` (which uses `#![deny(unsafe_op_in_unsafe_fn)]` with a justification comment); every public crate carries `#![deny(missing_docs)]` and a crate-level `//!` doc.
-- [ ] `packages/rust-auth/package.json` exists as a minimal stub (`@bymax-one/rust-auth`, private/unpublished for now).
-- [ ] No `.gitkeep` or empty-directory placeholder files exist.
+- [x] `cargo build --workspace` succeeds.
+- [x] Root `Cargo.toml` declares `[workspace]` members and a `[workspace.package]` with `edition = "2024"`, a `rust-version` MSRV, `license = "MIT"`, `repository`, and `authors`.
+- [x] Crates exist at `crates/bymax-auth`, `crates/bymax-auth-{types,crypto,jwt,core,redis,axum,client}`, and `bindings/bymax-auth-wasm`, each with `Cargo.toml` + `src/lib.rs`.
+- [x] Every first-party crate carries `#![forbid(unsafe_code)]` except `bymax-auth-wasm` (which uses `#![deny(unsafe_op_in_unsafe_fn)]` with a justification comment); every public crate carries `#![deny(missing_docs)]` and a crate-level `//!` doc.
+- [x] `packages/rust-auth/package.json` exists as a minimal stub (`@bymax-one/rust-auth`, private/unpublished for now).
+- [x] No `.gitkeep` or empty-directory placeholder files exist.
 
 #### Files to create / modify
 
@@ -187,7 +187,7 @@ Completion Protocol (after you finish):
 
 ### Task 0.2 — Toolchain pinning, workspace lints & formatting
 
-- **Status**: 📋 ToDo
+- **Status**: ✅ Done
 - **Priority**: P0
 - **Size**: S
 - **Depends on**: 0.1
@@ -198,11 +198,11 @@ Pin the Rust toolchain (channel, components, and the `wasm32` target), centraliz
 
 #### Acceptance criteria
 
-- [ ] `rust-toolchain.toml` pins a stable channel and the `rustfmt`, `clippy`, `llvm-tools-preview` components and the `wasm32-unknown-unknown` target.
-- [ ] `[workspace.lints]` defines the shared rust + clippy lint posture, inherited by every crate via `[lints] workspace = true`.
-- [ ] `cargo fmt --check` is clean across the workspace.
-- [ ] `cargo clippy --workspace --all-targets -- -D warnings` is clean.
-- [ ] `.gitignore` excludes `/target` and editor cruft; `Cargo.lock` is committed.
+- [x] `rust-toolchain.toml` pins a stable channel and the `rustfmt`, `clippy`, `llvm-tools-preview` components and the `wasm32-unknown-unknown` target.
+- [x] `[workspace.lints]` defines the shared rust + clippy lint posture, inherited by every crate via `[lints] workspace = true`.
+- [x] `cargo fmt --check` is clean across the workspace.
+- [x] `cargo clippy --workspace --all-targets -- -D warnings` is clean.
+- [x] `.gitignore` excludes `/target` and editor cruft; `Cargo.lock` is committed.
 
 #### Files to create / modify
 
@@ -290,7 +290,7 @@ overall %. 7. Append: `- 0.2 ✅ <YYYY-MM-DD> — <summary>`.
 
 ### Task 0.3 — Facade feature taxonomy, hasher guard & docs.rs metadata
 
-- **Status**: 📋 ToDo
+- **Status**: ✅ Done
 - **Priority**: P0
 - **Size**: M
 - **Depends on**: 0.1
@@ -301,10 +301,10 @@ Define the facade crate's complete feature taxonomy (`default = ["scrypt"]`, no 
 
 #### Acceptance criteria
 
-- [ ] `crates/bymax-auth/Cargo.toml` `[features]` matches the canonical taxonomy: `default = ["scrypt"]`; `scrypt`, `argon2`, `sessions`, `mfa`, `oauth`, `oauth-reqwest` (= `["oauth", ...]`), `platform`, `invitations`, `redis`, `axum`, `client`; a `full` meta-feature; **no `core` feature**.
-- [ ] `[package.metadata.docs.rs]` sets `features = ["full"]`.
-- [ ] `crates/bymax-auth/src/lib.rs` contains a `compile_error!` that fires when neither `scrypt` nor `argon2` is enabled.
-- [ ] `cargo build -p bymax-auth` (default) builds; `cargo build -p bymax-auth --features full` builds; `cargo build -p bymax-auth --no-default-features --features argon2` builds; `cargo build -p bymax-auth --no-default-features` FAILS with the hasher `compile_error!`.
+- [x] `crates/bymax-auth/Cargo.toml` `[features]` matches the canonical taxonomy: `default = ["scrypt"]`; `scrypt`, `argon2`, `sessions`, `mfa`, `oauth`, `oauth-reqwest` (= `["oauth", ...]`), `platform`, `invitations`, `redis`, `axum`, `client`; a `full` meta-feature; **no `core` feature**.
+- [x] `[package.metadata.docs.rs]` sets `features = ["full"]`.
+- [x] `crates/bymax-auth/src/lib.rs` contains a `compile_error!` that fires when neither `scrypt` nor `argon2` is enabled.
+- [x] `cargo build -p bymax-auth` (default) builds; `cargo build -p bymax-auth --features full` builds; `cargo build -p bymax-auth --no-default-features --features argon2` builds; `cargo build -p bymax-auth --no-default-features` FAILS with the hasher `compile_error!`.
 
 #### Files to create / modify
 
@@ -409,7 +409,7 @@ Completion Protocol:
 
 ### Task 0.4 — Supply-chain configuration (deny / vet / audit)
 
-- **Status**: 📋 ToDo
+- **Status**: ✅ Done
 - **Priority**: P0
 - **Size**: M
 - **Depends on**: 0.1
@@ -420,10 +420,10 @@ Add the supply-chain policy files: `cargo-deny` (advisories, licenses, bans, sou
 
 #### Acceptance criteria
 
-- [ ] `deny.toml` denies vulnerability/unmaintained advisories; sets a license allow-list (MIT, Apache-2.0, BSD-2/3-Clause, ISC, Unicode-DFS-2016); bans `openssl`/`openssl-sys`, duplicate semver-major versions, and `ring`; restricts sources to crates.io.
-- [ ] `supply-chain/config.toml` (and the generated `imports.lock`) exist with `cargo-vet` configured to import the Google, Mozilla, and Bytecode Alliance audit sets.
-- [ ] `cargo deny check` passes on the current (tiny) dependency graph.
-- [ ] `cargo audit` runs against `Cargo.lock` with no advisories.
+- [x] `deny.toml` denies vulnerability/unmaintained advisories; sets a license allow-list (MIT, Apache-2.0, BSD-2/3-Clause, ISC, Unicode-DFS-2016); bans `openssl`/`openssl-sys`, duplicate semver-major versions, and `ring`; restricts sources to crates.io.
+- [x] `supply-chain/config.toml` (and the generated `imports.lock`) exist with `cargo-vet` configured to import the Google, Mozilla, and Bytecode Alliance audit sets.
+- [x] `cargo deny check` passes on the current (tiny) dependency graph.
+- [x] `cargo audit` runs against `Cargo.lock` with no advisories.
 
 #### Files to create / modify
 
@@ -503,7 +503,7 @@ Completion Protocol:
 
 ### Task 0.5 — CI skeleton workflow
 
-- **Status**: 📋 ToDo
+- **Status**: ✅ Done
 - **Priority**: P0
 - **Size**: M
 - **Depends on**: 0.1, 0.2, 0.3, 0.4
@@ -514,10 +514,10 @@ Add the `ci.yml` GitHub Actions workflow that runs every foundational gate (fmt,
 
 #### Acceptance criteria
 
-- [ ] `.github/workflows/ci.yml` runs, on PR + push to main: `cargo fmt --check`, `cargo clippy --workspace -- -D warnings`, `cargo build --workspace`, `cargo test --workspace`, `cargo llvm-cov` (coverage artifact), `cargo deny check`, an MSRV-pinned build job, and a `wasm32-unknown-unknown` build of `bymax-auth-wasm`.
-- [ ] Workflow uses least-privilege `permissions: contents: read`, `concurrency` with `cancel-in-progress: true`, pinned action major versions, and `timeout-minutes` per job.
-- [ ] `.github/dependabot.yml` updates `cargo` and `github-actions` weekly (PRs only).
-- [ ] The workflow is valid YAML and every gate is green on the current stub workspace.
+- [x] `.github/workflows/ci.yml` runs, on PR + push to main: `cargo fmt --check`, `cargo clippy --workspace -- -D warnings`, `cargo build --workspace`, `cargo test --workspace`, `cargo llvm-cov` (coverage artifact), `cargo deny check`, an MSRV-pinned build job, and a `wasm32-unknown-unknown` build of `bymax-auth-wasm`.
+- [x] Workflow uses least-privilege `permissions: contents: read`, `concurrency` with `cancel-in-progress: true`, pinned action major versions, and `timeout-minutes` per job.
+- [x] `.github/dependabot.yml` updates `cargo` and `github-actions` weekly (PRs only).
+- [x] The workflow is valid YAML and every gate is green on the current stub workspace.
 
 #### Files to create / modify
 
@@ -603,7 +603,7 @@ Completion Protocol:
 
 ### Task 0.6 — Repo governance & docs files
 
-- **Status**: 📋 ToDo
+- **Status**: ✅ Done
 - **Priority**: P1
 - **Size**: S
 - **Depends on**: 0.1
@@ -614,11 +614,11 @@ Add the standard public-repository governance and documentation files (license, 
 
 #### Acceptance criteria
 
-- [ ] `LICENSE` (MIT), `SECURITY.md` (disclosure policy + contact), `CONTRIBUTING.md`, `CODE_OF_CONDUCT.md` (Contributor Covenant 2.1 by reference) all exist.
-- [ ] `CHANGELOG.md` follows Keep-a-Changelog + SemVer and has an `Unreleased` section.
-- [ ] `README.md` stub states the two-package model (`bymax-auth` = Rust backend on crates.io; `@bymax-one/rust-auth` = React/Next.js frontend on npm; the backend is never bundled in npm; `bymax-auth-wasm` is a build artifact, not a crates.io crate), a feature-matrix placeholder, a security note, a production-status line naming Bymax Live as the dogfood consumer, and badge placeholders.
-- [ ] `commitlint.config.cjs`, `.husky/commit-msg`, `.husky/pre-commit`, `.husky/pre-push`, `.gitmessage`, and a root `package.json` (husky/commitlint devDeps + `prepare: husky`) exist; the commit-msg hook rejects a non-Conventional commit; the `pre-push` hook runs the fast local gate (`cargo fmt --check` + `cargo test`) before push.
-- [ ] No text claims the library exists to demonstrate any author's or company's seniority/authority.
+- [x] `LICENSE` (MIT), `SECURITY.md` (disclosure policy + contact), `CONTRIBUTING.md`, `CODE_OF_CONDUCT.md` (Contributor Covenant 2.1 by reference) all exist.
+- [x] `CHANGELOG.md` follows Keep-a-Changelog + SemVer and has an `Unreleased` section.
+- [x] `README.md` stub states the two-package model (`bymax-auth` = Rust backend on crates.io; `@bymax-one/rust-auth` = React/Next.js frontend on npm; the backend is never bundled in npm; `bymax-auth-wasm` is a build artifact, not a crates.io crate), a feature-matrix placeholder, a security note, a production-status line naming Bymax Live as the dogfood consumer, and badge placeholders.
+- [x] `commitlint.config.cjs`, `.husky/commit-msg`, `.husky/pre-commit`, `.husky/pre-push`, `.gitmessage`, and a root `package.json` (husky/commitlint devDeps + `prepare: husky`) exist; the commit-msg hook rejects a non-Conventional commit; the `pre-push` hook runs the fast local gate (`cargo fmt --check` + `cargo test`) before push.
+- [x] No text claims the library exists to demonstrate any author's or company's seniority/authority.
 
 #### Files to create / modify
 
@@ -705,3 +705,10 @@ Completion Protocol:
 ## Completion log
 
 > Append-only. One line per completed task: `- <task-id> ✅ YYYY-MM-DD — <one-line summary>`.
+
+- 0.1 ✅ 2026-06-17 — Cargo workspace (resolver 3, edition 2024, MSRV 1.90) with eight crate skeletons, the wasm `cdylib` binding, and the npm package stub; `cargo build --workspace` green with zero warnings.
+- 0.2 ✅ 2026-06-17 — Pinned `rust-toolchain.toml` (1.96.0 + components + wasm target), centralized `[workspace.lints]` (rust + clippy) inherited by every crate, stable-only `rustfmt.toml`; `cargo fmt --check` and `cargo clippy -D warnings` clean, `Cargo.lock` tracked.
+- 0.3 ✅ 2026-06-17 — Facade `[features]` taxonomy (`default = ["scrypt"]`, no `core` feature, `full` meta-feature), at-least-one-hasher `compile_error!` guard, and `docs.rs` `features = ["full"]`; default/`full`/argon2-only builds green, no-hasher build fails with the guard.
+- 0.4 ✅ 2026-06-17 — `deny.toml` (yanked-deny advisories, permissive license allow-list, `openssl`/`openssl-sys`/`ring` + multiple-version bans, crates.io-only sources) and `cargo-vet` ledger with Google/Mozilla/Bytecode-Alliance imports; `cargo deny check`, `cargo vet`, and `cargo audit` all clean.
+- 0.5 ✅ 2026-06-17 — `ci.yml` (fmt, clippy, build & test, coverage, supply-chain, MSRV `cargo +1.90`, wasm32 — least-privilege, concurrency, pinned actions, per-job timeouts) + weekly `dependabot.yml` (cargo + github-actions). Coverage step tolerates the empty-stub "no coverage data" state (becomes a real gate once code lands). Every gate reproduced green locally.
+- 0.6 ✅ 2026-06-17 — Governance files (`LICENSE` MIT, `SECURITY.md`, `CONTRIBUTING.md`, `CODE_OF_CONDUCT.md` Covenant 2.1, `CHANGELOG.md` Keep-a-Changelog) + README augmented (Bymax Live production-status line, audit/provenance badges) + Conventional-Commits enforcement (root `package.json`, `commitlint.config.cjs`, husky `commit-msg`/`pre-commit`/`pre-push`, `.gitmessage`). commit-msg hook verified to reject non-Conventional and accept Conventional messages end-to-end.

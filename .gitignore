@@ -105,7 +105,10 @@ pnpm-debug.log*
 # ============================================
 # Package Manager Files
 # ============================================
-package-lock.json
+# package-lock.json is intentionally committed (not ignored): it pins the
+# dev-tooling (husky / commitlint) dependency graph for reproducible, auditable
+# installs, mirroring the committed Cargo.lock on the Rust side. It is watched by
+# the npm Dependabot ecosystem.
 yarn.lock
 .yarn/cache
 .yarn/unplugged

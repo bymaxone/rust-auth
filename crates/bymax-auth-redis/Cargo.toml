@@ -1,0 +1,12 @@
+[package]
+name = "bymax-auth-redis"
+version = "0.0.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Redis-backed store implementations for bymax-auth: session, OTP, and brute-force stores with atomic Lua scripts and no-PII namespaced keys."
+
+[lints]
+workspace = true

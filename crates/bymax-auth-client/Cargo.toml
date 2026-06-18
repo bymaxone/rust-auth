@@ -1,0 +1,12 @@
+[package]
+name = "bymax-auth-client"
+version = "0.0.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Native Rust HTTP auth client for bymax-auth (reqwest) — the typed client for service-to-service Rust consumers, mirroring the TypeScript ./client."
+
+[lints]
+workspace = true

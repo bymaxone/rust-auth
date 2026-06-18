@@ -1,0 +1,41 @@
+{
+  // Formatting + lint-on-save model (Rust analogue of the Prettier+ESLint setup):
+  // - rust-analyzer owns formatting via rustfmt (it reads rustfmt.toml), so
+  //   format-on-save produces byte-identical output to `cargo fmt`.
+  // - Clippy runs on every save as the check command, surfacing the same lints
+  //   the CI `clippy -D warnings` job enforces — inline, as you save.
+  // - Even Better TOML formats Cargo.toml / deny.toml / *.toml on save.
+  // format-on-save is scoped to [rust] and [toml] below (we have no universal
+  // formatter here), so hand-authored JSON/YAML/Markdown is never reflowed.
+  "editor.rulers": [100],
+  "files.eol": "\n",
+  "files.insertFinalNewline": true,
+  "files.trimTrailingWhitespace": true,
+
+  // Rust source: format with rustfmt (via rust-analyzer); 4-space indent (rustfmt default).
+  "[rust]": {
+    "editor.defaultFormatter": null,
+    "editor.formatOnSave": true,
+    "editor.tabSize": 4
+  },
+  // TOML manifests (Cargo.toml, deny.toml, rust-toolchain.toml): 2-space indent.
+  "[toml]": {
+    "editor.defaultFormatter": null,
+    "editor.formatOnSave": true,
+    "editor.tabSize": 2
+  },
+
+  // Run Clippy (not just `cargo check`) on save, across all targets and features —
+  // mirrors the CI lint job: `cargo clippy --workspace --all-targets --all-features`.
+  "rust-analyzer.check.command": "clippy",
+  "rust-analyzer.check.allTargets": true,
+  "rust-analyzer.cargo.features": "all",
+
+  // Keep search / quick-open focused on source.
+  "search.exclude": {
+    "**/target": true,
+    "**/node_modules": true,
+    "**/Cargo.lock": true,
+    "**/package-lock.json": true
+  }
+}

@@ -1,0 +1,12 @@
+[package]
+name = "bymax-auth-types"
+version = "0.0.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Shared data contracts for bymax-auth: users, JWT claims, results, the error catalog, and config value types."
+
+[lints]
+workspace = true
