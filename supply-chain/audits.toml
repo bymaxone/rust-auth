@@ -153,12 +153,6 @@ user-id = 5059 # Artyom Pavlov (newpavlov)
 start = "2019-06-28"
 end = "2027-06-18"
 
-[[trusted.getrandom]]
-criteria = "safe-to-deploy"
-trusted-publisher = "github:rust-random/getrandom"
-start = "2025-12-27"
-end = "2027-06-18"
-
 [[trusted.ghash]]
 criteria = "safe-to-deploy"
 user-id = 267 # Tony Arcieri (tarcieri)
@@ -193,12 +187,6 @@ end = "2027-06-18"
 criteria = "safe-to-deploy"
 user-id = 1 # Alex Crichton (alexcrichton)
 start = "2019-03-04"
-end = "2027-06-18"
-
-[[trusted.js-sys]]
-criteria = "safe-to-deploy"
-trusted-publisher = "github:wasm-bindgen/wasm-bindgen"
-start = "2026-04-28"
 end = "2027-06-18"
 
 [[trusted.libc]]
@@ -241,12 +229,6 @@ end = "2027-06-18"
 criteria = "safe-to-deploy"
 user-id = 33035 # Taiki Endo (taiki-e)
 start = "2019-10-22"
-end = "2027-06-18"
-
-[[trusted.pin-project-lite]]
-criteria = "safe-to-deploy"
-trusted-publisher = "github:taiki-e/pin-project-lite"
-start = "2026-02-27"
 end = "2027-06-18"
 
 [[trusted.polyval]]
@@ -375,34 +357,10 @@ user-id = 1 # Alex Crichton (alexcrichton)
 start = "2019-03-04"
 end = "2027-06-18"
 
-[[trusted.wasm-bindgen]]
-criteria = "safe-to-deploy"
-trusted-publisher = "github:wasm-bindgen/wasm-bindgen"
-start = "2026-04-28"
-end = "2027-06-18"
-
-[[trusted.wasm-bindgen-macro]]
-criteria = "safe-to-deploy"
-trusted-publisher = "github:wasm-bindgen/wasm-bindgen"
-start = "2026-04-28"
-end = "2027-06-18"
-
 [[trusted.wasm-bindgen-macro-support]]
 criteria = "safe-to-deploy"
 user-id = 1 # Alex Crichton (alexcrichton)
 start = "2019-03-04"
-end = "2027-06-18"
-
-[[trusted.wasm-bindgen-macro-support]]
-criteria = "safe-to-deploy"
-trusted-publisher = "github:wasm-bindgen/wasm-bindgen"
-start = "2026-04-28"
-end = "2027-06-18"
-
-[[trusted.wasm-bindgen-shared]]
-criteria = "safe-to-deploy"
-trusted-publisher = "github:wasm-bindgen/wasm-bindgen"
-start = "2026-04-28"
 end = "2027-06-18"
 
 [[trusted.windows-sys]]
@@ -427,12 +385,6 @@ end = "2027-06-18"
 criteria = "safe-to-deploy"
 user-id = 267 # Tony Arcieri (tarcieri)
 start = "2021-11-05"
-end = "2027-06-18"
-
-[[trusted.zeroize]]
-criteria = "safe-to-deploy"
-trusted-publisher = "github:RustCrypto/utils"
-start = "2026-06-12"
 end = "2027-06-18"
 
 [[trusted.zmij]]
