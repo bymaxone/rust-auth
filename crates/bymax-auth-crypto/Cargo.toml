@@ -8,5 +8,66 @@ repository.workspace = true
 authors.workspace = true
 description = "Cryptographic primitives for bymax-auth: password hashing, constant-time comparison, secure tokens, HMAC/SHA-2, and the MFA-gated AEAD/TOTP set."
 
+[dependencies]
+# Mandatory crypto set — compiled into every build regardless of features.
+#
+# The whole RustCrypto stack here is pinned to one coherent generation (the
+# `digest 0.10` / `password-hash 0.5` line). `argon2` and `aes-gcm` have not yet
+# published a release on the newer `digest 0.11` line, so mixing generations would
+# pull a second major of `digest`/`crypto-common`/`password-hash` — which the
+# workspace `deny.toml` (`multiple-versions = "deny"`) rejects. Keeping every
+# RustCrypto crate on the same generation is what keeps the dependency graph free
+# of duplicate-major bloat.
+hmac = "0.12"
+sha2 = "0.10"
+subtle = "2.6"
+rand = "0.8"
+# `getrandom` is pinned to the major that `rand_core 0.6` (pulled by `password-hash
+# 0.5` for salt generation) depends on, so the production (non-dev) graph carries a
+# single `getrandom`. (Dev-only `proptest` pulls a newer `rand`/`getrandom`; those are
+# never in a published build.) Per `getrandom`'s library guidance this crate does NOT
+# select a wasm RNG backend: the leaf `bymax-auth-wasm` binding (and this crate's own
+# wasm tests) enable `getrandom`'s browser backend to route randomness to Web Crypto.
+getrandom = "0.2"
+password-hash = { version = "0.5", features = ["rand_core"] }
+# `secrecy` (long-lived `SecretString` wrapping) belongs where secrets are *stored* —
+# the engine/config layer — not in these stateless primitives, which take key material
+# by short-lived reference and zeroize transient copies via `zeroize` directly.
+zeroize = "1.9"
+thiserror = "2"
+
+# Password hashers — feature-selected; at least one is required (see lib.rs).
+scrypt = { version = "0.11", optional = true }
+argon2 = { version = "0.5", optional = true }
+
+# MFA-gated primitives — absent from a no-`mfa` build.
+aes-gcm = { version = "0.10", optional = true }
+sha1 = { version = "0.10", optional = true }
+data-encoding = { version = "2", optional = true }
+
+[dev-dependencies]
+proptest = "1"
+hex = "0.4"
+# Benchmarks only (`cargo bench`). `default-features = false` drops the HTML/plotters
+# and rayon trees, keeping the dev dependency graph lean.
+criterion = { version = "0.5", default-features = false, features = ["cargo_bench_support"] }
+
+[[bench]]
+name = "crypto"
+harness = false
+
+[features]
+default = ["scrypt"]
+scrypt = ["dep:scrypt"]
+argon2 = ["dep:argon2"]
+mfa = ["dep:aes-gcm", "dep:sha1", "dep:data-encoding"]
+# Selects `getrandom`'s browser (Web Crypto) backend so this crate — and its own
+# wasm tests — can build and run on `wasm32-unknown-unknown`. OFF by default: a
+# reusable library must not pick a wasm RNG backend for its consumers (it would
+# break non-Web wasm targets); the leaf `bymax-auth-wasm` binding enables this in
+# production. `getrandom` does not compile for `wasm32-unknown-unknown` until some
+# crate in the build selects a backend, so any wasm build of this crate needs it.
+wasm-js = ["getrandom/js"]
+
 [lints]
 workspace = true
