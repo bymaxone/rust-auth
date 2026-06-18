@@ -97,7 +97,12 @@ jobs:
       - uses: actions-rust-lang/setup-rust-toolchain@46268bd060767258de96ed93c1251119784f2ab6 # v1.16.1
       - uses: taiki-e/install-action@b8cecb83565409bcc297b2df6e77f030b2a468d5 # v2.82.0
         with:
-          tool: cargo-deny,cargo-audit,cargo-vet
+          tool: cargo-deny,cargo-audit
+      # `install-action` ships the latest cargo-vet *release binary* (0.10.0), which is
+      # too old to parse the publisher-trust / audit schema produced by current
+      # cargo-vet and the imported audit sets. Pin a compatible version, built from
+      # source so it does not depend on a prebuilt binary existing for that release.
+      - run: cargo install --locked cargo-vet@0.10.2
       - run: cargo deny check                 # ban-list + licenses + advisories + sources
       - run: cargo audit                      # RustSec advisories against Cargo.lock
       - run: cargo vet                         # every dependency audited or trusted-imported
