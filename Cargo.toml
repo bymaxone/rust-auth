@@ -1,0 +1,43 @@
+[workspace]
+resolver = "3"
+members = ["crates/*", "bindings/*"]
+
+[workspace.package]
+edition = "2024"
+rust-version = "1.90"
+license = "MIT"
+repository = "https://github.com/bymaxone/rust-auth"
+authors = ["Bymax One"]
+
+# Internal crates are declared here so members can later depend on them with
+# `{ workspace = true }`, keeping every version pin in one place. Pins are exact
+# (`=0.0.0`) while the surface is pre-release; they move in lockstep. Real
+# third-party dependencies are added to this table as the crates gain content.
+[workspace.dependencies]
+bymax-auth-types = { path = "crates/bymax-auth-types", version = "=0.0.0" }
+bymax-auth-crypto = { path = "crates/bymax-auth-crypto", version = "=0.0.0" }
+bymax-auth-jwt = { path = "crates/bymax-auth-jwt", version = "=0.0.0" }
+bymax-auth-core = { path = "crates/bymax-auth-core", version = "=0.0.0" }
+bymax-auth-redis = { path = "crates/bymax-auth-redis", version = "=0.0.0" }
+bymax-auth-axum = { path = "crates/bymax-auth-axum", version = "=0.0.0" }
+bymax-auth-client = { path = "crates/bymax-auth-client", version = "=0.0.0" }
+
+# Shared lint posture, inherited by every crate via `[lints] workspace = true`.
+# The unsafe-code policy is intentionally NOT set here: it lives as a per-crate
+# file header (`#![forbid(unsafe_code)]` on every crate; the wasm binding instead
+# uses `#![deny(unsafe_op_in_unsafe_fn)]`). Keeping `unsafe_code` out of the shared
+# table lets the wasm binding inherit the same posture without colliding with a
+# `forbid` it must not carry (a `forbid` lint cannot be relaxed by an inheriting
+# crate).
+[workspace.lints.rust]
+missing_docs = "deny"
+# A lint *group* must sit at a lower priority than the individual lints above so
+# they can override it on overlap (clippy's `lint_groups_priority` enforces this,
+# the same reason `clippy::all` below carries `priority = -1`).
+rust_2024_compatibility = { level = "warn", priority = -1 }
+
+[workspace.lints.clippy]
+all = { level = "deny", priority = -1 }
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"

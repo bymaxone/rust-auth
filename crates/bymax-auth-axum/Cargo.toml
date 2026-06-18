@@ -1,0 +1,12 @@
+[package]
+name = "bymax-auth-axum"
+version = "0.0.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Axum HTTP adapter for bymax-auth: router factory, extractors and guards, token delivery, per-route rate limiting, WebSocket tickets, and DTO validation."
+
+[lints]
+workspace = true

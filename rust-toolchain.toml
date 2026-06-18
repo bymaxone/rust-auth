@@ -1,0 +1,10 @@
+# Pinned toolchain for reproducible local and CI builds. `channel` is an exact
+# stable version, bumped intentionally and never drifted. It is deliberately
+# higher than the MSRV floor (`rust-version = "1.90"` in `[workspace.package]`):
+# the MSRV is the lowest stable the workspace must still compile on and is proven
+# by a dedicated CI job that builds on that floor.
+[toolchain]
+channel = "1.96.0"
+components = ["rustfmt", "clippy", "llvm-tools-preview"]
+targets = ["wasm32-unknown-unknown"]
+profile = "minimal"

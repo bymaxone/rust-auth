@@ -1,0 +1,7 @@
+# Formatting is enforced on the pinned stable toolchain, so only stable rustfmt
+# options are set here. Import-grouping options (`imports_granularity`,
+# `group_imports`) are nightly-only; they are intentionally omitted so that
+# `cargo fmt --check` stays clean under the pinned stable toolchain.
+edition = "2024"
+max_width = 100
+newline_style = "Unix"

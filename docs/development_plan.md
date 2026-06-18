@@ -18,15 +18,15 @@ This document is Layer 2 of the spec → roadmap → phase-tasks workflow. It de
 
 ## Progress
 
-- **Overall progress:** 📋 0 / 13 phases done (0%)
-- **Active phase:** —
+- **Overall progress:** 🔄 1 / 13 phases done (8%)
+- **Active phase:** — (P0 complete; **P1** and **P2** are unblocked and may start in parallel)
 - **Blocked:** —
 
 ## Phase dashboard
 
 | ID | Phase | Status | Progress | Size | Last updated |
 | --- | --- | --- | --- | --- | --- |
-| P0 | Foundation: workspace, toolchain & CI skeleton | 📋 ToDo | — | M | — |
+| P0 | Foundation: workspace, toolchain & CI skeleton | ✅ Done | 6/6 | M | 2026-06-17 |
 | P1 | `bymax-auth-crypto` — hashing, constant-time, tokens, MFA-gated AEAD/TOTP | 📋 ToDo | — | L | — |
 | P2 | `bymax-auth-types` + `bymax-auth-jwt` — model, errors, HS256, ts-rs | 📋 ToDo | — | L | — |
 | P3 | `bymax-auth-core` — engine, builder, config profiles, trait set | 📋 ToDo | — | L | — |

@@ -1,0 +1,60 @@
+[package]
+name = "bymax-auth"
+version = "0.0.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Production-grade authentication and authorization — the single crates.io facade over the bymax-auth-* crates."
+
+# Feature bodies are placeholders while the internal crates are still skeletons:
+# each is wired to its target crate's capability (e.g. `bymax-auth-core/mfa`,
+# `dep:bymax-auth-redis`) as that crate lands. The feature *names* and the
+# at-least-one-hasher invariant (enforced by the `compile_error!` in lib.rs) are
+# stable from the start, so downstream feature selection never has to change.
+# Features are strictly additive, and there is deliberately no `core` feature —
+# the engine is always compiled.
+[features]
+default = ["scrypt"]
+
+# Password hashers — at least one is required.
+scrypt = []
+argon2 = []
+
+# Optional engine flows.
+sessions = []
+mfa = []
+oauth = []                # OAuth orchestration + traits; no HTTP client
+oauth-reqwest = ["oauth"] # adds the bundled ReqwestHttpClient (pulls reqwest)
+platform = []
+invitations = []
+
+# Infrastructure / adapters.
+redis = []
+axum = []
+client = []
+
+# Convenience meta-feature: every capability on.
+full = [
+    "scrypt",
+    "argon2",
+    "sessions",
+    "mfa",
+    "oauth",
+    "oauth-reqwest",
+    "platform",
+    "invitations",
+    "redis",
+    "axum",
+    "client",
+]
+
+# docs.rs renders the full public surface; `--cfg docsrs` enables the
+# feature-gated doc annotations added to items as the crates gain content.
+[package.metadata.docs.rs]
+features = ["full"]
+rustdoc-args = ["--cfg", "docsrs"]
+
+[lints]
+workspace = true

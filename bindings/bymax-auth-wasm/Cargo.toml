@@ -1,0 +1,24 @@
+[package]
+name = "bymax-auth-wasm"
+version = "0.0.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "WASM edge bindings for bymax-auth (npm-only; not published to crates.io) — wasm-bindgen surface over the wasm-safe bymax-auth-jwt subset."
+# Never published to crates.io: this crate is a build artifact for the npm package,
+# compiled to WASM via wasm-pack and bundled into @bymax-one/rust-auth.
+publish = false
+
+[lib]
+# cdylib for the wasm-bindgen artifact; rlib so the crate can also be unit-tested
+# and linked as a normal Rust library on the host.
+crate-type = ["cdylib", "rlib"]
+
+# Inherits the shared posture (missing_docs + clippy). The workspace lint table
+# deliberately omits `unsafe_code`, so this binding can carry its own file-level
+# `#![deny(unsafe_op_in_unsafe_fn)]` exception (wasm-bindgen needs `unsafe`) while
+# still sharing every other lint with the rest of the workspace.
+[lints]
+workspace = true

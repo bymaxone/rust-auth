@@ -15,8 +15,10 @@
   <a href="https://www.npmjs.com/package/@bymax-one/rust-auth"><img src="https://img.shields.io/npm/v/@bymax-one/rust-auth?style=flat-square&colorA=000000&colorB=000000&label=npm" alt="npm version" /></a>
   <a href="https://docs.rs/bymax-auth"><img src="https://img.shields.io/docsrs/bymax-auth?style=flat-square&colorA=000000&label=docs.rs" alt="docs.rs" /></a>
   <a href="https://github.com/bymaxone/rust-auth/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/bymaxone/rust-auth/ci.yml?branch=main&style=flat-square&colorA=000000&label=CI" alt="CI status" /></a>
-  <a href="https://github.com/bymaxone/rust-auth/actions/workflows/ci.yml"><img src="https://img.shields.io/badge/coverage-100%25-brightgreen?style=flat-square&colorA=000000" alt="coverage" /></a>
+  <a href="https://github.com/bymaxone/rust-auth/actions/workflows/ci.yml"><img src="https://img.shields.io/badge/coverage-pre--release-lightgrey?style=flat-square&colorA=000000" alt="coverage" /></a>
   <a href="https://scorecard.dev/viewer/?uri=github.com/bymaxone/rust-auth"><img src="https://api.scorecard.dev/projects/github.com/bymaxone/rust-auth/badge?style=flat-square" alt="OpenSSF Scorecard" /></a>
+  <a href="https://rustsec.org/"><img src="https://img.shields.io/badge/audit-RustSec-000000?style=flat-square" alt="RustSec audit" /></a>
+  <a href="https://github.com/bymaxone/rust-auth/attestations"><img src="https://img.shields.io/badge/provenance-attested-000000?style=flat-square" alt="build provenance" /></a>
   <a href="https://github.com/bymaxone/rust-auth/blob/main/LICENSE"><img src="https://img.shields.io/github/license/bymaxone/rust-auth?style=flat-square&colorA=000000&colorB=000000" alt="license" /></a>
   <a href="https://www.rust-lang.org/"><img src="https://img.shields.io/badge/Rust-edition%202024-000000?style=flat-square&logo=rust&logoColor=white" alt="Rust edition 2024" /></a>
 </p>
@@ -31,6 +33,9 @@
 </p>
 
 ---
+
+> [!IMPORTANT]
+> **🚧 Early development.** This repository is under active construction. The crates are **not yet published** to crates.io or npm, and the API described below is the **target surface** the project is building toward — not all of it exists yet. Badges, version numbers, and install commands reflect the intended 1.0 release. See the [development plan](docs/development_plan.md) for current status.
 
 ## ✨ Overview
 
@@ -51,6 +56,9 @@ Instead of stitching together a dozen crates and packages for JWT, MFA, OAuth, s
 cargo add bymax-auth --features "argon2,sessions,mfa,oauth,oauth-reqwest,redis,axum"
 pnpm add @bymax-one/rust-auth
 ```
+
+> [!NOTE]
+> **Production status.** **Bymax Live** — a Rust-backend + React/Next.js application — is the project's first production consumer (the dogfood target). It will run the library as its authentication and authorization layer (sessions, MFA, OAuth, platform admin, Redis), so the wire contract, the security invariants, and server/edge JWT parity are validated against real traffic rather than synthetic tests alone.
 
 ---
 

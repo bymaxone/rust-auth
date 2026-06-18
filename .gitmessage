@@ -1,0 +1,11 @@
+# <type>(<scope>): <subject>   — imperative mood, <= 72 chars, no trailing period
+#
+# Explain what changed and why (wrap at 72). Leave a blank line above this body.
+#
+# Footer (optional): BREAKING CHANGE: <description>  |  Refs: #<issue>
+#
+# Conventional Commit types:
+#   feat fix docs style refactor perf test build ci chore revert
+# Suggested scopes:
+#   types crypto jwt core redis axum client wasm facade
+#   config oauth mfa sessions password ci deps release docs

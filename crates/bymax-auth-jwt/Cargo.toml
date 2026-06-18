@@ -1,0 +1,12 @@
+[package]
+name = "bymax-auth-jwt"
+version = "0.0.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Pure-Rust HS256 JWT signing, verification, and unverified decoding with algorithm pinning — the shared server/edge implementation for bymax-auth."
+
+[lints]
+workspace = true

@@ -1,0 +1,12 @@
+[package]
+name = "bymax-auth-core"
+version = "0.0.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Framework-agnostic authentication engine for bymax-auth: AuthEngine, the builder, configuration, all auth flows, and the object-safe plugin traits."
+
+[lints]
+workspace = true

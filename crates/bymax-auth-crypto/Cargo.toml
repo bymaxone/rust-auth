@@ -1,0 +1,12 @@
+[package]
+name = "bymax-auth-crypto"
+version = "0.0.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Cryptographic primitives for bymax-auth: password hashing, constant-time comparison, secure tokens, HMAC/SHA-2, and the MFA-gated AEAD/TOTP set."
+
+[lints]
+workspace = true
