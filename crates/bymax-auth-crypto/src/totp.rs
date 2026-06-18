@@ -16,6 +16,11 @@ use crate::CryptoError;
 const TOTP_STEP_SECS: u64 = 30;
 /// TOTP code length in digits (the authenticator-app default).
 const TOTP_DIGITS: u32 = 6;
+/// Maximum accepted drift window in steps (spec §17 / RFC 6238 guidance). A caller's
+/// larger value is clamped to this, bounding the per-verification work to
+/// `2 * MAX_VERIFY_WINDOW + 1` HOTP computations so a misconfigured (or hostile) window
+/// cannot turn `verify` into a CPU-amplification vector.
+const MAX_VERIFY_WINDOW: u8 = 2;
 /// HMAC-SHA1 output length in bytes.
 const HMAC_SHA1_LEN: usize = 20;
 /// Upper-case hex alphabet for percent-encoding.
@@ -83,7 +88,9 @@ pub fn totp(secret: &[u8], unix_time: u64, step_secs: u64, digits: u32) -> u32 {
 }
 
 /// Verify a 6-digit TOTP `code` against `secret` at `unix_time`, accepting any code
-/// within `±window` 30-second steps. The digit comparison is constant time, and every
+/// within `±window` 30-second steps (`window` is clamped to a small maximum, so an
+/// oversized value cannot force an unbounded number of HOTP computations). The digit
+/// comparison is constant time, and every
 /// in-range step is evaluated with no early return — the only steps skipped are those
 /// before the Unix epoch (negative counters), which are unreachable for real
 /// timestamps, so for any realistic time neither the code value nor the matching step
@@ -99,7 +106,9 @@ pub fn totp(secret: &[u8], unix_time: u64, step_secs: u64, digits: u32) -> u32 {
 #[must_use]
 pub fn verify(secret: &[u8], code: &str, unix_time: u64, window: u8) -> bool {
     let current_step = unix_time / TOTP_STEP_SECS;
-    let window = i64::from(window);
+    // Clamp to the maximum accepted drift so an oversized `window` cannot force an
+    // unbounded number of HOTP computations.
+    let window = i64::from(window.min(MAX_VERIFY_WINDOW));
     let mut matched = Choice::from(0u8);
     for delta in -window..=window {
         // `checked_add_signed` skips any step before the Unix epoch instead of letting
@@ -248,6 +257,7 @@ mod tests {
         assert!(verify(RFC_SECRET, "287082", 89, 1)); // one step late (delta -1)
         assert!(verify(RFC_SECRET, "287082", 29, 1)); // one step early (delta +1)
         assert!(!verify(RFC_SECRET, "287082", 200, 1)); // far outside the window
+        assert!(verify(RFC_SECRET, "287082", 59, 255)); // oversized window is clamped, still accepts
     }
 
     #[test]

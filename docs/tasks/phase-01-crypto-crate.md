@@ -63,12 +63,12 @@ Wire the crate's dependencies and feature flags (`scrypt`, `argon2`, `mfa`), def
 
 #### Acceptance criteria
 
-- [x] `Cargo.toml` declares mandatory deps (`hmac`, `sha2`, `subtle`, `rand`, `getrandom`, `password-hash`, `thiserror`, `secrecy` (carries `zeroize`), `zeroize`) and feature-gated deps: `scrypt` (`scrypt`), `argon2` (`argon2`), `aes-gcm` + `sha1` + `data-encoding` (`mfa`); `default = ["scrypt"]`.
-- [x] `getrandom` is a dependency but its `wasm_js` backend is **not** enabled by this crate (per `getrandom`'s library guidance); the crate still builds for `wasm32-unknown-unknown` without it. The `wasm_js` backend is enabled downstream by the `bymax-auth-wasm` binding (Phase 11) and by this crate's own wasm tests.
+- [x] `Cargo.toml` declares mandatory deps (`hmac`, `sha2`, `subtle`, `rand`, `getrandom`, `password-hash`, `thiserror`, `zeroize`) and feature-gated deps: `scrypt` (`scrypt`), `argon2` (`argon2`), `aes-gcm` + `sha1` + `data-encoding` (`mfa`); `default = ["scrypt"]`. (`secrecy` belongs to the engine/config layer where long-lived secrets are stored, not these stateless primitives.)
+- [x] `getrandom` is a dependency but this crate selects **no** wasm RNG backend by default (per `getrandom`'s library guidance). Since `getrandom` requires a backend to be chosen for `wasm32-unknown-unknown`, the crate exposes an opt-in **`wasm-js`** feature (forwarding to `getrandom/js`); the wasm build uses that feature, and this crate's own wasm tests — and, in production, the leaf `bymax-auth-wasm` binding — enable it.
 - [x] `src/lib.rs` contains a `compile_error!` that fires at build time when neither the `scrypt` nor the `argon2` feature is enabled (at least one hasher is required); `cargo build -p bymax-auth-crypto --no-default-features` FAILS with that error.
 - [x] `CryptoError` (thiserror) exists with opaque variants (e.g. `Hash`, `Verify`, `Decrypt`, `InvalidParams`, `Encoding`) that never reveal internal step detail.
 - [x] Module skeleton exists: `compare`, `mac`, `token`, `password` (always), `aead` + `totp` (`#[cfg(feature = "mfa")]`).
-- [x] `cargo build -p bymax-auth-crypto` (default), `--features argon2,mfa`, and `--no-default-features --features argon2` all build; `cargo build -p bymax-auth-crypto --target wasm32-unknown-unknown` builds.
+- [x] `cargo build -p bymax-auth-crypto` (default), `--features argon2,mfa`, and `--no-default-features --features argon2` all build; `cargo build -p bymax-auth-crypto --target wasm32-unknown-unknown --features wasm-js` builds.
 - [x] `cargo tree -p bymax-auth-crypto -e features` shows `aes-gcm`/`sha1`/`data-encoding` ONLY under `mfa`.
 
 #### Files to create / modify

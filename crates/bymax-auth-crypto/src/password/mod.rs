@@ -156,6 +156,11 @@ pub struct PasswordParams {
 /// below the security floor (or the active algorithm's feature is not compiled in),
 /// and [`CryptoError::Hash`] if the underlying KDF fails.
 ///
+/// # Panics
+///
+/// Panics only if the OS CSPRNG is unavailable while generating the per-password salt
+/// — an unrecoverable entropy failure under which no password could be safely hashed.
+///
 /// # Examples
 ///
 /// ```

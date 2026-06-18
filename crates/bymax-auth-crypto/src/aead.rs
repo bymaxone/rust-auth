@@ -30,6 +30,11 @@ const TAG_LEN: usize = 16;
 /// Returns [`CryptoError::InvalidParams`] if the underlying cipher rejects the input
 /// (only reachable for an implausibly large plaintext — TOTP secrets are tiny).
 ///
+/// # Panics
+///
+/// Panics only if the OS CSPRNG is unavailable while drawing the nonce — an
+/// unrecoverable entropy failure under which no value could be safely encrypted.
+///
 /// # Examples
 ///
 /// ```

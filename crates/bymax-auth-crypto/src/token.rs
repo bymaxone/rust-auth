@@ -17,6 +17,12 @@ const HEX_ALPHABET: &[u8; 16] = b"0123456789abcdef";
 /// `getRandomValues` API. This is the raw entropy source behind every opaque token,
 /// salt, and nonce in the library.
 ///
+/// # Panics
+///
+/// Panics only if the OS/browser CSPRNG is unavailable — an unrecoverable entropy
+/// failure under which no secure value can be produced (the deliberate, fail-closed
+/// behavior shared by the whole RustCrypto/`rand` ecosystem).
+///
 /// # Examples
 ///
 /// ```
@@ -36,6 +42,10 @@ pub fn random_bytes(n: usize) -> Vec<u8> {
 ///
 /// Prefer this over [`random_bytes`] whenever the length is known at compile time
 /// (nonces, fixed-width keys): it avoids the `Vec` allocation entirely.
+///
+/// # Panics
+///
+/// Panics only on an unrecoverable OS/browser CSPRNG failure (see [`random_bytes`]).
 ///
 /// # Examples
 ///
@@ -57,6 +67,10 @@ pub fn random_array<const N: usize>() -> [u8; N] {
 /// Draws `byte_len` bytes from the CSPRNG ([`random_bytes`]) and lower-case
 /// hex-encodes them, so the returned string is `2 * byte_len` characters drawn from
 /// `[0-9a-f]`. The default of 32 bytes yields a 256-bit, 64-character token.
+///
+/// # Panics
+///
+/// Panics only on an unrecoverable OS/browser CSPRNG failure (see [`random_bytes`]).
 ///
 /// # Examples
 ///
