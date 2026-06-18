@@ -43,10 +43,10 @@ expect_used = "deny"
 panic = "deny"
 
 # Memory-hard KDFs are pathologically slow when built unoptimized, which turns a
-# password/MFA test run into minutes of wall-clock time. Optimize the crypto crates
-# (and their hot inner primitives) even under the `dev`/`test` profile so hashing
-# runs at production speed during tests. First-party crates stay unoptimized for fast
-# incremental builds and full debug info.
+# password/MFA test run into minutes of wall-clock time. These are dependency crates,
+# compiled with the `dev` profile for both `cargo build` and `cargo test`, so
+# optimizing them here makes hashing run at production speed during the test suite
+# while first-party crates stay unoptimized for fast incremental builds and debug info.
 [profile.dev.package.scrypt]
 opt-level = 3
 [profile.dev.package.salsa20]

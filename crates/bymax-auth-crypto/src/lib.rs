@@ -26,9 +26,11 @@
 //! # WebAssembly
 //!
 //! The crate compiles to `wasm32-unknown-unknown`. Following `getrandom`'s guidance
-//! for reusable libraries, it depends on `getrandom` but does **not** select a wasm
-//! RNG backend itself — the leaf `bymax-auth-wasm` binding (and this crate's own wasm
-//! tests) enable `getrandom`'s `wasm_js` backend to route randomness to Web Crypto.
+//! for reusable libraries, it does **not** select a wasm RNG backend by default. To
+//! build for the web, enable this crate's **`wasm-js`** feature, which forwards to
+//! `getrandom`'s browser backend (`getrandom/js`) so randomness routes to Web Crypto.
+//! This crate's own wasm tests turn it on; the eventual edge consumer (the
+//! `bymax-auth-wasm` binding) will enable it the same way.
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 

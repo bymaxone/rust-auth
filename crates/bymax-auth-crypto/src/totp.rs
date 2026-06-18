@@ -83,9 +83,11 @@ pub fn totp(secret: &[u8], unix_time: u64, step_secs: u64, digits: u32) -> u32 {
 }
 
 /// Verify a 6-digit TOTP `code` against `secret` at `unix_time`, accepting any code
-/// within `±window` 30-second steps. The digit comparison is constant time and every
-/// window step is evaluated (no early return), so neither the code value nor the
-/// matching step leaks through timing.
+/// within `±window` 30-second steps. The digit comparison is constant time, and every
+/// in-range step is evaluated with no early return — the only steps skipped are those
+/// before the Unix epoch (negative counters), which are unreachable for real
+/// timestamps, so for any realistic time neither the code value nor the matching step
+/// leaks through timing.
 ///
 /// # Examples
 ///
