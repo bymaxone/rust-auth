@@ -100,15 +100,21 @@ pub fn verify(secret: &[u8], code: &str, unix_time: u64, window: u8) -> bool {
     let window = i64::from(window);
     let mut matched = Choice::from(0u8);
     for delta in -window..=window {
-        let counter = current_step.wrapping_add_signed(delta);
+        // `checked_add_signed` skips any step before the Unix epoch instead of letting
+        // a negative delta wrap the counter to a huge value. Real TOTP timestamps are
+        // far from zero, so in practice no step is skipped and every candidate is
+        // evaluated — the constant-time guarantee holds across the realistic domain.
+        let Some(counter) = current_step.checked_add_signed(delta) else {
+            continue;
+        };
         let candidate = format!(
             "{:0>width$}",
             hotp(secret, counter, TOTP_DIGITS),
             width = TOTP_DIGITS as usize
         );
-        // Accumulate into a `subtle::Choice` (not an early-returning `bool`): every
-        // window step is always evaluated and the OR is opaque to the optimizer, so
-        // neither the code value nor which step matched leaks through timing.
+        // Accumulate into a `subtle::Choice` (not an early-returning `bool`): the OR is
+        // opaque to the optimizer, so neither the code value nor which step matched
+        // leaks through timing.
         matched |= candidate.as_bytes().ct_eq(code.as_bytes());
     }
     matched.into()

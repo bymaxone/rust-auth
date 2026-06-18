@@ -183,11 +183,17 @@ pub fn hash(password: &[u8], params: &PasswordParams) -> Result<String, CryptoEr
 /// Verify `password` against a stored hash, in constant time.
 ///
 /// This function is **total**: a wrong password, a malformed PHC string, or an
-/// unknown algorithm all return `Ok(false)` — never `Err` — and follow a uniform
-/// path so the result is not a timing oracle that distinguishes "invalid hash" from
-/// "wrong password". The stored algorithm is auto-detected from the PHC prefix (or
-/// the legacy `scrypt:hex:hex` form), so hashes written under any supported scheme
-/// still verify.
+/// unknown algorithm all return `Ok(false)` — never `Err`, never a panic. The stored
+/// algorithm is auto-detected from the PHC prefix (or the legacy `scrypt:hex:hex`
+/// form), so hashes written under any supported scheme still verify, and the password
+/// comparison itself is constant-time (via the `password-hash` verifier).
+///
+/// Timing: a *malformed* stored hash returns before the KDF runs, so it is not
+/// time-equivalent to a wrong password (which runs the full KDF). This is not a login
+/// oracle — the caller supplies the password while the stored hash is server-side (a
+/// real PHC string or the startup sentinel), so the fast path is never reached with
+/// attacker-controlled input. The anti-enumeration timing floor lives in the engine,
+/// not here.
 ///
 /// # Errors
 ///
