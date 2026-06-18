@@ -463,6 +463,7 @@ The library is a set of crates you embed in your Axum service — a framework-ag
 | **🪶 Tiny Mandatory Tree**  | A small always-compiled core; Redis, Axum, `reqwest`, and MFA are feature-gated, with a CI dependency budget |
 | **🦀 One Crypto, Everywhere** | A single pure-Rust HS256 primitive runs on the server **and** at the edge (WASM) — never two implementations |
 | **🌳 wasm-clean boundary**  | `bymax-auth-wasm` depends only on `-crypto`/`-jwt`/`-types`; a CI job builds `wasm32` to prove it          |
+| **⚡ Fast & measured**       | No GC and no FFI boundary; hot paths run in ns–µs while memory-hard KDFs stay tunable — tracked with Criterion benches ([details](#-performance--footprint)) |
 
 ---
 
@@ -539,6 +540,46 @@ When integrating `bymax-auth` in production, verify each of the following:
   <img src="https://img.shields.io/badge/Next.js-16-000000?style=flat-square&logo=next.js&logoColor=white" alt="Next.js" />
   <img src="https://img.shields.io/badge/TypeScript-strict-3178C6?style=flat-square&logo=typescript&logoColor=white" alt="TypeScript" />
 </p>
+
+---
+
+## ⚡ Performance & Footprint
+
+Rust's advantage over a managed runtime (Node, the JVM) is **per-operation cost with no garbage collector and no FFI marshalling**. `bymax-auth` is built to spend that advantage deliberately — and to **prove it with benchmarks** rather than assert it.
+
+### Built to be cheap where it should be
+
+| Lever | What it buys |
+| --- | --- |
+| **No runtime, no GC** | Auth work is synchronous CPU over owned bytes — no allocator pauses, no event-loop hops, predictable tail latency under load |
+| **Pure-Rust RustCrypto** | Every primitive is inlined Rust — no C bindings and no per-call FFI boundary to cross (the cost a native Node addon pays on every call) |
+| **Static where it's hot** | Internal services are monomorphized; dynamic dispatch (`Arc<dyn _>`) is paid only at the host-pluggable trait boundary, never in the inner loop |
+| **Allocation-aware** | Digests return a stack `[u8; 32]`; fixed-size randomness uses a stack `[u8; N]` instead of a `Vec`; transient key material lives in `Zeroizing` buffers wiped on drop |
+| **Pay for what you use** | A bare build is a tiny core — Redis, Axum, OAuth, and MFA are feature-gated behind a CI dependency budget, so unused capabilities cost zero binary and zero attack surface |
+| **Tiny edge** | The Next.js middleware verifies JWTs through a `wasm-bindgen` module — the *same* HS256 code as the server, with no network round-trip |
+
+### Memory-hard by design — not by accident
+
+Password hashing is **deliberately expensive**: scrypt and Argon2id are memory-hard so an attacker who exfiltrates the hash store cannot brute-force it cheaply. Their cost is a **security knob** (`cost_factor` / `memory_kib`), not a bottleneck — and it is the one operation the engine hands to `tokio::task::spawn_blocking`, so a burst of logins never stalls the async runtime. Everything *around* the KDF stays in the nanosecond–microsecond range.
+
+### Measured, not asserted
+
+Tracked with [Criterion](https://github.com/bheisler/criterion.rs) so a regression surfaces as a number — the same discipline applied to the coverage gate.
+
+| Primitive (per call) | Median | Role |
+| --- | --- | --- |
+| SHA-256 (`mac::sha256`) | ~110 ns | high-entropy token → Redis key suffix |
+| Keyed HMAC-SHA-256 | ~430 ns | low-entropy identifier / recovery-code hashing |
+| Secure token (32 B → hex) | ~870 ns | dominated by the OS CSPRNG syscall, not allocation |
+| AES-256-GCM encrypt / decrypt | ~2.1 µs / ~1.3 µs | TOTP secret encrypted at rest |
+| TOTP generate / verify (±1 window) | ~200 ns / ~710 ns | RFC 6238, constant-time |
+| scrypt hash / verify (N=2¹⁵) | ~37 ms | memory-hard — tunable security cost |
+| Argon2id hash / verify (19 MiB) | ~10 ms | memory-hard — tunable security cost |
+
+<sub>Indicative medians on an Apple M4 Max, `release` profile, Rust 1.96. Reproduce with `cargo bench -p bymax-auth-crypto --bench crypto --all-features`. Absolute figures are hardware-dependent — the point is the order of magnitude and that the numbers are tracked, not hand-waved.</sub>
+
+> [!NOTE]
+> The cheap operations cost **nanoseconds to microseconds**; the only deliberately slow step is the memory-hard KDF, which is a security control you dial in — not a hot loop. Optimisation is a standing project premise, but it never outranks a constant-time, zeroize, or no-oracle guarantee.
 
 ---
 
