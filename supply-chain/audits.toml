@@ -2,3 +2,441 @@
 # cargo-vet audits file
 
 [audits]
+
+[[trusted.aead]]
+criteria = "safe-to-deploy"
+user-id = 267 # Tony Arcieri (tarcieri)
+start = "2020-06-05"
+end = "2027-06-18"
+
+[[trusted.aes]]
+criteria = "safe-to-deploy"
+user-id = 267 # Tony Arcieri (tarcieri)
+start = "2020-06-05"
+end = "2027-06-18"
+
+[[trusted.aes-gcm]]
+criteria = "safe-to-deploy"
+user-id = 267 # Tony Arcieri (tarcieri)
+start = "2019-08-16"
+end = "2027-06-18"
+
+[[trusted.anstyle]]
+criteria = "safe-to-run"
+user-id = 6743 # Ed Page (epage)
+start = "2022-05-18"
+end = "2027-06-18"
+
+[[trusted.argon2]]
+criteria = "safe-to-deploy"
+user-id = 267 # Tony Arcieri (tarcieri)
+start = "2021-01-29"
+end = "2027-06-18"
+
+[[trusted.autocfg]]
+criteria = "safe-to-run"
+user-id = 539 # Josh Stone (cuviper)
+start = "2019-05-22"
+end = "2027-06-18"
+
+[[trusted.base64ct]]
+criteria = "safe-to-deploy"
+user-id = 267 # Tony Arcieri (tarcieri)
+start = "2021-01-21"
+end = "2027-06-18"
+
+[[trusted.bitflags]]
+criteria = "safe-to-deploy"
+user-id = 3204 # Ashley Mannix (KodrAus)
+start = "2019-05-02"
+end = "2027-06-18"
+
+[[trusted.blake2]]
+criteria = "safe-to-deploy"
+user-id = 5059 # Artyom Pavlov (newpavlov)
+start = "2019-08-25"
+end = "2027-06-18"
+
+[[trusted.clap]]
+criteria = "safe-to-deploy"
+user-id = 6743 # Ed Page (epage)
+start = "2021-12-08"
+end = "2027-06-18"
+
+[[trusted.clap_builder]]
+criteria = "safe-to-run"
+user-id = 6743 # Ed Page (epage)
+start = "2023-03-28"
+end = "2027-06-18"
+
+[[trusted.clap_lex]]
+criteria = "safe-to-run"
+user-id = 6743 # Ed Page (epage)
+start = "2022-04-15"
+end = "2027-06-18"
+
+[[trusted.cpufeatures]]
+criteria = "safe-to-deploy"
+user-id = 267 # Tony Arcieri (tarcieri)
+start = "2021-04-26"
+end = "2027-06-18"
+
+[[trusted.criterion]]
+criteria = "safe-to-deploy"
+user-id = 8785 # Brook Heisler (bheisler)
+start = "2019-04-09"
+end = "2027-06-18"
+
+[[trusted.criterion-plot]]
+criteria = "safe-to-deploy"
+user-id = 8785 # Brook Heisler (bheisler)
+start = "2019-04-09"
+end = "2027-06-18"
+
+[[trusted.crypto-common]]
+criteria = "safe-to-deploy"
+user-id = 5059 # Artyom Pavlov (newpavlov)
+start = "2021-02-10"
+end = "2027-06-18"
+
+[[trusted.ctr]]
+criteria = "safe-to-deploy"
+user-id = 5059 # Artyom Pavlov (newpavlov)
+start = "2019-03-11"
+end = "2027-06-18"
+
+[[trusted.data-encoding]]
+criteria = "safe-to-deploy"
+user-id = 3036 # Julien Cretin (ia0)
+start = "2020-02-22"
+end = "2027-06-18"
+
+[[trusted.digest]]
+criteria = "safe-to-deploy"
+user-id = 267 # Tony Arcieri (tarcieri)
+start = "2020-06-10"
+end = "2027-06-18"
+
+[[trusted.fastrand]]
+criteria = "safe-to-deploy"
+user-id = 33035 # Taiki Endo (taiki-e)
+start = "2021-04-24"
+end = "2027-06-18"
+
+[[trusted.futures-core]]
+criteria = "safe-to-deploy"
+user-id = 33035 # Taiki Endo (taiki-e)
+start = "2020-10-05"
+end = "2027-06-18"
+
+[[trusted.futures-task]]
+criteria = "safe-to-deploy"
+user-id = 33035 # Taiki Endo (taiki-e)
+start = "2019-07-29"
+end = "2027-06-18"
+
+[[trusted.futures-util]]
+criteria = "safe-to-deploy"
+user-id = 33035 # Taiki Endo (taiki-e)
+start = "2020-10-05"
+end = "2027-06-18"
+
+[[trusted.generic-array]]
+criteria = "safe-to-deploy"
+user-id = 5704 # Nova (novacrazy)
+start = "2019-04-14"
+end = "2027-06-18"
+
+[[trusted.getrandom]]
+criteria = "safe-to-deploy"
+user-id = 5059 # Artyom Pavlov (newpavlov)
+start = "2019-06-28"
+end = "2027-06-18"
+
+[[trusted.getrandom]]
+criteria = "safe-to-deploy"
+trusted-publisher = "github:rust-random/getrandom"
+start = "2025-12-27"
+end = "2027-06-18"
+
+[[trusted.ghash]]
+criteria = "safe-to-deploy"
+user-id = 267 # Tony Arcieri (tarcieri)
+start = "2019-09-19"
+end = "2027-06-18"
+
+[[trusted.half]]
+criteria = "safe-to-deploy"
+user-id = 3416 # Kathryn Long (VoidStarKat)
+start = "2019-10-04"
+end = "2027-06-18"
+
+[[trusted.hermit-abi]]
+criteria = "safe-to-deploy"
+user-id = 91569 # Martin Kröning (mkroening)
+start = "2022-09-06"
+end = "2027-06-18"
+
+[[trusted.is-terminal]]
+criteria = "safe-to-run"
+user-id = 6825 # Dan Gohman (sunfishcode)
+start = "2022-01-22"
+end = "2027-06-18"
+
+[[trusted.itoa]]
+criteria = "safe-to-deploy"
+user-id = 3618 # David Tolnay (dtolnay)
+start = "2019-05-02"
+end = "2027-06-18"
+
+[[trusted.js-sys]]
+criteria = "safe-to-deploy"
+user-id = 1 # Alex Crichton (alexcrichton)
+start = "2019-03-04"
+end = "2027-06-18"
+
+[[trusted.js-sys]]
+criteria = "safe-to-deploy"
+trusted-publisher = "github:wasm-bindgen/wasm-bindgen"
+start = "2026-04-28"
+end = "2027-06-18"
+
+[[trusted.libc]]
+criteria = "safe-to-deploy"
+user-id = 55123 # rust-lang-owner
+start = "2024-08-15"
+end = "2027-06-18"
+
+[[trusted.linux-raw-sys]]
+criteria = "safe-to-run"
+user-id = 6825 # Dan Gohman (sunfishcode)
+start = "2021-06-12"
+end = "2027-06-18"
+
+[[trusted.memchr]]
+criteria = "safe-to-run"
+user-id = 189 # Andrew Gallant (BurntSushi)
+start = "2019-07-07"
+end = "2027-06-18"
+
+[[trusted.once_cell]]
+criteria = "safe-to-deploy"
+user-id = 2699 # Alex Kladov (matklad)
+start = "2019-05-07"
+end = "2027-06-18"
+
+[[trusted.password-hash]]
+criteria = "safe-to-deploy"
+user-id = 267 # Tony Arcieri (tarcieri)
+start = "2021-01-29"
+end = "2027-06-18"
+
+[[trusted.pbkdf2]]
+criteria = "safe-to-deploy"
+user-id = 267 # Tony Arcieri (tarcieri)
+start = "2020-06-10"
+end = "2027-06-18"
+
+[[trusted.pin-project-lite]]
+criteria = "safe-to-deploy"
+user-id = 33035 # Taiki Endo (taiki-e)
+start = "2019-10-22"
+end = "2027-06-18"
+
+[[trusted.pin-project-lite]]
+criteria = "safe-to-deploy"
+trusted-publisher = "github:taiki-e/pin-project-lite"
+start = "2026-02-27"
+end = "2027-06-18"
+
+[[trusted.polyval]]
+criteria = "safe-to-deploy"
+user-id = 267 # Tony Arcieri (tarcieri)
+start = "2019-08-13"
+end = "2027-06-18"
+
+[[trusted.ppv-lite86]]
+criteria = "safe-to-deploy"
+user-id = 12840 # Keziah Wesley (kazcw)
+start = "2019-04-30"
+end = "2027-06-18"
+
+[[trusted.proptest]]
+criteria = "safe-to-deploy"
+user-id = 126501 # Tomas Zemanovic (tzemanovic)
+start = "2026-03-24"
+end = "2027-06-18"
+
+[[trusted.r-efi]]
+criteria = "safe-to-deploy"
+user-id = 12177 # David Rheinsberg (dvdhrm)
+start = "2019-03-01"
+end = "2027-06-18"
+
+[[trusted.regex]]
+criteria = "safe-to-run"
+user-id = 189 # Andrew Gallant (BurntSushi)
+start = "2019-02-27"
+end = "2027-06-18"
+
+[[trusted.regex-syntax]]
+criteria = "safe-to-run"
+user-id = 189 # Andrew Gallant (BurntSushi)
+start = "2019-03-30"
+end = "2027-06-18"
+
+[[trusted.rustix]]
+criteria = "safe-to-run"
+user-id = 6825 # Dan Gohman (sunfishcode)
+start = "2021-10-29"
+end = "2027-06-18"
+
+[[trusted.rusty-fork]]
+criteria = "safe-to-deploy"
+user-id = 4778 # Jason Lingle (AltSysrq)
+start = "2019-04-10"
+end = "2027-06-18"
+
+[[trusted.salsa20]]
+criteria = "safe-to-deploy"
+user-id = 5059 # Artyom Pavlov (newpavlov)
+start = "2019-07-30"
+end = "2027-06-18"
+
+[[trusted.scrypt]]
+criteria = "safe-to-deploy"
+user-id = 267 # Tony Arcieri (tarcieri)
+start = "2020-08-18"
+end = "2027-06-18"
+
+[[trusted.serde_json]]
+criteria = "safe-to-deploy"
+user-id = 3618 # David Tolnay (dtolnay)
+start = "2019-02-28"
+end = "2027-06-18"
+
+[[trusted.slab]]
+criteria = "safe-to-deploy"
+user-id = 6741 # Alice Ryhl (Darksonn)
+start = "2021-10-13"
+end = "2027-06-18"
+
+[[trusted.syn]]
+criteria = "safe-to-deploy"
+user-id = 3618 # David Tolnay (dtolnay)
+start = "2019-03-01"
+end = "2027-06-18"
+
+[[trusted.thiserror]]
+criteria = "safe-to-deploy"
+user-id = 3618 # David Tolnay (dtolnay)
+start = "2019-10-09"
+end = "2027-06-18"
+
+[[trusted.thiserror-impl]]
+criteria = "safe-to-deploy"
+user-id = 3618 # David Tolnay (dtolnay)
+start = "2019-10-09"
+end = "2027-06-18"
+
+[[trusted.typenum]]
+criteria = "safe-to-deploy"
+user-id = 243 # Paho Lurie-Gregg (paholg)
+start = "2019-08-25"
+end = "2027-06-18"
+
+[[trusted.unicode-ident]]
+criteria = "safe-to-deploy"
+user-id = 3618 # David Tolnay (dtolnay)
+start = "2021-10-02"
+end = "2027-06-18"
+
+[[trusted.version_check]]
+criteria = "safe-to-deploy"
+user-id = 3864 # Sergio Benitez (SergioBenitez)
+start = "2019-05-24"
+end = "2027-06-18"
+
+[[trusted.walkdir]]
+criteria = "safe-to-run"
+user-id = 189 # Andrew Gallant (BurntSushi)
+start = "2019-06-09"
+end = "2027-06-18"
+
+[[trusted.wasi]]
+criteria = "safe-to-deploy"
+user-id = 1 # Alex Crichton (alexcrichton)
+start = "2020-06-03"
+end = "2027-06-18"
+
+[[trusted.wasm-bindgen]]
+criteria = "safe-to-deploy"
+user-id = 1 # Alex Crichton (alexcrichton)
+start = "2019-03-04"
+end = "2027-06-18"
+
+[[trusted.wasm-bindgen]]
+criteria = "safe-to-deploy"
+trusted-publisher = "github:wasm-bindgen/wasm-bindgen"
+start = "2026-04-28"
+end = "2027-06-18"
+
+[[trusted.wasm-bindgen-macro]]
+criteria = "safe-to-deploy"
+trusted-publisher = "github:wasm-bindgen/wasm-bindgen"
+start = "2026-04-28"
+end = "2027-06-18"
+
+[[trusted.wasm-bindgen-macro-support]]
+criteria = "safe-to-deploy"
+user-id = 1 # Alex Crichton (alexcrichton)
+start = "2019-03-04"
+end = "2027-06-18"
+
+[[trusted.wasm-bindgen-macro-support]]
+criteria = "safe-to-deploy"
+trusted-publisher = "github:wasm-bindgen/wasm-bindgen"
+start = "2026-04-28"
+end = "2027-06-18"
+
+[[trusted.wasm-bindgen-shared]]
+criteria = "safe-to-deploy"
+trusted-publisher = "github:wasm-bindgen/wasm-bindgen"
+start = "2026-04-28"
+end = "2027-06-18"
+
+[[trusted.windows-sys]]
+criteria = "safe-to-deploy"
+user-id = 64539 # Kenny Kerr (kennykerr)
+start = "2021-11-15"
+end = "2027-06-18"
+
+[[trusted.zerocopy]]
+criteria = "safe-to-deploy"
+user-id = 7178 # Joshua Liebow-Feeser (joshlf)
+start = "2019-02-28"
+end = "2027-06-18"
+
+[[trusted.zerocopy-derive]]
+criteria = "safe-to-deploy"
+user-id = 7178 # Joshua Liebow-Feeser (joshlf)
+start = "2019-02-28"
+end = "2027-06-18"
+
+[[trusted.zeroize]]
+criteria = "safe-to-deploy"
+user-id = 267 # Tony Arcieri (tarcieri)
+start = "2021-11-05"
+end = "2027-06-18"
+
+[[trusted.zeroize]]
+criteria = "safe-to-deploy"
+trusted-publisher = "github:RustCrypto/utils"
+start = "2026-06-12"
+end = "2027-06-18"
+
+[[trusted.zmij]]
+criteria = "safe-to-deploy"
+user-id = 3618 # David Tolnay (dtolnay)
+start = "2025-12-18"
+end = "2027-06-18"
