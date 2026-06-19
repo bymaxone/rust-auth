@@ -421,6 +421,7 @@ dependencies = [
  "async-trait",
  "bymax-auth-core",
  "bymax-auth-crypto",
+ "bymax-auth-jwt",
  "bymax-auth-types",
  "deadpool-redis",
  "redis",

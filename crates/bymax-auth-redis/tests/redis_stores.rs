@@ -16,11 +16,15 @@ use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
 use bymax_auth_core::context::RequestContext;
+use bymax_auth_core::services::auth::{
+    AcceptInvitationInput, ForgotPasswordInput, ResetPasswordInput, VerifyResetOtpInput,
+};
 use bymax_auth_core::services::auth::{LoginInput, RegisterInput};
 use bymax_auth_core::testing::InMemoryUserRepository;
 use bymax_auth_core::traits::{
-    BruteForceStore, OtpPurpose, OtpStore, RotateOutcome, SessionKind, SessionRecord,
-    SessionRotation, SessionStore, WsTicketSnapshot, WsTicketStore,
+    BruteForceStore, InvitationStore, OtpPurpose, OtpStore, PasswordResetStore, ResetContext,
+    RotateOutcome, SessionKind, SessionRecord, SessionRotation, SessionStore, StoredInvitation,
+    UserRepository, WsTicketSnapshot, WsTicketStore,
 };
 use bymax_auth_core::{AuthConfig, AuthEngine, Environment};
 use bymax_auth_types::{AuthError, LoginResult};
@@ -389,13 +393,48 @@ async fn keys_are_namespaced_no_pii_and_carry_a_ttl() {
     ));
     assert!(matches!(stores.record_failure("bfhmac", 900).await, Ok(1)));
     assert!(stores.blacklist_access("jti-xyz", 60).await.is_ok());
+    // The single-use opaque-token keyspaces (`pr:`/`prv:`/`inv:`) also appear, hashed by
+    // sha256(token) so a raw token (which could contain attacker-chosen bytes) is never a key.
+    let reset_context = ResetContext {
+        user_id: "user-42".to_owned(),
+        email: "victim@example.com".to_owned(),
+        tenant_id: "t1".to_owned(),
+    };
+    assert!(
+        stores
+            .put_token("reset-token-secret", &reset_context, 600)
+            .await
+            .is_ok()
+    );
+    assert!(
+        stores
+            .put_verified("verified-token-secret", &reset_context, 300)
+            .await
+            .is_ok()
+    );
+    assert!(
+        stores
+            .put_invitation(
+                "invite-token-secret",
+                &StoredInvitation {
+                    email: "invitee@example.com".to_owned(),
+                    role: "MEMBER".to_owned(),
+                    tenant_id: "t1".to_owned(),
+                    inviter_user_id: "user-42".to_owned(),
+                },
+                604800,
+            )
+            .await
+            .is_ok()
+    );
     let minted = stores.mint(&snapshot(), 30).await;
     let Ok(ticket) = minted else { return };
 
     let keys = redis.all_keys().await;
     assert!(!keys.is_empty(), "operations should have written keys");
     let allowed = [
-        "rt", "rv", "rp", "sess", "sd", "lf", "otp", "resend", "wst", "prt", "prp", "psess", "psd",
+        "rt", "rv", "rp", "sess", "sd", "lf", "otp", "resend", "wst", "pr", "prv", "inv", "prt",
+        "prp", "psess", "psd",
     ];
     for key in &keys {
         // Namespaced under the configured prefix, applied in exactly one place.
@@ -413,6 +452,612 @@ async fn keys_are_namespaced_no_pii_and_carry_a_ttl() {
         let ttl = redis.ttl(key).await;
         assert!(ttl > 0, "key has no TTL (orphan): {key} (ttl={ttl})");
     }
+}
+
+#[tokio::test]
+async fn password_reset_and_invitation_stores_are_single_use_via_getdel() {
+    let Some(redis) = common::try_start().await else {
+        return;
+    };
+    let Some(stores) = redis.stores() else { return };
+
+    // Reset link token: stored under `pr:`, consumed once.
+    let reset = ResetContext {
+        user_id: "u1".to_owned(),
+        email: "u@example.com".to_owned(),
+        tenant_id: "t1".to_owned(),
+    };
+    assert!(stores.put_token("rt-secret", &reset, 600).await.is_ok());
+    assert!(matches!(
+        stores.consume_token("rt-secret").await,
+        Ok(Some(c)) if c.user_id == "u1"
+    ));
+    // Single-use: a second consume finds nothing.
+    assert!(matches!(stores.consume_token("rt-secret").await, Ok(None)));
+
+    // delete_token removes an unconsumed token (the undeliverable-email cleanup path).
+    assert!(stores.put_token("undeliverable", &reset, 600).await.is_ok());
+    assert!(stores.delete_token("undeliverable").await.is_ok());
+    assert!(matches!(
+        stores.consume_token("undeliverable").await,
+        Ok(None)
+    ));
+
+    // Verified token: stored under `prv:`, consumed once.
+    assert!(stores.put_verified("vt-secret", &reset, 300).await.is_ok());
+    assert!(matches!(
+        stores.consume_verified("vt-secret").await,
+        Ok(Some(c)) if c.email == "u@example.com"
+    ));
+    assert!(matches!(
+        stores.consume_verified("vt-secret").await,
+        Ok(None)
+    ));
+
+    // Invitation: stored under `inv:`, consumed once; a tampered role survives the store but
+    // is re-validated by the engine on accept (covered by the engine flow test below).
+    let invitation = StoredInvitation {
+        email: "invitee@example.com".to_owned(),
+        role: "MEMBER".to_owned(),
+        tenant_id: "t1".to_owned(),
+        inviter_user_id: "owner".to_owned(),
+    };
+    assert!(
+        stores
+            .put_invitation("inv-secret", &invitation, 604800)
+            .await
+            .is_ok()
+    );
+    assert!(matches!(
+        stores.consume_invitation("inv-secret").await,
+        Ok(Some(i)) if i.role == "MEMBER"
+    ));
+    assert!(matches!(
+        stores.consume_invitation("inv-secret").await,
+        Ok(None)
+    ));
+    // An unknown token is also `None`.
+    assert!(matches!(
+        stores.consume_invitation("never-seen").await,
+        Ok(None)
+    ));
+}
+
+#[tokio::test]
+async fn engine_runs_password_reset_via_token_against_redis() {
+    let Some(redis) = common::try_start().await else {
+        return;
+    };
+    let Some(token_stores) = redis.stores() else { return };
+
+    // Token method: register, plant a known token, reset via it, confirm revocation + single-use.
+    let users = Arc::new(InMemoryUserRepository::new());
+    let mut config = AuthConfig::default();
+    config.jwt.secret = SecretString::from("0123456789abcdef0123456789abcdef".to_owned());
+    config.roles.hierarchy = HashMap::from([("USER".to_owned(), Vec::new())]);
+    config.email_verification.required = false;
+    config.password_reset.method = bymax_auth_core::config::ResetMethod::Token;
+
+    let Ok(engine) = AuthEngine::builder()
+        .config(config)
+        .environment(Environment::Test)
+        .user_repository(users.clone())
+        .redis_stores(Arc::new(token_stores))
+        .build()
+    else {
+        return;
+    };
+    let ctx = RequestContext::new("203.0.113.4", "agent/1.0", BTreeMap::new());
+
+    let registered = engine
+        .register(
+            bymax_auth_core::services::auth::RegisterInput {
+                email: "reset@example.com".to_owned(),
+                name: "Reset User".to_owned(),
+                password: "correct horse battery staple".to_owned(),
+                tenant_id: "t1".to_owned(),
+            },
+            &ctx,
+        )
+        .await;
+    let Ok(LoginResult::Success(auth)) = registered else {
+        return;
+    };
+
+    // Initiate stores a reset token under `pr:` (best-effort); the raw token is opaque to the
+    // test, so plant a known token via the store to drive the reset deterministically.
+    assert!(
+        engine
+            .initiate_reset(ForgotPasswordInput {
+                email: "reset@example.com".to_owned(),
+                tenant_id: "t1".to_owned(),
+            })
+            .await
+            .is_ok()
+    );
+    let Some(reset_stores) = redis.stores() else { return };
+    assert!(
+        reset_stores
+            .put_token(
+                "known-reset-token",
+                &ResetContext {
+                    user_id: auth.user.id.clone(),
+                    email: "reset@example.com".to_owned(),
+                    tenant_id: "t1".to_owned(),
+                },
+                600,
+            )
+            .await
+            .is_ok()
+    );
+    assert!(
+        engine
+            .reset_password(ResetPasswordInput {
+                email: "reset@example.com".to_owned(),
+                tenant_id: "t1".to_owned(),
+                new_password: "a-brand-new-password".to_owned(),
+                token: Some("known-reset-token".to_owned()),
+                otp: None,
+                verified_token: None,
+            })
+            .await
+            .is_ok()
+    );
+
+    // All sessions were revoked: the refresh token from registration no longer rotates.
+    assert!(matches!(
+        engine
+            .refresh(&auth.refresh_token, "203.0.113.4", "agent/1.0")
+            .await,
+        Err(AuthError::RefreshTokenInvalid)
+    ));
+    // The reset token is single-use: a replay is invalid.
+    assert!(matches!(
+        engine
+            .reset_password(ResetPasswordInput {
+                email: "reset@example.com".to_owned(),
+                tenant_id: "t1".to_owned(),
+                new_password: "again".to_owned(),
+                token: Some("known-reset-token".to_owned()),
+                otp: None,
+                verified_token: None,
+            })
+            .await,
+        Err(AuthError::PasswordResetTokenInvalid)
+    ));
+}
+
+#[tokio::test]
+async fn engine_runs_password_reset_via_otp_against_redis() {
+    let Some(redis) = common::try_start().await else {
+        return;
+    };
+    let Some(otp_stores) = redis.stores_with_namespace("otpns") else {
+        return;
+    };
+
+    // OTP method: register, drive the engine to generate+store a real OTP, read the code back
+    // from its `otp:` record, then run the verify→verified-token→reset bridge against real Redis
+    // and confirm the password changed and every session was revoked.
+    let otp_users = Arc::new(InMemoryUserRepository::new());
+    let mut otp_config = AuthConfig::default();
+    otp_config.jwt.secret = SecretString::from("fedcba9876543210fedcba9876543210".to_owned());
+    otp_config.roles.hierarchy = HashMap::from([("USER".to_owned(), Vec::new())]);
+    otp_config.email_verification.required = false;
+    otp_config.password_reset.method = bymax_auth_core::config::ResetMethod::Otp;
+    let Ok(otp_engine) = AuthEngine::builder()
+        .config(otp_config)
+        .environment(Environment::Test)
+        .user_repository(otp_users.clone())
+        .redis_stores(Arc::new(otp_stores))
+        .build()
+    else {
+        return;
+    };
+    let otp_ctx = RequestContext::new("203.0.113.4", "agent/1.0", BTreeMap::new());
+    let registered = otp_engine
+        .register(
+            bymax_auth_core::services::auth::RegisterInput {
+                email: "otp-reset@example.com".to_owned(),
+                name: "Otp User".to_owned(),
+                password: "old-password".to_owned(),
+                tenant_id: "t1".to_owned(),
+            },
+            &otp_ctx,
+        )
+        .await;
+    let Ok(LoginResult::Success(auth)) = registered else {
+        return;
+    };
+    let user_id = auth.user.id.clone();
+    // The password hash before the reset, to prove it actually changes.
+    let before = otp_users
+        .find_by_id(&user_id, None)
+        .await
+        .ok()
+        .flatten()
+        .and_then(|u| u.password_hash);
+
+    // Initiate stores a real OTP under `otpns:otp:password_reset:<hmac>` (the store write is
+    // awaited, so the record exists once this returns). The identifier is an opaque HMAC, so
+    // read the code back from the record's value rather than recomputing the key.
+    assert!(
+        otp_engine
+            .initiate_reset(ForgotPasswordInput {
+                email: "otp-reset@example.com".to_owned(),
+                tenant_id: "t1".to_owned(),
+            })
+            .await
+            .is_ok()
+    );
+    let keys = redis.all_keys().await;
+    let Some(otp_key) = keys
+        .into_iter()
+        .find(|k| k.contains(":otp:password_reset:"))
+    else {
+        // No Docker / no record: nothing to drive, skip the rest cleanly.
+        return;
+    };
+    let Some(raw) = redis.get(&otp_key).await else { return };
+    let Ok(record) = serde_json::from_str::<serde_json::Value>(&raw) else {
+        return;
+    };
+    let Some(code) = record
+        .get("code")
+        .and_then(|c| c.as_str())
+        .map(str::to_owned)
+    else {
+        return;
+    };
+
+    // Verify the OTP for a short-lived verified token, then reset through the verified path.
+    let verified = otp_engine
+        .verify_reset_otp(VerifyResetOtpInput {
+            email: "otp-reset@example.com".to_owned(),
+            tenant_id: "t1".to_owned(),
+            otp: code,
+        })
+        .await;
+    assert!(verified.is_ok());
+    let Ok(verified_token) = verified else { return };
+    assert!(
+        otp_engine
+            .reset_password(ResetPasswordInput {
+                email: "otp-reset@example.com".to_owned(),
+                tenant_id: "t1".to_owned(),
+                new_password: "a-fresh-new-password".to_owned(),
+                token: None,
+                otp: None,
+                verified_token: Some(verified_token.clone()),
+            })
+            .await
+            .is_ok()
+    );
+
+    // The password actually changed.
+    let after = otp_users
+        .find_by_id(&user_id, None)
+        .await
+        .ok()
+        .flatten()
+        .and_then(|u| u.password_hash);
+    assert_ne!(before, after, "the stored password hash must change");
+    assert!(after.is_some());
+
+    // Every session was revoked: the registration refresh token no longer rotates.
+    assert!(matches!(
+        otp_engine
+            .refresh(&auth.refresh_token, "203.0.113.4", "agent/1.0")
+            .await,
+        Err(AuthError::RefreshTokenInvalid)
+    ));
+
+    // The verified token is single-use: a replay through the verified path is rejected.
+    assert!(matches!(
+        otp_engine
+            .reset_password(ResetPasswordInput {
+                email: "otp-reset@example.com".to_owned(),
+                tenant_id: "t1".to_owned(),
+                new_password: "another".to_owned(),
+                token: None,
+                otp: None,
+                verified_token: Some(verified_token),
+            })
+            .await,
+        Err(AuthError::PasswordResetTokenInvalid)
+    ));
+}
+
+/// A hooks spy that records the new-session hook's payload (device, IP, and the short session
+/// hash), so the persisted session record can be asserted to match what the hook reports.
+#[derive(Default)]
+struct CaptureNewSessionHook {
+    captured: std::sync::Mutex<Option<(String, String, String)>>,
+}
+
+#[async_trait::async_trait]
+impl bymax_auth_core::traits::AuthHooks for CaptureNewSessionHook {
+    async fn on_new_session(
+        &self,
+        _user: &bymax_auth_types::SafeAuthUser,
+        session: &bymax_auth_core::traits::SessionInfo,
+        _ctx: &bymax_auth_core::traits::HookContext,
+    ) -> Result<(), bymax_auth_core::traits::HookError> {
+        if let Ok(mut slot) = self.captured.lock() {
+            *slot = Some((
+                session.device.clone(),
+                session.ip.clone(),
+                session.session_hash.clone(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn engine_persists_normalized_ua_and_ip_matching_the_new_session_hook() {
+    let Some(redis) = common::try_start().await else {
+        return;
+    };
+    let Some(stores) = redis.stores_with_namespace("normns") else {
+        return;
+    };
+    let stores = Arc::new(stores);
+
+    let users = Arc::new(InMemoryUserRepository::new());
+    let mut config = AuthConfig::default();
+    config.jwt.secret = SecretString::from("0123456789abcdef0123456789abcdef".to_owned());
+    config.roles.hierarchy = HashMap::from([("USER".to_owned(), Vec::new())]);
+    config.email_verification.required = false;
+    // Enable session tracking so the new-session hook fires for the issued session.
+    config.sessions.enabled = true;
+
+    let hooks = Arc::new(CaptureNewSessionHook::default());
+    let Ok(engine) = AuthEngine::builder()
+        .config(config)
+        .environment(Environment::Test)
+        .user_repository(users.clone())
+        .redis_stores(stores.clone())
+        .hooks(hooks.clone())
+        .build()
+    else {
+        return;
+    };
+
+    // A raw Chrome/macOS user-agent and an attacker-controlled IP that is <= 45 chars but
+    // > 45 bytes (20 three-byte chars = 60 bytes): both must be normalized at the persistence
+    // point, not just in the hook record.
+    let raw_ua = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15) Chrome/120.0 Safari/537.36";
+    let overlong_ip = "中".repeat(20);
+    let ctx = RequestContext::new(&overlong_ip, raw_ua, BTreeMap::new());
+
+    let registered = engine
+        .register(
+            RegisterInput {
+                email: "norm@example.com".to_owned(),
+                name: "Norm User".to_owned(),
+                password: "correct horse battery staple".to_owned(),
+                tenant_id: "t1".to_owned(),
+            },
+            &ctx,
+        )
+        .await;
+    let Ok(LoginResult::Success(auth)) = registered else {
+        return;
+    };
+    let user_id = auth.user.id.clone();
+    let full_hash =
+        bymax_auth_jwt::RawRefreshToken::from_raw(auth.refresh_token.clone()).redis_hash();
+
+    // The PERSISTED record (read via the store, i.e. what `list_sessions` returns) carries the
+    // parsed UA and the byte-bounded IP — proving normalization reached Redis, not only the hook.
+    let listed = stores.list_sessions(SessionKind::Dashboard, &user_id).await;
+    assert!(matches!(&listed, Ok(v) if v.len() == 1));
+    let Ok(listed) = listed else { return };
+    let Some(detail) = listed.into_iter().next() else { return };
+    assert_eq!(detail.device, "Chrome on macOS");
+    assert!(detail.ip.len() <= 45, "the stored IP must be <= 45 bytes");
+    assert!(
+        detail.ip.chars().all(|c| c == '中'),
+        "must not split a codepoint"
+    );
+    assert_eq!(detail.session_hash, full_hash);
+
+    // The new-session hook payload matches the persisted record exactly, and carries only the
+    // short (<= 8 char) session hash, a prefix of the full stored hash.
+    let captured = match hooks.captured.lock() {
+        Ok(slot) => slot.as_ref().cloned(),
+        Err(_) => None,
+    };
+    let Some((hook_device, hook_ip, hook_hash)) = captured else { return };
+    assert_eq!(hook_device, detail.device);
+    assert_eq!(hook_ip, detail.ip);
+    assert!(hook_hash.len() <= 8);
+    assert!(full_hash.starts_with(&hook_hash));
+}
+
+#[tokio::test]
+async fn engine_runs_invitation_accept_against_redis() {
+    let Some(redis) = common::try_start().await else {
+        return;
+    };
+    let Some(stores) = redis.stores_with_namespace("invns") else {
+        return;
+    };
+    let stores = Arc::new(stores);
+
+    let users = Arc::new(InMemoryUserRepository::new());
+    let mut config = AuthConfig::default();
+    config.jwt.secret = SecretString::from("0123456789abcdef0123456789abcdef".to_owned());
+    config.roles.hierarchy = HashMap::from([
+        ("ADMIN".to_owned(), vec!["MEMBER".to_owned()]),
+        ("MEMBER".to_owned(), Vec::new()),
+    ]);
+    config.email_verification.required = false;
+    config.invitations.enabled = true;
+
+    let Ok(engine) = AuthEngine::builder()
+        .config(config)
+        .environment(Environment::Test)
+        .user_repository(users.clone())
+        .redis_stores(stores.clone())
+        .build()
+    else {
+        return;
+    };
+
+    // Seed an ADMIN inviter, then create a real invitation through `invite`.
+    let Ok(admin) = users
+        .create(bymax_auth_types::CreateUserData {
+            email: "admin@example.com".to_owned(),
+            name: "Admin".to_owned(),
+            password_hash: Some("$scrypt$x".to_owned()),
+            role: Some("ADMIN".to_owned()),
+            status: Some("ACTIVE".to_owned()),
+            tenant_id: "t1".to_owned(),
+            email_verified: Some(true),
+        })
+        .await
+    else {
+        return;
+    };
+    assert!(
+        engine
+            .invite(
+                &admin.id,
+                "invitee@example.com",
+                "MEMBER",
+                "t1",
+                Some("Acme")
+            )
+            .await
+            .is_ok()
+    );
+
+    // The raw token is opaque, so plant a known invitation under `inv:` and accept it.
+    assert!(
+        stores
+            .put_invitation(
+                "known-invite-token",
+                &StoredInvitation {
+                    email: "invitee@example.com".to_owned(),
+                    role: "MEMBER".to_owned(),
+                    tenant_id: "t1".to_owned(),
+                    inviter_user_id: admin.id.clone(),
+                },
+                604800,
+            )
+            .await
+            .is_ok()
+    );
+    let accepted = engine
+        .accept_invitation(
+            AcceptInvitationInput {
+                token: "known-invite-token".to_owned(),
+                name: "New Member".to_owned(),
+                password: "a-strong-password".to_owned(),
+            },
+            "203.0.113.4",
+            "agent/1.0",
+            BTreeMap::new(),
+        )
+        .await;
+    assert!(matches!(&accepted, Ok(a) if a.user.email == "invitee@example.com"));
+    let Ok(result) = accepted else { return };
+    assert!(result.user.email_verified);
+    assert_eq!(result.user.role, "MEMBER");
+
+    // The session was persisted in Redis under the refresh hash.
+    let hash = bymax_auth_jwt::RawRefreshToken::from_raw(result.refresh_token.clone()).redis_hash();
+    assert!(matches!(
+        stores.find_session(SessionKind::Dashboard, &hash).await,
+        Ok(Some(_))
+    ));
+
+    // The invitation token is single-use: a replay is rejected.
+    assert!(matches!(
+        engine
+            .accept_invitation(
+                AcceptInvitationInput {
+                    token: "known-invite-token".to_owned(),
+                    name: "Replay".to_owned(),
+                    password: "pw".to_owned(),
+                },
+                "203.0.113.4",
+                "agent/1.0",
+                BTreeMap::new(),
+            )
+            .await,
+        Err(AuthError::InvalidInvitationToken)
+    ));
+}
+
+#[tokio::test]
+async fn engine_session_limit_evicts_oldest_against_redis() {
+    let Some(redis) = common::try_start().await else {
+        return;
+    };
+    let Some(stores) = redis.stores_with_namespace("sessns") else {
+        return;
+    };
+    let stores = Arc::new(stores);
+
+    let users = Arc::new(InMemoryUserRepository::new());
+    let mut config = AuthConfig::default();
+    config.jwt.secret = SecretString::from("0123456789abcdef0123456789abcdef".to_owned());
+    config.roles.hierarchy = HashMap::from([("USER".to_owned(), Vec::new())]);
+    config.email_verification.required = false;
+    // Enable session tracking with a cap of two so the third login evicts the oldest.
+    config.sessions.enabled = true;
+    config.sessions.default_max_sessions = 2;
+
+    let Ok(engine) = AuthEngine::builder()
+        .config(config)
+        .environment(Environment::Test)
+        .user_repository(users.clone())
+        .redis_stores(stores.clone())
+        .build()
+    else {
+        return;
+    };
+    let ctx = RequestContext::new("203.0.113.4", "agent/1.0", BTreeMap::new());
+
+    let register = bymax_auth_core::services::auth::RegisterInput {
+        email: "cap@example.com".to_owned(),
+        name: "Cap User".to_owned(),
+        password: "correct horse battery staple".to_owned(),
+        tenant_id: "t1".to_owned(),
+    };
+    let first = engine.register(register, &ctx).await;
+    let Ok(LoginResult::Success(first)) = first else {
+        return;
+    };
+    let user_id = first.user.id.clone();
+    let first_hash =
+        bymax_auth_jwt::RawRefreshToken::from_raw(first.refresh_token.clone()).redis_hash();
+
+    let login = |email: &str| bymax_auth_core::services::auth::LoginInput {
+        email: email.to_owned(),
+        password: "correct horse battery staple".to_owned(),
+        tenant_id: "t1".to_owned(),
+    };
+    // Two more logins push the live session count to three, over the cap of two.
+    let Ok(LoginResult::Success(_)) = engine.login(login("cap@example.com"), &ctx).await else {
+        return;
+    };
+    let Ok(LoginResult::Success(third)) = engine.login(login("cap@example.com"), &ctx).await else {
+        return;
+    };
+    let third_hash =
+        bymax_auth_jwt::RawRefreshToken::from_raw(third.refresh_token.clone()).redis_hash();
+
+    // The cap holds at two and the oldest (registration) session was evicted, while the newest
+    // survives — proof the FIFO eviction excluded the just-created session.
+    let listed = stores.list_sessions(SessionKind::Dashboard, &user_id).await;
+    assert!(matches!(&listed, Ok(v) if v.len() == 2));
+    let Ok(listed) = listed else { return };
+    assert!(listed.iter().all(|s| s.session_hash != first_hash));
+    assert!(listed.iter().any(|s| s.session_hash == third_hash));
 }
 
 #[tokio::test]

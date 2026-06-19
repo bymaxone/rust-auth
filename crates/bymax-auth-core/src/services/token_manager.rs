@@ -17,6 +17,7 @@ use bymax_auth_types::{
     RotatedTokens, SafeAuthUser,
 };
 
+use crate::services::session::normalize_session_metadata;
 use crate::services::{internal_error, is_refresh_token_shape, new_uuid_v4, now_offset, now_unix};
 use crate::traits::{RotateOutcome, SessionKind, SessionRecord, SessionRotation, SessionStore};
 
@@ -94,12 +95,16 @@ impl TokenManagerService {
         };
         let access_token = self.issue_access(&claims)?;
 
+        // Normalize the attacker-controlled metadata at the persistence point, so the stored
+        // record matches what `list_sessions` and the new-session hook report (and the IP byte
+        // bound actually reaches the store).
+        let (device, stored_ip) = normalize_session_metadata(user_agent, ip);
         let record = SessionRecord {
             user_id: user.id.clone(),
             tenant_id: Some(user.tenant_id.clone()),
             role: user.role.clone(),
-            device: device_label(user_agent),
-            ip: ip.to_owned(),
+            device,
+            ip: stored_ip,
             created_at: now_offset(),
         };
         self.session_store
@@ -299,36 +304,35 @@ fn map_jwt_error(error: bymax_auth_jwt::JwtError) -> AuthError {
 }
 
 /// Build a fresh refresh-session record for a rotation, carrying the seed identity and
-/// stamping the current device/IP/time.
+/// stamping the current device/IP/time. The device/IP are normalized at this persistence
+/// point (parsed UA + byte-bounded IP) so a rotated record matches what `list_sessions` and
+/// the session hooks report.
 fn identity_record(seed: &SessionRecord, ip: &str, user_agent: &str) -> SessionRecord {
+    let (device, stored_ip) = normalize_session_metadata(user_agent, ip);
     SessionRecord {
         user_id: seed.user_id.clone(),
         tenant_id: seed.tenant_id.clone(),
         role: seed.role.clone(),
-        device: device_label(user_agent),
-        ip: ip.to_owned(),
+        device,
+        ip: stored_ip,
         created_at: now_offset(),
     }
 }
 
 /// A placeholder identity used only when the live old token is absent; the rotation never
 /// stores it (an absent live token can only yield Grace or Invalid), so its empty identity
-/// is never observed.
+/// is never observed. The device/IP are still normalized for consistency with the records
+/// that are persisted.
 fn placeholder_record(ip: &str, user_agent: &str) -> SessionRecord {
+    let (device, stored_ip) = normalize_session_metadata(user_agent, ip);
     SessionRecord {
         user_id: String::new(),
         tenant_id: None,
         role: String::new(),
-        device: device_label(user_agent),
-        ip: ip.to_owned(),
+        device,
+        ip: stored_ip,
         created_at: now_offset(),
     }
-}
-
-/// The human-readable device label stored on a session record. Full user-agent parsing is
-/// the session service's concern; here the raw value is carried verbatim.
-fn device_label(user_agent: &str) -> String {
-    user_agent.to_owned()
 }
 
 #[cfg(test)]

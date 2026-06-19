@@ -44,6 +44,9 @@ testcontainers-modules = { version = "0.15", default-features = false, features 
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }
 # The in-memory repository + a real `AuthEngine` for the end-to-end flow test against Redis.
 bymax-auth-core = { workspace = true, features = ["testing"] }
+# Recomputing a refresh token's `sha256` hash to assert the persisted session in the
+# end-to-end flow, reset, invitation, and session-limit tests.
+bymax-auth-jwt = { workspace = true }
 # Building the engine's JWT signing secret in the end-to-end test.
 secrecy = "0.10"
 

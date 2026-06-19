@@ -12,13 +12,16 @@
 //!   lockout with the identifier-injection guard).
 //! - [`otp`] — the [`otp::OtpService`] (CSPRNG numeric OTP generation, attempt-bounded
 //!   verify with timing normalization, and the resend cooldown).
+//! - [`session`] — the [`session::SessionService`] (concurrent-session tracking, FIFO
+//!   eviction, device/IP metadata, ownership-checked revoke, and atomic detail rotation).
 //! - [`auth`] — the local authentication flows (register, login, logout, me, refresh,
-//!   email verification, and password-less issuance).
+//!   email verification, password reset, invitations, and password-less issuance).
 
 pub mod auth;
 pub mod brute_force;
 pub mod otp;
 pub mod password;
+pub mod session;
 pub mod token_manager;
 
 use bymax_auth_types::AuthError;

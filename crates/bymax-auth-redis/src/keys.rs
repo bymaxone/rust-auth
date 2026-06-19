@@ -42,6 +42,12 @@ pub enum Prefix {
     Resend,
     /// Single-use WebSocket upgrade ticket (`wst`).
     Wst,
+    /// Password-reset link token (`pr`).
+    Pr,
+    /// Password-reset OTP "verified" token (`prv`).
+    Prv,
+    /// Pending invitation (`inv`).
+    Inv,
     /// Platform-admin refresh session (`prt`).
     Prt,
     /// Platform rotation grace pointer (`prp`).
@@ -66,6 +72,9 @@ impl Prefix {
             Self::Otp => "otp",
             Self::Resend => "resend",
             Self::Wst => "wst",
+            Self::Pr => "pr",
+            Self::Prv => "prv",
+            Self::Inv => "inv",
             Self::Prt => "prt",
             Self::Prp => "prp",
             Self::Psess => "psess",
@@ -136,6 +145,9 @@ mod tests {
             (Prefix::Otp, "auth:otp:abc"),
             (Prefix::Resend, "auth:resend:abc"),
             (Prefix::Wst, "auth:wst:abc"),
+            (Prefix::Pr, "auth:pr:abc"),
+            (Prefix::Prv, "auth:prv:abc"),
+            (Prefix::Inv, "auth:inv:abc"),
             (Prefix::Prt, "auth:prt:abc"),
             (Prefix::Prp, "auth:prp:abc"),
             (Prefix::Psess, "auth:psess:abc"),

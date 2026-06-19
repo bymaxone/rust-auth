@@ -14,10 +14,12 @@ use crate::config::{AuthConfig, Environment, ResolvedConfig};
 use crate::services::brute_force::BruteForceService;
 use crate::services::otp::OtpService;
 use crate::services::password::PasswordService;
+use crate::services::session::SessionService;
 use crate::services::token_manager::TokenManagerService;
 use crate::traits::{
-    AuthHooks, BruteForceStore, EmailProvider, HttpClient, NoOpAuthHooks, NoOpEmailProvider,
-    OAuthProvider, OtpStore, PlatformUserRepository, SessionStore, UserRepository, WsTicketStore,
+    AuthHooks, BruteForceStore, EmailProvider, HttpClient, InvitationStore, NoOpAuthHooks,
+    NoOpEmailProvider, OAuthProvider, OtpStore, PasswordResetStore, PlatformUserRepository,
+    SessionStore, UserRepository, WsTicketStore,
 };
 
 /// Assembles an [`AuthEngine`] from a configuration plus the host's trait implementations.
@@ -34,6 +36,8 @@ pub struct AuthEngineBuilder {
     otp_store: Option<Arc<dyn OtpStore>>,
     brute_force_store: Option<Arc<dyn BruteForceStore>>,
     ws_ticket_store: Option<Arc<dyn WsTicketStore>>,
+    password_reset_store: Option<Arc<dyn PasswordResetStore>>,
+    invitation_store: Option<Arc<dyn InvitationStore>>,
     oauth_providers: HashMap<String, Arc<dyn OAuthProvider>>,
     http_client: Option<Arc<dyn HttpClient>>,
 }
@@ -60,6 +64,8 @@ impl AuthEngineBuilder {
             otp_store: None,
             brute_force_store: None,
             ws_ticket_store: None,
+            password_reset_store: None,
+            invitation_store: None,
             oauth_providers: HashMap::new(),
             http_client: None,
         }
@@ -137,16 +143,43 @@ impl AuthEngineBuilder {
         self
     }
 
+    /// Set the password-reset proof store (`pr:`/`prv:` single-use tokens). Required only when
+    /// the password-reset flow uses the token method or the OTP verified-token bridge.
+    #[must_use]
+    pub fn password_reset_store(mut self, store: Arc<dyn PasswordResetStore>) -> Self {
+        self.password_reset_store = Some(store);
+        self
+    }
+
+    /// Set the invitation store (`inv:` single-use tokens). Required only when the invitation
+    /// domain is enabled.
+    #[must_use]
+    pub fn invitation_store(mut self, store: Arc<dyn InvitationStore>) -> Self {
+        self.invitation_store = Some(store);
+        self
+    }
+
     /// Register the session, OTP, and brute-force stores from a single backend that
     /// implements all three (the common case — one Redis handle behind every store trait).
+    /// When the same backend also implements the WebSocket-ticket, password-reset, and
+    /// invitation stores, those are wired too, so one handle satisfies every store seam.
     #[must_use]
     pub fn redis_stores<S>(mut self, stores: Arc<S>) -> Self
     where
-        S: SessionStore + OtpStore + BruteForceStore + 'static,
+        S: SessionStore
+            + OtpStore
+            + BruteForceStore
+            + WsTicketStore
+            + PasswordResetStore
+            + InvitationStore
+            + 'static,
     {
         self.session_store = Some(stores.clone());
         self.otp_store = Some(stores.clone());
-        self.brute_force_store = Some(stores);
+        self.brute_force_store = Some(stores.clone());
+        self.ws_ticket_store = Some(stores.clone());
+        self.password_reset_store = Some(stores.clone());
+        self.invitation_store = Some(stores);
         self
     }
 
@@ -200,6 +233,8 @@ impl AuthEngineBuilder {
             otp_store,
             brute_force_store,
             ws_ticket_store,
+            password_reset_store,
+            invitation_store,
             oauth_providers,
             http_client,
         } = self;
@@ -234,6 +269,11 @@ impl AuthEngineBuilder {
         if config.controllers.oauth && oauth_providers.is_empty() {
             return Err(ConfigError::OAuthToggleWithoutProvider);
         }
+        // The invitation domain is gated by both its config toggle and a backing store: an
+        // enabled domain with no `inv:` store could never persist or consume an invitation.
+        if config.invitations.enabled && invitation_store.is_none() {
+            return Err(ConfigError::MissingInvitationStore);
+        }
 
         // Build the password service (and its startup sentinel hash) from the validated
         // password config before it is moved into the resolved bundle.
@@ -246,7 +286,15 @@ impl AuthEngineBuilder {
         let grace_window = config.jwt.refresh_grace_window;
         let brute_max_attempts = config.brute_force.max_attempts;
         let brute_window_secs = config.brute_force.window.as_secs();
+        let refresh_ttl_secs = u64::from(refresh_days) * 86_400;
+        let session_config = config.sessions.clone();
         let signing_key = HsKey::from_bytes(config.jwt.secret.expose_secret().as_bytes());
+
+        // Default the email provider and hooks before they are shared with both the engine and
+        // the session service, so the session service holds the same instances the engine does.
+        let email_provider =
+            email_provider.unwrap_or_else(|| Arc::new(NoOpEmailProvider) as Arc<dyn EmailProvider>);
+        let hooks = hooks.unwrap_or_else(|| Arc::new(NoOpAuthHooks) as Arc<dyn AuthHooks>);
 
         let config = Arc::new(ResolvedConfig::new(config, environment, secure_cookies));
 
@@ -263,24 +311,33 @@ impl AuthEngineBuilder {
             brute_window_secs,
         );
         let otp = OtpService::new(otp_store.clone());
+        let sessions = SessionService::new(
+            session_store.clone(),
+            user_repository.clone(),
+            hooks.clone(),
+            session_config,
+            refresh_ttl_secs,
+        );
 
         Ok(AuthEngine {
             config,
             user_repository,
             platform_user_repository,
-            email_provider: email_provider
-                .unwrap_or_else(|| Arc::new(NoOpEmailProvider) as Arc<dyn EmailProvider>),
-            hooks: hooks.unwrap_or_else(|| Arc::new(NoOpAuthHooks) as Arc<dyn AuthHooks>),
+            email_provider,
+            hooks,
             session_store,
             otp_store,
             brute_force_store,
             ws_ticket_store,
+            password_reset_store,
+            invitation_store,
             oauth_providers,
             http_client,
             passwords,
             tokens,
             brute_force,
             otp,
+            sessions,
         })
     }
 }
@@ -336,7 +393,11 @@ mod tests {
         let _ = engine.session_store();
         let _ = engine.otp_store();
         let _ = engine.brute_force_store();
-        assert!(engine.ws_ticket_store().is_none());
+        // The single backend handle satisfies every store seam, so `redis_stores` wires the
+        // ws-ticket, password-reset, and invitation stores from it too.
+        assert!(engine.ws_ticket_store().is_some());
+        assert!(engine.password_reset_store().is_some());
+        assert!(engine.invitation_store().is_some());
         assert!(engine.oauth_providers().is_empty());
         // No transport is wired unless the consumer supplies one.
         assert!(engine.http_client().is_none());
@@ -355,7 +416,9 @@ mod tests {
             .session_store(stores.clone())
             .otp_store(stores.clone())
             .brute_force_store(stores.clone())
-            .ws_ticket_store(stores)
+            .ws_ticket_store(stores.clone())
+            .password_reset_store(stores.clone())
+            .invitation_store(stores)
             .email_provider(Arc::new(NoOpEmailProvider))
             .hooks(Arc::new(NoOpAuthHooks))
             .http_client(Arc::new(MockHttpClient::ok()))
@@ -364,8 +427,26 @@ mod tests {
         assert!(result.is_ok(), "explicit collaborators must assemble");
         let Ok(engine) = result else { return };
         assert!(engine.ws_ticket_store().is_some());
+        assert!(engine.password_reset_store().is_some());
+        assert!(engine.invitation_store().is_some());
         assert!(engine.http_client().is_some());
         assert!(engine.oauth_providers().contains_key("google"));
+    }
+
+    #[test]
+    fn rejects_invitations_enabled_without_an_invitation_store() {
+        // Enabling the invitation domain without a backing `inv:` store fails fast, rather
+        // than assembling an engine that could never persist or consume an invitation.
+        let mut cfg = valid_config();
+        cfg.invitations.enabled = true;
+        let err = AuthEngine::builder()
+            .config(cfg)
+            .user_repository(user_repo())
+            .session_store(stores())
+            .otp_store(stores())
+            .brute_force_store(stores())
+            .build();
+        assert!(matches!(err, Err(ConfigError::MissingInvitationStore)));
     }
 
     #[test]

@@ -8,9 +8,16 @@
 
 mod detached;
 mod email_verification;
+mod invitation;
 mod login;
+mod password_reset;
 mod register;
 mod session_ops;
+
+pub use invitation::AcceptInvitationInput;
+pub use password_reset::{
+    ForgotPasswordInput, ResendResetOtpInput, ResetPasswordInput, VerifyResetOtpInput,
+};
 
 use std::fmt;
 use std::future::Future;
@@ -18,13 +25,16 @@ use std::pin::Pin;
 use std::time::Duration;
 
 use bymax_auth_crypto::mac::hmac_sha256;
-use bymax_auth_types::AuthError;
+use bymax_auth_jwt::RawRefreshToken;
+use bymax_auth_types::{AuthError, AuthResult};
 
 use crate::RepositoryError;
 use crate::config::resolvers::{RequestParts, TenantResolveError};
 use crate::context::RequestContext;
 use crate::engine::AuthEngine;
-use crate::services::{internal_error, to_hex};
+use crate::services::session::normalize_session_metadata;
+use crate::services::{internal_error, now_offset, to_hex};
+use crate::traits::{HookContext, SessionRecord};
 
 /// The minimum total elapsed time, in milliseconds, for an email-existence-revealing
 /// response, so account existence never leaks through latency (§7.1 / §15.5 / §17.2).
@@ -187,6 +197,48 @@ impl AuthEngine {
     pub(crate) fn hashed_identifier(&self, tenant_id: &str, email: &str) -> String {
         let input = format!("{tenant_id}:{email}");
         to_hex(&hmac_sha256(self.config().hmac_key(), input.as_bytes()))
+    }
+
+    /// Enforce the per-user session cap and fire the new-session hook for a **dashboard**
+    /// session the token manager has just issued. A no-op unless session tracking is enabled;
+    /// when it is, the just-created session's hash is recomputed from the issued refresh token
+    /// so eviction can exclude it. The device/IP are normalized with the same
+    /// [`normalize_session_metadata`] the token manager applied at persistence (parsed UA +
+    /// byte-bounded IP), so this hook record matches the stored one and bounds an
+    /// attacker-controlled `X-Forwarded-For`. This is a dashboard-only path: the record always carries the
+    /// dashboard tenant (the platform identity surface manages its own sessions separately), so
+    /// the `tenant_id` is taken verbatim from the dashboard user.
+    ///
+    /// # Errors
+    ///
+    /// Returns a store [`AuthError`] only on an infrastructure failure listing the user's
+    /// sessions; eviction itself is best-effort.
+    pub(crate) async fn enforce_sessions_after_issue(
+        &self,
+        result: &AuthResult,
+        ip: &str,
+        user_agent: &str,
+        hook_ctx: &HookContext,
+    ) -> Result<(), AuthError> {
+        if !self.config().config().sessions.enabled {
+            return Ok(());
+        }
+        let new_hash = RawRefreshToken::from_raw(result.refresh_token.clone()).redis_hash();
+        // Build the hook/management record with the SAME normalization the token manager applied
+        // when it persisted this session, so the stored record, `list_sessions`, and the
+        // new-session hook payload all agree.
+        let (device, stored_ip) = normalize_session_metadata(user_agent, ip);
+        let record = SessionRecord {
+            user_id: result.user.id.clone(),
+            tenant_id: Some(result.user.tenant_id.clone()),
+            role: result.user.role.clone(),
+            device,
+            ip: stored_ip,
+            created_at: now_offset(),
+        };
+        self.sessions()
+            .after_session_created(&record, &new_hash, hook_ctx)
+            .await
     }
 }
 

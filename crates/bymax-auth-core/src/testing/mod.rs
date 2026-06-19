@@ -22,9 +22,10 @@ use time::OffsetDateTime;
 
 use crate::RepositoryError;
 use crate::traits::{
-    BruteForceStore, HttpClient, HttpError, HttpRequest, HttpResponse, OAuthProfile, OAuthProvider,
-    OAuthProviderError, OAuthTokens, OtpPurpose, OtpStore, PlatformUserRepository, RotateOutcome,
-    SessionDetail, SessionKind, SessionRecord, SessionRotation, SessionStore, UserRepository,
+    BruteForceStore, HttpClient, HttpError, HttpRequest, HttpResponse, InvitationStore,
+    OAuthProfile, OAuthProvider, OAuthProviderError, OAuthTokens, OtpPurpose, OtpStore,
+    PasswordResetStore, PlatformUserRepository, ResetContext, RotateOutcome, SessionDetail,
+    SessionKind, SessionRecord, SessionRotation, SessionStore, StoredInvitation, UserRepository,
     WsTicketSnapshot, WsTicketStore,
 };
 
@@ -301,6 +302,9 @@ pub struct InMemoryStores {
     brute_force: Mutex<HashMap<String, (i64, u64)>>,
     tickets: Mutex<HashMap<String, WsTicketSnapshot>>,
     ticket_counter: AtomicU64,
+    reset_tokens: Mutex<HashMap<String, ResetContext>>,
+    reset_verified: Mutex<HashMap<String, ResetContext>>,
+    invitations: Mutex<HashMap<String, StoredInvitation>>,
 }
 
 impl InMemoryStores {
@@ -535,6 +539,71 @@ impl WsTicketStore for InMemoryStores {
 
     async fn redeem(&self, ticket: &str) -> Result<Option<WsTicketSnapshot>, AuthError> {
         Ok(lock(&self.tickets).remove(ticket))
+    }
+}
+
+/// Hash an opaque token to its store-key form, mirroring the real store's
+/// "the raw token is never a key" guarantee (so the test double exercises the same
+/// hash-then-key path the engine relies on).
+fn token_key(token: &str) -> String {
+    let mut out = String::with_capacity(64);
+    for byte in bymax_auth_crypto::mac::sha256(token.as_bytes()) {
+        out.push(char::from(b"0123456789abcdef"[usize::from(byte >> 4)]));
+        out.push(char::from(b"0123456789abcdef"[usize::from(byte & 0x0f)]));
+    }
+    out
+}
+
+#[async_trait]
+impl PasswordResetStore for InMemoryStores {
+    async fn put_token(
+        &self,
+        token: &str,
+        context: &ResetContext,
+        _ttl_secs: u64,
+    ) -> Result<(), AuthError> {
+        lock(&self.reset_tokens).insert(token_key(token), context.clone());
+        Ok(())
+    }
+
+    async fn consume_token(&self, token: &str) -> Result<Option<ResetContext>, AuthError> {
+        Ok(lock(&self.reset_tokens).remove(&token_key(token)))
+    }
+
+    async fn delete_token(&self, token: &str) -> Result<(), AuthError> {
+        lock(&self.reset_tokens).remove(&token_key(token));
+        Ok(())
+    }
+
+    async fn put_verified(
+        &self,
+        token: &str,
+        context: &ResetContext,
+        _ttl_secs: u64,
+    ) -> Result<(), AuthError> {
+        lock(&self.reset_verified).insert(token_key(token), context.clone());
+        Ok(())
+    }
+
+    async fn consume_verified(&self, token: &str) -> Result<Option<ResetContext>, AuthError> {
+        Ok(lock(&self.reset_verified).remove(&token_key(token)))
+    }
+}
+
+#[async_trait]
+impl InvitationStore for InMemoryStores {
+    async fn put_invitation(
+        &self,
+        token: &str,
+        invitation: &StoredInvitation,
+        _ttl_secs: u64,
+    ) -> Result<(), AuthError> {
+        lock(&self.invitations).insert(token_key(token), invitation.clone());
+        Ok(())
+    }
+
+    async fn consume_invitation(&self, token: &str) -> Result<Option<StoredInvitation>, AuthError> {
+        Ok(lock(&self.invitations).remove(&token_key(token)))
     }
 }
 
@@ -937,6 +1006,72 @@ mod tests {
         assert!(matches!(store.remaining_lockout_secs("id").await, Ok(900)));
         assert!(store.reset("id").await.is_ok());
         assert!(matches!(store.is_locked("id", 3).await, Ok(false)));
+    }
+
+    #[tokio::test]
+    async fn password_reset_store_consumes_tokens_single_use() {
+        // The reset-link and verified tokens both store a context, consume once (getdel), and
+        // the link token can be deleted out-of-band after an undeliverable email.
+        let store = InMemoryStores::new();
+        let context = ResetContext {
+            user_id: "u1".to_owned(),
+            email: "u@example.com".to_owned(),
+            tenant_id: "t1".to_owned(),
+        };
+        assert!(store.put_token("tok", &context, 600).await.is_ok());
+        assert!(matches!(
+            store.consume_token("tok").await,
+            Ok(Some(c)) if c.user_id == "u1"
+        ));
+        // Single-use: a second consume finds nothing.
+        assert!(matches!(store.consume_token("tok").await, Ok(None)));
+
+        // delete_token removes an unconsumed token (the undeliverable-email cleanup path).
+        assert!(
+            store
+                .put_token("undeliverable", &context, 600)
+                .await
+                .is_ok()
+        );
+        assert!(store.delete_token("undeliverable").await.is_ok());
+        assert!(matches!(
+            store.consume_token("undeliverable").await,
+            Ok(None)
+        ));
+
+        // The verified token mirrors the same single-use semantics on its own keyspace.
+        assert!(store.put_verified("vtok", &context, 300).await.is_ok());
+        assert!(matches!(
+            store.consume_verified("vtok").await,
+            Ok(Some(c)) if c.email == "u@example.com"
+        ));
+        assert!(matches!(store.consume_verified("vtok").await, Ok(None)));
+    }
+
+    #[tokio::test]
+    async fn invitation_store_consumes_invitations_single_use() {
+        // An invitation is stored and consumed exactly once.
+        let store = InMemoryStores::new();
+        let invitation = StoredInvitation {
+            email: "invitee@example.com".to_owned(),
+            role: "MEMBER".to_owned(),
+            tenant_id: "t1".to_owned(),
+            inviter_user_id: "owner".to_owned(),
+        };
+        assert!(
+            store
+                .put_invitation("inv-tok", &invitation, 600)
+                .await
+                .is_ok()
+        );
+        assert!(matches!(
+            store.consume_invitation("inv-tok").await,
+            Ok(Some(i)) if i.role == "MEMBER"
+        ));
+        assert!(matches!(
+            store.consume_invitation("inv-tok").await,
+            Ok(None)
+        ));
     }
 
     #[tokio::test]

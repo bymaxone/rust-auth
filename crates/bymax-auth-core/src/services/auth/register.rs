@@ -66,6 +66,11 @@ impl AuthEngine {
             .issue_tokens(&safe, &ctx.ip, &ctx.user_agent, false)
             .await?;
 
+        // Enforce the concurrent-session cap (and fire the new-session hook) for the
+        // just-issued session; a no-op when session tracking is disabled.
+        self.enforce_sessions_after_issue(&result, &ctx.ip, &ctx.user_agent, &hook_ctx)
+            .await?;
+
         // `after_register` is fire-and-forget under the timeout ceiling.
         spawn_guarded(run_after_register(self.hooks().clone(), safe, hook_ctx));
 

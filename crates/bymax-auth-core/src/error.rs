@@ -166,6 +166,9 @@ pub enum ConfigError {
     /// One or more of the session / OTP / brute-force stores was not supplied.
     #[error("a SessionStore/OtpStore/BruteForceStore is required")]
     MissingStores,
+    /// `invitations.enabled` is set but no `InvitationStore` was supplied.
+    #[error("invitations.enabled requires an InvitationStore")]
+    MissingInvitationStore,
     /// The anti-enumeration sentinel hash could not be computed from the validated
     /// password parameters during engine assembly — effectively unreachable once the
     /// password floors have passed validation, but reported rather than panicked.

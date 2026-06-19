@@ -18,10 +18,12 @@ use crate::config::ResolvedConfig;
 use crate::services::brute_force::BruteForceService;
 use crate::services::otp::OtpService;
 use crate::services::password::PasswordService;
+use crate::services::session::SessionService;
 use crate::services::token_manager::TokenManagerService;
 use crate::traits::{
-    AuthHooks, BruteForceStore, EmailProvider, HttpClient, OAuthProvider, OtpStore,
-    PlatformUserRepository, SessionStore, UserRepository, WsTicketStore,
+    AuthHooks, BruteForceStore, EmailProvider, HttpClient, InvitationStore, OAuthProvider,
+    OtpStore, PasswordResetStore, PlatformUserRepository, SessionStore, UserRepository,
+    WsTicketStore,
 };
 
 /// The single composition root. It owns the resolved configuration and the trait objects
@@ -40,12 +42,15 @@ pub struct AuthEngine {
     otp_store: Arc<dyn OtpStore>,
     brute_force_store: Arc<dyn BruteForceStore>,
     ws_ticket_store: Option<Arc<dyn WsTicketStore>>,
+    password_reset_store: Option<Arc<dyn PasswordResetStore>>,
+    invitation_store: Option<Arc<dyn InvitationStore>>,
     oauth_providers: HashMap<String, Arc<dyn OAuthProvider>>,
     http_client: Option<Arc<dyn HttpClient>>,
     passwords: Arc<PasswordService>,
     tokens: TokenManagerService,
     brute_force: BruteForceService,
     otp: OtpService,
+    sessions: SessionService,
 }
 
 impl AuthEngine {
@@ -74,6 +79,24 @@ impl AuthEngine {
     /// The OTP service (CSPRNG generation, attempt-bounded verify, resend cooldown).
     pub(crate) fn otp(&self) -> &OtpService {
         &self.otp
+    }
+
+    /// The session service (concurrent-session tracking, FIFO eviction, ownership-checked
+    /// revoke, atomic detail rotation).
+    pub(crate) fn sessions(&self) -> &SessionService {
+        &self.sessions
+    }
+
+    /// The password-reset proof store (`pr:`/`prv:` single-use tokens), present only when the
+    /// password-reset flow is wired.
+    pub(crate) fn password_reset_store(&self) -> Option<&Arc<dyn PasswordResetStore>> {
+        self.password_reset_store.as_ref()
+    }
+
+    /// The invitation store (`inv:` single-use tokens), present only when the invitation flow
+    /// is enabled and wired.
+    pub(crate) fn invitation_store(&self) -> Option<&Arc<dyn InvitationStore>> {
+        self.invitation_store.as_ref()
     }
 
     /// The resolved configuration (validated `AuthConfig`, resolved `secure_cookies`, the
