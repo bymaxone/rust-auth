@@ -51,6 +51,24 @@ pub(crate) async fn run_after_email_verified(
     hooks.after_email_verified(&user, &ctx).await
 }
 
+/// Invoke the `after_password_reset` notification hook.
+pub(crate) async fn run_after_password_reset(
+    hooks: Arc<dyn AuthHooks>,
+    user: SafeAuthUser,
+    ctx: HookContext,
+) -> Result<(), HookError> {
+    hooks.after_password_reset(&user, &ctx).await
+}
+
+/// Invoke the `after_invitation_accepted` notification hook.
+pub(crate) async fn run_after_invitation_accepted(
+    hooks: Arc<dyn AuthHooks>,
+    user: SafeAuthUser,
+    ctx: HookContext,
+) -> Result<(), HookError> {
+    hooks.after_invitation_accepted(&user, &ctx).await
+}
+
 /// Stamp the user's last successful login.
 pub(crate) async fn run_update_last_login(
     repository: Arc<dyn UserRepository>,
@@ -83,6 +101,15 @@ pub(crate) async fn run_send_verification_email(
     provider
         .send_email_verification_otp(&email, &otp, None)
         .await
+}
+
+/// Send a password-reset OTP to the recipient.
+pub(crate) async fn run_send_reset_otp_email(
+    provider: Arc<dyn EmailProvider>,
+    email: String,
+    otp: String,
+) -> Result<(), EmailError> {
+    provider.send_password_reset_otp(&email, &otp, None).await
 }
 
 #[cfg(test)]
@@ -123,7 +150,7 @@ mod tests {
 
     #[tokio::test]
     async fn notification_hooks_run_against_the_noop_defaults() {
-        // The four notification wrappers each invoke their hook and succeed on the NoOp impl.
+        // The six notification wrappers each invoke their hook and succeed on the NoOp impl.
         let hooks: Arc<dyn AuthHooks> = Arc::new(NoOpAuthHooks);
         assert!(
             run_after_register(hooks.clone(), safe_user("u1"), hook_ctx())
@@ -141,7 +168,17 @@ mod tests {
                 .is_ok()
         );
         assert!(
-            run_after_email_verified(hooks, safe_user("u1"), hook_ctx())
+            run_after_email_verified(hooks.clone(), safe_user("u1"), hook_ctx())
+                .await
+                .is_ok()
+        );
+        assert!(
+            run_after_password_reset(hooks.clone(), safe_user("u1"), hook_ctx())
+                .await
+                .is_ok()
+        );
+        assert!(
+            run_after_invitation_accepted(hooks, safe_user("u1"), hook_ctx())
                 .await
                 .is_ok()
         );
@@ -149,10 +186,19 @@ mod tests {
 
     #[tokio::test]
     async fn send_verification_email_invokes_the_provider() {
-        // The email wrapper forwards to the provider (NoOp → Ok), never logging the OTP.
+        // The email wrappers forward to the provider (NoOp → Ok), never logging the OTP/token.
         let provider: Arc<dyn EmailProvider> = Arc::new(NoOpEmailProvider);
         assert!(
-            run_send_verification_email(provider, "u@example.com".to_owned(), "123456".to_owned())
+            run_send_verification_email(
+                provider.clone(),
+                "u@example.com".to_owned(),
+                "123456".to_owned()
+            )
+            .await
+            .is_ok()
+        );
+        assert!(
+            run_send_reset_otp_email(provider, "u@example.com".to_owned(), "654321".to_owned())
                 .await
                 .is_ok()
         );

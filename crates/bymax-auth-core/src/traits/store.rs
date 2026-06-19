@@ -301,6 +301,103 @@ pub trait WsTicketStore: Send + Sync {
     async fn redeem(&self, ticket: &str) -> Result<Option<WsTicketSnapshot>, AuthError>;
 }
 
+/// The identity bound to a password-reset proof (a link token or the OTP-flow verified
+/// token). Stored under `pr:`/`prv:` keyed by `sha256(token)` — the raw token is never a
+/// key — and read back on consume so the reset can re-bind the proof to the same account.
+/// JSON is camelCase for parity with nest-auth payloads already in Redis.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ResetContext {
+    /// The account the reset proof was issued for.
+    pub user_id: String,
+    /// The email the reset proof was issued for (re-checked on consume).
+    pub email: String,
+    /// The tenant scope the reset proof was issued for (re-checked on consume).
+    pub tenant_id: String,
+}
+
+/// The trusted metadata stored for a pending invitation under `inv:` keyed by
+/// `sha256(token)` — the raw token is never a key. Read back on accept; because the payload
+/// is trusted, the accept flow re-validates `role` against the hierarchy as anti-tamper (a
+/// deployment that does not fully trust Redis SHOULD additionally HMAC-sign this record).
+/// JSON is camelCase for parity with nest-auth payloads already in Redis.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StoredInvitation {
+    /// The invited email (already normalized: trimmed + lower-cased).
+    pub email: String,
+    /// The role the invitee is granted on accept (re-validated against the hierarchy).
+    pub role: String,
+    /// The tenant the invitee joins.
+    pub tenant_id: String,
+    /// The user id of the inviter (for audit / the accepted hook).
+    pub inviter_user_id: String,
+}
+
+/// Single-use password-reset proof storage: the link token (`pr:`) and the OTP-flow
+/// verified token (`prv:`). Both store a [`ResetContext`] keyed by `sha256(token)` and are
+/// consumed atomically with `getdel`, so a proof is valid exactly once. The OTP records
+/// themselves are owned by [`OtpStore`] — this store backs only the two opaque-token
+/// keyspaces.
+///
+/// # Errors
+///
+/// Returns [`AuthError`] on a store failure; a `consume_*` of an absent/expired/already-used
+/// proof is the non-error `Ok(None)`, not an error.
+#[async_trait]
+pub trait PasswordResetStore: Send + Sync {
+    /// Store a reset-link-token context under `pr:{sha256(token)}` with a TTL.
+    async fn put_token(
+        &self,
+        token: &str,
+        context: &ResetContext,
+        ttl_secs: u64,
+    ) -> Result<(), AuthError>;
+
+    /// Atomically consume (`getdel`) a reset-link-token context. `None` when the token is
+    /// unknown, expired, or already consumed.
+    async fn consume_token(&self, token: &str) -> Result<Option<ResetContext>, AuthError>;
+
+    /// Delete a reset-link token without consuming its value, used to clean up after an
+    /// undeliverable email so an unusable token does not linger in a Redis snapshot.
+    async fn delete_token(&self, token: &str) -> Result<(), AuthError>;
+
+    /// Store an OTP-flow verified-token context under `prv:{sha256(token)}` with a TTL.
+    async fn put_verified(
+        &self,
+        token: &str,
+        context: &ResetContext,
+        ttl_secs: u64,
+    ) -> Result<(), AuthError>;
+
+    /// Atomically consume (`getdel`) a verified-token context. `None` when the token is
+    /// unknown, expired, or already consumed.
+    async fn consume_verified(&self, token: &str) -> Result<Option<ResetContext>, AuthError>;
+}
+
+/// Single-use invitation storage. A [`StoredInvitation`] is held under `inv:{sha256(token)}`
+/// and consumed atomically with `getdel`, so an invitation is accepted exactly once.
+///
+/// # Errors
+///
+/// Returns [`AuthError`] on a store failure; a `consume` of an absent/expired/already-used
+/// invitation is the non-error `Ok(None)`, not an error.
+#[async_trait]
+pub trait InvitationStore: Send + Sync {
+    /// Store an invitation under `inv:{sha256(token)}` with a TTL. The raw token is never
+    /// persisted — only its hash becomes a key.
+    async fn put_invitation(
+        &self,
+        token: &str,
+        invitation: &StoredInvitation,
+        ttl_secs: u64,
+    ) -> Result<(), AuthError>;
+
+    /// Atomically consume (`getdel`) an invitation. `None` when the token is unknown,
+    /// expired, or already consumed.
+    async fn consume_invitation(&self, token: &str) -> Result<Option<StoredInvitation>, AuthError>;
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -422,5 +519,39 @@ mod tests {
             RotateOutcome::Grace(_)
         ));
         assert!(matches!(RotateOutcome::Invalid, RotateOutcome::Invalid));
+    }
+
+    #[test]
+    fn reset_context_round_trips_camel_case() -> serde_json::Result<()> {
+        // The `pr:`/`prv:` value is camelCase and round-trips every field so the consume
+        // path can re-bind the proof to the same account.
+        let context = ResetContext {
+            user_id: "u1".into(),
+            email: "user@example.com".into(),
+            tenant_id: "t1".into(),
+        };
+        let json = serde_json::to_string(&context)?;
+        assert!(json.contains("\"userId\":\"u1\""));
+        assert!(json.contains("\"tenantId\":\"t1\""));
+        let back: ResetContext = serde_json::from_str(&json)?;
+        assert_eq!(back, context);
+        Ok(())
+    }
+
+    #[test]
+    fn stored_invitation_round_trips_camel_case() -> serde_json::Result<()> {
+        // The `inv:` value is camelCase and round-trips so accept can re-validate the role.
+        let invitation = StoredInvitation {
+            email: "invitee@example.com".into(),
+            role: "MEMBER".into(),
+            tenant_id: "t1".into(),
+            inviter_user_id: "owner-1".into(),
+        };
+        let json = serde_json::to_string(&invitation)?;
+        assert!(json.contains("\"tenantId\":\"t1\""));
+        assert!(json.contains("\"inviterUserId\":\"owner-1\""));
+        let back: StoredInvitation = serde_json::from_str(&json)?;
+        assert_eq!(back, invitation);
+        Ok(())
     }
 }

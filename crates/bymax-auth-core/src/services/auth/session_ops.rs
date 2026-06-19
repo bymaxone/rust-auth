@@ -141,15 +141,20 @@ impl AuthEngine {
             .issue_tokens(&safe, ip, user_agent, false)
             .await?;
 
-        spawn_guarded(run_update_last_login(
-            self.user_repository().clone(),
-            safe.id.clone(),
-        ));
         let hook_ctx = identity_only_context(
             &safe.id,
             Some(safe.email.clone()),
             Some(safe.tenant_id.clone()),
         );
+        // Enforce the concurrent-session cap (and fire the new-session hook) for the
+        // password-less session; a no-op when session tracking is disabled.
+        self.enforce_sessions_after_issue(&result, ip, user_agent, &hook_ctx)
+            .await?;
+
+        spawn_guarded(run_update_last_login(
+            self.user_repository().clone(),
+            safe.id.clone(),
+        ));
         spawn_guarded(run_after_login(self.hooks().clone(), safe, hook_ctx));
         Ok(result)
     }

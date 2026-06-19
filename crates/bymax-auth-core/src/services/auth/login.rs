@@ -167,6 +167,11 @@ impl AuthEngine {
             .tokens()
             .issue_tokens(&safe, ip, user_agent, false)
             .await?;
+        // Enforce the concurrent-session cap (and fire the new-session hook) for the
+        // just-issued session before the fire-and-forget bookkeeping; a no-op when session
+        // tracking is disabled.
+        self.enforce_sessions_after_issue(&result, ip, user_agent, &hook_ctx)
+            .await?;
         spawn_guarded(run_update_last_login(
             self.user_repository().clone(),
             safe.id.clone(),
@@ -241,6 +246,47 @@ mod tests {
         let Ok(LoginResult::Success(auth)) = result else { return };
         assert_eq!(auth.user.email, "ok@example.com");
         assert!(!auth.access_token.is_empty());
+    }
+
+    #[tokio::test]
+    async fn login_with_session_tracking_enforces_the_cap_via_the_session_service() {
+        // With session tracking on and a cap of one, a second login for the same user evicts
+        // the first session, so only the newest survives — exercising the engine's
+        // enforce-sessions-after-issue path and the session service it drives.
+        let mut cfg = base_config();
+        cfg.email_verification.required = false;
+        cfg.sessions.enabled = true;
+        cfg.sessions.default_max_sessions = 1;
+        let Some(h) = harness(cfg, None) else { return };
+        let id = h.seed(SeedUser::active("cap@example.com", "pw")).await;
+
+        let first = h
+            .engine
+            .login(login_input("cap@example.com", "pw"), &ctx())
+            .await;
+        let Ok(LoginResult::Success(first)) = first else { return };
+        let first_hash =
+            bymax_auth_jwt::RawRefreshToken::from_raw(first.refresh_token.clone()).redis_hash();
+
+        let second = h
+            .engine
+            .login(login_input("cap@example.com", "pw"), &ctx())
+            .await;
+        let Ok(LoginResult::Success(second)) = second else { return };
+        let second_hash =
+            bymax_auth_jwt::RawRefreshToken::from_raw(second.refresh_token.clone()).redis_hash();
+
+        // The cap of one held: the first session was evicted, the newest survives.
+        let listed = h
+            .engine
+            .sessions()
+            .list_sessions(&id, Some(&second_hash))
+            .await;
+        assert!(matches!(&listed, Ok(v) if v.len() == 1));
+        let Ok(listed) = listed else { return };
+        assert_eq!(listed[0].session_hash, second_hash);
+        assert_ne!(listed[0].session_hash, first_hash);
+        assert!(listed[0].is_current);
     }
 
     #[tokio::test]

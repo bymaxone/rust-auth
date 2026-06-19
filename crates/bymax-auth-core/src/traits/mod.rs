@@ -26,6 +26,7 @@ pub use oauth::{OAuthProfile, OAuthProvider, OAuthProviderError, OAuthProviders,
 pub use repository::{PlatformUserRepository, UserRepository};
 #[doc(inline)]
 pub use store::{
-    BruteForceStore, OtpPurpose, OtpStore, RotateOutcome, SessionDetail, SessionKind,
-    SessionRecord, SessionRotation, SessionStore, WsTicketSnapshot, WsTicketStore,
+    BruteForceStore, InvitationStore, OtpPurpose, OtpStore, PasswordResetStore, ResetContext,
+    RotateOutcome, SessionDetail, SessionKind, SessionRecord, SessionRotation, SessionStore,
+    StoredInvitation, WsTicketSnapshot, WsTicketStore,
 };
