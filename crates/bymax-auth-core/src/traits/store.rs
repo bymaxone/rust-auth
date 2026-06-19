@@ -124,8 +124,10 @@ impl std::fmt::Debug for SessionRotation {
 /// The outcome of an atomic refresh rotation (`refresh_rotate`).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RotateOutcome {
-    /// The old token was present and consumed; the caller issues the new token bound to
-    /// this record and updates the session bookkeeping.
+    /// The old token was present and consumed. Carries the **consumed (old) session
+    /// record**, from which the caller derives the user id to update the session
+    /// bookkeeping; the freshly-minted token is bound to the new record that was supplied in
+    /// the [`SessionRotation`] and is already stored.
     Rotated(SessionRecord),
     /// The old token was already rotated but is inside the grace window; the caller mints
     /// a fresh token for this recovered record without planting a new grace pointer.
@@ -274,7 +276,10 @@ pub trait BruteForceStore: Send + Sync {
     /// Reset the counter (on a successful authentication).
     async fn reset(&self, identifier: &str) -> Result<(), AuthError>;
 
-    /// Seconds remaining on the current lockout window, or `0` when not locked.
+    /// Seconds remaining on this identifier's fixed window — the TTL of its failure counter,
+    /// which exists from the first failure — or `0` when no counter is recorded. Callers
+    /// compute a `Retry-After` from this after [`BruteForceStore::is_locked`] confirms a
+    /// lockout.
     async fn remaining_lockout_secs(&self, identifier: &str) -> Result<u64, AuthError>;
 }
 

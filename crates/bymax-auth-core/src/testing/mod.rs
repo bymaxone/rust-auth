@@ -502,11 +502,8 @@ impl BruteForceStore for InMemoryStores {
         Ok(())
     }
 
-    /// Returns the stored window for any identifier with at least one recorded failure.
-    /// Unlike the real Redis store — whose lockout key only exists while a lockout is
-    /// active — this double cannot see `max_attempts` here, so it reports the window for a
-    /// counted-but-not-yet-locked identifier too. Callers should consult this only after
-    /// [`BruteForceStore::is_locked`] has confirmed a lockout.
+    /// Returns the stored window while a counter exists (mirroring the real store, whose
+    /// counter key carries the window TTL from the first failure), else `0`.
     async fn remaining_lockout_secs(&self, identifier: &str) -> Result<u64, AuthError> {
         Ok(lock(&self.brute_force)
             .get(identifier)
@@ -538,7 +535,7 @@ pub struct MockHttpClient {
 }
 
 impl MockHttpClient {
-    /// A client that always responds `200 OK` with the given body.
+    /// A client that always responds with the given status and body.
     #[must_use]
     pub fn with_body(status: u16, body: Vec<u8>) -> Self {
         Self { status, body }

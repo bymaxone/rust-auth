@@ -1,6 +1,6 @@
 # Phase 3 — `bymax-auth-core`: engine, builder, config profiles, trait set
 
-> **Status**: 🔄 In Progress · **Progress**: 6 / 6 tasks · **Last updated**: 2026-06-19
+> **Status**: ✅ Done · **Progress**: 6 / 6 tasks · **Last updated**: 2026-06-19
 > **Source roadmap**: [`docs/development_plan.md`](../development_plan.md) § P3
 > **Source spec**: [`docs/technical_specification.md`](../technical_specification.md)
 
