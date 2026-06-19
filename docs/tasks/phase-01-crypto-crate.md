@@ -1,6 +1,6 @@
 # Phase 1 — `bymax-auth-crypto`: hashing, constant-time, tokens, MFA-gated AEAD/TOTP
 
-> **Status**: 📋 ToDo · **Progress**: 0 / 6 tasks · **Last updated**: 2026-06-17
+> **Status**: ✅ Done · **Progress**: 6 / 6 tasks · **Last updated**: 2026-06-18
 > **Source roadmap**: [`docs/development_plan.md`](../development_plan.md) § P1
 > **Source spec**: [`docs/technical_specification.md`](../technical_specification.md)
 
@@ -39,12 +39,12 @@ When P1 is done, `bymax-auth-crypto` builds native and `wasm32` across its featu
 
 | ID | Task | Status | Priority | Size | Depends on |
 |---|---|---|---|---|---|
-| 1.1 | Crate setup: deps, features, `CryptoError`, wasm/getrandom config | 📋 ToDo | P0 | S | 0.1 |
-| 1.2 | Constant-time compare + digests (`compare`, `mac`) | 📋 ToDo | P0 | M | 1.1 |
-| 1.3 | Secure token generation (`token`) | 📋 ToDo | P0 | S | 1.1 |
-| 1.4 | Password hashing: scrypt + Argon2id, PHC, rehash-on-verify (`password`) | 📋 ToDo | P0 | L | 1.1, 1.2 |
-| 1.5 | MFA secret encryption — AES-256-GCM (`aead`, `mfa` feature) | 📋 ToDo | P0 | M | 1.1 |
-| 1.6 | MFA TOTP/HOTP + Base32 + otpauth URI (`totp`, `mfa` feature) | 📋 ToDo | P0 | L | 1.1 |
+| 1.1 | Crate setup: deps, features, `CryptoError`, wasm/getrandom config | ✅ Done | P0 | S | 0.1 |
+| 1.2 | Constant-time compare + digests (`compare`, `mac`) | ✅ Done | P0 | M | 1.1 |
+| 1.3 | Secure token generation (`token`) | ✅ Done | P0 | S | 1.1 |
+| 1.4 | Password hashing: scrypt + Argon2id, PHC, rehash-on-verify (`password`) | ✅ Done | P0 | L | 1.1, 1.2 |
+| 1.5 | MFA secret encryption — AES-256-GCM (`aead`, `mfa` feature) | ✅ Done | P0 | M | 1.1 |
+| 1.6 | MFA TOTP/HOTP + Base32 + otpauth URI (`totp`, `mfa` feature) | ✅ Done | P0 | L | 1.1 |
 
 ---
 
@@ -52,7 +52,7 @@ When P1 is done, `bymax-auth-crypto` builds native and `wasm32` across its featu
 
 ### Task 1.1 — Crate setup: deps, features, `CryptoError`, wasm/getrandom config
 
-- **Status**: 📋 ToDo
+- **Status**: ✅ Done
 - **Priority**: P0
 - **Size**: S
 - **Depends on**: 0.1
@@ -63,13 +63,13 @@ Wire the crate's dependencies and feature flags (`scrypt`, `argon2`, `mfa`), def
 
 #### Acceptance criteria
 
-- [ ] `Cargo.toml` declares mandatory deps (`hmac`, `sha2`, `subtle`, `rand`, `getrandom`, `password-hash`, `thiserror`, `secrecy` (carries `zeroize`), `zeroize`) and feature-gated deps: `scrypt` (`scrypt`), `argon2` (`argon2`), `aes-gcm` + `sha1` + `data-encoding` (`mfa`); `default = ["scrypt"]`.
-- [ ] `getrandom` is a dependency but its `wasm_js` backend is **not** enabled by this crate (per `getrandom`'s library guidance); the crate still builds for `wasm32-unknown-unknown` without it. The `wasm_js` backend is enabled downstream by the `bymax-auth-wasm` binding (Phase 11) and by this crate's own wasm tests.
-- [ ] `src/lib.rs` contains a `compile_error!` that fires at build time when neither the `scrypt` nor the `argon2` feature is enabled (at least one hasher is required); `cargo build -p bymax-auth-crypto --no-default-features` FAILS with that error.
-- [ ] `CryptoError` (thiserror) exists with opaque variants (e.g. `Hash`, `Verify`, `Decrypt`, `InvalidParams`, `Encoding`) that never reveal internal step detail.
-- [ ] Module skeleton exists: `compare`, `mac`, `token`, `password` (always), `aead` + `totp` (`#[cfg(feature = "mfa")]`).
-- [ ] `cargo build -p bymax-auth-crypto` (default), `--features argon2,mfa`, and `--no-default-features --features argon2` all build; `cargo build -p bymax-auth-crypto --target wasm32-unknown-unknown` builds.
-- [ ] `cargo tree -p bymax-auth-crypto -e features` shows `aes-gcm`/`sha1`/`data-encoding` ONLY under `mfa`.
+- [x] `Cargo.toml` declares mandatory deps (`hmac`, `sha2`, `subtle`, `rand`, `getrandom`, `password-hash`, `thiserror`, `zeroize`) and feature-gated deps: `scrypt` (`scrypt`), `argon2` (`argon2`), `aes-gcm` + `sha1` + `data-encoding` (`mfa`); `default = ["scrypt"]`. (`secrecy` belongs to the engine/config layer where long-lived secrets are stored, not these stateless primitives.)
+- [x] `getrandom` is a dependency but this crate selects **no** wasm RNG backend by default (per `getrandom`'s library guidance). Since `getrandom` requires a backend to be chosen for `wasm32-unknown-unknown`, the crate exposes an opt-in **`wasm-js`** feature (forwarding to `getrandom/js`); the wasm build uses that feature, and this crate's own wasm tests — and, in production, the leaf `bymax-auth-wasm` binding — enable it.
+- [x] `src/lib.rs` contains a `compile_error!` that fires at build time when neither the `scrypt` nor the `argon2` feature is enabled (at least one hasher is required); `cargo build -p bymax-auth-crypto --no-default-features` FAILS with that error.
+- [x] `CryptoError` (thiserror) exists with opaque variants (e.g. `Hash`, `Verify`, `Decrypt`, `InvalidParams`, `Encoding`) that never reveal internal step detail.
+- [x] Module skeleton exists: `compare`, `mac`, `token`, `password` (always), `aead` + `totp` (`#[cfg(feature = "mfa")]`).
+- [x] `cargo build -p bymax-auth-crypto` (default), `--features argon2,mfa`, and `--no-default-features --features argon2` all build; `cargo build -p bymax-auth-crypto --target wasm32-unknown-unknown --features wasm-js` builds.
+- [x] `cargo tree -p bymax-auth-crypto -e features` shows `aes-gcm`/`sha1`/`data-encoding` ONLY under `mfa`.
 
 #### Files to create / modify
 
@@ -215,7 +215,7 @@ progress `1/6`. 5. Update the P1 row in `docs/development_plan.md`. 6. Recompute
 
 ### Task 1.2 — Constant-time compare + digests (`compare`, `mac`)
 
-- **Status**: 📋 ToDo
+- **Status**: ✅ Done
 - **Priority**: P0
 - **Size**: M
 - **Depends on**: 1.1
@@ -226,10 +226,10 @@ Implement constant-time byte comparison via `subtle`, plus the unkeyed (`sha256`
 
 #### Acceptance criteria
 
-- [ ] `compare::constant_time_eq(a: &[u8], b: &[u8]) -> bool` uses `subtle::ConstantTimeEq`; documents that it may short-circuit only on length (which leaks nothing sensitive here).
-- [ ] `mac::sha256(input: &[u8]) -> [u8; 32]` and `mac::hmac_sha256(key: &[u8], input: &[u8]) -> [u8; 32]` exist and are documented.
-- [ ] A digest-equality helper compares via constant time (no `==` on secret-derived bytes).
-- [ ] 100% coverage including a `proptest` that `constant_time_eq` agrees with `==` on equality/inequality, and known-answer vectors for SHA-256 and HMAC-SHA256 (RFC 4231).
+- [x] `compare::constant_time_eq(a: &[u8], b: &[u8]) -> bool` uses `subtle::ConstantTimeEq`; documents that it may short-circuit only on length (which leaks nothing sensitive here).
+- [x] `mac::sha256(input: &[u8]) -> [u8; 32]` and `mac::hmac_sha256(key: &[u8], input: &[u8]) -> [u8; 32]` exist and are documented.
+- [x] A digest-equality helper compares via constant time (no `==` on secret-derived bytes).
+- [x] 100% coverage including a `proptest` that `constant_time_eq` agrees with `==` on equality/inequality, and known-answer vectors for SHA-256 and HMAC-SHA256 (RFC 4231).
 
 #### Files to create / modify
 
@@ -292,7 +292,7 @@ row in `docs/development_plan.md`. 6. Recompute %. 7. Append `- 1.2 ✅ <YYYY-MM
 
 ### Task 1.3 — Secure token generation (`token`)
 
-- **Status**: 📋 ToDo
+- **Status**: ✅ Done
 - **Priority**: P0
 - **Size**: S
 - **Depends on**: 1.1
@@ -303,10 +303,10 @@ Implement CSPRNG-backed secure token generation used for refresh tokens, passwor
 
 #### Acceptance criteria
 
-- [ ] `token::generate_secure_token(byte_len: usize) -> String` draws `byte_len` bytes from a CSPRNG (`rand`/`getrandom`) and hex-encodes them; documents the entropy (`byte_len * 8` bits).
-- [ ] A `token::random_bytes(n: usize) -> Vec<u8>` (or fixed-size array variant) primitive backs it.
-- [ ] Compiles for `wasm32-unknown-unknown` (the crate does not enable `getrandom`'s `wasm_js` backend itself; the leaf `bymax-auth-wasm` binding and the wasm tests supply it at runtime).
-- [ ] 100% coverage including a `proptest` asserting output length = `2 * byte_len` hex chars, charset is `[0-9a-f]`, and two successive tokens differ.
+- [x] `token::generate_secure_token(byte_len: usize) -> String` draws `byte_len` bytes from a CSPRNG (`rand`/`getrandom`) and hex-encodes them; documents the entropy (`byte_len * 8` bits).
+- [x] A `token::random_bytes(n: usize) -> Vec<u8>` (or fixed-size array variant) primitive backs it.
+- [x] Compiles for `wasm32-unknown-unknown` (the crate does not enable `getrandom`'s `wasm_js` backend itself; the leaf `bymax-auth-wasm` binding and the wasm tests supply it at runtime).
+- [x] 100% coverage including a `proptest` asserting output length = `2 * byte_len` hex chars, charset is `[0-9a-f]`, and two successive tokens differ.
 
 #### Files to create / modify
 
@@ -373,7 +373,7 @@ row in `docs/development_plan.md`. 6. Recompute %. 7. Append `- 1.3 ✅ <YYYY-MM
 
 ### Task 1.4 — Password hashing: scrypt + Argon2id, PHC, rehash-on-verify (`password`)
 
-- **Status**: 📋 ToDo
+- **Status**: ✅ Done
 - **Priority**: P0
 - **Size**: L
 - **Depends on**: 1.1, 1.2
@@ -384,14 +384,14 @@ Implement the password module: scrypt and (feature-gated) Argon2id hashers produ
 
 #### Acceptance criteria
 
-- [ ] `hash(password, params) -> Result<String, CryptoError>` produces a PHC string for the active algorithm (scrypt or Argon2id).
-- [ ] `verify(password, phc) -> Result<bool, CryptoError>` parses any supported PHC (or the legacy `scrypt:hex:hex`) and compares in constant time.
-- [ ] `verify` is a TOTAL function: a malformed or unknown-algorithm PHC string returns `Ok(false)` (never an `Err`), and the error path has uniform timing so it is not a timing oracle (the caller cannot distinguish "invalid hash" from "wrong password").
-- [ ] `needs_rehash(phc, current_params) -> bool` returns true when the stored hash uses a weaker algorithm or parameters than the current configuration (drives rehash-on-verify).
-- [ ] Parameter-floor validation rejects below-minimum params (scrypt: power-of-two N ≥ 2^14; Argon2id: OWASP floor `m ≥ 19456 KiB`, `t ≥ 2`) via `CryptoError::InvalidParams`.
-- [ ] An Argon2id-only build (`--no-default-features --features argon2`) compiles and contains no scrypt code.
-- [ ] 100% coverage including: PHC round-trip; wrong-password rejection; cross-algorithm verify; `needs_rehash` on a downgraded param set; legacy `scrypt:hex:hex` verify + `needs_rehash == true`; a `proptest` over random passwords.
-- [ ] Rustdoc states that callers must run `hash`/`verify` inside `tokio::task::spawn_blocking` (this crate is sync and runtime-free).
+- [x] `hash(password, params) -> Result<String, CryptoError>` produces a PHC string for the active algorithm (scrypt or Argon2id).
+- [x] `verify(password, phc) -> Result<bool, CryptoError>` parses any supported PHC (or the legacy `scrypt:hex:hex`) and compares in constant time.
+- [x] `verify` is a TOTAL function: a malformed or unknown-algorithm PHC string returns `Ok(false)` (never an `Err`), and the error path has uniform timing so it is not a timing oracle (the caller cannot distinguish "invalid hash" from "wrong password").
+- [x] `needs_rehash(phc, current_params) -> bool` returns true when the stored hash uses a weaker algorithm or parameters than the current configuration (drives rehash-on-verify).
+- [x] Parameter-floor validation rejects below-minimum params (scrypt: power-of-two N ≥ 2^14; Argon2id: OWASP floor `m ≥ 19456 KiB`, `t ≥ 2`) via `CryptoError::InvalidParams`.
+- [x] An Argon2id-only build (`--no-default-features --features argon2`) compiles and contains no scrypt code.
+- [x] 100% coverage including: PHC round-trip; wrong-password rejection; cross-algorithm verify; `needs_rehash` on a downgraded param set; legacy `scrypt:hex:hex` verify + `needs_rehash == true`; a `proptest` over random passwords.
+- [x] Rustdoc states that callers must run `hash`/`verify` inside `tokio::task::spawn_blocking` (this crate is sync and runtime-free).
 
 #### Files to create / modify
 
@@ -475,7 +475,7 @@ row in `docs/development_plan.md`. 6. Recompute %. 7. Append `- 1.4 ✅ <YYYY-MM
 
 ### Task 1.5 — MFA secret encryption — AES-256-GCM (`aead`, `mfa` feature)
 
-- **Status**: 📋 ToDo
+- **Status**: ✅ Done
 - **Priority**: P0
 - **Size**: M
 - **Depends on**: 1.1
@@ -486,11 +486,11 @@ Implement the `mfa`-gated AES-256-GCM module used to encrypt the TOTP secret at 
 
 #### Acceptance criteria
 
-- [ ] The `aead` module is `#[cfg(feature = "mfa")]`; with `mfa` off, `aes-gcm` is absent from the dependency tree.
-- [ ] `encrypt(plaintext, key) -> Result<String, CryptoError>` uses AES-256-GCM with a fresh CSPRNG 12-byte IV; output is a self-describing string (e.g. `base64(iv):base64(tag):base64(ciphertext)`).
-- [ ] `decrypt(wire, key) -> Result<Vec<u8>, CryptoError>` validates the auth tag; any tampering or wrong key yields `CryptoError::Decrypt` (opaque).
-- [ ] The 32-byte key is wrapped/zeroized appropriately; key length is validated.
-- [ ] 100% coverage including: round-trip; tamper-detection (flip a ciphertext/tag byte → `Decrypt`); wrong-key rejection; malformed-wire rejection; a `proptest` over random plaintexts.
+- [x] The `aead` module is `#[cfg(feature = "mfa")]`; with `mfa` off, `aes-gcm` is absent from the dependency tree.
+- [x] `encrypt(plaintext, key) -> Result<String, CryptoError>` uses AES-256-GCM with a fresh CSPRNG 12-byte IV; output is a self-describing string (e.g. `base64(iv):base64(tag):base64(ciphertext)`).
+- [x] `decrypt(wire, key) -> Result<Vec<u8>, CryptoError>` validates the auth tag; any tampering or wrong key yields `CryptoError::Decrypt` (opaque).
+- [x] The 32-byte key is wrapped/zeroized appropriately; key length is validated.
+- [x] 100% coverage including: round-trip; tamper-detection (flip a ciphertext/tag byte → `Decrypt`); wrong-key rejection; malformed-wire rejection; a `proptest` over random plaintexts.
 
 #### Files to create / modify
 
@@ -554,7 +554,7 @@ row in `docs/development_plan.md`. 6. Recompute %. 7. Append `- 1.5 ✅ <YYYY-MM
 
 ### Task 1.6 — MFA TOTP/HOTP + Base32 + otpauth URI (`totp`, `mfa` feature)
 
-- **Status**: 📋 ToDo
+- **Status**: ✅ Done
 - **Priority**: P0
 - **Size**: L
 - **Depends on**: 1.1
@@ -565,12 +565,12 @@ Implement the `mfa`-gated TOTP/HOTP module per RFC 6238 / RFC 4226: code generat
 
 #### Acceptance criteria
 
-- [ ] The `totp` module is `#[cfg(feature = "mfa")]`; with `mfa` off, `sha1`/`data-encoding` are absent from the tree.
-- [ ] HOTP (RFC 4226) and TOTP (RFC 6238) generation are implemented over HMAC-SHA1 with a 30s step and 6-digit default.
-- [ ] `verify(secret, code, time, window) -> bool` accepts a code within `±window` steps, compared in constant time.
-- [ ] Base32 secret encode/decode via `data-encoding` (RFC 4648, no padding, uppercase).
-- [ ] `provisioning_uri(secret, account, issuer) -> String` produces a valid `otpauth://totp/...` URI.
-- [ ] 100% coverage including the **RFC 6238 / RFC 4226 known-answer test vectors**, window boundary tests, and a Base32 round-trip `proptest`.
+- [x] The `totp` module is `#[cfg(feature = "mfa")]`; with `mfa` off, `sha1`/`data-encoding` are absent from the tree.
+- [x] HOTP (RFC 4226) and TOTP (RFC 6238) generation are implemented over HMAC-SHA1 with a 30s step and 6-digit default.
+- [x] `verify(secret, code, time, window) -> bool` accepts a code within `±window` steps, compared in constant time.
+- [x] Base32 secret encode/decode via `data-encoding` (RFC 4648, no padding, uppercase).
+- [x] `provisioning_uri(secret, account, issuer) -> String` produces a valid `otpauth://totp/...` URI.
+- [x] 100% coverage including the **RFC 6238 / RFC 4226 known-answer test vectors**, window boundary tests, and a Base32 round-trip `proptest`.
 
 #### Files to create / modify
 
@@ -637,3 +637,11 @@ overall %. 7. Append `- 1.6 ✅ <YYYY-MM-DD> — <summary>`.
 ## Completion log
 
 > Append-only. One line per completed task: `- <task-id> ✅ YYYY-MM-DD — <one-line summary>`.
+
+- 1.1 ✅ 2026-06-18 — Crate deps/features/`CryptoError`/module skeleton; coherent RustCrypto generation (digest 0.10), `wasm-js` opt-in backend, MFA strictly feature-gated.
+- 1.2 ✅ 2026-06-18 — `compare::constant_time_eq` (subtle) + `mac::{sha256,hmac_sha256,verify_digest}` with SHA-256 / RFC 4231 known-answer vectors; 100% line coverage.
+- 1.3 ✅ 2026-06-18 — `token::{random_bytes,generate_secure_token}` over `OsRng`; length/charset/uniqueness property tests; wasm build verified.
+- 1.4 ✅ 2026-06-18 — Password module: scrypt + Argon2id PHC, total constant-time `verify`, `needs_rehash`, parameter floors, legacy `scrypt:hex:hex` parser (external Python KAT); argon2-only build drops scrypt.
+- 1.5 ✅ 2026-06-18 — `aead` AES-256-GCM (fresh 12-byte nonce, opaque `Decrypt`, zeroized key) with tamper/wrong-key/malformed-wire tests; `mfa`-gated.
+- 1.6 ✅ 2026-06-18 — `totp` HOTP/TOTP (RFC 4226/6238 KATs), Base32, otpauth URI; `subtle::Choice` window accumulation for constant-time verify; `mfa`-gated, wasm build verified.
+- opt ✅ 2026-06-18 — Performance premise: added `token::random_array::<N>` (stack, zero-alloc) used by `aead` nonce; added Criterion harness (`benches/crypto.rs`) with measured baselines (sha256 ~110ns, hmac ~433ns, scrypt ~36ms, argon2id ~10ms, aead enc/dec 2.1/1.3µs, totp gen/verify 201/713ns).

@@ -1,3 +1,7 @@
 set -e
+# Load cargo onto PATH for GUI git clients (Cursor, VS Code, GitHub Desktop) launched
+# by launchd, which do not source the interactive shell profile. No-op in a terminal
+# that already has cargo on PATH.
+[ -f "$HOME/.cargo/env" ] && . "$HOME/.cargo/env"
 cargo fmt --all --check
 cargo test --workspace

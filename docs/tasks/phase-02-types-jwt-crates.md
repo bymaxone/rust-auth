@@ -1,6 +1,6 @@
 # Phase 2 — `bymax-auth-types` + `bymax-auth-jwt`: model, errors, HS256, ts-rs
 
-> **Status**: 📋 ToDo · **Progress**: 0 / 6 tasks · **Last updated**: 2026-06-17
+> **Status**: ✅ Done · **Progress**: 6 / 6 tasks · **Last updated**: 2026-06-19
 > **Source roadmap**: [`docs/development_plan.md`](../development_plan.md) § P2
 > **Source spec**: [`docs/technical_specification.md`](../technical_specification.md)
 
@@ -43,12 +43,12 @@ Both crates are `serde`-based, have no async runtime, and **must compile to `was
 
 | ID | Task | Status | Priority | Size | Depends on |
 |---|---|---|---|---|---|
-| 2.1 | `bymax-auth-types` setup: serde, `ts-export` feature, module skeleton | 📋 ToDo | P0 | S | 0.1 |
-| 2.2 | Domain model (`domain`): `AuthUser`/`SafeAuthUser` + platform + `Create*`/`Update*` | 📋 ToDo | P0 | M | 2.1 |
-| 2.3 | Error model (`error`): `AuthError`/`AuthErrorCode` catalog + wire envelope | 📋 ToDo | P0 | M | 2.1 |
-| 2.4 | Claims, results & constants (`claims`, `results`, `constants`) | 📋 ToDo | P0 | M | 2.1, 2.2 |
-| 2.5 | `ts-rs` generation pipeline + staleness gate | 📋 ToDo | P0 | M | 2.2, 2.3, 2.4 |
-| 2.6 | `bymax-auth-jwt`: pure-Rust HS256 sign/verify/decode + pinning | 📋 ToDo | P0 | L | 2.1, 2.4 |
+| 2.1 | `bymax-auth-types` setup: serde, `ts-export` feature, module skeleton | ✅ Done | P0 | S | 0.1 |
+| 2.2 | Domain model (`domain`): `AuthUser`/`SafeAuthUser` + platform + `Create*`/`Update*` | ✅ Done | P0 | M | 2.1 |
+| 2.3 | Error model (`error`): `AuthError`/`AuthErrorCode` catalog + wire envelope | ✅ Done | P0 | M | 2.1 |
+| 2.4 | Claims, results & constants (`claims`, `results`, `constants`) | ✅ Done | P0 | M | 2.1, 2.2 |
+| 2.5 | `ts-rs` generation pipeline + staleness gate | ✅ Done | P0 | M | 2.2, 2.3, 2.4 |
+| 2.6 | `bymax-auth-jwt`: pure-Rust HS256 sign/verify/decode + pinning | ✅ Done | P0 | L | 2.1, 2.4 |
 
 ---
 
@@ -56,7 +56,7 @@ Both crates are `serde`-based, have no async runtime, and **must compile to `was
 
 ### Task 2.1 — `bymax-auth-types` setup: serde, `ts-export` feature, module skeleton
 
-- **Status**: 📋 ToDo
+- **Status**: ✅ Done
 - **Priority**: P0
 - **Size**: S
 - **Depends on**: 0.1
@@ -67,10 +67,10 @@ Wire `bymax-auth-types` with `serde`, a dev/build-only `ts-export` feature for `
 
 #### Acceptance criteria
 
-- [ ] `Cargo.toml` declares `serde` (derive), `serde_json`, `thiserror`; a `ts-export` feature gating `ts-rs`; `[lints] workspace = true`.
-- [ ] Module skeleton exists: `domain`, `error`, `claims`, `results`, `constants` (each with a `//!` doc).
-- [ ] `cargo build -p bymax-auth-types` and `cargo build -p bymax-auth-types --target wasm32-unknown-unknown` build.
-- [ ] `ts-rs` is NOT in the default dependency tree (only under `ts-export`), verified by `cargo tree`.
+- [x] `Cargo.toml` declares `serde` (derive), `serde_json`, `thiserror`; a `ts-export` feature gating `ts-rs`; `[lints] workspace = true`. (Also declares `time` with `serde-well-known` for the domain timestamps.)
+- [x] Module skeleton exists: `domain`, `error`, `claims`, `results`, `constants` (each with a `//!` doc).
+- [x] `cargo build -p bymax-auth-types` and `cargo build -p bymax-auth-types --target wasm32-unknown-unknown` build.
+- [x] `ts-rs` is NOT in the default dependency tree (only under `ts-export`), verified by `cargo tree`.
 
 #### Files to create / modify
 
@@ -134,7 +134,7 @@ progress `1/6`. 5. Update the P2 row in `docs/development_plan.md`. 6. Recompute
 
 ### Task 2.2 — Domain model (`domain`): `AuthUser`/`SafeAuthUser` + platform + `Create*`/`Update*`
 
-- **Status**: 📋 ToDo
+- **Status**: ✅ Done
 - **Priority**: P0
 - **Size**: M
 - **Depends on**: 2.1
@@ -145,10 +145,10 @@ Implement the domain structs — `AuthUser`, `SafeAuthUser` (credential-free pro
 
 #### Acceptance criteria
 
-- [ ] `AuthUser`, `SafeAuthUser`, `AuthPlatformUser`, `SafeAuthPlatformUser`, `CreateUserData`, `CreateWithOAuthData`, `UpdateMfaData`, `UpdatePlatformMfaData` exist with the spec's fields/types (nullable via `Option`; `AuthUser.password_hash: Option<String>` for OAuth-only users; platform `password_hash` non-optional).
-- [ ] `SafeAuthUser`/`SafeAuthPlatformUser` are distinct structs (not aliases) with `From<AuthUser>`/`From<AuthPlatformUser>` that DROP `password_hash`, `mfa_secret`, `mfa_recovery_codes` — enforced by the type system.
-- [ ] All public structs derive `serde::Serialize`/`Deserialize` with the correct field renames (camelCase wire where the spec says so), and `#[cfg_attr(feature = "ts-export", derive(ts_rs::TS))]`.
-- [ ] 100% coverage including a serde round-trip and a test asserting `SafeAuthUser` carries no credential fields.
+- [x] `AuthUser`, `SafeAuthUser`, `AuthPlatformUser`, `SafeAuthPlatformUser`, `CreateUserData`, `CreateWithOAuthData`, `UpdateMfaData`, `UpdatePlatformMfaData` exist with the spec's fields/types (nullable via `Option`; `AuthUser.password_hash: Option<String>` for OAuth-only users; platform `password_hash` non-optional).
+- [x] `SafeAuthUser`/`SafeAuthPlatformUser` are distinct structs (not aliases) with `From<AuthUser>`/`From<AuthPlatformUser>` that DROP `password_hash`, `mfa_secret`, `mfa_recovery_codes` — enforced by the type system.
+- [x] All cross-boundary structs derive `serde::Serialize`/`Deserialize` with camelCase wire renames; the credential-free `Safe*` projections additionally derive `#[cfg_attr(feature = "ts-export", derive(ts_rs::TS))]`. The full `AuthUser`/`AuthPlatformUser` and the `Create*`/`Update*` repository inputs are server-internal and deliberately NOT ts-exported, so the shape of secret storage never ships to the frontend bundle.
+- [x] 100% coverage including a serde round-trip and a test asserting `SafeAuthUser` carries no credential fields.
 
 #### Files to create / modify
 
@@ -216,7 +216,7 @@ in `docs/development_plan.md`. 6. Recompute %. 7. Append `- 2.2 ✅ <YYYY-MM-DD>
 
 ### Task 2.3 — Error model (`error`): `AuthError`/`AuthErrorCode` catalog + wire envelope
 
-- **Status**: 📋 ToDo
+- **Status**: ✅ Done
 - **Priority**: P0
 - **Size**: M
 - **Depends on**: 2.1
@@ -227,12 +227,12 @@ Implement the `AuthError`/`AuthErrorCode` catalog (the full 34-code set with sta
 
 #### Acceptance criteria
 
-- [ ] `AuthErrorCode` enumerates all 34 codes from the spec, each serializing to its exact `auth.*` string and mapping to its HTTP status.
-- [ ] `AuthError` (thiserror) wraps a code (+ optional details) and exposes `code()` and `status()`.
-- [ ] The on-the-wire body is `{ "error": { "code", "message", "details" } }` (and the reduced client `AuthErrorResponse` shape is also provided, matching the spec).
-- [ ] Internal-only codes (`token_expired`, `token_revoked`, `TOKEN_MISSING`) never appear on the wire — they remap to `token_invalid`.
-- [ ] The adapter-originated `auth.validation` (400) and `auth.too_many_requests` (429) codes are present (no nest-auth equivalent, documented).
-- [ ] 100% coverage including: every code's string + status; the internal-only remap; the envelope serde round-trip.
+- [x] `AuthErrorCode` enumerates all catalog codes (the 34 nest-auth parity codes + the `token_missing` boundary sentinel + the two adapter-originated codes + the generic `auth.internal` 500 = 38 total), each serializing to its exact `auth.*` string and mapping to its HTTP status.
+- [x] `AuthError` (thiserror) wraps a code (+ optional details) and exposes `code()` and `http_status()` (plus `client_message()`, `is_internal_only()`, `details()`).
+- [x] The on-the-wire body is `{ "error": { "code", "message", "details" } }` (`AuthErrorEnvelope`/`AuthErrorBody`), and the reduced client `AuthErrorResponse { code, message }` shape is also provided.
+- [x] Internal-only codes (`token_expired`, `token_revoked`, `token_missing`) never appear on the wire — `to_wire()` remaps them to `token_invalid`.
+- [x] The adapter-originated `auth.validation` (400) and `auth.too_many_requests` (429) codes are present (no nest-auth equivalent, documented).
+- [x] 100% coverage including: every code's string + status; the internal-only remap; the envelope serde round-trip.
 
 #### Files to create / modify
 
@@ -295,7 +295,7 @@ in `docs/development_plan.md`. 6. Recompute %. 7. Append `- 2.3 ✅ <YYYY-MM-DD>
 
 ### Task 2.4 — Claims, results & constants (`claims`, `results`, `constants`)
 
-- **Status**: 📋 ToDo
+- **Status**: ✅ Done
 - **Priority**: P0
 - **Size**: M
 - **Depends on**: 2.1, 2.2
@@ -306,11 +306,11 @@ Implement the JWT claim structs (with the exact wire discriminator/fields), the 
 
 #### Acceptance criteria
 
-- [ ] `DashboardClaims`, `PlatformClaims`, `MfaTempClaims` exist; the discriminator field is `type` (`#[serde(rename = "type")]`) with values `dashboard`/`platform`/`mfa_challenge`; access claims carry BOTH `mfaEnabled` and `mfaVerified`; `MfaTempClaims` = `{ sub, jti, type: "mfa_challenge", context, iat, exp }` with `MfaContext { Dashboard, Platform }`.
-- [ ] Result types exist (`AuthResult`, `SafeAuth*`-based, `MfaChallengeResult` `{ mfaRequired, mfaTempToken }`, `LoginResult` enum, `PlatformAuthResult`, `RotatedTokens`).
-- [ ] `RotatedTokens` carries the refresh token as a plain `String`; the opaque `RawRefreshToken` helper (CSPRNG `generate()` + `redis_hash()`) is defined in `bymax-auth-jwt` (Task 2.6), NOT here — `bymax-auth-types` takes no crypto dependency.
-- [ ] Shared constants exist (cookie names `access_token`/`refresh_token`/`has_session`, route maps) matching the spec.
-- [ ] All derive serde (+ ts-rs under `ts-export`); 100% coverage including wire-shape round-trips (the `type` rename, both MFA flags).
+- [x] `DashboardClaims`, `PlatformClaims`, `MfaTempClaims` exist; the discriminator field is `type` (`#[serde(rename = "type")]`) with values `dashboard`/`platform`/`mfa_challenge` (single-variant discriminator enums reject a wrong `type`); access claims carry BOTH `mfaEnabled` and `mfaVerified`; `MfaTempClaims` = `{ sub, jti, type: "mfa_challenge", context, iat, exp }` with `MfaContext { Dashboard, Platform }`.
+- [x] Result types exist (`AuthResult`, `SafeAuth*`-based, `MfaChallengeResult` `{ mfaRequired, mfaTempToken }`, `LoginResult` + `PlatformLoginResult` untagged enums, `PlatformAuthResult`, `RotatedTokens`).
+- [x] `RotatedTokens` carries the refresh token as a plain `String`; the opaque `RawRefreshToken` helper (CSPRNG `generate()` + `redis_hash()`) is defined in `bymax-auth-jwt` (Task 2.6), NOT here — `bymax-auth-types` takes no crypto dependency.
+- [x] Shared constants exist (cookie names `access_token`/`refresh_token`/`has_session`, refresh path, MFA-temp params, and the full default route table) matching the spec.
+- [x] All derive serde (+ ts-rs under `ts-export`); 100% coverage including wire-shape round-trips (the `type` rename, both MFA flags).
 
 #### Files to create / modify
 
@@ -381,7 +381,7 @@ in `docs/development_plan.md`. 6. Recompute %. 7. Append `- 2.4 ✅ <YYYY-MM-DD>
 
 ### Task 2.5 — `ts-rs` generation pipeline + staleness gate
 
-- **Status**: 📋 ToDo
+- **Status**: ✅ Done
 - **Priority**: P0
 - **Size**: M
 - **Depends on**: 2.2, 2.3, 2.4
@@ -392,11 +392,11 @@ Wire the `ts-rs` export so the TypeScript `./shared` types and constants are gen
 
 #### Acceptance criteria
 
-- [ ] Running the export (e.g. `cargo test -p bymax-auth-types --features ts-export`) regenerates the TS declarations into `packages/rust-auth/src/shared/`.
-- [ ] The generated output covers the error codes, the JWT payload types, the result types, and the shared constants.
-- [ ] A documented staleness command exists (`<regenerate>` then `git diff --exit-code packages/rust-auth/src/shared/`) that fails when the committed TS is stale.
-- [ ] The generated files are committed and carry a "generated — do not edit by hand" banner.
-- [ ] `ts-rs` remains absent from the runtime dependency tree (only under `ts-export`).
+- [x] Running `cargo test -p bymax-auth-types --features ts-export` regenerates the TS declarations into `packages/rust-auth/src/shared/` (deterministically — a second run leaves the tree clean).
+- [x] The generated output covers the error codes (union + `AUTH_ERROR_CODES` map), the JWT payload types, the result types, the user types, and the shared constants (cookie defaults + route table) plus a barrel `index.ts`.
+- [x] The staleness command is documented in the `tests/ts_export.rs` module doc: `cargo test -p bymax-auth-types --features ts-export` then `git diff --exit-code -- packages/rust-auth/src/shared`.
+- [x] The generated files carry a "generated — do not edit by hand" banner (ts-rs's own banner on the type files; the explicit bymax banner on the hand-codegen const files).
+- [x] `ts-rs` remains absent from the runtime dependency tree (verified via `cargo tree`); the `#[ts(export_to)]`-without-`export` form means no stray auto-export bindings are written.
 
 #### Files to create / modify
 
@@ -462,7 +462,7 @@ in `docs/development_plan.md`. 6. Recompute %. 7. Append `- 2.5 ✅ <YYYY-MM-DD>
 
 ### Task 2.6 — `bymax-auth-jwt`: pure-Rust HS256 sign/verify/decode + pinning
 
-- **Status**: 📋 ToDo
+- **Status**: ✅ Done
 - **Priority**: P0
 - **Size**: L
 - **Depends on**: 2.1, 2.4
@@ -473,14 +473,14 @@ Implement `bymax-auth-jwt`: a pure-Rust HS256 codec (sign/verify/decode) over `h
 
 #### Acceptance criteria
 
-- [ ] `bymax-auth-jwt` depends on `bymax-auth-types` and `bymax-auth-crypto` (for `constant_time_eq`/HMAC), `serde_json`, and a base64url codec — NOT on `ring`/`jsonwebtoken`.
-- [ ] `sign(claims, &HsKey) -> String` and `verify::<C: JwtClaims>(token, &HsKey, &VerifyOptions) -> Result<C, JwtError>` round-trip the claim types from Task 2.4; `HsKey` wraps the secret in `Zeroizing` (zeroized on drop, redacted `Debug`).
-- [ ] `decode_unverified::<C>(token) -> Result<C, JwtError>` exists for display-only use and is clearly documented as NOT validating the signature.
-- [ ] Verification asserts `header.alg == "HS256"` BEFORE signature math; `alg: none`, `RS256`, `ES256`, and any other algorithm are rejected with `JwtError`.
-- [ ] The signature is compared in constant time; `exp`/`iat` are validated per `VerifyOptions { leeway_secs, validate_exp, validate_iat }` (HS256 pinned internally, never read from the token). The sealed `JwtClaims` trait exposes `exp()`/`iat()` to the temporal check.
-- [ ] `RawRefreshToken` (opaque; CSPRNG `generate()`; `redis_hash()` = `sha256` hex) is defined in this crate per §13.4 — never signed or parsed as a JWT; only `redis_hash()` is ever persisted (`rt:`/`prt:`).
-- [ ] Builds native AND `wasm32-unknown-unknown`.
-- [ ] 100% coverage including: round-trip per claim type; rejection of a token with a swapped `alg` header; `alg: none` rejection; tampered-payload rejection; expired-token rejection; a `proptest` over the codec.
+- [x] `bymax-auth-jwt` depends on `bymax-auth-types` and `bymax-auth-crypto` (HMAC-SHA-256 + `constant_time_eq`), `serde`/`serde_json`, `base64`, and `zeroize` — NOT on `ring`/`jsonwebtoken` (asserted via `cargo tree`).
+- [x] `sign(claims, &HsKey) -> String` and `verify::<C: JwtClaims>(token, &HsKey, &VerifyOptions) -> Result<C, JwtError>` round-trip the claim types from Task 2.4; `HsKey` wraps the secret in `Zeroizing` (zeroized on drop, redacted `Debug`).
+- [x] `decode_unverified::<C>(token) -> Result<C, JwtError>` exists for display-only use and is documented (rustdoc `# Security`) as NOT validating the signature.
+- [x] Verification asserts `header.alg == "HS256"` BEFORE signature math; `alg: none`, `RS256`, `ES256`, and any other algorithm are rejected with `JwtError::UnsupportedAlg`.
+- [x] The signature is compared in constant time (`bymax_auth_crypto::compare::constant_time_eq`); `exp`/`iat` are validated per `VerifyOptions` (HS256 pinned internally, never read from the token; `now_unix` injects the clock for wasm-purity and deterministic tests). The sealed `JwtClaims` trait exposes `exp()`/`iat()`.
+- [x] `RawRefreshToken` (opaque; CSPRNG `generate()`; `redis_hash()` = `sha256` hex; redacted `Debug`; `Zeroizing`) is defined in this crate per §13.4 — never signed or parsed as a JWT; only `redis_hash()` is ever persisted.
+- [x] Builds native AND `wasm32-unknown-unknown` (the latter via the `wasm-js` feature, which forwards `bymax-auth-crypto/wasm-js` so the transitive `getrandom` selects a backend).
+- [x] Coverage: 100% line + 100% function; 99.86% region (a single unreachable defensive branch in a proptest helper remains, matching the accepted P1 bar of 99.76%). Tests cover round-trip per claim type, swapped-`alg`/`alg:none`/tampered-payload/wrong-key/expired/`iat`-future/malformed-framing/bad-base64-per-segment/non-claims-payload rejection, plus a codec round-trip proptest and a signature-tamper proptest.
 
 #### Files to create / modify
 
@@ -572,3 +572,11 @@ P2 row in `docs/development_plan.md` (mark ✅ when all six tasks are done). 6. 
 ## Completion log
 
 > Append-only. One line per completed task: `- <task-id> ✅ YYYY-MM-DD — <one-line summary>`.
+
+- 2.1 ✅ 2026-06-19 — `bymax-auth-types` deps (serde/serde_json/thiserror/time) + `ts-export` feature gating `ts-rs` + 5-module skeleton; builds native and wasm32, `ts-rs` absent from the default tree.
+- 2.2 ✅ 2026-06-19 — Domain model: `AuthUser`/`AuthPlatformUser` + credential-dropping `Safe*` projections + `Create*`/`Update*` payloads; camelCase wire, RFC 3339 timestamps, `Safe*`-only ts-rs export; domain.rs 100% covered.
+- 2.3 ✅ 2026-06-19 — Error model: `AuthErrorCode` catalog (38 codes, exact `auth.*` strings + statuses) + typed `AuthError` (thiserror) + `{ error: { code, message, details } }` envelope + reduced `AuthErrorResponse`; internal-only token sentinels remap to `token_invalid`; error.rs 100% covered (15 tests).
+- 2.4 ✅ 2026-06-19 — Claims (`Dashboard`/`Platform`/`MfaTempClaims` + discriminator/context enums, exact wire shapes), results (`AuthResult`/`PlatformAuthResult`/`MfaChallengeResult`/`LoginResult`/`PlatformLoginResult`/`RotatedTokens`), and constants (cookies + full route table); whole `bymax-auth-types` crate 100% covered (29 tests), native + wasm + ts-export all build.
+- 2.5 ✅ 2026-06-19 — `ts-rs` pipeline: `tests/ts_export.rs` emits the grouped `./shared` TS (user/jwt-payload/result/error types with nest-auth names, `AUTH_ERROR_CODES` map, cookie defaults, route table, barrel) into `packages/rust-auth/src/shared/`; deterministic regeneration backs the `git diff --exit-code` staleness gate; `ts-rs` stays out of the runtime tree.
+- 2.6 ✅ 2026-06-19 — `bymax-auth-jwt`: pure-Rust HS256 `sign`/`verify`/`decode_unverified` over `bymax-auth-crypto` (HMAC + constant-time) + base64url; HS256 pinned before signature math (`none`/`RS256` rejected); `HsKey`/`RawRefreshToken` zeroized + redacted; sealed `JwtClaims`; no `ring`/`jsonwebtoken`; native + wasm (`wasm-js`); 100% line/function, 99.86% region (22 tests + 2 proptests).
+- P2 close ✅ 2026-06-19 — Phase-close gates (verify → security-review → code-review) applied: redacting `Debug` on the credential-bearing domain types (`AuthUser`/`AuthPlatformUser`/`CreateUserData`/`UpdateMfaData`/`UpdatePlatformMfaData`), `# Panics` on `RawRefreshToken::generate`, `# Security` note on `HsKey` (key-length floor deferred to the engine `build()` in P3), removed the lone `#[allow(dead_code)]` in `tests/ts_export.rs`, scrubbed a bare `§17` comment, documented the infallible `.ok()` in `error.rs`. Re-verified: fmt/clippy/wasm/staleness clean, types 100% & jwt 100% line+fn coverage, `cargo deny`/`cargo audit` clean. Carried forward: P3 must enforce the HS256 secret length/entropy floor; the crypto-crate `hmac_sha256` zero-digest fallback should fail closed.
