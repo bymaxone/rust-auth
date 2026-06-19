@@ -62,11 +62,7 @@ impl HookContext {
             tenant_id,
             ip: ctx.ip.clone(),
             user_agent: ctx.user_agent.clone(),
-            sanitized_headers: ctx
-                .sanitized_headers
-                .iter()
-                .map(|(k, v)| (k.clone(), v.clone()))
-                .collect(),
+            sanitized_headers: ctx.sanitized_headers.clone(),
         }
     }
 }

@@ -8,6 +8,7 @@ use std::collections::HashMap;
 use base64::Engine;
 use bymax_auth_crypto::mac::sha256;
 use secrecy::{ExposeSecret, SecretBox};
+use zeroize::Zeroizing;
 
 use super::{AuthConfig, Environment, PasswordConfig, SameSite, TokenDelivery};
 use crate::ConfigError;
@@ -74,9 +75,10 @@ impl ResolvedConfig {
     }
 }
 
-/// Derive the identifier-hashing key as `SHA-256(label || secret)`.
+/// Derive the identifier-hashing key as `SHA-256(label || secret)`. The temporary buffer
+/// holding the raw secret bytes is zeroized on drop so it does not linger in freed memory.
 fn derive_hmac_key(secret: &str) -> SecretBox<[u8; 32]> {
-    let mut input = Vec::with_capacity(HMAC_KEY_LABEL.len() + secret.len());
+    let mut input = Zeroizing::new(Vec::with_capacity(HMAC_KEY_LABEL.len() + secret.len()));
     input.extend_from_slice(HMAC_KEY_LABEL);
     input.extend_from_slice(secret.as_bytes());
     SecretBox::new(Box::new(sha256(&input)))
