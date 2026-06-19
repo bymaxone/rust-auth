@@ -8,5 +8,79 @@ repository.workspace = true
 authors.workspace = true
 description = "Framework-agnostic authentication engine for bymax-auth: AuthEngine, the builder, configuration, all auth flows, and the object-safe plugin traits."
 
+[dependencies]
+# The shared data contracts (users, claims, results, the AuthError catalog) and the
+# cryptographic / JWT primitives the engine composes. `bymax-auth-crypto` is pulled
+# with its default `scrypt` hasher; the `argon2` / `mfa` hashers are forwarded from
+# this crate's own features below.
+bymax-auth-types = { workspace = true }
+bymax-auth-crypto = { workspace = true }
+bymax-auth-jwt = { workspace = true }
+# Tokio backs the async engine surface and the fire-and-forget hook model (detached
+# tasks under a timeout ceiling). The core takes only the runtime + timer + macro
+# features — no net/fs — keeping it transport-agnostic.
+tokio = { version = "1", features = ["rt", "macros", "time"] }
+# Object-safe async plugin traits (`UserRepository`, `EmailProvider`, hooks, stores,
+# `OAuthProvider`, `HttpClient`) desugar through `#[async_trait]` so they are usable as
+# `Arc<dyn _>`.
+async-trait = "0.1"
+# Structured logging for fire-and-forget hook/email failures and config diagnostics —
+# the engine emits spans/events but installs no subscriber (that is the host's choice).
+tracing = "0.1"
+# Long-lived secret wrappers: the JWT signing secret and the MFA encryption key live as
+# `SecretString` (redacted Debug/Display, zeroized on drop); the derived identifier-
+# hashing key lives as `SecretBox<[u8; 32]>`.
+secrecy = "0.10"
+# Wipe the transient buffer that holds the JWT secret while deriving the identifier-hashing
+# key, so the raw secret bytes do not linger in freed memory.
+zeroize = "1.9"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+# Timestamps on the session value DTOs, matching the RFC 3339 wire shape of the domain
+# structs in `bymax-auth-types`.
+time = { version = "0.3", default-features = false, features = ["std", "serde-well-known"] }
+# Decoding the configured MFA encryption key (base64 standard or url-safe) during startup
+# validation to confirm it is exactly 32 bytes for AES-256-GCM.
+base64 = "0.22"
+
+# Reserved for the bundled `reqwest`-backed `HttpClient` transport. Optional and pulled in
+# ONLY by `oauth-reqwest`; the base `oauth` feature is HTTP-client-free, with transport
+# supplied through the pluggable `HttpClient` trait. No TLS backend is selected here:
+# reqwest's default `rustls-tls` pulls `ring`, which the workspace ban-list forbids
+# (RustCrypto-only crypto policy). The RustCrypto-backed rustls provider and the bundled
+# transport are wired with the OAuth flow that performs the actual HTTPS exchange.
+reqwest = { version = "0.12", optional = true, default-features = false }
+
+[dev-dependencies]
+# Multi-threaded runtime + the assertion-friendly test macros for the async trait and
+# builder tests.
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "time"] }
+
+[features]
+# A bare dependency gets scrypt hashing plus the always-on engine — nothing else. There
+# is deliberately no `core` feature: the engine is the always-present floor and the
+# `auth` / `password-reset` flows are runtime toggles, not compile-time features.
+default = ["scrypt"]
+# Hasher selection, forwarded to `bymax-auth-crypto`. At least one must be enabled; the
+# config validates that the selected `active_algorithm` is a compiled-in hasher.
+scrypt = ["bymax-auth-crypto/scrypt"]
+argon2 = ["bymax-auth-crypto/argon2"]
+# Forwards the MFA-gated crypto set (AES-256-GCM / TOTP / Base32).
+mfa = ["bymax-auth-crypto/mfa"]
+# Optional flow capabilities. These gate which engine flows and route groups a build
+# compiles; each is additive.
+sessions = []
+oauth = []
+# The bundled reqwest transport: `oauth` plus the optional `reqwest` dependency.
+oauth-reqwest = ["oauth", "dep:reqwest"]
+platform = []
+invitations = []
+# Exposes the in-memory trait doubles (`InMemoryUserRepository`, `InMemoryStores`, the
+# mock OAuth/HTTP clients) for downstream integration tests and this crate's own tests.
+testing = []
+# Convenience meta-feature: every optional flow capability for a full backend.
+full = ["sessions", "mfa", "oauth", "oauth-reqwest", "platform", "invitations"]
+
 [lints]
 workspace = true
