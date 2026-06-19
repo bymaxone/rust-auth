@@ -8,5 +8,30 @@ repository.workspace = true
 authors.workspace = true
 description = "Pure-Rust HS256 JWT signing, verification, and unverified decoding with algorithm pinning — the shared server/edge implementation for bymax-auth."
 
+[dependencies]
+# The shared claim structures and the opaque refresh-token's hashing/CSPRNG primitives.
+bymax-auth-types = { workspace = true }
+bymax-auth-crypto = { workspace = true }
+# Claims (de)serialization and the compact JWS framing — pure-Rust, wasm-clean. No
+# `ring`/`jsonwebtoken`: those pull C/assembly and break the wasm32 edge build.
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+base64 = "0.22"
+# Zeroize the in-memory signing secret and the raw refresh token on drop.
+zeroize = "1.9"
+thiserror = "2"
+
+[dev-dependencies]
+proptest = "1"
+
+[features]
+# Forwards `bymax-auth-crypto`'s browser RNG backend so the crate (which pulls
+# `getrandom` transitively for `RawRefreshToken::generate`) builds and runs on
+# `wasm32-unknown-unknown`. Off by default — a reusable library must not pick a wasm
+# RNG backend for its consumers; the leaf wasm binding enables it, matching the policy
+# set by bymax-auth-crypto's own `wasm-js` feature. Signing and verification themselves
+# use no RNG.
+wasm-js = ["bymax-auth-crypto/wasm-js"]
+
 [lints]
 workspace = true

@@ -8,5 +8,30 @@ repository.workspace = true
 authors.workspace = true
 description = "Shared data contracts for bymax-auth: users, JWT claims, results, the error catalog, and config value types."
 
+[dependencies]
+# Pure-data contract layer: serde (de)serialization plus `thiserror` for the typed
+# error catalog. No async runtime, no I/O — which keeps the crate compilable for
+# `wasm32-unknown-unknown` (the edge build is the enforcing tripwire).
+serde = { version = "1", features = ["derive"] }
+# `serde_json` carries the open-ended `details` payload on the error envelope and
+# backs the round-trip tests; it is pure-Rust and wasm-clean.
+serde_json = "1"
+thiserror = "2"
+# Timestamps on the domain structs. `serde-well-known` brings the RFC 3339 serde
+# adapters so datetimes cross the wire as ISO-8601 strings (JS `Date` parity); the
+# platform-specific `local-offset` feature is intentionally left off so the crate
+# stays wasm-safe.
+time = { version = "0.3", default-features = false, features = ["std", "serde-well-known"] }
+
+# `ts-rs` is a build/dev-only tool that emits the TypeScript `./shared` surface from
+# these types. It is optional and gated behind `ts-export` so it never enters the
+# runtime dependency tree of a crates.io consumer.
+ts-rs = { version = "11", optional = true }
+
+[features]
+# Turning this on pulls `ts-rs` in to regenerate the committed TypeScript contracts.
+# Off by default: a backend consumer never needs the generator.
+ts-export = ["dep:ts-rs"]
+
 [lints]
 workspace = true
