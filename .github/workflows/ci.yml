@@ -115,9 +115,10 @@ jobs:
   # ─────────────────────────────────────────────────────────────────────────────
   # Feature matrix — each feature is verified in isolation to catch accidental
   # cross-feature dependencies or features that only compile when combined.
-  # bymax-auth-crypto mandates at least one hasher (scrypt or argon2) via
-  # compile_error!, so it is tested separately with every valid configuration;
-  # the remaining workspace members use cargo-hack --each-feature.
+  # bymax-auth-crypto and the bymax-auth facade both mandate at least one hasher
+  # (scrypt or argon2) via compile_error!, so they cannot be run feature-by-feature
+  # (an isolated non-hasher feature would fail the guard); they are checked
+  # separately with valid combinations, and the rest use cargo-hack --each-feature.
   # ─────────────────────────────────────────────────────────────────────────────
   feature-matrix:
     name: feature matrix (cargo-hack)
@@ -130,17 +131,22 @@ jobs:
       - uses: taiki-e/install-action@b8cecb83565409bcc297b2df6e77f030b2a468d5 # v2.82.0
         with:
           tool: cargo-hack
-      - name: bymax-auth-crypto — valid hasher combinations
+      - name: Hasher-gated crates — valid combinations
         run: |
           for features in scrypt argon2 'scrypt,argon2' 'scrypt,mfa' 'argon2,mfa' 'scrypt,argon2,mfa'; do
             echo "checking bymax-auth-crypto --features $features"
             cargo check -p bymax-auth-crypto --no-default-features --features "$features" --locked
+          done
+          for features in scrypt argon2 'scrypt,argon2' full; do
+            echo "checking bymax-auth --features $features"
+            cargo check -p bymax-auth --no-default-features --features "$features" --locked
           done
       - name: Workspace feature matrix (each feature in isolation)
         run: |
           cargo hack check \
             --workspace \
             --exclude bymax-auth-crypto \
+            --exclude bymax-auth \
             --each-feature \
             --locked
 
