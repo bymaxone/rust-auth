@@ -309,6 +309,16 @@ impl InMemoryStores {
     pub fn new() -> Self {
         Self::default()
     }
+
+    /// Read the stored OTP code for a purpose + identifier without consuming it. A test-only
+    /// inspection helper (the real store never exposes a stored code), used to drive the
+    /// verification flow end to end against the in-memory double.
+    #[must_use]
+    pub fn peek_otp(&self, purpose: OtpPurpose, identifier: &str) -> Option<String> {
+        lock(&self.otps)
+            .get(&(purpose, identifier.to_owned()))
+            .map(|(code, _attempts)| code.clone())
+    }
 }
 
 #[async_trait]

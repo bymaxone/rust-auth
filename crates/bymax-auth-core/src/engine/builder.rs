@@ -5,9 +5,16 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use bymax_auth_jwt::keys::HsKey;
+use secrecy::ExposeSecret;
+
 use super::AuthEngine;
 use crate::ConfigError;
 use crate::config::{AuthConfig, Environment, ResolvedConfig};
+use crate::services::brute_force::BruteForceService;
+use crate::services::otp::OtpService;
+use crate::services::password::PasswordService;
+use crate::services::token_manager::TokenManagerService;
 use crate::traits::{
     AuthHooks, BruteForceStore, EmailProvider, HttpClient, NoOpAuthHooks, NoOpEmailProvider,
     OAuthProvider, OtpStore, PlatformUserRepository, SessionStore, UserRepository, WsTicketStore,
@@ -228,7 +235,34 @@ impl AuthEngineBuilder {
             return Err(ConfigError::OAuthToggleWithoutProvider);
         }
 
+        // Build the password service (and its startup sentinel hash) from the validated
+        // password config before it is moved into the resolved bundle.
+        let passwords = Arc::new(PasswordService::new(&config.password)?);
+
+        // Capture the scalar token/brute-force settings and the signing key before the
+        // config is consumed by `ResolvedConfig::new`.
+        let access_ttl = config.jwt.access_expires_in;
+        let refresh_days = config.jwt.refresh_expires_in_days;
+        let grace_window = config.jwt.refresh_grace_window;
+        let brute_max_attempts = config.brute_force.max_attempts;
+        let brute_window_secs = config.brute_force.window.as_secs();
+        let signing_key = HsKey::from_bytes(config.jwt.secret.expose_secret().as_bytes());
+
         let config = Arc::new(ResolvedConfig::new(config, environment, secure_cookies));
+
+        let tokens = TokenManagerService::new(
+            signing_key,
+            session_store.clone(),
+            access_ttl,
+            refresh_days,
+            grace_window,
+        );
+        let brute_force = BruteForceService::new(
+            brute_force_store.clone(),
+            brute_max_attempts,
+            brute_window_secs,
+        );
+        let otp = OtpService::new(otp_store.clone());
 
         Ok(AuthEngine {
             config,
@@ -243,6 +277,10 @@ impl AuthEngineBuilder {
             ws_ticket_store,
             oauth_providers,
             http_client,
+            passwords,
+            tokens,
+            brute_force,
+            otp,
         })
     }
 }

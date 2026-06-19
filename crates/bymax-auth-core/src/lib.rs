@@ -31,6 +31,7 @@ pub mod config;
 pub mod context;
 pub mod engine;
 mod error;
+pub mod services;
 pub mod traits;
 
 #[cfg(any(test, feature = "testing"))]

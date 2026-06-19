@@ -166,6 +166,11 @@ pub enum ConfigError {
     /// One or more of the session / OTP / brute-force stores was not supplied.
     #[error("a SessionStore/OtpStore/BruteForceStore is required")]
     MissingStores,
+    /// The anti-enumeration sentinel hash could not be computed from the validated
+    /// password parameters during engine assembly — effectively unreachable once the
+    /// password floors have passed validation, but reported rather than panicked.
+    #[error("failed to compute the password sentinel hash from the configured parameters")]
+    SentinelHashFailed,
 }
 
 /// A failure crossing the storage seam. The host maps its concrete datastore errors
