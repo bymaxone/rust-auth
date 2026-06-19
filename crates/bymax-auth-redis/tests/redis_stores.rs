@@ -1,0 +1,456 @@
+//! End-to-end Redis integration tier for `bymax-auth-redis`, run against a real `redis:8`
+//! container via testcontainers. Consolidated into one binary so the shared harness is fully
+//! used (no dead code, no `#[allow]`) and one container is reused per test.
+//!
+//! These tests assert the section 24 invariants the Lua scripts uphold: rotation cannot
+//! double-spend a refresh token (invariant 15), revoke is ownership-checked (no cross-user
+//! revoke), the brute-force window starts at the first failure and does not slide, `otp_verify`
+//! bumps attempts preserving residual TTL and consumes on success, the WebSocket ticket is
+//! single-use, and no raw secret/PII is ever resident as a key (invariant 9). When Docker is
+//! unavailable each test skips via `let Some(..) else { return }`, so a no-Docker run compiles
+//! and passes.
+
+mod common;
+
+use std::collections::{BTreeMap, HashMap};
+use std::sync::Arc;
+
+use bymax_auth_core::context::RequestContext;
+use bymax_auth_core::services::auth::{LoginInput, RegisterInput};
+use bymax_auth_core::testing::InMemoryUserRepository;
+use bymax_auth_core::traits::{
+    BruteForceStore, OtpPurpose, OtpStore, RotateOutcome, SessionKind, SessionRecord,
+    SessionRotation, SessionStore, WsTicketSnapshot, WsTicketStore,
+};
+use bymax_auth_core::{AuthConfig, AuthEngine, Environment};
+use bymax_auth_types::{AuthError, LoginResult};
+use secrecy::SecretString;
+use time::OffsetDateTime;
+
+/// A dashboard/platform session record for the given user.
+fn record(user: &str) -> SessionRecord {
+    SessionRecord {
+        user_id: user.to_owned(),
+        tenant_id: Some("t1".to_owned()),
+        role: "MEMBER".to_owned(),
+        device: "Chrome on macOS".to_owned(),
+        ip: "203.0.113.4".to_owned(),
+        created_at: OffsetDateTime::UNIX_EPOCH,
+    }
+}
+
+/// A rotation bundle moving `old` -> `new` for `user`.
+fn rotation(old: &str, new: &str, user: &str) -> SessionRotation {
+    SessionRotation {
+        old_hash: old.to_owned(),
+        new_hash: new.to_owned(),
+        new_raw: "raw-token-never-persisted".to_owned(),
+        new_record: record(user),
+        refresh_ttl: 3600,
+        grace_ttl: 30,
+    }
+}
+
+/// A verified-claims snapshot for a WebSocket ticket.
+fn snapshot() -> WsTicketSnapshot {
+    WsTicketSnapshot {
+        sub: "u1".to_owned(),
+        tenant_id: Some("t1".to_owned()),
+        role: "MEMBER".to_owned(),
+        status: "ACTIVE".to_owned(),
+        mfa_enabled: false,
+        mfa_verified: false,
+    }
+}
+
+#[tokio::test]
+async fn session_create_rotate_grace_revoke_and_blacklist() {
+    let Some(redis) = common::try_start().await else {
+        return;
+    };
+    let Some(stores) = redis.stores() else { return };
+    let kind = SessionKind::Dashboard;
+    let rec = record("u1");
+
+    // Create, then find (hit + miss) and list.
+    assert!(stores.create_session(kind, "h1", &rec, 3600).await.is_ok());
+    assert!(matches!(
+        stores.find_session(kind, "h1").await,
+        Ok(Some(r)) if r.user_id == "u1"
+    ));
+    assert!(matches!(
+        stores.find_session(kind, "missing").await,
+        Ok(None)
+    ));
+    assert!(matches!(
+        stores.list_sessions(kind, "u1").await,
+        Ok(v) if v.len() == 1 && v[0].session_hash == "h1"
+    ));
+
+    // A member whose detail key has expired ahead of its index membership is skipped on list.
+    assert!(redis.del("auth:sd:h1").await);
+    assert!(matches!(stores.list_sessions(kind, "u1").await, Ok(v) if v.is_empty()));
+    // Restore the detail for the rest of the flow.
+    assert!(stores.create_session(kind, "h1", &rec, 3600).await.is_ok());
+
+    // Rotate h1 -> h2: the old token is consumed and the index moves to the new hash.
+    let rot = rotation("h1", "h2", "u1");
+    assert!(matches!(
+        stores.rotate(kind, &rot).await,
+        Ok(RotateOutcome::Rotated(old)) if old.user_id == "u1"
+    ));
+    assert!(matches!(stores.find_session(kind, "h1").await, Ok(None)));
+    assert!(matches!(stores.find_session(kind, "h2").await, Ok(Some(_))));
+    assert!(matches!(
+        stores.list_sessions(kind, "u1").await,
+        Ok(v) if v.len() == 1 && v[0].session_hash == "h2"
+    ));
+
+    // Invariant 15: a replay of the consumed token cannot double-spend — it recovers via the
+    // grace window (a single recovery), never a second independent Rotated.
+    assert!(matches!(
+        stores.rotate(kind, &rot).await,
+        Ok(RotateOutcome::Grace(r)) if r.user_id == "u1"
+    ));
+    // A never-issued token is invalid (neither live nor in grace).
+    assert!(matches!(
+        stores.rotate(kind, &rotation("ghost", "hX", "u1")).await,
+        Ok(RotateOutcome::Invalid)
+    ));
+
+    // Ownership-checked revoke: a non-owner and an unknown hash are both rejected.
+    assert!(matches!(
+        stores.revoke_session(kind, "intruder", "h2").await,
+        Err(AuthError::SessionNotFound)
+    ));
+    assert!(matches!(
+        stores.revoke_session(kind, "u1", "absent").await,
+        Err(AuthError::SessionNotFound)
+    ));
+    assert!(stores.revoke_session(kind, "u1", "h2").await.is_ok());
+    assert!(matches!(stores.find_session(kind, "h2").await, Ok(None)));
+
+    // revoke_all clears every member key and the index set in one transaction.
+    assert!(stores.create_session(kind, "a1", &rec, 3600).await.is_ok());
+    assert!(stores.create_session(kind, "a2", &rec, 3600).await.is_ok());
+    assert!(stores.revoke_all(kind, "u1").await.is_ok());
+    assert!(matches!(stores.list_sessions(kind, "u1").await, Ok(v) if v.is_empty()));
+    assert!(matches!(stores.find_session(kind, "a1").await, Ok(None)));
+
+    // Access-JWT blacklist: absent, then present; a zero-TTL blacklist is a no-op.
+    assert!(matches!(stores.is_blacklisted("jti-1").await, Ok(false)));
+    assert!(stores.blacklist_access("jti-1", 60).await.is_ok());
+    assert!(matches!(stores.is_blacklisted("jti-1").await, Ok(true)));
+    assert!(stores.blacklist_access("jti-expired", 0).await.is_ok());
+    assert!(matches!(
+        stores.is_blacklisted("jti-expired").await,
+        Ok(false)
+    ));
+}
+
+#[tokio::test]
+async fn platform_sessions_use_the_platform_keyspace() {
+    let Some(redis) = common::try_start().await else {
+        return;
+    };
+    let Some(stores) = redis.stores() else { return };
+    let kind = SessionKind::Platform;
+
+    assert!(
+        stores
+            .create_session(kind, "phash1", &record("padmin"), 3600)
+            .await
+            .is_ok()
+    );
+    assert!(matches!(
+        stores.find_session(kind, "phash1").await,
+        Ok(Some(r)) if r.user_id == "padmin"
+    ));
+    // Platform ops write the platform prefixes (`prt`/`psess`/`psd`); a dashboard lookup of the
+    // same hash misses, proving the keyspaces are distinct.
+    assert!(matches!(
+        stores.find_session(SessionKind::Dashboard, "phash1").await,
+        Ok(None)
+    ));
+    assert!(stores.revoke_all(kind, "padmin").await.is_ok());
+    assert!(matches!(stores.list_sessions(kind, "padmin").await, Ok(v) if v.is_empty()));
+}
+
+#[tokio::test]
+async fn otp_put_verify_outcomes_and_resend() {
+    let Some(redis) = common::try_start().await else {
+        return;
+    };
+    let Some(stores) = redis.stores() else { return };
+    let purpose = OtpPurpose::EmailVerification;
+
+    // Verify before put -> expired.
+    assert!(matches!(
+        stores.verify(purpose, "id1", "123456", 5).await,
+        Err(AuthError::OtpExpired)
+    ));
+    assert!(stores.put(purpose, "id1", "123456", 600).await.is_ok());
+    // Wrong code bumps attempts; the right code consumes.
+    assert!(matches!(
+        stores.verify(purpose, "id1", "000000", 5).await,
+        Err(AuthError::OtpInvalid)
+    ));
+    assert!(stores.verify(purpose, "id1", "123456", 5).await.is_ok());
+    // After consume the record is gone.
+    assert!(matches!(
+        stores.verify(purpose, "id1", "123456", 5).await,
+        Err(AuthError::OtpExpired)
+    ));
+
+    // Residual-TTL preservation: a wrong guess re-stores with the residual TTL, never extended.
+    assert!(stores.put(purpose, "ttlid", "111111", 600).await.is_ok());
+    assert!(matches!(
+        stores.verify(purpose, "ttlid", "999999", 5).await,
+        Err(AuthError::OtpInvalid)
+    ));
+    let residual = redis.ttl("auth:otp:email_verification:ttlid").await;
+    assert!(
+        residual > 0 && residual <= 600,
+        "residual TTL must be preserved, not reset/extended (got {residual})"
+    );
+
+    // Max-attempts lockout: with a ceiling of 1, one wrong guess exhausts it.
+    assert!(stores.put(purpose, "id2", "654321", 600).await.is_ok());
+    assert!(matches!(
+        stores.verify(purpose, "id2", "000000", 1).await,
+        Err(AuthError::OtpInvalid)
+    ));
+    assert!(matches!(
+        stores.verify(purpose, "id2", "654321", 1).await,
+        Err(AuthError::OtpMaxAttempts)
+    ));
+
+    // Resend cooldown: first begins, second is throttled.
+    assert!(matches!(
+        stores.try_begin_resend(purpose, "id1", 60).await,
+        Ok(true)
+    ));
+    assert!(matches!(
+        stores.try_begin_resend(purpose, "id1", 60).await,
+        Ok(false)
+    ));
+}
+
+#[tokio::test]
+async fn brute_force_window_starts_at_first_failure_and_does_not_slide() {
+    let Some(redis) = common::try_start().await else {
+        return;
+    };
+    let Some(stores) = redis.stores() else { return };
+    let id = "bf-id";
+
+    assert!(matches!(stores.is_locked(id, 3).await, Ok(false)));
+    // An absent counter has no lockout remaining.
+    assert!(matches!(stores.remaining_lockout_secs(id).await, Ok(0)));
+
+    assert!(matches!(stores.record_failure(id, 900).await, Ok(1)));
+    let ttl_after_first = redis.ttl("auth:lf:bf-id").await;
+    assert!(ttl_after_first > 0 && ttl_after_first <= 900);
+
+    assert!(matches!(stores.record_failure(id, 900).await, Ok(2)));
+    let ttl_after_second = redis.ttl("auth:lf:bf-id").await;
+    // The window does not slide: the TTL is set only on the 0->1 transition.
+    assert!(
+        ttl_after_second <= ttl_after_first,
+        "window must not extend on later failures"
+    );
+
+    assert!(matches!(stores.record_failure(id, 900).await, Ok(3)));
+    assert!(matches!(stores.is_locked(id, 3).await, Ok(true)));
+    assert!(matches!(
+        stores.remaining_lockout_secs(id).await,
+        Ok(s) if s > 0 && s <= 900
+    ));
+
+    assert!(stores.reset(id).await.is_ok());
+    assert!(matches!(stores.is_locked(id, 3).await, Ok(false)));
+    assert!(matches!(stores.remaining_lockout_secs(id).await, Ok(0)));
+}
+
+#[tokio::test]
+async fn ws_ticket_is_single_use() {
+    let Some(redis) = common::try_start().await else {
+        return;
+    };
+    let Some(stores) = redis.stores() else { return };
+
+    let minted = stores.mint(&snapshot(), 30).await;
+    assert!(matches!(&minted, Ok(t) if !t.is_empty()));
+    let Ok(ticket) = minted else { return };
+
+    // Redeem once succeeds and returns the snapshot.
+    assert!(matches!(
+        stores.redeem(&ticket).await,
+        Ok(Some(s)) if s.sub == "u1"
+    ));
+    // A second redeem of the same ticket finds nothing (single-use GETDEL).
+    assert!(matches!(stores.redeem(&ticket).await, Ok(None)));
+    // An unknown ticket also yields nothing.
+    assert!(matches!(stores.redeem("unknown-ticket").await, Ok(None)));
+}
+
+#[tokio::test]
+async fn keys_are_namespaced_no_pii_and_carry_a_ttl() {
+    let Some(redis) = common::try_start().await else {
+        return;
+    };
+    // A custom namespace proves prefixing is applied verbatim and in one place.
+    let Some(stores) = redis.stores_with_namespace("myapp") else {
+        return;
+    };
+
+    // Exercise every store operation so each catalog prefix appears in the keyspace.
+    let kind = SessionKind::Dashboard;
+    assert!(
+        stores
+            .create_session(kind, "deadbeef01", &record("user-42"), 3600)
+            .await
+            .is_ok()
+    );
+    assert!(matches!(
+        stores
+            .rotate(kind, &rotation("deadbeef01", "cafebabe02", "user-42"))
+            .await,
+        Ok(RotateOutcome::Rotated(_))
+    ));
+    assert!(
+        stores
+            .create_session(
+                SessionKind::Platform,
+                "platformhash03",
+                &record("padmin"),
+                3600
+            )
+            .await
+            .is_ok()
+    );
+    assert!(
+        stores
+            .put(OtpPurpose::PasswordReset, "hmacid", "123456", 600)
+            .await
+            .is_ok()
+    );
+    assert!(matches!(
+        stores
+            .try_begin_resend(OtpPurpose::PasswordReset, "hmacid", 60)
+            .await,
+        Ok(true)
+    ));
+    assert!(matches!(stores.record_failure("bfhmac", 900).await, Ok(1)));
+    assert!(stores.blacklist_access("jti-xyz", 60).await.is_ok());
+    let minted = stores.mint(&snapshot(), 30).await;
+    let Ok(ticket) = minted else { return };
+
+    let keys = redis.all_keys().await;
+    assert!(!keys.is_empty(), "operations should have written keys");
+    let allowed = [
+        "rt", "rv", "rp", "sess", "sd", "lf", "otp", "resend", "wst", "prt", "prp", "psess", "psd",
+    ];
+    for key in &keys {
+        // Namespaced under the configured prefix, applied in exactly one place.
+        assert!(key.starts_with("myapp:"), "key not namespaced: {key}");
+        let rest = &key["myapp:".len()..];
+        let prefix = rest.split(':').next().unwrap_or_default();
+        assert!(allowed.contains(&prefix), "unknown catalog prefix in {key}");
+        // No raw PII: an email ('@') never appears, and the raw WebSocket ticket is hashed.
+        assert!(!key.contains('@'), "an email leaked into a key: {key}");
+        assert!(
+            !key.contains(&ticket),
+            "the raw ws ticket leaked into a key: {key}"
+        );
+        // Every key carries a TTL — no orphan keys.
+        let ttl = redis.ttl(key).await;
+        assert!(ttl > 0, "key has no TTL (orphan): {key} (ttl={ttl})");
+    }
+}
+
+#[tokio::test]
+async fn engine_runs_register_login_refresh_logout_against_redis() {
+    let Some(redis) = common::try_start().await else {
+        return;
+    };
+    let Some(stores) = redis.stores() else { return };
+
+    let users = Arc::new(InMemoryUserRepository::new());
+    let mut config = AuthConfig::default();
+    config.jwt.secret = SecretString::from("0123456789abcdef0123456789abcdef".to_owned());
+    config.roles.hierarchy = HashMap::from([("USER".to_owned(), Vec::new())]);
+    config.email_verification.required = false;
+
+    let built = AuthEngine::builder()
+        .config(config)
+        .environment(Environment::Test)
+        .user_repository(users)
+        .redis_stores(Arc::new(stores))
+        .build();
+    assert!(built.is_ok(), "engine must assemble with the Redis stores");
+    let Ok(engine) = built else { return };
+    let ctx = RequestContext::new("203.0.113.4", "agent/1.0", BTreeMap::new());
+
+    // Register issues a full session persisted in Redis.
+    let registered = engine
+        .register(
+            RegisterInput {
+                email: "e2e@example.com".to_owned(),
+                name: "E2E User".to_owned(),
+                password: "correct horse battery staple".to_owned(),
+                tenant_id: "t1".to_owned(),
+            },
+            &ctx,
+        )
+        .await;
+    assert!(
+        matches!(registered, Ok(LoginResult::Success(_))),
+        "register should succeed"
+    );
+
+    // Login with the same credentials returns a fresh session.
+    let logged_in = engine
+        .login(
+            LoginInput {
+                email: "e2e@example.com".to_owned(),
+                password: "correct horse battery staple".to_owned(),
+                tenant_id: "t1".to_owned(),
+            },
+            &ctx,
+        )
+        .await;
+    assert!(
+        matches!(&logged_in, Ok(LoginResult::Success(_))),
+        "login should succeed"
+    );
+    let Ok(LoginResult::Success(auth)) = logged_in else {
+        return;
+    };
+
+    // Refresh rotates against the real Redis stores, returning a new pair the client now holds.
+    let refreshed = engine
+        .refresh(&auth.refresh_token, "203.0.113.4", "agent/1.0")
+        .await;
+    assert!(
+        matches!(&refreshed, Ok(tokens) if tokens.refresh_token != auth.refresh_token),
+        "refresh should rotate to a new token"
+    );
+    let Ok(rotated) = refreshed else { return };
+
+    // Logout revokes the live (rotated) session and blacklists its access token — best-effort,
+    // always Ok.
+    assert!(
+        engine
+            .logout(&rotated.access_token, &rotated.refresh_token, &auth.user.id)
+            .await
+            .is_ok()
+    );
+    // The revoked refresh token no longer rotates after logout.
+    assert!(matches!(
+        engine
+            .refresh(&rotated.refresh_token, "203.0.113.4", "agent/1.0")
+            .await,
+        Err(AuthError::RefreshTokenInvalid)
+    ));
+}

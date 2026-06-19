@@ -26,6 +26,10 @@ allow = [
     "BSD-2-Clause",
     "BSD-3-Clause",
     "ISC",
+    # Boost Software License 1.0 — an OSI-approved, GPL-compatible permissive license
+    # (no binary-distribution attribution requirement), strictly more permissive than
+    # MIT. Pulled by `xxhash-rust` (a transitive dependency of the `redis` client).
+    "BSL-1.0",
     "Unicode-DFS-2016",
     "Unicode-3.0",
 ]
