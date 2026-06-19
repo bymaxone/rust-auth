@@ -489,11 +489,12 @@ impl BruteForceStore for InMemoryStores {
 
     async fn record_failure(&self, identifier: &str, window_secs: u64) -> Result<i64, AuthError> {
         let mut counters = lock(&self.brute_force);
+        // The window is recorded once, when the counter is created on the first failure —
+        // a fixed window that does not slide as later failures arrive.
         let entry = counters
             .entry(identifier.to_owned())
             .or_insert((0, window_secs));
         entry.0 += 1;
-        entry.1 = window_secs;
         Ok(entry.0)
     }
 

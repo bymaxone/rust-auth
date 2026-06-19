@@ -8,10 +8,11 @@
 //! [`BeforeRegisterResult`] that may reject or override field defaults),
 //! [`AuthHooks::before_login`] (blocks by returning `Err`), and
 //! [`AuthHooks::on_oauth_login`] (returns an [`OAuthLoginResult`] selecting create / link
-//! / reject). Every other hook is fire-and-forget: the engine detaches it as a
-//! `tokio::spawn` task under a 5 s `tokio::time::timeout` ceiling and swallows any error,
-//! timeout, or panic (logged via `tracing`), so a slow or failing notification can never
-//! stall — or roll back — the user-facing operation.
+//! / reject). Every other hook is **fire-and-forget** under the engine's invocation
+//! contract: it is run detached and time-bounded, with any error, timeout, or panic
+//! swallowed and logged via `tracing`, so a slow or failing notification can never stall —
+//! or roll back — the user-facing operation. (The flows that invoke hooks honor this
+//! contract; the trait itself only defines the surface.)
 //!
 //! Every hook receives a [`SafeAuthUser`] (never the credential-bearing `AuthUser`) plus a
 //! [`HookContext`], so secret fields can never leak into analytics, audit, or CRM code.
