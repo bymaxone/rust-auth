@@ -1,6 +1,6 @@
 # Phase 3 — `bymax-auth-core`: engine, builder, config profiles, trait set
 
-> **Status**: 📋 ToDo · **Progress**: 0 / 6 tasks · **Last updated**: 2026-06-17
+> **Status**: 🔄 In Progress · **Progress**: 6 / 6 tasks · **Last updated**: 2026-06-19
 > **Source roadmap**: [`docs/development_plan.md`](../development_plan.md) § P3
 > **Source spec**: [`docs/technical_specification.md`](../technical_specification.md)
 
@@ -39,12 +39,12 @@ This phase deliberately stops at the skeleton: it defines the traits and the wir
 
 | ID | Task | Status | Priority | Size | Depends on |
 |---|---|---|---|---|---|
-| 3.1 | `bymax-auth-core` setup: deps, features, errors, module skeleton | 📋 ToDo | P0 | S | 2.1 |
-| 3.2 | Repository & email provider traits | 📋 ToDo | P0 | M | 3.1 |
-| 3.3 | Hooks: `AuthHooks` (14 hooks) + `HookContext` + NoOp | 📋 ToDo | P0 | M | 3.1 |
-| 3.4 | Store, OAuth & `HttpClient` traits | 📋 ToDo | P0 | M | 3.1 |
-| 3.5 | Config model, default profiles, resolvers & `ConfigError` validation | 📋 ToDo | P0 | L | 3.1 |
-| 3.6 | `AuthEngine` + `AuthEngineBuilder` + in-memory test doubles | 📋 ToDo | P0 | L | 3.2, 3.3, 3.4, 3.5 |
+| 3.1 | `bymax-auth-core` setup: deps, features, errors, module skeleton | ✅ Done | P0 | S | 2.1 |
+| 3.2 | Repository & email provider traits | ✅ Done | P0 | M | 3.1 |
+| 3.3 | Hooks: `AuthHooks` (14 hooks) + `HookContext` + NoOp | ✅ Done | P0 | M | 3.1 |
+| 3.4 | Store, OAuth & `HttpClient` traits | ✅ Done | P0 | M | 3.1 |
+| 3.5 | Config model, default profiles, resolvers & `ConfigError` validation | ✅ Done | P0 | L | 3.1 |
+| 3.6 | `AuthEngine` + `AuthEngineBuilder` + in-memory test doubles | ✅ Done | P0 | L | 3.2, 3.3, 3.4, 3.5 |
 
 ---
 
@@ -52,7 +52,7 @@ This phase deliberately stops at the skeleton: it defines the traits and the wir
 
 ### Task 3.1 — `bymax-auth-core` setup: deps, features, errors, module skeleton
 
-- **Status**: 📋 ToDo
+- **Status**: ✅ Done
 - **Priority**: P0
 - **Size**: S
 - **Depends on**: 2.1
@@ -139,7 +139,7 @@ progress `1/6`. 5. Update the P3 row in `docs/development_plan.md`. 6. Recompute
 
 ### Task 3.2 — Repository & email provider traits
 
-- **Status**: 📋 ToDo
+- **Status**: ✅ Done
 - **Priority**: P0
 - **Size**: M
 - **Depends on**: 3.1
@@ -217,7 +217,7 @@ in `docs/development_plan.md`. 6. Recompute %. 7. Append `- 3.2 ✅ <YYYY-MM-DD>
 
 ### Task 3.3 — Hooks: `AuthHooks` (14 hooks) + `HookContext` + NoOp
 
-- **Status**: 📋 ToDo
+- **Status**: ✅ Done
 - **Priority**: P0
 - **Size**: M
 - **Depends on**: 3.1
@@ -294,7 +294,7 @@ in `docs/development_plan.md`. 6. Recompute %. 7. Append `- 3.3 ✅ <YYYY-MM-DD>
 
 ### Task 3.4 — Store, OAuth & `HttpClient` traits
 
-- **Status**: 📋 ToDo
+- **Status**: ✅ Done
 - **Priority**: P0
 - **Size**: M
 - **Depends on**: 3.1
@@ -373,7 +373,7 @@ in `docs/development_plan.md`. 6. Recompute %. 7. Append `- 3.4 ✅ <YYYY-MM-DD>
 
 ### Task 3.5 — Config model, default profiles, resolvers & `ConfigError` validation
 
-- **Status**: 📋 ToDo
+- **Status**: ✅ Done
 - **Priority**: P0
 - **Size**: L
 - **Depends on**: 3.1
@@ -465,7 +465,7 @@ in `docs/development_plan.md`. 6. Recompute %. 7. Append `- 3.5 ✅ <YYYY-MM-DD>
 
 ### Task 3.6 — `AuthEngine` + `AuthEngineBuilder` + in-memory test doubles
 
-- **Status**: 📋 ToDo
+- **Status**: ✅ Done
 - **Priority**: P0
 - **Size**: L
 - **Depends on**: 3.2, 3.3, 3.4, 3.5
@@ -560,3 +560,10 @@ P3 row in `docs/development_plan.md` (mark ✅ when all six tasks are done). 6. 
 ## Completion log
 
 > Append-only. One line per completed task: `- <task-id> ✅ YYYY-MM-DD — <one-line summary>`.
+
+- 3.1 ✅ 2026-06-19 — Wired `bymax-auth-core` deps + features (`sessions`/`mfa`/`oauth`/`oauth-reqwest`/`platform`/`invitations`/`scrypt`/`argon2`/`testing`/`full`, no `core`), `ConfigError`/`RepositoryError`, and the `config`/`traits`/`engine`/`context` module skeleton; default graph carries no axum/redis/reqwest.
+- 3.2 ✅ 2026-06-19 — Object-safe `UserRepository`/`PlatformUserRepository` and `EmailProvider` (+`SessionInfo`/`InviteData`/`EmailError`) with `NoOpEmailProvider`.
+- 3.3 ✅ 2026-06-19 — `AuthHooks` (14 hooks, default bodies; `on_oauth_login` deny-by-default), `HookContext`/`RegisterAttempt`/`BeforeRegisterResult`/`OAuthLoginResult`/`HookError`, and `NoOpAuthHooks`.
+- 3.4 ✅ 2026-06-19 — Domain-level `SessionStore`/`OtpStore`/`BruteForceStore`/`WsTicketStore` (`SessionKind`/`OtpPurpose` + value DTOs), `OAuthProvider`/`OAuthProviders`, and the dependency-free `HttpClient` (+ ring-free `ReqwestHttpClient` under `oauth-reqwest`).
+- 3.5 ✅ 2026-06-19 — `AuthConfig` + sub-configs, `nest_compat_defaults()`/`secure_defaults()` (`#[cfg(argon2)]`)/`Default`, the `Environment` input, resolver traits, and the full `ConfigError` validation with `secure_cookies` resolution + derived HMAC key in `ResolvedConfig`.
+- 3.6 ✅ 2026-06-19 — `AuthEngine` + `AuthEngineBuilder` (validate-at-`build()`, toggle auto-promotion, collaborator-presence rules) and the in-memory `testing` doubles; 100% line/function coverage.

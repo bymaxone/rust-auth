@@ -19,7 +19,7 @@ This document is Layer 2 of the spec → roadmap → phase-tasks workflow. It de
 ## Progress
 
 - **Overall progress:** 🔄 3 / 13 phases done (23%)
-- **Active phase:** **P3** (`bymax-auth-core` — engine, builder, config profiles, trait set) 📋 ready to start, now unblocked since both **P1** and **P2** are ✅ Done
+- **Active phase:** **P3** (`bymax-auth-core` — engine, builder, config profiles, trait set) 🔄 In Progress
 - **Blocked:** —
 
 ## Phase dashboard
@@ -29,7 +29,7 @@ This document is Layer 2 of the spec → roadmap → phase-tasks workflow. It de
 | P0 | Foundation: workspace, toolchain & CI skeleton | ✅ Done | 6/6 | M | 2026-06-17 |
 | P1 | `bymax-auth-crypto` — hashing, constant-time, tokens, MFA-gated AEAD/TOTP | ✅ Done | 6/6 | L | 2026-06-18 |
 | P2 | `bymax-auth-types` + `bymax-auth-jwt` — model, errors, HS256, ts-rs | ✅ Done | 6/6 | L | 2026-06-19 |
-| P3 | `bymax-auth-core` — engine, builder, config profiles, trait set | 📋 ToDo | — | L | — |
+| P3 | `bymax-auth-core` — engine, builder, config profiles, trait set | 🔄 In Progress | 6/6 | L | 2026-06-19 |
 | P4 | Local auth flows + password + brute-force + session-fixation | 📋 ToDo | — | L | — |
 | P5 | `bymax-auth-redis` — stores + Lua + WS ticket (E2E Redis) | 📋 ToDo | — | M | — |
 | P6 | Sessions, OTP, password reset, email verification, invitations | 📋 ToDo | — | L | — |
