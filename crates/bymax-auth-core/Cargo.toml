@@ -41,13 +41,12 @@ time = { version = "0.3", default-features = false, features = ["std", "serde-we
 # validation to confirm it is exactly 32 bytes for AES-256-GCM.
 base64 = "0.22"
 
-# The bundled `reqwest`-backed `HttpClient` default for OAuth transport. Optional and
-# pulled in ONLY by `oauth-reqwest`; the base `oauth` feature is HTTP-client-free, with
-# transport supplied through the pluggable `HttpClient` trait. No TLS backend is selected
-# here: reqwest's default `rustls-tls` pulls `ring`, which the workspace ban-list forbids
-# (RustCrypto-only crypto policy). The RustCrypto-backed rustls provider is wired with the
-# OAuth flow that performs the actual HTTPS exchange; this skeleton keeps the dependency
-# ring-free.
+# Reserved for the bundled `reqwest`-backed `HttpClient` transport. Optional and pulled in
+# ONLY by `oauth-reqwest`; the base `oauth` feature is HTTP-client-free, with transport
+# supplied through the pluggable `HttpClient` trait. No TLS backend is selected here:
+# reqwest's default `rustls-tls` pulls `ring`, which the workspace ban-list forbids
+# (RustCrypto-only crypto policy). The RustCrypto-backed rustls provider and the bundled
+# transport are wired with the OAuth flow that performs the actual HTTPS exchange.
 reqwest = { version = "0.12", optional = true, default-features = false }
 
 [dev-dependencies]

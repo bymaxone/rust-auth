@@ -29,7 +29,3 @@ pub use store::{
     BruteForceStore, OtpPurpose, OtpStore, RotateOutcome, SessionDetail, SessionKind,
     SessionRecord, SessionRotation, SessionStore, WsTicketSnapshot, WsTicketStore,
 };
-
-#[cfg(feature = "oauth-reqwest")]
-#[doc(inline)]
-pub use http::ReqwestHttpClient;

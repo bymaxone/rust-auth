@@ -4,9 +4,10 @@
 //! dependency. The base `oauth` feature therefore adds the orchestration and provider
 //! contracts without pulling `reqwest` (or any TLS stack) into the consumer's graph.
 //!
-//! A deployment either brings its own client (implementing [`HttpClient`] over whatever
-//! it already has) or enables the `oauth-reqwest` feature for the bundled
-//! [`ReqwestHttpClient`].
+//! A deployment brings its own client by implementing [`HttpClient`] over whatever it
+//! already has. The `oauth-reqwest` feature reserves the `reqwest` dependency for the
+//! bundled transport, which is wired alongside the OAuth flow that performs the real HTTPS
+//! exchange.
 
 use async_trait::async_trait;
 
@@ -70,99 +71,6 @@ pub enum HttpError {
     /// Any other transport failure (TLS, body read, malformed response).
     #[error("http transport error: {0}")]
     Transport(String),
-}
-
-/// Default per-request timeout for the bundled [`ReqwestHttpClient`], in seconds.
-#[cfg(feature = "oauth-reqwest")]
-const REQWEST_DEFAULT_TIMEOUT_SECS: u64 = 10;
-
-/// The bundled `reqwest`-backed transport, compiled only under the `oauth-reqwest`
-/// feature, with a default per-request timeout. Enable the feature and pass an instance to
-/// `AuthEngineBuilder::http_client`, or let the builder default to it.
-///
-/// No TLS backend is selected on `reqwest` here, because its default `rustls-tls` pulls
-/// `ring`, which the workspace forbids (RustCrypto-only policy). The RustCrypto-backed
-/// rustls provider is installed alongside the OAuth flow that performs the real HTTPS
-/// exchange; until then an HTTPS request returns a transport error rather than silently
-/// downgrading.
-#[cfg(feature = "oauth-reqwest")]
-#[derive(Clone, Debug)]
-pub struct ReqwestHttpClient {
-    client: reqwest::Client,
-}
-
-#[cfg(feature = "oauth-reqwest")]
-impl ReqwestHttpClient {
-    /// Construct a client with the default per-request timeout. Construction degrades to
-    /// `reqwest`'s default client (logged via `tracing`) if the builder fails, so it is
-    /// infallible.
-    #[must_use]
-    pub fn new() -> Self {
-        let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(REQWEST_DEFAULT_TIMEOUT_SECS))
-            .build()
-            .unwrap_or_else(|err| {
-                tracing::warn!(error = %err, "reqwest client build failed; using the default client (no per-request timeout)");
-                reqwest::Client::default()
-            });
-        Self { client }
-    }
-}
-
-#[cfg(feature = "oauth-reqwest")]
-impl Default for ReqwestHttpClient {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-#[cfg(feature = "oauth-reqwest")]
-#[async_trait]
-impl HttpClient for ReqwestHttpClient {
-    async fn send(&self, req: HttpRequest) -> Result<HttpResponse, HttpError> {
-        let method = match req.method {
-            HttpMethod::Get => reqwest::Method::GET,
-            HttpMethod::Post => reqwest::Method::POST,
-        };
-        let mut builder = self.client.request(method, &req.url);
-        for (name, value) in &req.headers {
-            builder = builder.header(name, value);
-        }
-        if let Some(body) = req.body {
-            builder = builder.body(body);
-        }
-        let response = builder.send().await.map_err(map_reqwest_error)?;
-        let status = response.status().as_u16();
-        let headers = response
-            .headers()
-            .iter()
-            .map(|(name, value)| {
-                (
-                    name.as_str().to_owned(),
-                    String::from_utf8_lossy(value.as_bytes()).into_owned(),
-                )
-            })
-            .collect();
-        let body = response.bytes().await.map_err(map_reqwest_error)?.to_vec();
-        Ok(HttpResponse {
-            status,
-            headers,
-            body,
-        })
-    }
-}
-
-/// Map a `reqwest` error to the transport-neutral [`HttpError`], preserving the failure
-/// class (timeout vs. connect vs. other) without leaking `reqwest` types.
-#[cfg(feature = "oauth-reqwest")]
-fn map_reqwest_error(err: reqwest::Error) -> HttpError {
-    if err.is_timeout() {
-        HttpError::Timeout
-    } else if err.is_connect() {
-        HttpError::Connect(err.to_string())
-    } else {
-        HttpError::Transport(err.to_string())
-    }
 }
 
 #[cfg(test)]

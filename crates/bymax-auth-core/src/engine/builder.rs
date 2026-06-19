@@ -162,11 +162,9 @@ impl AuthEngineBuilder {
         self
     }
 
-    /// Set the OAuth HTTP transport. With the `oauth-reqwest` feature, `build()` defaults
-    /// this to the bundled `ReqwestHttpClient` when it is left unset. That bundled client
-    /// carries no TLS backend (the workspace forbids `ring`); a deployment that needs HTTPS
-    /// OAuth exchanges must install a RustCrypto rustls provider or supply its own
-    /// `HttpClient` here, otherwise an HTTPS request fails with a transport error.
+    /// Set the OAuth HTTP transport. The consumer supplies an [`HttpClient`]; the bundled
+    /// `reqwest`-backed transport is wired alongside the OAuth flow that performs the real
+    /// HTTPS exchange.
     #[must_use]
     pub fn http_client(mut self, http: Arc<dyn HttpClient>) -> Self {
         self.http_client = Some(http);
@@ -230,11 +228,6 @@ impl AuthEngineBuilder {
             return Err(ConfigError::OAuthToggleWithoutProvider);
         }
 
-        let http_client = match http_client {
-            Some(client) => Some(client),
-            None => default_http_client(),
-        };
-
         let config = Arc::new(ResolvedConfig::new(config, environment, secure_cookies));
 
         Ok(AuthEngine {
@@ -252,19 +245,6 @@ impl AuthEngineBuilder {
             http_client,
         })
     }
-}
-
-/// The default OAuth transport when none is supplied: the bundled `ReqwestHttpClient` under
-/// the `oauth-reqwest` feature, otherwise none (the host must supply its own).
-#[cfg(feature = "oauth-reqwest")]
-fn default_http_client() -> Option<Arc<dyn HttpClient>> {
-    Some(Arc::new(crate::traits::ReqwestHttpClient::new()) as Arc<dyn HttpClient>)
-}
-
-/// The default OAuth transport when the `oauth-reqwest` feature is off: none.
-#[cfg(not(feature = "oauth-reqwest"))]
-fn default_http_client() -> Option<Arc<dyn HttpClient>> {
-    None
 }
 
 #[cfg(test)]
@@ -320,11 +300,8 @@ mod tests {
         let _ = engine.brute_force_store();
         assert!(engine.ws_ticket_store().is_none());
         assert!(engine.oauth_providers().is_empty());
-        // Without `oauth-reqwest`, no default transport is wired.
-        #[cfg(not(feature = "oauth-reqwest"))]
+        // No transport is wired unless the consumer supplies one.
         assert!(engine.http_client().is_none());
-        #[cfg(feature = "oauth-reqwest")]
-        assert!(engine.http_client().is_some());
     }
 
     #[test]
