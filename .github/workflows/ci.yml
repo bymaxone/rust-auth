@@ -19,6 +19,10 @@ concurrency:
 # moved tag cannot inject code); the trailing `# vX.Y.Z` is the human-readable
 # version, kept current by Dependabot's github-actions updates.
 jobs:
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # Formatting
+  # ─────────────────────────────────────────────────────────────────────────────
   fmt:
     name: format
     runs-on: ubuntu-latest
@@ -30,6 +34,11 @@ jobs:
           components: rustfmt
       - run: cargo fmt --all --check
 
+  # ─────────────────────────────────────────────────────────────────────────────
+  # Linting — every warning is a hard error; --locked ensures the lockfile is
+  # authoritative. Covers all targets (lib, bins, tests, benchmarks, examples)
+  # and all features so no code path escapes analysis.
+  # ─────────────────────────────────────────────────────────────────────────────
   clippy:
     name: clippy
     runs-on: ubuntu-latest
@@ -39,40 +48,54 @@ jobs:
       - uses: actions-rust-lang/setup-rust-toolchain@46268bd060767258de96ed93c1251119784f2ab6 # v1.16.1
         with:
           components: clippy
-      - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+      - run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
 
+  # ─────────────────────────────────────────────────────────────────────────────
+  # Build + test — unit tests, integration tests, and doctests in one pass.
+  # --locked prevents silent version drift from the committed Cargo.lock.
+  # ─────────────────────────────────────────────────────────────────────────────
   test:
     name: build & test
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
       - uses: actions-rust-lang/setup-rust-toolchain@46268bd060767258de96ed93c1251119784f2ab6 # v1.16.1
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
       - run: cargo build --workspace --all-features --locked
-      - run: cargo test --workspace --all-features --locked
+      - run: cargo test  --workspace --all-features --locked
 
+  # ─────────────────────────────────────────────────────────────────────────────
+  # Coverage — 100% line / branch / region is a hard gate enforced by
+  # --fail-under-*. The empty-stub guard tolerates the pre-content phases where
+  # llvm-cov reports "no coverage data found" (zero instrumented functions); any
+  # other failure — including a missed threshold — propagates as a hard CI error.
+  # ─────────────────────────────────────────────────────────────────────────────
   coverage:
-    name: coverage (llvm-cov)
+    name: coverage 100% (llvm-cov)
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
       - uses: actions-rust-lang/setup-rust-toolchain@46268bd060767258de96ed93c1251119784f2ab6 # v1.16.1
         with:
           components: llvm-tools-preview
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
       - uses: taiki-e/install-action@b8cecb83565409bcc297b2df6e77f030b2a468d5 # v2.82.0
         with:
           tool: cargo-llvm-cov
-      - name: Coverage (LCOV)
+      - name: Coverage — 100% hard gate
         run: |
           set -euo pipefail
           cov_err="$(mktemp)"
-          # Until the crates carry coverable code, the instrumented stubs produce no
-          # profile data and llvm-cov reports "no coverage data found". Tolerate only
-          # that specific empty-workspace state (emitting an empty report); any other
-          # failure fails the job. This becomes a normal coverage gate the moment the
-          # crates gain functions and tests.
-          if cargo llvm-cov --workspace --all-features --locked --lcov --output-path lcov.info 2> "$cov_err"; then
+          if cargo llvm-cov \
+              --workspace --all-features --locked \
+              --fail-under-lines   100 \
+              --fail-under-branches 100 \
+              --fail-under-regions  100 \
+              --lcov --output-path lcov.info \
+              2> "$cov_err"; then
             cat "$cov_err" >&2 || true
           elif grep -q 'no coverage data found' "$cov_err"; then
             cat "$cov_err" >&2
@@ -88,6 +111,131 @@ jobs:
           name: lcov
           path: lcov.info
 
+  # ─────────────────────────────────────────────────────────────────────────────
+  # Feature matrix — each feature is verified in isolation to catch accidental
+  # cross-feature dependencies or features that only compile when combined.
+  # bymax-auth-crypto mandates at least one hasher (scrypt or argon2) via
+  # compile_error!, so it is tested separately with every valid configuration;
+  # the remaining workspace members use cargo-hack --each-feature.
+  # ─────────────────────────────────────────────────────────────────────────────
+  feature-matrix:
+    name: feature matrix (cargo-hack)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - uses: actions-rust-lang/setup-rust-toolchain@46268bd060767258de96ed93c1251119784f2ab6 # v1.16.1
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+      - uses: taiki-e/install-action@b8cecb83565409bcc297b2df6e77f030b2a468d5 # v2.82.0
+        with:
+          tool: cargo-hack
+      - name: bymax-auth-crypto — valid hasher combinations
+        run: |
+          for features in scrypt argon2 'scrypt,argon2' 'scrypt,mfa' 'argon2,mfa' 'scrypt,argon2,mfa'; do
+            echo "checking bymax-auth-crypto --features $features"
+            cargo check -p bymax-auth-crypto --no-default-features --features "$features" --locked
+          done
+      - name: Workspace feature matrix (each feature in isolation)
+        run: |
+          cargo hack check \
+            --workspace \
+            --exclude bymax-auth-crypto \
+            --each-feature \
+            --no-dev-deps \
+            --locked
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # Rustdoc — RUSTDOCFLAGS=-D warnings turns broken intra-doc links, malformed
+  # attributes, and missing backticks into hard errors. --no-deps restricts the
+  # gate to workspace crates only, not third-party documentation.
+  # ─────────────────────────────────────────────────────────────────────────────
+  doc:
+    name: rustdoc
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - uses: actions-rust-lang/setup-rust-toolchain@46268bd060767258de96ed93c1251119784f2ab6 # v1.16.1
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+      - run: RUSTDOCFLAGS="-D warnings" cargo doc --workspace --all-features --no-deps --locked
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # ts-rs staleness — regenerates the ./shared TypeScript types from the Rust
+  # source and fails if the committed output has drifted. Skipped automatically
+  # while bymax-auth-types does not yet declare the ts-export feature (pre-P2).
+  # ─────────────────────────────────────────────────────────────────────────────
+  ts-rs-drift:
+    name: ts-rs staleness
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - uses: actions-rust-lang/setup-rust-toolchain@46268bd060767258de96ed93c1251119784f2ab6 # v1.16.1
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+      - name: Check for ts-rs drift
+        run: |
+          set -euo pipefail
+          # Resolve whether bymax-auth-types declares the ts-export feature.
+          # Before P2 lands the feature is absent and the gate is a no-op.
+          if cargo metadata --no-deps --format-version 1 2>/dev/null | \
+              python3 -c "
+          import sys, json
+          pkgs = json.load(sys.stdin)['packages']
+          pkg  = next((p for p in pkgs if p['name'] == 'bymax-auth-types'), None)
+          exit(0 if pkg and 'ts-export' in (pkg.get('features') or {}) else 1)
+          " 2>/dev/null; then
+            cargo test -p bymax-auth-types --features ts-export --locked
+            git diff --exit-code packages/rust-auth/src/shared/
+          else
+            echo 'note: ts-export feature not yet present in bymax-auth-types; staleness check skipped.'
+          fi
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # WASM purity — the three foundation crates (types, crypto, jwt) must compile
+  # on wasm32-unknown-unknown independently, ensuring no tokio / std::net / C FFI
+  # leaks onto any default-feature path. This catches purity regressions before
+  # the edge binding (bymax-auth-wasm) is built.
+  # ─────────────────────────────────────────────────────────────────────────────
+  wasm-purity:
+    name: wasm purity (foundation crates)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - uses: actions-rust-lang/setup-rust-toolchain@46268bd060767258de96ed93c1251119784f2ab6 # v1.16.1
+        with:
+          target: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+      - run: cargo build -p bymax-auth-types  --target wasm32-unknown-unknown --locked
+      - run: cargo build -p bymax-auth-crypto --target wasm32-unknown-unknown --locked
+      - run: cargo build -p bymax-auth-jwt    --target wasm32-unknown-unknown --locked
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # WASM binding — the edge binding must compile cleanly as a cdylib for the
+  # wasm32 target. A successful build here proves the complete wasm-safe stack:
+  # types → crypto → jwt → wasm binding.
+  # ─────────────────────────────────────────────────────────────────────────────
+  wasm-binding:
+    name: wasm binding build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    needs: wasm-purity
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - uses: actions-rust-lang/setup-rust-toolchain@46268bd060767258de96ed93c1251119784f2ab6 # v1.16.1
+        with:
+          target: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+      - run: cargo build -p bymax-auth-wasm --target wasm32-unknown-unknown --locked
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # Supply chain — three-layer gate:
+  #   cargo-deny  : ban-list, license allow-list, RustSec advisories, source policy
+  #   cargo-audit : cross-check Cargo.lock against the RustSec advisory database
+  #   cargo-vet   : every dependency audited or trust-imported from vetted orgs
+  # cargo-vet 0.10.2 is installed from source; the latest release binary (0.10.0
+  # shipped by taiki-e/install-action) cannot parse the current audit schema.
+  # ─────────────────────────────────────────────────────────────────────────────
   supply-chain:
     name: supply-chain (deny / audit / vet)
     runs-on: ubuntu-latest
@@ -98,37 +246,22 @@ jobs:
       - uses: taiki-e/install-action@b8cecb83565409bcc297b2df6e77f030b2a468d5 # v2.82.0
         with:
           tool: cargo-deny,cargo-audit
-      # `install-action` ships the latest cargo-vet *release binary* (0.10.0), which is
-      # too old to parse the publisher-trust / audit schema produced by current
-      # cargo-vet and the imported audit sets. Pin a compatible version, built from
-      # source so it does not depend on a prebuilt binary existing for that release.
       - run: cargo install --locked cargo-vet@0.10.2
-      - run: cargo deny check                 # ban-list + licenses + advisories + sources
-      - run: cargo audit                      # RustSec advisories against Cargo.lock
-      - run: cargo vet                         # every dependency audited or trusted-imported
+      - run: cargo deny check
+      - run: cargo audit
+      - run: cargo vet
 
+  # ─────────────────────────────────────────────────────────────────────────────
+  # MSRV — proves the workspace builds on the declared support floor (1.90).
+  # Uses `cargo +1.90` to override rust-toolchain.toml explicitly.
+  # ─────────────────────────────────────────────────────────────────────────────
   msrv:
     name: msrv (1.90)
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
-      # Install the support floor alongside the pinned dev toolchain. `cargo +1.90`
-      # below selects it explicitly, overriding rust-toolchain.toml so the build
-      # actually proves the declared MSRV (`rust-version = "1.90"`).
       - name: Install the MSRV toolchain
         run: rustup toolchain install 1.90 --profile minimal --no-self-update
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
       - run: cargo +1.90 build --workspace --locked
-
-  wasm:
-    name: wasm build-integrity
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
-      - uses: actions-rust-lang/setup-rust-toolchain@46268bd060767258de96ed93c1251119784f2ab6 # v1.16.1
-        with:
-          target: wasm32-unknown-unknown
-      # The edge binding must compile wasm-clean — no tokio / std-net leakage.
-      - run: cargo build -p bymax-auth-wasm --target wasm32-unknown-unknown --locked
