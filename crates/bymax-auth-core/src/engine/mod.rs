@@ -15,6 +15,10 @@ use std::sync::Arc;
 pub use builder::AuthEngineBuilder;
 
 use crate::config::ResolvedConfig;
+use crate::services::brute_force::BruteForceService;
+use crate::services::otp::OtpService;
+use crate::services::password::PasswordService;
+use crate::services::token_manager::TokenManagerService;
 use crate::traits::{
     AuthHooks, BruteForceStore, EmailProvider, HttpClient, OAuthProvider, OtpStore,
     PlatformUserRepository, SessionStore, UserRepository, WsTicketStore,
@@ -38,6 +42,10 @@ pub struct AuthEngine {
     ws_ticket_store: Option<Arc<dyn WsTicketStore>>,
     oauth_providers: HashMap<String, Arc<dyn OAuthProvider>>,
     http_client: Option<Arc<dyn HttpClient>>,
+    passwords: Arc<PasswordService>,
+    tokens: TokenManagerService,
+    brute_force: BruteForceService,
+    otp: OtpService,
 }
 
 impl AuthEngine {
@@ -45,6 +53,27 @@ impl AuthEngine {
     #[must_use]
     pub fn builder() -> AuthEngineBuilder {
         AuthEngineBuilder::new()
+    }
+
+    /// The password service (hash/verify off the runtime, rehash-on-verify, sentinel). The
+    /// `Arc` is returned so a fire-and-forget rehash task can clone an owned handle.
+    pub(crate) fn passwords(&self) -> &Arc<PasswordService> {
+        &self.passwords
+    }
+
+    /// The token manager (access JWT + opaque refresh, rotation, JTI blacklist).
+    pub(crate) fn tokens(&self) -> &TokenManagerService {
+        &self.tokens
+    }
+
+    /// The brute-force service (HMAC-identifier fixed-window lockout).
+    pub(crate) fn brute_force(&self) -> &BruteForceService {
+        &self.brute_force
+    }
+
+    /// The OTP service (CSPRNG generation, attempt-bounded verify, resend cooldown).
+    pub(crate) fn otp(&self) -> &OtpService {
+        &self.otp
     }
 
     /// The resolved configuration (validated `AuthConfig`, resolved `secure_cookies`, the

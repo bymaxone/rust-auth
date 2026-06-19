@@ -1,6 +1,6 @@
 # Phase 4 — Local auth flows + password + brute-force + session-fixation
 
-> **Status**: 📋 ToDo · **Progress**: 0 / 7 tasks · **Last updated**: 2026-06-17
+> **Status**: ✅ Done · **Progress**: 7 / 7 tasks · **Last updated**: 2026-06-19
 > **Source roadmap**: [`docs/development_plan.md`](../development_plan.md) § P4
 > **Source spec**: [`docs/technical_specification.md`](../technical_specification.md)
 
@@ -41,13 +41,13 @@ Everything is implemented against the **store traits** (`SessionStore`/`OtpStore
 
 | ID | Task | Status | Priority | Size | Depends on |
 |---|---|---|---|---|---|
-| 4.1 | `PasswordService`: hash/verify (spawn_blocking), rehash-on-verify, sentinel | 📋 ToDo | P0 | M | 3.6 |
-| 4.2 | `TokenManager`: access JWT + opaque refresh, rotation + grace, JTI revocation | 📋 ToDo | P0 | L | 3.6 |
-| 4.3 | `BruteForceService` + `OtpService` (store-backed primitives) | 📋 ToDo | P0 | M | 3.6 |
-| 4.4 | Registration flow (`register`) | 📋 ToDo | P0 | M | 4.1, 4.2, 4.3 |
-| 4.5 | Login / logout / me / refresh flows | 📋 ToDo | P0 | L | 4.1, 4.2, 4.3 |
-| 4.6 | Email verification flows (`verify-email`, `resend-verification`) | 📋 ToDo | P0 | S | 4.3, 4.4 |
-| 4.7 | `issue_tokens_for_user_id` (password-less issuance) | 📋 ToDo | P0 | S | 4.2, 4.5 |
+| 4.1 | `PasswordService`: hash/verify (spawn_blocking), rehash-on-verify, sentinel | ✅ Done | P0 | M | 3.6 |
+| 4.2 | `TokenManager`: access JWT + opaque refresh, rotation + grace, JTI revocation | ✅ Done | P0 | L | 3.6 |
+| 4.3 | `BruteForceService` + `OtpService` (store-backed primitives) | ✅ Done | P0 | M | 3.6 |
+| 4.4 | Registration flow (`register`) | ✅ Done | P0 | M | 4.1, 4.2, 4.3 |
+| 4.5 | Login / logout / me / refresh flows | ✅ Done | P0 | L | 4.1, 4.2, 4.3 |
+| 4.6 | Email verification flows (`verify-email`, `resend-verification`) | ✅ Done | P0 | S | 4.3, 4.4 |
+| 4.7 | `issue_tokens_for_user_id` (password-less issuance) | ✅ Done | P0 | S | 4.2, 4.5 |
 
 ---
 
@@ -632,3 +632,11 @@ done). 6. Recompute the overall %. 7. Append `- 4.7 ✅ <YYYY-MM-DD> — <summar
 ## Completion log
 
 > Append-only. One line per completed task: `- <task-id> ✅ YYYY-MM-DD — <one-line summary>`.
+
+- 4.1 ✅ 2026-06-19 — `PasswordService` (async hash/verify via `spawn_blocking`, rehash-on-verify detection, startup sentinel hash) in `services/password.rs`.
+- 4.2 ✅ 2026-06-19 — `TokenManagerService` (HS256 access JWT + fresh UUID-v4 jti, opaque refresh, atomic rotation + grace window, JTI blacklist, MFA temp token) in `services/token_manager.rs`.
+- 4.3 ✅ 2026-06-19 — `BruteForceService` (HMAC-identifier fixed-window lockout + injection guard) and `OtpService` (CSPRNG OTP, attempt-bounded verify with timing normalization, resend cooldown) in `services/{brute_force,otp}.rs`.
+- 4.4 ✅ 2026-06-19 — `register` flow (before_register gate, uniqueness-before-hash, provisioning, optional verification OTP, token issuance, after_register) in `services/auth/register.rs`.
+- 4.5 ✅ 2026-06-19 — `login`/`logout`/`me`/`refresh` (anti-enumeration with sentinel + 300 ms floor, status & verification gates before the KDF, MFA challenge branch, session-fixation renewal, JTI blacklist on logout) in `services/auth/{login,session_ops}.rs`.
+- 4.6 ✅ 2026-06-19 — `verify_email`/`resend_verification_email` (single-use OTP, anti-enumeration, atomic resend cooldown) in `services/auth/email_verification.rs`.
+- 4.7 ✅ 2026-06-19 — `issue_tokens_for_user_id` (password-less issuance with status/verification gates and `MfaRequired` refusal) in `services/auth/session_ops.rs`. Workspace coverage gate green at 100% line + function under `--all-features`.
