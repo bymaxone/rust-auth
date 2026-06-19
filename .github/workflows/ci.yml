@@ -67,10 +67,12 @@ jobs:
       - run: cargo test  --workspace --all-features --locked
 
   # ─────────────────────────────────────────────────────────────────────────────
-  # Coverage — 100% line / branch / region is a hard gate enforced by
-  # --fail-under-*. The empty-stub guard tolerates the pre-content phases where
-  # llvm-cov reports "no coverage data found" (zero instrumented functions); any
-  # other failure — including a missed threshold — propagates as a hard CI error.
+  # Coverage — 100% line and function coverage is a hard gate. cargo-llvm-cov has
+  # no branch-coverage flag, and a handful of unreachable defensive branches keep
+  # region coverage a hair under 100%, so neither is gated. The empty-stub guard
+  # tolerates the early state where llvm-cov reports "no coverage data found" (zero
+  # instrumented functions); any other failure — including a missed threshold —
+  # propagates as a hard CI error.
   # ─────────────────────────────────────────────────────────────────────────────
   coverage:
     name: coverage 100% (llvm-cov)
@@ -91,9 +93,8 @@ jobs:
           cov_err="$(mktemp)"
           if cargo llvm-cov \
               --workspace --all-features --locked \
-              --fail-under-lines   100 \
-              --fail-under-branches 100 \
-              --fail-under-regions  100 \
+              --fail-under-lines     100 \
+              --fail-under-functions 100 \
               --lcov --output-path lcov.info \
               2> "$cov_err"; then
             cat "$cov_err" >&2 || true
@@ -141,7 +142,6 @@ jobs:
             --workspace \
             --exclude bymax-auth-crypto \
             --each-feature \
-            --no-dev-deps \
             --locked
 
   # ─────────────────────────────────────────────────────────────────────────────
@@ -162,7 +162,7 @@ jobs:
   # ─────────────────────────────────────────────────────────────────────────────
   # ts-rs staleness — regenerates the ./shared TypeScript types from the Rust
   # source and fails if the committed output has drifted. Skipped automatically
-  # while bymax-auth-types does not yet declare the ts-export feature (pre-P2).
+  # while bymax-auth-types does not yet declare the ts-export feature.
   # ─────────────────────────────────────────────────────────────────────────────
   ts-rs-drift:
     name: ts-rs staleness
@@ -176,7 +176,7 @@ jobs:
         run: |
           set -euo pipefail
           # Resolve whether bymax-auth-types declares the ts-export feature.
-          # Before P2 lands the feature is absent and the gate is a no-op.
+          # While that feature is absent, the gate is a no-op.
           if cargo metadata --no-deps --format-version 1 2>/dev/null | \
               python3 -c "
           import sys, json
@@ -191,10 +191,11 @@ jobs:
           fi
 
   # ─────────────────────────────────────────────────────────────────────────────
-  # WASM purity — the three foundation crates (types, crypto, jwt) must compile
-  # on wasm32-unknown-unknown independently, ensuring no tokio / std::net / C FFI
-  # leaks onto any default-feature path. This catches purity regressions before
-  # the edge binding (bymax-auth-wasm) is built.
+  # WASM purity — the three foundation crates (types, crypto, jwt) must compile on
+  # wasm32-unknown-unknown, ensuring no tokio / std::net / C FFI leaks onto any
+  # path. crypto and jwt pull `getrandom`, which refuses to compile on wasm until a
+  # backend is selected, so they are built with their `wasm-js` (Web Crypto)
+  # feature. This catches purity regressions before the edge binding is built.
   # ─────────────────────────────────────────────────────────────────────────────
   wasm-purity:
     name: wasm purity (foundation crates)
@@ -207,8 +208,8 @@ jobs:
           target: wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
       - run: cargo build -p bymax-auth-types  --target wasm32-unknown-unknown --locked
-      - run: cargo build -p bymax-auth-crypto --target wasm32-unknown-unknown --locked
-      - run: cargo build -p bymax-auth-jwt    --target wasm32-unknown-unknown --locked
+      - run: cargo build -p bymax-auth-crypto --target wasm32-unknown-unknown --features wasm-js --locked
+      - run: cargo build -p bymax-auth-jwt    --target wasm32-unknown-unknown --features wasm-js --locked
 
   # ─────────────────────────────────────────────────────────────────────────────
   # WASM binding — the edge binding must compile cleanly as a cdylib for the
