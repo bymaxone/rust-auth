@@ -3,8 +3,8 @@
 
 use std::collections::BTreeMap;
 
-use bymax_auth_jwt::{RawRefreshToken, decode_unverified};
-use bymax_auth_types::{AuthError, AuthResult, DashboardClaims, RotatedTokens, SafeAuthUser};
+use bymax_auth_jwt::RawRefreshToken;
+use bymax_auth_types::{AuthError, AuthResult, RotatedTokens, SafeAuthUser};
 
 use crate::engine::AuthEngine;
 use crate::services::auth::detached::{run_after_login, run_after_logout, run_update_last_login};
@@ -14,7 +14,8 @@ use crate::traits::{HookContext, SessionKind};
 
 impl AuthEngine {
     /// Revoke the current session: blacklist the access token's `jti` for its remaining
-    /// lifetime and delete the refresh session (idempotent on an already-gone session).
+    /// lifetime — only when the token actually verifies — and delete the refresh session
+    /// (idempotent on an already-gone session).
     ///
     /// # Errors
     ///
@@ -26,16 +27,17 @@ impl AuthEngine {
         raw_refresh: &str,
         user_id: &str,
     ) -> Result<(), AuthError> {
-        // Decode WITHOUT verifying — the access token may already be expired at logout.
-        if let Ok(claims) = decode_unverified::<DashboardClaims>(access_token) {
-            let remaining = claims.exp.saturating_sub(now_unix());
-            if remaining > 0 {
-                // Best-effort blacklist; a store failure must not block the logout.
-                let _ = self
-                    .tokens()
-                    .revoke_access(&claims.jti, remaining.unsigned_abs())
-                    .await;
-            }
+        // Blacklist only a token that actually verifies (signature + algorithm + temporal).
+        // A forged or expired token needs no revocation, and trusting an unverified `jti`
+        // would let a caller pollute the revocation set with long-lived junk entries.
+        if let Ok(claims) = self.tokens().verify_access(access_token).await {
+            // Blacklist for the token's residual lifetime only. `try_from` clamps to `0` if
+            // the token lapsed in the window between `verify_access` and this clock read, so a
+            // stale token can never be handed a positive (extended) TTL. Best-effort — a store
+            // failure (including a store that rejects a zero TTL for an already-expiring token)
+            // must not block the logout.
+            let ttl = u64::try_from(claims.exp.saturating_sub(now_unix())).unwrap_or(0);
+            let _ = self.tokens().revoke_access(&claims.jti, ttl).await;
         }
 
         // Ownership-checked refresh revoke; SessionNotFound (already rotated/evicted) and any
@@ -176,7 +178,7 @@ mod tests {
     use super::*;
     use crate::services::auth::LoginInput;
     use crate::services::auth::test_support::{Harness, SeedUser, base_config, ctx, harness};
-    use bymax_auth_types::LoginResult;
+    use bymax_auth_types::{DashboardClaims, LoginResult};
 
     fn login_input(email: &str, password: &str) -> LoginInput {
         LoginInput {
@@ -220,12 +222,37 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn logout_is_idempotent_for_an_expired_or_garbage_token() {
-        // Logout tolerates an undecodable access token (skip the blacklist) and an unknown
-        // refresh token (SessionNotFound swallowed), still succeeding.
+    async fn logout_skips_blacklist_for_an_unverified_token_but_revokes_the_session() {
+        // A forged/garbage access token never verifies, so logout skips the blacklist
+        // (the live access token is left untouched) yet still revokes the refresh session.
         let mut cfg = base_config();
         cfg.email_verification.required = false;
         let Some(h) = harness(cfg, None) else { return };
+        let Some((id, auth)) = logged_in(&h, "skip@example.com", "pw").await else { return };
+        assert!(
+            h.engine
+                .logout("not-a-jwt", &auth.refresh_token, &id)
+                .await
+                .is_ok()
+        );
+        // The blacklist was skipped: the genuine access token still verifies.
+        assert!(
+            h.engine
+                .tokens()
+                .verify_access(&auth.access_token)
+                .await
+                .is_ok()
+        );
+        // The refresh session was revoked all the same.
+        assert!(matches!(
+            h.engine
+                .refresh(&auth.refresh_token, "1.2.3.4", "agent")
+                .await,
+            Err(AuthError::RefreshTokenInvalid)
+        ));
+
+        // Logout also tolerates a non-shaped refresh token (skipped before hashing) and an
+        // unknown user, still succeeding.
         assert!(
             h.engine
                 .logout("not-a-jwt", "unknown-refresh", "user-x")
@@ -233,8 +260,8 @@ mod tests {
                 .is_ok()
         );
 
-        // A decodable but already-expired access token skips the blacklist (remaining ≤ 0)
-        // yet logout still succeeds.
+        // An already-expired access token fails verification, so the blacklist is skipped
+        // and logout still succeeds.
         let now = crate::services::now_unix();
         let expired = DashboardClaims {
             sub: "user-x".to_owned(),
