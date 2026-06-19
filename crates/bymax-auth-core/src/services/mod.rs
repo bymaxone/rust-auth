@@ -74,9 +74,32 @@ pub(crate) fn now_offset() -> OffsetDateTime {
     OffsetDateTime::now_utc()
 }
 
+/// The fixed shape of an engine-issued opaque refresh token: exactly 64 lower-case hex
+/// characters (256 bits, the `generate_secure_token(32)` output). Checking the shape before
+/// hashing rejects an oversized or malformed value cheaply — without an allocation and a
+/// SHA-256 over an unbounded input — and such a value could never match a stored hash anyway.
+pub(crate) fn is_refresh_token_shape(raw: &str) -> bool {
+    raw.len() == 64
+        && raw
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn is_refresh_token_shape_accepts_only_64_lowercase_hex() {
+        // A genuine engine-issued token (64 lower-case hex) passes; wrong length, an
+        // upper-case digit, and a non-hex character are each rejected before any hashing.
+        assert!(is_refresh_token_shape(&"a1".repeat(32)));
+        assert!(!is_refresh_token_shape(&"a".repeat(63)));
+        assert!(!is_refresh_token_shape(&"a".repeat(65)));
+        assert!(!is_refresh_token_shape(&"A".repeat(64)));
+        assert!(!is_refresh_token_shape(&"g".repeat(64)));
+        assert!(!is_refresh_token_shape(""));
+    }
 
     #[test]
     fn to_hex_encodes_lowercase_two_chars_per_byte() {

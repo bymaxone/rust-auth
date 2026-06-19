@@ -9,7 +9,7 @@ use bymax_auth_types::{AuthError, AuthResult, DashboardClaims, RotatedTokens, Sa
 use crate::engine::AuthEngine;
 use crate::services::auth::detached::{run_after_login, run_after_logout, run_update_last_login};
 use crate::services::auth::{map_repository_error, spawn_guarded};
-use crate::services::now_unix;
+use crate::services::{is_refresh_token_shape, now_unix};
 use crate::traits::{HookContext, SessionKind};
 
 impl AuthEngine {
@@ -39,12 +39,15 @@ impl AuthEngine {
         }
 
         // Ownership-checked refresh revoke; SessionNotFound (already rotated/evicted) and any
-        // other store error are both swallowed, so logout is idempotent and never blocks.
-        let session_hash = RawRefreshToken::from_raw(raw_refresh.to_owned()).redis_hash();
-        let _ = self
-            .session_store()
-            .revoke_session(SessionKind::Dashboard, user_id, &session_hash)
-            .await;
+        // other store error are both swallowed, so logout is idempotent and never blocks. A
+        // malformed/oversized token is skipped before hashing — it owns no session anyway.
+        if is_refresh_token_shape(raw_refresh) {
+            let session_hash = RawRefreshToken::from_raw(raw_refresh.to_owned()).redis_hash();
+            let _ = self
+                .session_store()
+                .revoke_session(SessionKind::Dashboard, user_id, &session_hash)
+                .await;
+        }
 
         let hook_ctx = identity_only_context(user_id, None, None);
         spawn_guarded(run_after_logout(

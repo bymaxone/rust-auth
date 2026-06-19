@@ -192,11 +192,19 @@ mod tests {
             Err(AuthError::OtpExpired)
         ));
 
-        // Exhausting the attempts on a fresh record yields OtpMaxAttempts (cap of one here).
+        // Exhausting the attempts on a fresh record yields OtpMaxAttempts. The first
+        // MAX_ATTEMPTS wrong codes each bump the counter and report OtpInvalid; once the
+        // counter reaches the ceiling the next verify reports OtpMaxAttempts.
         assert!(svc.store(purpose, "max", "123456", 600).await.is_ok());
+        for _ in 0..MAX_ATTEMPTS {
+            assert!(matches!(
+                svc.verify(purpose, "max", "000000").await,
+                Err(AuthError::OtpInvalid)
+            ));
+        }
         assert!(matches!(
             svc.verify(purpose, "max", "000000").await,
-            Err(AuthError::OtpInvalid)
+            Err(AuthError::OtpMaxAttempts)
         ));
     }
 

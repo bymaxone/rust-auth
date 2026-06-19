@@ -17,7 +17,7 @@ use bymax_auth_types::{
     RotatedTokens, SafeAuthUser,
 };
 
-use crate::services::{internal_error, new_uuid_v4, now_offset, now_unix};
+use crate::services::{internal_error, is_refresh_token_shape, new_uuid_v4, now_offset, now_unix};
 use crate::traits::{RotateOutcome, SessionKind, SessionRecord, SessionRotation, SessionStore};
 
 /// MFA temp-token lifetime, in seconds (§7.3 constant `MFA_TEMP_TOKEN_TTL_SECONDS`).
@@ -133,6 +133,11 @@ impl TokenManagerService {
         ip: &str,
         user_agent: &str,
     ) -> Result<RotatedTokens, AuthError> {
+        // Reject a malformed/oversized token before hashing it — it could never match a
+        // stored hash, and this caps the work an arbitrary input can force.
+        if !is_refresh_token_shape(raw_refresh) {
+            return Err(AuthError::RefreshTokenInvalid);
+        }
         let old = RawRefreshToken::from_raw(raw_refresh.to_owned());
         let old_hash = old.redis_hash();
         let new = RawRefreshToken::generate();
@@ -428,11 +433,19 @@ mod tests {
             .await;
         assert!(grace.is_ok());
 
-        // An unknown refresh token is rejected.
-        let unknown = svc
-            .reissue_tokens("never-issued", "10.0.0.1", "agent/1.0")
-            .await;
-        assert!(matches!(unknown, Err(AuthError::RefreshTokenInvalid)));
+        // A well-formed but never-issued token passes the shape guard, misses the store on
+        // both the live and grace lookups, and is rejected as invalid.
+        let unissued = "f".repeat(64);
+        assert!(matches!(
+            svc.reissue_tokens(&unissued, "10.0.0.1", "agent/1.0").await,
+            Err(AuthError::RefreshTokenInvalid)
+        ));
+        // A malformed/oversized token is rejected by the shape guard before any hashing.
+        assert!(matches!(
+            svc.reissue_tokens("too-short", "10.0.0.1", "agent/1.0")
+                .await,
+            Err(AuthError::RefreshTokenInvalid)
+        ));
     }
 
     #[tokio::test]
