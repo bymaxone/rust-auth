@@ -114,8 +114,15 @@ fn digit_from_byte(byte: u8) -> Option<char> {
 /// Draw one uniformly-distributed decimal digit from the CSPRNG, re-drawing on a rejected
 /// byte (see [`digit_from_byte`]).
 fn random_digit() -> char {
+    draw_digit(|| random_array::<1>()[0])
+}
+
+/// Draw a decimal digit from successive bytes produced by `draw`, skipping a rejected byte
+/// and re-drawing. The byte source is a closure so the re-draw path can be exercised
+/// deterministically, independent of any particular CSPRNG outcome.
+fn draw_digit(mut draw: impl FnMut() -> u8) -> char {
     loop {
-        if let Some(digit) = digit_from_byte(random_array::<1>()[0]) {
+        if let Some(digit) = digit_from_byte(draw()) {
             return digit;
         }
     }
@@ -149,6 +156,20 @@ mod tests {
         assert_eq!(digit_from_byte(249), Some('9'));
         assert_eq!(digit_from_byte(250), None);
         assert_eq!(digit_from_byte(255), None);
+    }
+
+    #[test]
+    fn draw_digit_re_draws_past_a_rejected_byte() {
+        // A byte in the biased tail is rejected and forces a re-draw; the next accepted byte
+        // yields the digit. Driving the byte source deterministically exercises the
+        // rejection→redraw loop without depending on a CSPRNG outcome.
+        let mut calls = 0u8;
+        let digit = draw_digit(|| {
+            calls += 1;
+            if calls == 1 { 255 } else { 7 }
+        });
+        assert_eq!(digit, '7');
+        assert_eq!(calls, 2);
     }
 
     #[test]

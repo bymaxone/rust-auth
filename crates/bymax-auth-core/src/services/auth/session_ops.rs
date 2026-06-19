@@ -31,13 +31,13 @@ impl AuthEngine {
         // A forged or expired token needs no revocation, and trusting an unverified `jti`
         // would let a caller pollute the revocation set with long-lived junk entries.
         if let Ok(claims) = self.tokens().verify_access(access_token).await {
-            // A verified token is still live, so its remaining lifetime is bounded and
-            // positive. Best-effort blacklist; a store failure must not block the logout.
-            let remaining = claims.exp.saturating_sub(now_unix());
-            let _ = self
-                .tokens()
-                .revoke_access(&claims.jti, remaining.unsigned_abs())
-                .await;
+            // Blacklist for the token's residual lifetime only. `try_from` clamps to `0` if
+            // the token lapsed in the window between `verify_access` and this clock read, so a
+            // stale token can never be handed a positive (extended) TTL. Best-effort — a store
+            // failure (including a store that rejects a zero TTL for an already-expiring token)
+            // must not block the logout.
+            let ttl = u64::try_from(claims.exp.saturating_sub(now_unix())).unwrap_or(0);
+            let _ = self.tokens().revoke_access(&claims.jti, ttl).await;
         }
 
         // Ownership-checked refresh revoke; SessionNotFound (already rotated/evicted) and any
