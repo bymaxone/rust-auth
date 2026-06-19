@@ -126,7 +126,10 @@ fn validate_temporal<C: JwtClaims>(claims: &C, opts: &VerifyOptions) -> Result<(
     // Saturating cast: a leeway beyond `i64::MAX` is clamped rather than wrapped.
     let leeway = opts.leeway_secs.min(i64::MAX as u64) as i64;
     let now = resolve_now(opts);
-    if opts.validate_exp && now > claims.exp().saturating_add(leeway) {
+    // `exp` is the first instant the token is invalid: reject at `now >= exp + leeway`
+    // (RFC 7519 / jsonwebtoken semantics), not strictly greater — so the boundary
+    // second stays at parity with nest-auth.
+    if opts.validate_exp && now >= claims.exp().saturating_add(leeway) {
         return Err(JwtError::Expired);
     }
     if opts.validate_iat && claims.iat() > now.saturating_add(leeway) {
@@ -306,21 +309,40 @@ mod tests {
 
     #[test]
     fn rejects_an_expired_token() {
-        // Past `exp` (beyond leeway) is Expired; the engine maps this to the public
-        // token_invalid via the internal token_expired.
+        // `exp` is the first invalid second (`now >= exp`), matching RFC 7519 /
+        // jsonwebtoken so the boundary stays at parity with nest-auth. The engine maps
+        // Expired to the public token_invalid via the internal token_expired.
         let key = key();
         let token = sign(&dashboard(1_000, 2_000), &key).unwrap_or_default();
+        // One second before exp: still valid.
+        assert!(verify::<DashboardClaims>(&token, &key, &opts_at(1_999)).is_ok());
+        // Exactly at exp: already expired (the boundary second is invalid).
+        assert_eq!(
+            verify::<DashboardClaims>(&token, &key, &opts_at(2_000)),
+            Err(JwtError::Expired)
+        );
+        // Past exp: expired.
         assert_eq!(
             verify::<DashboardClaims>(&token, &key, &opts_at(2_001)),
             Err(JwtError::Expired)
         );
-        // Within leeway, the same just-expired token still verifies.
-        let lenient = VerifyOptions {
+        // Leeway extends validity up to (but not including) `exp + leeway`.
+        let within_leeway = VerifyOptions {
             leeway_secs: 5,
-            now_unix: Some(2_003),
+            now_unix: Some(2_004),
             ..VerifyOptions::default()
         };
-        assert!(verify::<DashboardClaims>(&token, &key, &lenient).is_ok());
+        assert!(verify::<DashboardClaims>(&token, &key, &within_leeway).is_ok());
+        // At `exp + leeway` the token is expired again.
+        let at_leeway_edge = VerifyOptions {
+            leeway_secs: 5,
+            now_unix: Some(2_005),
+            ..VerifyOptions::default()
+        };
+        assert_eq!(
+            verify::<DashboardClaims>(&token, &key, &at_leeway_edge),
+            Err(JwtError::Expired)
+        );
     }
 
     #[test]

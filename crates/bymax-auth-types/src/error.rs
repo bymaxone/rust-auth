@@ -317,7 +317,8 @@ pub struct AuthErrorBody {
     /// The client-facing message for `code`.
     pub message: String,
     /// Optional structured data (e.g. `{ "retryAfterSeconds": 300 }` or the per-field
-    /// validation errors); `null` when the variant carries none.
+    /// validation errors); the field is omitted from the JSON entirely (not `null`)
+    /// when the variant carries none.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub details: Option<serde_json::Value>,
 }
