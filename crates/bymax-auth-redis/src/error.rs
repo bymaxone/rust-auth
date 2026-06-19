@@ -3,8 +3,8 @@
 //! Every backend failure — a pool that cannot hand out a connection, a Redis command or
 //! Lua script that fails, a stored value that will not deserialize, or a pool that cannot be
 //! built — is captured as a [`RedisStoreError`]. Store-trait methods surface it as the
-//! opaque [`AuthError::Internal`]; the concrete cause is carried for `tracing` but never
-//! serialized to a client, and it never contains a secret.
+//! opaque [`AuthError::Internal`]; the concrete cause is carried for diagnostics (the engine
+//! logs it) but never serialized to a client, and it never contains a secret.
 
 use bymax_auth_types::AuthError;
 

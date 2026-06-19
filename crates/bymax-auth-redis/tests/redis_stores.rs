@@ -39,16 +39,21 @@ fn record(user: &str) -> SessionRecord {
     }
 }
 
-/// A rotation bundle moving `old` -> `new` for `user`.
-fn rotation(old: &str, new: &str, user: &str) -> SessionRotation {
+/// A rotation bundle moving `old` -> `new` for `user`, with the given grace TTL (seconds).
+fn rotation_with_grace(old: &str, new: &str, user: &str, grace_ttl: u64) -> SessionRotation {
     SessionRotation {
         old_hash: old.to_owned(),
         new_hash: new.to_owned(),
         new_raw: "raw-token-never-persisted".to_owned(),
         new_record: record(user),
         refresh_ttl: 3600,
-        grace_ttl: 30,
+        grace_ttl,
     }
+}
+
+/// A rotation bundle moving `old` -> `new` for `user`, with the default 30s grace window.
+fn rotation(old: &str, new: &str, user: &str) -> SessionRotation {
+    rotation_with_grace(old, new, user, 30)
 }
 
 /// A verified-claims snapshot for a WebSocket ticket.
@@ -145,6 +150,47 @@ async fn session_create_rotate_grace_revoke_and_blacklist() {
     assert!(matches!(
         stores.is_blacklisted("jti-expired").await,
         Ok(false)
+    ));
+}
+
+#[tokio::test]
+async fn rotate_with_zero_grace_writes_no_grace_pointer() {
+    let Some(redis) = common::try_start().await else {
+        return;
+    };
+    let Some(stores) = redis.stores() else { return };
+    let kind = SessionKind::Dashboard;
+
+    // A live session under `z1`, then a rotation with a zero-width grace window.
+    assert!(
+        stores
+            .create_session(kind, "z1", &record("zu"), 3600)
+            .await
+            .is_ok()
+    );
+    let rot = rotation_with_grace("z1", "z2", "zu", 0);
+    assert!(matches!(
+        stores.rotate(kind, &rot).await,
+        Ok(RotateOutcome::Rotated(old)) if old.user_id == "zu"
+    ));
+
+    // The new key exists and carries the rotated record; the old key is consumed.
+    assert!(matches!(
+        stores.find_session(kind, "z2").await,
+        Ok(Some(r)) if r.user_id == "zu"
+    ));
+    assert!(matches!(stores.find_session(kind, "z1").await, Ok(None)));
+
+    // No grace pointer is written for a zero grace window: neither the old nor the new hash
+    // has an `rp:` key (absent keys report a `-2` TTL).
+    assert_eq!(redis.ttl("auth:rp:z1").await, -2);
+    assert_eq!(redis.ttl("auth:rp:z2").await, -2);
+
+    // A replay of the consumed token cannot recover: with no grace pointer it is invalid,
+    // never a second live rotation.
+    assert!(matches!(
+        stores.rotate(kind, &rot).await,
+        Ok(RotateOutcome::Invalid)
     ));
 }
 

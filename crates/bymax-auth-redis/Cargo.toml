@@ -32,8 +32,6 @@ thiserror = "2"
 # RFC 3339 timestamps on the `sd:`/`psd:` per-session detail value, matching the wire shape
 # of the session DTOs in `bymax-auth-types`.
 time = { version = "0.3", default-features = false, features = ["std", "serde-well-known"] }
-# Connection/pool failures are surfaced as structured diagnostics (never the secret).
-tracing = "0.1"
 
 [dev-dependencies]
 # A real Redis via Docker for the atomicity/no-PII integration tier; the crate still builds
