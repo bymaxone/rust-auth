@@ -151,8 +151,8 @@ impl AuthEngineBuilder {
         self
     }
 
-    /// Register every provider in an [`OAuthProviders`] registry in one call, each keyed by
-    /// its [`OAuthProvider::name`].
+    /// Register every provider in an [`OAuthProviders`](crate::traits::OAuthProviders)
+    /// registry in one call, each keyed by its [`OAuthProvider::name`].
     #[must_use]
     pub fn oauth_providers(mut self, providers: crate::traits::OAuthProviders) -> Self {
         for provider in providers.0 {
