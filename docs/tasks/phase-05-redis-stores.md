@@ -1,6 +1,6 @@
 # Phase 5 — `bymax-auth-redis`: stores + Lua + WS ticket (E2E Redis)
 
-> **Status**: 📋 ToDo · **Progress**: 0 / 6 tasks · **Last updated**: 2026-06-17
+> **Status**: ✅ Done · **Progress**: 6 / 6 tasks · **Last updated**: 2026-06-19
 > **Source roadmap**: [`docs/development_plan.md`](../development_plan.md) § P5
 > **Source spec**: [`docs/technical_specification.md`](../technical_specification.md)
 
@@ -39,12 +39,12 @@ When P5 is done, a consumer can swap the in-memory doubles for `RedisStores` and
 
 | ID | Task | Status | Priority | Size | Depends on |
 |---|---|---|---|---|---|
-| 5.1 | Crate setup: pool, namespace, `RedisStores`, Lua loader | 📋 ToDo | P0 | M | 3.6 |
-| 5.2 | `SessionStore` impl + rotation/grace + revoke Lua + JTI blacklist | 📋 ToDo | P0 | L | 5.1 |
-| 5.3 | `OtpStore` impl + attempt-bounded verify Lua | 📋 ToDo | P0 | M | 5.1 |
-| 5.4 | `BruteForceStore` impl + fixed-window Lua | 📋 ToDo | P0 | M | 5.1 |
-| 5.5 | `WsTicketStore` impl (single-use ticket via GETDEL) | 📋 ToDo | P0 | S | 5.1 |
-| 5.6 | Key-catalog conformance + no-PII tests + builder wiring | 📋 ToDo | P0 | M | 5.2, 5.3, 5.4, 5.5 |
+| 5.1 | Crate setup: pool, namespace, `RedisStores`, Lua loader | ✅ Done | P0 | M | 3.6 |
+| 5.2 | `SessionStore` impl + rotation/grace + revoke Lua + JTI blacklist | ✅ Done | P0 | L | 5.1 |
+| 5.3 | `OtpStore` impl + attempt-bounded verify Lua | ✅ Done | P0 | M | 5.1 |
+| 5.4 | `BruteForceStore` impl + fixed-window Lua | ✅ Done | P0 | M | 5.1 |
+| 5.5 | `WsTicketStore` impl (single-use ticket via GETDEL) | ✅ Done | P0 | S | 5.1 |
+| 5.6 | Key-catalog conformance + no-PII tests + builder wiring | ✅ Done | P0 | M | 5.2, 5.3, 5.4, 5.5 |
 
 ---
 
@@ -52,7 +52,7 @@ When P5 is done, a consumer can swap the in-memory doubles for `RedisStores` and
 
 ### Task 5.1 — Crate setup: pool, namespace, `RedisStores`, Lua loader
 
-- **Status**: 📋 ToDo
+- **Status**: ✅ Done
 - **Priority**: P0
 - **Size**: M
 - **Depends on**: 3.6
@@ -63,11 +63,11 @@ Wire `bymax-auth-redis`: the `deadpool-redis` pool, the namespace-prefixing key 
 
 #### Acceptance criteria
 
-- [ ] `Cargo.toml` depends on `bymax-auth-core` (traits), `bymax-auth-crypto` (hashing), `redis`, `deadpool-redis`, `serde`/`serde_json`, `thiserror`; dev-deps include `testcontainers` (+ a Redis image) and `tokio` test macros.
-- [ ] `RedisStores::connect(url, namespace)` builds a `deadpool-redis` pool; a `key(prefix, id)` helper produces `"{namespace}:{prefix}:{id}"`.
-- [ ] A `LuaScript` loader caches each script's SHA and invokes via `EVALSHA` with an `EVAL`/`NOSCRIPT` fallback.
-- [ ] A `RedisStoreError` (thiserror) maps pool/Redis errors into the store trait's error type (no panics).
-- [ ] `cargo build -p bymax-auth-redis` builds; a smoke integration test (gated, testcontainers) does a round-trip `SET`/`GET` through the pool + namespace.
+- [x] `Cargo.toml` depends on `bymax-auth-core` (traits), `bymax-auth-crypto` (hashing), `redis`, `deadpool-redis`, `serde`/`serde_json`, `thiserror`; dev-deps include `testcontainers` (+ a Redis image) and `tokio` test macros.
+- [x] `RedisStores::connect(url, namespace)` builds a `deadpool-redis` pool; a `key(prefix, id)` helper produces `"{namespace}:{prefix}:{id}"`.
+- [x] A `LuaScript` loader caches each script's SHA and invokes via `EVALSHA` with an `EVAL`/`NOSCRIPT` fallback.
+- [x] A `RedisStoreError` (thiserror) maps pool/Redis errors into the store trait's error type (no panics).
+- [x] `cargo build -p bymax-auth-redis` builds; a smoke integration test (gated, testcontainers) does a round-trip `SET`/`GET` through the pool + namespace.
 
 #### Files to create / modify
 
@@ -136,7 +136,7 @@ progress `1/6`. 5. Update the P5 row in `docs/development_plan.md`. 6. Recompute
 
 ### Task 5.2 — `SessionStore` impl + rotation/grace + revoke Lua + JTI blacklist
 
-- **Status**: 📋 ToDo
+- **Status**: ✅ Done
 - **Priority**: P0
 - **Size**: L
 - **Depends on**: 5.1
@@ -147,12 +147,12 @@ Implement `SessionStore` over Redis: `create_session`, the atomic refresh-rotati
 
 #### Acceptance criteria
 
-- [ ] `create_session(kind, ...)` stores the session under `rt:{sha256(token)}` (+ `sess`/`sd` detail) with the refresh TTL; platform sessions use the `psess`/`psd` prefixes.
-- [ ] `rotate(kind, raw_refresh) -> RotateOutcome` is a single Lua script: read the old session, mint/return the new record, set the grace pointer (`rp:{old_hash}` → the new `SessionRecord` JSON, never a raw token or token hash) with the grace TTL, and delete/expire the old — atomically.
-- [ ] `revoke(kind, session_id, owner)` is an ownership-checked Lua (only the owner's session is deleted); `revoke_all(kind, user)` is the atomic `invalidate_user_sessions` Lua (SMEMBERS → DEL each namespaced member → DEL the set, one transaction; §12.3/§12.5).
-- [ ] `blacklist_access(jti, ttl)` / `is_blacklisted(jti)` implement the `rv:{jti}` blacklist with the remaining-lifetime TTL.
-- [ ] Integration tests (testcontainers) assert: create→rotate produces a new pair and the old stays valid only within grace; ownership revoke rejects a non-owner; blacklist rejects a revoked `jti`.
-- [ ] 100% coverage; no raw token in any key/value.
+- [x] `create_session(kind, ...)` stores the session under `rt:{sha256(token)}` (+ `sess`/`sd` detail) with the refresh TTL; platform sessions use the `psess`/`psd` prefixes.
+- [x] `rotate(kind, raw_refresh) -> RotateOutcome` is a single Lua script: read the old session, mint/return the new record, set the grace pointer (`rp:{old_hash}` → the new `SessionRecord` JSON, never a raw token or token hash) with the grace TTL, and delete/expire the old — atomically.
+- [x] `revoke(kind, session_id, owner)` is an ownership-checked Lua (only the owner's session is deleted); `revoke_all(kind, user)` is the atomic `invalidate_user_sessions` Lua (SMEMBERS → DEL each namespaced member → DEL the set, one transaction; §12.3/§12.5).
+- [x] `blacklist_access(jti, ttl)` / `is_blacklisted(jti)` implement the `rv:{jti}` blacklist with the remaining-lifetime TTL.
+- [x] Integration tests (testcontainers) assert: create→rotate produces a new pair and the old stays valid only within grace; ownership revoke rejects a non-owner; blacklist rejects a revoked `jti`.
+- [x] 100% coverage; no raw token in any key/value.
 
 #### Files to create / modify
 
@@ -218,7 +218,7 @@ in `docs/development_plan.md`. 6. Recompute %. 7. Append `- 5.2 ✅ <YYYY-MM-DD>
 
 ### Task 5.3 — `OtpStore` impl + attempt-bounded verify Lua
 
-- **Status**: 📋 ToDo
+- **Status**: ✅ Done
 - **Priority**: P0
 - **Size**: M
 - **Depends on**: 5.1
@@ -229,12 +229,12 @@ Implement `OtpStore` over Redis: `put` (OTP record + attempt counter + TTL), the
 
 #### Acceptance criteria
 
-- [ ] `put(...)` stores the OTP record under `otp:{hashed_id}` with the configured TTL and a zeroed attempt counter.
-- [ ] `verify(...)` is a single Lua: increment attempts, compare the code, delete on success OR when `max_attempts` is reached, and return a typed outcome (`Ok`/`Wrong`/`MaxAttempts`/`Expired`).
-- [ ] `try_begin_resend(...)` enforces a resend throttle under `resend:{hashed_id}`.
-- [ ] Keys carry only hashed identifiers (no raw email).
-- [ ] Integration tests (testcontainers): success, wrong-then-success within attempts, max-attempts lockout, expiry, resend throttle.
-- [ ] 100% coverage.
+- [x] `put(...)` stores the OTP record under `otp:{hashed_id}` with the configured TTL and a zeroed attempt counter.
+- [x] `verify(...)` is a single Lua: increment attempts, compare the code, delete on success OR when `max_attempts` is reached, and return a typed outcome (`Ok`/`Wrong`/`MaxAttempts`/`Expired`).
+- [x] `try_begin_resend(...)` enforces a resend throttle under `resend:{hashed_id}`.
+- [x] Keys carry only hashed identifiers (no raw email).
+- [x] Integration tests (testcontainers): success, wrong-then-success within attempts, max-attempts lockout, expiry, resend throttle.
+- [x] 100% coverage.
 
 #### Files to create / modify
 
@@ -288,7 +288,7 @@ in `docs/development_plan.md`. 6. Recompute %. 7. Append `- 5.3 ✅ <YYYY-MM-DD>
 
 ### Task 5.4 — `BruteForceStore` impl + fixed-window Lua
 
-- **Status**: 📋 ToDo
+- **Status**: ✅ Done
 - **Priority**: P0
 - **Size**: M
 - **Depends on**: 5.1
@@ -299,12 +299,12 @@ Implement `BruteForceStore` over Redis: `is_locked`, `record_failure` (fixed-win
 
 #### Acceptance criteria
 
-- [ ] `record_failure(hashed_id)` is a Lua that INCRs `lf:{hashed_id}` and sets the TTL only when the counter transitions from 0→1 (the window does not slide on later failures).
-- [ ] `is_locked(hashed_id)` returns true when the counter ≥ `max_attempts`; `reset(hashed_id)` deletes the counter.
-- [ ] `remaining_lockout_secs(hashed_id)` returns the counter's residual TTL (`TTL` clamped to `>= 0`) so the caller can compute a `Retry-After` (§12.5.3).
-- [ ] Keys use only the HMAC'd identifier (no raw email).
-- [ ] Integration tests (testcontainers): lockout after `max_attempts`; the window does not extend across failures; reset clears it.
-- [ ] 100% coverage.
+- [x] `record_failure(hashed_id)` is a Lua that INCRs `lf:{hashed_id}` and sets the TTL only when the counter transitions from 0→1 (the window does not slide on later failures).
+- [x] `is_locked(hashed_id)` returns true when the counter ≥ `max_attempts`; `reset(hashed_id)` deletes the counter.
+- [x] `remaining_lockout_secs(hashed_id)` returns the counter's residual TTL (`TTL` clamped to `>= 0`) so the caller can compute a `Retry-After` (§12.5.3).
+- [x] Keys use only the HMAC'd identifier (no raw email).
+- [x] Integration tests (testcontainers): lockout after `max_attempts`; the window does not extend across failures; reset clears it.
+- [x] 100% coverage.
 
 #### Files to create / modify
 
@@ -360,7 +360,7 @@ in `docs/development_plan.md`. 6. Recompute %. 7. Append `- 5.4 ✅ <YYYY-MM-DD>
 
 ### Task 5.5 — `WsTicketStore` impl (single-use ticket via GETDEL)
 
-- **Status**: 📋 ToDo
+- **Status**: ✅ Done
 - **Priority**: P0
 - **Size**: S
 - **Depends on**: 5.1
@@ -371,11 +371,11 @@ Implement `WsTicketStore` over Redis: issue a short-TTL opaque WS upgrade ticket
 
 #### Acceptance criteria
 
-- [ ] `issue(...)` stores a snapshot under `wst:{sha256(ticket)}` with the configured short TTL (e.g. 30s).
-- [ ] `redeem(raw_ticket)` is a single atomic `GETDEL` — the ticket is valid exactly once; a second redeem returns "not found".
-- [ ] Keys carry only `sha256(ticket)` (no raw ticket).
-- [ ] Integration tests (testcontainers): redeem-once-succeeds, second-redeem-fails, expiry.
-- [ ] 100% coverage.
+- [x] `issue(...)` stores a snapshot under `wst:{sha256(ticket)}` with the configured short TTL (e.g. 30s).
+- [x] `redeem(raw_ticket)` is a single atomic `GETDEL` — the ticket is valid exactly once; a second redeem returns "not found".
+- [x] Keys carry only `sha256(ticket)` (no raw ticket).
+- [x] Integration tests (testcontainers): redeem-once-succeeds, second-redeem-fails, expiry.
+- [x] 100% coverage.
 
 #### Files to create / modify
 
@@ -427,7 +427,7 @@ in `docs/development_plan.md`. 6. Recompute %. 7. Append `- 5.5 ✅ <YYYY-MM-DD>
 
 ### Task 5.6 — Key-catalog conformance + no-PII tests + builder wiring
 
-- **Status**: 📋 ToDo
+- **Status**: ✅ Done
 - **Priority**: P0
 - **Size**: M
 - **Depends on**: 5.2, 5.3, 5.4, 5.5
@@ -438,11 +438,11 @@ Assert every key matches the spec's catalog prefix and contains no raw PII, then
 
 #### Acceptance criteria
 
-- [ ] A conformance test enumerates the keys written by every store operation — including the `us:` (`UserStatusCache`) key (§12.4) — and asserts each matches the spec's catalog prefix (namespaced) and contains only hashes (no raw email/token); the `us:` key is keyed on the opaque `userId` (not hashed, per §12.4), so its assertion is prefix-only.
-- [ ] `RedisStores` implements all four store traits and is accepted by `AuthEngineBuilder::redis_stores(...)` (the convenience that fans out to the individual store setters).
-- [ ] An end-to-end test assembles an `AuthEngine` with `redis_stores(RedisStores::connect(...))` and runs a Phase 4 flow (register → login → refresh → logout) against the testcontainers Redis.
-- [ ] `cargo deny check` still passes with the new Redis dependencies.
-- [ ] 100% coverage for the crate.
+- [x] A conformance test enumerates the keys written by every store operation — including the `us:` (`UserStatusCache`) key (§12.4) — and asserts each matches the spec's catalog prefix (namespaced) and contains only hashes (no raw email/token); the `us:` key is keyed on the opaque `userId` (not hashed, per §12.4), so its assertion is prefix-only.
+- [x] `RedisStores` implements all four store traits and is accepted by `AuthEngineBuilder::redis_stores(...)` (the convenience that fans out to the individual store setters).
+- [x] An end-to-end test assembles an `AuthEngine` with `redis_stores(RedisStores::connect(...))` and runs a Phase 4 flow (register → login → refresh → logout) against the testcontainers Redis.
+- [x] `cargo deny check` still passes with the new Redis dependencies.
+- [x] 100% coverage for the crate.
 
 #### Files to create / modify
 
@@ -504,3 +504,10 @@ P5 row in `docs/development_plan.md` (mark ✅ when all six tasks are done). 6. 
 ## Completion log
 
 > Append-only. One line per completed task: `- <task-id> ✅ YYYY-MM-DD — <one-line summary>`.
+
+- 5.1 ✅ 2026-06-19 — Crate wired over `redis` 1.x + `deadpool-redis`: `RedisStores::connect`, the `NamespacedRedis`/`Prefix` key builder, the `LuaScript` loader (EVALSHA→EVAL fallback via `redis::Script`), the typed `RedisStoreError`, and the `testcontainers` (`redis:8`) harness.
+- 5.2 ✅ 2026-06-19 — `SessionStore` impl: `create_session`, the `refresh_rotate` grace Lua, ownership-checked `session_revoke`, the `invalidate_user_sessions` revoke-all transaction, and the `rv:` JTI blacklist — keyed by `SessionKind` (dashboard/platform); grace pointer stores the new `SessionRecord`, never a raw token.
+- 5.3 ✅ 2026-06-19 — `OtpStore` impl: `put`, the attempt-bounded `otp_verify` Lua (residual-TTL-preserving, fail-closed on a non-positive TTL), and the `try_begin_resend` `SET NX EX` cooldown; the authoritative compare is constant-time in Rust via `subtle`.
+- 5.4 ✅ 2026-06-19 — `BruteForceStore` impl: fixed-window `brute_force_incr` Lua (EXPIRE only on the 0→1 transition), `is_locked`, `reset`, and `remaining_lockout_secs` (residual TTL clamped `>= 0`).
+- 5.5 ✅ 2026-06-19 — `WsTicketStore` impl: `mint` (CSPRNG ticket stored under `wst:{sha256(ticket)}`) and single-use `redeem` via atomic `GETDEL`.
+- 5.6 ✅ 2026-06-19 — Key-catalog conformance + no-PII + every-key-has-a-TTL assertions, custom-namespace prefixing, and an end-to-end `AuthEngine` register → login → refresh → logout flow run against the testcontainers Redis via `redis_stores(...)`. 100% line+function coverage; `cargo deny`/`audit`/`vet` green (cargo-vet exemptions regenerated).

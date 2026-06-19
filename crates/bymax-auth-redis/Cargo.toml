@@ -8,5 +8,44 @@ repository.workspace = true
 authors.workspace = true
 description = "Redis-backed store implementations for bymax-auth: session, OTP, and brute-force stores with atomic Lua scripts and no-PII namespaced keys."
 
+[dependencies]
+# The store-trait contracts (`SessionStore`/`OtpStore`/`BruteForceStore`/`WsTicketStore`),
+# their `SessionKind`-keyed value DTOs, and the `AuthError` catalog every method returns.
+# The flow logic that *calls* these stores lives in the engine, not here.
+bymax-auth-core = { workspace = true }
+bymax-auth-types = { workspace = true }
+# Hashing for the only secret this crate hashes itself: the opaque WebSocket ticket
+# (`sha256(ticket)`), and the CSPRNG that mints it. Session/OTP/brute-force identifiers
+# arrive already hashed from the engine.
+bymax-auth-crypto = { workspace = true }
+# The async Redis driver (Tokio I/O + first-class `Script` EVALSHA-with-EVAL fallback) and
+# the connection pool, mirroring the ioredis single-pool model of nest-auth.
+redis = { version = "1", default-features = false, features = ["tokio-comp", "script"] }
+deadpool-redis = "0.23"
+# The store traits are object-safe async traits (`#[async_trait]`); implementing them needs
+# the same desugaring macro the definitions use.
+async-trait = "0.1"
+# camelCase JSON value shapes, byte-identical to the nest-auth payloads already in Redis.
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+# RFC 3339 timestamps on the `sd:`/`psd:` per-session detail value, matching the wire shape
+# of the session DTOs in `bymax-auth-types`.
+time = { version = "0.3", default-features = false, features = ["std", "serde-well-known"] }
+
+[dev-dependencies]
+# A real Redis via Docker for the atomicity/no-PII integration tier; the crate still builds
+# without Docker (these only compile into the test targets). Default features are dropped so
+# the Docker client (`bollard`) is built without its `ring`-backed TLS stack — local Docker
+# is reached over a unix socket, and `ring` is forbidden by the workspace ban-list.
+testcontainers = { version = "0.27", default-features = false }
+testcontainers-modules = { version = "0.15", default-features = false, features = ["redis"] }
+# The async test runtime for the integration tests.
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }
+# The in-memory repository + a real `AuthEngine` for the end-to-end flow test against Redis.
+bymax-auth-core = { workspace = true, features = ["testing"] }
+# Building the engine's JWT signing secret in the end-to-end test.
+secrecy = "0.10"
+
 [lints]
 workspace = true

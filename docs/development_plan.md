@@ -18,8 +18,8 @@ This document is Layer 2 of the spec → roadmap → phase-tasks workflow. It de
 
 ## Progress
 
-- **Overall progress:** 🔄 5 / 13 phases done (38%)
-- **Active phase:** **P5** (`bymax-auth-redis` — stores + Lua + WS ticket) 📋 ready to start, unblocked since **P3** is ✅ Done (independent of P4)
+- **Overall progress:** 🔄 6 / 13 phases done (46%)
+- **Active phase:** **P6** (Sessions, OTP, password reset, email verification, invitations), unblocked since **P4** and **P5** are ✅ Done
 - **Blocked:** —
 
 ## Phase dashboard
@@ -31,7 +31,7 @@ This document is Layer 2 of the spec → roadmap → phase-tasks workflow. It de
 | P2 | `bymax-auth-types` + `bymax-auth-jwt` — model, errors, HS256, ts-rs | ✅ Done | 6/6 | L | 2026-06-19 |
 | P3 | `bymax-auth-core` — engine, builder, config profiles, trait set | ✅ Done | 6/6 | L | 2026-06-19 |
 | P4 | Local auth flows + password + brute-force + session-fixation | ✅ Done | 7/7 | L | 2026-06-19 |
-| P5 | `bymax-auth-redis` — stores + Lua + WS ticket (E2E Redis) | 📋 ToDo | — | M | — |
+| P5 | `bymax-auth-redis` — stores + Lua + WS ticket (E2E Redis) | ✅ Done | 6/6 | M | 2026-06-19 |
 | P6 | Sessions, OTP, password reset, email verification, invitations | 📋 ToDo | — | L | — |
 | P7 | MFA (TOTP) end-to-end | 📋 ToDo | — | L | — |
 | P8 | OAuth — `HttpClient` trait + Google + PKCE/state + linking | 📋 ToDo | — | L | — |
