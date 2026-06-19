@@ -32,7 +32,7 @@ use crate::RepositoryError;
 use crate::config::resolvers::{RequestParts, TenantResolveError};
 use crate::context::RequestContext;
 use crate::engine::AuthEngine;
-use crate::services::session::truncate_ip;
+use crate::services::session::normalize_session_metadata;
 use crate::services::{internal_error, now_offset, to_hex};
 use crate::traits::{HookContext, SessionRecord};
 
@@ -202,8 +202,10 @@ impl AuthEngine {
     /// Enforce the per-user session cap and fire the new-session hook for a **dashboard**
     /// session the token manager has just issued. A no-op unless session tracking is enabled;
     /// when it is, the just-created session's hash is recomputed from the issued refresh token
-    /// so eviction can exclude it. The IP is truncated to bound an attacker-controlled
-    /// `X-Forwarded-For`. This is a dashboard-only path: the record always carries the
+    /// so eviction can exclude it. The device/IP are normalized with the same
+    /// [`normalize_session_metadata`] the token manager applied at persistence (parsed UA +
+    /// byte-bounded IP), so this hook record matches the stored one and bounds an
+    /// attacker-controlled `X-Forwarded-For`. This is a dashboard-only path: the record always carries the
     /// dashboard tenant (the platform identity surface manages its own sessions separately), so
     /// the `tenant_id` is taken verbatim from the dashboard user.
     ///
@@ -222,12 +224,16 @@ impl AuthEngine {
             return Ok(());
         }
         let new_hash = RawRefreshToken::from_raw(result.refresh_token.clone()).redis_hash();
+        // Build the hook/management record with the SAME normalization the token manager applied
+        // when it persisted this session, so the stored record, `list_sessions`, and the
+        // new-session hook payload all agree.
+        let (device, stored_ip) = normalize_session_metadata(user_agent, ip);
         let record = SessionRecord {
             user_id: result.user.id.clone(),
             tenant_id: Some(result.user.tenant_id.clone()),
             role: result.user.role.clone(),
-            device: crate::services::session::parse_user_agent(user_agent),
-            ip: truncate_ip(ip),
+            device,
+            ip: stored_ip,
             created_at: now_offset(),
         };
         self.sessions()

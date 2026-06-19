@@ -524,13 +524,13 @@ async fn password_reset_and_invitation_stores_are_single_use_via_getdel() {
 }
 
 #[tokio::test]
-async fn engine_runs_password_reset_via_token_and_otp_against_redis() {
+async fn engine_runs_password_reset_via_token_against_redis() {
     let Some(redis) = common::try_start().await else {
         return;
     };
     let Some(token_stores) = redis.stores() else { return };
 
-    // --- Token method: register, plant a session, reset via a token, confirm revocation. ---
+    // Token method: register, plant a known token, reset via it, confirm revocation + single-use.
     let users = Arc::new(InMemoryUserRepository::new());
     let mut config = AuthConfig::default();
     config.jwt.secret = SecretString::from("0123456789abcdef0123456789abcdef".to_owned());
@@ -625,11 +625,20 @@ async fn engine_runs_password_reset_via_token_and_otp_against_redis() {
             .await,
         Err(AuthError::PasswordResetTokenInvalid)
     ));
+}
 
-    // --- OTP method: verify→verified-token→reset bridge against the real `otp:`/`prv:`. ---
+#[tokio::test]
+async fn engine_runs_password_reset_via_otp_against_redis() {
+    let Some(redis) = common::try_start().await else {
+        return;
+    };
     let Some(otp_stores) = redis.stores_with_namespace("otpns") else {
         return;
     };
+
+    // OTP method: register, drive the engine to generate+store a real OTP, read the code back
+    // from its `otp:` record, then run the verify→verified-token→reset bridge against real Redis
+    // and confirm the password changed and every session was revoked.
     let otp_users = Arc::new(InMemoryUserRepository::new());
     let mut otp_config = AuthConfig::default();
     otp_config.jwt.secret = SecretString::from("fedcba9876543210fedcba9876543210".to_owned());
@@ -657,28 +666,214 @@ async fn engine_runs_password_reset_via_token_and_otp_against_redis() {
             &otp_ctx,
         )
         .await;
-    assert!(matches!(registered, Ok(LoginResult::Success(_))));
-
-    // Plant a known OTP under the real `otp:` keyspace so the verify→token→reset path runs.
-    let Some(seed) = redis.stores_with_namespace("otpns") else {
+    let Ok(LoginResult::Success(auth)) = registered else {
         return;
     };
-    // The identifier is hmac(tenant:email) — opaque to the test — so drive the OTP through the
-    // engine's resend path, then read it back is not possible; instead store a known code
-    // under the OTP store directly via the engine's identifier by initiating, which writes a
-    // code we cannot read. So exercise verify_reset_otp's failure path (wrong code) here and
-    // rely on the in-memory engine tests for the success path's exact code matching.
-    let _ = seed;
-    assert!(matches!(
+    let user_id = auth.user.id.clone();
+    // The password hash before the reset, to prove it actually changes.
+    let before = otp_users
+        .find_by_id(&user_id, None)
+        .await
+        .ok()
+        .flatten()
+        .and_then(|u| u.password_hash);
+
+    // Initiate stores a real OTP under `otpns:otp:password_reset:<hmac>` (the store write is
+    // awaited, so the record exists once this returns). The identifier is an opaque HMAC, so
+    // read the code back from the record's value rather than recomputing the key.
+    assert!(
         otp_engine
-            .verify_reset_otp(VerifyResetOtpInput {
+            .initiate_reset(ForgotPasswordInput {
                 email: "otp-reset@example.com".to_owned(),
                 tenant_id: "t1".to_owned(),
-                otp: "000000".to_owned(),
+            })
+            .await
+            .is_ok()
+    );
+    let keys = redis.all_keys().await;
+    let Some(otp_key) = keys
+        .into_iter()
+        .find(|k| k.contains(":otp:password_reset:"))
+    else {
+        // No Docker / no record: nothing to drive, skip the rest cleanly.
+        return;
+    };
+    let Some(raw) = redis.get(&otp_key).await else { return };
+    let Ok(record) = serde_json::from_str::<serde_json::Value>(&raw) else {
+        return;
+    };
+    let Some(code) = record
+        .get("code")
+        .and_then(|c| c.as_str())
+        .map(str::to_owned)
+    else {
+        return;
+    };
+
+    // Verify the OTP for a short-lived verified token, then reset through the verified path.
+    let verified = otp_engine
+        .verify_reset_otp(VerifyResetOtpInput {
+            email: "otp-reset@example.com".to_owned(),
+            tenant_id: "t1".to_owned(),
+            otp: code,
+        })
+        .await;
+    assert!(verified.is_ok());
+    let Ok(verified_token) = verified else { return };
+    assert!(
+        otp_engine
+            .reset_password(ResetPasswordInput {
+                email: "otp-reset@example.com".to_owned(),
+                tenant_id: "t1".to_owned(),
+                new_password: "a-fresh-new-password".to_owned(),
+                token: None,
+                otp: None,
+                verified_token: Some(verified_token.clone()),
+            })
+            .await
+            .is_ok()
+    );
+
+    // The password actually changed.
+    let after = otp_users
+        .find_by_id(&user_id, None)
+        .await
+        .ok()
+        .flatten()
+        .and_then(|u| u.password_hash);
+    assert_ne!(before, after, "the stored password hash must change");
+    assert!(after.is_some());
+
+    // Every session was revoked: the registration refresh token no longer rotates.
+    assert!(matches!(
+        otp_engine
+            .refresh(&auth.refresh_token, "203.0.113.4", "agent/1.0")
+            .await,
+        Err(AuthError::RefreshTokenInvalid)
+    ));
+
+    // The verified token is single-use: a replay through the verified path is rejected.
+    assert!(matches!(
+        otp_engine
+            .reset_password(ResetPasswordInput {
+                email: "otp-reset@example.com".to_owned(),
+                tenant_id: "t1".to_owned(),
+                new_password: "another".to_owned(),
+                token: None,
+                otp: None,
+                verified_token: Some(verified_token),
             })
             .await,
-        Err(AuthError::OtpExpired) | Err(AuthError::OtpInvalid)
+        Err(AuthError::PasswordResetTokenInvalid)
     ));
+}
+
+/// A hooks spy that records the new-session hook's payload (device, IP, and the short session
+/// hash), so the persisted session record can be asserted to match what the hook reports.
+#[derive(Default)]
+struct CaptureNewSessionHook {
+    captured: std::sync::Mutex<Option<(String, String, String)>>,
+}
+
+#[async_trait::async_trait]
+impl bymax_auth_core::traits::AuthHooks for CaptureNewSessionHook {
+    async fn on_new_session(
+        &self,
+        _user: &bymax_auth_types::SafeAuthUser,
+        session: &bymax_auth_core::traits::SessionInfo,
+        _ctx: &bymax_auth_core::traits::HookContext,
+    ) -> Result<(), bymax_auth_core::traits::HookError> {
+        if let Ok(mut slot) = self.captured.lock() {
+            *slot = Some((
+                session.device.clone(),
+                session.ip.clone(),
+                session.session_hash.clone(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn engine_persists_normalized_ua_and_ip_matching_the_new_session_hook() {
+    let Some(redis) = common::try_start().await else {
+        return;
+    };
+    let Some(stores) = redis.stores_with_namespace("normns") else {
+        return;
+    };
+    let stores = Arc::new(stores);
+
+    let users = Arc::new(InMemoryUserRepository::new());
+    let mut config = AuthConfig::default();
+    config.jwt.secret = SecretString::from("0123456789abcdef0123456789abcdef".to_owned());
+    config.roles.hierarchy = HashMap::from([("USER".to_owned(), Vec::new())]);
+    config.email_verification.required = false;
+    // Enable session tracking so the new-session hook fires for the issued session.
+    config.sessions.enabled = true;
+
+    let hooks = Arc::new(CaptureNewSessionHook::default());
+    let Ok(engine) = AuthEngine::builder()
+        .config(config)
+        .environment(Environment::Test)
+        .user_repository(users.clone())
+        .redis_stores(stores.clone())
+        .hooks(hooks.clone())
+        .build()
+    else {
+        return;
+    };
+
+    // A raw Chrome/macOS user-agent and an attacker-controlled IP that is <= 45 chars but
+    // > 45 bytes (20 three-byte chars = 60 bytes): both must be normalized at the persistence
+    // point, not just in the hook record.
+    let raw_ua = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15) Chrome/120.0 Safari/537.36";
+    let overlong_ip = "中".repeat(20);
+    let ctx = RequestContext::new(&overlong_ip, raw_ua, BTreeMap::new());
+
+    let registered = engine
+        .register(
+            RegisterInput {
+                email: "norm@example.com".to_owned(),
+                name: "Norm User".to_owned(),
+                password: "correct horse battery staple".to_owned(),
+                tenant_id: "t1".to_owned(),
+            },
+            &ctx,
+        )
+        .await;
+    let Ok(LoginResult::Success(auth)) = registered else {
+        return;
+    };
+    let user_id = auth.user.id.clone();
+    let full_hash =
+        bymax_auth_jwt::RawRefreshToken::from_raw(auth.refresh_token.clone()).redis_hash();
+
+    // The PERSISTED record (read via the store, i.e. what `list_sessions` returns) carries the
+    // parsed UA and the byte-bounded IP — proving normalization reached Redis, not only the hook.
+    let listed = stores.list_sessions(SessionKind::Dashboard, &user_id).await;
+    assert!(matches!(&listed, Ok(v) if v.len() == 1));
+    let Ok(listed) = listed else { return };
+    let Some(detail) = listed.into_iter().next() else { return };
+    assert_eq!(detail.device, "Chrome on macOS");
+    assert!(detail.ip.len() <= 45, "the stored IP must be <= 45 bytes");
+    assert!(
+        detail.ip.chars().all(|c| c == '中'),
+        "must not split a codepoint"
+    );
+    assert_eq!(detail.session_hash, full_hash);
+
+    // The new-session hook payload matches the persisted record exactly, and carries only the
+    // short (<= 8 char) session hash, a prefix of the full stored hash.
+    let captured = match hooks.captured.lock() {
+        Ok(slot) => slot.as_ref().cloned(),
+        Err(_) => None,
+    };
+    let Some((hook_device, hook_ip, hook_hash)) = captured else { return };
+    assert_eq!(hook_device, detail.device);
+    assert_eq!(hook_ip, detail.ip);
+    assert!(hook_hash.len() <= 8);
+    assert!(full_hash.starts_with(&hook_hash));
 }
 
 #[tokio::test]

@@ -21,9 +21,11 @@ use crate::traits::{
     SessionStore, UserRepository,
 };
 
-/// The maximum stored IP length, in characters: an IPv6 textual address is at most 45 chars.
-/// The originating IP is truncated to this before it lands in a session record so an
+/// The maximum stored IP length, in **bytes**: a maximal IPv6 textual address is 45 ASCII
+/// bytes. The originating IP is truncated to this before it lands in a session record so an
 /// attacker-controlled `X-Forwarded-For` cannot inflate the stored value unboundedly (§7.4).
+/// The bound is on bytes, not chars, so a multi-byte value cannot exceed the storage limit
+/// while staying within 45 chars.
 pub(crate) const MAX_IP_LENGTH: usize = 45;
 
 /// One session's display-safe projection, returned to the user by [`SessionService::list_sessions`].
@@ -123,7 +125,11 @@ impl SessionService {
             .store
             .list_sessions(SessionKind::Dashboard, user_id)
             .await?;
-        let limit = self.resolve_session_limit(user_id).await;
+        // Clamp the resolved cap to at least 1. A cap of 0 is unenforceable here: eviction
+        // always excludes the just-created session, so a literal 0 would leave the user one
+        // over an impossible "zero" cap forever. Treating 0 as 1 keeps the just-created session
+        // and evicts every other, which is the only coherent outcome for a single-session cap.
+        let limit = self.resolve_session_limit(user_id).await.max(1);
 
         // Sort oldest-first so the FIFO victims are the front of the list. A session whose
         // detail vanished is treated as oldest by the store's epoch fallback already.
@@ -329,14 +335,37 @@ fn short_hash(hash: &str) -> String {
     hash.chars().take(8).collect()
 }
 
-/// Truncate an IP to at most [`MAX_IP_LENGTH`] characters, on a UTF-8 char boundary, so a
-/// well-formed IPv6 address is preserved while an over-long attacker-controlled value is
-/// bounded.
+/// Truncate an IP to at most [`MAX_IP_LENGTH`] **bytes**, cut on a UTF-8 char boundary, so a
+/// well-formed IPv6 address is preserved while an over-long attacker-controlled value (which a
+/// non-ASCII `X-Forwarded-For` can push past the byte limit while still under 45 chars) is
+/// bounded by the storage limit without ever splitting a codepoint.
 pub(crate) fn truncate_ip(ip: &str) -> String {
     if ip.len() <= MAX_IP_LENGTH {
         return ip.to_owned();
     }
-    ip.chars().take(MAX_IP_LENGTH).collect()
+    // The byte length exceeds the bound: cut at the largest char boundary whose byte offset is
+    // `<= MAX_IP_LENGTH`. `char_indices` yields each char's start offset in ascending order, so
+    // the last offset still within the bound is the maximal safe cut (`floor_char_boundary` is
+    // unstable, so this walks the boundaries explicitly). The first offset is always `0`, so a
+    // boundary always exists for a non-empty string.
+    let cut = ip
+        .char_indices()
+        .map(|(offset, _)| offset)
+        .take_while(|&offset| offset <= MAX_IP_LENGTH)
+        .last()
+        .unwrap_or(0);
+    ip[..cut].to_owned()
+}
+
+/// Normalize attacker-controlled request metadata into its stored form: parse the user-agent
+/// into a `"{Browser} on {OS}"` device label (via [`parse_user_agent`]) and bound the IP to
+/// [`MAX_IP_LENGTH`] bytes on a UTF-8 boundary (via [`truncate_ip`]). This is the **single**
+/// normalization applied both where the refresh session is persisted (the token manager) and
+/// where the management/hook projection is built, so the stored record,
+/// [`SessionService::list_sessions`], and the new-session / session-evicted hook payloads never
+/// diverge and the byte bound actually reaches the store.
+pub(crate) fn normalize_session_metadata(user_agent: &str, ip: &str) -> (String, String) {
+    (parse_user_agent(user_agent), truncate_ip(ip))
 }
 
 /// Project a stored [`SessionDetail`] into the display-safe [`SessionInfo`], stamping
@@ -602,6 +631,90 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn limit_of_zero_is_clamped_to_keep_only_the_new_session() {
+        // A resolved cap of 0 must not leave the user permanently over cap: it is clamped to 1,
+        // so the just-created session is kept and every older session is evicted, firing the
+        // session-evicted hook. With one older + the new session, exactly the new one remains.
+        let store = Arc::new(InMemoryStores::new());
+        let users = Arc::new(InMemoryUserRepository::new());
+        let uid = seed_user(&users, "zero-cap").await;
+        let hooks = Arc::new(CountingHooks::default());
+        let old = hash("a0a0");
+        let new = hash("b0b0");
+        let base = OffsetDateTime::UNIX_EPOCH;
+        assert!(
+            store
+                .create_session(SessionKind::Dashboard, &old, &record(&uid, base), 3600)
+                .await
+                .is_ok()
+        );
+        let new_record = record(&uid, base + time::Duration::seconds(1));
+        assert!(
+            store
+                .create_session(SessionKind::Dashboard, &new, &new_record, 3600)
+                .await
+                .is_ok()
+        );
+
+        // A default cap of 0 (clamped to 1 internally) evicts the old session, keeping the new.
+        let svc = service(store.clone(), users, hooks.clone(), config(0, None));
+        assert!(
+            svc.after_session_created(&new_record, &new, &ctx())
+                .await
+                .is_ok()
+        );
+        let remaining = svc.list_sessions(&uid, Some(&new)).await;
+        assert!(matches!(&remaining, Ok(v) if v.len() == 1 && v[0].session_hash == new));
+        assert_eq!(hooks.evictions.load(Ordering::Relaxed), 1);
+        assert_eq!(hooks.new_sessions.load(Ordering::Relaxed), 1);
+    }
+
+    #[tokio::test]
+    async fn limit_of_one_evicts_every_older_session_keeping_only_the_new_one() {
+        // The boundary cap of exactly 1: with two older sessions and the new one, both older
+        // sessions are evicted (two eviction hooks), leaving only the just-created session.
+        let store = Arc::new(InMemoryStores::new());
+        let users = Arc::new(InMemoryUserRepository::new());
+        let uid = seed_user(&users, "one-cap").await;
+        let hooks = Arc::new(CountingHooks::default());
+        let old1 = hash("c1c1");
+        let old2 = hash("d2d2");
+        let new = hash("e3e3");
+        let base = OffsetDateTime::UNIX_EPOCH;
+        for (h, secs) in [(&old1, 0), (&old2, 1)] {
+            assert!(
+                store
+                    .create_session(
+                        SessionKind::Dashboard,
+                        h,
+                        &record(&uid, base + time::Duration::seconds(secs)),
+                        3600
+                    )
+                    .await
+                    .is_ok()
+            );
+        }
+        let new_record = record(&uid, base + time::Duration::seconds(2));
+        assert!(
+            store
+                .create_session(SessionKind::Dashboard, &new, &new_record, 3600)
+                .await
+                .is_ok()
+        );
+
+        let svc = service(store.clone(), users, hooks.clone(), config(1, None));
+        assert!(
+            svc.after_session_created(&new_record, &new, &ctx())
+                .await
+                .is_ok()
+        );
+        let remaining = svc.list_sessions(&uid, Some(&new)).await;
+        assert!(matches!(&remaining, Ok(v) if v.len() == 1 && v[0].session_hash == new));
+        assert_eq!(hooks.evictions.load(Ordering::Relaxed), 2);
+        assert_eq!(hooks.new_sessions.load(Ordering::Relaxed), 1);
+    }
+
+    #[tokio::test]
     async fn resolver_override_drives_the_cap() {
         // A resolver capping the user at one evicts down to a single session.
         let store = Arc::new(InMemoryStores::new());
@@ -809,6 +922,24 @@ mod tests {
         let ipv6 = "2001:0db8:85a3:0000:0000:8a2e:0370:7334:ffff:ffff:ffff";
         let truncated = truncate_ip(ipv6);
         assert!(truncated.chars().count() <= MAX_IP_LENGTH);
+    }
+
+    #[test]
+    fn truncate_ip_bounds_by_bytes_on_a_char_boundary_for_a_multibyte_value() {
+        // An attacker-controlled value that is <= 45 CHARS but > 45 BYTES (20 three-byte CJK
+        // chars: 20 chars, 60 bytes) must be bounded by BYTES, not chars, and never split a
+        // codepoint. A char-count truncation would have returned all 60 bytes.
+        let multibyte = "中".repeat(20);
+        assert!(multibyte.chars().count() <= MAX_IP_LENGTH);
+        assert!(multibyte.len() > MAX_IP_LENGTH);
+
+        let bounded = truncate_ip(&multibyte);
+        // Bounded by the byte limit, and a whole number of full chars (45 / 3 = 15), proving the
+        // cut landed on a char boundary rather than mid-codepoint.
+        assert!(bounded.len() <= MAX_IP_LENGTH);
+        assert!(bounded.chars().all(|c| c == '中'));
+        assert_eq!(bounded.len(), 45);
+        assert_eq!(bounded.chars().count(), 15);
     }
 
     #[test]

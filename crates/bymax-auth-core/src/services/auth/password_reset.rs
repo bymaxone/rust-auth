@@ -99,14 +99,19 @@ pub struct ResendResetOtpInput {
 }
 
 impl AuthEngine {
-    /// Initiate a password reset. Always returns `Ok(())` and always takes at least the
-    /// anti-enumeration floor, regardless of whether the account exists, is blocked, or the
-    /// email send fails — so neither the body nor the latency reveals account existence.
+    /// Initiate a password reset. The **account-state outcome is always `Ok(())`** — the body
+    /// is identical whether or not the account exists, is blocked, or the email send fails —
+    /// and the ≥ 300 ms anti-enumeration timing floor is honored on **every** path, so neither
+    /// the response nor the latency reveals account existence. An **infrastructure failure**
+    /// (the account lookup or persisting the proof is unreachable) is still surfaced as an
+    /// [`AuthError`]; only the account state never changes the outcome.
     ///
     /// # Errors
     ///
-    /// Returns a store [`AuthError`] only on an infrastructure failure persisting the proof;
-    /// account state never changes the (always-`Ok`) outcome.
+    /// Returns a store [`AuthError`] only on an infrastructure failure (the account lookup or
+    /// persisting the proof); account state never changes the otherwise-`Ok(())` outcome. The
+    /// timing floor is applied before the error is returned, so an infra error stays
+    /// latency-indistinguishable from a normal response.
     pub async fn initiate_reset(&self, input: ForgotPasswordInput) -> Result<(), AuthError> {
         let started = Instant::now();
         // Run the fallible body, then normalize the elapsed time on EVERY exit — including an
@@ -274,14 +279,19 @@ impl AuthEngine {
         Ok(raw)
     }
 
-    /// Re-issue a reset OTP, throttled by an atomic 60 s cooldown and uniformly
-    /// anti-enumerating: an identical response and timing floor whether or not the account
-    /// exists or is blocked.
+    /// Re-issue a reset OTP. The **account-state outcome is always `Ok(())`** — an identical
+    /// response and ≥ 300 ms timing floor whether or not the account exists or is blocked —
+    /// preserving the atomic 60 s cooldown (a second resend inside the window is a silent
+    /// `Ok(())`). An **infrastructure failure** (the cooldown gate or the account lookup is
+    /// unreachable) is still surfaced as an [`AuthError`]; only the account state never changes
+    /// the outcome.
     ///
     /// # Errors
     ///
-    /// Returns a store [`AuthError`] only on an infrastructure failure; account state never
-    /// changes the (always-`Ok`) outcome.
+    /// Returns a store [`AuthError`] only on an infrastructure failure (the cooldown gate or the
+    /// account lookup); account state never changes the otherwise-`Ok(())` outcome. The timing
+    /// floor is applied before the error is returned, so an infra error stays
+    /// latency-indistinguishable from a normal response.
     pub async fn resend_reset_otp(&self, input: ResendResetOtpInput) -> Result<(), AuthError> {
         let started = Instant::now();
         // Run the fallible body, then normalize the elapsed time on EVERY exit — the cooldown

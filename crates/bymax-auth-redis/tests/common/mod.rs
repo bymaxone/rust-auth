@@ -68,6 +68,19 @@ impl TestRedis {
             .is_ok()
     }
 
+    /// The string value of a key, or `None` when it is absent. Used by the OTP-reset flow to
+    /// read back the engine-generated code from its real `otp:` record so the verify→reset
+    /// bridge can run end to end against Redis.
+    pub async fn get(&self, key: &str) -> Option<String> {
+        let mut conn = self.raw().await?;
+        redis::cmd("GET")
+            .arg(key)
+            .query_async::<Option<String>>(&mut conn)
+            .await
+            .ok()
+            .flatten()
+    }
+
     /// The TTL (seconds) of a key: `-2` when absent, `-1` when it has no expiry.
     pub async fn ttl(&self, key: &str) -> i64 {
         let Some(mut conn) = self.raw().await else {
