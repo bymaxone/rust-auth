@@ -60,7 +60,7 @@ impl OtpService {
     }
 
     /// Verify a submitted `code` atomically (match + attempt bump + single-use consume),
-    /// normalizing the elapsed time to at least [`MIN_VERIFY_MS`] so timing reveals nothing
+    /// normalizing the elapsed time to at least `MIN_VERIFY_MS` so timing reveals nothing
     /// about whether the record existed.
     ///
     /// # Errors

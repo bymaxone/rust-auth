@@ -40,7 +40,7 @@ impl BruteForceService {
     }
 
     /// Reject an identifier that could corrupt the namespaced store key — one containing
-    /// `:`, `\n`, or `\r`, or exceeding [`MAX_IDENTIFIER_LENGTH`] bytes — with
+    /// `:`, `\n`, or `\r`, or exceeding `MAX_IDENTIFIER_LENGTH` bytes — with
     /// [`AuthError::Forbidden`]. The rejection is logged without the identifier value.
     ///
     /// # Errors
