@@ -40,14 +40,22 @@ impl AuthEngine {
             let _ = self.tokens().revoke_access(&claims.jti, ttl).await;
         }
 
-        // Ownership-checked refresh revoke; SessionNotFound (already rotated/evicted) and any
-        // other store error are both swallowed, so logout is idempotent and never blocks. A
+        // Clean BOTH the primary and grace refresh keys for the presented token. The
+        // ownership-checked revoke deletes the primary `rt:`/`sd:` keys and the `sess:`
+        // membership; the grace-pointer delete then removes any `rp:` recovery pointer for this
+        // hash, so a token logged out inside its grace window cannot still rotate into a fresh
+        // session. Both are best-effort: `SessionNotFound` (already rotated/evicted) and any
+        // other store error are swallowed, so logout is idempotent and never blocks. A
         // malformed/oversized token is skipped before hashing — it owns no session anyway.
         if is_refresh_token_shape(raw_refresh) {
             let session_hash = RawRefreshToken::from_raw(raw_refresh.to_owned()).redis_hash();
             let _ = self
                 .session_store()
                 .revoke_session(SessionKind::Dashboard, user_id, &session_hash)
+                .await;
+            let _ = self
+                .session_store()
+                .delete_grace_pointer(SessionKind::Dashboard, &session_hash)
                 .await;
         }
 

@@ -206,6 +206,17 @@ pub trait SessionStore: Send + Sync {
         session_hash: &str,
     ) -> Result<(), AuthError>;
 
+    /// Delete the rotation grace pointer for a refresh-token hash (`rp:`/`prp:`), if any, so a
+    /// just-rotated token cannot still recover a session through the grace window after the
+    /// owner has logged out. Idempotent: a no-op when no grace pointer exists. This complements
+    /// [`SessionStore::revoke_session`], which deletes only the primary refresh keys; logout
+    /// calls both so BOTH the primary and grace keys are cleaned.
+    async fn delete_grace_pointer(
+        &self,
+        kind: SessionKind,
+        session_hash: &str,
+    ) -> Result<(), AuthError>;
+
     /// Revoke every session for a user in one transaction.
     async fn revoke_all(&self, kind: SessionKind, user_id: &str) -> Result<(), AuthError>;
 

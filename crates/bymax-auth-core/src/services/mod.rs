@@ -16,6 +16,9 @@
 //!   eviction, device/IP metadata, ownership-checked revoke, and atomic detail rotation).
 //! - [`auth`] — the local authentication flows (register, login, logout, me, refresh,
 //!   email verification, password reset, invitations, and password-less issuance).
+//! - `platform` (feature `platform`) — the [`platform::PlatformAuthService`]: the operator
+//!   identity domain (login/MFA-challenge, me, logout, refresh, revoke-all), isolated from the
+//!   tenant domain with platform claims (no `tenantId`) and the platform session keyspaces.
 
 pub mod auth;
 pub mod brute_force;
@@ -25,6 +28,8 @@ pub mod mfa;
 pub mod oauth;
 pub mod otp;
 pub mod password;
+#[cfg(feature = "platform")]
+pub mod platform;
 pub mod session;
 pub mod token_manager;
 

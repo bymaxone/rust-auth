@@ -74,6 +74,29 @@ impl ResolvedConfig {
         self.hmac_key.expose_secret()
     }
 
+    /// Whether `held_role` satisfies a required dashboard/tenant role under the dashboard
+    /// hierarchy: a role satisfies itself, or any role it transitively includes (the hierarchy
+    /// is fully denormalized, so this is a single-level membership test). A role absent from the
+    /// hierarchy satisfies only itself. This consults ONLY [`crate::config::RolesConfig::hierarchy`],
+    /// never the platform hierarchy, so a platform role can never satisfy a dashboard-role check.
+    #[must_use]
+    pub fn dashboard_role_satisfies(&self, held_role: &str, required_role: &str) -> bool {
+        role_satisfies(&self.config.roles.hierarchy, held_role, required_role)
+    }
+
+    /// Whether `held_role` satisfies a required platform role under the platform hierarchy.
+    /// Returns `false` when no platform hierarchy is configured (the platform domain is then
+    /// disabled, so no platform role is grantable). This consults ONLY
+    /// [`crate::config::RolesConfig::platform_hierarchy`], never the dashboard hierarchy, so a
+    /// dashboard/tenant role can never satisfy a platform-role check — the domains are isolated.
+    #[must_use]
+    pub fn platform_role_satisfies(&self, held_role: &str, required_role: &str) -> bool {
+        match self.config.roles.platform_hierarchy.as_ref() {
+            Some(hierarchy) => role_satisfies(hierarchy, held_role, required_role),
+            None => false,
+        }
+    }
+
     /// Decode the configured MFA encryption key into its 32-byte AES-256-GCM form. `None` when
     /// MFA is not configured. Startup validation already proved a configured key decodes to
     /// exactly 32 bytes, so a present `config.mfa` always yields `Some`. The transient decoded
@@ -289,6 +312,24 @@ impl AuthConfig {
         }
         urls
     }
+}
+
+/// Whether `held_role` satisfies `required_role` under a denormalized role `hierarchy`: a role
+/// always satisfies itself, and otherwise satisfies any role listed among the roles it
+/// transitively includes. A `held_role` absent from the hierarchy satisfies only itself, so an
+/// unknown or cross-domain role can never satisfy a check against a different domain's roles.
+/// The membership test is a single-level lookup because the hierarchy is fully denormalized.
+fn role_satisfies(
+    hierarchy: &HashMap<String, Vec<String>>,
+    held_role: &str,
+    required_role: &str,
+) -> bool {
+    if held_role == required_role {
+        return true;
+    }
+    hierarchy
+        .get(held_role)
+        .is_some_and(|included| included.iter().any(|role| role == required_role))
 }
 
 /// Validate that every child role in `hierarchy` is itself declared as a key. Roles are
@@ -867,6 +908,69 @@ mod tests {
         // Setting an explicit refresh path clears the mismatch.
         cfg.cookies.refresh_cookie_path = "/api-auth".to_owned();
         assert!(cfg.validate(Environment::Production).is_ok());
+    }
+
+    #[test]
+    fn role_hierarchies_are_provably_isolated_in_both_directions() {
+        // A config wiring a dashboard hierarchy (ADMIN ⊇ MEMBER) and a DISJOINT platform
+        // hierarchy (SUPER_ADMIN ⊇ SUPPORT) proves the two domains never cross-satisfy.
+        let mut cfg = valid_config();
+        cfg.roles.hierarchy = HashMap::from([
+            ("ADMIN".to_owned(), vec!["MEMBER".to_owned()]),
+            ("MEMBER".to_owned(), Vec::new()),
+        ]);
+        cfg.roles.platform_hierarchy = Some(HashMap::from([
+            ("SUPER_ADMIN".to_owned(), vec!["SUPPORT".to_owned()]),
+            ("SUPPORT".to_owned(), Vec::new()),
+        ]));
+        let resolved = ResolvedConfig::new(cfg, Environment::Test, false);
+
+        // Dashboard hierarchy: a role satisfies itself and the roles it includes.
+        assert!(resolved.dashboard_role_satisfies("ADMIN", "ADMIN"));
+        assert!(resolved.dashboard_role_satisfies("ADMIN", "MEMBER"));
+        assert!(!resolved.dashboard_role_satisfies("MEMBER", "ADMIN"));
+
+        // Platform hierarchy: likewise within its own domain.
+        assert!(resolved.platform_role_satisfies("SUPER_ADMIN", "SUPER_ADMIN"));
+        assert!(resolved.platform_role_satisfies("SUPER_ADMIN", "SUPPORT"));
+        assert!(!resolved.platform_role_satisfies("SUPPORT", "SUPER_ADMIN"));
+
+        // Direction 1 — a tenant role can NEVER satisfy a platform-role check: the dashboard
+        // ADMIN/MEMBER roles do not satisfy any platform role, even one named identically were
+        // it absent from the platform set.
+        assert!(!resolved.platform_role_satisfies("ADMIN", "SUPER_ADMIN"));
+        assert!(!resolved.platform_role_satisfies("ADMIN", "SUPPORT"));
+        assert!(!resolved.platform_role_satisfies("MEMBER", "SUPPORT"));
+
+        // Direction 2 — a platform role can NEVER satisfy a tenant-role check.
+        assert!(!resolved.dashboard_role_satisfies("SUPER_ADMIN", "ADMIN"));
+        assert!(!resolved.dashboard_role_satisfies("SUPER_ADMIN", "MEMBER"));
+        assert!(!resolved.dashboard_role_satisfies("SUPPORT", "MEMBER"));
+
+        // MEMBER lives only in the dashboard hierarchy: a platform check for it is satisfied
+        // only reflexively (role-equals-itself), never via inclusion — and crucially a dashboard
+        // MEMBER cannot reach any *other* platform role, which is the isolation that matters.
+        assert!(!resolved.platform_role_satisfies("MEMBER", "SUPER_ADMIN"));
+    }
+
+    #[test]
+    fn platform_role_check_is_false_without_a_platform_hierarchy() {
+        // With no platform hierarchy configured the platform domain is off, so no platform role
+        // is grantable — every platform-role check is false, even a role-equals-itself query.
+        let mut cfg = valid_config();
+        cfg.roles.platform_hierarchy = None;
+        let resolved = ResolvedConfig::new(cfg, Environment::Test, false);
+        assert!(!resolved.platform_role_satisfies("SUPER_ADMIN", "SUPER_ADMIN"));
+        assert!(!resolved.platform_role_satisfies("ADMIN", "ADMIN"));
+    }
+
+    #[test]
+    fn role_satisfies_self_for_a_role_absent_from_the_hierarchy() {
+        // A role not present as a key still satisfies itself (reflexive) but nothing else.
+        let hierarchy = HashMap::from([("ADMIN".to_owned(), vec!["MEMBER".to_owned()])]);
+        assert!(role_satisfies(&hierarchy, "GHOST", "GHOST"));
+        assert!(!role_satisfies(&hierarchy, "GHOST", "ADMIN"));
+        assert!(!role_satisfies(&hierarchy, "GHOST", "MEMBER"));
     }
 
     #[test]

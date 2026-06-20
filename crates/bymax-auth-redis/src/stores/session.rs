@@ -297,6 +297,24 @@ impl RedisStores {
         Ok(owned)
     }
 
+    /// Delete the rotation grace pointer (`rp:`/`prp:`) for a refresh-token hash. Idempotent: a
+    /// `DEL` of an absent key is a no-op. Logout calls this after the ownership-checked revoke so
+    /// a just-rotated token cannot recover a session through the grace window post-logout.
+    async fn delete_grace_pointer_inner(
+        &self,
+        kind: SessionKind,
+        session_hash: &str,
+    ) -> Result<(), RedisStoreError> {
+        let prefixes = kind_prefixes(kind);
+        let rp_key = self.keys().key(prefixes.rp, session_hash);
+        let mut conn = self.connection().await?;
+        redis::cmd("DEL")
+            .arg(&rp_key)
+            .query_async::<i64>(&mut conn)
+            .await?;
+        Ok(())
+    }
+
     /// Run the `invalidate_user_sessions` transaction, deleting every member's `rt:`/`sd:`
     /// key and the `sess:` SET in one atomic step.
     async fn revoke_all_inner(
@@ -404,6 +422,16 @@ impl SessionStore for RedisStores {
         } else {
             Err(AuthError::SessionNotFound)
         }
+    }
+
+    async fn delete_grace_pointer(
+        &self,
+        kind: SessionKind,
+        session_hash: &str,
+    ) -> Result<(), AuthError> {
+        self.delete_grace_pointer_inner(kind, session_hash)
+            .await
+            .map_err(AuthError::from)
     }
 
     async fn revoke_all(&self, kind: SessionKind, user_id: &str) -> Result<(), AuthError> {

@@ -57,3 +57,6 @@ pub use services::mfa::{LoginResultMfa, MfaService, MfaSetupResult};
 #[cfg(feature = "oauth")]
 #[doc(inline)]
 pub use services::oauth::OAuthOutcome;
+#[cfg(feature = "platform")]
+#[doc(inline)]
+pub use services::platform::PlatformAuthService;

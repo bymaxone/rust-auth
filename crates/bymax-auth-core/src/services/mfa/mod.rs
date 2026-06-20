@@ -79,13 +79,16 @@ impl std::fmt::Debug for MfaSetupResult {
     }
 }
 
-/// The result of a successful MFA *challenge*. Discriminated by the temp token's context; in
-/// this phase only the dashboard issuance path is wired (platform issuance lands with the
-/// platform identity domain).
+/// The result of a successful MFA *challenge*. Discriminated by the temp token's context: a
+/// dashboard challenge yields a dashboard session, a platform challenge yields a platform
+/// session — each with `mfa_verified = true`.
 #[derive(Clone, Debug)]
 pub enum LoginResultMfa {
     /// A full dashboard authentication (the second factor cleared, `mfa_verified = true`).
     Dashboard(AuthResult),
+    /// A full platform-admin authentication (the second factor cleared, `mfa_verified = true`).
+    #[cfg(feature = "platform")]
+    Platform(bymax_auth_types::PlatformAuthResult),
 }
 
 /// The AES-protected pending-setup record, held under `mfa_setup:{hmac(user_id)}` between

@@ -16,6 +16,8 @@ use bymax_auth_types::{
     AuthError, AuthResult, DashboardClaims, DashboardType, MfaContext, MfaTempClaims, MfaTempType,
     RotatedTokens, SafeAuthUser,
 };
+#[cfg(feature = "platform")]
+use bymax_auth_types::{PlatformAuthResult, PlatformClaims, PlatformType, SafeAuthPlatformUser};
 
 use crate::services::session::normalize_session_metadata;
 use crate::services::{internal_error, is_refresh_token_shape, new_uuid_v4, now_offset, now_unix};
@@ -276,6 +278,192 @@ impl TokenManagerService {
         }
     }
 
+    /// Sign a platform access JWT (HS256). The claims carry NO `tenant_id` (the platform
+    /// identity domain is never tenant-scoped) and a fresh `jti`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AuthError::Internal`] only if claim serialization fails (unreachable for the
+    /// crate's claim types).
+    #[cfg(feature = "platform")]
+    pub fn issue_platform_access(&self, claims: &PlatformClaims) -> Result<String, AuthError> {
+        sign(claims, &self.key).map_err(signing_failed)
+    }
+
+    /// Issue a fresh platform access JWT plus an opaque refresh token for `admin`, persisting
+    /// the refresh session in the **platform** keyspace ([`SessionKind::Platform`] →
+    /// `prt`/`prp`/`psess`/`psd`). The minted [`PlatformClaims`] carry no `tenant_id`.
+    /// `mfa_verified` flags whether this session cleared the second factor (always `false` at
+    /// first issuance; `true` only after a platform MFA challenge succeeds).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AuthError`] if signing fails or the store rejects the session write.
+    #[cfg(feature = "platform")]
+    pub async fn issue_platform_tokens(
+        &self,
+        admin: &SafeAuthPlatformUser,
+        ip: &str,
+        user_agent: &str,
+        mfa_verified: bool,
+    ) -> Result<PlatformAuthResult, AuthError> {
+        let refresh = RawRefreshToken::generate();
+        let now = now_unix();
+        let claims = PlatformClaims {
+            sub: admin.id.clone(),
+            jti: new_uuid_v4(),
+            role: admin.role.clone(),
+            token_type: PlatformType::Platform,
+            mfa_enabled: admin.mfa_enabled,
+            mfa_verified,
+            iat: now,
+            exp: now.saturating_add(self.access_ttl.as_secs().min(i64::MAX as u64) as i64),
+        };
+        let access_token = self.issue_platform_access(&claims)?;
+
+        // The platform session record carries NO tenant scope (a platform admin is never
+        // tenant-scoped). The device/IP are normalized at the persistence point, identically to
+        // the dashboard path, so the stored record and any management projection agree.
+        let (device, stored_ip) = normalize_session_metadata(user_agent, ip);
+        let record = SessionRecord {
+            user_id: admin.id.clone(),
+            tenant_id: None,
+            role: admin.role.clone(),
+            device,
+            ip: stored_ip,
+            created_at: now_offset(),
+        };
+        self.session_store
+            .create_session(
+                SessionKind::Platform,
+                &refresh.redis_hash(),
+                &record,
+                self.refresh_ttl_secs,
+            )
+            .await?;
+
+        Ok(PlatformAuthResult {
+            user: admin.clone(),
+            access_token,
+            refresh_token: refresh.expose_secret().to_owned(),
+        })
+    }
+
+    /// Atomically rotate a presented platform refresh token into a fresh pair, honoring the
+    /// grace window — the platform-keyspace analogue of [`Self::reissue_tokens`]. The rotation
+    /// runs against [`SessionKind::Platform`] and the reissued access claims carry no
+    /// `tenant_id`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AuthError::RefreshTokenInvalid`] when the token is neither live nor inside the
+    /// grace window, or a store/signing [`AuthError`] on failure.
+    #[cfg(feature = "platform")]
+    pub async fn reissue_platform_tokens(
+        &self,
+        raw_refresh: &str,
+        ip: &str,
+        user_agent: &str,
+    ) -> Result<RotatedTokens, AuthError> {
+        // Reject a malformed/oversized token before hashing it (it could never match a stored
+        // hash and this caps attacker-forced work), mirroring the dashboard rotation.
+        if !is_refresh_token_shape(raw_refresh) {
+            return Err(AuthError::RefreshTokenInvalid);
+        }
+        let old = RawRefreshToken::from_raw(raw_refresh.to_owned());
+        let old_hash = old.redis_hash();
+        let new = RawRefreshToken::generate();
+
+        let live = self
+            .session_store
+            .find_session(SessionKind::Platform, &old_hash)
+            .await?;
+        let seed = live.unwrap_or_else(|| placeholder_record(ip, user_agent));
+        let new_record = platform_identity_record(&seed, ip, user_agent);
+
+        let rotation = SessionRotation {
+            old_hash,
+            new_hash: new.redis_hash(),
+            new_raw: new.expose_secret().to_owned(),
+            new_record: new_record.clone(),
+            refresh_ttl: self.refresh_ttl_secs,
+            grace_ttl: self.grace_ttl_secs,
+        };
+
+        match self
+            .session_store
+            .rotate(SessionKind::Platform, &rotation)
+            .await?
+        {
+            RotateOutcome::Rotated(_old) => {
+                let access_token =
+                    self.issue_platform_access(&self.rotated_platform_claims(&new_record))?;
+                Ok(RotatedTokens {
+                    access_token,
+                    refresh_token: new.expose_secret().to_owned(),
+                })
+            }
+            RotateOutcome::Grace(recovered) => {
+                // Lost the rotation race: mint a fresh platform session for the recovered
+                // identity rather than re-planting a grace pointer.
+                let fresh = RawRefreshToken::generate();
+                let fresh_record = platform_identity_record(&recovered, ip, user_agent);
+                self.session_store
+                    .create_session(
+                        SessionKind::Platform,
+                        &fresh.redis_hash(),
+                        &fresh_record,
+                        self.refresh_ttl_secs,
+                    )
+                    .await?;
+                let access_token =
+                    self.issue_platform_access(&self.rotated_platform_claims(&fresh_record))?;
+                Ok(RotatedTokens {
+                    access_token,
+                    refresh_token: fresh.expose_secret().to_owned(),
+                })
+            }
+            RotateOutcome::Invalid => Err(AuthError::RefreshTokenInvalid),
+        }
+    }
+
+    /// Verify a platform access JWT (signature + algorithm + temporal, HS256-pinned) and reject
+    /// it if its `jti` is blacklisted. The single-variant [`PlatformType`] discriminator means a
+    /// dashboard token (whose `type` is `dashboard`) fails to deserialize here, so a dashboard
+    /// JWT can never pass a platform verification.
+    ///
+    /// # Errors
+    ///
+    /// Returns the internal-only [`AuthError::TokenExpired`]/[`AuthError::TokenRevoked`] or the
+    /// public [`AuthError::TokenInvalid`]; all collapse to `token_invalid` at the boundary.
+    #[cfg(feature = "platform")]
+    pub async fn verify_platform_access(&self, token: &str) -> Result<PlatformClaims, AuthError> {
+        let claims = verify::<PlatformClaims>(token, &self.key, &VerifyOptions::default())
+            .map_err(map_jwt_error)?;
+        if self.session_store.is_blacklisted(&claims.jti).await? {
+            return Err(AuthError::TokenRevoked);
+        }
+        Ok(claims)
+    }
+
+    /// Build the platform access claims for a rotated/recovered session. As with the dashboard
+    /// rotation, `mfa_verified` is dropped (re-acquired only via the MFA challenge); the claims
+    /// carry no `tenant_id`.
+    #[cfg(feature = "platform")]
+    fn rotated_platform_claims(&self, record: &SessionRecord) -> PlatformClaims {
+        let now = now_unix();
+        PlatformClaims {
+            sub: record.user_id.clone(),
+            jti: new_uuid_v4(),
+            role: record.role.clone(),
+            token_type: PlatformType::Platform,
+            mfa_enabled: false,
+            mfa_verified: false,
+            iat: now,
+            exp: now.saturating_add(self.access_ttl.as_secs().min(i64::MAX as u64) as i64),
+        }
+    }
+
     /// Verify a dashboard access JWT (signature + algorithm + temporal) and reject it if
     /// its `jti` is blacklisted.
     ///
@@ -493,6 +681,23 @@ fn identity_record(seed: &SessionRecord, ip: &str, user_agent: &str) -> SessionR
     }
 }
 
+/// Build a fresh platform refresh-session record for a rotation, carrying the seed identity and
+/// stamping the current device/IP/time. A platform record never carries a tenant scope, so
+/// `tenant_id` is forced to `None` regardless of the seed (defense in depth: even a seed that
+/// somehow held a tenant cannot leak one onto a platform session).
+#[cfg(feature = "platform")]
+fn platform_identity_record(seed: &SessionRecord, ip: &str, user_agent: &str) -> SessionRecord {
+    let (device, stored_ip) = normalize_session_metadata(user_agent, ip);
+    SessionRecord {
+        user_id: seed.user_id.clone(),
+        tenant_id: None,
+        role: seed.role.clone(),
+        device,
+        ip: stored_ip,
+        created_at: now_offset(),
+    }
+}
+
 /// A placeholder identity used only when the live old token is absent; the rotation never
 /// stores it (an absent live token can only yield Grace or Invalid), so its empty identity
 /// is never observed. The device/IP are still normalized for consistency with the records
@@ -682,6 +887,145 @@ mod tests {
         assert!(matches!(
             signing_failed(bymax_auth_jwt::JwtError::Decode),
             AuthError::Internal(_)
+        ));
+    }
+
+    #[cfg(feature = "platform")]
+    fn platform_admin() -> SafeAuthPlatformUser {
+        SafeAuthPlatformUser {
+            id: "p1".to_owned(),
+            email: "admin@example.com".to_owned(),
+            name: "Admin".to_owned(),
+            role: "SUPER_ADMIN".to_owned(),
+            status: "ACTIVE".to_owned(),
+            mfa_enabled: false,
+            platform_id: None,
+            last_login_at: None,
+            updated_at: OffsetDateTime::UNIX_EPOCH,
+            created_at: OffsetDateTime::UNIX_EPOCH,
+        }
+    }
+
+    #[cfg(feature = "platform")]
+    #[tokio::test]
+    async fn platform_issue_carries_no_tenant_and_round_trips() {
+        // Platform issuance mints an access JWT whose claims carry NO tenant_id, persists the
+        // refresh session in the PLATFORM keyspace, and the token verifies through the manager.
+        let store = Arc::new(InMemoryStores::new());
+        let svc = service(store.clone());
+        let issued = svc
+            .issue_platform_tokens(&platform_admin(), "10.0.0.1", "agent/1.0", false)
+            .await;
+        assert!(issued.is_ok());
+        let Ok(issued) = issued else { return };
+        let claims = svc.verify_platform_access(&issued.access_token).await;
+        assert!(matches!(&claims, Ok(c) if c.sub == "p1" && c.role == "SUPER_ADMIN"));
+        // The serialized claims must NOT carry a tenantId field at all.
+        let body = issued.access_token.split('.').nth(1).unwrap_or_default();
+        use base64::Engine as _;
+        let decoded = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .decode(body)
+            .unwrap_or_default();
+        let json = String::from_utf8(decoded).unwrap_or_default();
+        assert!(json.contains("\"type\":\"platform\""));
+        assert!(!json.contains("tenantId"));
+
+        // The refresh session landed in the PLATFORM keyspace, not the dashboard one.
+        let hash = RawRefreshToken::from_raw(issued.refresh_token.clone()).redis_hash();
+        assert!(matches!(
+            store.find_session(SessionKind::Platform, &hash).await,
+            Ok(Some(_))
+        ));
+        assert!(matches!(
+            store.find_session(SessionKind::Dashboard, &hash).await,
+            Ok(None)
+        ));
+    }
+
+    #[cfg(feature = "platform")]
+    #[tokio::test]
+    async fn a_dashboard_token_never_verifies_as_a_platform_token_and_vice_versa() {
+        // The single-variant discriminators isolate the two token families: a dashboard JWT
+        // fails platform verification, and a platform JWT fails dashboard verification.
+        let store = Arc::new(InMemoryStores::new());
+        let svc = service(store);
+        let issued_dash = svc
+            .issue_tokens(&user(), "10.0.0.1", "agent/1.0", false)
+            .await;
+        let Ok(dash) = issued_dash else { return };
+        assert!(matches!(
+            svc.verify_platform_access(&dash.access_token).await,
+            Err(AuthError::TokenInvalid)
+        ));
+        let issued_plat = svc
+            .issue_platform_tokens(&platform_admin(), "10.0.0.1", "agent/1.0", false)
+            .await;
+        let Ok(plat) = issued_plat else { return };
+        assert!(matches!(
+            svc.verify_access(&plat.access_token).await,
+            Err(AuthError::TokenInvalid)
+        ));
+    }
+
+    #[cfg(feature = "platform")]
+    #[tokio::test]
+    async fn platform_rotation_produces_a_new_pair_and_grace_absorbs_a_retry() {
+        // Platform rotation mirrors the dashboard one over the platform keyspace: the first
+        // rotation consumes the old token, a concurrent retry hits the grace window, and a
+        // never-issued / malformed token is rejected.
+        let store = Arc::new(InMemoryStores::new());
+        let svc = service(store);
+        let issued_res = svc
+            .issue_platform_tokens(&platform_admin(), "10.0.0.1", "agent/1.0", false)
+            .await;
+        let Ok(issued) = issued_res else { return };
+        let rotated = svc
+            .reissue_platform_tokens(&issued.refresh_token, "10.0.0.1", "agent/1.0")
+            .await;
+        assert!(matches!(&rotated, Ok(r) if r.refresh_token != issued.refresh_token));
+        let Ok(rotated) = rotated else { return };
+        // The rotated platform access token verifies and carries the platform role.
+        assert!(matches!(
+            svc.verify_platform_access(&rotated.access_token).await,
+            Ok(c) if c.role == "SUPER_ADMIN"
+        ));
+        // Replaying the original token lands in the grace window and still succeeds.
+        assert!(
+            svc.reissue_platform_tokens(&issued.refresh_token, "10.0.0.1", "agent/1.0")
+                .await
+                .is_ok()
+        );
+        // A never-issued (well-formed) token misses both lookups; a malformed one is rejected
+        // by the shape guard before any hashing.
+        assert!(matches!(
+            svc.reissue_platform_tokens(&"f".repeat(64), "10.0.0.1", "agent/1.0")
+                .await,
+            Err(AuthError::RefreshTokenInvalid)
+        ));
+        assert!(matches!(
+            svc.reissue_platform_tokens("too-short", "10.0.0.1", "agent/1.0")
+                .await,
+            Err(AuthError::RefreshTokenInvalid)
+        ));
+    }
+
+    #[cfg(feature = "platform")]
+    #[tokio::test]
+    async fn platform_blacklist_rejects_a_revoked_access_token() {
+        // Revoking a platform access jti makes verify_platform_access report the internal-only
+        // token_revoked, the same revocation path the dashboard token uses.
+        let store = Arc::new(InMemoryStores::new());
+        let svc = service(store);
+        let issued_res = svc
+            .issue_platform_tokens(&platform_admin(), "10.0.0.1", "agent/1.0", false)
+            .await;
+        let Ok(issued) = issued_res else { return };
+        let claims_res = svc.verify_platform_access(&issued.access_token).await;
+        let Ok(claims) = claims_res else { return };
+        assert!(svc.revoke_access(&claims.jti, 900).await.is_ok());
+        assert!(matches!(
+            svc.verify_platform_access(&issued.access_token).await,
+            Err(AuthError::TokenRevoked)
         ));
     }
 

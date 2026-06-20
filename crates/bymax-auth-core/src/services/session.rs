@@ -1064,6 +1064,13 @@ mod tests {
         ) -> Result<(), AuthError> {
             Err(AuthError::Internal("revoke backend down".into()))
         }
+        async fn delete_grace_pointer(
+            &self,
+            _kind: SessionKind,
+            _session_hash: &str,
+        ) -> Result<(), AuthError> {
+            Ok(())
+        }
         async fn revoke_all(&self, _kind: SessionKind, _user_id: &str) -> Result<(), AuthError> {
             Ok(())
         }
@@ -1120,6 +1127,12 @@ mod tests {
             store.find_session(SessionKind::Dashboard, "h").await,
             Ok(None)
         ));
+        assert!(
+            store
+                .delete_grace_pointer(SessionKind::Dashboard, "h")
+                .await
+                .is_ok()
+        );
         assert!(store.revoke_all(SessionKind::Dashboard, "u1").await.is_ok());
         assert!(store.blacklist_access("jti", 60).await.is_ok());
         assert!(matches!(store.is_blacklisted("jti").await, Ok(false)));

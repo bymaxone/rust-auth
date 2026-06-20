@@ -434,6 +434,17 @@ impl SessionStore for InMemoryStores {
         Ok(())
     }
 
+    async fn delete_grace_pointer(
+        &self,
+        kind: SessionKind,
+        session_hash: &str,
+    ) -> Result<(), AuthError> {
+        // The grace pointer is keyed by the OLD token's hash; deleting it (idempotently) blocks a
+        // post-logout grace-window recovery, mirroring the real store's `DEL rp:`/`prp:`.
+        lock(&self.grace).remove(&(kind, session_hash.to_owned()));
+        Ok(())
+    }
+
     async fn revoke_all(&self, kind: SessionKind, user_id: &str) -> Result<(), AuthError> {
         if let Some(details) = lock(&self.session_index).remove(&(kind, user_id.to_owned())) {
             let mut sessions = lock(&self.sessions);

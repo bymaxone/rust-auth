@@ -435,6 +435,39 @@ impl AuthEngineBuilder {
             sessions_enabled,
         });
 
+        // The platform-admin authentication service is constructed only when the platform domain
+        // is enabled AND a platform repository is wired. The collaborator-presence check above
+        // already rejected `enabled` without a repository, so the `Some(repo)` arm always fires
+        // for an enabled domain; matching on the pair keeps this total without an unreachable
+        // double. A build with the MFA surface lets the platform login issue a real challenge;
+        // without it, an MFA-enabled admin fails closed.
+        #[cfg(feature = "platform")]
+        let platform_auth = match (
+            config.config().platform.enabled,
+            platform_user_repository.clone(),
+        ) {
+            (true, Some(repo)) => {
+                #[cfg(feature = "mfa")]
+                let mfa_enabled_for_build = mfa.is_some();
+                #[cfg(not(feature = "mfa"))]
+                let mfa_enabled_for_build = false;
+                Some(crate::services::platform::PlatformAuthService::new(
+                    crate::services::platform::PlatformAuthDeps {
+                        repo,
+                        tokens: tokens.clone(),
+                        session_store: session_store.clone(),
+                        passwords: passwords.clone(),
+                        brute_force: brute_force.clone(),
+                        hooks: hooks.clone(),
+                        identifier_key: zeroize::Zeroizing::new(*config.hmac_key()),
+                        mfa_enabled_for_build,
+                        blocked_statuses: config.config().blocked_statuses.clone(),
+                    },
+                ))
+            }
+            _ => None,
+        };
+
         Ok(AuthEngine {
             config,
             user_repository,
@@ -458,6 +491,8 @@ impl AuthEngineBuilder {
             sessions,
             #[cfg(feature = "mfa")]
             mfa,
+            #[cfg(feature = "platform")]
+            platform_auth,
         })
     }
 }
