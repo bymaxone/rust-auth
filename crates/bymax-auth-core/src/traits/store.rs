@@ -472,6 +472,35 @@ pub trait MfaStore: Send + Sync {
     ) -> Result<bool, AuthError>;
 }
 
+/// Single-use OAuth `state` + PKCE storage backing the `os:` keyspace (§11.3, §12.4). On
+/// initiate the engine writes `os:{sha256(state)} = <payload>` with a short TTL (600 s); on
+/// callback it consumes the key atomically with `getdel`, so a captured `state` cannot be
+/// replayed. Only the `sha256` of the raw `state` is ever a key, and the payload (the tenant
+/// scope plus the PKCE `code_verifier`) is opaque to this trait — the engine owns its
+/// encoding so the verifier never leaves the server in cleartext.
+///
+/// # Errors
+///
+/// Returns [`AuthError`] on a store failure; a `take_state` of an absent / expired /
+/// already-consumed key is the non-error `Ok(None)`, not an error.
+#[cfg(feature = "oauth")]
+#[async_trait]
+pub trait OAuthStateStore: Send + Sync {
+    /// Store the opaque state payload under `os:{state_hash}` with a TTL. `state_hash` is the
+    /// hex `sha256` of the raw `state`; the raw `state` is never persisted.
+    async fn put_state(
+        &self,
+        state_hash: &str,
+        payload: &str,
+        ttl_secs: u64,
+    ) -> Result<(), AuthError>;
+
+    /// Atomically read-and-delete (`getdel`) the payload at `os:{state_hash}` — the single
+    /// step that both verifies the `state` and consumes it. `None` when the key is unknown,
+    /// expired, or already consumed (an invalid / forged / replayed `state`).
+    async fn take_state(&self, state_hash: &str) -> Result<Option<String>, AuthError>;
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

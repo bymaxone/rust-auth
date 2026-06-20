@@ -160,6 +160,11 @@ pub enum ConfigError {
     /// `controllers.oauth` is enabled but no `OAuthProvider` was registered.
     #[error("controllers.oauth is enabled but no OAuth provider was registered")]
     OAuthToggleWithoutProvider,
+    /// `controllers.oauth` is enabled but no `OAuthStateStore` was supplied, so the
+    /// single-use `state` + PKCE record could never be persisted or consumed.
+    #[cfg(feature = "oauth")]
+    #[error("controllers.oauth is enabled but no OAuthStateStore was supplied")]
+    OAuthStateStoreMissing,
     /// No `UserRepository` was supplied — it is mandatory.
     #[error("a UserRepository is required")]
     MissingUserRepository,

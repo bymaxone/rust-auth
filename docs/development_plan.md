@@ -18,8 +18,8 @@ This document is Layer 2 of the spec → roadmap → phase-tasks workflow. It de
 
 ## Progress
 
-- **Overall progress:** 🔄 8 / 13 phases done (62%)
-- **Active phase:** **P8** (OAuth — `HttpClient` trait + Google + PKCE/state + linking), unblocked since **P4** is ✅ Done
+- **Overall progress:** 🔄 9 / 13 phases done (69%)
+- **Active phase:** **P9** (Platform admin identity domain), unblocked since **P4** and **P7** are ✅ Done
 - **Blocked:** —
 
 ## Phase dashboard
@@ -34,7 +34,7 @@ This document is Layer 2 of the spec → roadmap → phase-tasks workflow. It de
 | P5 | `bymax-auth-redis` — stores + Lua + WS ticket (E2E Redis) | ✅ Done | 6/6 | M | 2026-06-19 |
 | P6 | Sessions, OTP, password reset, email verification, invitations | ✅ Done | 4/4 | L | 2026-06-19 |
 | P7 | MFA (TOTP) end-to-end | ✅ Done | 6/6 | L | 2026-06-19 |
-| P8 | OAuth — `HttpClient` trait + Google + PKCE/state + linking | 📋 ToDo | — | L | — |
+| P8 | OAuth — `HttpClient` trait + Google + PKCE/state + linking | ✅ Done | 8/8 | L | 2026-06-20 |
 | P9 | Platform admin identity domain | 📋 ToDo | — | M | — |
 | P10 | `bymax-auth-axum` — router, extractors, delivery, rate-limit, WS, validation (E2E) | 📋 ToDo | — | L | — |
 | P11 | `bymax-auth-wasm` + `@bymax-one/rust-auth` (npm) + Rust client | 📋 ToDo | — | L | — |

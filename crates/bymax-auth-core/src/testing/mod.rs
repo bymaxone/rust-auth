@@ -314,6 +314,9 @@ pub struct InMemoryStores {
     /// `tu:` — the TOTP anti-replay markers keyed by `hmac_sha256("{user_id}:{code}")`.
     #[cfg(feature = "mfa")]
     mfa_replay: Mutex<HashSet<String>>,
+    /// `os:` — the single-use OAuth `state` + PKCE payload keyed by `sha256(state)`.
+    #[cfg(feature = "oauth")]
+    oauth_state: Mutex<HashMap<String, String>>,
 }
 
 impl InMemoryStores {
@@ -688,6 +691,26 @@ impl crate::traits::MfaStore for InMemoryStores {
             replay.remove(replay_id);
             Ok(false)
         }
+    }
+}
+
+#[cfg(feature = "oauth")]
+#[async_trait]
+impl crate::traits::OAuthStateStore for InMemoryStores {
+    async fn put_state(
+        &self,
+        state_hash: &str,
+        payload: &str,
+        _ttl_secs: u64,
+    ) -> Result<(), AuthError> {
+        lock(&self.oauth_state).insert(state_hash.to_owned(), payload.to_owned());
+        Ok(())
+    }
+
+    async fn take_state(&self, state_hash: &str) -> Result<Option<String>, AuthError> {
+        // Reproduce `GETDEL`: read and remove in one critical section so a captured `state`
+        // can be consumed exactly once.
+        Ok(lock(&self.oauth_state).remove(state_hash))
     }
 }
 
@@ -1175,6 +1198,22 @@ mod tests {
         assert!(matches!(store.redeem(&ticket).await, Ok(Some(_))));
         // A second redeem of the same ticket finds nothing (single-use).
         assert!(matches!(store.redeem(&ticket).await, Ok(None)));
+    }
+
+    #[cfg(feature = "oauth")]
+    #[tokio::test]
+    async fn oauth_state_store_consumes_state_single_use() {
+        // The `os:` payload is stored under its state hash and consumed exactly once (getdel).
+        use crate::traits::OAuthStateStore;
+        let store = InMemoryStores::new();
+        assert!(store.put_state("statehash", "payload", 600).await.is_ok());
+        assert!(matches!(
+            store.take_state("statehash").await,
+            Ok(Some(p)) if p == "payload"
+        ));
+        // A second take finds nothing (single-use), as does an unknown hash.
+        assert!(matches!(store.take_state("statehash").await, Ok(None)));
+        assert!(matches!(store.take_state("absent").await, Ok(None)));
     }
 
     #[tokio::test]

@@ -21,6 +21,8 @@ pub mod auth;
 pub mod brute_force;
 #[cfg(feature = "mfa")]
 pub mod mfa;
+#[cfg(feature = "oauth")]
+pub mod oauth;
 pub mod otp;
 pub mod password;
 pub mod session;

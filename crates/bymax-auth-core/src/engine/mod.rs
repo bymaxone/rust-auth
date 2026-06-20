@@ -46,6 +46,9 @@ pub struct AuthEngine {
     invitation_store: Option<Arc<dyn InvitationStore>>,
     oauth_providers: HashMap<String, Arc<dyn OAuthProvider>>,
     http_client: Option<Arc<dyn HttpClient>>,
+    /// The single-use OAuth `state` + PKCE store, wired only when the OAuth flow is enabled.
+    #[cfg(feature = "oauth")]
+    oauth_state_store: Option<Arc<dyn crate::traits::OAuthStateStore>>,
     passwords: Arc<PasswordService>,
     tokens: Arc<TokenManagerService>,
     brute_force: Arc<BruteForceService>,
@@ -175,5 +178,12 @@ impl AuthEngine {
     #[must_use]
     pub fn http_client(&self) -> Option<&Arc<dyn HttpClient>> {
         self.http_client.as_ref()
+    }
+
+    /// The single-use OAuth `state` + PKCE store, present only when the OAuth flow is wired.
+    #[cfg(feature = "oauth")]
+    #[must_use]
+    pub fn oauth_state_store(&self) -> Option<&Arc<dyn crate::traits::OAuthStateStore>> {
+        self.oauth_state_store.as_ref()
     }
 }

@@ -54,8 +54,9 @@ reqwest = { version = "0.12", optional = true, default-features = false }
 
 [dev-dependencies]
 # Multi-threaded runtime + the assertion-friendly test macros for the async trait and
-# builder tests.
-tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "time"] }
+# builder tests. `net` + `io-util` back the local plain-HTTP one-shot listener that exercises
+# the bundled `ReqwestHttpClient` adapter to full coverage without a real network or TLS.
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "time", "net", "io-util"] }
 
 [features]
 # A bare dependency gets scrypt hashing plus the always-on engine — nothing else. There
