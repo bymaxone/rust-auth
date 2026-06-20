@@ -20,6 +20,12 @@
 //!   identity domain (login/MFA-challenge, me, logout, refresh, revoke-all), isolated from the
 //!   tenant domain with platform claims (no `tenantId`) and the platform session keyspaces.
 
+/// The thin public engine surface the HTTP adapter calls (token verification, role/status
+/// checks, WebSocket ticket mint/redeem). Each method delegates to an existing service.
+mod adapter_api;
+
+pub use adapter_api::WS_TICKET_TTL_SECONDS;
+
 pub mod auth;
 pub mod brute_force;
 #[cfg(feature = "mfa")]

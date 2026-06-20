@@ -32,6 +32,10 @@ allow = [
     "BSL-1.0",
     "Unicode-DFS-2016",
     "Unicode-3.0",
+    # zlib License — OSI-approved, FSF Free/Libre, strictly more permissive than MIT (no
+    # attribution requirement on binary distribution). Pulled by `foldhash` (a transitive
+    # dependency of `hashbrown` under the `governor` rate limiter).
+    "Zlib",
 ]
 confidence-threshold = 0.9
 
@@ -45,9 +49,22 @@ deny = [
     { crate = "openssl-sys", reason = "C OpenSSL bindings are banned — preserves the zero-native-binding posture." },
     { crate = "ring", reason = "ring breaks the wasm32 edge build and is non-RustCrypto; RustCrypto is the crypto policy (spec §19.6)." },
 ]
-# No duplicate-version exceptions are needed on the current graph.
+# Duplicate-version exceptions, all confined to the Axum adapter's mandated edge
+# dependencies and reviewed individually. The first-party RustCrypto stack stays on its
+# own `rand 0.8` / `getrandom 0.2` / `rand_core 0.6` line; the extra majors below are
+# pulled ONLY by the rate limiter (`tower_governor` → `governor`, plus its
+# `forwarded-header-value` → `thiserror 1`) and the WebSocket upgrade transport
+# (`axum`'s `ws` feature → `tokio-tungstenite` → `tungstenite`). None reaches the
+# wasm-targeted `types`/`crypto`/`jwt` crates, so the edge build is unaffected; they are
+# server-only and non-cryptographic on the auth hot path.
 skip = []
-skip-tree = []
+# The rate-limiter and WebSocket transport bring their own `rand`/`getrandom`/`hashbrown`
+# majors; skipping their subtrees keeps the duplicate count from those leaves out of the
+# gate without masking a duplicate anywhere on the first-party crypto path.
+skip-tree = [
+    { crate = "governor@0.10", reason = "GCRA rate limiter behind tower_governor; pulls rand 0.9 / getrandom 0.3 / dashmap+hashbrown 0.14, all server-only." },
+    { crate = "tungstenite@0.29", reason = "axum `ws` WebSocket transport; pulls rand 0.9 for the masking key, server-only and never on the crypto/edge path." },
+]
 
 [sources]
 # crates.io only — no git dependencies, no vendored or unknown registries.
