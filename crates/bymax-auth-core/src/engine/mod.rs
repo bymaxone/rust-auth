@@ -57,6 +57,10 @@ pub struct AuthEngine {
     /// The MFA lifecycle service, constructed only when `config.mfa` is present.
     #[cfg(feature = "mfa")]
     mfa: Option<crate::services::mfa::MfaService>,
+    /// The platform-admin authentication service, constructed only when
+    /// `config.platform.enabled`.
+    #[cfg(feature = "platform")]
+    platform_auth: Option<crate::services::platform::PlatformAuthService>,
 }
 
 impl AuthEngine {
@@ -99,6 +103,15 @@ impl AuthEngine {
     #[must_use]
     pub fn mfa(&self) -> Option<&crate::services::mfa::MfaService> {
         self.mfa.as_ref()
+    }
+
+    /// The platform-admin authentication service (login/MFA-challenge, me, logout, refresh,
+    /// revoke-all), present only when `config.platform.enabled`. Returns `None` when the
+    /// platform identity domain is not enabled for the deployment.
+    #[cfg(feature = "platform")]
+    #[must_use]
+    pub fn platform_auth(&self) -> Option<&crate::services::platform::PlatformAuthService> {
+        self.platform_auth.as_ref()
     }
 
     /// The password-reset proof store (`pr:`/`prv:` single-use tokens), present only when the

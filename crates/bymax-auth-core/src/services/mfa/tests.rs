@@ -658,6 +658,256 @@ async fn platform_context_routes_to_the_platform_repository() {
     assert!(matches!(after, Ok(Some(ref a)) if !a.mfa_enabled));
 }
 
+#[cfg(feature = "platform")]
+#[tokio::test]
+async fn platform_challenge_exchanges_a_temp_token_for_a_full_platform_session() {
+    // The login → MFA-challenge → full-token exchange for an MFA-enabled platform admin: enable
+    // MFA on the admin (platform context), mint a PLATFORM temp token, then run the challenge
+    // with a valid TOTP code and assert a full PLATFORM session is issued (mfa_verified, no
+    // tenant). A recovery code then completes a second challenge and is spent single-use.
+    let Some(h) = build(false, true) else { return };
+    let admin = AuthPlatformUser {
+        id: "p1".to_owned(),
+        email: "admin@example.com".to_owned(),
+        name: "Admin".to_owned(),
+        password_hash: "$scrypt$x".to_owned(),
+        role: "SUPER_ADMIN".to_owned(),
+        status: "ACTIVE".to_owned(),
+        mfa_enabled: false,
+        mfa_secret: None,
+        mfa_recovery_codes: None,
+        platform_id: None,
+        last_login_at: None,
+        updated_at: OffsetDateTime::UNIX_EPOCH,
+        created_at: OffsetDateTime::UNIX_EPOCH,
+    };
+    h.platform.insert(admin);
+    let Some(mfa) = h.engine.mfa() else { return };
+
+    // Enable MFA on the platform admin so a challenge has a secret to verify against.
+    let base = now_secs();
+    let Ok(setup) = mfa.setup("p1", MfaContext::Platform).await else {
+        return;
+    };
+    let enable_code = code_at(&setup.secret, base);
+    assert!(
+        mfa.verify_and_enable("p1", &enable_code, "1.2.3.4", "ua", MfaContext::Platform)
+            .await
+            .is_ok()
+    );
+
+    // Mint a PLATFORM temp token (what the platform login plants for an MFA-enabled admin) and
+    // exchange it for a full session with a fresh TOTP code from a later step (distinct from the
+    // enable code so the anti-replay marker does not reject it).
+    let Ok(temp) = h
+        .engine
+        .tokens()
+        .issue_mfa_temp_token("p1", MfaContext::Platform)
+        .await
+    else {
+        return;
+    };
+    let challenge_code = code_at(&setup.secret, base + 30);
+    let exchanged = mfa.challenge(&temp, &challenge_code, "1.2.3.4", "ua").await;
+    assert!(matches!(&exchanged, Ok(LoginResultMfa::Platform(_))));
+    let Ok(LoginResultMfa::Platform(result)) = exchanged else {
+        return;
+    };
+    assert_eq!(result.user.email, "admin@example.com");
+    // The issued access token verifies as a PLATFORM token carrying mfa_verified, and the
+    // serialized claims carry no tenantId.
+    let claims = h
+        .engine
+        .tokens()
+        .verify_platform_access(&result.access_token)
+        .await;
+    assert!(matches!(&claims, Ok(c) if c.mfa_verified && c.role == "SUPER_ADMIN"));
+    let body = result.access_token.split('.').nth(1).unwrap_or_default();
+    let decoded = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(body)
+        .unwrap_or_default();
+    assert!(
+        !String::from_utf8(decoded)
+            .unwrap_or_default()
+            .contains("tenantId")
+    );
+
+    // A recovery code completes a SECOND challenge (fresh temp token) and is then spent: a
+    // replay of the same recovery code fails.
+    let recovery = setup.recovery_codes[0].clone();
+    let Ok(temp2) = h
+        .engine
+        .tokens()
+        .issue_mfa_temp_token("p1", MfaContext::Platform)
+        .await
+    else {
+        return;
+    };
+    assert!(matches!(
+        mfa.challenge(&temp2, &recovery, "1.2.3.4", "ua").await,
+        Ok(LoginResultMfa::Platform(_))
+    ));
+    let Ok(temp3) = h
+        .engine
+        .tokens()
+        .issue_mfa_temp_token("p1", MfaContext::Platform)
+        .await
+    else {
+        return;
+    };
+    assert!(matches!(
+        mfa.challenge(&temp3, &recovery, "1.2.3.4", "ua").await,
+        Err(AuthError::MfaInvalidCode)
+    ));
+}
+
+#[cfg(feature = "platform")]
+#[tokio::test]
+async fn platform_challenge_rejects_a_wrong_code_and_keeps_the_temp_token_alive() {
+    // A wrong TOTP code on a platform challenge is the retryable MfaInvalidCode (the temp token
+    // stays alive within its TTL); a correct code on the retry then succeeds.
+    let Some(h) = build(false, true) else { return };
+    h.platform.insert(AuthPlatformUser {
+        id: "p2".to_owned(),
+        email: "retry@example.com".to_owned(),
+        name: "Admin".to_owned(),
+        password_hash: "$scrypt$x".to_owned(),
+        role: "SUPER_ADMIN".to_owned(),
+        status: "ACTIVE".to_owned(),
+        mfa_enabled: false,
+        mfa_secret: None,
+        mfa_recovery_codes: None,
+        platform_id: None,
+        last_login_at: None,
+        updated_at: OffsetDateTime::UNIX_EPOCH,
+        created_at: OffsetDateTime::UNIX_EPOCH,
+    });
+    let Some(mfa) = h.engine.mfa() else { return };
+    let base = now_secs();
+    let Ok(setup) = mfa.setup("p2", MfaContext::Platform).await else {
+        return;
+    };
+    assert!(
+        mfa.verify_and_enable(
+            "p2",
+            &code_at(&setup.secret, base),
+            "1.2.3.4",
+            "ua",
+            MfaContext::Platform
+        )
+        .await
+        .is_ok()
+    );
+    let Ok(temp) = h
+        .engine
+        .tokens()
+        .issue_mfa_temp_token("p2", MfaContext::Platform)
+        .await
+    else {
+        return;
+    };
+    // A wrong code is rejected but leaves the temp token alive.
+    assert!(matches!(
+        mfa.challenge(&temp, &wrong_totp(&setup.secret), "1.2.3.4", "ua")
+            .await,
+        Err(AuthError::MfaInvalidCode)
+    ));
+    // The same temp token then succeeds with a valid code from a later step.
+    let good = code_at(&setup.secret, base + 60);
+    assert!(matches!(
+        mfa.challenge(&temp, &good, "1.2.3.4", "ua").await,
+        Ok(LoginResultMfa::Platform(_))
+    ));
+}
+
+#[cfg(feature = "platform")]
+#[tokio::test]
+async fn platform_challenge_rejects_an_admin_without_enabled_mfa_or_a_secret() {
+    // A platform temp token minted for an admin that is NOT MFA-enabled (or has no secret) is
+    // rejected as MfaNotEnabled — the challenge never issues a session for an account that has
+    // not configured the second factor.
+    let Some(h) = build(false, true) else { return };
+    h.platform.insert(AuthPlatformUser {
+        id: "p-no".to_owned(),
+        email: "noenroll@example.com".to_owned(),
+        name: "Admin".to_owned(),
+        password_hash: "$scrypt$x".to_owned(),
+        role: "SUPER_ADMIN".to_owned(),
+        status: "ACTIVE".to_owned(),
+        // MFA not enabled and no secret stored.
+        mfa_enabled: false,
+        mfa_secret: None,
+        mfa_recovery_codes: None,
+        platform_id: None,
+        last_login_at: None,
+        updated_at: OffsetDateTime::UNIX_EPOCH,
+        created_at: OffsetDateTime::UNIX_EPOCH,
+    });
+    let Some(mfa) = h.engine.mfa() else { return };
+    let Ok(temp) = h
+        .engine
+        .tokens()
+        .issue_mfa_temp_token("p-no", MfaContext::Platform)
+        .await
+    else {
+        return;
+    };
+    assert!(matches!(
+        mfa.challenge(&temp, "123456", "1.2.3.4", "ua").await,
+        Err(AuthError::MfaNotEnabled)
+    ));
+    // A missing admin entirely is also MfaNotEnabled.
+    let Ok(ghost_temp) = h
+        .engine
+        .tokens()
+        .issue_mfa_temp_token("ghost", MfaContext::Platform)
+        .await
+    else {
+        return;
+    };
+    assert!(matches!(
+        mfa.challenge(&ghost_temp, "123456", "1.2.3.4", "ua").await,
+        Err(AuthError::MfaNotEnabled)
+    ));
+}
+
+#[cfg(feature = "platform")]
+#[tokio::test]
+async fn platform_challenge_with_an_undecryptable_secret_is_an_opaque_failure() {
+    // An admin marked MFA-enabled but whose stored secret will not decrypt (corrupt/foreign
+    // ciphertext) yields the opaque TokenInvalid — no decrypt oracle leaks the failure mode.
+    let Some(h) = build(false, true) else { return };
+    h.platform.insert(AuthPlatformUser {
+        id: "p-corrupt".to_owned(),
+        email: "corrupt@example.com".to_owned(),
+        name: "Admin".to_owned(),
+        password_hash: "$scrypt$x".to_owned(),
+        role: "SUPER_ADMIN".to_owned(),
+        status: "ACTIVE".to_owned(),
+        mfa_enabled: true,
+        // A non-decryptable wire string (not produced by this engine's AES key).
+        mfa_secret: Some("not-a-valid-aes-wire-string".to_owned()),
+        mfa_recovery_codes: None,
+        platform_id: None,
+        last_login_at: None,
+        updated_at: OffsetDateTime::UNIX_EPOCH,
+        created_at: OffsetDateTime::UNIX_EPOCH,
+    });
+    let Some(mfa) = h.engine.mfa() else { return };
+    let Ok(temp) = h
+        .engine
+        .tokens()
+        .issue_mfa_temp_token("p-corrupt", MfaContext::Platform)
+        .await
+    else {
+        return;
+    };
+    assert!(matches!(
+        mfa.challenge(&temp, "123456", "1.2.3.4", "ua").await,
+        Err(AuthError::TokenInvalid)
+    ));
+}
+
 // ---- Scripted-store branches: the TOCTOU race and corrupt-record paths of `setup` ----
 
 /// An `MfaStore` whose `get_setup` returns a scripted sequence and whose `put_setup_nx`
