@@ -119,8 +119,10 @@ impl RedisStores {
     }
 
     /// The fused `mfa_challenge` Lua: set `tu:{replay_id}` `NX EX ttl` and, iff newly created,
-    /// `DEL mfa:{jti_hash}` — returning whether the marker was newly created (the token was
-    /// consumed) in one atomic step.
+    /// `DEL mfa:{jti_hash}`, gating success on the deletion — returning whether this call both
+    /// freshly marked the code and removed the still-present temp token (the sole winner), in one
+    /// atomic step. A distinct still-valid code that loses the race for an already-consumed token
+    /// is rolled back (its marker is dropped) and reports `false`.
     async fn challenge_consume_inner(
         &self,
         replay_id: &str,

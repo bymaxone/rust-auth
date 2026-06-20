@@ -454,12 +454,16 @@ pub trait MfaStore: Send + Sync {
     /// `regenerate_recovery_codes`, which have no temp token to consume.
     async fn mark_totp_used(&self, replay_id: &str, ttl: u64) -> Result<bool, AuthError>;
 
-    /// The **fused** challenge step (§7.5.6): set `tu:{replay_id}` `NX EX ttl` and, *iff* the
+    /// The **fused** challenge step (§7.5.6): set `tu:{replay_id}` `NX EX ttl` and, *iff* that
     /// marker was newly created, delete the temp token `mfa:{jti_hash}` — in one atomic Lua
-    /// script. Returns `true` when the marker was newly created (the token was consumed) and
-    /// `false` on a replay (the token is untouched). This makes "mark the code used" and
-    /// "consume the temp token" inseparable, so a replayed code can never consume a second
-    /// token and a token can never be consumed without burning its code.
+    /// script. The temp-token deletion is the single-consume gate: returns `true` only when this
+    /// call **both** freshly marked the code **and** removed a still-present temp token (the sole
+    /// winner). It returns `false` on a replayed code (the marker already existed) **and** when a
+    /// distinct still-valid code loses the race for an already-consumed token — in that case the
+    /// just-set marker is rolled back so the unused code is not burned. This makes "mark the code
+    /// used" and "consume the temp token" inseparable, so neither a replayed code nor two
+    /// distinct still-valid codes (different `replay_id`s) sharing one temp token can ever issue
+    /// more than one session.
     async fn challenge_consume(
         &self,
         replay_id: &str,

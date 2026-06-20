@@ -39,9 +39,9 @@ use crate::traits::{
 
 /// The TTL of the AES-protected pending-setup record, in seconds (§7.5).
 const MFA_SETUP_TTL_SECONDS: u64 = 600;
-/// The TTL of a TOTP anti-replay marker, in seconds: covers the full ±1-period acceptance
-/// span ((2·window+1)·30 = 90 s) plus buffer (§7.5).
-const TOTP_ANTI_REPLAY_TTL_SECONDS: u64 = 90;
+/// The TOTP time step in seconds (RFC 6238 default), mirrored from the crypto layer to derive
+/// the anti-replay marker TTL from the acceptance window.
+const TOTP_STEP_SECONDS: u64 = 30;
 /// The number of random bytes behind one recovery code (96 bits of entropy, §7.5).
 const RECOVERY_CODE_BYTES: usize = 12;
 /// The number of random bytes behind a TOTP secret (160 bits, RFC 6238 / §7.5.1).
@@ -200,6 +200,19 @@ impl MfaService {
         ))
     }
 
+    /// The TTL (seconds) of a TOTP anti-replay marker, derived from the configured acceptance
+    /// window so the marker always outlives the maximum span over which the *same* code stays
+    /// acceptable. `verify` accepts a code at any server step in `[s-window, s+window]`, so the
+    /// same code is first accepted as early as step `s-window` and last accepted through the end
+    /// of step `s+window`; that span lasts `(2·window+1)` full steps, i.e.
+    /// `(2·window+1)·STEP` seconds. Using exactly that value guarantees the marker cannot expire
+    /// while the code it protects is still accepted (which would re-open the replay window). A
+    /// fixed literal would be wrong whenever `totp_window` is configured larger.
+    fn anti_replay_ttl_seconds(&self) -> u64 {
+        let window = u64::from(self.totp_window);
+        (2 * window + 1) * TOTP_STEP_SECONDS
+    }
+
     /// The hashed brute-force identifier for the pre-auth challenge counter
     /// (`hmac_sha256("challenge:{user_id}")`, hex), isolated from the `disable:` namespace.
     fn challenge_bf_id(&self, user_id: &str) -> String {
@@ -246,9 +259,10 @@ impl MfaService {
     }
 
     /// Verify a 6-digit TOTP `code` against `secret` and, on success, atomically mark it used
-    /// (the standalone `tu:` marker, `NX EX 90`). A code that verifies but was already seen
-    /// returns `Ok(false)` — the replay is rejected. Used by the enable / disable / regenerate
-    /// paths, which carry no temp token to consume (§7.5.6).
+    /// (the standalone `tu:` marker, `NX EX` with the window-derived TTL from
+    /// [`Self::anti_replay_ttl_seconds`]). A code that verifies but was already seen returns
+    /// `Ok(false)` — the replay is rejected. Used by the enable / disable / regenerate paths,
+    /// which carry no temp token to consume (§7.5.6).
     ///
     /// # Errors
     ///
@@ -265,7 +279,10 @@ impl MfaService {
         // The code is valid; mark it used. `mark_totp_used` returns whether the marker was
         // newly created — `false` means the code was already seen, i.e. a replay.
         self.mfa_store
-            .mark_totp_used(&self.replay_id(user_id, code), TOTP_ANTI_REPLAY_TTL_SECONDS)
+            .mark_totp_used(
+                &self.replay_id(user_id, code),
+                self.anti_replay_ttl_seconds(),
+            )
             .await
     }
 

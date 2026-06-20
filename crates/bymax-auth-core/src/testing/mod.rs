@@ -671,13 +671,23 @@ impl crate::traits::MfaStore for InMemoryStores {
         _ttl: u64,
     ) -> Result<bool, AuthError> {
         // Fuse the marker-set and the temp-token consume under one lock pair so the two are
-        // inseparable, mirroring the atomic Lua: mark the code used, and only if it was newly
-        // marked, consume the temp token.
-        let newly_marked = lock(&self.mfa_replay).insert(replay_id.to_owned());
-        if newly_marked {
-            lock(&self.mfa_temp).remove(jti_hash);
+        // inseparable, mirroring the atomic Lua. The temp-token removal is the single-consume
+        // gate: success requires BOTH that this code was freshly marked AND that the temp token
+        // was still present to remove.
+        let mut replay = lock(&self.mfa_replay);
+        if !replay.insert(replay_id.to_owned()) {
+            // The code was already used: a replay. Leave both maps untouched.
+            return Ok(false);
         }
-        Ok(newly_marked)
+        // A distinct still-valid code that lost the race for an already-consumed temp token must
+        // not be burned: only confirm success when the temp-token marker actually went away, and
+        // otherwise roll back the marker we just inserted.
+        if lock(&self.mfa_temp).remove(jti_hash).is_some() {
+            Ok(true)
+        } else {
+            replay.remove(replay_id);
+            Ok(false)
+        }
     }
 }
 

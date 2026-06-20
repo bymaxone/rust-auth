@@ -262,3 +262,84 @@ async fn concurrent_correct_totp_yields_one_session() {
         "exactly one concurrent challenge may issue a session"
     );
 }
+
+#[tokio::test]
+async fn concurrent_distinct_valid_codes_yield_one_session() {
+    // The replay attack the same-code test cannot catch, against REAL Redis: one temp token,
+    // two concurrent challenges with DIFFERENT still-valid codes (steps s+1 and s+2, both inside
+    // the ±2 window). Each distinct code has a distinct `tu:` marker, so each wins its own
+    // `SET NX`; only the fused temp-token deletion gate may admit one. Exactly one session is
+    // issued, the loser is rejected, and the single temp token is consumed exactly once.
+    let Some(redis) = try_start().await else { return };
+    let Some(stores) = redis.stores("mfaconc3") else { return };
+    let Some((engine, _users)) = build_engine(Arc::new(stores)) else { return };
+    let Some(uid) = register(&engine, "twocode@example.com").await else { return };
+
+    let secret;
+    {
+        let Some(mfa) = engine.mfa() else { return };
+        let Ok(setup) = mfa.setup(&uid, MfaContext::Dashboard).await else { return };
+        if mfa
+            .verify_and_enable(
+                &uid,
+                &code(&setup.secret, 0),
+                "1.2.3.4",
+                "ua",
+                MfaContext::Dashboard,
+            )
+            .await
+            .is_err()
+        {
+            return;
+        }
+        secret = setup.secret;
+    }
+
+    let Some(temp) = login_temp_token(&engine, "twocode@example.com").await else { return };
+    // Two distinct in-window codes off one captured base, so they never collide as the clock
+    // advances; both are valid under the ±2 verifier window but differ in value.
+    let base = now_secs();
+    let code_a = code_at(&secret, base + 30);
+    let code_b = code_at(&secret, base + 60);
+    assert_ne!(
+        code_a, code_b,
+        "the two codes must differ to exercise the attack"
+    );
+    let engine = Arc::new(engine);
+
+    let mut handles = Vec::new();
+    for submitted in [code_a, code_b] {
+        let engine = engine.clone();
+        let temp = temp.clone();
+        handles.push(tokio::spawn(async move {
+            match engine.mfa() {
+                Some(mfa) => matches!(
+                    mfa.challenge(&temp, &submitted, "1.2.3.4", "ua").await,
+                    Ok(LoginResultMfa::Dashboard(_))
+                ),
+                None => false,
+            }
+        }));
+    }
+    let mut sessions = 0;
+    for handle in handles {
+        if let Ok(true) = handle.await {
+            sessions += 1;
+        }
+    }
+    assert_eq!(
+        sessions, 1,
+        "exactly one distinct-code challenge may issue a session against real Redis"
+    );
+
+    // The single temp token was consumed exactly once: a fresh challenge on the same token now
+    // fails the temp-token check outright, proving one and only one consumption occurred.
+    let Some(mfa) = engine.mfa() else { return };
+    let replay = mfa
+        .challenge(&temp, &code_at(&secret, base + 90), "1.2.3.4", "ua")
+        .await;
+    assert!(
+        replay.is_err(),
+        "the temp token was already consumed exactly once"
+    );
+}

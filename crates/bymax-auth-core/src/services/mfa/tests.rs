@@ -1056,6 +1056,126 @@ async fn detached_notifications_invoke_their_targets() {
 }
 
 #[test]
+fn anti_replay_ttl_is_derived_from_the_window_and_scales() {
+    // The marker must outlive the maximum span over which the same code stays acceptable:
+    // a code is accepted at any step in [s-window, s+window], so the span is (2·window+1)
+    // full 30 s steps. For the test/config window of 2 that is (2·2+1)·30 = 150 s — at least
+    // the longest time a code can be replayed — and a fixed 90 s literal would expire early.
+    let users = Arc::new(InMemoryUserRepository::new());
+    let store: Arc<dyn MfaStore> = Arc::new(ScriptedMfaStore {
+        get_setup: Mutex::new(VecDeque::new()),
+        put_nx: true,
+    });
+    let mut service = service_over(store.clone(), users.clone());
+
+    // `service_over` builds with totp_window = 2: the derived TTL is exactly the max
+    // code-acceptance window, never the old fixed 90 s.
+    let max_window_secs_w2 = (2 * 2 + 1) * 30;
+    assert_eq!(service.anti_replay_ttl_seconds(), max_window_secs_w2);
+    assert!(service.anti_replay_ttl_seconds() >= max_window_secs_w2);
+
+    // It scales with the window: a wider window yields a strictly longer TTL, and a zero
+    // window collapses to a single step (the code is accepted at exactly one step).
+    service.totp_window = 4;
+    assert_eq!(service.anti_replay_ttl_seconds(), (2 * 4 + 1) * 30);
+    assert!(service.anti_replay_ttl_seconds() > max_window_secs_w2);
+    service.totp_window = 0;
+    assert_eq!(service.anti_replay_ttl_seconds(), 30);
+}
+
+#[tokio::test]
+async fn concurrent_distinct_valid_codes_issue_one_session() {
+    // The real anti-replay attack the same-code test cannot catch: two concurrent challenges on
+    // ONE temp token with DIFFERENT still-valid codes (steps s+1 and s+2, both inside the ±2
+    // window) have DISTINCT `tu:` markers, so each wins its own `SET NX`. Only the temp-token
+    // deletion gate may admit one — exactly one session is issued, the loser is rejected (with a
+    // typed `Mfa*` error), and the single temp token is consumed exactly once. The loser's error
+    // is either `MfaInvalidCode` (it lost the fused gate after reading a still-present token) or
+    // `MfaTempTokenInvalid` (the winner had already deleted the token before its temp-token
+    // check) — both are correct second-factor rejections; what matters is that no SECOND session
+    // is ever issued.
+    let Some(h) = build(false, false) else { return };
+    let Some(uid) = register(&h.engine, "twocode@example.com").await else {
+        return;
+    };
+    let secret;
+    {
+        let Some(mfa) = h.engine.mfa() else { return };
+        let Ok(setup) = mfa.setup(&uid, MfaContext::Dashboard).await else {
+            return;
+        };
+        if mfa
+            .verify_and_enable(
+                &uid,
+                &code(&setup.secret, 0),
+                "1.2.3.4",
+                "ua",
+                MfaContext::Dashboard,
+            )
+            .await
+            .is_err()
+        {
+            return;
+        }
+        secret = setup.secret;
+    }
+
+    let Some(temp) = login_temp_token(&h.engine, "twocode@example.com").await else {
+        return;
+    };
+    // Two distinct in-window codes off one captured base, so they never collide as the clock
+    // advances. Steps s+1 and s+2 are both within the ±2 verifier window and differ in value.
+    let base = now_secs();
+    let code_a = code_at(&secret, base + 30);
+    let code_b = code_at(&secret, base + 60);
+    assert_ne!(
+        code_a, code_b,
+        "the two codes must be distinct to exercise the attack"
+    );
+    let engine = Arc::new(h.engine);
+
+    let mut handles = Vec::new();
+    for submitted in [code_a, code_b] {
+        let engine = engine.clone();
+        let temp = temp.clone();
+        handles.push(tokio::spawn(async move {
+            match engine.mfa() {
+                Some(mfa) => mfa.challenge(&temp, &submitted, "1.2.3.4", "ua").await,
+                None => Err(AuthError::MfaNotEnabled),
+            }
+        }));
+    }
+    let mut sessions = 0;
+    let mut rejected = 0;
+    for handle in handles {
+        match handle.await {
+            Ok(Ok(LoginResultMfa::Dashboard(_))) => sessions += 1,
+            // Either typed rejection is a correct second-factor failure; neither issues a session.
+            Ok(Err(AuthError::MfaInvalidCode | AuthError::MfaTempTokenInvalid)) => rejected += 1,
+            _ => {}
+        }
+    }
+    assert_eq!(
+        sessions, 1,
+        "exactly one distinct-code challenge may issue a session"
+    );
+    assert_eq!(
+        rejected, 1,
+        "the loser is rejected with a typed Mfa* error, never a second session"
+    );
+
+    // The single temp token was consumed exactly once: a fresh challenge on the SAME temp token
+    // now fails the temp-token check outright (regardless of the code), proving one consumption.
+    let Some(mfa) = engine.mfa() else { return };
+    let leftover = code_at(&secret, base + 90);
+    let replay = mfa.challenge(&temp, &leftover, "1.2.3.4", "ua").await;
+    assert!(
+        replay.is_err(),
+        "the temp token was already consumed exactly once"
+    );
+}
+
+#[test]
 fn setup_result_debug_redacts_the_secret_and_codes() {
     // A `{:?}` of the one-time result must never leak the secret, the secret-bearing QR URI, or
     // the plaintext recovery codes.

@@ -135,6 +135,42 @@ async fn fused_challenge_consumes_the_temp_token_exactly_once() {
 }
 
 #[tokio::test]
+async fn fused_challenge_gates_distinct_codes_on_the_temp_token() {
+    let Some(redis) = try_start().await else { return };
+    let Some(stores) = redis.stores("mfagate") else { return };
+
+    // One temp token, two DIFFERENT still-valid codes (distinct `tu:` markers): each `SET NX`
+    // succeeds, but the temp-token deletion is the single-consume gate. The first call wins and
+    // consumes the token; the second freshly marks its own code yet finds the token gone, so it
+    // rolls that marker back and reports failure.
+    assert!(stores.put_temp("jti-g", "user-g", 300).await.is_ok());
+    assert!(matches!(
+        stores.challenge_consume("replay-g1", "jti-g", 90).await,
+        Ok(true)
+    ));
+    assert!(matches!(stores.get_temp("jti-g").await, Ok(None)));
+    assert!(matches!(
+        stores.challenge_consume("replay-g2", "jti-g", 90).await,
+        Ok(false)
+    ));
+    // The loser's still-unused code was NOT burned: its marker was rolled back, so once a fresh
+    // temp token exists the same `replay-g2` code can legitimately win.
+    assert!(stores.put_temp("jti-g", "user-g", 300).await.is_ok());
+    assert!(matches!(
+        stores.challenge_consume("replay-g2", "jti-g", 90).await,
+        Ok(true)
+    ));
+    // A genuine replay of an already-burned code stays rejected even with a live token.
+    assert!(stores.put_temp("jti-g", "user-g", 300).await.is_ok());
+    assert!(matches!(
+        stores.challenge_consume("replay-g1", "jti-g", 90).await,
+        Ok(false)
+    ));
+    // That rejection rolled nothing forward: the token it could not consume is still present.
+    assert!(matches!(stores.get_temp("jti-g").await, Ok(Some(_))));
+}
+
+#[tokio::test]
 async fn fused_challenge_admits_one_winner_under_concurrency() {
     let Some(redis) = try_start().await else { return };
     let Some(stores) = redis.stores("mfaconc") else { return };

@@ -136,13 +136,15 @@ impl MfaService {
         ) {
             return Ok(false);
         }
-        // The fused step: mark `tu:{replay}` `NX` and, iff newly marked, `DEL mfa:{jti_hash}`.
-        // A losing concurrent submission of the same correct code sees the marker already
-        // present and is rejected, so exactly one session is issued.
+        // The fused step: mark `tu:{replay}` `NX` and, iff newly marked, `DEL mfa:{jti_hash}`,
+        // gating success on the deletion. A losing concurrent submission — whether the same code
+        // (same marker already present) or a different still-valid code (its marker is fresh but
+        // the temp token is already gone) — is rejected, so exactly one session is issued. The
+        // anti-replay TTL is derived from the configured window so the marker outlives the code.
         let replay = self.replay_id(user_id, code);
         let jti_marker = to_hex(&bymax_auth_crypto::mac::sha256(jti.as_bytes()));
         self.mfa_store
-            .challenge_consume(&replay, &jti_marker, super::TOTP_ANTI_REPLAY_TTL_SECONDS)
+            .challenge_consume(&replay, &jti_marker, self.anti_replay_ttl_seconds())
             .await
     }
 
