@@ -15,10 +15,12 @@ use http::StatusCode;
 use tower_cookies::Cookies;
 
 use crate::delivery::{TokenDelivery, user_body};
-use crate::dto::{LoginDto, RefreshDto, RegisterDto, ResendVerificationDto, VerifyEmailDto};
+use crate::dto::{LoginDto, RegisterDto, ResendVerificationDto, VerifyEmailDto};
 use crate::extractors::AuthUser;
-use crate::response::{AuthRejection, error_response};
-use crate::routes::{PresentedAccessToken, RequestMeta, source_refresh_token};
+use crate::response::error_response;
+use crate::routes::{
+    PresentedAccessToken, RequestMeta, parse_optional_refresh_body, source_refresh_token,
+};
 use crate::state::{AuthState, AxumAuthConfig, ClientIpSource};
 use crate::validation::ValidatedJson;
 
@@ -127,10 +129,9 @@ async fn refresh(
 ) -> Response {
     // The refresh body is optional (cookie mode sends none). Parse it leniently: an empty
     // body yields no body-supplied token, a present body must be a valid `RefreshDto`.
-    let parsed = parse_optional_refresh_body(&body);
-    let dto = match parsed {
+    let dto = match parse_optional_refresh_body(&body) {
         Ok(dto) => dto,
-        Err(error) => return error_response(&error.0),
+        Err(error) => return error_response(&error),
     };
     let body_refresh = dto.refresh_token.as_deref();
     let refresh =
@@ -143,23 +144,6 @@ async fn refresh(
         Ok(tokens) => deliver_refresh(&state, &cookies, &tokens),
         Err(error) => error_response(&error),
     }
-}
-
-/// Parse an optional refresh body: an empty body is a default (no body token); a present
-/// body is validated as a [`RefreshDto`] (unknown fields rejected). Used by `refresh` so a
-/// cookie-mode request with no body and a bearer-mode request with a JSON body both work.
-fn parse_optional_refresh_body(bytes: &[u8]) -> Result<RefreshDto, AuthRejection> {
-    if bytes.is_empty() {
-        return Ok(RefreshDto::default());
-    }
-    serde_json::from_slice::<RefreshDto>(bytes).map_err(|error| {
-        AuthRejection(bymax_auth_types::AuthError::Validation {
-            details: vec![bymax_auth_types::FieldError {
-                field: "body".to_owned(),
-                message: error.to_string(),
-            }],
-        })
-    })
 }
 
 /// `GET /auth/me` (200). Requires [`AuthUser`]. Returns the credential-free user.

@@ -28,16 +28,34 @@ use std::net::SocketAddr;
 
 use axum::extract::{ConnectInfo, FromRef, FromRequestParts};
 use bymax_auth_core::context::RequestContext;
+use bymax_auth_types::{AuthError, FieldError};
+use http::HeaderName;
 use http::header;
 use http::request::Parts;
 use tower_cookies::Cookies;
 
+use crate::dto::RefreshDto;
 use crate::extractors::source_access_token;
 use crate::state::AuthState;
 
 /// The set of request headers that must never enter a `RequestContext`'s sanitized map (the
-/// credential-bearing ones). Lowercased to match the normalized header keys.
+/// credential-bearing ones). Lowercased to match the normalized header keys. This is the
+/// single source of truth for "sensitive" headers: both [`sanitize_headers`] (which drops
+/// them from the engine context) and the tracing redaction layer
+/// ([`sensitive_header_names`]) derive from it, so a header is never redacted in one path but
+/// recorded in the other.
 const SENSITIVE_HEADERS: [&str; 3] = ["authorization", "cookie", "x-csrf-token"];
+
+/// The sensitive headers as typed [`HeaderName`]s, for the `SetSensitiveRequestHeadersLayer`
+/// that masks them in `tracing` spans/events. Derived from [`SENSITIVE_HEADERS`] so the
+/// redaction set always matches what [`sanitize_headers`] strips. Any entry that is not a
+/// valid header name is skipped (the const holds only valid lowercase names).
+pub(crate) fn sensitive_header_names() -> Vec<HeaderName> {
+    SENSITIVE_HEADERS
+        .iter()
+        .filter_map(|name| HeaderName::from_bytes(name.as_bytes()).ok())
+        .collect()
+}
 
 /// Build a framework-neutral [`RequestContext`] from request parts: the client IP (peer
 /// socket address, never a raw `X-Forwarded-For`), the `User-Agent`, and the sanitized
@@ -100,6 +118,24 @@ pub(crate) fn source_refresh_token(
                 .filter(|value| !value.is_empty())
         })
         .unwrap_or_default()
+}
+
+/// Parse an optional refresh body shared by the dashboard and platform refresh handlers: an
+/// empty body yields a default [`RefreshDto`] (no body-supplied token, the cookie-mode case);
+/// a present body must deserialize as a valid `RefreshDto` (unknown fields rejected). On a
+/// malformed body it returns an `auth.validation` error whose `body` detail surfaces the
+/// serde parse message — a body-shape diagnostic that leaks no secret. Both refresh paths use
+/// this one helper so the parsing rule and the error envelope stay identical.
+pub(crate) fn parse_optional_refresh_body(bytes: &[u8]) -> Result<RefreshDto, AuthError> {
+    if bytes.is_empty() {
+        return Ok(RefreshDto::default());
+    }
+    serde_json::from_slice::<RefreshDto>(bytes).map_err(|error| AuthError::Validation {
+        details: vec![FieldError {
+            field: "body".to_owned(),
+            message: error.to_string(),
+        }],
+    })
 }
 
 /// A handler extractor that resolves an owned [`RequestContext`] from the request parts
@@ -177,6 +213,24 @@ mod tests {
     }
 
     #[test]
+    fn sensitive_header_names_cover_every_stripped_header() {
+        // The tracing redaction set must include every header `sanitize_headers` strips —
+        // notably `x-csrf-token`, which the global redaction layer would otherwise record.
+        let names: Vec<String> = sensitive_header_names()
+            .iter()
+            .map(|name| name.as_str().to_owned())
+            .collect();
+        for stripped in SENSITIVE_HEADERS {
+            assert!(
+                names.iter().any(|name| name == stripped),
+                "redaction set missing {stripped}"
+            );
+        }
+        assert!(names.iter().any(|name| name == "x-csrf-token"));
+        assert_eq!(names.len(), SENSITIVE_HEADERS.len());
+    }
+
+    #[test]
     fn peer_ip_is_empty_without_connect_info() {
         // No `ConnectInfo` extension → an empty IP (the engine treats it as unknown).
         let (parts, ()) = Request::builder()
@@ -185,6 +239,25 @@ mod tests {
             .unwrap_or_default()
             .into_parts();
         assert!(peer_ip(&parts).is_empty());
+    }
+
+    #[test]
+    fn parse_optional_refresh_body_handles_empty_present_and_malformed() {
+        // Empty body → default DTO (no body token); a valid JSON body deserializes the
+        // token; a malformed body → `auth.validation` with the `body` field detail (the
+        // serde message), the shared shape the dashboard and platform handlers both surface.
+        assert!(matches!(
+            parse_optional_refresh_body(b""),
+            Ok(dto) if dto.refresh_token.is_none()
+        ));
+        assert!(matches!(
+            parse_optional_refresh_body(br#"{"refreshToken":"r1"}"#),
+            Ok(dto) if dto.refresh_token.as_deref() == Some("r1")
+        ));
+        assert!(matches!(
+            parse_optional_refresh_body(b"{ not json"),
+            Err(AuthError::Validation { details }) if details[0].field == "body"
+        ));
     }
 
     #[test]

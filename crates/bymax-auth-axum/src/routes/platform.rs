@@ -17,10 +17,12 @@ use serde_json::json;
 use tower_cookies::Cookies;
 
 use crate::delivery::TokenDelivery;
-use crate::dto::{MfaChallengeDto, PlatformLoginDto, RefreshDto};
+use crate::dto::{MfaChallengeDto, PlatformLoginDto};
 use crate::extractors::PlatformUser;
 use crate::response::error_response;
-use crate::routes::{PresentedAccessToken, RequestMeta, source_refresh_token};
+use crate::routes::{
+    PresentedAccessToken, RequestMeta, parse_optional_refresh_body, source_refresh_token,
+};
 use crate::state::{AuthState, AxumAuthConfig, ClientIpSource};
 use crate::validation::ValidatedJson;
 
@@ -130,14 +132,7 @@ async fn refresh(
 ) -> Response {
     let dto = match parse_optional_refresh_body(&body) {
         Ok(dto) => dto,
-        Err(()) => {
-            return error_response(&bymax_auth_types::AuthError::Validation {
-                details: vec![bymax_auth_types::FieldError {
-                    field: "body".to_owned(),
-                    message: "invalid refresh body".to_owned(),
-                }],
-            });
-        }
+        Err(error) => return error_response(&error),
     };
     let body_refresh = dto.refresh_token.as_deref();
     let refresh =
@@ -175,12 +170,4 @@ fn deliver_platform(
 /// Deliver a platform refresh rotation.
 fn deliver_refresh(state: &AuthState, cookies: &Cookies, tokens: &RotatedTokens) -> Response {
     TokenDelivery::new(state.config()).deliver_refresh(cookies, tokens)
-}
-
-/// Parse an optional platform refresh body (empty → default; present → validated `RefreshDto`).
-fn parse_optional_refresh_body(bytes: &[u8]) -> Result<RefreshDto, ()> {
-    if bytes.is_empty() {
-        return Ok(RefreshDto::default());
-    }
-    serde_json::from_slice::<RefreshDto>(bytes).map_err(|_| ())
 }

@@ -236,10 +236,15 @@ pub struct OAuthInitiateQuery {
     pub tenant_id: String,
 }
 
-/// `GET /auth/oauth/{provider}/callback` query (§11.3.2). Provider extras are accepted but
-/// unused, so a real provider redirect is not rejected by `deny_unknown_fields`.
+/// `GET /auth/oauth/{provider}/callback` query (§11.3.2). Only `code` and `state` are
+/// required; the named optionals below are common provider extras we recognize. Crucially
+/// this DTO does **not** use `deny_unknown_fields` (unlike the other query/body DTOs, where
+/// it is a deliberate security default): a real provider redirect appends extra query
+/// parameters we do not enumerate (Google alone varies its set over time), and rejecting an
+/// unknown one would break a legitimate callback. Serde ignores unrecognized fields by
+/// default, so any extra parameter is silently dropped while the known fields still validate.
 #[derive(Debug, Deserialize, Validate)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[serde(rename_all = "camelCase")]
 pub struct OAuthCallbackQuery {
     /// The authorization code returned by the provider.
     #[garde(length(min = 1, max = 2048))]

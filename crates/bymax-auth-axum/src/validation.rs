@@ -123,7 +123,7 @@ fn map_bytes_rejection(rejection: BytesRejection) -> AuthRejection {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::dto::{LoginDto, OAuthInitiateQuery};
+    use crate::dto::{LoginDto, OAuthCallbackQuery, OAuthInitiateQuery};
 
     #[test]
     fn deserialize_json_maps_serde_errors_to_validation() {
@@ -149,6 +149,17 @@ mod tests {
         ));
         let ok = deserialize_query::<OAuthInitiateQuery>("tenantId=t1");
         assert!(matches!(ok, Ok(q) if q.tenant_id == "t1"));
+    }
+
+    #[test]
+    fn oauth_callback_query_accepts_unknown_provider_extras() {
+        // A real provider appends parameters we do not enumerate (e.g. Google's `authuser`
+        // beyond the named optionals). The callback DTO must ignore unknown query fields
+        // while still extracting `code` and `state`, not reject the redirect.
+        let ok = deserialize_query::<OAuthCallbackQuery>(
+            "code=abc&state=xyz&authuser=0&delegatedClientId=foo&unexpected=1",
+        );
+        assert!(matches!(ok, Ok(q) if q.code == "abc" && q.state == "xyz"));
     }
 
     #[test]
