@@ -11,9 +11,11 @@ use bymax_auth_types::{AuthError, DashboardClaims, DashboardType};
 #[cfg(feature = "mfa")]
 use bymax_auth_types::{AuthResult, MfaContext};
 #[cfg(feature = "platform")]
-use bymax_auth_types::{
-    PlatformAuthResult, PlatformClaims, PlatformLoginResult, RotatedTokens, SafeAuthPlatformUser,
-};
+use bymax_auth_types::{PlatformClaims, PlatformLoginResult, RotatedTokens, SafeAuthPlatformUser};
+// `PlatformAuthResult` only surfaces through the MFA challenge split (`platform_mfa_challenge`
+// and `mfa_result_platform`), so it is needed solely when both domains are compiled in.
+#[cfg(all(feature = "platform", feature = "mfa"))]
+use bymax_auth_types::PlatformAuthResult;
 
 use crate::engine::AuthEngine;
 use crate::services::auth::map_repository_error;

@@ -92,7 +92,7 @@ async fn mfa_challenge(
     // A platform build without the MFA surface cannot complete a challenge.
     #[cfg(not(feature = "mfa"))]
     {
-        let _ = (&cookies, &ctx, &dto);
+        let _ = (&state, &cookies, &ctx, &dto);
         error_response(&bymax_auth_types::AuthError::MfaNotEnabled)
     }
 }
