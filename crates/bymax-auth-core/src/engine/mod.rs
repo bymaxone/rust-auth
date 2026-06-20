@@ -47,10 +47,13 @@ pub struct AuthEngine {
     oauth_providers: HashMap<String, Arc<dyn OAuthProvider>>,
     http_client: Option<Arc<dyn HttpClient>>,
     passwords: Arc<PasswordService>,
-    tokens: TokenManagerService,
-    brute_force: BruteForceService,
+    tokens: Arc<TokenManagerService>,
+    brute_force: Arc<BruteForceService>,
     otp: OtpService,
-    sessions: SessionService,
+    sessions: Arc<SessionService>,
+    /// The MFA lifecycle service, constructed only when `config.mfa` is present.
+    #[cfg(feature = "mfa")]
+    mfa: Option<crate::services::mfa::MfaService>,
 }
 
 impl AuthEngine {
@@ -85,6 +88,14 @@ impl AuthEngine {
     /// revoke, atomic detail rotation).
     pub(crate) fn sessions(&self) -> &SessionService {
         &self.sessions
+    }
+
+    /// The MFA lifecycle service, present only when `config.mfa` is configured. Returns
+    /// `None` when MFA is not set up for the deployment.
+    #[cfg(feature = "mfa")]
+    #[must_use]
+    pub fn mfa(&self) -> Option<&crate::services::mfa::MfaService> {
+        self.mfa.as_ref()
     }
 
     /// The password-reset proof store (`pr:`/`prv:` single-use tokens), present only when the

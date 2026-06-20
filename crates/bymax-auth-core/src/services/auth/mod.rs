@@ -6,7 +6,7 @@
 //! shared input DTOs, the small mapping helpers, and the cross-cutting concerns
 //! (tenant resolution, the status gate, hook context, and fire-and-forget dispatch).
 
-mod detached;
+pub(crate) mod detached;
 mod email_verification;
 mod invitation;
 mod login;

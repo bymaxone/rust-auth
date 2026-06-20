@@ -1,6 +1,6 @@
 # Phase 7 — MFA (TOTP) end-to-end
 
-> **Status**: 📋 ToDo · **Progress**: 0 / 6 tasks · **Last updated**: 2026-06-17
+> **Status**: ✅ Done · **Progress**: 6 / 6 tasks · **Last updated**: 2026-06-19
 > **Source roadmap**: [`docs/development_plan.md`](../development_plan.md) § P7
 > **Source spec**: [`docs/technical_specification.md`](../technical_specification.md)
 
@@ -49,12 +49,12 @@ When P7 is done, the full lifecycle — setup → verify-and-enable → challeng
 
 | ID | Task | Status | Priority | Size | Depends on |
 |---|---|---|---|---|---|
-| 7.1 | `MfaStore` trait + Redis impl + MFA Lua (setup NX, `tu:` replay, fused challenge) | 📋 ToDo | P0 | M | 5.1 |
-| 7.2 | MFA temp tokens on `TokenManagerService` (split verify/consume) | 📋 ToDo | P0 | M | 7.1, 4.2 |
-| 7.3 | `MfaService::setup` + `verify_and_enable` | 📋 ToDo | P0 | L | 7.1, 1.5, 1.6 |
-| 7.4 | `MfaService::challenge` (TOTP + recovery code, fused consume, issue tokens) | 📋 ToDo | P0 | L | 7.2, 7.3 |
-| 7.5 | `MfaService::disable` + `regenerate_recovery_codes` | 📋 ToDo | P0 | M | 7.3 |
-| 7.6 | `mfa` facade feature wiring + no-MFA build proof + lifecycle E2E | 📋 ToDo | P0 | M | 7.3, 7.4, 7.5 |
+| 7.1 | `MfaStore` trait + Redis impl + MFA Lua (setup NX, `tu:` replay, fused challenge) | ✅ Done | P0 | M | 5.1 |
+| 7.2 | MFA temp tokens on `TokenManagerService` (split verify/consume) | ✅ Done | P0 | M | 7.1, 4.2 |
+| 7.3 | `MfaService::setup` + `verify_and_enable` | ✅ Done | P0 | L | 7.1, 1.5, 1.6 |
+| 7.4 | `MfaService::challenge` (TOTP + recovery code, fused consume, issue tokens) | ✅ Done | P0 | L | 7.2, 7.3 |
+| 7.5 | `MfaService::disable` + `regenerate_recovery_codes` | ✅ Done | P0 | M | 7.3 |
+| 7.6 | `mfa` facade feature wiring + no-MFA build proof + lifecycle E2E | ✅ Done | P0 | M | 7.3, 7.4, 7.5 |
 
 ---
 
@@ -615,3 +615,10 @@ done). 6. Recompute the overall %. 7. Append `- 7.6 ✅ <YYYY-MM-DD> — <summar
 ## Completion log
 
 > Append-only. One line per completed task: `- <task-id> ✅ YYYY-MM-DD — <one-line summary>`.
+
+- 7.1 ✅ 2026-06-19 — `MfaStore` trait (core, `mfa`-gated) + Redis impl over `mfa_setup:`/`mfa:`/`tu:` keyspaces with the fused `mfa_challenge.lua`; in-memory double; testcontainers store-e2e proving NX-once, replay-rejected, and single-consume under concurrency.
+- 7.2 ✅ 2026-06-19 — split MFA temp-token methods on `TokenManagerService` (`issue` plants `mfa:` + resets the `challenge:` counter, `verify` is non-consuming GET + constant-time `sub` cross-check, `consume` idempotent DEL); namespace-isolation test.
+- 7.3 ✅ 2026-06-19 — `MfaService` skeleton + `verify_totp_with_anti_replay`, idempotent AES-protected `setup` (SET NX, fast-path), and `verify_and_enable` (anti-replay + atomic GETDEL completion gate + revoke-all); no-secret-after-enable proven.
+- 7.4 ✅ 2026-06-19 — `MfaService::challenge` (non-consuming temp-token verify, isolated `challenge:` brute-force, fused TOTP consume or constant-time recovery-code scan + splice, `mfa_verified=true` issuance); concurrent-same-code single-session e2e.
+- 7.5 ✅ 2026-06-19 — TOTP-only `disable` (revokes sessions) and `regenerate_recovery_codes` (atomic wholesale replacement, sessions preserved), both on the shared `disable:` counter; documented session-invalidation divergence.
+- 7.6 ✅ 2026-06-19 — `mfa` feature wired end to end (core + redis); no-MFA build proven to exclude `aes-gcm`/`data-encoding`/RustCrypto-`sha1`; full lifecycle E2E against real Redis; 100% line+function coverage, wasm purity preserved.

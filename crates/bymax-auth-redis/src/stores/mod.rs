@@ -10,6 +10,8 @@
 //! into the engine's [`bymax_auth_types::AuthError`] at the boundary.
 
 mod brute_force;
+#[cfg(feature = "mfa")]
+mod mfa;
 mod otp;
 mod session;
 mod single_use;

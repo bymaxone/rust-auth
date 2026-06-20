@@ -73,6 +73,20 @@ impl ResolvedConfig {
     pub fn hmac_key(&self) -> &[u8; 32] {
         self.hmac_key.expose_secret()
     }
+
+    /// Decode the configured MFA encryption key into its 32-byte AES-256-GCM form. `None` when
+    /// MFA is not configured. Startup validation already proved a configured key decodes to
+    /// exactly 32 bytes, so a present `config.mfa` always yields `Some`. The transient decoded
+    /// buffer is zeroized on drop.
+    #[cfg(feature = "mfa")]
+    #[must_use]
+    pub(crate) fn mfa_encryption_key(&self) -> Option<Zeroizing<[u8; 32]>> {
+        let mfa = self.config.mfa.as_ref()?;
+        let decoded = Zeroizing::new(decode_base64_any(mfa.encryption_key.expose_secret())?);
+        <[u8; 32]>::try_from(decoded.as_slice())
+            .ok()
+            .map(Zeroizing::new)
+    }
 }
 
 /// Derive the identifier-hashing key as `SHA-256(label || secret)`. The temporary buffer

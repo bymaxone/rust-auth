@@ -24,6 +24,66 @@ use crate::traits::{RotateOutcome, SessionKind, SessionRecord, SessionRotation, 
 /// MFA temp-token lifetime, in seconds (§7.3 constant `MFA_TEMP_TOKEN_TTL_SECONDS`).
 const MFA_TEMP_TOKEN_TTL_SECONDS: i64 = 300;
 
+/// The verified payload of an MFA temp token, returned by
+/// [`TokenManagerService::verify_mfa_temp_token`]. The split verify/consume design means this
+/// is produced **without** consuming the token, so a mistyped code stays retryable (§7.3.5).
+#[cfg(feature = "mfa")]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MfaTempVerified {
+    /// The challenged user id (the token `sub`, cross-checked against the `mfa:` marker).
+    pub user_id: String,
+    /// The identity domain the challenge targets (selects the repository downstream).
+    pub context: MfaContext,
+    /// The token id, used to consume the `mfa:` marker after the code is confirmed valid.
+    pub jti: String,
+}
+
+/// The collaborators the MFA temp-token methods need beyond JWT signing: the single-use
+/// `mfa:` marker store and the brute-force store/key for the per-user challenge counter
+/// reset. Held as `Option` on the token manager so a build without a wired MFA store still
+/// issues a (sign-only) challenge token; the store-backed single-use path engages only when
+/// the support is present.
+#[cfg(feature = "mfa")]
+pub(crate) struct MfaTokenSupport {
+    store: std::sync::Arc<dyn crate::traits::MfaStore>,
+    brute_force: std::sync::Arc<dyn crate::traits::BruteForceStore>,
+    challenge_hmac_key: zeroize::Zeroizing<[u8; 32]>,
+}
+
+#[cfg(feature = "mfa")]
+impl MfaTokenSupport {
+    /// Assemble the support bundle from the MFA store, the brute-force store, and the engine's
+    /// derived identifier-hashing key (copied into a zeroizing buffer).
+    pub(crate) fn new(
+        store: std::sync::Arc<dyn crate::traits::MfaStore>,
+        brute_force: std::sync::Arc<dyn crate::traits::BruteForceStore>,
+        hmac_key: &[u8; 32],
+    ) -> Self {
+        Self {
+            store,
+            brute_force,
+            challenge_hmac_key: zeroize::Zeroizing::new(*hmac_key),
+        }
+    }
+
+    /// The hashed brute-force identifier for the per-user MFA-challenge counter
+    /// (`hmac_sha256("challenge:{user_id}")`, hex). Namespaced as `challenge:` so it is
+    /// isolated from the `disable:` counter the management ops use (§7.5.3).
+    fn challenge_bf_id(&self, user_id: &str) -> String {
+        crate::services::to_hex(&bymax_auth_crypto::mac::hmac_sha256(
+            self.challenge_hmac_key.as_ref(),
+            format!("challenge:{user_id}").as_bytes(),
+        ))
+    }
+}
+
+/// Hash an MFA temp-token `jti` into its `mfa:` marker key suffix (`sha256(jti)`, hex), so the
+/// raw token id is never resident in the store.
+#[cfg(feature = "mfa")]
+fn jti_hash(jti: &str) -> String {
+    crate::services::to_hex(&bymax_auth_crypto::mac::sha256(jti.as_bytes()))
+}
+
 /// Issues and rotates the dashboard token pair over the [`SessionStore`] seam. Platform
 /// issuance (`SafeAuthPlatformUser`/`PlatformClaims`) is a separate identity surface and
 /// is wired with the platform domain.
@@ -33,6 +93,9 @@ pub struct TokenManagerService {
     access_ttl: Duration,
     refresh_ttl_secs: u64,
     grace_ttl_secs: u64,
+    /// The MFA single-use temp-token support, wired only when an MFA store is supplied.
+    #[cfg(feature = "mfa")]
+    mfa: Option<MfaTokenSupport>,
 }
 
 impl TokenManagerService {
@@ -51,7 +114,18 @@ impl TokenManagerService {
             access_ttl,
             refresh_ttl_secs: u64::from(refresh_expires_in_days) * 86_400,
             grace_ttl_secs: grace_window.as_secs(),
+            #[cfg(feature = "mfa")]
+            mfa: None,
         }
+    }
+
+    /// Attach the MFA temp-token support (the single-use `mfa:` marker store and the
+    /// brute-force counter reset), enabling the store-backed single-use challenge path. Set by
+    /// the builder when an MFA store is wired.
+    #[cfg(feature = "mfa")]
+    pub(crate) fn with_mfa_support(mut self, support: MfaTokenSupport) -> Self {
+        self.mfa = Some(support);
+        self
     }
 
     /// Sign a dashboard access JWT (HS256). The claims already carry a fresh `jti`.
@@ -230,40 +304,140 @@ impl TokenManagerService {
             .await
     }
 
-    /// Issue a short-lived MFA temp token bridging the password step and the second factor.
-    /// The TOTP verification is performed by the MFA challenge flow; this only mints the
-    /// signed challenge JWT.
+    /// Build and sign a short-lived MFA temp token, returning the compact JWT and its `jti`.
+    /// The JWT carries the `MfaTempClaims` bridging the password step and the second factor;
+    /// the `jti` keys the single-use `mfa:` marker.
     ///
     /// # Errors
     ///
-    /// Returns [`AuthError::Internal`] only if claim serialization fails (unreachable).
-    pub fn issue_mfa_temp_token(
+    /// Returns [`AuthError::Internal`] only if claim serialization fails (unreachable for the
+    /// concrete claim type).
+    fn build_mfa_temp_token(
         &self,
         user_id: &str,
         context: MfaContext,
-    ) -> Result<String, AuthError> {
+    ) -> Result<(String, String), AuthError> {
         let now = now_unix();
+        let jti = new_uuid_v4();
         let claims = MfaTempClaims {
             sub: user_id.to_owned(),
-            jti: new_uuid_v4(),
+            jti: jti.clone(),
             token_type: MfaTempType::MfaChallenge,
             context,
             iat: now,
             exp: now.saturating_add(MFA_TEMP_TOKEN_TTL_SECONDS),
         };
-        sign(&claims, &self.key).map_err(signing_failed)
+        let token = sign(&claims, &self.key).map_err(signing_failed)?;
+        Ok((token, jti))
     }
 
-    /// Verify an MFA temp token (signature + expiry). Does **not** consume it — the
-    /// single-use store consumption is part of the MFA challenge flow.
+    /// Issue a short-lived MFA temp token bridging the password step and the second factor
+    /// (build-only fallback for a build without a wired MFA store: the signed challenge JWT is
+    /// returned, but no single-use `mfa:` marker is planted).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AuthError::Internal`] only if claim serialization fails (unreachable).
+    #[cfg(not(feature = "mfa"))]
+    pub async fn issue_mfa_temp_token(
+        &self,
+        user_id: &str,
+        context: MfaContext,
+    ) -> Result<String, AuthError> {
+        Ok(self.build_mfa_temp_token(user_id, context)?.0)
+    }
+
+    /// Issue a short-lived MFA temp token bridging the password step and the second factor.
+    /// When the single-use support is wired this signs the challenge JWT, plants the
+    /// single-use `mfa:{sha256(jti)}` marker (300 s), and resets the per-user MFA-challenge
+    /// brute-force counter (a fresh login restarts the challenge budget; §7.3.5). Without the
+    /// support it falls back to signing only.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AuthError::Internal`] if signing fails (unreachable), or a store
+    /// [`AuthError`] if planting the marker or resetting the counter fails.
+    #[cfg(feature = "mfa")]
+    pub async fn issue_mfa_temp_token(
+        &self,
+        user_id: &str,
+        context: MfaContext,
+    ) -> Result<String, AuthError> {
+        let (token, jti) = self.build_mfa_temp_token(user_id, context)?;
+        if let Some(support) = &self.mfa {
+            support
+                .store
+                .put_temp(
+                    &jti_hash(&jti),
+                    user_id,
+                    MFA_TEMP_TOKEN_TTL_SECONDS.unsigned_abs(),
+                )
+                .await?;
+            // A fresh login proves renewed password possession, so the challenge counter
+            // restarts from zero. The `disable:` counter is a separate namespace and is left
+            // untouched, so a pre-auth attacker can neither lock out nor clear the
+            // authenticated user's management-op budget.
+            support
+                .brute_force
+                .reset(&support.challenge_bf_id(user_id))
+                .await?;
+        }
+        Ok(token)
+    }
+
+    /// Verify an MFA temp token (signature + expiry, HS256-pinned) and confirm its single-use
+    /// `mfa:` marker is still present, **without** consuming it. The split verify/consume
+    /// keeps the token alive for a retry on a mistyped code (§7.3.5): an atomic `GETDEL` here
+    /// would dead-end the retry as `MfaTempTokenInvalid` instead of the retryable
+    /// `MfaInvalidCode`. Cross-checks the stored `user_id` against the token `sub` in constant
+    /// time (defense in depth).
     ///
     /// # Errors
     ///
     /// Returns [`AuthError::MfaTempTokenInvalid`] for any malformed, mis-signed, or expired
-    /// token.
-    pub fn verify_mfa_temp_token(&self, token: &str) -> Result<MfaTempClaims, AuthError> {
-        verify::<MfaTempClaims>(token, &self.key, &VerifyOptions::default())
-            .map_err(|_| AuthError::MfaTempTokenInvalid)
+    /// token, an absent/expired marker, or a `user_id`/`sub` mismatch, or a store
+    /// [`AuthError`] on a backend failure.
+    #[cfg(feature = "mfa")]
+    pub async fn verify_mfa_temp_token(&self, token: &str) -> Result<MfaTempVerified, AuthError> {
+        let claims = verify::<MfaTempClaims>(token, &self.key, &VerifyOptions::default())
+            .map_err(|_| AuthError::MfaTempTokenInvalid)?;
+        let Some(support) = &self.mfa else {
+            return Err(AuthError::MfaTempTokenInvalid);
+        };
+        // GET (never GETDEL) the marker so a retry stays possible within the token's TTL.
+        let Some(stored_user) = support.store.get_temp(&jti_hash(&claims.jti)).await? else {
+            return Err(AuthError::MfaTempTokenInvalid);
+        };
+        // Defense in depth: the marker must name the same user as the token subject.
+        if !bymax_auth_crypto::compare::constant_time_eq(
+            stored_user.as_bytes(),
+            claims.sub.as_bytes(),
+        ) {
+            return Err(AuthError::MfaTempTokenInvalid);
+        }
+        Ok(MfaTempVerified {
+            user_id: claims.sub,
+            context: claims.context,
+            jti: claims.jti,
+        })
+    }
+
+    /// Consume an MFA temp token by deleting its `mfa:{sha256(jti)}` marker. Idempotent, and
+    /// called only after the submitted code is confirmed valid (§7.5.3). For the TOTP path the
+    /// consume is fused with the anti-replay mark in a single atomic step
+    /// ([`crate::traits::MfaStore::challenge_consume`]); this standalone form serves the
+    /// recovery-code path, whose code carries no `tu:` marker.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AuthError::MfaTempTokenInvalid`] when no single-use support is wired, or a
+    /// store [`AuthError`] on a backend failure.
+    #[cfg(feature = "mfa")]
+    pub async fn consume_mfa_temp_token(&self, jti: &str) -> Result<(), AuthError> {
+        let Some(support) = &self.mfa else {
+            return Err(AuthError::MfaTempTokenInvalid);
+        };
+        support.store.del_temp(&jti_hash(jti)).await
     }
 
     /// Build the access claims for a rotated/recovered session. Rotation always drops
@@ -511,18 +685,135 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn mfa_temp_token_round_trips_and_rejects_garbage() {
-        // The short MFA temp token signs and verifies back to its claims; a malformed token
-        // is rejected as mfa_temp_token_invalid (the TOTP step is the MFA challenge's job).
+    #[tokio::test]
+    async fn mfa_temp_token_is_signed_as_a_compact_jwt() {
+        // Issuing a challenge token (no MFA store wired) signs a compact three-segment JWT;
+        // this is the sign-only path a build without a single-use store falls back to.
         let store = Arc::new(InMemoryStores::new());
         let svc = service(store);
-        let Ok(token) = svc.issue_mfa_temp_token("u1", MfaContext::Dashboard) else { return };
-        let verified = svc.verify_mfa_temp_token(&token);
-        assert!(matches!(&verified, Ok(c) if c.sub == "u1" && c.context == MfaContext::Dashboard));
+        let issued = svc.issue_mfa_temp_token("u1", MfaContext::Dashboard).await;
+        assert!(matches!(&issued, Ok(t) if t.matches('.').count() == 2));
+    }
+
+    #[cfg(feature = "mfa")]
+    fn service_with_mfa(store: Arc<InMemoryStores>) -> TokenManagerService {
+        // A token manager whose MFA support is backed by the in-memory stores (which satisfy
+        // both the MFA-marker and brute-force seams), under a fixed identifier-hashing key.
+        let brute_force: Arc<dyn crate::traits::BruteForceStore> = store.clone();
+        let mfa_store: Arc<dyn crate::traits::MfaStore> = store.clone();
+        let support = MfaTokenSupport::new(mfa_store, brute_force, &[7u8; 32]);
+        TokenManagerService::new(
+            key(),
+            store,
+            Duration::from_secs(900),
+            7,
+            Duration::from_secs(30),
+        )
+        .with_mfa_support(support)
+    }
+
+    #[cfg(feature = "mfa")]
+    #[tokio::test]
+    async fn store_backed_temp_token_issues_verifies_non_consuming_and_consumes() {
+        // With the single-use support wired: issue plants the `mfa:` marker and the
+        // non-consuming verify returns the payload twice (a mistyped digit stays retryable);
+        // consume then deletes the marker (idempotently), after which verify fails.
+        let store = Arc::new(InMemoryStores::new());
+        let svc = service_with_mfa(store);
+        let Ok(token) = svc.issue_mfa_temp_token("u1", MfaContext::Dashboard).await else { return };
+        let first = svc.verify_mfa_temp_token(&token).await;
+        assert!(matches!(&first, Ok(v) if v.user_id == "u1"
+            && v.context == MfaContext::Dashboard && v.jti.len() == 36));
+        // Verify is non-consuming: a second verify still succeeds.
+        assert!(svc.verify_mfa_temp_token(&token).await.is_ok());
+        let Ok(verified) = first else { return };
+        // Consume is idempotent: the first deletes the marker, the second is a no-op.
+        assert!(svc.consume_mfa_temp_token(&verified.jti).await.is_ok());
+        assert!(svc.consume_mfa_temp_token(&verified.jti).await.is_ok());
+        // After consume the marker is gone, so verify now fails.
         assert!(matches!(
-            svc.verify_mfa_temp_token("garbage"),
+            svc.verify_mfa_temp_token(&token).await,
             Err(AuthError::MfaTempTokenInvalid)
         ));
+    }
+
+    #[cfg(feature = "mfa")]
+    #[tokio::test]
+    async fn store_backed_verify_rejects_garbage_and_a_subject_mismatch() {
+        // A malformed token is rejected before any store read; a marker naming a different
+        // user than the token subject fails the constant-time cross-check.
+        let store = Arc::new(InMemoryStores::new());
+        let svc = service_with_mfa(store.clone());
+        assert!(matches!(
+            svc.verify_mfa_temp_token("garbage").await,
+            Err(AuthError::MfaTempTokenInvalid)
+        ));
+        // Mint a token for "u1" but point its marker at "intruder": the cross-check rejects it.
+        let built = svc.build_mfa_temp_token("u1", MfaContext::Dashboard);
+        let Ok((token, jti)) = built else { return };
+        let mfa_store: Arc<dyn crate::traits::MfaStore> = store;
+        assert!(
+            mfa_store
+                .put_temp(&jti_hash(&jti), "intruder", 300)
+                .await
+                .is_ok()
+        );
+        assert!(matches!(
+            svc.verify_mfa_temp_token(&token).await,
+            Err(AuthError::MfaTempTokenInvalid)
+        ));
+    }
+
+    #[cfg(feature = "mfa")]
+    #[tokio::test]
+    async fn temp_token_methods_fail_closed_without_a_wired_store() {
+        // Without the single-use support, issue falls back to a sign-only token (no marker),
+        // and verify/consume fail closed as `MfaTempTokenInvalid` rather than panicking.
+        let store = Arc::new(InMemoryStores::new());
+        let svc = service(store); // `service` leaves the MFA support unset.
+        let Ok(token) = svc.issue_mfa_temp_token("u1", MfaContext::Dashboard).await else { return };
+        assert!(matches!(
+            svc.verify_mfa_temp_token(&token).await,
+            Err(AuthError::MfaTempTokenInvalid)
+        ));
+        assert!(matches!(
+            svc.consume_mfa_temp_token("some-jti").await,
+            Err(AuthError::MfaTempTokenInvalid)
+        ));
+    }
+
+    #[cfg(feature = "mfa")]
+    #[tokio::test]
+    async fn issue_resets_only_the_challenge_brute_force_namespace() {
+        // Issuing a fresh temp token clears the `challenge:` counter (a fresh login restarts
+        // the MFA budget) while leaving the `disable:` counter untouched, so the two
+        // namespaces are isolated.
+        let store = Arc::new(InMemoryStores::new());
+        let svc = service_with_mfa(store.clone());
+        let bf: Arc<dyn crate::traits::BruteForceStore> = store.clone();
+        let key_bytes = [7u8; 32];
+        let challenge_id = crate::services::to_hex(&bymax_auth_crypto::mac::hmac_sha256(
+            &key_bytes,
+            b"challenge:u1",
+        ));
+        let disable_id = crate::services::to_hex(&bymax_auth_crypto::mac::hmac_sha256(
+            &key_bytes,
+            b"disable:u1",
+        ));
+        // Seed both counters to the lockout threshold.
+        for _ in 0..5 {
+            assert!(bf.record_failure(&challenge_id, 900).await.is_ok());
+            assert!(bf.record_failure(&disable_id, 900).await.is_ok());
+        }
+        assert!(matches!(bf.is_locked(&challenge_id, 5).await, Ok(true)));
+        assert!(matches!(bf.is_locked(&disable_id, 5).await, Ok(true)));
+        // Issuing a token resets the challenge counter only.
+        assert!(
+            svc.issue_mfa_temp_token("u1", MfaContext::Dashboard)
+                .await
+                .is_ok()
+        );
+        assert!(matches!(bf.is_locked(&challenge_id, 5).await, Ok(false)));
+        assert!(matches!(bf.is_locked(&disable_id, 5).await, Ok(true)));
     }
 }

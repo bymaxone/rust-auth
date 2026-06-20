@@ -56,6 +56,12 @@ pub enum Prefix {
     Psess,
     /// Platform per-session detail (`psd`).
     Psd,
+    /// MFA pending-setup record (`mfa_setup`).
+    MfaSetup,
+    /// MFA temp-token single-use marker (`mfa`).
+    Mfa,
+    /// TOTP anti-replay marker (`tu`).
+    Tu,
 }
 
 impl Prefix {
@@ -79,6 +85,9 @@ impl Prefix {
             Self::Prp => "prp",
             Self::Psess => "psess",
             Self::Psd => "psd",
+            Self::MfaSetup => "mfa_setup",
+            Self::Mfa => "mfa",
+            Self::Tu => "tu",
         }
     }
 }
@@ -152,6 +161,9 @@ mod tests {
             (Prefix::Prp, "auth:prp:abc"),
             (Prefix::Psess, "auth:psess:abc"),
             (Prefix::Psd, "auth:psd:abc"),
+            (Prefix::MfaSetup, "auth:mfa_setup:abc"),
+            (Prefix::Mfa, "auth:mfa:abc"),
+            (Prefix::Tu, "auth:tu:abc"),
         ];
         for (prefix, expected) in cases {
             assert_eq!(ns.key(prefix, "abc"), expected);

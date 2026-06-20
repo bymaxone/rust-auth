@@ -43,3 +43,6 @@ pub use config::{AuthConfig, Environment};
 pub use engine::{AuthEngine, AuthEngineBuilder};
 #[doc(inline)]
 pub use error::{ConfigError, RepositoryError};
+#[cfg(feature = "mfa")]
+#[doc(inline)]
+pub use services::mfa::{LoginResultMfa, MfaService, MfaSetupResult};

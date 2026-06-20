@@ -305,6 +305,15 @@ pub struct InMemoryStores {
     reset_tokens: Mutex<HashMap<String, ResetContext>>,
     reset_verified: Mutex<HashMap<String, ResetContext>>,
     invitations: Mutex<HashMap<String, StoredInvitation>>,
+    /// `mfa_setup:` — the AES-protected pending-setup record keyed by `hmac_sha256(user_id)`.
+    #[cfg(feature = "mfa")]
+    mfa_setup: Mutex<HashMap<String, String>>,
+    /// `mfa:` — the MFA temp-token single-use marker keyed by `sha256(jti)`.
+    #[cfg(feature = "mfa")]
+    mfa_temp: Mutex<HashMap<String, String>>,
+    /// `tu:` — the TOTP anti-replay markers keyed by `hmac_sha256("{user_id}:{code}")`.
+    #[cfg(feature = "mfa")]
+    mfa_replay: Mutex<HashSet<String>>,
 }
 
 impl InMemoryStores {
@@ -604,6 +613,71 @@ impl InvitationStore for InMemoryStores {
 
     async fn consume_invitation(&self, token: &str) -> Result<Option<StoredInvitation>, AuthError> {
         Ok(lock(&self.invitations).remove(&token_key(token)))
+    }
+}
+
+#[cfg(feature = "mfa")]
+#[async_trait]
+impl crate::traits::MfaStore for InMemoryStores {
+    async fn put_setup_nx(
+        &self,
+        user_id_hash: &str,
+        value: &str,
+        _ttl: u64,
+    ) -> Result<bool, AuthError> {
+        let mut setups = lock(&self.mfa_setup);
+        // Reproduce `SET NX`: write only when absent, reporting whether this call created it.
+        if setups.contains_key(user_id_hash) {
+            return Ok(false);
+        }
+        setups.insert(user_id_hash.to_owned(), value.to_owned());
+        Ok(true)
+    }
+
+    async fn get_setup(&self, user_id_hash: &str) -> Result<Option<String>, AuthError> {
+        Ok(lock(&self.mfa_setup).get(user_id_hash).cloned())
+    }
+
+    async fn take_setup(&self, user_id_hash: &str) -> Result<Option<String>, AuthError> {
+        // Reproduce `GETDEL`: read and remove in one critical section so the completion gate
+        // admits exactly one winner.
+        Ok(lock(&self.mfa_setup).remove(user_id_hash))
+    }
+
+    async fn put_temp(&self, jti_hash: &str, user_id: &str, _ttl: u64) -> Result<(), AuthError> {
+        lock(&self.mfa_temp).insert(jti_hash.to_owned(), user_id.to_owned());
+        Ok(())
+    }
+
+    async fn get_temp(&self, jti_hash: &str) -> Result<Option<String>, AuthError> {
+        Ok(lock(&self.mfa_temp).get(jti_hash).cloned())
+    }
+
+    async fn del_temp(&self, jti_hash: &str) -> Result<(), AuthError> {
+        lock(&self.mfa_temp).remove(jti_hash);
+        Ok(())
+    }
+
+    async fn mark_totp_used(&self, replay_id: &str, _ttl: u64) -> Result<bool, AuthError> {
+        // `HashSet::insert` returns whether the value was newly added — exactly the `SET NX`
+        // "was it new?" decision the real `tu:` marker reports.
+        Ok(lock(&self.mfa_replay).insert(replay_id.to_owned()))
+    }
+
+    async fn challenge_consume(
+        &self,
+        replay_id: &str,
+        jti_hash: &str,
+        _ttl: u64,
+    ) -> Result<bool, AuthError> {
+        // Fuse the marker-set and the temp-token consume under one lock pair so the two are
+        // inseparable, mirroring the atomic Lua: mark the code used, and only if it was newly
+        // marked, consume the temp token.
+        let newly_marked = lock(&self.mfa_replay).insert(replay_id.to_owned());
+        if newly_marked {
+            lock(&self.mfa_temp).remove(jti_hash);
+        }
+        Ok(newly_marked)
     }
 }
 

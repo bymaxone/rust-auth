@@ -419,6 +419,7 @@ name = "bymax-auth-redis"
 version = "0.0.0"
 dependencies = [
  "async-trait",
+ "base64",
  "bymax-auth-core",
  "bymax-auth-crypto",
  "bymax-auth-jwt",

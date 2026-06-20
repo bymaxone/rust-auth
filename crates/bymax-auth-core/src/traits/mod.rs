@@ -24,6 +24,9 @@ pub use http::{HttpClient, HttpError, HttpMethod, HttpRequest, HttpResponse};
 pub use oauth::{OAuthProfile, OAuthProvider, OAuthProviderError, OAuthProviders, OAuthTokens};
 #[doc(inline)]
 pub use repository::{PlatformUserRepository, UserRepository};
+#[cfg(feature = "mfa")]
+#[doc(inline)]
+pub use store::MfaStore;
 #[doc(inline)]
 pub use store::{
     BruteForceStore, InvitationStore, OtpPurpose, OtpStore, PasswordResetStore, ResetContext,

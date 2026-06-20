@@ -16,6 +16,8 @@ use crate::services::otp::OtpService;
 use crate::services::password::PasswordService;
 use crate::services::session::SessionService;
 use crate::services::token_manager::TokenManagerService;
+#[cfg(feature = "mfa")]
+use crate::traits::MfaStore;
 use crate::traits::{
     AuthHooks, BruteForceStore, EmailProvider, HttpClient, InvitationStore, NoOpAuthHooks,
     NoOpEmailProvider, OAuthProvider, OtpStore, PasswordResetStore, PlatformUserRepository,
@@ -40,6 +42,8 @@ pub struct AuthEngineBuilder {
     invitation_store: Option<Arc<dyn InvitationStore>>,
     oauth_providers: HashMap<String, Arc<dyn OAuthProvider>>,
     http_client: Option<Arc<dyn HttpClient>>,
+    #[cfg(feature = "mfa")]
+    mfa_store: Option<Arc<dyn MfaStore>>,
 }
 
 impl Default for AuthEngineBuilder {
@@ -68,6 +72,8 @@ impl AuthEngineBuilder {
             invitation_store: None,
             oauth_providers: HashMap::new(),
             http_client: None,
+            #[cfg(feature = "mfa")]
+            mfa_store: None,
         }
     }
 
@@ -159,10 +165,21 @@ impl AuthEngineBuilder {
         self
     }
 
+    /// Set the MFA store (`mfa_setup:`/`mfa:`/`tu:` keyspaces). Required only when the MFA
+    /// lifecycle is used; wired automatically by [`AuthEngineBuilder::redis_stores`] when the
+    /// backend also implements [`MfaStore`].
+    #[cfg(feature = "mfa")]
+    #[must_use]
+    pub fn mfa_store(mut self, store: Arc<dyn MfaStore>) -> Self {
+        self.mfa_store = Some(store);
+        self
+    }
+
     /// Register the session, OTP, and brute-force stores from a single backend that
     /// implements all three (the common case — one Redis handle behind every store trait).
     /// When the same backend also implements the WebSocket-ticket, password-reset, and
     /// invitation stores, those are wired too, so one handle satisfies every store seam.
+    #[cfg(not(feature = "mfa"))]
     #[must_use]
     pub fn redis_stores<S>(mut self, stores: Arc<S>) -> Self
     where
@@ -180,6 +197,32 @@ impl AuthEngineBuilder {
         self.ws_ticket_store = Some(stores.clone());
         self.password_reset_store = Some(stores.clone());
         self.invitation_store = Some(stores);
+        self
+    }
+
+    /// Register every store seam from a single backend (the common one-Redis-handle case).
+    /// Under the `mfa` feature the backend must also implement [`MfaStore`], so the MFA
+    /// lifecycle's `mfa_setup:`/`mfa:`/`tu:` keyspaces are wired from the same handle.
+    #[cfg(feature = "mfa")]
+    #[must_use]
+    pub fn redis_stores<S>(mut self, stores: Arc<S>) -> Self
+    where
+        S: SessionStore
+            + OtpStore
+            + BruteForceStore
+            + WsTicketStore
+            + PasswordResetStore
+            + InvitationStore
+            + MfaStore
+            + 'static,
+    {
+        self.session_store = Some(stores.clone());
+        self.otp_store = Some(stores.clone());
+        self.brute_force_store = Some(stores.clone());
+        self.ws_ticket_store = Some(stores.clone());
+        self.password_reset_store = Some(stores.clone());
+        self.invitation_store = Some(stores.clone());
+        self.mfa_store = Some(stores);
         self
     }
 
@@ -237,6 +280,8 @@ impl AuthEngineBuilder {
             invitation_store,
             oauth_providers,
             http_client,
+            #[cfg(feature = "mfa")]
+            mfa_store,
         } = self;
 
         let mut config = config.unwrap_or_default();
@@ -296,6 +341,8 @@ impl AuthEngineBuilder {
             email_provider.unwrap_or_else(|| Arc::new(NoOpEmailProvider) as Arc<dyn EmailProvider>);
         let hooks = hooks.unwrap_or_else(|| Arc::new(NoOpAuthHooks) as Arc<dyn AuthHooks>);
 
+        #[cfg(feature = "mfa")]
+        let sessions_enabled = session_config.enabled;
         let config = Arc::new(ResolvedConfig::new(config, environment, secure_cookies));
 
         let tokens = TokenManagerService::new(
@@ -305,19 +352,50 @@ impl AuthEngineBuilder {
             refresh_days,
             grace_window,
         );
-        let brute_force = BruteForceService::new(
+        // Wire the MFA temp-token single-use support when an MFA store is supplied, so the
+        // challenge token planted at login is store-backed and brute-force-capped.
+        #[cfg(feature = "mfa")]
+        let tokens = match &mfa_store {
+            Some(store) => {
+                tokens.with_mfa_support(crate::services::token_manager::MfaTokenSupport::new(
+                    store.clone(),
+                    brute_force_store.clone(),
+                    config.hmac_key(),
+                ))
+            }
+            None => tokens,
+        };
+        let tokens = Arc::new(tokens);
+        let brute_force = Arc::new(BruteForceService::new(
             brute_force_store.clone(),
             brute_max_attempts,
             brute_window_secs,
-        );
+        ));
         let otp = OtpService::new(otp_store.clone());
-        let sessions = SessionService::new(
+        let sessions = Arc::new(SessionService::new(
             session_store.clone(),
             user_repository.clone(),
             hooks.clone(),
             session_config,
             refresh_ttl_secs,
-        );
+        ));
+
+        // The MFA lifecycle service is constructed only when `config.mfa` is present and an MFA
+        // store is wired; otherwise the engine exposes no MFA surface.
+        #[cfg(feature = "mfa")]
+        let mfa = build_mfa_service(MfaWiring {
+            config: &config,
+            mfa_store: mfa_store.as_ref(),
+            user_repository: &user_repository,
+            platform_user_repository: platform_user_repository.as_ref(),
+            tokens: &tokens,
+            sessions: &sessions,
+            session_store: &session_store,
+            brute_force: &brute_force,
+            email_provider: &email_provider,
+            hooks: &hooks,
+            sessions_enabled,
+        });
 
         Ok(AuthEngine {
             config,
@@ -338,8 +416,54 @@ impl AuthEngineBuilder {
             brute_force,
             otp,
             sessions,
+            #[cfg(feature = "mfa")]
+            mfa,
         })
     }
+}
+
+/// The collaborators [`build_mfa_service`] reads to assemble the optional MFA service, grouped
+/// so the helper takes one borrow rather than a long positional list.
+#[cfg(feature = "mfa")]
+struct MfaWiring<'a> {
+    config: &'a Arc<ResolvedConfig>,
+    mfa_store: Option<&'a Arc<dyn MfaStore>>,
+    user_repository: &'a Arc<dyn UserRepository>,
+    platform_user_repository: Option<&'a Arc<dyn PlatformUserRepository>>,
+    tokens: &'a Arc<TokenManagerService>,
+    sessions: &'a Arc<SessionService>,
+    session_store: &'a Arc<dyn SessionStore>,
+    brute_force: &'a Arc<BruteForceService>,
+    email_provider: &'a Arc<dyn EmailProvider>,
+    hooks: &'a Arc<dyn AuthHooks>,
+    sessions_enabled: bool,
+}
+
+/// Construct the [`crate::services::mfa::MfaService`] when both `config.mfa` and an MFA store
+/// are present; otherwise the engine has no MFA surface (returns `None`).
+#[cfg(feature = "mfa")]
+fn build_mfa_service(wiring: MfaWiring<'_>) -> Option<crate::services::mfa::MfaService> {
+    let mfa_config = wiring.config.config().mfa.as_ref()?;
+    let mfa_store = wiring.mfa_store?.clone();
+    let encryption_key = wiring.config.mfa_encryption_key()?;
+    let deps = crate::services::mfa::MfaServiceDeps {
+        mfa_store,
+        user_repo: wiring.user_repository.clone(),
+        platform_repo: wiring.platform_user_repository.cloned(),
+        tokens: wiring.tokens.clone(),
+        sessions: wiring.sessions.clone(),
+        session_store: wiring.session_store.clone(),
+        brute_force: wiring.brute_force.clone(),
+        email: wiring.email_provider.clone(),
+        hooks: wiring.hooks.clone(),
+        encryption_key,
+        identifier_key: zeroize::Zeroizing::new(*wiring.config.hmac_key()),
+        issuer: mfa_config.issuer.clone(),
+        totp_window: mfa_config.totp_window,
+        recovery_code_count: mfa_config.recovery_code_count,
+        sessions_enabled: wiring.sessions_enabled,
+    };
+    Some(crate::services::mfa::MfaService::new(deps))
 }
 
 #[cfg(test)]
@@ -431,6 +555,34 @@ mod tests {
         assert!(engine.invitation_store().is_some());
         assert!(engine.http_client().is_some());
         assert!(engine.oauth_providers().contains_key("google"));
+    }
+
+    #[cfg(feature = "mfa")]
+    #[test]
+    fn build_wires_the_mfa_service_via_the_explicit_mfa_store_setter() {
+        // With `config.mfa` present and the MFA store supplied through its dedicated setter, the
+        // engine exposes a constructed MFA service.
+        use crate::config::MfaConfig;
+        use base64::Engine as _;
+        let mut cfg = valid_config();
+        cfg.mfa = Some(MfaConfig {
+            encryption_key: SecretString::from(
+                base64::engine::general_purpose::STANDARD.encode([3u8; 32]),
+            ),
+            issuer: "Bymax One".to_owned(),
+            recovery_code_count: 8,
+            totp_window: 1,
+        });
+        let s = stores();
+        let result = AuthEngine::builder()
+            .config(cfg)
+            .user_repository(user_repo())
+            .session_store(s.clone())
+            .otp_store(s.clone())
+            .brute_force_store(s.clone())
+            .mfa_store(s)
+            .build();
+        assert!(matches!(&result, Ok(engine) if engine.mfa().is_some()));
     }
 
     #[test]
