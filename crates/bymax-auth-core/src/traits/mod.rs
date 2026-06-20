@@ -27,6 +27,9 @@ pub use repository::{PlatformUserRepository, UserRepository};
 #[cfg(feature = "mfa")]
 #[doc(inline)]
 pub use store::MfaStore;
+#[cfg(feature = "oauth")]
+#[doc(inline)]
+pub use store::OAuthStateStore;
 #[doc(inline)]
 pub use store::{
     BruteForceStore, InvitationStore, OtpPurpose, OtpStore, PasswordResetStore, ResetContext,

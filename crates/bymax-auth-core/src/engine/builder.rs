@@ -42,6 +42,8 @@ pub struct AuthEngineBuilder {
     invitation_store: Option<Arc<dyn InvitationStore>>,
     oauth_providers: HashMap<String, Arc<dyn OAuthProvider>>,
     http_client: Option<Arc<dyn HttpClient>>,
+    #[cfg(feature = "oauth")]
+    oauth_state_store: Option<Arc<dyn crate::traits::OAuthStateStore>>,
     #[cfg(feature = "mfa")]
     mfa_store: Option<Arc<dyn MfaStore>>,
 }
@@ -72,6 +74,8 @@ impl AuthEngineBuilder {
             invitation_store: None,
             oauth_providers: HashMap::new(),
             http_client: None,
+            #[cfg(feature = "oauth")]
+            oauth_state_store: None,
             #[cfg(feature = "mfa")]
             mfa_store: None,
         }
@@ -254,6 +258,16 @@ impl AuthEngineBuilder {
         self
     }
 
+    /// Set the single-use OAuth `state` + PKCE store (the `os:` keyspace). Required when the
+    /// OAuth controller is enabled; the same Redis backend that satisfies the other store
+    /// seams implements it, so this is typically `engine.oauth_state_store(stores.clone())`.
+    #[cfg(feature = "oauth")]
+    #[must_use]
+    pub fn oauth_state_store(mut self, store: Arc<dyn crate::traits::OAuthStateStore>) -> Self {
+        self.oauth_state_store = Some(store);
+        self
+    }
+
     /// Validate the configuration and assemble the engine.
     ///
     /// # Errors
@@ -280,9 +294,17 @@ impl AuthEngineBuilder {
             invitation_store,
             oauth_providers,
             http_client,
+            #[cfg(feature = "oauth")]
+            oauth_state_store,
             #[cfg(feature = "mfa")]
             mfa_store,
         } = self;
+
+        // Capture whether the consumer supplied custom hooks before the NoOp default is
+        // applied below, so the OAuth-misconfiguration warning can distinguish "OAuth enabled
+        // with a real `on_oauth_login`" from "OAuth enabled while the hook is the secure-deny
+        // default" (which makes every callback fail).
+        let hooks_supplied = hooks.is_some();
 
         let mut config = config.unwrap_or_default();
 
@@ -313,6 +335,22 @@ impl AuthEngineBuilder {
         }
         if config.controllers.oauth && oauth_providers.is_empty() {
             return Err(ConfigError::OAuthToggleWithoutProvider);
+        }
+        // OAuth needs the single-use `state` + PKCE store to persist and consume the CSRF
+        // nonce; an enabled controller without it could never complete a callback.
+        #[cfg(feature = "oauth")]
+        if config.controllers.oauth && oauth_state_store.is_none() {
+            return Err(ConfigError::OAuthStateStoreMissing);
+        }
+        // OAuth sign-in stays disabled by default: when the controller is enabled but the
+        // `on_oauth_login` hook is still the secure-deny NoOp default, every callback will
+        // `OAuthFailed` (§24 invariant 12). Make that loud rather than silent at startup.
+        if oauth_enabled_without_custom_hook(config.controllers.oauth, hooks_supplied) {
+            tracing::warn!(
+                "OAuth controller enabled but no custom AuthHooks supplied: on_oauth_login \
+                 defaults to a secure deny, so every OAuth sign-in will fail until it is \
+                 implemented"
+            );
         }
         // The invitation domain is gated by both its config toggle and a backing store: an
         // enabled domain with no `inv:` store could never persist or consume an invitation.
@@ -411,6 +449,8 @@ impl AuthEngineBuilder {
             invitation_store,
             oauth_providers,
             http_client,
+            #[cfg(feature = "oauth")]
+            oauth_state_store,
             passwords,
             tokens,
             brute_force,
@@ -420,6 +460,14 @@ impl AuthEngineBuilder {
             mfa,
         })
     }
+}
+
+/// Whether OAuth sign-in is enabled while `on_oauth_login` is still the secure-deny default
+/// (no custom hooks supplied). In that state every callback fails until the deployer
+/// implements the hook, so the builder emits a startup warning. Kept as a tiny pure helper so
+/// the decision is directly unit-testable without inspecting `tracing` output.
+fn oauth_enabled_without_custom_hook(oauth_enabled: bool, hooks_supplied: bool) -> bool {
+    oauth_enabled && !hooks_supplied
 }
 
 /// The collaborators [`build_mfa_service`] reads to assemble the optional MFA service, grouped
@@ -610,12 +658,16 @@ mod tests {
             .with(Arc::new(MockOAuthProvider::new("github")));
         let mut cfg = valid_config();
         cfg.controllers.oauth = true;
-        let result = AuthEngine::builder()
+        let mut builder = AuthEngine::builder()
             .config(cfg)
             .user_repository(user_repo())
             .redis_stores(stores())
-            .oauth_providers(registry)
-            .build();
+            .oauth_providers(registry);
+        #[cfg(feature = "oauth")]
+        {
+            builder = builder.oauth_state_store(stores());
+        }
+        let result = builder.build();
         assert!(result.is_ok(), "registry wiring must assemble");
         let Ok(engine) = result else { return };
         assert!(engine.oauth_providers().contains_key("google"));
@@ -687,6 +739,50 @@ mod tests {
             .redis_stores(stores())
             .build();
         assert!(matches!(err, Err(ConfigError::OAuthToggleWithoutProvider)));
+    }
+
+    #[cfg(feature = "oauth")]
+    #[test]
+    fn rejects_oauth_toggle_without_a_state_store() {
+        // OAuth enabled with a provider but no `OAuthStateStore` fails fast: the single-use
+        // `state` + PKCE record could never be persisted or consumed.
+        let mut cfg = valid_config();
+        cfg.controllers.oauth = true;
+        let err = AuthEngine::builder()
+            .config(cfg)
+            .user_repository(user_repo())
+            .redis_stores(stores())
+            .oauth_provider(Arc::new(MockOAuthProvider::new("google")))
+            .build();
+        assert!(matches!(err, Err(ConfigError::OAuthStateStoreMissing)));
+    }
+
+    #[cfg(feature = "oauth")]
+    #[test]
+    fn oauth_enabled_with_a_state_store_and_default_hooks_assembles_and_warns() {
+        // OAuth on, a provider and a state store wired, but no custom hooks: the engine still
+        // assembles (the secure-deny default applies) and the startup-warning branch runs.
+        let s = stores();
+        let mut cfg = valid_config();
+        cfg.controllers.oauth = true;
+        let result = AuthEngine::builder()
+            .config(cfg)
+            .user_repository(user_repo())
+            .redis_stores(s.clone())
+            .oauth_provider(Arc::new(MockOAuthProvider::new("google")))
+            .oauth_state_store(s)
+            .build();
+        assert!(matches!(&result, Ok(engine) if engine.oauth_state_store().is_some()));
+    }
+
+    #[test]
+    fn oauth_enabled_without_custom_hook_flags_only_the_default_hook_case() {
+        // The warning predicate fires exactly when OAuth is enabled AND no custom hooks were
+        // supplied; the other three combinations stay silent.
+        assert!(oauth_enabled_without_custom_hook(true, false));
+        assert!(!oauth_enabled_without_custom_hook(true, true));
+        assert!(!oauth_enabled_without_custom_hook(false, false));
+        assert!(!oauth_enabled_without_custom_hook(false, true));
     }
 
     #[test]
