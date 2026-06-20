@@ -38,6 +38,10 @@ time = { version = "0.3", default-features = false, features = ["std", "serde-we
 # keyspaces and the fused `mfa_challenge` Lua) compiles only under this feature, and the
 # trait it implements is itself `mfa`-gated in `bymax-auth-core`.
 mfa = ["bymax-auth-core/mfa"]
+# Forwards the OAuth storage seam: the `OAuthStateStore` impl (the single-use `os:`
+# keyspace, `SET ... EX 600` then atomic `GETDEL`) compiles only under this feature, and the
+# trait it implements is itself `oauth`-gated in `bymax-auth-core`.
+oauth = ["bymax-auth-core/oauth"]
 
 [dev-dependencies]
 # A real Redis via Docker for the atomicity/no-PII integration tier; the crate still builds

@@ -137,6 +137,15 @@ impl AuthEngine {
         let provider_impl = self.resolve_oauth_provider(provider)?;
         let provider_name = provider_impl.name().to_owned();
 
+        // Reject a `state` that does not match the engine-issued 64-hex shape BEFORE hashing
+        // it: `state` is attacker-controlled, so an arbitrarily large value would otherwise
+        // drive an unbounded SHA-256 (a cheap DoS). A bad-shape value could never match a
+        // stored key anyway, so it takes the same path as a missing/forged/replayed state —
+        // the opaque `OauthFailed` — and never reaches `state_key`/the store.
+        if !is_oauth_state_shape(state) {
+            return Err(AuthError::OauthFailed);
+        }
+
         // Atomic read-and-delete: existence is the CSRF check, deletion is the replay guard.
         let Some(raw_payload) = self
             .require_oauth_state_store()?
@@ -351,6 +360,18 @@ fn generate_state() -> String {
     to_hex(&bymax_auth_crypto::token::random_array::<OAUTH_RANDOM_BYTES>())
 }
 
+/// Whether `state` matches the engine-issued CSRF `state` shape: exactly 64 lower-case hex
+/// characters (the [`generate_state`] output, a 256-bit draw). Checking the shape before
+/// hashing rejects an oversized or malformed value cheaply — without a SHA-256 over an
+/// unbounded, attacker-controlled input — and such a value could never key a stored record
+/// anyway. Mirrors the refresh-token / session-hash shape guards used elsewhere.
+fn is_oauth_state_shape(state: &str) -> bool {
+    state.len() == 64
+        && state
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+}
+
 /// Mint a PKCE `(code_verifier, code_challenge)` pair (RFC 7636, S256): the verifier is a
 /// base64url-no-pad 256-bit draw; the challenge is `base64url(SHA-256(code_verifier))`.
 fn generate_pkce() -> (String, String) {
@@ -533,6 +554,42 @@ mod tests {
              \"name\":\"New User\",\"picture\":\"https://pic.example.com/a.png\"}}"
         )
         .into_bytes()
+    }
+
+    /// An [`OAuthStateStore`] that counts how many times `take_state` is invoked, so a test can
+    /// prove a rejected `state` never reaches the store (no hash, no lookup). `put_state` is a
+    /// no-op; `take_state` always reports a miss after recording the call.
+    struct CountingStateStore {
+        takes: std::sync::atomic::AtomicUsize,
+    }
+
+    impl CountingStateStore {
+        fn new() -> Self {
+            Self {
+                takes: std::sync::atomic::AtomicUsize::new(0),
+            }
+        }
+
+        fn take_count(&self) -> usize {
+            self.takes.load(std::sync::atomic::Ordering::SeqCst)
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl OAuthStateStore for CountingStateStore {
+        async fn put_state(
+            &self,
+            _state_hash: &str,
+            _payload: &str,
+            _ttl_secs: u64,
+        ) -> Result<(), AuthError> {
+            Ok(())
+        }
+
+        async fn take_state(&self, _state_hash: &str) -> Result<Option<String>, AuthError> {
+            self.takes.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(None)
+        }
     }
 
     /// A hook returning a fixed `on_oauth_login` decision.
@@ -861,6 +918,50 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn callback_rejects_a_bad_shape_state_before_hashing_or_lookup() {
+        // A `state` that is not 64 lower-case hex is rejected as OauthFailed BEFORE it is
+        // hashed or looked up: the counting state store records zero `take_state` calls, so an
+        // oversized / non-hex / wrong-length value never drives a SHA-256 or a Redis round-trip.
+        let users = Arc::new(InMemoryUserRepository::new());
+        let stores = Arc::new(InMemoryStores::new());
+        let counting = Arc::new(CountingStateStore::new());
+        let google = GoogleOAuthProvider::new(google_config(), Arc::new(RoutingHttpClient::new()));
+        let mut cfg = base_config();
+        cfg.controllers.oauth = true;
+        let engine = AuthEngine::builder()
+            .config(cfg)
+            .environment(Environment::Test)
+            .user_repository(users)
+            .redis_stores(stores)
+            .hooks(Arc::new(DecisionHook(OAuthLoginResult::Create)))
+            .oauth_provider(Arc::new(google))
+            .oauth_state_store(counting.clone())
+            .build();
+        let Ok(engine) = engine else { return };
+        // An oversized value (well beyond 64 chars), a wrong length, an upper-case hex digit,
+        // and a non-hex character are each rejected on the same path.
+        for bad in [
+            "a".repeat(100_000),
+            "a".repeat(63),
+            "A".repeat(64),
+            "g".repeat(64),
+        ] {
+            assert!(matches!(
+                engine.oauth_callback("google", "code", &bad, &ctx()).await,
+                Err(AuthError::OauthFailed)
+            ));
+        }
+        // The store was never consulted: no hashing, no Redis lookup on a bad-shape state.
+        assert_eq!(counting.take_count(), 0);
+        // Positive control on the counter itself: a direct store call DOES register, so the
+        // zero above is a genuine "never reached", not a counter that can never move. `put_state`
+        // is a no-op double; `take_state` increments and reports a miss.
+        assert!(counting.put_state("hash", "payload", 600).await.is_ok());
+        assert!(matches!(counting.take_state("hash").await, Ok(None)));
+        assert_eq!(counting.take_count(), 1);
+    }
+
+    #[tokio::test]
     async fn callback_rejects_a_malformed_stored_state_payload() {
         // A stored payload that is not valid JSON collapses to OauthFailed, not an internal error.
         let hooks: Arc<dyn AuthHooks> = Arc::new(DecisionHook(OAuthLoginResult::Create));
@@ -1076,6 +1177,20 @@ mod tests {
         assert!(!is_valid_provider_name("Google"));
         assert!(!is_valid_provider_name("has space"));
         assert!(!is_valid_provider_name(&"a".repeat(65)));
+    }
+
+    #[test]
+    fn oauth_state_shape_accepts_only_64_lowercase_hex() {
+        // A genuine minted state (64 lower-case hex) passes; wrong length, an upper-case digit,
+        // a non-hex character, and an empty value are each rejected before any hashing — and a
+        // freshly minted state round-trips through the guard.
+        assert!(is_oauth_state_shape(&generate_state()));
+        assert!(is_oauth_state_shape(&"a1".repeat(32)));
+        assert!(!is_oauth_state_shape(&"a".repeat(63)));
+        assert!(!is_oauth_state_shape(&"a".repeat(65)));
+        assert!(!is_oauth_state_shape(&"A".repeat(64)));
+        assert!(!is_oauth_state_shape(&"g".repeat(64)));
+        assert!(!is_oauth_state_shape(""));
     }
 
     #[test]

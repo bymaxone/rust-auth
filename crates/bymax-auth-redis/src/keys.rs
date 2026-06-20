@@ -62,6 +62,8 @@ pub enum Prefix {
     Mfa,
     /// TOTP anti-replay marker (`tu`).
     Tu,
+    /// Single-use OAuth `state` + PKCE record (`os`).
+    Os,
 }
 
 impl Prefix {
@@ -88,6 +90,7 @@ impl Prefix {
             Self::MfaSetup => "mfa_setup",
             Self::Mfa => "mfa",
             Self::Tu => "tu",
+            Self::Os => "os",
         }
     }
 }
@@ -164,6 +167,7 @@ mod tests {
             (Prefix::MfaSetup, "auth:mfa_setup:abc"),
             (Prefix::Mfa, "auth:mfa:abc"),
             (Prefix::Tu, "auth:tu:abc"),
+            (Prefix::Os, "auth:os:abc"),
         ];
         for (prefix, expected) in cases {
             assert_eq!(ns.key(prefix, "abc"), expected);
