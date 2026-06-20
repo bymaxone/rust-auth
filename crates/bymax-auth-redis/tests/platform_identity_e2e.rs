@@ -5,8 +5,9 @@
 //! in-memory tier, that the platform session keyspaces (`prt:`/`prp:`/`psess:`/`psd:`) are the
 //! ones actually written, and that platform tokens carry NO `tenantId`.
 //!
-//! Compiles only under the `platform` feature; every case returns early when Docker is
-//! unavailable, so a no-Docker run still compiles and passes.
+//! Compiles only under the `platform` feature. The single legitimate skip is Docker being
+//! unavailable (no container starts); once a container is running, every step hard-fails on a
+//! real error rather than returning silently, so a regression can never pass unnoticed.
 #![cfg(feature = "platform")]
 
 use std::collections::HashMap;
@@ -147,19 +148,39 @@ fn code_at(secret_b32: &str, at_unix: i64) -> String {
 
 #[tokio::test]
 async fn platform_login_me_refresh_logout_and_revoke_all_against_redis() {
+    // The only legitimate skip: Docker is unavailable, so no container could start.
     let Some(redis) = try_start().await else { return };
-    let Some(stores) = redis.stores("auth") else { return };
-    let Some((engine, admins)) = build_engine(Arc::new(stores)) else {
-        return;
-    };
+
+    // Past this point a container is running, so every infrastructure step MUST succeed — a
+    // failure here is a real regression (broken RedisStores wiring, an unwired platform domain,
+    // a broken login), never a skip. Bind each step behind a hard assertion; the `else` arms are
+    // unreachable on the happy path and exist only to satisfy the irrefutable-let requirement.
+    let connected = redis.stores("auth");
+    assert!(
+        connected.is_some(),
+        "RedisStores must connect once the container is up"
+    );
+    let Some(stores) = connected else { return };
+    let built = build_engine(Arc::new(stores));
+    assert!(
+        built.is_some(),
+        "platform-enabled engine must build over real Redis"
+    );
+    let Some((engine, admins)) = built else { return };
     let id = seed_admin(&admins, "p1", "ops@admin.io");
-    let Some(svc) = engine.platform_auth() else { return };
+    let platform = engine.platform_auth();
+    assert!(platform.is_some(), "the platform-auth domain must be wired");
+    let Some(svc) = platform else { return };
 
     // Login issues a full platform session written to the PLATFORM keyspace.
-    let Ok(PlatformLoginResult::Success(auth)) = svc
+    let login = svc
         .login("ops@admin.io", PASSWORD, "1.2.3.4", "agent")
-        .await
-    else {
+        .await;
+    assert!(
+        matches!(login, Ok(PlatformLoginResult::Success(_))),
+        "platform login must succeed against real Redis: {login:?}"
+    );
+    let Ok(PlatformLoginResult::Success(auth)) = login else {
         return;
     };
     assert_eq!(auth.user.email, "ops@admin.io");
@@ -185,7 +206,12 @@ async fn platform_login_me_refresh_logout_and_revoke_all_against_redis() {
 
     // me returns the admin; refresh rotates to a new pair against the platform keyspace.
     assert!(matches!(svc.me(&id).await, Ok(u) if u.email == "ops@admin.io"));
-    let Ok(rotated) = svc.refresh(&auth.refresh_token, "1.2.3.4", "agent").await else {
+    let refreshed = svc.refresh(&auth.refresh_token, "1.2.3.4", "agent").await;
+    assert!(
+        refreshed.is_ok(),
+        "refresh must rotate the platform pair: {refreshed:?}"
+    );
+    let Ok(rotated) = refreshed else {
         return;
     };
     assert_ne!(rotated.refresh_token, auth.refresh_token);
@@ -226,10 +252,14 @@ async fn platform_login_me_refresh_logout_and_revoke_all_against_redis() {
     ));
 
     // A second login, then revoke-all atomically clears every platform session.
-    let Ok(PlatformLoginResult::Success(again)) = svc
+    let relogin = svc
         .login("ops@admin.io", PASSWORD, "5.6.7.8", "agent")
-        .await
-    else {
+        .await;
+    assert!(
+        matches!(relogin, Ok(PlatformLoginResult::Success(_))),
+        "the second platform login must succeed: {relogin:?}"
+    );
+    let Ok(PlatformLoginResult::Success(again)) = relogin else {
         return;
     };
     assert!(svc.revoke_all_platform_sessions(&id).await.is_ok());
@@ -244,20 +274,39 @@ async fn platform_login_me_refresh_logout_and_revoke_all_against_redis() {
 
 #[tokio::test]
 async fn platform_mfa_challenge_exchange_issues_a_full_session_against_redis() {
+    // The only legitimate skip: Docker is unavailable, so no container could start.
     let Some(redis) = try_start().await else { return };
+
+    // Past this point a container is running; every infrastructure step below MUST succeed, so
+    // each is bound behind a hard assertion. The `else` arms are unreachable on the happy path.
     // A distinct namespace isolates this case from the first within one container.
-    let Some(stores) = redis.stores("plat") else { return };
-    let Some((engine, admins)) = build_engine(Arc::new(stores)) else {
-        return;
-    };
+    let connected = redis.stores("plat");
+    assert!(
+        connected.is_some(),
+        "RedisStores must connect once the container is up"
+    );
+    let Some(stores) = connected else { return };
+    let built = build_engine(Arc::new(stores));
+    assert!(
+        built.is_some(),
+        "platform-enabled engine must build over real Redis"
+    );
+    let Some((engine, admins)) = built else { return };
     let id = seed_admin(&admins, "p-mfa", "mfa-admin.io");
-    let Some(mfa) = engine.mfa() else { return };
+    let mfa_domain = engine.mfa();
+    assert!(mfa_domain.is_some(), "the MFA domain must be wired");
+    let Some(mfa) = mfa_domain else { return };
 
     // Enable MFA on the platform admin (platform context), then mint a platform temp token and
     // exchange it for a full platform session with a valid TOTP code — the login → challenge →
     // full-token exchange, end to end against Redis.
     let base = now_secs();
-    let Ok(setup) = mfa.setup(&id, MfaContext::Platform).await else {
+    let setup_result = mfa.setup(&id, MfaContext::Platform).await;
+    assert!(
+        setup_result.is_ok(),
+        "platform MFA setup must succeed: {setup_result:?}"
+    );
+    let Ok(setup) = setup_result else {
         return;
     };
     assert!(
@@ -273,22 +322,31 @@ async fn platform_mfa_challenge_exchange_issues_a_full_session_against_redis() {
     );
 
     // A login for the now-MFA-enabled admin returns a challenge (not tokens).
-    let Some(svc) = engine.platform_auth() else { return };
+    let platform = engine.platform_auth();
+    assert!(platform.is_some(), "the platform-auth domain must be wired");
+    let Some(svc) = platform else { return };
     let challenge = svc
         .login("mfa-admin.io", PASSWORD, "1.2.3.4", "agent")
         .await;
-    let temp = match challenge {
-        Ok(PlatformLoginResult::MfaChallenge(c)) => c.mfa_temp_token,
-        _ => return,
+    assert!(
+        matches!(challenge, Ok(PlatformLoginResult::MfaChallenge(_))),
+        "an MFA-enabled admin login must return a challenge, not tokens: {challenge:?}"
+    );
+    let Ok(PlatformLoginResult::MfaChallenge(c)) = challenge else {
+        return;
     };
+    let temp = c.mfa_temp_token;
 
     // Exchange the temp token for a full session via the MFA challenge flow.
     let exchanged = mfa
         .challenge(&temp, &code_at(&setup.secret, base + 30), "1.2.3.4", "ua")
         .await;
-    let result = match exchanged {
-        Ok(bymax_auth_core::LoginResultMfa::Platform(result)) => result,
-        _ => return,
+    assert!(
+        matches!(exchanged, Ok(bymax_auth_core::LoginResultMfa::Platform(_))),
+        "the temp-token exchange must issue a full platform session: {exchanged:?}"
+    );
+    let Ok(bymax_auth_core::LoginResultMfa::Platform(result)) = exchanged else {
+        return;
     };
     assert_eq!(result.user.email, "mfa-admin.io");
     // The issued access token carries `mfaVerified: true` and the platform discriminator, with
