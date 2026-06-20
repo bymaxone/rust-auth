@@ -8,5 +8,91 @@ repository.workspace = true
 authors.workspace = true
 description = "Axum HTTP adapter for bymax-auth: router factory, extractors and guards, token delivery, per-route rate limiting, WebSocket tickets, and DTO validation."
 
+[dependencies]
+# The framework-agnostic engine this adapter exposes over HTTP, plus the shared wire
+# contracts (claims, results, cookie/route constants, the `AuthError` catalog the
+# `IntoResponse` impl renders). The adapter owns no auth logic — it only routes,
+# extracts, validates, delivers, and maps errors.
+bymax-auth-core = { workspace = true }
+bymax-auth-types = { workspace = true }
+# The HTTP framework. No TLS feature is enabled (termination is external), so axum and
+# its hyper/tower stack stay free of any TLS backend and therefore free of `ring`.
+axum = { version = "0.8", default-features = false, features = ["json", "query", "tokio", "http1", "matched-path"] }
+# The lower-level HTTP types axum re-exports; pinned to the same 1.x already in the graph
+# so the ban on duplicate semver-major versions holds.
+http = "1"
+# The tower middleware traits (`ServiceBuilder`, `Layer`) for the ordered stack.
+tower = { version = "0.5", default-features = false }
+# The shared middleware layers: tracing spans, request-body limit, sensitive-header
+# redaction, and the optional CORS layer. No TLS feature — server-side termination is
+# external, so tower-http never pulls a TLS backend.
+tower-http = { version = "0.6", default-features = false, features = ["trace", "limit", "sensitive-headers", "cors"] }
+# The typed cookie jar + `CookieManagerLayer` for reading and emitting `Set-Cookie`
+# without parsing raw headers in handlers.
+tower-cookies = "0.11"
+# Per-route edge rate limiting (the tower port of the `governor` GCRA limiter). Attached
+# per route group, never as one global layer (§16.2). `governor` is named directly for its
+# `NoOpMiddleware` marker on the `GovernorConfig` type parameter; the version is pinned to
+# the one `tower_governor` already resolves so no duplicate major is introduced.
+tower_governor = { version = "0.8", default-features = false, features = ["axum"] }
+governor = { version = "0.10", default-features = false, features = ["std"] }
+# Declarative DTO field validation (the `class-validator` analogue), wrapped by the
+# `ValidatedJson`/`ValidatedQuery` extractors alongside `serde`'s `deny_unknown_fields`.
+garde = { version = "0.23", default-features = false, features = ["email", "derive"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_urlencoded = "0.7"
+# Timestamp arithmetic for projecting `SessionInfo`'s `OffsetDateTime` fields into the
+# Unix-millisecond numbers the session list body emits.
+time = { version = "0.3", default-features = false, features = ["std"] }
+# Structured spans/events; the adapter emits them but installs NO subscriber (the
+# consuming application owns subscriber setup).
+tracing = "0.1"
+
+[dev-dependencies]
+# A multi-threaded runtime + the assertion-friendly macros for the async E2E tests.
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }
+# Drives the built router with `ServiceExt::oneshot` (no socket needed) and reads bodies.
+tower = { version = "0.5", default-features = false, features = ["util"] }
+http-body-util = "0.1"
+# The in-memory trait doubles (`InMemoryUserRepository`, `InMemoryStores`, the mock
+# OAuth/HTTP clients) for the no-Docker unit-tier extractor/handler tests.
+bymax-auth-core = { workspace = true, features = ["testing", "full"] }
+# The real Redis-backed stores for the testcontainers end-to-end tier.
+bymax-auth-redis = { workspace = true, features = ["mfa", "oauth", "platform"] }
+# A real `redis:8` via Docker for the end-to-end tier; the crate still builds without
+# Docker (these only compile into the test targets). Default features are dropped so the
+# Docker client is built without its `ring`-backed TLS stack — local Docker is reached
+# over a unix socket, and `ring` is forbidden by the workspace ban-list.
+testcontainers = { version = "0.27", default-features = false }
+testcontainers-modules = { version = "0.15", default-features = false, features = ["redis"] }
+redis = { version = "1", default-features = false, features = ["tokio-comp"] }
+base64 = "0.22"
+# The MFA-gated crypto surface (TOTP + Base32) so the E2E tests can compute a valid TOTP from
+# a freshly enrolled secret and exercise the verify-enable / challenge / disable happy paths.
+bymax-auth-crypto = { workspace = true, features = ["mfa"] }
+# The HS256 signer so the unit tier can mint a token with arbitrary claims (e.g. an
+# MFA-enabled-but-unverified token) that no normal engine flow would issue.
+bymax-auth-jwt = { workspace = true }
+secrecy = "0.10"
+# The test `AuthHooks` double (an OAuth-allowing hook) implements the `#[async_trait]` core
+# trait, so the same desugaring macro the trait uses is needed here.
+async-trait = "0.1"
+
+[features]
+# A bare adapter mounts only the always-on `auth` + `password_reset` groups. Each optional
+# group is feature-gated AND runtime-toggle-gated: a disabled feature compiles none of the
+# corresponding code, and a `false` engine toggle mounts no routes.
+default = []
+mfa = ["bymax-auth-core/mfa"]
+sessions = ["bymax-auth-core/sessions"]
+platform = ["bymax-auth-core/platform"]
+oauth = ["bymax-auth-core/oauth"]
+invitations = ["bymax-auth-core/invitations"]
+# The WebSocket upgrade-ticket surface (mint endpoint + the two redeem extractors).
+websocket = ["axum/ws"]
+# Convenience meta-feature: every optional group for a full backend.
+full = ["mfa", "sessions", "platform", "oauth", "invitations", "websocket"]
+
 [lints]
 workspace = true

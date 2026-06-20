@@ -1,6 +1,6 @@
 # Phase 10 — `bymax-auth-axum`: router, extractors, delivery, rate-limit, WS, validation
 
-> **Status**: 📋 ToDo · **Progress**: 0 / 7 tasks · **Last updated**: 2026-06-17
+> **Status**: ✅ Done · **Progress**: 7 / 7 tasks · **Last updated**: 2026-06-20
 > **Source roadmap**: [`docs/development_plan.md`](../development_plan.md) § P10
 > **Source spec**: [`docs/technical_specification.md`](../technical_specification.md)
 
@@ -50,13 +50,13 @@ When P10 is done, every endpoint in §8.2 works end to end under E2E tests (Axum
 
 | ID | Task | Status | Priority | Size | Depends on |
 |---|---|---|---|---|---|
-| 10.1 | Adapter skeleton: `auth_router` / `AuthState` / `RouteGroups` + `IntoResponse` + middleware | 📋 ToDo | P0 | M | 4.5 |
-| 10.2 | Token extractors (`AuthUser`/`OptionalAuthUser`/`CurrentUser`) + `ValidatedJson`/`ValidatedQuery` | 📋 ToDo | P0 | L | 10.1 |
-| 10.3 | Authz extractors (`RequireRole`/`PlatformUser`/`RequirePlatformRole`/`UserStatus`/`MfaSatisfied`/`SelfOrAdmin`) | 📋 ToDo | P0 | M | 10.2 |
-| 10.4 | `auth` + `password_reset` groups + `TokenDelivery` (cookie/bearer/both) | 📋 ToDo | P0 | L | 10.2, 10.3 |
-| 10.5 | Optional groups: `mfa`/`sessions`/`platform`/`platform_mfa`/`oauth`/`invitations` | 📋 ToDo | P0 | L | 10.3, 10.4 |
-| 10.6 | Per-route rate limiting (`tower_governor`) + `RateLimitConfig` + `Retry-After` | 📋 ToDo | P0 | M | 10.4 |
-| 10.7 | WS ticket endpoint + `WsAuthUser`/`WsAuthUserFromHeader` + full-router E2E | 📋 ToDo | P0 | L | 10.4, 10.5, 10.6 |
+| 10.1 | Adapter skeleton: `auth_router` / `AuthState` / `RouteGroups` + `IntoResponse` + middleware | ✅ Done | P0 | M | 4.5 |
+| 10.2 | Token extractors (`AuthUser`/`OptionalAuthUser`/`CurrentUser`) + `ValidatedJson`/`ValidatedQuery` | ✅ Done | P0 | L | 10.1 |
+| 10.3 | Authz extractors (`RequireRole`/`PlatformUser`/`RequirePlatformRole`/`UserStatus`/`MfaSatisfied`/`SelfOrAdmin`) | ✅ Done | P0 | M | 10.2 |
+| 10.4 | `auth` + `password_reset` groups + `TokenDelivery` (cookie/bearer/both) | ✅ Done | P0 | L | 10.2, 10.3 |
+| 10.5 | Optional groups: `mfa`/`sessions`/`platform`/`platform_mfa`/`oauth`/`invitations` | ✅ Done | P0 | L | 10.3, 10.4 |
+| 10.6 | Per-route rate limiting (`tower_governor`) + `RateLimitConfig` + `Retry-After` | ✅ Done | P0 | M | 10.4 |
+| 10.7 | WS ticket endpoint + `WsAuthUser`/`WsAuthUserFromHeader` + full-router E2E | ✅ Done | P0 | L | 10.4, 10.5, 10.6 |
 
 ---
 
@@ -625,3 +625,11 @@ done). 6. Recompute the overall %. 7. Append `- 10.7 ✅ <YYYY-MM-DD> — <summa
 ## Completion log
 
 > Append-only. One line per completed task: `- <task-id> ✅ YYYY-MM-DD — <one-line summary>`.
+
+- 10.1 ✅ 2026-06-20 — Skeleton: `auth_router`/`AuthRouter::from_engine`/`AuthState`/`RouteGroups` (derived from the engine's `ControllerToggles`, `platform_mfa = platform && mfa`), the `AuthError`→`IntoResponse` envelope+status map+`Retry-After`, and the ordered tower stack (trace→body-limit→sensitive-header redaction→optional CORS→cookie manager, no subscriber).
+- 10.2 ✅ 2026-06-20 — `AuthUser`/`OptionalAuthUser`/`CurrentUser` over Axum-0.8 native-async `FromRequestParts` (cookie-or-bearer only, HS256-pinned engine verify, claims cached on `parts.extensions`, internal-only codes remapped to `token_invalid`); `ValidatedJson`/`ValidatedQuery` (`deny_unknown_fields` + `garde` → `auth.validation`) + the full §8.4.1 DTO catalog.
+- 10.3 ✅ 2026-06-20 — `RequireRole<R>`/`PlatformUser`/`RequirePlatformRole<R>`/`UserStatus`/`MfaSatisfied`/`SelfOrAdmin<A>` (cached-claims reuse; platform extractors `platform`-gated; thin public engine API added: `verify_access_token`/`verify_platform_token`/`role_satisfies`/`assert_user_active`).
+- 10.4 ✅ 2026-06-20 — `auth` (register/login/logout/refresh/me/verify-email/resend-verification) + `password_reset` groups and the `TokenDelivery` helper for cookie/bearer/both with §14 secure cookies (HttpOnly, Secure-by-default, refresh path-scoped `SameSite=Strict`, non-HttpOnly `has_session`); anti-enum endpoints fold to a uniform response.
+- 10.5 ✅ 2026-06-20 — `mfa`/`sessions`/`platform`/`platform_mfa`/`oauth`/`invitations` groups wired to engine methods (each feature- and toggle-gated); OAuth callback redirect-vs-JSON (§11.3.3) with a 302 `found` helper and the planted `mfa_temp_token` cookie; `create_invitation` derives `tenant_id` from the claims.
+- 10.6 ✅ 2026-06-20 — Per-route `tower_governor` limits (`RateLimitConfig` reproducing `AUTH_THROTTLE_CONFIGS`), attached per group (never global), keyed on peer IP or a trusted-proxy `X-Forwarded-For` strategy, normalized into the `auth.too_many_requests` 429 envelope with `Retry-After`.
+- 10.7 ✅ 2026-06-20 — `POST /auth/ws-ticket` (composes `AuthUser`+`UserStatus`+`MfaSatisfied`, `issue_ws_ticket`), `WsAuthUser` (single-use `GETDEL` redeem of the `ticket` query param) + `WsAuthUserFromHeader` (handshake `Authorization` JWT), all `websocket`-gated; full-router testcontainers E2E (`redis_e2e.rs`) across every group + the single-use ticket. 100% line+function coverage on the adapter; `cargo deny` passes ring-free.
