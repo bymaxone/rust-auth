@@ -52,3 +52,8 @@ pub static BRUTE_FORCE_INCR: LazyLock<LuaScript> =
 /// `otp_verify` — attempt-bounded verify + consume (section 12.5.4).
 pub static OTP_VERIFY: LazyLock<LuaScript> =
     LazyLock::new(|| LuaScript::new(include_str!("lua/otp_verify.lua")));
+
+/// `mfa_challenge` — the fused TOTP anti-replay mark + temp-token consume (section 7.5.6).
+#[cfg(feature = "mfa")]
+pub static MFA_CHALLENGE: LazyLock<LuaScript> =
+    LazyLock::new(|| LuaScript::new(include_str!("lua/mfa_challenge.lua")));

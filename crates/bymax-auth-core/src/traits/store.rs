@@ -398,6 +398,80 @@ pub trait InvitationStore: Send + Sync {
     async fn consume_invitation(&self, token: &str) -> Result<Option<StoredInvitation>, AuthError>;
 }
 
+/// The MFA storage seam: the AES-protected pending-setup record, the short-lived MFA
+/// temp-token marker, and the TOTP anti-replay marker — backing the `mfa_setup:`, `mfa:`,
+/// and `tu:` keyspaces (§12.4). Every value is hashed/encrypted by the engine before it
+/// reaches this trait; the store never sees a plaintext secret, recovery code, or `jti`.
+///
+/// The setup record (`put_setup_nx`/`get_setup`/`take_setup`) is the AES-256-GCM wire
+/// string the [`crate::services`] MFA layer produced — this trait stores it opaquely. The
+/// `mark_totp_used` and `challenge_consume` operations are the two anti-replay forms: the
+/// standalone marker for the enable/disable/regenerate paths, and the **fused** marker-set
+/// plus temp-token consume that the login/OAuth challenge path runs in one atomic step so a
+/// replayed TOTP code can never consume a second token (§7.5.6).
+///
+/// # Errors
+///
+/// Returns [`AuthError`] on a store failure. The boolean results carry the atomic decision
+/// (whether the `SET NX` won, whether the replay marker was newly created) rather than an
+/// error, so the caller can branch without a second round-trip.
+#[cfg(feature = "mfa")]
+#[async_trait]
+pub trait MfaStore: Send + Sync {
+    /// Store the pending-setup record under `mfa_setup:{user_id_hash}` only if absent
+    /// (atomic `SET NX EX`). Returns `true` when this call created the record, `false` when
+    /// one already existed (a concurrent `setup` won the race).
+    async fn put_setup_nx(
+        &self,
+        user_id_hash: &str,
+        value: &str,
+        ttl: u64,
+    ) -> Result<bool, AuthError>;
+
+    /// Read the pending-setup record at `mfa_setup:{user_id_hash}` without consuming it
+    /// (the idempotent `setup` fast-path). `None` when absent or expired.
+    async fn get_setup(&self, user_id_hash: &str) -> Result<Option<String>, AuthError>;
+
+    /// Atomically consume (`GETDEL`) the pending-setup record at `mfa_setup:{user_id_hash}`
+    /// — the completion gate for `verify_and_enable`. `None` when a concurrent enable already
+    /// consumed it.
+    async fn take_setup(&self, user_id_hash: &str) -> Result<Option<String>, AuthError>;
+
+    /// Write the MFA temp-token marker `mfa:{jti_hash} = user_id` with a TTL, enforcing
+    /// single-use of the challenge temp token.
+    async fn put_temp(&self, jti_hash: &str, user_id: &str, ttl: u64) -> Result<(), AuthError>;
+
+    /// Read the MFA temp-token marker at `mfa:{jti_hash}` with `GET` (never `GETDEL`), so a
+    /// mistyped code leaves the token alive for a retry (§7.3.5). `None` when absent/expired.
+    async fn get_temp(&self, jti_hash: &str) -> Result<Option<String>, AuthError>;
+
+    /// Delete the MFA temp-token marker at `mfa:{jti_hash}`. Idempotent.
+    async fn del_temp(&self, jti_hash: &str) -> Result<(), AuthError>;
+
+    /// Set the standalone anti-replay marker `tu:{replay_id} = "1"` with `NX EX ttl`.
+    /// Returns `true` when the marker was newly created (the code had not been seen) and
+    /// `false` when it already existed (a replay). Used by `verify_and_enable` / `disable` /
+    /// `regenerate_recovery_codes`, which have no temp token to consume.
+    async fn mark_totp_used(&self, replay_id: &str, ttl: u64) -> Result<bool, AuthError>;
+
+    /// The **fused** challenge step (§7.5.6): set `tu:{replay_id}` `NX EX ttl` and, *iff* that
+    /// marker was newly created, delete the temp token `mfa:{jti_hash}` — in one atomic Lua
+    /// script. The temp-token deletion is the single-consume gate: returns `true` only when this
+    /// call **both** freshly marked the code **and** removed a still-present temp token (the sole
+    /// winner). It returns `false` on a replayed code (the marker already existed) **and** when a
+    /// distinct still-valid code loses the race for an already-consumed token — in that case the
+    /// just-set marker is rolled back so the unused code is not burned. This makes "mark the code
+    /// used" and "consume the temp token" inseparable, so neither a replayed code nor two
+    /// distinct still-valid codes (different `replay_id`s) sharing one temp token can ever issue
+    /// more than one session.
+    async fn challenge_consume(
+        &self,
+        replay_id: &str,
+        jti_hash: &str,
+        ttl: u64,
+    ) -> Result<bool, AuthError>;
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

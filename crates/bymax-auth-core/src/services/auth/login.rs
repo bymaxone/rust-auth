@@ -100,7 +100,8 @@ impl AuthEngine {
         if user.mfa_enabled {
             let mfa_temp_token = self
                 .tokens()
-                .issue_mfa_temp_token(&user.id, MfaContext::Dashboard)?;
+                .issue_mfa_temp_token(&user.id, MfaContext::Dashboard)
+                .await?;
             return Ok(LoginResult::MfaChallenge(MfaChallengeResult {
                 mfa_required: true,
                 mfa_temp_token,

@@ -33,6 +33,12 @@ thiserror = "2"
 # of the session DTOs in `bymax-auth-types`.
 time = { version = "0.3", default-features = false, features = ["std", "serde-well-known"] }
 
+[features]
+# Forwards the MFA storage seam: the `MfaStore` impl (the `mfa_setup:`/`mfa:`/`tu:`
+# keyspaces and the fused `mfa_challenge` Lua) compiles only under this feature, and the
+# trait it implements is itself `mfa`-gated in `bymax-auth-core`.
+mfa = ["bymax-auth-core/mfa"]
+
 [dev-dependencies]
 # A real Redis via Docker for the atomicity/no-PII integration tier; the crate still builds
 # without Docker (these only compile into the test targets). Default features are dropped so
@@ -49,6 +55,10 @@ bymax-auth-core = { workspace = true, features = ["testing"] }
 bymax-auth-jwt = { workspace = true }
 # Building the engine's JWT signing secret in the end-to-end test.
 secrecy = "0.10"
+# The MFA lifecycle e2e test computes valid TOTP codes from a setup secret (Base32 decode +
+# RFC 6238) and builds a 32-byte AES key, so it reaches for the MFA crypto + a base64 codec.
+bymax-auth-crypto = { workspace = true, features = ["mfa"] }
+base64 = "0.22"
 
 [lints]
 workspace = true
