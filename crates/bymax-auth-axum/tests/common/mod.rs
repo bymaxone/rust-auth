@@ -275,12 +275,24 @@ pub fn mint_platform_token(sub: &str, role: &str) -> String {
 /// session/WS handlers hit their store-failure error arms.
 pub struct FailingStores {
     inner: Arc<InMemoryStores>,
+    /// When set, `is_blacklisted` itself fails (simulating Redis down during the `rv:{jti}`
+    /// revocation check), so a test can drive the auth-extractor's internal-error path rather
+    /// than the handler error arms. Default `false` keeps the auth extractors passing.
+    blacklist_fails: bool,
 }
 
 impl FailingStores {
     fn new() -> Self {
         Self {
             inner: Arc::new(InMemoryStores::new()),
+            blacklist_fails: false,
+        }
+    }
+
+    fn with_failing_blacklist() -> Self {
+        Self {
+            inner: Arc::new(InMemoryStores::new()),
+            blacklist_fails: true,
         }
     }
 }
@@ -356,6 +368,9 @@ impl bymax_auth_core::traits::SessionStore for FailingStores {
             .await
     }
     async fn is_blacklisted(&self, jti_or_hash: &str) -> Result<bool, bymax_auth_types::AuthError> {
+        if self.blacklist_fails {
+            return Err(fail());
+        }
         self.inner.is_blacklisted(jti_or_hash).await
     }
 }
@@ -582,6 +597,40 @@ pub fn build_failing() -> Option<Harness> {
     config.roles.platform_hierarchy = Some(HashMap::from([("SUPER_ADMIN".to_owned(), Vec::new())]));
     // Mount the sessions group but keep session tracking off, so register does not trigger the
     // (failing) `list_sessions` eviction path — the handlers still reach the failing store.
+    config.sessions.enabled = false;
+    config.controllers.sessions = true;
+    config.platform.enabled = true;
+
+    let engine = AuthEngine::builder()
+        .config(config)
+        .environment(Environment::Test)
+        .user_repository(users.clone())
+        .platform_user_repository(admins.clone())
+        .redis_stores(failing)
+        .build()
+        .ok()?;
+    Some(Harness {
+        engine: Arc::new(engine),
+        users,
+        admins,
+        stores: inert,
+    })
+}
+
+/// Build a platform-enabled engine whose `is_blacklisted` check always fails with an internal
+/// error, so a test can confirm the platform auth extractor PROPAGATES that infrastructure
+/// failure as a 500 rather than masking it as a 401. Everything else delegates to the in-memory
+/// stores, so a well-formed platform token reaches the revocation check before it fails.
+pub fn build_failing_blacklist() -> Option<Harness> {
+    let users = Arc::new(InMemoryUserRepository::new());
+    let admins = Arc::new(InMemoryPlatformUserRepository::new());
+    let failing = Arc::new(FailingStores::with_failing_blacklist());
+    let inert = Arc::new(InMemoryStores::new());
+
+    let mut config = AuthConfig::default();
+    config.jwt.secret = SecretString::from(JWT_SECRET.to_owned());
+    config.roles.hierarchy = HashMap::from([("USER".to_owned(), Vec::new())]);
+    config.roles.platform_hierarchy = Some(HashMap::from([("SUPER_ADMIN".to_owned(), Vec::new())]));
     config.sessions.enabled = false;
     config.controllers.sessions = true;
     config.platform.enabled = true;

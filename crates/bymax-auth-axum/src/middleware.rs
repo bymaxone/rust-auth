@@ -17,9 +17,11 @@ use crate::routes::sensitive_header_names;
 use crate::state::AuthState;
 
 /// Apply the ordered middleware stack to an assembled router. `max_body_bytes` caps the
-/// request body; `cors`, when `Some`, is applied outermost (after tracing) so a preflight
-/// is answered before the inner layers run. The cookie manager is innermost so the typed
-/// jar is populated for every extractor and handler.
+/// request body. The `TraceLayer` is applied last, so it is the **outermost** layer and every
+/// request — including a CORS preflight — is traced first; `cors`, when `Some`, sits just
+/// inside tracing (it answers the preflight before the redaction/body-limit/cookie layers
+/// run). The cookie manager is innermost so the typed jar is populated for every extractor and
+/// handler.
 pub(crate) fn apply_middleware(
     router: Router<AuthState>,
     max_body_bytes: usize,

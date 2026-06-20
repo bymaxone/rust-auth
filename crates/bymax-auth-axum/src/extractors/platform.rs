@@ -28,10 +28,28 @@ async fn verified_platform_claims(
         .engine()
         .verify_platform_token(&token)
         .await
-        // A dashboard token (or any non-platform token) here is "platform auth required".
-        .map_err(|_| AuthError::PlatformAuthRequired)?;
+        .map_err(map_platform_verify_error)?;
     parts.extensions.insert(claims.clone());
     Ok(claims)
+}
+
+/// Map a `verify_platform_token` failure to the boundary error, discriminating token-auth
+/// failures from internal/infra failures the same way the dashboard guard does.
+///
+/// Only the token-authentication outcomes — an invalid/malformed/wrong-type token
+/// ([`AuthError::TokenInvalid`]), an expired token ([`AuthError::TokenExpired`]), or a revoked
+/// one ([`AuthError::TokenRevoked`]) — collapse to [`AuthError::PlatformAuthRequired`] (401),
+/// since a dashboard or otherwise non-platform token presented here is "platform auth
+/// required". Every other variant (notably [`AuthError::Internal`] from a store/Redis failure
+/// during the `rv:{jti}` revocation check) is propagated unchanged, so an infrastructure
+/// outage surfaces as a 500 rather than being masked as an auth failure.
+fn map_platform_verify_error(error: AuthError) -> AuthError {
+    match error {
+        AuthError::TokenInvalid | AuthError::TokenExpired | AuthError::TokenRevoked => {
+            AuthError::PlatformAuthRequired
+        }
+        other => other,
+    }
 }
 
 /// Verified platform access-token claims (`type == platform`, no `tenantId`). A dashboard
@@ -112,6 +130,31 @@ mod tests {
             iat: 1_700_000_000,
             exp: 4_700_000_000,
         }
+    }
+
+    #[test]
+    fn map_platform_verify_error_masks_token_failures_and_propagates_internal() {
+        // The three token-authentication outcomes collapse to `platform_auth_required` (a
+        // dashboard/non-platform/expired/revoked token presented here is simply "not authed").
+        assert!(matches!(
+            map_platform_verify_error(AuthError::TokenInvalid),
+            AuthError::PlatformAuthRequired
+        ));
+        assert!(matches!(
+            map_platform_verify_error(AuthError::TokenExpired),
+            AuthError::PlatformAuthRequired
+        ));
+        assert!(matches!(
+            map_platform_verify_error(AuthError::TokenRevoked),
+            AuthError::PlatformAuthRequired
+        ));
+        // An internal/infra failure (e.g. Redis down during the revocation check) is propagated
+        // unchanged, so it surfaces as a 500 rather than being masked as a 401.
+        let internal = AuthError::Internal(Box::new(std::io::Error::other("redis down")));
+        assert!(matches!(
+            map_platform_verify_error(internal),
+            AuthError::Internal(_)
+        ));
     }
 
     #[tokio::test]

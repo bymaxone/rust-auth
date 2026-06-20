@@ -254,7 +254,15 @@ async fn full_router_against_real_redis() {
         // Docker unavailable — skip cleanly.
         return;
     };
-    let Some((engine, users, admins)) = build_engine(&redis) else { return };
+    // The container is up, so engine/router setup MUST succeed; a failure here is an
+    // infrastructure regression, not a skip condition. Assert before binding so the test
+    // hard-fails instead of silently passing on a broken setup.
+    let built = build_engine(&redis);
+    assert!(
+        built.is_some(),
+        "engine/router setup must succeed once the Redis container is running"
+    );
+    let Some((engine, users, admins)) = built else { return };
     let app = AuthRouter::from_engine(engine.clone(), AxumAuthConfig::default()).into_router();
 
     // ---- register → login → refresh → logout → me, all over real Redis -----------------

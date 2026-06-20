@@ -1941,3 +1941,34 @@ async fn platform_revoke_all_store_failure_arm() {
         .await;
     assert_eq!(revoke.status, StatusCode::INTERNAL_SERVER_ERROR);
 }
+
+#[tokio::test]
+async fn platform_extractor_propagates_internal_errors_but_masks_token_failures() {
+    // With the `rv:{jti}` revocation check failing (Redis down), a *well-formed* platform token
+    // reaches that check inside the `PlatformUser` extractor. The internal failure MUST surface
+    // as a 500 — masking it as a 401 would hide an outage behind an auth error.
+    let Some(h) = common::build_failing_blacklist() else {
+        return;
+    };
+    let app = router(&h);
+
+    let token = common::mint_platform_token("padmin", "SUPER_ADMIN");
+    let internal = Req::get("/auth/platform/me")
+        .cookie("access_token", &token)
+        .send(&app)
+        .await;
+    assert_eq!(internal.status, StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(internal.json()["error"]["code"], "auth.internal");
+
+    // A token-auth failure (a malformed/invalid token) never reaches the revocation check, so it
+    // still collapses to `platform_auth_required` (401) — the masking is correct for THIS case.
+    let invalid = Req::get("/auth/platform/me")
+        .cookie("access_token", "not-a-jwt")
+        .send(&app)
+        .await;
+    assert_eq!(invalid.status, StatusCode::UNAUTHORIZED);
+    assert_eq!(
+        invalid.json()["error"]["code"],
+        "auth.platform_auth_required"
+    );
+}

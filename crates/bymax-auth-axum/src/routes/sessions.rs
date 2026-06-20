@@ -104,8 +104,61 @@ fn session_to_json(info: &SessionInfo) -> Value {
     })
 }
 
-/// Convert an `OffsetDateTime` to Unix milliseconds, clamped into `i64`.
+/// Convert an `OffsetDateTime` to Unix milliseconds, clamped into the `i64` range (see
+/// [`clamp_millis`]). A pre-epoch (negative) instant stays negative rather than being silently
+/// flipped to `i64::MAX`.
 fn to_millis(value: time::OffsetDateTime) -> i64 {
-    let nanos = value.unix_timestamp_nanos();
-    i64::try_from(nanos / 1_000_000).unwrap_or(i64::MAX)
+    clamp_millis(value.unix_timestamp_nanos() / 1_000_000)
+}
+
+/// Saturate an `i128` millisecond count into the `i64` range: a value past `i64::MAX` clamps to
+/// `i64::MAX`, one below `i64::MIN` clamps to `i64::MIN`, and any in-range value is returned
+/// exactly. This preserves the sign — corrupting a negative timestamp into `i64::MAX` (the old
+/// `try_from(..).unwrap_or(i64::MAX)` behavior) is the bug this avoids.
+fn clamp_millis(millis: i128) -> i64 {
+    millis.clamp(i64::MIN as i128, i64::MAX as i128) as i64
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{clamp_millis, to_millis};
+    use time::OffsetDateTime;
+
+    #[test]
+    fn clamp_millis_returns_in_range_values_unchanged() {
+        // A normal, in-range millisecond count passes through exactly.
+        assert_eq!(clamp_millis(1_700_000_000_000), 1_700_000_000_000);
+        // The boundary values are returned as themselves, not clamped.
+        assert_eq!(clamp_millis(i64::MAX as i128), i64::MAX);
+        assert_eq!(clamp_millis(i64::MIN as i128), i64::MIN);
+    }
+
+    #[test]
+    fn clamp_millis_preserves_a_negative_pre_epoch_value() {
+        // A pre-epoch (negative) timestamp stays negative — it must NOT become i64::MAX.
+        let pre_epoch = -1_700_000_000_000_i128;
+        assert_eq!(clamp_millis(pre_epoch), -1_700_000_000_000);
+        assert_ne!(clamp_millis(pre_epoch), i64::MAX);
+    }
+
+    #[test]
+    fn clamp_millis_saturates_above_and_below_the_i64_range() {
+        // Above i64::MAX saturates to i64::MAX; below i64::MIN saturates to i64::MIN.
+        assert_eq!(clamp_millis(i64::MAX as i128 + 1), i64::MAX);
+        assert_eq!(clamp_millis(i64::MIN as i128 - 1), i64::MIN);
+    }
+
+    #[test]
+    fn to_millis_converts_normal_and_pre_epoch_instants() {
+        // A normal post-epoch instant converts to its positive millisecond count.
+        let normal = OffsetDateTime::from_unix_timestamp(1_700_000_000)
+            .unwrap_or(OffsetDateTime::UNIX_EPOCH);
+        assert_eq!(to_millis(normal), 1_700_000_000_000);
+        // A pre-epoch instant converts to a NEGATIVE millisecond count (the regression guard:
+        // the old `try_from(..).unwrap_or(i64::MAX)` would have corrupted this to i64::MAX).
+        let pre_epoch =
+            OffsetDateTime::from_unix_timestamp(-1_000).unwrap_or(OffsetDateTime::UNIX_EPOCH);
+        assert_eq!(to_millis(pre_epoch), -1_000_000);
+        assert_ne!(to_millis(pre_epoch), i64::MAX);
+    }
 }
