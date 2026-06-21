@@ -1,6 +1,6 @@
 # Phase 11 — `bymax-auth-wasm` + `@bymax-one/rust-auth` (npm) + Rust client
 
-> **Status**: 📋 ToDo · **Progress**: 0 / 6 tasks · **Last updated**: 2026-06-17
+> **Status**: ✅ Done · **Progress**: 6 / 6 tasks · **Last updated**: 2026-06-21
 > **Source roadmap**: [`docs/development_plan.md`](../development_plan.md) § P11
 > **Source spec**: [`docs/technical_specification.md`](../technical_specification.md)
 
@@ -46,12 +46,12 @@ When P11 is done, the npm package builds dual ESM+CJS with a `.d.ts` per subpath
 
 | ID | Task | Status | Priority | Size | Depends on |
 |---|---|---|---|---|---|
-| 11.1 | `bymax-auth-wasm` cdylib — edge JWT verify (wasm-pack bundler) | 📋 ToDo | P0 | M | 2.6 |
-| 11.2 | npm `./shared` subpath — hand-written helpers over generated types | 📋 ToDo | P0 | S | 2.5 |
-| 11.3 | npm `./client` + `./react` (fetch client, single-flight refresh, hooks) | 📋 ToDo | P0 | M | 11.2 |
-| 11.4 | npm `./nextjs` — WASM-backed proxy/handlers/edge JWT | 📋 ToDo | P0 | L | 11.1, 11.2 |
-| 11.5 | `bymax-auth-client` Rust crate (`client` feature) | 📋 ToDo | P1 | M | 10.4 |
-| 11.6 | Package layout (dual ESM+CJS, exports, WASM bundle) + parity E2E | 📋 ToDo | P0 | L | 11.3, 11.4, 11.5 |
+| 11.1 | `bymax-auth-wasm` cdylib — edge JWT verify (wasm-pack bundler) | ✅ Done | P0 | M | 2.6 |
+| 11.2 | npm `./shared` subpath — hand-written helpers over generated types | ✅ Done | P0 | S | 2.5 |
+| 11.3 | npm `./client` + `./react` (fetch client, single-flight refresh, hooks) | ✅ Done | P0 | M | 11.2 |
+| 11.4 | npm `./nextjs` — WASM-backed proxy/handlers/edge JWT | ✅ Done | P0 | L | 11.1, 11.2 |
+| 11.5 | `bymax-auth-client` Rust crate (`client` feature) | ✅ Done | P1 | M | 10.4 |
+| 11.6 | Package layout (dual ESM+CJS, exports, WASM bundle) + parity E2E | ✅ Done | P0 | L | 11.3, 11.4, 11.5 |
 
 ---
 
@@ -542,3 +542,10 @@ done). 6. Recompute the overall %. 7. Append `- 11.6 ✅ <YYYY-MM-DD> — <summa
 ## Completion log
 
 > Append-only. One line per completed task: `- <task-id> ✅ YYYY-MM-DD — <one-line summary>`.
+
+- 11.1 ✅ 2026-06-21 — `bymax-auth-wasm` cdylib+rlib: `verify_jwt_hs256` (HS256-pinned, secret zeroized), `decode_jwt`/`extract_claims`, edge leeway, `wasm-extra`-gated password surface excluded from npm; getrandom 0.2 via `bymax-auth-jwt/wasm-js` (no new major, ring-free); ~69 KiB gzipped vs the 350 KiB gate; `wasm-pack test --node`; 100% rlib coverage.
+- 11.2 ✅ 2026-06-21 — npm `./shared`: hand-written `AuthClientError` + `AuthResponseCode` brand + `buildAuthRefreshSkipSuffixes`/`AUTH_REFRESH_SKIP_PATH_SUFFIXES` over the ts-rs-generated types; generator barrel updated so the staleness gate stays clean; vitest green.
+- 11.3 ✅ 2026-06-21 — npm `./client` (`createAuthFetch` single-flight 401 refresh + the eight `createAuthClient` methods, discriminated `ResetPasswordInput`) and `./react` (`AuthProvider`/`useSession`/`useAuth`/`useAuthStatus`); vitest green.
+- 11.4 ✅ 2026-06-21 — npm `./nextjs`: `createAuthProxy` ({ proxy, config }, seven security patterns), the three route-handler factories, and the WASM-backed async `verifyJwtToken` (decode-only fallback); server-only guard + open-redirect guard; a real backend-signed token verified through the WASM codec in Node (server/edge parity).
+- 11.5 ✅ 2026-06-21 — `bymax-auth-client` native reqwest client (eight typed ops, single-flight 401 refresh, typed `AuthClientError`, `#![forbid(unsafe_code)]`), testcontainers register→me→refresh→logout round-trip over real HTTP; 100% coverage.
+- 11.6 ✅ 2026-06-21 — package layout: dual ESM+CJS per subpath (tsup, .mjs/.cjs/.d.ts each, build-integrity check), no `.` root, scoped `sideEffects`, bundled `wasm/`; zero ts-rs drift; headless parity proven (Rust client real HTTP + WASM edge-verify of a backend-signed token + React/Next unit tests). A full Next.js dev-server / browser DOM E2E is deferred (needs a live Next app + backend).
