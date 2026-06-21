@@ -7,3 +7,5 @@ export * from "./auth-error.types";
 export * from "./error-codes";
 export * from "./cookie-defaults";
 export * from "./routes";
+export * from "./auth-client-error";
+export * from "./refresh-skip";

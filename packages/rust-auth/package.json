@@ -2,5 +2,90 @@
   "name": "@bymax-one/rust-auth",
   "version": "0.0.0",
   "private": true,
-  "description": "Frontend (React/Next.js) auth for the rust-auth backend"
+  "type": "module",
+  "description": "Frontend (React/Next.js) auth + edge JWT for the rust-auth backend — the byte-for-byte npm counterpart of @bymax-one/nest-auth.",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/bymaxone/rust-auth.git",
+    "directory": "packages/rust-auth"
+  },
+  "sideEffects": [
+    "./wasm/*.js",
+    "*.wasm"
+  ],
+  "files": [
+    "dist",
+    "wasm",
+    "LICENSE",
+    "README.md",
+    "CHANGELOG.md"
+  ],
+  "exports": {
+    "./shared": {
+      "types": "./dist/shared/index.d.ts",
+      "import": "./dist/shared/index.mjs",
+      "require": "./dist/shared/index.cjs"
+    },
+    "./client": {
+      "types": "./dist/client/index.d.ts",
+      "import": "./dist/client/index.mjs",
+      "require": "./dist/client/index.cjs"
+    },
+    "./react": {
+      "types": "./dist/react/index.d.ts",
+      "import": "./dist/react/index.mjs",
+      "require": "./dist/react/index.cjs"
+    },
+    "./nextjs": {
+      "types": "./dist/nextjs/index.d.ts",
+      "import": "./dist/nextjs/index.mjs",
+      "require": "./dist/nextjs/index.cjs"
+    }
+  },
+  "scripts": {
+    "build:wasm": "wasm-pack build ../../bindings/bymax-auth-wasm --target bundler --release --out-dir pkg && rm -rf wasm && mkdir -p wasm && cp ../../bindings/bymax-auth-wasm/pkg/bymax_auth_wasm.js ../../bindings/bymax-auth-wasm/pkg/bymax_auth_wasm_bg.js ../../bindings/bymax-auth-wasm/pkg/bymax_auth_wasm_bg.wasm ../../bindings/bymax-auth-wasm/pkg/bymax_auth_wasm.d.ts ../../bindings/bymax-auth-wasm/pkg/bymax_auth_wasm_bg.wasm.d.ts wasm/",
+    "build": "tsup",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "gen:format": "prettier --write \"src/shared/**/*.ts\"",
+    "gen:check": "cargo test -p bymax-auth-types --features ts-export --locked && git diff --exit-code -- src/shared"
+  },
+  "dependencies": {
+    "server-only": "^0.0.1"
+  },
+  "peerDependencies": {
+    "next": "^16.0.0",
+    "react": "^19.0.0"
+  },
+  "peerDependenciesMeta": {
+    "next": {
+      "optional": true
+    },
+    "react": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@testing-library/dom": "^10.4.0",
+    "@testing-library/react": "^16.1.0",
+    "@types/node": "^22.10.2",
+    "@types/react": "^19.0.2",
+    "@types/react-dom": "^19.0.2",
+    "jsdom": "^25.0.1",
+    "next": "^16.0.0",
+    "prettier": "^3.4.2",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
+    "tsup": "^8.3.5",
+    "typescript": "^5.7.2",
+    "vitest": "^2.1.8"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org/"
+  }
 }
