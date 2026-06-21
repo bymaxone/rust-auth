@@ -331,6 +331,10 @@ criteria = "safe-to-deploy"
 version = "0.3.102"
 criteria = "safe-to-deploy"
 
+[[exemptions.libm]]
+version = "0.2.16"
+criteria = "safe-to-run"
+
 [[exemptions.litemap]]
 version = "0.8.2"
 criteria = "safe-to-deploy"
@@ -354,6 +358,10 @@ criteria = "safe-to-deploy"
 [[exemptions.mime]]
 version = "0.3.16"
 criteria = "safe-to-deploy"
+
+[[exemptions.minicov]]
+version = "0.3.8"
+criteria = "safe-to-run"
 
 [[exemptions.mio]]
 version = "1.2.1"
@@ -742,6 +750,18 @@ criteria = "safe-to-deploy"
 [[exemptions.wasm-bindgen-shared]]
 version = "0.2.125"
 criteria = "safe-to-deploy"
+
+[[exemptions.wasm-bindgen-test]]
+version = "0.3.75"
+criteria = "safe-to-run"
+
+[[exemptions.wasm-bindgen-test-macro]]
+version = "0.3.75"
+criteria = "safe-to-run"
+
+[[exemptions.wasm-bindgen-test-shared]]
+version = "0.2.125"
+criteria = "safe-to-run"
 
 [[exemptions.web-sys]]
 version = "0.3.102"

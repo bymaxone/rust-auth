@@ -236,6 +236,35 @@ jobs:
       - run: cargo build -p bymax-auth-wasm --target wasm32-unknown-unknown --locked
 
   # ─────────────────────────────────────────────────────────────────────────────
+  # wasm-pack — the artifact the npm package actually ships. Builds the JWT-only
+  # edge binding for the `bundler` target, enforces the gzipped *_bg.wasm size
+  # budget (≤ 350 KiB — a real, fixed gate, not a placeholder), and runs the wasm
+  # smoke tests under Node (no browser: the JWT surface is pure compute). The
+  # exhaustive decision coverage lives in the host-side unit tests gated by the
+  # coverage job; this proves the emitted wasm artifact works end to end.
+  # ─────────────────────────────────────────────────────────────────────────────
+  wasm-pack:
+    name: wasm-pack (bundler build + node test + size gate)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    needs: wasm-purity
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions-rust-lang/setup-rust-toolchain@46268bd060767258de96ed93c1251119784f2ab6 # v1.16.1
+        with:
+          target: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+      - uses: taiki-e/install-action@b8cecb83565409bcc297b2df6e77f030b2a468d5 # v2.82.0
+        with:
+          tool: wasm-pack
+      - name: Build the edge wasm (npm bundler target, JWT-only)
+        run: wasm-pack build bindings/bymax-auth-wasm --target bundler --release --out-dir pkg
+      - name: Enforce the gzipped wasm size budget
+        run: bash bindings/bymax-auth-wasm/check-wasm-size.sh
+      - name: Run the wasm smoke tests under Node
+        run: wasm-pack test --node bindings/bymax-auth-wasm
+
+  # ─────────────────────────────────────────────────────────────────────────────
   # Supply chain — three-layer gate:
   #   cargo-deny  : ban-list, license allow-list, RustSec advisories, source policy
   #   cargo-audit : cross-check Cargo.lock against the RustSec advisory database

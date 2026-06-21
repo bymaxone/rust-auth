@@ -16,6 +16,55 @@ publish = false
 # and linked as a normal Rust library on the host.
 crate-type = ["cdylib", "rlib"]
 
+[dependencies]
+# The shared HS256 codec — the EXACT verification path the native server runs, so the
+# edge and the server can never drift. `wasm-js` forwards the browser RNG backend that
+# `getrandom 0.2` (pulled transitively through `bymax-auth-crypto` for the unrelated
+# refresh-token CSPRNG) needs in order to compile on `wasm32-unknown-unknown`. The
+# verify/decode path itself uses NO randomness; enabling the feature only satisfies the
+# transitive `getrandom` backend requirement WITHOUT introducing a second `getrandom`
+# major into the production graph (the whole workspace stays on `getrandom 0.2`).
+bymax-auth-jwt = { workspace = true, features = ["wasm-js"] }
+# The shared claim structures (`DashboardClaims`/`PlatformClaims`/`MfaTempClaims`) the
+# edge re-serializes back to JSON.
+bymax-auth-types = { workspace = true }
+# The JS boundary. wasm-bindgen 0.2 is already in the workspace graph (getrandom's `js`
+# backend pulls it), so this adds no new major. It is the one crate whose generated glue
+# uses `unsafe`, which is why this binding relaxes to `#![deny(unsafe_op_in_unsafe_fn)]`
+# instead of `#![forbid(unsafe_code)]`.
+wasm-bindgen = "0.2"
+# Peek the (unsigned) `type` discriminator and re-serialize verified claims as JSON.
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# Base64url decoding for the decode-only header+payload projection. Same major the JWT
+# codec already uses, so no new dependency major enters the graph.
+base64 = "0.22"
+# The typed edge error category (mirrors the JWT codec's opaque error posture).
+thiserror = "2"
+
+# The optional password surface, EXCLUDED from the npm-distributed build (the edge JWT
+# verifier ships without it). Pulls `bymax-auth-crypto` (its default scrypt hasher plus
+# the wasm RNG backend) only when a deployment opts in to offline password verification.
+bymax-auth-crypto = { workspace = true, optional = true, features = ["wasm-js"] }
+zeroize = { version = "1.9", optional = true }
+
+# The JS `Date` clock is only available on the wasm target; the host build reads the
+# system clock instead (see `now_unix_secs`). Scoping `js-sys` to wasm keeps it out of
+# the host test/coverage build, where it would panic if called.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+js-sys = "0.3"
+
+[dev-dependencies]
+# Drives the `wasm-pack test --node` smoke tests (verify/decode round-trip, expiry and
+# algorithm rejection). The host-side `#[cfg(test)]` units carry the 100% coverage gate.
+wasm-bindgen-test = "0.3"
+
+[features]
+# OFF in the npm build (`wasm-pack build … --target bundler --release` without
+# `--features wasm-extra`). Gates the optional password surface so the shipped edge
+# verifier stays JWT-only and minimal.
+wasm-extra = ["dep:bymax-auth-crypto", "dep:zeroize"]
+
 # Inherits the shared posture (missing_docs + clippy). The workspace lint table
 # deliberately omits `unsafe_code`, so this binding can carry its own file-level
 # `#![deny(unsafe_op_in_unsafe_fn)]` exception (wasm-bindgen needs `unsafe`) while
