@@ -301,3 +301,41 @@ jobs:
         run: rustup toolchain install 1.90 --profile minimal --no-self-update
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
       - run: cargo +1.90 build --workspace --locked
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # npm package — the @bymax-one/rust-auth frontend package. Rebuilds the edge wasm
+  # from source (the wasm/ output is gitignored), then builds the dual ESM + CJS
+  # bundles, typechecks every subpath, and runs the Vitest suite (which verifies a
+  # real backend-signed HS256 token against the same wasm the package ships).
+  # ─────────────────────────────────────────────────────────────────────────────
+  npm:
+    name: npm package (build + typecheck + test)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: 24
+      - uses: actions-rust-lang/setup-rust-toolchain@46268bd060767258de96ed93c1251119784f2ab6 # v1.16.1
+        with:
+          target: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+      - uses: taiki-e/install-action@b8cecb83565409bcc297b2df6e77f030b2a468d5 # v2.82.0
+        with:
+          tool: wasm-pack
+      - name: Install npm dependencies
+        working-directory: packages/rust-auth
+        run: npm ci
+      - name: Build the edge wasm (bundler target)
+        working-directory: packages/rust-auth
+        run: npm run build:wasm
+      - name: Build the dual ESM + CJS bundles
+        working-directory: packages/rust-auth
+        run: npm run build
+      - name: Typecheck every subpath
+        working-directory: packages/rust-auth
+        run: npx tsc --noEmit
+      - name: Run the Vitest suite
+        working-directory: packages/rust-auth
+        run: npm test

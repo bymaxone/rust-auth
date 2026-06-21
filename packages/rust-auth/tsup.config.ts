@@ -36,11 +36,18 @@ export default defineConfig({
   ],
   onSuccess: async () => {
     const subpaths = ["shared", "client", "react", "nextjs"];
-    const missing: string[] = [];
-    for (const sub of subpaths) {
-      for (const ext of [".mjs", ".cjs", ".d.ts"]) {
-        const file = resolve(`dist/${sub}/index${ext}`);
-        if (!existsSync(file)) missing.push(`dist/${sub}/index${ext}`);
+    const targets = subpaths.flatMap((sub) =>
+      [".mjs", ".cjs", ".d.ts"].map((ext) => `dist/${sub}/index${ext}`),
+    );
+    // The `.d.ts` files come from tsup's separate (parallel) declaration build, which can
+    // finish after this hook fires; poll briefly so the check observes the final output
+    // rather than racing the declaration emit.
+    const deadline = Date.now() + 15_000;
+    let missing: string[] = targets;
+    while (missing.length > 0 && Date.now() < deadline) {
+      missing = targets.filter((file) => !existsSync(resolve(file)));
+      if (missing.length > 0) {
+        await new Promise((done) => setTimeout(done, 100));
       }
     }
     if (missing.length > 0) {
