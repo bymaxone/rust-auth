@@ -18,7 +18,7 @@ description = "Cryptographic primitives for bymax-auth: password hashing, consta
 # workspace `deny.toml` (`multiple-versions = "deny"`) rejects. Keeping every
 # RustCrypto crate on the same generation is what keeps the dependency graph free
 # of duplicate-major bloat.
-hmac = "0.12"
+hmac = "0.13"
 sha2 = "0.10"
 subtle = "2.6"
 rand = "0.8"
