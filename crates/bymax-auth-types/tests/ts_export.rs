@@ -223,7 +223,11 @@ fn append_error_code_map() {
     );
 }
 
-/// Emit the barrel `index.ts` re-exporting every generated module.
+/// Emit the barrel `index.ts` re-exporting every generated module plus the small
+/// hand-written runtime set (`AuthClientError`/`AuthResponseCode` and the refresh-skip
+/// builder). The hand-written modules are not produced by `ts-rs`, but the barrel ties
+/// the whole `./shared` surface together, so it lists them here; the generator never
+/// overwrites those source files, so the staleness gate stays clean.
 fn write_index() {
     let modules = [
         "auth-user.types",
@@ -233,6 +237,9 @@ fn write_index() {
         "error-codes",
         "cookie-defaults",
         "routes",
+        // Hand-written runtime helpers (see the files of the same name).
+        "auth-client-error",
+        "refresh-skip",
     ];
     let mut body = String::new();
     for module in modules {

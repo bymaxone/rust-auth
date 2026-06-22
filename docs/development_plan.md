@@ -18,8 +18,8 @@ This document is Layer 2 of the spec → roadmap → phase-tasks workflow. It de
 
 ## Progress
 
-- **Overall progress:** 🔄 11 / 13 phases done (85%)
-- **Active phase:** **P11** (`bymax-auth-wasm` + `@bymax-one/rust-auth` npm + Rust client), unblocked since **P2** and **P10** are ✅ Done
+- **Overall progress:** 🔄 12 / 13 phases done (92%)
+- **Active phase:** **P12** (release engineering, supply-chain, docs, examples, dogfood), unblocked since all of **P0–P11** are ✅ Done
 - **Blocked:** —
 
 ## Phase dashboard
@@ -37,7 +37,7 @@ This document is Layer 2 of the spec → roadmap → phase-tasks workflow. It de
 | P8 | OAuth — `HttpClient` trait + Google + PKCE/state + linking | ✅ Done | 8/8 | L | 2026-06-20 |
 | P9 | Platform admin identity domain | ✅ Done | 5/5 | M | 2026-06-20 |
 | P10 | `bymax-auth-axum` — router, extractors, delivery, rate-limit, WS, validation (E2E) | ✅ Done | 7/7 | L | 2026-06-20 |
-| P11 | `bymax-auth-wasm` + `@bymax-one/rust-auth` (npm) + Rust client | 🔄 In Progress | — | L | — |
+| P11 | `bymax-auth-wasm` + `@bymax-one/rust-auth` (npm) + Rust client | ✅ Done | 6/6 | L | 2026-06-21 |
 | P12 | Release engineering, supply-chain, docs, examples, dogfood | 📋 ToDo | — | L | — |
 
 ## Dependency graph

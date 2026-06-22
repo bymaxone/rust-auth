@@ -8,5 +8,38 @@ repository.workspace = true
 authors.workspace = true
 description = "Native Rust HTTP auth client for bymax-auth (reqwest) — the typed client for service-to-service Rust consumers, mirroring the TypeScript ./client."
 
+[dependencies]
+# The shared wire contracts (results, the rotated-token pair, the safe user, and the
+# `auth.*` error envelope) the client (de)serializes against the Axum backend.
+bymax-auth-types = { workspace = true }
+# The HTTP transport. Pulled with `default-features = false` and NO TLS backend — every
+# reqwest TLS feature reintroduces a banned crate (`rustls-tls` → `ring`, `native-tls` →
+# `openssl`). As shipped the client therefore speaks plain HTTP (and HTTPS only behind a
+# caller-supplied `reqwest::Client` whose TLS provider the deployment has chosen — the
+# `with_http_client` seam), keeping the workspace RustCrypto-only and ring-free.
+reqwest = { version = "0.12", default-features = false }
+# Async refresh serialization (the single-flight lock) — only the `sync` primitives, no
+# runtime (the caller brings the runtime, exactly as reqwest expects).
+tokio = { version = "1", default-features = false, features = ["sync"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+
+[dev-dependencies]
+# A multi-threaded runtime + assertion macros for the async unit and integration tests.
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "time", "sync"] }
+# The full Axum backend, engine, and real Redis stores for the end-to-end round-trip.
+bymax-auth-axum = { workspace = true, features = ["sessions"] }
+bymax-auth-core = { workspace = true, features = ["testing"] }
+bymax-auth-redis = { workspace = true }
+# Serve the built router over a real TCP socket so reqwest can drive it end to end.
+axum = { version = "0.8", default-features = false, features = ["tokio", "http1"] }
+secrecy = "0.10"
+# A real `redis:8` via Docker for the end-to-end tier; the crate still builds without
+# Docker (these only compile into the test target). Default features are dropped so the
+# Docker client stays free of its `ring`-backed TLS stack (local Docker over a socket).
+testcontainers = { version = "0.27", default-features = false }
+testcontainers-modules = { version = "0.15", default-features = false, features = ["redis"] }
+
 [lints]
 workspace = true
