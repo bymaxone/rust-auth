@@ -17,7 +17,7 @@ bymax-auth-types = { workspace = true }
 # `openssl`). As shipped the client therefore speaks plain HTTP (and HTTPS only behind a
 # caller-supplied `reqwest::Client` whose TLS provider the deployment has chosen — the
 # `with_http_client` seam), keeping the workspace RustCrypto-only and ring-free.
-reqwest = { version = "0.12", default-features = false }
+reqwest = { version = "0.13", default-features = false }
 # Async refresh serialization (the single-flight lock) — only the `sync` primitives, no
 # runtime (the caller brings the runtime, exactly as reqwest expects).
 tokio = { version = "1", default-features = false, features = ["sync"] }
