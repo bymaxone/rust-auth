@@ -50,7 +50,7 @@ proptest = "1"
 hex = "0.4"
 # Benchmarks only (`cargo bench`). `default-features = false` drops the HTML/plotters
 # and rayon trees, keeping the dev dependency graph lean.
-criterion = { version = "0.5", default-features = false, features = ["cargo_bench_support"] }
+criterion = { version = "0.8", default-features = false, features = ["cargo_bench_support"] }
 
 [[bench]]
 name = "crypto"
