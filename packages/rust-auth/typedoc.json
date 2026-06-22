@@ -25,7 +25,7 @@
     "@layer"
   ],
   "navigationLinks": {
-    "crates.io (backend docs)": "https://docs.rs/bymax-auth",
+    "docs.rs (backend docs)": "https://docs.rs/bymax-auth",
     "GitHub": "https://github.com/bymaxone/rust-auth"
   }
 }

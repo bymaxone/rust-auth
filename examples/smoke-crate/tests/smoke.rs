@@ -87,10 +87,21 @@ async fn serve(engine: Arc<AuthEngine>) -> Option<(String, tokio::task::JoinHand
 
 #[tokio::test]
 async fn happy_path_register_login_me_refresh_logout() {
-    // Skip cleanly when Docker is unavailable; otherwise every step asserts a real outcome.
+    // The ONLY legitimate skip is Docker being unavailable. Once the container is up,
+    // every subsequent step must assert a real outcome (assert-then-bind) so an engine
+    // build or server-bind failure HARD-FAILS the smoke instead of passing silently.
     let Some(redis) = try_start().await else { return };
-    let Some(engine) = build_engine(&redis) else { return };
-    let Some((base, server)) = serve(engine).await else { return };
+
+    let engine = build_engine(&redis);
+    assert!(engine.is_some(), "engine build failed after Redis came up");
+    let Some(engine) = engine else { return };
+
+    let served = serve(engine).await;
+    assert!(
+        served.is_some(),
+        "router failed to bind after Redis came up"
+    );
+    let Some((base, server)) = served else { return };
 
     // register → a full bearer-mode authentication; the client retains the session.
     let client = AuthClient::new(base.clone());

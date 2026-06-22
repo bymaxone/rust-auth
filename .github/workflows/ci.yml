@@ -494,7 +494,7 @@ jobs:
       - name: Build the react-vite example
         working-directory: examples/react-vite
         run: |
-          npm install --no-audit --no-fund
+          npm ci --no-audit --no-fund
           npm run build
       # nextjs — `next build` type-checks and compiles every route + the middleware.
       - name: Build the nextjs example
@@ -503,7 +503,7 @@ jobs:
           AUTH_ACCESS_TOKEN_SECRET: an-edge-ci-secret-key-0123456789abcdef
           AUTH_BACKEND_URL: http://127.0.0.1:8080
         run: |
-          npm install --no-audit --no-fund
+          npm ci --no-audit --no-fund
           npm run build
 
   # ─────────────────────────────────────────────────────────────────────────────
@@ -549,7 +549,7 @@ jobs:
       - name: npm smoke (edge HS256 parity)
         working-directory: examples/smoke-npm
         run: |
-          npm install --no-audit --no-fund
+          npm ci --no-audit --no-fund
           npm run typecheck
           npm run smoke
 
@@ -603,14 +603,14 @@ jobs:
           AUTH_ACCESS_TOKEN_SECRET: ${{ env.AUTH_E2E_SECRET }}
           AUTH_BACKEND_URL: http://127.0.0.1:8090
         run: |
-          npm install --no-audit --no-fund
+          npm ci --no-audit --no-fund
           npm run build
       # Install Playwright's own chromium (with OS deps) and run the suite. The harness
       # starts Redis (testcontainers) + the backend; Playwright starts the Next server.
       - name: Install Playwright chromium
         working-directory: examples/e2e
         run: |
-          npm install --no-audit --no-fund
+          npm ci --no-audit --no-fund
           npx playwright install --with-deps chromium
       - name: Run the browser E2E
         working-directory: examples/e2e

@@ -27,8 +27,21 @@ async function forward(request: NextRequest, path: string[]): Promise<NextRespon
 
   const upstream = await fetch(target, init);
 
-  // Relay the status, body, and headers — preserving every Set-Cookie from the backend.
-  const responseHeaders = new Headers(upstream.headers);
+  // Relay the status, body, and headers. A login/refresh response carries several
+  // `Set-Cookie` headers at once (access + refresh + has_session); `new Headers(...)`
+  // would fold them into a single comma-joined value, corrupting the cookies. Copy
+  // every non-cookie header first, then re-append each `Set-Cookie` individually via
+  // `getSetCookie()` (undici/Node 20+) so all auth cookies reach the browser intact.
+  const responseHeaders = new Headers();
+  upstream.headers.forEach((value, key) => {
+    if (key.toLowerCase() !== "set-cookie") {
+      responseHeaders.set(key, value);
+    }
+  });
+  for (const cookie of upstream.headers.getSetCookie()) {
+    responseHeaders.append("set-cookie", cookie);
+  }
+
   const body = await upstream.arrayBuffer();
   return new NextResponse(body, {
     status: upstream.status,

@@ -10,6 +10,10 @@
 # Usage: scripts/dependency-budget.sh
 set -euo pipefail
 
+# Resolve to the repository root so `cargo tree` runs against this workspace
+# regardless of the caller's working directory (mirrors check-invariants.sh).
+cd "$(dirname "$0")/.."
+
 # Each entry: "<crate>:<features>:<cap>". Empty <features> means default features.
 # `lib` selects the library target's normal edges only (no dev-dependencies).
 BUDGETS=(
@@ -34,9 +38,22 @@ for entry in "${BUDGETS[@]}"; do
     feature_args=(--features "$features")
   fi
 
-  # Count the unique crates in the normal (production) dependency graph.
-  count="$(cargo tree -p "$crate" ${feature_args[@]+"${feature_args[@]}"} \
-    --edges normal --prefix none --no-dedupe 2>/dev/null \
+  # Resolve the normal (production) dependency graph. Capture cargo's own stderr and
+  # surface it on failure rather than discarding it, so a resolver/feature error is
+  # diagnosable in CI instead of silently producing an empty (under-cap) graph.
+  tree_err="$(mktemp)"
+  if ! tree_out="$(cargo tree -p "$crate" ${feature_args[@]+"${feature_args[@]}"} \
+      --edges normal --prefix none --no-dedupe 2>"$tree_err")"; then
+    echo "FAIL  $crate (${features:-default}): 'cargo tree' failed" >&2
+    cat "$tree_err" >&2
+    rm -f "$tree_err"
+    status=1
+    continue
+  fi
+  rm -f "$tree_err"
+
+  # Count the unique crates in the resolved graph.
+  count="$(printf '%s\n' "$tree_out" \
     | sed 's/ v[0-9].*//' \
     | grep -v '^$' \
     | sort -u \

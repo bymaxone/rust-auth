@@ -2,8 +2,8 @@
 //
 // Mirrors the nest-auth ESLint-as-error posture: the typescript-eslint recommended
 // rules plus eslint-plugin-security run over the kept TypeScript layers
-// (./shared, ./client, ./react, ./nextjs). The generated ./shared/*.types.ts files
-// are produced by ts-rs and are checked for drift, not for style, so they are
+// (src/shared, src/client, src/react, src/nextjs). The generated src/shared/*.types.ts
+// files are produced by ts-rs and are checked for drift, not for style, so they are
 // linted with the same rules but never hand-edited.
 import js from "@eslint/js";
 import tseslint from "typescript-eslint";

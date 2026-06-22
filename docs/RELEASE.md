@@ -142,7 +142,7 @@ in `ci`; the **release-time** layers (SBOM, attestations, OIDC publishing,
 
 | Control | Tool / mechanism | When | Status |
 | --- | --- | --- | --- |
-| Advisory scanning | `cargo-audit` (RustSec) | per-PR + weekly cron | active (`ci`, `audit`) |
+| Advisory scanning | `cargo-audit` (RustSec) | per-PR + daily cron | active (`ci`, `audit`) |
 | Policy / ban-list | `cargo-deny` | per-PR | active (`ci`) |
 | Dependency audit ledger | `cargo-vet` | per-PR | active (`ci`) |
 | Dependency budget | `cargo tree` count gate | per-PR | active (`ci`) |
