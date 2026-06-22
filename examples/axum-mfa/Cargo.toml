@@ -1,0 +1,22 @@
+[package]
+name = "axum-mfa"
+version = "0.0.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+description = "The bymax-auth-axum MFA lifecycle: setup, verify-enable, and the TOTP challenge."
+
+[dependencies]
+# The MFA route group is doubly gated: the `mfa` Cargo feature compiles it and the
+# `controllers.mfa` runtime toggle mounts it.
+bymax-auth-axum = { workspace = true, features = ["mfa", "sessions"] }
+bymax-auth-core = { workspace = true, features = ["testing", "mfa", "sessions"] }
+axum = { workspace = true }
+tokio = { workspace = true }
+secrecy = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+[lints]
+workspace = true

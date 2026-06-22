@@ -1,0 +1,24 @@
+[package]
+name = "axum-oauth-google"
+version = "0.0.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+description = "The Google OAuth authorize -> callback flow with single-use state + PKCE."
+
+[dependencies]
+bymax-auth-axum = { workspace = true, features = ["oauth", "sessions"] }
+# `oauth-reqwest` brings the bundled `ReqwestHttpClient`; `testing` provides the
+# in-memory `OAuthStateStore` so the example needs no Redis to build and start.
+bymax-auth-core = { workspace = true, features = ["testing", "oauth", "oauth-reqwest"] }
+bymax-auth-types = { workspace = true }
+async-trait = "0.1"
+axum = { workspace = true }
+tokio = { workspace = true }
+secrecy = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+[lints]
+workspace = true

@@ -1,0 +1,49 @@
+# A SEPARATE Cargo workspace for the official examples.
+#
+# The examples are demonstration/consumer code — never part of the published
+# crate surface. They live in their own workspace (with their own Cargo.lock) so
+# the root workspace's coverage gate (`cargo llvm-cov --workspace`, held at 100 %)
+# only ever measures the library crates, never this illustrative example code. CI
+# builds and lints these in a dedicated job so a contract change that breaks an
+# example fails the build.
+[workspace]
+resolver = "3"
+members = [
+    "axum-minimal",
+    "axum-mfa",
+    "axum-oauth-google",
+    "bymax-live-auth",
+    "smoke-crate",
+]
+
+[workspace.package]
+edition = "2024"
+rust-version = "1.90"
+license = "MIT"
+publish = false
+
+# The library crates are consumed by path, exactly as a real crates.io consumer
+# would consume them by version. Features are selected per example.
+[workspace.dependencies]
+bymax-auth-types = { path = "../crates/bymax-auth-types" }
+bymax-auth-jwt = { path = "../crates/bymax-auth-jwt" }
+bymax-auth-crypto = { path = "../crates/bymax-auth-crypto" }
+bymax-auth-core = { path = "../crates/bymax-auth-core" }
+bymax-auth-redis = { path = "../crates/bymax-auth-redis" }
+bymax-auth-axum = { path = "../crates/bymax-auth-axum" }
+bymax-auth-client = { path = "../crates/bymax-auth-client" }
+
+axum = { version = "0.8", default-features = false, features = ["tokio", "http1"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal"] }
+secrecy = "0.10"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Examples are illustrative binaries; the workspace lint posture still forbids
+# unwrap/panic, but `expect` with a descriptive message is permitted for the
+# unrecoverable startup paths (binding a socket, building the engine) where a
+# typed error has nowhere to propagate to. Prefer `?` everywhere it is possible.
+[workspace.lints.clippy]
+all = { level = "deny", priority = -1 }
+unwrap_used = "deny"
+panic = "deny"

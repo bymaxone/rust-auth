@@ -336,6 +336,68 @@ jobs:
       - name: Typecheck every subpath
         working-directory: packages/rust-auth
         run: npx tsc --noEmit
+      - name: Lint the kept TypeScript layers
+        working-directory: packages/rust-auth
+        run: npm run lint
+      - name: Validate the TypeDoc API surface renders
+        working-directory: packages/rust-auth
+        run: npx typedoc --emit none
       - name: Run the Vitest suite
         working-directory: packages/rust-auth
         run: npm test
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # Examples — the official examples form their OWN Cargo workspace (and their own
+  # npm packages), so they are never measured by the coverage gate. They are built
+  # and linted here so a contract change that breaks an example fails CI. The
+  # frontend examples consume the npm package by `file:` path, so the package's
+  # dist/ + wasm/ are built first. The examples never contact external services.
+  # ─────────────────────────────────────────────────────────────────────────────
+  examples:
+    name: examples (build + lint)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: 24
+      - uses: actions-rust-lang/setup-rust-toolchain@46268bd060767258de96ed93c1251119784f2ab6 # v1.16.1
+        with:
+          target: wasm32-unknown-unknown
+          components: clippy
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          workspaces: ". -> target\nexamples -> examples/target"
+      - uses: taiki-e/install-action@b8cecb83565409bcc297b2df6e77f030b2a468d5 # v2.82.0
+        with:
+          tool: wasm-pack
+      # Rust examples — their own workspace; build + clippy-as-error over all targets.
+      - name: Build the Rust examples
+        working-directory: examples
+        run: cargo build --locked
+      - name: Lint the Rust examples
+        working-directory: examples
+        run: cargo clippy --all-targets --locked -- -D warnings
+      # The npm package the frontend examples consume must exist on disk first.
+      - name: Build the npm package (dist + wasm)
+        working-directory: packages/rust-auth
+        run: |
+          npm ci
+          npm run build:wasm
+          npm run build
+      # react-vite — typecheck + production build against the built package.
+      - name: Build the react-vite example
+        working-directory: examples/react-vite
+        run: |
+          npm install --no-audit --no-fund
+          npm run build
+      # nextjs — `next build` type-checks and compiles every route + the middleware.
+      - name: Build the nextjs example
+        working-directory: examples/nextjs
+        env:
+          AUTH_ACCESS_TOKEN_SECRET: an-edge-ci-secret-key-0123456789abcdef
+          AUTH_BACKEND_URL: http://127.0.0.1:8080
+        run: |
+          npm install --no-audit --no-fund
+          npm run build

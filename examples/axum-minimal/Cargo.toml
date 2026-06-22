@@ -1,0 +1,22 @@
+[package]
+name = "axum-minimal"
+version = "0.0.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+description = "The smallest end-to-end bymax-auth-axum service: register, login, and /me."
+
+[dependencies]
+bymax-auth-axum = { workspace = true }
+# `testing` exposes the in-memory `UserRepository` and store doubles, so the
+# example runs with no database and no Redis — the focus is the wiring, not infra.
+bymax-auth-core = { workspace = true, features = ["testing"] }
+axum = { workspace = true }
+tokio = { workspace = true }
+secrecy = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+[lints]
+workspace = true

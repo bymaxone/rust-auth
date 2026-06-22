@@ -1,6 +1,12 @@
 [workspace]
 resolver = "3"
 members = ["crates/*", "bindings/*"]
+# The `examples/` apps form their OWN workspace (examples/Cargo.toml). Excluding
+# them here is belt-and-suspenders: it guarantees the coverage gate
+# (`cargo llvm-cov --workspace`, held at 100 %) only ever measures the library
+# crates, never the illustrative example/dogfood code, even if a future glob
+# change would otherwise reach them.
+exclude = ["examples", "fuzz"]
 
 [workspace.package]
 edition = "2024"
