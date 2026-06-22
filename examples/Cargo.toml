@@ -14,6 +14,7 @@ members = [
     "axum-oauth-google",
     "bymax-live-auth",
     "smoke-crate",
+    "e2e-backend",
 ]
 
 [workspace.package]

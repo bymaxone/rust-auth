@@ -788,6 +788,20 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d0881ea181b1df73ff77ffaaf9c7544ecc11e82fba9b5f27b262a3c73a332555"
 
 [[package]]
+name = "e2e-backend"
+version = "0.0.0"
+dependencies = [
+ "axum",
+ "bymax-auth-axum",
+ "bymax-auth-core",
+ "bymax-auth-redis",
+ "secrecy",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "either"
 version = "1.16.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"

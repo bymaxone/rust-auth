@@ -1,0 +1,21 @@
+[package]
+name = "e2e-backend"
+version = "0.0.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+description = "The backend the Playwright E2E drives: the Axum router over Redis, cookie delivery, sessions on."
+
+[dependencies]
+bymax-auth-axum = { workspace = true, features = ["sessions"] }
+bymax-auth-core = { workspace = true, features = ["testing", "sessions"] }
+bymax-auth-redis = { workspace = true }
+axum = { workspace = true }
+tokio = { workspace = true }
+secrecy = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+[lints]
+workspace = true
