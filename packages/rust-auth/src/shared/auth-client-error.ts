@@ -47,8 +47,9 @@ export class AuthClientError extends Error {
     this.code = body?.code;
     this.body = body;
     // Restore the prototype chain so `instanceof` holds when this class is extended or
-    // transpiled to ES5-target output (the classic TS `extends Error` caveat).
-    Object.setPrototypeOf(this, AuthClientError.prototype);
+    // transpiled to ES5-target output (the classic TS `extends Error` caveat). `new.target`
+    // is the actually-constructed class, so a subclass keeps `instanceof Subclass` too.
+    Object.setPrototypeOf(this, new.target.prototype);
   }
 
   /**

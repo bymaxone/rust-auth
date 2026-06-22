@@ -7,14 +7,17 @@
  * `bymax_auth_wasm.js` wrapper to this module.
  */
 import { readFileSync } from "node:fs";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 
 import * as bg from "../wasm/bymax_auth_wasm_bg.js";
 
-// `import.meta.dirname` is a plain filesystem path (no URL scheme), which avoids the
-// `file:`-scheme requirement that trips `fileURLToPath` when this module is loaded through a
-// Vitest alias rather than a `file://` URL.
-const wasmBytes = readFileSync(join(import.meta.dirname, "..", "wasm", "bymax_auth_wasm_bg.wasm"));
+// Resolve the wasm binary from this module's directory using the standard, portable
+// `fileURLToPath(import.meta.url)` form (not the non-standard `import.meta.dirname`). The
+// bare `import.meta.url` is used deliberately: the `new URL(rel, import.meta.url)` pattern is
+// rewritten by Vite into an asset URL, which breaks plain `readFileSync` under the test alias.
+const moduleDir = dirname(fileURLToPath(import.meta.url));
+const wasmBytes = readFileSync(join(moduleDir, "..", "wasm", "bymax_auth_wasm_bg.wasm"));
 const wasmModule = new WebAssembly.Module(wasmBytes);
 
 // The wasm imports its host functions from a single module (`./bymax_auth_wasm_bg.js`); map

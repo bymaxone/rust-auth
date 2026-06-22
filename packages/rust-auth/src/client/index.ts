@@ -120,7 +120,7 @@ async function performRefresh(
   defaultHeaders: Record<string, string>,
 ): Promise<boolean> {
   try {
-    const response = await fetch(resolveUrl(refreshEndpoint, baseUrl), {
+    const response = await fetch(resolveRefreshUrl(refreshEndpoint, baseUrl), {
       method: "POST",
       credentials,
       headers: new Headers(defaultHeaders),
@@ -129,6 +129,19 @@ async function performRefresh(
   } catch {
     return false;
   }
+}
+
+/**
+ * Resolve the refresh endpoint. The default (`/api/auth/client-refresh`) is a same-origin
+ * Next route, not a backend path, so an absolute URL or a root-relative same-origin path is
+ * used verbatim and must never be rebased onto `baseUrl` (which points at the backend). Only
+ * a genuinely-relative path (no leading slash, no scheme) is resolved against `baseUrl`.
+ */
+function resolveRefreshUrl(refreshEndpoint: string, baseUrl: string): string {
+  if (refreshEndpoint.startsWith("/") || /^[a-z][a-z0-9+.-]*:\/\//i.test(refreshEndpoint)) {
+    return refreshEndpoint;
+  }
+  return resolveUrl(refreshEndpoint, baseUrl);
 }
 
 /** Merge the per-request init with the wrapper defaults; per-request values take precedence. */
@@ -157,14 +170,45 @@ async function fetchWithTimeout(
   const timer = setTimeout(() => {
     controller.abort();
   }, timeout);
-  const signal = init.signal
-    ? AbortSignal.any([init.signal, controller.signal])
-    : controller.signal;
+  const signal = combineSignals(init.signal, controller.signal);
   try {
     return await fetch(url, { ...init, signal });
   } finally {
     clearTimeout(timer);
   }
+}
+
+/**
+ * Combine a caller's `AbortSignal` with the timeout controller's signal into a single signal
+ * for `fetch`. Prefers the native `AbortSignal.any`; on older Node 18 / some browsers where it
+ * is absent, it falls back to a forwarding controller so BOTH the caller's abort and the
+ * timeout still abort the request.
+ *
+ * @param callerSignal - The caller-supplied signal, if any.
+ * @param timeoutSignal - The timeout controller's signal (always present).
+ * @returns A single signal honoring both sources.
+ */
+function combineSignals(
+  callerSignal: AbortSignal | null | undefined,
+  timeoutSignal: AbortSignal,
+): AbortSignal {
+  if (!callerSignal) return timeoutSignal;
+  const anyFn = (AbortSignal as { any?: (signals: AbortSignal[]) => AbortSignal }).any;
+  if (typeof anyFn === "function") {
+    return anyFn([callerSignal, timeoutSignal]);
+  }
+  // Fallback: forward either source's abort onto one controller, whose signal drives fetch.
+  const controller = new AbortController();
+  const onAbort = (): void => {
+    controller.abort();
+  };
+  if (callerSignal.aborted || timeoutSignal.aborted) {
+    controller.abort();
+  } else {
+    callerSignal.addEventListener("abort", onAbort, { once: true });
+    timeoutSignal.addEventListener("abort", onAbort, { once: true });
+  }
+  return controller.signal;
 }
 
 /** Normalize any `fetch` input to a URL string for matching and base-URL resolution. */

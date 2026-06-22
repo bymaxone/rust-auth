@@ -148,4 +148,10 @@ describe("hook guards", () => {
     // The hook reads the null context sentinel and throws — caught by renderHook.
     expect(() => renderHook(() => useSession())).toThrow(/AuthProvider/);
   });
+
+  it("names useAuthStatus in the out-of-provider error message", () => {
+    // The shared guard message must enumerate every hook, including useAuthStatus, so a
+    // misuse points at the right hook.
+    expect(() => renderHook(() => useAuthStatus())).toThrow(/useAuthStatus/);
+  });
 });

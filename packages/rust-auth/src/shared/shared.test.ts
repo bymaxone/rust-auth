@@ -21,6 +21,17 @@ describe("AuthClientError", () => {
     expect(error.name).toBe("AuthClientError");
   });
 
+  it("preserves instanceof for a subclass via new.target", () => {
+    // Using `new.target.prototype` (not the hard-coded base prototype) keeps `instanceof`
+    // working for subclasses, which a host might define to specialize the thrown error.
+    class SubAuthClientError extends AuthClientError {}
+    const error = new SubAuthClientError("sub", 418);
+    expect(error).toBeInstanceOf(SubAuthClientError);
+    expect(error).toBeInstanceOf(AuthClientError);
+    expect(error).toBeInstanceOf(Error);
+    expect(error.status).toBe(418);
+  });
+
   it("has an undefined code when no body is given", () => {
     // A transport-level failure has a status but no parsed envelope.
     const error = new AuthClientError("network", 0);

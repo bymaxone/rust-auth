@@ -257,8 +257,10 @@ impl AuthClient {
         let access = self.access_token().ok_or(AuthClientError::NoSession)?;
         match self.fetch_me(&access).await {
             Err(AuthClientError::Api { status, .. }) if status == UNAUTHORIZED => {
-                // Single-flight refresh: serialize so concurrent 401s share one rotation.
-                self.refresh_single_flight().await?;
+                // Single-flight refresh: serialize so concurrent 401s share one rotation,
+                // passing the access token that just failed so a waiter that finds the
+                // session already rotated skips a redundant refresh.
+                self.refresh_single_flight(&access).await?;
                 let access = self.access_token().ok_or(AuthClientError::NoSession)?;
                 self.fetch_me(&access).await
             }
@@ -377,10 +379,17 @@ impl AuthClient {
         Ok(body.user)
     }
 
-    /// Refresh under the single-flight lock so concurrent callers queue behind one rotation.
-    async fn refresh_single_flight(&self) -> Result<(), AuthClientError> {
+    /// Refresh under the single-flight lock so concurrent callers share one rotation. The
+    /// `stale_access` is the access token the caller saw fail; after acquiring the lock, if an
+    /// earlier waiter has already rotated the session, the stored access token differs from
+    /// `stale_access`, so this skips the redundant refresh and reuses the fresh token. With N
+    /// concurrent `401`s on the same token this performs exactly one refresh.
+    async fn refresh_single_flight(&self, stale_access: &str) -> Result<(), AuthClientError> {
         let _guard = self.refresh_lock.lock().await;
-        self.refresh().await.map(|_| ())
+        match self.access_token() {
+            Some(current) if current != stale_access => Ok(()),
+            _ => self.refresh().await.map(|_| ()),
+        }
     }
 
     /// Send a request expecting a JSON 2xx body of type `T`; map a non-2xx to the typed
@@ -499,6 +508,8 @@ fn parse_api_error(status: u16, bytes: &[u8]) -> AuthClientError {
 mod tests {
     use super::*;
     use std::future::Future;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
     use tokio::task::JoinHandle;
@@ -544,6 +555,86 @@ mod tests {
         let Some((url, handle)) = serve(responses).await else { return };
         body(AuthClient::new(url)).await;
         let _ = handle.await;
+    }
+
+    /// Route a request for the single-flight concurrency test by inspecting the request line
+    /// and bearer token: login seeds the session, the refresh `POST` bumps the shared counter
+    /// and rotates `acc` → `acc2`, a `me` call carrying the fresh token succeeds, and a `me`
+    /// call still carrying the stale token gets a `401`.
+    fn route(request: &str, refresh_count: &AtomicUsize) -> Vec<u8> {
+        if request.contains("POST /auth/login") {
+            return response(200, "OK", &auth_body("acc", "ref"));
+        }
+        if request.contains("POST /auth/refresh") {
+            refresh_count.fetch_add(1, Ordering::SeqCst);
+            return response(200, "OK", r#"{"accessToken":"acc2","refreshToken":"ref2"}"#);
+        }
+        if request.contains("Bearer acc2") {
+            return response(200, "OK", &me_body());
+        }
+        response(
+            401,
+            "Unauthorized",
+            &error_body("auth.token_expired", "stale"),
+        )
+    }
+
+    /// Bind a loopback listener that answers each request via [`route`] (counting refreshes)
+    /// until `shutdown` fires. Unlike [`serve`], it is content-aware, so concurrent requests
+    /// need no fixed response ordering. The graceful shutdown lets the task loop end normally.
+    async fn serve_concurrent(
+        refresh_count: Arc<AtomicUsize>,
+        mut shutdown: tokio::sync::oneshot::Receiver<()>,
+    ) -> Option<(String, JoinHandle<()>)> {
+        let listener = TcpListener::bind("127.0.0.1:0").await.ok()?;
+        let addr = listener.local_addr().ok()?;
+        let handle = tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    _ = &mut shutdown => break,
+                    accepted = listener.accept() => {
+                        let Ok((mut socket, _)) = accepted else { continue };
+                        let mut buf = [0u8; 8192];
+                        let Ok(n) = socket.read(&mut buf).await else { continue };
+                        let reply = route(&String::from_utf8_lossy(&buf[..n]), &refresh_count);
+                        let _ = socket.write_all(&reply).await;
+                        let _ = socket.flush().await;
+                    }
+                }
+            }
+        });
+        Some((format!("http://{addr}"), handle))
+    }
+
+    /// Wire a client to a content-aware mock server (sharing `refresh_count`), run `body`, then
+    /// signal the server to stop and await its clean exit.
+    async fn with_server_concurrent<F, Fut>(refresh_count: Arc<AtomicUsize>, body: F)
+    where
+        F: FnOnce(AuthClient) -> Fut,
+        Fut: Future<Output = ()>,
+    {
+        let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+        let Some((url, handle)) = serve_concurrent(refresh_count, rx).await else { return };
+        body(AuthClient::new(url)).await;
+        let _ = tx.send(());
+        let _ = handle.await;
+    }
+
+    #[tokio::test]
+    async fn concurrent_401s_trigger_exactly_one_refresh() {
+        // Three me() calls race on the same stale token: all 401, all queue behind the
+        // single-flight lock, and exactly one rotation happens (the rest reuse the new token).
+        let refresh_count = Arc::new(AtomicUsize::new(0));
+        let counter = Arc::clone(&refresh_count);
+        with_server_concurrent(refresh_count, |client| async move {
+            let _ = client.login(&login_input()).await;
+            let (a, b, c) = tokio::join!(client.me(), client.me(), client.me());
+            assert!(a.is_ok());
+            assert!(b.is_ok());
+            assert!(c.is_ok());
+            assert_eq!(counter.load(Ordering::SeqCst), 1);
+        })
+        .await;
     }
 
     /// A success auth body (bearer mode): user + token pair.

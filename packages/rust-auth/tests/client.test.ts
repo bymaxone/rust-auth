@@ -161,6 +161,110 @@ describe("createAuthFetch — single-flight 401 refresh", () => {
     expect(new Headers(call.init.headers).get("content-type")).toBe("application/json");
     expect(call.init.credentials).toBe("include");
   });
+
+  it("posts the refresh to the same-origin refreshEndpoint, not rebased onto baseUrl", async () => {
+    // The default refresh route is a same-origin Next route; even with a backend baseUrl set,
+    // it must be hit verbatim at `/api/auth/client-refresh`, NOT at baseUrl + that path.
+    let refreshUrl = "";
+    installFetch(async (input) => {
+      const url = String(input);
+      if (url.endsWith("/api/auth/client-refresh")) {
+        refreshUrl = url;
+        return jsonResponse({ ok: true });
+      }
+      return refreshUrl !== "" ? jsonResponse({ ok: true }) : jsonResponse({}, 401);
+    });
+
+    const authFetch = createAuthFetch({ baseUrl: "https://api.test", timeout: 0 });
+    await authFetch("/auth/me");
+
+    expect(refreshUrl).toBe("/api/auth/client-refresh");
+  });
+
+  it("rebases a genuinely-relative refreshEndpoint onto baseUrl", async () => {
+    // A relative (no leading slash, no scheme) refresh path IS a backend path, so it resolves
+    // against baseUrl like any other relative endpoint.
+    let refreshUrl = "";
+    installFetch(async (input) => {
+      const url = String(input);
+      if (url.endsWith("custom-refresh")) {
+        refreshUrl = url;
+        return jsonResponse({ ok: true });
+      }
+      return refreshUrl !== "" ? jsonResponse({ ok: true }) : jsonResponse({}, 401);
+    });
+
+    const authFetch = createAuthFetch({
+      baseUrl: "https://api.test",
+      refreshEndpoint: "custom-refresh",
+      timeout: 0,
+    });
+    await authFetch("/auth/me");
+
+    expect(refreshUrl).toBe("https://api.test/custom-refresh");
+  });
+});
+
+describe("fetchWithTimeout — AbortSignal.any fallback", () => {
+  /** Replace `AbortSignal.any` with `replacement` and restore it after `body`. */
+  async function withoutAbortSignalAny(body: () => Promise<void>): Promise<void> {
+    const holder = AbortSignal as { any?: unknown };
+    const original = holder.any;
+    holder.any = undefined;
+    try {
+      await body();
+    } finally {
+      holder.any = original;
+    }
+  }
+
+  /** Install a `fetch` that only ever settles by rejecting when its signal aborts (or is
+   *  already aborted at call time, mirroring the platform's immediate rejection). */
+  function installAbortAwareFetch(): void {
+    const mock = (_input: RequestInfo | URL, init?: RequestInit): Promise<Response> =>
+      new Promise<Response>((_resolve, reject) => {
+        const signal = init?.signal;
+        const fail = (): void => {
+          reject(new DOMException("Aborted", "AbortError"));
+        };
+        if (signal?.aborted) {
+          fail();
+          return;
+        }
+        signal?.addEventListener("abort", fail);
+      });
+    globalThis.fetch = vi.fn(mock) as unknown as typeof fetch;
+  }
+
+  it("aborts via the timeout when AbortSignal.any is unavailable and a caller signal is given", async () => {
+    await withoutAbortSignalAny(async () => {
+      installAbortAwareFetch();
+      const caller = new AbortController();
+      const authFetch = createAuthFetch({ timeout: 5 });
+      await expect(authFetch("/auth/me", { signal: caller.signal })).rejects.toThrow();
+    });
+  });
+
+  it("forwards a caller abort through the fallback", async () => {
+    await withoutAbortSignalAny(async () => {
+      installAbortAwareFetch();
+      const caller = new AbortController();
+      const authFetch = createAuthFetch({ timeout: 30_000 });
+      const pending = authFetch("/auth/me", { signal: caller.signal });
+      caller.abort();
+      await expect(pending).rejects.toThrow();
+    });
+  });
+
+  it("aborts immediately when the caller signal is already aborted", async () => {
+    await withoutAbortSignalAny(async () => {
+      installAbortAwareFetch();
+      const authFetch = createAuthFetch({ timeout: 30_000 });
+      await expect(
+        authFetch("/auth/me", { signal: AbortSignal.abort() }),
+      ).rejects.toThrow();
+    });
+  });
 });
 
 describe("AuthClient — endpoint, payload, and error mapping", () => {

@@ -121,7 +121,7 @@ export function AuthProvider(props: AuthProviderProps): React.ReactNode {
 function useAuthContext(): AuthContextValue {
   const context = React.useContext(AuthContext);
   if (context === null) {
-    throw new Error("useSession/useAuth must be used within an <AuthProvider>.");
+    throw new Error("useSession/useAuth/useAuthStatus must be used within an <AuthProvider>.");
   }
   return context;
 }

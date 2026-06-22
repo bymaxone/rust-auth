@@ -1,7 +1,9 @@
 import { createHmac } from "node:crypto";
 import { readFileSync } from "node:fs";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 
+import { NextRequest } from "next/server";
 import { describe, expect, it } from "vitest";
 
 import {
@@ -12,7 +14,7 @@ import {
   isTokenExpired,
   verifyJwtToken,
 } from "../src/nextjs/jwt";
-import { resolveSafeDestination } from "../src/nextjs/proxy";
+import { createAuthProxy, resolveSafeDestination } from "../src/nextjs/proxy";
 
 /** The shared HS256 secret used to sign and verify test tokens (server == edge). */
 const SECRET = "an-edge-test-hs256-secret-key-0123456789";
@@ -53,6 +55,29 @@ function dashboardToken(overrides: Record<string, unknown> = {}): string {
     },
     SECRET,
   );
+}
+
+/** Build an MFA-temp (`type: "mfa_challenge"`) token whose validity window spans now. */
+function mfaTempToken(): string {
+  const now = Math.floor(Date.now() / 1000);
+  return signHs256(
+    {
+      sub: "u_1",
+      jti: "jti-1",
+      type: "mfa_challenge",
+      context: "dashboard",
+      iat: now - 10,
+      exp: now + 300,
+    },
+    SECRET,
+  );
+}
+
+/** Build a GET request to a protected path carrying the access cookie set to `token`. */
+function protectedRequest(token: string): NextRequest {
+  return new NextRequest("https://app.test/dashboard", {
+    headers: { cookie: `access_token=${token}` },
+  });
 }
 
 /** Flip the final signature character so the signature is wrong but the framing intact. */
@@ -140,7 +165,61 @@ describe("resolveSafeDestination — open-redirect guard", () => {
 
 describe("server-only enforcement", () => {
   it("the WASM-backed jwt module imports 'server-only' so a Client Component import fails the build", () => {
-    const source = readFileSync(join(import.meta.dirname, "..", "src", "nextjs", "jwt.ts"), "utf8");
+    const here = dirname(fileURLToPath(import.meta.url));
+    const source = readFileSync(join(here, "..", "src", "nextjs", "jwt.ts"), "utf8");
     expect(source).toMatch(/import\s+["']server-only["'];/);
+  });
+});
+
+describe("createAuthProxy — fail-closed verification (S1) and token-type assertion (S2)", () => {
+  /** Whether a proxy response forwarded the UI-only x-user-id header (i.e. admitted). */
+  function admittedUserId(response: { headers: Headers }): string | null {
+    return response.headers.get("x-middleware-request-x-user-id");
+  }
+
+  /** Whether a proxy response redirected to the sign-in path (i.e. rejected). */
+  function redirectedToLogin(response: { headers: Headers }): boolean {
+    const location = response.headers.get("location");
+    return location !== null && location.includes("/login");
+  }
+
+  it("admits a validly-signed access token when a non-empty secret is configured", async () => {
+    // The happy path: an authoritative HS256 verification with the matching secret admits the
+    // request and forwards the user id header; no sign-in redirect is issued.
+    const { proxy } = createAuthProxy({ accessTokenSecret: SECRET });
+    const response = await proxy(protectedRequest(dashboardToken()));
+
+    expect(redirectedToLogin(response)).toBe(false);
+    expect(admittedUserId(response)).toBe("u_1");
+  });
+
+  it("rejects a forged token when no secret is configured (S1 fail-closed)", async () => {
+    // Without a secret the proxy must NEVER fall back to decode-only acceptance: a forged
+    // (tampered) token is treated as unauthenticated and redirected to sign-in, not admitted.
+    const { proxy } = createAuthProxy({});
+    const response = await proxy(protectedRequest(tamperSignature(dashboardToken())));
+
+    expect(redirectedToLogin(response)).toBe(true);
+    expect(admittedUserId(response)).toBeNull();
+  });
+
+  it("rejects even a structurally-valid token when no secret is configured (S1 fail-closed)", async () => {
+    // A genuinely-signed token must also be rejected when there is no secret to verify it —
+    // the proxy cannot prove it genuine, so it fails closed rather than admitting it.
+    const { proxy } = createAuthProxy({});
+    const response = await proxy(protectedRequest(dashboardToken()));
+
+    expect(redirectedToLogin(response)).toBe(true);
+    expect(admittedUserId(response)).toBeNull();
+  });
+
+  it("rejects a verified MFA-challenge token (S2 token-type confusion)", async () => {
+    // An MFA-temp token verifies under the secret but is NOT an access token; admitting it
+    // would let a half-authenticated (pre-second-factor) session reach a protected route.
+    const { proxy } = createAuthProxy({ accessTokenSecret: SECRET });
+    const response = await proxy(protectedRequest(mfaTempToken()));
+
+    expect(redirectedToLogin(response)).toBe(true);
+    expect(admittedUserId(response)).toBeNull();
   });
 });

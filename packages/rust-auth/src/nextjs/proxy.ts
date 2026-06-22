@@ -24,6 +24,14 @@ import {
   isTokenExpired,
   verifyJwtToken,
 } from "./jwt";
+import type { DecodedToken } from "./jwt";
+
+/**
+ * The access-token `type` discriminants the proxy will admit — the dashboard and platform
+ * access tokens. Any other type, notably the short-lived MFA-temp `mfa_challenge`, must never
+ * gate a protected route, so it is treated as unauthenticated.
+ */
+const ACCESS_TOKEN_TYPES: readonly string[] = ["dashboard", "platform"];
 
 /** The query parameter that counts redirect bounces, used to break refresh loops. */
 const REDIRECT_COUNT_PARAM = "_r";
@@ -46,7 +54,11 @@ export interface AuthProxyRoleRule {
 export interface AuthProxyConfig {
   /** Where to send unauthenticated users. Defaults to `/login`. */
   loginPath?: string;
-  /** The HS256 secret for authoritative token verification; `null` decodes only (weaker). */
+  /**
+   * The HS256 secret for authoritative token verification. Without a non-empty secret the
+   * proxy fails closed: every request is treated as unauthenticated, since it can never
+   * verify a token's signature and must not admit one it cannot prove genuine.
+   */
   accessTokenSecret?: string | null;
   /** Path prefixes that bypass auth entirely (e.g. `/_next`, `/public`). */
   publicPaths?: readonly string[];
@@ -66,7 +78,7 @@ export interface AuthProxyConfig {
 export interface ResolvedAuthProxyConfig {
   /** The resolved sign-in path. */
   loginPath: string;
-  /** The resolved HS256 secret, or `null` for decode-only mode. */
+  /** The resolved HS256 secret, or `null` to fail closed (no request is authenticated). */
   accessTokenSecret: string | null;
   /** The resolved public path-prefix list. */
   publicPaths: readonly string[];
@@ -123,11 +135,19 @@ export function createAuthProxy(config: AuthProxyConfig): AuthProxyInstance {
     }
 
     const token = request.cookies.get(AUTH_ACCESS_COOKIE_NAME)?.value;
-    const decoded = token
-      ? await verifyJwtToken(token, resolved.accessTokenSecret)
-      : { isValid: false };
+    const secret = resolved.accessTokenSecret;
+    // Fail closed: a request is authenticated only by an authoritative HS256 verification
+    // with a non-empty secret. Without a secret the decode-only path would admit any
+    // structurally valid (even forged) token, so a missing secret is unauthenticated.
+    const decoded: DecodedToken =
+      token !== undefined && typeof secret === "string" && secret.length > 0
+        ? await verifyJwtToken(token, secret)
+        : { isValid: false };
 
-    if (!decoded.isValid || isTokenExpired(decoded)) {
+    // Reject an invalid, expired, or non-access token. Admitting a non-access type — notably
+    // the MFA-temp `mfa_challenge` issued before the second factor clears — would let a
+    // half-authenticated session reach a protected route, so only an access token is admitted.
+    if (!decoded.isValid || isTokenExpired(decoded) || !isAccessToken(decoded)) {
       return handleUnauthenticated(request, resolved);
     }
 
@@ -219,6 +239,20 @@ function forwardWithUserHeaders(
 /** Whether a pathname is matched by any configured public prefix. */
 function isPublicPath(pathname: string, publicPaths: readonly string[]): boolean {
   return publicPaths.some((prefix) => pathname === prefix || pathname.startsWith(prefix));
+}
+
+/**
+ * Whether a verified token is an access token. A token with no `type`, or a non-access type
+ * such as the MFA-temp `mfa_challenge`, is rejected so only a genuine access token can
+ * authenticate a protected route.
+ *
+ * @param token - A verified {@link DecodedToken}.
+ * @returns `true` only for the dashboard / platform access discriminants.
+ */
+function isAccessToken(token: DecodedToken): boolean {
+  const payload = token.payload;
+  if (payload === undefined || !("type" in payload)) return false;
+  return ACCESS_TOKEN_TYPES.includes(payload.type);
 }
 
 /** Read the redirect-bounce counter from the `_r` query parameter. */
