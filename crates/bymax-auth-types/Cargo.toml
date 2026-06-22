@@ -26,7 +26,7 @@ time = { version = "0.3", default-features = false, features = ["std", "serde-we
 # `ts-rs` is a build/dev-only tool that emits the TypeScript `./shared` surface from
 # these types. It is optional and gated behind `ts-export` so it never enters the
 # runtime dependency tree of a crates.io consumer.
-ts-rs = { version = "11", optional = true }
+ts-rs = { version = "12", optional = true }
 
 [features]
 # Turning this on pulls `ts-rs` in to regenerate the committed TypeScript contracts.
