@@ -58,14 +58,45 @@ fi
 
 # `#![forbid(unsafe_code)]` on every first-party crate except the wasm bindgen glue,
 # which must instead carry `#![deny(unsafe_op_in_unsafe_fn)]`.
+#
+# These must verify the REAL crate-level inner attribute, not merely the substring:
+# a bare `grep 'forbid(unsafe_code)'` also matches a doc/line comment that happens to
+# mention the attribute (the wasm crate's own `//!` prose does exactly that), which
+# would let the security tripwire pass while the actual attribute is absent. So the
+# patterns are anchored to the inner-attribute form `#![…]` at the START of a line —
+# tolerating internal whitespace (`#! [ forbid ( unsafe_code ) ]`) for robustness but
+# never firing inside a `//`/`//!` comment or a string literal.
+forbid_attr_pattern='^[[:space:]]*#!\[[[:space:]]*forbid[[:space:]]*\([[:space:]]*unsafe_code[[:space:]]*\)[[:space:]]*\]'
+deny_unsafe_fn_attr_pattern='^[[:space:]]*#!\[[[:space:]]*deny[[:space:]]*\([[:space:]]*unsafe_op_in_unsafe_fn[[:space:]]*\)[[:space:]]*\]'
+
+# Self-test: prove each pattern matches the real attribute and rejects a comment-only
+# mention, so a future edit that re-weakens this to a bare substring fails loudly here
+# instead of silently re-opening the bypass.
+real_forbid='#![forbid(unsafe_code)]'
+comment_forbid='//! cannot forbid(unsafe_code) here, see the wasm glue note'
+real_deny='#![deny(unsafe_op_in_unsafe_fn)]'
+comment_deny='// the crate uses #![deny(unsafe_op_in_unsafe_fn)] so unsafe is explicit'
+if ! printf '%s\n' "$real_forbid" | grep -Eq "$forbid_attr_pattern"; then
+  note "invariant 17: SELF-TEST FAILED — the forbid(unsafe_code) gate no longer matches the real attribute"
+fi
+if printf '%s\n' "$comment_forbid" | grep -Eq "$forbid_attr_pattern"; then
+  note "invariant 17: SELF-TEST FAILED — the forbid(unsafe_code) gate now matches a comment-only mention"
+fi
+if ! printf '%s\n' "$real_deny" | grep -Eq "$deny_unsafe_fn_attr_pattern"; then
+  note "invariant 17: SELF-TEST FAILED — the deny(unsafe_op_in_unsafe_fn) gate no longer matches the real attribute"
+fi
+if printf '%s\n' "$comment_deny" | grep -Eq "$deny_unsafe_fn_attr_pattern"; then
+  note "invariant 17: SELF-TEST FAILED — the deny(unsafe_op_in_unsafe_fn) gate now matches a comment-only mention"
+fi
+
 missing_forbid=0
 while IFS= read -r librs; do
   case "$librs" in
     bindings/bymax-auth-wasm/*)
-      grep -q 'deny(unsafe_op_in_unsafe_fn)' "$librs" || { note "invariant 17: $librs must deny unsafe_op_in_unsafe_fn"; missing_forbid=1; }
+      grep -Eq "$deny_unsafe_fn_attr_pattern" "$librs" || { note "invariant 17: $librs must deny unsafe_op_in_unsafe_fn"; missing_forbid=1; }
       ;;
     *)
-      grep -q 'forbid(unsafe_code)' "$librs" || { note "invariant 17: $librs must forbid unsafe_code"; missing_forbid=1; }
+      grep -Eq "$forbid_attr_pattern" "$librs" || { note "invariant 17: $librs must forbid unsafe_code"; missing_forbid=1; }
       ;;
   esac
 done < <(find crates bindings -name lib.rs)

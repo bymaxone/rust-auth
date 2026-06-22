@@ -38,11 +38,14 @@ for entry in "${BUDGETS[@]}"; do
     feature_args=(--features "$features")
   fi
 
-  # Resolve the normal (production) dependency graph. Capture cargo's own stderr and
-  # surface it on failure rather than discarding it, so a resolver/feature error is
-  # diagnosable in CI instead of silently producing an empty (under-cap) graph.
+  # Resolve the normal (production) dependency graph. `--locked` forces resolution
+  # strictly from the committed Cargo.lock (and fails on a stale lockfile), matching
+  # the rest of the workflow's locked posture and keeping the budget deterministic in
+  # CI. Capture cargo's own stderr and surface it on failure rather than discarding it,
+  # so a resolver/feature/lockfile error is diagnosable in CI instead of silently
+  # producing an empty (under-cap) graph.
   tree_err="$(mktemp)"
-  if ! tree_out="$(cargo tree -p "$crate" ${feature_args[@]+"${feature_args[@]}"} \
+  if ! tree_out="$(cargo tree --locked -p "$crate" ${feature_args[@]+"${feature_args[@]}"} \
       --edges normal --prefix none --no-dedupe 2>"$tree_err")"; then
     echo "FAIL  $crate (${features:-default}): 'cargo tree' failed" >&2
     cat "$tree_err" >&2
