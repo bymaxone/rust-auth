@@ -83,5 +83,12 @@ testing = []
 # Convenience meta-feature: every optional flow capability for a full backend.
 full = ["sessions", "mfa", "oauth", "oauth-reqwest", "platform", "invitations"]
 
+# docs.rs renders every flow plus both hashers; `--cfg docsrs` enables the
+# feature-gated doc annotations. `testing` is excluded — the in-memory doubles are
+# test helpers, not part of the documented production surface.
+[package.metadata.docs.rs]
+features = ["full", "argon2"]
+rustdoc-args = ["--cfg", "docsrs"]
+
 [lints]
 workspace = true

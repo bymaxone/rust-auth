@@ -1,6 +1,6 @@
 # Phase 12 — Release engineering, supply-chain, docs, examples, dogfood
 
-> **Status**: 📋 ToDo · **Progress**: 0 / 6 tasks · **Last updated**: 2026-06-17
+> **Status**: 🔄 Partial — non-publishing scope ✅ Done; release/publish pipeline DEFERRED · **Progress**: docs + examples + extra CI gates + dogfood + browser E2E shipped (2026-06-22); the `release` workflow, OIDC trusted publishing, SBOM/attestation publishing, the protected environment, and the tag↔version publish gate are deferred to a future release phase (see [`docs/RELEASE.md`](../RELEASE.md)) · **Last updated**: 2026-06-22
 > **Source roadmap**: [`docs/development_plan.md`](../development_plan.md) § P12
 > **Source spec**: [`docs/technical_specification.md`](../technical_specification.md)
 
@@ -507,3 +507,6 @@ done). 6. Recompute the overall % — and mark the project's task-scaffolding co
 ## Completion log
 
 > Append-only. One line per completed task: `- <task-id> ✅ YYYY-MM-DD — <one-line summary>`.
+
+- P12 (non-publishing scope) ✅ 2026-06-22 — docs.rs metadata on all public crates, TypeDoc + ESLint for the npm package, `docs/RELEASE.md`; the six official examples (own workspace, excluded from the 100% coverage gate); extra CI gates (codeql, scorecard, scheduled audit, public-api + semver-checks, dependency-budget, time-boxed cargo-fuzz, scheduled cargo-mutants, §24 invariants); crate + npm dogfood smokes; and a Playwright browser E2E (login → request → silent refresh → logout with edge WASM verification).
+- DEFERRED (future release phase) — the `release` workflow, crates.io + npm OIDC trusted publishing, SBOM/attestation publishing, the protected GitHub environment, and the tag↔version publish gate. Documented in `docs/RELEASE.md` (tasks 12.3 publish jobs + the publishing half of 12.6 dry-run).

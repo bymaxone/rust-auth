@@ -69,5 +69,12 @@ mfa = ["dep:aes-gcm", "dep:sha1", "dep:data-encoding"]
 # crate in the build selects a backend, so any wasm build of this crate needs it.
 wasm-js = ["getrandom/js"]
 
+# docs.rs renders the full host-target surface; `--cfg docsrs` enables the
+# feature-gated doc annotations. `wasm-js` is deliberately excluded — it selects a
+# browser RNG backend that does not compile on the docs.rs host target (x86_64).
+[package.metadata.docs.rs]
+features = ["scrypt", "argon2", "mfa"]
+rustdoc-args = ["--cfg", "docsrs"]
+
 [lints]
 workspace = true

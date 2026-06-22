@@ -1,0 +1,50 @@
+name: codeql
+
+# CodeQL static analysis for the Rust crates and the TypeScript/JavaScript npm
+# package. `security-extended` is appropriate for a library handling tokens,
+# sessions, and crypto. Runs on push/PR to main and on a weekly schedule so a newly
+# published query reaches the codebase even without a code change.
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    # Mondays 06:17 UTC — an off-peak, non-round minute to avoid the top-of-hour rush.
+    - cron: "17 6 * * 1"
+
+# Least privilege: read the code, write security results. No job widens this further.
+permissions:
+  contents: read
+
+concurrency:
+  group: codeql-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  analyze:
+    name: analyze (${{ matrix.language }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      security-events: write
+    strategy:
+      fail-fast: false
+      matrix:
+        language: [rust, javascript-typescript]
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@c35d1b164463ee62a100735382aaaa525c5d3496 # v2.25.6
+        with:
+          languages: ${{ matrix.language }}
+          queries: security-extended
+      - name: Autobuild
+        uses: github/codeql-action/autobuild@c35d1b164463ee62a100735382aaaa525c5d3496 # v2.25.6
+      - name: Analyze
+        uses: github/codeql-action/analyze@c35d1b164463ee62a100735382aaaa525c5d3496 # v2.25.6
+        with:
+          category: "/language:${{ matrix.language }}"

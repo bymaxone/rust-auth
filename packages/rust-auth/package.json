@@ -46,6 +46,8 @@
     "build:wasm": "wasm-pack build ../../bindings/bymax-auth-wasm --target bundler --release --out-dir pkg && rm -rf wasm && mkdir -p wasm && cp ../../bindings/bymax-auth-wasm/pkg/bymax_auth_wasm.js ../../bindings/bymax-auth-wasm/pkg/bymax_auth_wasm_bg.js ../../bindings/bymax-auth-wasm/pkg/bymax_auth_wasm_bg.wasm ../../bindings/bymax-auth-wasm/pkg/bymax_auth_wasm.d.ts ../../bindings/bymax-auth-wasm/pkg/bymax_auth_wasm_bg.wasm.d.ts wasm/",
     "build": "tsup",
     "typecheck": "tsc --noEmit",
+    "lint": "eslint src tests --max-warnings 0",
+    "docs": "typedoc",
     "test": "vitest run",
     "gen:format": "prettier --write \"src/shared/**/*.ts\"",
     "gen:check": "cargo test -p bymax-auth-types --features ts-export --locked && git diff --exit-code -- src/shared"
@@ -66,18 +68,23 @@
     }
   },
   "devDependencies": {
+    "@eslint/js": "^9.17.0",
     "@testing-library/dom": "^10.4.0",
     "@testing-library/react": "^16.1.0",
     "@types/node": "^22.10.2",
     "@types/react": "^19.0.2",
     "@types/react-dom": "^19.0.2",
+    "eslint": "^9.17.0",
+    "eslint-plugin-security": "^3.0.1",
     "jsdom": "^25.0.1",
     "next": "^16.0.0",
     "prettier": "^3.4.2",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
     "tsup": "^8.3.5",
+    "typedoc": "^0.27.6",
     "typescript": "^5.7.2",
+    "typescript-eslint": "^8.18.2",
     "vitest": "^2.1.8"
   },
   "engines": {

@@ -33,5 +33,12 @@ ts-rs = { version = "11", optional = true }
 # Off by default: a backend consumer never needs the generator.
 ts-export = ["dep:ts-rs"]
 
+# docs.rs renders the full public surface; `--cfg docsrs` enables the feature-gated
+# doc annotations on items that carry them. `all-features` is safe here — this crate
+# has no mutually-exclusive features.
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
+
 [lints]
 workspace = true

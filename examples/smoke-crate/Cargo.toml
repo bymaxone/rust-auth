@@ -1,0 +1,35 @@
+[package]
+name = "smoke-crate"
+version = "0.0.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+description = "Pre-publish dogfood smoke: boot the Axum router over a real Redis and drive the happy path."
+
+# A library target with no content — the smoke lives entirely in the integration
+# test, which boots a real backend and asserts the to-be-shipped surface works.
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+# Nothing at build time; the smoke's dependencies are all dev-only (test target).
+
+[dev-dependencies]
+# The published surface, consumed by path exactly as a crates.io consumer would by
+# version: the facade-equivalent stack (axum adapter + engine + Redis stores) plus
+# the native client used to drive it.
+bymax-auth-axum = { workspace = true, features = ["sessions", "mfa"] }
+bymax-auth-core = { workspace = true, features = ["testing", "sessions", "mfa"] }
+bymax-auth-redis = { workspace = true, features = ["mfa"] }
+bymax-auth-client = { workspace = true }
+bymax-auth-types = { workspace = true }
+axum = { workspace = true }
+tokio = { workspace = true }
+secrecy = { workspace = true }
+# A real `redis:8` via Docker; the smoke skips cleanly when Docker is unavailable.
+testcontainers = { version = "0.27", default-features = false }
+testcontainers-modules = { version = "0.15", default-features = false, features = ["redis"] }
+
+[lints]
+workspace = true

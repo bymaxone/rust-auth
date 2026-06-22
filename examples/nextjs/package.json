@@ -1,0 +1,24 @@
+{
+  "name": "nextjs-example",
+  "version": "0.0.0",
+  "private": true,
+  "description": "A Next.js 16 app using @bymax-one/rust-auth/nextjs: the edge proxy, the route handlers, and WASM-backed verifyJwtToken.",
+  "scripts": {
+    "build": "next build",
+    "typecheck": "next build --no-lint > /dev/null && tsc --noEmit",
+    "dev": "next dev",
+    "start": "next start"
+  },
+  "dependencies": {
+    "@bymax-one/rust-auth": "file:../../packages/rust-auth",
+    "next": "^16.0.0",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "@types/react": "^19.0.2",
+    "@types/react-dom": "^19.0.2",
+    "typescript": "^5.7.2"
+  }
+}

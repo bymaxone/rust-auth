@@ -286,6 +286,110 @@ jobs:
       - run: cargo deny check
       - run: cargo audit
       - run: cargo vet
+      - name: Dependency budget (per-crate transitive-graph cap)
+        run: bash scripts/dependency-budget.sh
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # Security invariants — the § 24 contract expressed as automatable structural
+  # checks (HS256 pinned, no token in a query string, RustCrypto-only / no ring,
+  # forbid(unsafe_code) everywhere but the wasm glue, no `.` npm root, the wasm
+  # binding never a crate, no secret interpolated into a log). A change that weakens
+  # one fails the build. The dynamic gates (coverage, mutation, property, fuzz)
+  # protect the same contract at runtime.
+  # ─────────────────────────────────────────────────────────────────────────────
+  invariants:
+    name: security invariants (§24 gate)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - run: bash scripts/check-invariants.sh
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # Public API surface — `cargo public-api` snapshots the exported surface and
+  # `cargo-semver-checks` gates SemVer compatibility, so a breaking change to the
+  # published API cannot ship unnoticed. `cargo public-api` builds rustdoc JSON,
+  # which only the nightly toolchain emits; nightly is installed for this job and
+  # selected per invocation with `cargo +nightly` (the tool has no toolchain flag —
+  # `+toolchain` is the only supported selector).
+  # ─────────────────────────────────────────────────────────────────────────────
+  public-api:
+    name: public API (public-api + semver-checks)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - uses: actions-rust-lang/setup-rust-toolchain@46268bd060767258de96ed93c1251119784f2ab6 # v1.16.1
+      - name: Install the nightly toolchain (rustdoc JSON for public-api)
+        run: rustup toolchain install nightly --profile minimal --no-self-update
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+      - uses: taiki-e/install-action@b8cecb83565409bcc297b2df6e77f030b2a468d5 # v2.82.0
+        with:
+          tool: cargo-public-api,cargo-semver-checks
+      - name: Snapshot the public API of every published crate
+        # An informational snapshot of the exported surface — it must not fail on
+        # ordinary output. RUSTFLAGS is cleared for this step: the job-wide
+        # `-D warnings` (set by setup-rust-toolchain) would promote benign nightly
+        # rustdoc-JSON build lints to hard errors and break the metadata build.
+        env:
+          RUSTFLAGS: ""
+        run: |
+          set -euo pipefail
+          for crate in bymax-auth-types bymax-auth-jwt bymax-auth-crypto \
+                       bymax-auth-redis bymax-auth-client bymax-auth-core \
+                       bymax-auth-axum bymax-auth; do
+            echo "::group::public-api $crate"
+            cargo +nightly public-api -p "$crate" --all-features
+            echo "::endgroup::"
+          done
+      - name: SemVer compatibility check
+        # Non-blocking until the first publish: cargo-semver-checks diffs the current
+        # API against a baseline from crates.io, and nothing is published yet (the
+        # release pipeline is deferred — see docs/RELEASE.md), so there is no baseline
+        # to diff against. We still build the rustdoc and surface any findings as an
+        # informational log. Once the first version is published this becomes a hard
+        # gate: drop `continue-on-error` so a SemVer-breaking change fails the build.
+        continue-on-error: true
+        env:
+          RUSTFLAGS: ""
+        run: cargo semver-checks --workspace --all-features
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # Fuzz smoke — a deterministic COMPILE-ONLY smoke over the trust-boundary parsers
+  # (JWT decode, Base32 TOTP secret, PHC password string). `cargo fuzz build`
+  # compiles all three libFuzzer targets against the real crate APIs but never runs
+  # them, which proves the harnesses stay valid as the surface evolves without the
+  # flakiness of hosting libFuzzer on a shared runner. The exhaustive "no panic on
+  # adversarial input" guarantees are covered by the property tests in the coverage
+  # job; this gate keeps the fuzz targets buildable. cargo-fuzz needs nightly.
+  #
+  # The target is pinned to the host gnu triple: on some nightlies `cargo fuzz`
+  # defaults to `x86_64-unknown-linux-musl`, which is statically linked (the ASan
+  # instrumentation rejects a static libc) and is not installed on the runner.
+  # Building for `x86_64-unknown-linux-gnu` sidesteps both problems deterministically.
+  # ─────────────────────────────────────────────────────────────────────────────
+  fuzz-smoke:
+    name: fuzz smoke (time-boxed)
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - name: Install the nightly toolchain (libFuzzer instrumentation)
+        run: rustup toolchain install nightly --profile minimal --no-self-update
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          workspaces: "fuzz -> fuzz/target"
+      - uses: taiki-e/install-action@b8cecb83565409bcc297b2df6e77f030b2a468d5 # v2.82.0
+        with:
+          tool: cargo-fuzz
+      - name: Compile every fuzz target (build-only smoke)
+        run: cargo +nightly fuzz build --target x86_64-unknown-linux-gnu
 
   # ─────────────────────────────────────────────────────────────────────────────
   # MSRV — proves the workspace builds on the declared support floor (1.90).
@@ -336,6 +440,187 @@ jobs:
       - name: Typecheck every subpath
         working-directory: packages/rust-auth
         run: npx tsc --noEmit
+      - name: Lint the kept TypeScript layers
+        working-directory: packages/rust-auth
+        run: npm run lint
+      - name: Validate the TypeDoc API surface renders
+        working-directory: packages/rust-auth
+        run: npx typedoc --emit none
       - name: Run the Vitest suite
         working-directory: packages/rust-auth
         run: npm test
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # Examples — the official examples form their OWN Cargo workspace (and their own
+  # npm packages), so they are never measured by the coverage gate. They are built
+  # and linted here so a contract change that breaks an example fails CI. The
+  # frontend examples consume the npm package by `file:` path, so the package's
+  # dist/ + wasm/ are built first. The examples never contact external services.
+  # ─────────────────────────────────────────────────────────────────────────────
+  examples:
+    name: examples (build + lint)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: 24
+      - uses: actions-rust-lang/setup-rust-toolchain@46268bd060767258de96ed93c1251119784f2ab6 # v1.16.1
+        with:
+          target: wasm32-unknown-unknown
+          components: clippy
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          workspaces: ". -> target\nexamples -> examples/target"
+      - uses: taiki-e/install-action@b8cecb83565409bcc297b2df6e77f030b2a468d5 # v2.82.0
+        with:
+          tool: wasm-pack
+      # Rust examples — their own workspace; build + clippy-as-error over all targets.
+      - name: Build the Rust examples
+        working-directory: examples
+        run: cargo build --locked
+      - name: Lint the Rust examples
+        working-directory: examples
+        run: cargo clippy --all-targets --locked -- -D warnings
+      # The npm package the frontend examples consume must exist on disk first.
+      - name: Build the npm package (dist + wasm)
+        working-directory: packages/rust-auth
+        run: |
+          npm ci
+          npm run build:wasm
+          npm run build
+      # react-vite — typecheck + production build against the built package.
+      - name: Build the react-vite example
+        working-directory: examples/react-vite
+        run: |
+          npm ci --no-audit --no-fund
+          npm run build
+      # nextjs — `next build` type-checks and compiles every route + the middleware.
+      - name: Build the nextjs example
+        working-directory: examples/nextjs
+        env:
+          AUTH_ACCESS_TOKEN_SECRET: an-edge-ci-secret-key-0123456789abcdef
+          AUTH_BACKEND_URL: http://127.0.0.1:8080
+        run: |
+          npm ci --no-audit --no-fund
+          npm run build
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # Dogfood smokes — non-publishing validation of the to-be-shipped surface.
+  #   crate smoke: boots the Axum router over a real testcontainers Redis and drives
+  #                register -> login -> /me -> refresh -> logout via the native client.
+  #   npm smoke  : verifies a backend-signed HS256 token at the edge through the
+  #                shipped wasm (server/edge parity) against the built package.
+  # The GitHub-hosted Ubuntu runner ships Docker, so the crate smoke runs a real Redis.
+  # ─────────────────────────────────────────────────────────────────────────────
+  dogfood:
+    name: dogfood smokes (crate + npm)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: 24
+      - uses: actions-rust-lang/setup-rust-toolchain@46268bd060767258de96ed93c1251119784f2ab6 # v1.16.1
+        with:
+          target: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          workspaces: ". -> target\nexamples -> examples/target"
+      - uses: taiki-e/install-action@b8cecb83565409bcc297b2df6e77f030b2a468d5 # v2.82.0
+        with:
+          tool: wasm-pack
+      # Crate smoke — boots the router over a real Redis (testcontainers) and asserts
+      # the happy path end to end.
+      - name: Crate smoke (Axum + real Redis)
+        working-directory: examples
+        run: cargo test -p smoke-crate --test smoke --locked -- --nocapture
+      # npm smoke — build the package, then verify edge HS256 parity against the wasm.
+      - name: Build the npm package (dist + wasm)
+        working-directory: packages/rust-auth
+        run: |
+          npm ci
+          npm run build:wasm
+          npm run build
+      - name: npm smoke (edge HS256 parity)
+        working-directory: examples/smoke-npm
+        run: |
+          npm ci --no-audit --no-fund
+          npm run typecheck
+          npm run smoke
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # Browser E2E (Playwright) — drives a real Chromium (Playwright manages its own
+  # headless browser, no system browser needed) through login -> protected request ->
+  # silent refresh -> logout against the Next.js example served in front of the Rust
+  # backend (Axum over a testcontainers Redis). It asserts the Next middleware
+  # edge-verifies (via WASM) a token the backend signed — server/edge JWT parity in a
+  # real browser. The harness starts Redis + the backend; Playwright's webServer
+  # starts the built Next.js app.
+  # ─────────────────────────────────────────────────────────────────────────────
+  e2e-browser:
+    name: browser e2e (Playwright)
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    env:
+      AUTH_E2E_SECRET: an-e2e-edge-hs256-secret-key-0123456789ab
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: 24
+      - uses: actions-rust-lang/setup-rust-toolchain@46268bd060767258de96ed93c1251119784f2ab6 # v1.16.1
+        with:
+          target: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          workspaces: ". -> target\nexamples -> examples/target"
+      - uses: taiki-e/install-action@b8cecb83565409bcc297b2df6e77f030b2a468d5 # v2.82.0
+        with:
+          tool: wasm-pack
+      # Build the backend binary up front so the harness spawn does not pay for a cold
+      # compile inside the test timeout.
+      - name: Pre-build the e2e backend
+        working-directory: examples
+        run: cargo build -p e2e-backend --locked
+      # Build the npm package the Next.js example consumes.
+      - name: Build the npm package (dist + wasm)
+        working-directory: packages/rust-auth
+        run: |
+          npm ci
+          npm run build:wasm
+          npm run build
+      # Build the Next.js example (production server is what the E2E drives).
+      - name: Build the nextjs example
+        working-directory: examples/nextjs
+        env:
+          AUTH_ACCESS_TOKEN_SECRET: ${{ env.AUTH_E2E_SECRET }}
+          AUTH_BACKEND_URL: http://127.0.0.1:8090
+        run: |
+          npm ci --no-audit --no-fund
+          npm run build
+      # Install Playwright's own chromium (with OS deps) and run the suite. The harness
+      # starts Redis (testcontainers) + the backend; Playwright starts the Next server.
+      - name: Install Playwright chromium
+        working-directory: examples/e2e
+        run: |
+          npm ci --no-audit --no-fund
+          npx playwright install --with-deps chromium
+      - name: Run the browser E2E
+        working-directory: examples/e2e
+        run: npm test
+      - name: Upload the Playwright report on failure
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: playwright-report
+          path: |
+            examples/e2e/playwright-report/
+            examples/e2e/test-results/
+          retention-days: 7

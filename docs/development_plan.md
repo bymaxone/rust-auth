@@ -18,8 +18,8 @@ This document is Layer 2 of the spec → roadmap → phase-tasks workflow. It de
 
 ## Progress
 
-- **Overall progress:** 🔄 12 / 13 phases done (92%)
-- **Active phase:** **P12** (release engineering, supply-chain, docs, examples, dogfood), unblocked since all of **P0–P11** are ✅ Done
+- **Overall progress:** 🔄 12 / 13 phases implemented (92%); the **release/publish pipeline is deferred** by the user to a future release phase (see [`docs/RELEASE.md`](RELEASE.md)). The 1.0 is **not yet published** to crates.io or npm.
+- **Active phase:** **P12** — its non-publishing scope (docs, the six examples, the extra CI quality/security gates, the dogfood smokes, and the Playwright browser E2E) is ✅ Done (2026-06-22); the registry-publish half (OIDC trusted publishing, the `release` workflow, SBOM/attestation publishing, the protected environment, the tag↔version gate) is **DEFERRED**.
 - **Blocked:** —
 
 ## Phase dashboard
@@ -38,7 +38,7 @@ This document is Layer 2 of the spec → roadmap → phase-tasks workflow. It de
 | P9 | Platform admin identity domain | ✅ Done | 5/5 | M | 2026-06-20 |
 | P10 | `bymax-auth-axum` — router, extractors, delivery, rate-limit, WS, validation (E2E) | ✅ Done | 7/7 | L | 2026-06-20 |
 | P11 | `bymax-auth-wasm` + `@bymax-one/rust-auth` (npm) + Rust client | ✅ Done | 6/6 | L | 2026-06-21 |
-| P12 | Release engineering, supply-chain, docs, examples, dogfood | 📋 ToDo | — | L | — |
+| P12 | Docs, examples, extra CI gates, dogfood, browser E2E (✅) — release/publish pipeline DEFERRED | 🔄 Partial | impl ✅ / publish deferred | L | 2026-06-22 |
 
 ## Dependency graph
 

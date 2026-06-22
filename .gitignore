@@ -73,6 +73,13 @@ dist/
 build/
 .next/
 *.tgz
+# Generated TypeScript API documentation (TypeDoc), published at release time.
+docs-api/
+# Playwright browser E2E artefacts and the harness state file.
+test-results/
+playwright-report/
+playwright/.cache/
+examples/e2e/.e2e-state.json
 
 # ============================================
 # TypeScript

@@ -1,0 +1,52 @@
+name: scorecard
+
+# OpenSSF Scorecard — a public, automated assessment of the repository's
+# supply-chain posture (pinned dependencies, token permissions, branch protection,
+# SAST, etc.). For an auth library, supply-chain transparency is part of the product:
+# the result is uploaded to the Security tab and published to the public viewer.
+on:
+  branch_protection_rule:
+  push:
+    branches: [main]
+  schedule:
+    # Mondays 05:31 UTC.
+    - cron: "31 5 * * 1"
+
+# Least privilege at the workflow level; the job widens only what Scorecard needs.
+permissions:
+  contents: read
+
+concurrency:
+  group: scorecard-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  analysis:
+    name: scorecard analysis
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      security-events: write # upload the SARIF results
+      id-token: write # publish the signed results to the public viewer
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - name: Run analysis
+        uses: ossf/scorecard-action@4eaacf0543bb3f2c246792bd56e8cdeffafb205a # v2.4.3
+        with:
+          results_file: results.sarif
+          results_format: sarif
+          publish_results: true
+      - name: Upload artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: scorecard-results
+          path: results.sarif
+          retention-days: 5
+      - name: Upload SARIF to the code-scanning dashboard
+        uses: github/codeql-action/upload-sarif@c35d1b164463ee62a100735382aaaa525c5d3496 # v2.25.6
+        with:
+          sarif_file: results.sarif

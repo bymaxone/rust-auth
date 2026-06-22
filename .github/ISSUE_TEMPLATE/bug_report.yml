@@ -1,0 +1,57 @@
+name: Bug report
+description: Report a defect in a crate or the npm package.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for filing a bug. **Do not report security vulnerabilities here** —
+        use GitHub Security Advisories (see SECURITY.md). For everything else,
+        please give us enough to reproduce.
+  - type: dropdown
+    id: surface
+    attributes:
+      label: Affected surface
+      description: Which part of the project does this concern?
+      options:
+        - bymax-auth (facade crate)
+        - bymax-auth-core
+        - bymax-auth-axum
+        - bymax-auth-redis
+        - bymax-auth-crypto / bymax-auth-jwt
+        - bymax-auth-client
+        - "@bymax-one/rust-auth (npm: shared/client/react/nextjs)"
+        - WASM edge verifier
+        - Other / not sure
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: The crate version or npm package version where you saw this.
+      placeholder: "e.g. 1.0.0"
+    validations:
+      required: true
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: Describe the bug, the expected behavior, and the actual behavior.
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      description: A minimal reproduction — code, feature flags, and configuration.
+      render: text
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: OS, Rust toolchain version, Node version (for the npm package), and the enabled Cargo features.
+    validations:
+      required: false
