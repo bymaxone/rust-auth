@@ -29,7 +29,7 @@ rand = "0.8"
 # select a wasm RNG backend: the leaf `bymax-auth-wasm` binding (and this crate's own
 # wasm tests) enable `getrandom`'s browser backend to route randomness to Web Crypto.
 getrandom = "0.2"
-password-hash = { version = "0.5", features = ["rand_core"] }
+password-hash = { version = "0.6", features = ["rand_core"] }
 # `secrecy` (long-lived `SecretString` wrapping) belongs where secrets are *stored* —
 # the engine/config layer — not in these stateless primitives, which take key material
 # by short-lived reference and zeroize transient copies via `zeroize` directly.
