@@ -73,6 +73,8 @@ dist/
 build/
 .next/
 *.tgz
+# Generated TypeScript API documentation (TypeDoc), published at release time.
+docs-api/
 
 # ============================================
 # TypeScript

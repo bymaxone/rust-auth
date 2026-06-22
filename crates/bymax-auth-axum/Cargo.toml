@@ -94,5 +94,11 @@ websocket = ["axum/ws"]
 # Convenience meta-feature: every optional group for a full backend.
 full = ["mfa", "sessions", "platform", "oauth", "invitations", "websocket"]
 
+# docs.rs renders every route group; `--cfg docsrs` enables the feature-gated doc
+# annotations on the optional extractors and route factories.
+[package.metadata.docs.rs]
+features = ["full"]
+rustdoc-args = ["--cfg", "docsrs"]
+
 [lints]
 workspace = true

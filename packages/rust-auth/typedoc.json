@@ -1,0 +1,31 @@
+{
+  "$schema": "https://typedoc.org/schema.json",
+  "name": "@bymax-one/rust-auth",
+  "entryPoints": [
+    "src/shared/index.ts",
+    "src/client/index.ts",
+    "src/react/index.ts",
+    "src/nextjs/index.ts"
+  ],
+  "out": "docs-api",
+  "readme": "none",
+  "excludeInternal": true,
+  "excludePrivate": true,
+  "excludeExternals": true,
+  "githubPages": false,
+  "blockTags": [
+    "@param",
+    "@returns",
+    "@throws",
+    "@example",
+    "@remarks",
+    "@see",
+    "@defaultValue",
+    "@fileoverview",
+    "@layer"
+  ],
+  "navigationLinks": {
+    "crates.io (backend docs)": "https://docs.rs/bymax-auth",
+    "GitHub": "https://github.com/bymaxone/rust-auth"
+  }
+}

@@ -48,6 +48,12 @@ oauth = ["bymax-auth-core/oauth"]
 # platform end-to-end integration test.
 platform = ["bymax-auth-core/platform"]
 
+# docs.rs renders the full store surface; `--cfg docsrs` enables the feature-gated
+# doc annotations. `all-features` is safe — every feature only forwards an engine flow.
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
+
 [dev-dependencies]
 # A real Redis via Docker for the atomicity/no-PII integration tier; the crate still builds
 # without Docker (these only compile into the test targets). Default features are dropped so

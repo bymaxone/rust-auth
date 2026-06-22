@@ -33,5 +33,11 @@ proptest = "1"
 # use no RNG.
 wasm-js = ["bymax-auth-crypto/wasm-js"]
 
+# docs.rs renders the host-target surface; `--cfg docsrs` enables the feature-gated
+# doc annotations. `wasm-js` is excluded — it forwards a browser RNG backend that
+# does not compile on the docs.rs host target (x86_64).
+[package.metadata.docs.rs]
+rustdoc-args = ["--cfg", "docsrs"]
+
 [lints]
 workspace = true

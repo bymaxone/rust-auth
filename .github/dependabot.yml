@@ -29,3 +29,13 @@ updates:
     commit-message:
       prefix: chore
       include: scope
+
+  # The published npm package and its build/lint/docs dev-tooling.
+  - package-ecosystem: npm
+    directory: "/packages/rust-auth"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 10
+    commit-message:
+      prefix: chore
+      include: scope

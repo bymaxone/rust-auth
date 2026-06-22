@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Security vulnerability
+    url: https://github.com/bymaxone/rust-auth/security/advisories/new
+    about: Report a vulnerability privately through GitHub Security Advisories — never as a public issue. See SECURITY.md.
+  - name: Question or discussion
+    url: https://github.com/bymaxone/rust-auth/discussions
+    about: Ask usage questions or propose ideas in Discussions.

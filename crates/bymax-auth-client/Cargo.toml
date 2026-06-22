@@ -41,5 +41,10 @@ secrecy = "0.10"
 testcontainers = { version = "0.27", default-features = false }
 testcontainers-modules = { version = "0.15", default-features = false, features = ["redis"] }
 
+# docs.rs renders the public client surface; `--cfg docsrs` enables the feature-gated
+# doc annotations. The crate has no opt-in features, so no feature set is selected.
+[package.metadata.docs.rs]
+rustdoc-args = ["--cfg", "docsrs"]
+
 [lints]
 workspace = true

@@ -700,8 +700,13 @@ cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo fmt --all -- --check
 
 # Frontend package
-pnpm install && pnpm --filter @bymax-one/rust-auth build
+cd packages/rust-auth && npm ci && npm run build:wasm && npm run build
 ```
+
+Runnable apps live under [`examples/`](./examples) (three Axum services, a
+React + Vite SPA, a Next.js edge app, and a dogfood integration). The release and
+publishing process — and the one-time OIDC / protected-environment setup it
+requires — is documented in [`docs/RELEASE.md`](./docs/RELEASE.md).
 
 ---
 
