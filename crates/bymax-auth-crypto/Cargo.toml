@@ -19,7 +19,7 @@ description = "Cryptographic primitives for bymax-auth: password hashing, consta
 # RustCrypto crate on the same generation is what keeps the dependency graph free
 # of duplicate-major bloat.
 hmac = "0.12"
-sha2 = "0.10"
+sha2 = "0.11"
 subtle = "2.6"
 rand = "0.8"
 # `getrandom` is pinned to the major that `rand_core 0.6` (pulled by `password-hash
