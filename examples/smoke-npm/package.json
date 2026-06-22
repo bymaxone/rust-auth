@@ -1,0 +1,23 @@
+{
+  "name": "smoke-npm",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Pre-publish npm smoke: consume the packed @bymax-one/rust-auth and verify a backend-signed token at the edge.",
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "smoke": "node --import tsx smoke.ts"
+  },
+  "dependencies": {
+    "@bymax-one/rust-auth": "file:../../packages/rust-auth",
+    "next": "^16.0.0",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "@types/react": "^19.0.2",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2"
+  }
+}
