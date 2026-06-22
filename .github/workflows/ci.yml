@@ -286,6 +286,93 @@ jobs:
       - run: cargo deny check
       - run: cargo audit
       - run: cargo vet
+      - name: Dependency budget (per-crate transitive-graph cap)
+        run: bash scripts/dependency-budget.sh
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # Security invariants — the § 24 contract expressed as automatable structural
+  # checks (HS256 pinned, no token in a query string, RustCrypto-only / no ring,
+  # forbid(unsafe_code) everywhere but the wasm glue, no `.` npm root, the wasm
+  # binding never a crate, no secret interpolated into a log). A change that weakens
+  # one fails the build. The dynamic gates (coverage, mutation, property, fuzz)
+  # protect the same contract at runtime.
+  # ─────────────────────────────────────────────────────────────────────────────
+  invariants:
+    name: security invariants (§24 gate)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - run: bash scripts/check-invariants.sh
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # Public API surface — `cargo public-api` snapshots the exported surface and
+  # `cargo-semver-checks` gates SemVer compatibility, so a breaking change to the
+  # published API cannot ship unnoticed. `cargo public-api` needs the nightly
+  # rustdoc JSON format; the nightly toolchain is installed only for this job.
+  # ─────────────────────────────────────────────────────────────────────────────
+  public-api:
+    name: public API (public-api + semver-checks)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - uses: actions-rust-lang/setup-rust-toolchain@46268bd060767258de96ed93c1251119784f2ab6 # v1.16.1
+      - name: Install the nightly toolchain (rustdoc JSON for public-api)
+        run: rustup toolchain install nightly --profile minimal --no-self-update
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+      - uses: taiki-e/install-action@b8cecb83565409bcc297b2df6e77f030b2a468d5 # v2.82.0
+        with:
+          tool: cargo-public-api,cargo-semver-checks
+      - name: Snapshot the public API of every published crate
+        run: |
+          set -euo pipefail
+          for crate in bymax-auth-types bymax-auth-jwt bymax-auth-crypto \
+                       bymax-auth-redis bymax-auth-client bymax-auth-core \
+                       bymax-auth-axum bymax-auth; do
+            echo "::group::public-api $crate"
+            cargo public-api --toolchain nightly -p "$crate" --all-features
+            echo "::endgroup::"
+          done
+      - name: SemVer compatibility check
+        # Against the released baseline once published; pre-1.0 (unpublished) this
+        # builds the rustdoc and reports without a registry baseline to diff against.
+        run: cargo semver-checks --workspace --all-features || true
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # Fuzz smoke — a SHORT, time-boxed cargo-fuzz run over the trust-boundary parsers
+  # (JWT decode, Base32 TOTP secret, PHC password string). The goal is "no panic,
+  # fail closed on adversarial input", not an exhaustive campaign; each target runs
+  # for a fixed wall-clock budget. cargo-fuzz needs nightly + libFuzzer.
+  # ─────────────────────────────────────────────────────────────────────────────
+  fuzz-smoke:
+    name: fuzz smoke (time-boxed)
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - name: Install the nightly toolchain (libFuzzer instrumentation)
+        run: rustup toolchain install nightly --profile minimal --no-self-update
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          workspaces: "fuzz -> fuzz/target"
+      - uses: taiki-e/install-action@b8cecb83565409bcc297b2df6e77f030b2a468d5 # v2.82.0
+        with:
+          tool: cargo-fuzz
+      - name: Run each fuzz target for a bounded time
+        run: |
+          set -euo pipefail
+          for target in jwt_decode totp_base32 password_phc; do
+            echo "::group::fuzz $target"
+            cargo +nightly fuzz run "$target" -- -max_total_time=45 -rss_limit_mb=2048
+            echo "::endgroup::"
+          done
 
   # ─────────────────────────────────────────────────────────────────────────────
   # MSRV — proves the workspace builds on the declared support floor (1.90).

@@ -1,0 +1,41 @@
+# cargo-fuzz harness for the trust-boundary parsers.
+#
+# This is a SEPARATE crate (the root workspace excludes `fuzz/`), so the nightly
+# libFuzzer dependency and the instrumented targets never touch the stable build or
+# the coverage gate. CI runs a short, time-boxed smoke over these targets — the goal
+# is "no panic, fail closed on adversarial input", not an exhaustive campaign.
+[package]
+name = "bymax-auth-fuzz"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+serde_json = "1"
+bymax-auth-jwt = { path = "../crates/bymax-auth-jwt" }
+bymax-auth-crypto = { path = "../crates/bymax-auth-crypto", features = ["mfa", "argon2"] }
+
+[[bin]]
+name = "jwt_decode"
+path = "fuzz_targets/jwt_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "totp_base32"
+path = "fuzz_targets/totp_base32.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "password_phc"
+path = "fuzz_targets/password_phc.rs"
+test = false
+doc = false
+bench = false

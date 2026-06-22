@@ -1,0 +1,59 @@
+name: mutants
+
+# Mutation testing (cargo-mutants) — the deliberate PRE-RELEASE gate, NOT a per-PR
+# blocker. It is expensive (it rebuilds and re-tests the suite once per mutant), so it
+# runs on a weekly schedule and on demand rather than on every pull request. The
+# release process runs it before cutting a tag; a score below the documented
+# near-100% floor blocks the release. The floor and the logic-crate set are in
+# mutants.toml.
+on:
+  schedule:
+    # Sundays 03:11 UTC — a low-traffic window for the long run.
+    - cron: "11 3 * * 0"
+  workflow_dispatch:
+    inputs:
+      package:
+        description: "Limit to a single crate (e.g. bymax-auth-jwt); empty = all logic crates"
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+concurrency:
+  group: mutants-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  mutants:
+    name: cargo-mutants (pre-release gate)
+    runs-on: ubuntu-latest
+    timeout-minutes: 240
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - uses: actions-rust-lang/setup-rust-toolchain@46268bd060767258de96ed93c1251119784f2ab6 # v1.16.1
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+      - uses: taiki-e/install-action@b8cecb83565409bcc297b2df6e77f030b2a468d5 # v2.82.0
+        with:
+          tool: cargo-mutants
+      - name: Run mutation testing
+        env:
+          ONLY_PACKAGE: ${{ github.event.inputs.package }}
+        run: |
+          set -euo pipefail
+          args=(--all-features --in-place)
+          if [ -n "${ONLY_PACKAGE}" ]; then
+            args+=(--package "${ONLY_PACKAGE}")
+          fi
+          # `--all-features` so the mutated code paths match what the suite exercises;
+          # the floor (and any documented equivalent mutants) live in mutants.toml.
+          cargo mutants "${args[@]}"
+      - name: Upload the mutation report
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: mutants-report
+          path: mutants.out/
+          retention-days: 14

@@ -1,0 +1,36 @@
+# cargo-mutants configuration — the PRE-RELEASE mutation gate.
+#
+# Mutation testing is the slow, high-signal gate that runs before a release (see
+# .github/workflows/mutants.yml), never on every PR. The agreed floor is a
+# near-100% caught-mutant score across the logic crates: a release is blocked when
+# the score drops below it, and any surviving mutant must be either killed by a new
+# test or explicitly recorded here as a documented equivalent mutant with a reason.
+#
+# `examine_globs` scopes mutation to the crates that carry real logic; pure-data and
+# generated surfaces are not mutated (a mutated `Debug` derive or a config-default
+# constant is noise, not signal). Build artefacts, examples, and the fuzz harness are
+# never mutated.
+
+examine_globs = [
+    "crates/bymax-auth-core/**",
+    "crates/bymax-auth-jwt/**",
+    "crates/bymax-auth-crypto/**",
+    "crates/bymax-auth-redis/**",
+    "crates/bymax-auth-axum/**",
+    "crates/bymax-auth-client/**",
+]
+
+exclude_globs = [
+    "**/tests/**",
+    "examples/**",
+    "fuzz/**",
+    "bindings/**",
+]
+
+# Build the mutants with every feature so the suite that the catch-rate is measured
+# against exercises the same paths the mutated code lives on.
+additional_cargo_args = ["--all-features"]
+
+# Documented equivalent mutants (mutants that cannot be killed because the change is
+# behaviour-preserving) are listed under [[skip]] entries with a `reason`. None are
+# recorded yet — every surviving mutant must first be triaged before being skipped.

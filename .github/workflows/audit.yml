@@ -1,0 +1,39 @@
+name: audit
+
+# Scheduled RustSec advisory sweep. `cargo-audit` cross-checks the committed
+# Cargo.lock against the RustSec advisory database and fails on a newly-disclosed
+# vulnerability — the time-based counterpart to the per-PR `cargo-deny` advisory
+# check, so an advisory published after a PR merged is still caught. Also runnable on
+# demand, and re-run when the lockfile or this workflow changes.
+on:
+  schedule:
+    # Daily 04:23 UTC — advisories land continuously; a daily sweep keeps the window short.
+    - cron: "23 4 * * *"
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - "Cargo.lock"
+      - ".github/workflows/audit.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: audit-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  audit:
+    name: cargo-audit (RustSec)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - uses: taiki-e/install-action@b8cecb83565409bcc297b2df6e77f030b2a468d5 # v2.82.0
+        with:
+          tool: cargo-audit
+      - name: Audit the committed lockfile against the RustSec database
+        run: cargo audit --deny warnings
