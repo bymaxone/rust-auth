@@ -21,7 +21,7 @@ description = "Cryptographic primitives for bymax-auth: password hashing, consta
 hmac = "0.12"
 sha2 = "0.10"
 subtle = "2.6"
-rand = "0.8"
+rand = "0.10"
 # `getrandom` is pinned to the major that `rand_core 0.6` (pulled by `password-hash
 # 0.5` for salt generation) depends on, so the production (non-dev) graph carries a
 # single `getrandom`. (Dev-only `proptest` pulls a newer `rand`/`getrandom`; those are
