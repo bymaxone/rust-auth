@@ -30,6 +30,7 @@ export default defineConfig({
     "react-dom",
     "next",
     "next/server",
+    "next/server.js",
     "server-only",
     /^\.\.\/wasm\//,
     /bymax_auth_wasm/,

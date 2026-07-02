@@ -129,16 +129,16 @@ describe("verifyJwtToken — decode-only fallback is non-authoritative", () => {
 });
 
 describe("decodeJwtToken", () => {
-  it("returns the header and payload without verifying the signature", () => {
-    const decoded = decodeJwtToken(dashboardToken());
+  it("returns the header and payload without verifying the signature", async () => {
+    const decoded = await decodeJwtToken(dashboardToken());
     expect(decoded.isValid).toBe(true);
     expect(decoded.header?.alg).toBe("HS256");
     expect(getUserId(decoded)).toBe("u_1");
   });
 
-  it("returns { isValid: false } for a malformed token and never throws", () => {
-    expect(decodeJwtToken("not-a-token").isValid).toBe(false);
-    expect(getTenantId(decodeJwtToken("not-a-token"))).toBeUndefined();
+  it("returns { isValid: false } for a malformed token and never throws", async () => {
+    expect((await decodeJwtToken("not-a-token")).isValid).toBe(false);
+    expect(getTenantId(await decodeJwtToken("not-a-token"))).toBeUndefined();
   });
 });
 
