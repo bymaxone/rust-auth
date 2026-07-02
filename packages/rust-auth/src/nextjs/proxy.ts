@@ -7,8 +7,13 @@
  * @layer nextjs-server
  */
 
-import { NextResponse } from "next/server";
-import type { NextRequest } from "next/server";
+// Imported with the explicit `.js` extension: when this package is installed by a Next 16
+// consumer and externalized (`serverExternalPackages`), the built `dist/nextjs` is loaded by
+// Node's native ESM resolver, which cannot resolve the bare subpath `next/server` because
+// `next` ships no `exports` map (extensionless subpaths require a fully-specified path). The
+// `.js` specifier resolves identically under bundlers and Vitest.
+import { NextResponse } from "next/server.js";
+import type { NextRequest } from "next/server.js";
 
 import {
   AUTH_ACCESS_COOKIE_NAME,

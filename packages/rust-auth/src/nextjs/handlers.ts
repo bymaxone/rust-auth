@@ -6,8 +6,11 @@
  * @layer nextjs-server
  */
 
-import { NextResponse } from "next/server";
-import type { NextRequest } from "next/server";
+// The explicit `.js` extension keeps `next/server` resolvable when the built package is
+// externalized and loaded by Node's native ESM resolver (see the note in `proxy.ts`): `next`
+// ships no `exports` map, so Node ESM cannot resolve the extensionless subpath.
+import { NextResponse } from "next/server.js";
+import type { NextRequest } from "next/server.js";
 
 import {
   AUTH_ACCESS_COOKIE_NAME,

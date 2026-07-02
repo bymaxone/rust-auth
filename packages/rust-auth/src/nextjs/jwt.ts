@@ -2,7 +2,6 @@
 // browser bundle. The `server-only` import makes a Client-Component import a build error.
 import "server-only";
 
-import { decode_jwt, verify_jwt_hs256 } from "../../wasm/bymax_auth_wasm.js";
 import type {
   DashboardJwtPayload,
   MfaTempPayload,
@@ -13,8 +12,29 @@ import type {
  * @fileoverview Edge JWT helpers backed by the WASM verifier. `verifyJwtToken` runs the exact
  * Rust HS256 codec the backend signs with (authoritative); `decodeJwtToken` and the
  * decode-only fallback never check a signature and must never gate an authorization decision.
+ *
+ * The WASM glue self-initializes on import (its top-level `__wbindgen_start`), so it is loaded
+ * lazily via a memoized dynamic `import()` on first use rather than at module load: importing
+ * this module — or the `/nextjs` barrel — must have NO WASM side effect, so a Next build's
+ * page-data collection (which cannot instantiate the edge WASM) can evaluate the barrel.
  * @layer nextjs-server
  */
+
+/** The edge codec surface this module consumes from the bundled `bymax-auth-wasm` glue. */
+type EdgeWasm = typeof import("../../wasm/bymax_auth_wasm.js");
+
+/** The memoized in-flight (then resolved) WASM import; `undefined` until first use. */
+let edgeWasm: Promise<EdgeWasm> | undefined;
+
+/**
+ * Load the edge WASM codec lazily and at most once. The dynamic `import()` defers the glue's
+ * self-initialization to first use and caches the module namespace, so repeated calls share a
+ * single wasm-init instance and importing this module stays side-effect-free.
+ */
+function loadEdgeWasm(): Promise<EdgeWasm> {
+  edgeWasm ??= import("../../wasm/bymax_auth_wasm.js");
+  return edgeWasm;
+}
 
 /** The three claim shapes the backend issues, discriminated by their `type` field. */
 export type AuthJwtPayload = DashboardJwtPayload | PlatformJwtPayload | MfaTempPayload;
@@ -55,8 +75,9 @@ interface DecodedHeaderPayload {
  * @param token - The compact JWS to decode.
  * @returns `{ isValid: true, header, payload }` when decodable, else `{ isValid: false }`.
  */
-export function decodeJwtToken(token: string): DecodedToken {
+export async function decodeJwtToken(token: string): Promise<DecodedToken> {
   try {
+    const { decode_jwt } = await loadEdgeWasm();
     const raw = decode_jwt(token);
     if (raw === undefined) return { isValid: false };
     const { header, payload } = JSON.parse(raw) as DecodedHeaderPayload;
@@ -82,6 +103,7 @@ export async function verifyJwtToken(
   secret?: string | null,
 ): Promise<DecodedToken> {
   try {
+    const { decode_jwt, verify_jwt_hs256 } = await loadEdgeWasm();
     if (typeof secret === "string" && secret.length > 0) {
       const raw = verify_jwt_hs256(token, secret);
       if (raw === undefined) return { isValid: false };
