@@ -1,7 +1,8 @@
 # cargo-mutants configuration — the PRE-RELEASE mutation gate.
 #
-# Mutation testing is the slow, high-signal gate that runs before a release (see
-# .github/workflows/mutants.yml), never on every PR. The agreed floor is a
+# Mutation testing is the slow, high-signal gate that runs automatically post-merge
+# on `main` (and on demand) via the shared reusable (bymaxone/.github → rust-ci.yml),
+# never on every PR. The agreed floor is a
 # near-100% caught-mutant score across the logic crates: a release is blocked when
 # the score drops below it, and any surviving mutant must be either killed by a new
 # test or explicitly recorded here as a documented equivalent mutant with a reason.
