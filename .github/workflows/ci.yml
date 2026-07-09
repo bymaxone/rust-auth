@@ -26,7 +26,7 @@ jobs:
   # ─────────────────────────────────────────────────────────────────────────────
   # Universal Cargo core — format, clippy, build & test, 100% llvm-cov coverage,
   # the MSRV floor build, and the source-gated cargo-mutants run — all via the
-  # org-wide reusable (bymaxone/.github → rust-ci). Mutation runs only on a push
+  # org-wide reusable (bymaxone/.github → rust-ci.yml). Mutation runs only on a push
   # to main / manual dispatch, never on PRs. Every bespoke gate below stays here.
   # ─────────────────────────────────────────────────────────────────────────────
   core:
