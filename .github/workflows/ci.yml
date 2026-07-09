@@ -38,7 +38,10 @@ jobs:
       msrv-version: '1.90'
       run-mutation: true
       mutation-command: cargo mutants --all-features --in-place
-      mutation-source-globs: '^(crates/|bindings/)'
+      # Match mutants.toml examine_globs (logic crates only; bindings/** is
+      # excluded there), so a bindings-only change never triggers the gate for
+      # code cargo-mutants would not mutate.
+      mutation-source-globs: '^(crates/)'
 
   # ─────────────────────────────────────────────────────────────────────────────
   # Feature matrix — each feature is verified in isolation to catch accidental
