@@ -84,8 +84,9 @@ Each job widens only the scope it needs.
 - **Full verify** — rerun the `ci` gate (fmt / clippy / build / 100 % coverage /
   doctests / supply-chain) on the tagged SHA.
 - **Mutation gate** — `cargo-mutants` over the logic crates must meet the agreed
-  near-100 % floor (this is the deliberate pre-release placement of the slow gate;
-  see `.github/workflows/mutants.yml`).
+  near-100 % floor. It runs automatically post-merge on `main` via the shared
+  reusable (`bymaxone/.github` → `rust-ci.yml`), and on demand via `workflow_dispatch`;
+  run it locally with `cargo mutants --all-features` before tagging.
 - **Dogfood smokes** — the crate Axum smoke and the npm Next.js smoke
   (`examples/smoke-crate`, `examples/smoke-npm`) must pass against the
   to-be-published artefacts. A smoke failure blocks the tag.

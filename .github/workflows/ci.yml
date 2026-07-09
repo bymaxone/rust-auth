@@ -15,102 +15,33 @@ concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
-# Actions are pinned to a full commit SHA (an immutable supply-chain anchor — a
-# moved tag cannot inject code); the trailing `# vX.Y.Z` is the human-readable
-# version, kept current by Dependabot's github-actions updates.
+# Third-party actions are pinned to a full commit SHA (an immutable supply-chain
+# anchor — a moved tag cannot inject code); the trailing `# vX.Y.Z` is the
+# human-readable version, kept current by Dependabot's github-actions updates.
+# The one exception is the org-owned reusable `bymaxone/.github` workflow below,
+# pinned to the moving major `@v1` by deliberate convention so a vetted CI fix
+# propagates to every repo at once (org-internal, not a third-party dependency).
 jobs:
 
   # ─────────────────────────────────────────────────────────────────────────────
-  # Formatting
+  # Universal Cargo core — format, clippy, build & test, 100% llvm-cov coverage,
+  # the MSRV floor build, and the source-gated cargo-mutants run — all via the
+  # org-wide reusable (bymaxone/.github → rust-ci.yml). Mutation runs only on a push
+  # to main / manual dispatch, never on PRs. Every bespoke gate below stays here.
   # ─────────────────────────────────────────────────────────────────────────────
-  fmt:
-    name: format
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-      - uses: actions-rust-lang/setup-rust-toolchain@46268bd060767258de96ed93c1251119784f2ab6 # v1.16.1
-        with:
-          components: rustfmt
-      - run: cargo fmt --all --check
-
-  # ─────────────────────────────────────────────────────────────────────────────
-  # Linting — every warning is a hard error; --locked ensures the lockfile is
-  # authoritative. Covers all targets (lib, bins, tests, benchmarks, examples)
-  # and all features so no code path escapes analysis.
-  # ─────────────────────────────────────────────────────────────────────────────
-  clippy:
-    name: clippy
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
-    steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-      - uses: actions-rust-lang/setup-rust-toolchain@46268bd060767258de96ed93c1251119784f2ab6 # v1.16.1
-        with:
-          components: clippy
-      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
-      - run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
-
-  # ─────────────────────────────────────────────────────────────────────────────
-  # Build + test — unit tests, integration tests, and doctests in one pass.
-  # --locked prevents silent version drift from the committed Cargo.lock.
-  # ─────────────────────────────────────────────────────────────────────────────
-  test:
-    name: build & test
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-      - uses: actions-rust-lang/setup-rust-toolchain@46268bd060767258de96ed93c1251119784f2ab6 # v1.16.1
-      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
-      - run: cargo build --workspace --all-features --locked
-      - run: cargo test  --workspace --all-features --locked
-
-  # ─────────────────────────────────────────────────────────────────────────────
-  # Coverage — 100% line and function coverage is a hard gate. cargo-llvm-cov has
-  # no branch-coverage flag, and a handful of unreachable defensive branches keep
-  # region coverage a hair under 100%, so neither is gated. The empty-stub guard
-  # tolerates the early state where llvm-cov reports "no coverage data found" (zero
-  # instrumented functions); any other failure — including a missed threshold —
-  # propagates as a hard CI error.
-  # ─────────────────────────────────────────────────────────────────────────────
-  coverage:
-    name: coverage 100% (llvm-cov)
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-      - uses: actions-rust-lang/setup-rust-toolchain@46268bd060767258de96ed93c1251119784f2ab6 # v1.16.1
-        with:
-          components: llvm-tools-preview
-      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
-      - uses: taiki-e/install-action@9e1e5806d4a4822de933115878265be9aaa786d9 # v2.82.2
-        with:
-          tool: cargo-llvm-cov
-      - name: Coverage — 100% hard gate
-        run: |
-          set -euo pipefail
-          cov_err="$(mktemp)"
-          if cargo llvm-cov \
-              --workspace --all-features --locked \
-              --fail-under-lines     100 \
-              --fail-under-functions 100 \
-              --lcov --output-path lcov.info \
-              2> "$cov_err"; then
-            cat "$cov_err" >&2 || true
-          elif grep -q 'no coverage data found' "$cov_err"; then
-            cat "$cov_err" >&2
-            echo 'note: no coverable code yet (empty stubs); emitting an empty LCOV.'
-            : > lcov.info
-          else
-            cat "$cov_err" >&2
-            exit 1
-          fi
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        if: always()
-        with:
-          name: lcov
-          path: lcov.info
+  core:
+    uses: bymaxone/.github/.github/workflows/rust-ci.yml@v1
+    with:
+      run-coverage: true
+      coverage-fail-under: 100
+      run-msrv: true
+      msrv-version: '1.90'
+      run-mutation: true
+      mutation-command: cargo mutants --all-features --in-place
+      # Match mutants.toml examine_globs (logic crates only; bindings/** is
+      # excluded there), so a bindings-only change never triggers the gate for
+      # code cargo-mutants would not mutate.
+      mutation-source-globs: '^(crates/)'
 
   # ─────────────────────────────────────────────────────────────────────────────
   # Feature matrix — each feature is verified in isolation to catch accidental
@@ -390,21 +321,6 @@ jobs:
           tool: cargo-fuzz
       - name: Compile every fuzz target (build-only smoke)
         run: cargo +nightly fuzz build --target x86_64-unknown-linux-gnu
-
-  # ─────────────────────────────────────────────────────────────────────────────
-  # MSRV — proves the workspace builds on the declared support floor (1.90).
-  # Uses `cargo +1.90` to override rust-toolchain.toml explicitly.
-  # ─────────────────────────────────────────────────────────────────────────────
-  msrv:
-    name: msrv (1.90)
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
-    steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-      - name: Install the MSRV toolchain
-        run: rustup toolchain install 1.90 --profile minimal --no-self-update
-      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
-      - run: cargo +1.90 build --workspace --locked
 
   # ─────────────────────────────────────────────────────────────────────────────
   # npm package — the @bymax-one/rust-auth frontend package. Rebuilds the edge wasm
