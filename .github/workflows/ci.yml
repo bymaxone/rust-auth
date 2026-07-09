@@ -15,9 +15,12 @@ concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
-# Actions are pinned to a full commit SHA (an immutable supply-chain anchor — a
-# moved tag cannot inject code); the trailing `# vX.Y.Z` is the human-readable
-# version, kept current by Dependabot's github-actions updates.
+# Third-party actions are pinned to a full commit SHA (an immutable supply-chain
+# anchor — a moved tag cannot inject code); the trailing `# vX.Y.Z` is the
+# human-readable version, kept current by Dependabot's github-actions updates.
+# The one exception is the org-owned reusable `bymaxone/.github` workflow below,
+# pinned to the moving major `@v1` by deliberate convention so a vetted CI fix
+# propagates to every repo at once (org-internal, not a third-party dependency).
 jobs:
 
   # ─────────────────────────────────────────────────────────────────────────────
