@@ -620,7 +620,7 @@ version = "0.1.9"
 criteria = "safe-to-deploy"
 
 [[exemptions.time-macros]]
-version = "0.2.29"
+version = "0.2.31"
 criteria = "safe-to-deploy"
 
 [[exemptions.tinystr]]
