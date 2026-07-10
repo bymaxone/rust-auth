@@ -612,7 +612,7 @@ version = "0.15.0"
 criteria = "safe-to-run"
 
 [[exemptions.time]]
-version = "0.3.49"
+version = "0.3.53"
 criteria = "safe-to-deploy"
 
 [[exemptions.time-core]]
