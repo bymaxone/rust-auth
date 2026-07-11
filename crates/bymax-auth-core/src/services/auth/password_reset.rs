@@ -536,6 +536,7 @@ mod tests {
             device: "Chrome".to_owned(),
             ip: "1.2.3.4".to_owned(),
             created_at: time::OffsetDateTime::UNIX_EPOCH,
+            family_id: "fam-test".to_owned(),
         };
         assert!(
             h.stores

@@ -296,6 +296,14 @@ pub struct InMemoryStores {
     sessions: Mutex<HashMap<(SessionKind, String), SessionRecord>>,
     session_index: Mutex<HashMap<(SessionKind, String), Vec<SessionDetail>>>,
     grace: Mutex<HashMap<(SessionKind, String), SessionRecord>>,
+    /// `cf:` consumed-token markers: an already-rotated token's hash → the family it belonged
+    /// to. Outlives the grace pointer (which the real store keys with the shorter grace TTL),
+    /// so a post-grace replay of the consumed token is detected as a reuse rather than a plain
+    /// invalid. Keyed by `(kind, old_hash)`.
+    consumed: Mutex<HashMap<(SessionKind, String), String>>,
+    /// `fam:` family index: a family id → the set of its live session hashes, so a whole
+    /// lineage can be revoked on reuse detection. Keyed by `(kind, family_id)`.
+    families: Mutex<HashMap<(SessionKind, String), HashSet<String>>>,
     blacklist: Mutex<HashSet<String>>,
     otps: Mutex<HashMap<(OtpPurpose, String), (String, u32)>>,
     resend: Mutex<HashSet<(OtpPurpose, String)>>,
@@ -357,6 +365,15 @@ impl SessionStore for InMemoryStores {
                 created_at: detail.created_at,
                 last_activity_at: detail.created_at,
             });
+        // Register the new session in its family index (a fresh login, or the grace-path fork),
+        // so the whole lineage is revocable on reuse detection. A legacy record with no family
+        // simply carries no index entry.
+        if !detail.family_id.is_empty() {
+            lock(&self.families)
+                .entry((kind, detail.family_id.clone()))
+                .or_default()
+                .insert(token_hash.to_owned());
+        }
         Ok(())
     }
 
@@ -386,10 +403,31 @@ impl SessionStore for InMemoryStores {
                     last_activity_at: rotation.new_record.created_at,
                 });
             }
+            // Family bookkeeping: mark the consumed old token (so a post-grace replay is caught
+            // as a reuse, not a plain invalid) and move the family membership from old to new.
+            // Old and new share the inherited family id.
+            if !old_record.family_id.is_empty() {
+                lock(&self.consumed).insert(
+                    (kind, rotation.old_hash.clone()),
+                    old_record.family_id.clone(),
+                );
+                if let Some(members) =
+                    lock(&self.families).get_mut(&(kind, old_record.family_id.clone()))
+                {
+                    members.remove(&rotation.old_hash);
+                    members.insert(rotation.new_hash.clone());
+                }
+            }
             return Ok(RotateOutcome::Rotated(old_record));
         }
         if let Some(recovered) = lock(&self.grace).get(&(kind, rotation.old_hash.clone())) {
             return Ok(RotateOutcome::Grace(recovered.clone()));
+        }
+        // Neither live nor in grace: a surviving consumed-token marker means this token was
+        // validly issued and already rotated — a reuse of a consumed token (its grace window
+        // has closed). Surface the compromised family for the caller to revoke.
+        if let Some(family) = lock(&self.consumed).get(&(kind, rotation.old_hash.clone())) {
+            return Ok(RotateOutcome::Reused(family.clone()));
         }
         Ok(RotateOutcome::Invalid)
     }
@@ -450,6 +488,28 @@ impl SessionStore for InMemoryStores {
             let mut sessions = lock(&self.sessions);
             for detail in details {
                 sessions.remove(&(kind, detail.session_hash));
+            }
+        }
+        Ok(())
+    }
+
+    async fn revoke_family(&self, kind: SessionKind, family_id: &str) -> Result<(), AuthError> {
+        // Idempotent: an empty, unknown, or already-cleared family drops nothing.
+        if family_id.is_empty() {
+            return Ok(());
+        }
+        let Some(hashes) = lock(&self.families).remove(&(kind, family_id.to_owned())) else {
+            return Ok(());
+        };
+        let mut sessions = lock(&self.sessions);
+        let mut index = lock(&self.session_index);
+        for hash in hashes {
+            // Every live descendant of the compromised login is deleted, and pruned from its
+            // owner's session index (all family members share one user).
+            if let Some(record) = sessions.remove(&(kind, hash.clone()))
+                && let Some(details) = index.get_mut(&(kind, record.user_id.clone()))
+            {
+                details.retain(|detail| detail.session_hash != hash);
             }
         }
         Ok(())
@@ -993,6 +1053,10 @@ mod tests {
     }
 
     fn record(user: &str) -> SessionRecord {
+        record_in_family(user, "fam-1")
+    }
+
+    fn record_in_family(user: &str, family: &str) -> SessionRecord {
         SessionRecord {
             user_id: user.to_owned(),
             tenant_id: Some("t1".to_owned()),
@@ -1000,6 +1064,7 @@ mod tests {
             device: "Chrome".to_owned(),
             ip: "203.0.113.4".to_owned(),
             created_at: OffsetDateTime::UNIX_EPOCH,
+            family_id: family.to_owned(),
         }
     }
 
@@ -1069,6 +1134,77 @@ mod tests {
         assert!(matches!(store.is_blacklisted("jti").await, Ok(false)));
         assert!(store.blacklist_access("jti", 30).await.is_ok());
         assert!(matches!(store.is_blacklisted("jti").await, Ok(true)));
+    }
+
+    #[tokio::test]
+    async fn session_store_detects_reuse_and_revokes_the_family() {
+        let store = InMemoryStores::new();
+        let kind = SessionKind::Dashboard;
+        // A login in family "famA", then a rotation h1 -> h2 (same inherited family).
+        assert!(
+            store
+                .create_session(kind, "h1", &record_in_family("u1", "famA"), 60)
+                .await
+                .is_ok()
+        );
+        let rotation = SessionRotation {
+            old_hash: "h1".to_owned(),
+            new_hash: "h2".to_owned(),
+            new_raw: "raw2".to_owned(),
+            new_record: record_in_family("u1", "famA"),
+            refresh_ttl: 60,
+            grace_ttl: 30,
+        };
+        assert!(matches!(
+            store.rotate(kind, &rotation).await,
+            Ok(RotateOutcome::Rotated(_))
+        ));
+        // Inside the grace window, replaying the consumed token recovers rather than trips reuse.
+        assert!(matches!(
+            store.rotate(kind, &rotation).await,
+            Ok(RotateOutcome::Grace(_))
+        ));
+        // Once the grace pointer is gone (the window has closed), the surviving consumed marker
+        // makes the same replay a REUSE carrying the compromised family id.
+        assert!(store.delete_grace_pointer(kind, "h1").await.is_ok());
+        assert!(matches!(
+            store.rotate(kind, &rotation).await,
+            Ok(RotateOutcome::Reused(family)) if family == "famA"
+        ));
+        // The live descendant h2 is present until the family is revoked; revoke_family then
+        // deletes it and clears the owner's index, and is idempotent on unknown/empty families.
+        assert!(matches!(store.find_session(kind, "h2").await, Ok(Some(_))));
+        assert!(store.revoke_family(kind, "famA").await.is_ok());
+        assert!(matches!(store.find_session(kind, "h2").await, Ok(None)));
+        assert!(matches!(store.list_sessions(kind, "u1").await, Ok(v) if v.is_empty()));
+        assert!(store.revoke_family(kind, "famA").await.is_ok());
+        assert!(store.revoke_family(kind, "").await.is_ok());
+
+        // A legacy session with no family plants no consumed marker, so a post-grace replay is a
+        // plain Invalid, never a reuse.
+        assert!(
+            store
+                .create_session(kind, "g1", &record_in_family("u2", ""), 60)
+                .await
+                .is_ok()
+        );
+        let legacy = SessionRotation {
+            old_hash: "g1".to_owned(),
+            new_hash: "g2".to_owned(),
+            new_raw: "rawg".to_owned(),
+            new_record: record_in_family("u2", ""),
+            refresh_ttl: 60,
+            grace_ttl: 30,
+        };
+        assert!(matches!(
+            store.rotate(kind, &legacy).await,
+            Ok(RotateOutcome::Rotated(_))
+        ));
+        assert!(store.delete_grace_pointer(kind, "g1").await.is_ok());
+        assert!(matches!(
+            store.rotate(kind, &legacy).await,
+            Ok(RotateOutcome::Invalid)
+        ));
     }
 
     #[tokio::test]

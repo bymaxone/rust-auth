@@ -235,6 +235,10 @@ impl AuthEngine {
             device,
             ip: stored_ip,
             created_at: now_offset(),
+            // The family id is server-internal to the reuse-detection store and is not part of
+            // the new-session hook / eviction projection (which keys on the session hash), so
+            // this display record leaves it empty.
+            family_id: String::new(),
         };
         self.sessions()
             .after_session_created(&record, &new_hash, hook_ctx)

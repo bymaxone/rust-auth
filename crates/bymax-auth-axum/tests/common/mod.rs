@@ -358,6 +358,13 @@ impl bymax_auth_core::traits::SessionStore for FailingStores {
     ) -> Result<(), bymax_auth_types::AuthError> {
         Err(fail())
     }
+    async fn revoke_family(
+        &self,
+        kind: bymax_auth_core::traits::SessionKind,
+        family_id: &str,
+    ) -> Result<(), bymax_auth_types::AuthError> {
+        self.inner.revoke_family(kind, family_id).await
+    }
     async fn blacklist_access(
         &self,
         jti_or_hash: &str,

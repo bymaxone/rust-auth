@@ -182,6 +182,9 @@ impl TokenManagerService {
             device,
             ip: stored_ip,
             created_at: now_offset(),
+            // A fresh login opens a new refresh-token family; every rotation inherits this id,
+            // so the whole lineage can be revoked together on reuse detection.
+            family_id: new_uuid_v4(),
         };
         self.session_store
             .create_session(
@@ -274,6 +277,16 @@ impl TokenManagerService {
                     refresh_token: fresh.expose_secret().to_owned(),
                 })
             }
+            RotateOutcome::Reused(family) => {
+                // A consumed refresh token was replayed after its grace window closed — the
+                // signature of a stolen token. Revoke the whole family (every live descendant
+                // of that login) so the thief's chain dies too, then reject: every holder must
+                // re-authenticate (§12.5.2, OWASP rotation with automatic reuse detection).
+                self.session_store
+                    .revoke_family(SessionKind::Dashboard, &family)
+                    .await?;
+                Err(AuthError::RefreshTokenInvalid)
+            }
             RotateOutcome::Invalid => Err(AuthError::RefreshTokenInvalid),
         }
     }
@@ -332,6 +345,8 @@ impl TokenManagerService {
             device,
             ip: stored_ip,
             created_at: now_offset(),
+            // A fresh platform login opens a new refresh-token family (section 12.5.2).
+            family_id: new_uuid_v4(),
         };
         self.session_store
             .create_session(
@@ -422,6 +437,14 @@ impl TokenManagerService {
                     access_token,
                     refresh_token: fresh.expose_secret().to_owned(),
                 })
+            }
+            RotateOutcome::Reused(family) => {
+                // Post-grace replay of a consumed platform refresh token: revoke the whole
+                // family and reject, the platform-keyspace analogue of the dashboard path.
+                self.session_store
+                    .revoke_family(SessionKind::Platform, &family)
+                    .await?;
+                Err(AuthError::RefreshTokenInvalid)
             }
             RotateOutcome::Invalid => Err(AuthError::RefreshTokenInvalid),
         }
@@ -678,6 +701,9 @@ fn identity_record(seed: &SessionRecord, ip: &str, user_agent: &str) -> SessionR
         device,
         ip: stored_ip,
         created_at: now_offset(),
+        // Rotation inherits the seed's family unchanged, so every descendant of one login
+        // shares the id and the whole lineage is revocable together on reuse detection.
+        family_id: seed.family_id.clone(),
     }
 }
 
@@ -695,6 +721,8 @@ fn platform_identity_record(seed: &SessionRecord, ip: &str, user_agent: &str) ->
         device,
         ip: stored_ip,
         created_at: now_offset(),
+        // The platform rotation inherits the seed's family unchanged (section 12.5.2).
+        family_id: seed.family_id.clone(),
     }
 }
 
@@ -711,6 +739,9 @@ fn placeholder_record(ip: &str, user_agent: &str) -> SessionRecord {
         device,
         ip: stored_ip,
         created_at: now_offset(),
+        // The placeholder is never stored (an absent live token yields only Grace/Reused/Invalid),
+        // so it carries no family.
+        family_id: String::new(),
     }
 }
 
@@ -826,6 +857,90 @@ mod tests {
         // A malformed/oversized token is rejected by the shape guard before any hashing.
         assert!(matches!(
             svc.reissue_tokens("too-short", "10.0.0.1", "agent/1.0")
+                .await,
+            Err(AuthError::RefreshTokenInvalid)
+        ));
+    }
+
+    #[tokio::test]
+    async fn reused_refresh_token_after_grace_revokes_the_whole_family() {
+        // Issue → rotate (the old token is consumed, a grace pointer planted). Drop the grace
+        // pointer to simulate the grace window closing. Replaying the consumed old token is now
+        // caught as a reuse: it is rejected AND the whole family is revoked, so the live rotated
+        // token can no longer rotate either — a stolen token cannot keep a parallel chain alive.
+        let store = Arc::new(InMemoryStores::new());
+        let svc = service(store.clone());
+        let issued = svc
+            .issue_tokens(&user(), "10.0.0.1", "agent/1.0", false)
+            .await;
+        let Ok(issued) = issued else { return };
+        let old_hash = RawRefreshToken::from_raw(issued.refresh_token.clone()).redis_hash();
+        let rotated = svc
+            .reissue_tokens(&issued.refresh_token, "10.0.0.1", "agent/1.0")
+            .await;
+        let Ok(rotated) = rotated else { return };
+        // The freshly rotated token is live right up until the reuse is detected.
+        assert!(
+            store
+                .find_session(SessionKind::Dashboard, &rotated_hash(&rotated))
+                .await
+                .is_ok()
+        );
+        // Simulate the grace window elapsing so the old token is no longer grace-recoverable.
+        assert!(
+            store
+                .delete_grace_pointer(SessionKind::Dashboard, &old_hash)
+                .await
+                .is_ok()
+        );
+        // Replaying the consumed old token is rejected as a detected reuse...
+        assert!(matches!(
+            svc.reissue_tokens(&issued.refresh_token, "10.0.0.1", "agent/1.0")
+                .await,
+            Err(AuthError::RefreshTokenInvalid)
+        ));
+        // ...and the reuse revoked the whole family, so the live rotated token no longer rotates.
+        assert!(matches!(
+            svc.reissue_tokens(&rotated.refresh_token, "10.0.0.1", "agent/1.0")
+                .await,
+            Err(AuthError::RefreshTokenInvalid)
+        ));
+    }
+
+    /// The store hash of a rotated pair's refresh token.
+    fn rotated_hash(rotated: &RotatedTokens) -> String {
+        RawRefreshToken::from_raw(rotated.refresh_token.clone()).redis_hash()
+    }
+
+    #[cfg(feature = "platform")]
+    #[tokio::test]
+    async fn reused_platform_refresh_token_after_grace_revokes_the_family() {
+        // The platform-keyspace analogue: a replayed consumed platform refresh token, past its
+        // grace window, is rejected as a reuse and revokes the whole platform family.
+        let store = Arc::new(InMemoryStores::new());
+        let svc = service(store.clone());
+        let issued = svc
+            .issue_platform_tokens(&platform_admin(), "10.0.0.1", "agent/1.0", false)
+            .await;
+        let Ok(issued) = issued else { return };
+        let old_hash = RawRefreshToken::from_raw(issued.refresh_token.clone()).redis_hash();
+        let rotated = svc
+            .reissue_platform_tokens(&issued.refresh_token, "10.0.0.1", "agent/1.0")
+            .await;
+        let Ok(rotated) = rotated else { return };
+        assert!(
+            store
+                .delete_grace_pointer(SessionKind::Platform, &old_hash)
+                .await
+                .is_ok()
+        );
+        assert!(matches!(
+            svc.reissue_platform_tokens(&issued.refresh_token, "10.0.0.1", "agent/1.0")
+                .await,
+            Err(AuthError::RefreshTokenInvalid)
+        ));
+        assert!(matches!(
+            svc.reissue_platform_tokens(&rotated.refresh_token, "10.0.0.1", "agent/1.0")
                 .await,
             Err(AuthError::RefreshTokenInvalid)
         ));
