@@ -408,9 +408,14 @@ impl AuthEngine {
         // Sessions are invalidated only after the password is durably updated. This is the
         // dashboard reset flow, so only dashboard sessions are revoked; platform-admin sessions
         // are a separate identity surface with their own credential-reset path and are not
-        // touched here.
+        // touched here. Revoking the refresh sessions stops rotation; bumping the token epoch
+        // additionally invalidates every already-issued (stateless) access token at once, so a
+        // reset takes effect immediately rather than lingering for the access-token lifetime.
         self.session_store()
             .revoke_all(crate::traits::SessionKind::Dashboard, &context.user_id)
+            .await?;
+        self.session_store()
+            .bump_epoch(crate::traits::SessionKind::Dashboard, &context.user_id)
             .await?;
 
         let hook_ctx = reset_context_hooks(context);
@@ -536,6 +541,7 @@ mod tests {
             device: "Chrome".to_owned(),
             ip: "1.2.3.4".to_owned(),
             created_at: time::OffsetDateTime::UNIX_EPOCH,
+            family_id: "fam-test".to_owned(),
         };
         assert!(
             h.stores
@@ -598,6 +604,49 @@ mod tests {
         assert!(matches!(
             h.engine.reset_password(replay).await,
             Err(AuthError::PasswordResetTokenInvalid)
+        ));
+    }
+
+    #[tokio::test]
+    async fn reset_bumps_the_token_epoch_so_pre_reset_access_tokens_are_invalidated() {
+        // A reset revokes the refresh sessions AND advances the user's token epoch, so every
+        // already-issued (stateless) access token is rejected on its next verification rather
+        // than lingering for its remaining lifetime.
+        let Some(h) = token_harness() else { return };
+        let id = h.seed(SeedUser::active("epoch@example.com", "pw")).await;
+        // Before the reset the user carries the inert epoch 0.
+        assert!(matches!(
+            h.stores.current_epoch(SessionKind::Dashboard, &id).await,
+            Ok(0)
+        ));
+        let known = "e".repeat(64);
+        assert!(
+            h.stores
+                .put_token(
+                    &known,
+                    &ResetContext {
+                        user_id: id.clone(),
+                        email: "epoch@example.com".to_owned(),
+                        tenant_id: "t1".to_owned(),
+                    },
+                    600,
+                )
+                .await
+                .is_ok()
+        );
+        let reset = ResetPasswordInput {
+            email: "epoch@example.com".to_owned(),
+            tenant_id: "t1".to_owned(),
+            new_password: "brand-new-pw".to_owned(),
+            token: Some(known),
+            otp: None,
+            verified_token: None,
+        };
+        assert!(h.engine.reset_password(reset).await.is_ok());
+        // The reset advanced the epoch: any token stamped at 0 is now below the current value.
+        assert!(matches!(
+            h.stores.current_epoch(SessionKind::Dashboard, &id).await,
+            Ok(1)
         ));
     }
 

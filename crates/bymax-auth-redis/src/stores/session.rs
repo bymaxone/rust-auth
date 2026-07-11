@@ -21,6 +21,11 @@ use crate::script;
 /// the literal in `lua/refresh_rotate.lua`.
 const GRACE_TAG: &str = "GRACE:";
 
+/// The tag the `refresh_rotate` script prepends to a reuse-detection reply (a replay of a
+/// consumed token past its grace window), carrying the compromised family id. Matches the
+/// literal in `lua/refresh_rotate.lua`.
+const REUSED_TAG: &str = "REUSED:";
+
 /// The stored `sd:`/`psd:` per-session detail value. The `session_hash` lives in the key, so
 /// it is absent here; the field set is byte-identical to nest-auth.
 #[derive(Serialize, Deserialize)]
@@ -51,28 +56,34 @@ impl SessionDetailValue {
     }
 }
 
-/// The prefix quartet selected by a [`SessionKind`]: the refresh-session, grace-pointer,
-/// session-index, and per-session-detail keyspaces.
+/// The prefix sextet selected by a [`SessionKind`]: the refresh-session, grace-pointer,
+/// consumed-family marker, family-index, session-index, and per-session-detail keyspaces.
 struct KindPrefixes {
     rt: Prefix,
     rp: Prefix,
+    cf: Prefix,
+    fam: Prefix,
     sess: Prefix,
     sd: Prefix,
 }
 
-/// Map a [`SessionKind`] onto its prefix quartet (`rt`/`rp`/`sess`/`sd` for dashboard,
-/// `prt`/`prp`/`psess`/`psd` for platform).
+/// Map a [`SessionKind`] onto its prefix sextet (`rt`/`rp`/`cf`/`fam`/`sess`/`sd` for dashboard,
+/// `prt`/`prp`/`pcf`/`pfam`/`psess`/`psd` for platform).
 fn kind_prefixes(kind: SessionKind) -> KindPrefixes {
     match kind {
         SessionKind::Dashboard => KindPrefixes {
             rt: Prefix::Rt,
             rp: Prefix::Rp,
+            cf: Prefix::Cf,
+            fam: Prefix::Fam,
             sess: Prefix::Sess,
             sd: Prefix::Sd,
         },
         SessionKind::Platform => KindPrefixes {
             rt: Prefix::Prt,
             rp: Prefix::Prp,
+            cf: Prefix::Pcf,
+            fam: Prefix::Pfam,
             sess: Prefix::Psess,
             sd: Prefix::Psd,
         },
@@ -86,18 +97,25 @@ enum RotateParsed {
     Rotated(SessionRecord),
     /// The old token was inside the grace window; carries the recovered record.
     Grace(SessionRecord),
-    /// Neither the live token nor a grace pointer was present.
+    /// The old token was already consumed and its grace window has closed — a reuse; carries
+    /// the compromised family id.
+    Reused(String),
+    /// Neither the live token, a grace pointer, nor a consumed marker was present.
     Invalid,
 }
 
 /// Interpret the raw `refresh_rotate` reply: `nil` is an invalid refresh, a `"GRACE:"`-tagged
-/// payload is a grace-window hit, and any other payload is the consumed old-session JSON.
+/// payload is a grace-window hit, a `"REUSED:"`-tagged payload is a consumed-token reuse
+/// carrying its family id, and any other payload is the consumed old-session JSON.
 fn interpret_rotate(raw: Option<String>) -> Result<RotateParsed, RedisStoreError> {
     let Some(payload) = raw else {
         return Ok(RotateParsed::Invalid);
     };
     if let Some(grace_json) = payload.strip_prefix(GRACE_TAG) {
         return Ok(RotateParsed::Grace(serde_json::from_str(grace_json)?));
+    }
+    if let Some(family) = payload.strip_prefix(REUSED_TAG) {
+        return Ok(RotateParsed::Reused(family.to_owned()));
     }
     Ok(RotateParsed::Rotated(serde_json::from_str(&payload)?))
 }
@@ -121,9 +139,8 @@ impl RedisStores {
         let detail_json = serde_json::to_string(&SessionDetailValue::at_creation(detail))?;
         let ttl_window = i64::try_from(ttl_secs).unwrap_or(i64::MAX);
 
-        let mut conn = self.connection().await?;
-        redis::pipe()
-            .cmd("SET")
+        let mut pipe = redis::pipe();
+        pipe.cmd("SET")
             .arg(&rt_key)
             .arg(&record_json)
             .arg("EX")
@@ -142,9 +159,24 @@ impl RedisStores {
             .cmd("EXPIRE")
             .arg(&sess_key)
             .arg(ttl_window)
-            .ignore()
-            .query_async::<()>(&mut conn)
-            .await?;
+            .ignore();
+        // Register the session in its family index (skipped for a legacy record with no family),
+        // so the whole lineage can be revoked on reuse detection. The index carries the refresh
+        // TTL so it ages out with the sessions it tracks.
+        if !detail.family_id.is_empty() {
+            let fam_key = keys.key(prefixes.fam, &detail.family_id);
+            pipe.cmd("SADD")
+                .arg(&fam_key)
+                .arg(token_hash)
+                .ignore()
+                .cmd("EXPIRE")
+                .arg(&fam_key)
+                .arg(ttl_window)
+                .ignore();
+        }
+
+        let mut conn = self.connection().await?;
+        pipe.query_async::<()>(&mut conn).await?;
         Ok(())
     }
 
@@ -160,6 +192,12 @@ impl RedisStores {
         let rt_old = keys.key(prefixes.rt, &rotation.old_hash);
         let rt_new = keys.key(prefixes.rt, &rotation.new_hash);
         let rp_old = keys.key(prefixes.rp, &rotation.old_hash);
+        let cf_old = keys.key(prefixes.cf, &rotation.old_hash);
+        // The family index of the presented session's lineage. When the new record carries no
+        // family (a legacy rotation) the script's `ARGV[4] == ''` guard skips every family write,
+        // so this key is built but never touched.
+        let family = &rotation.new_record.family_id;
+        let fam_key = keys.key(prefixes.fam, family);
         let new_json = serde_json::to_string(&rotation.new_record)?;
 
         let mut conn = self.connection().await?;
@@ -168,21 +206,55 @@ impl RedisStores {
             .key(&rt_old)
             .key(&rt_new)
             .key(&rp_old)
+            .key(&cf_old)
+            .key(&fam_key)
             .arg(&new_json)
             .arg(rotation.refresh_ttl)
             .arg(rotation.grace_ttl)
+            .arg(family)
+            .arg(&rotation.old_hash)
+            .arg(&rotation.new_hash)
             .invoke_async(&mut conn)
             .await?;
 
         match interpret_rotate(raw)? {
             RotateParsed::Invalid => Ok(RotateOutcome::Invalid),
             RotateParsed::Grace(record) => Ok(RotateOutcome::Grace(record)),
+            RotateParsed::Reused(family) => Ok(RotateOutcome::Reused(family)),
             RotateParsed::Rotated(old_record) => {
                 self.move_session_member(&mut conn, &prefixes, rotation, &old_record.user_id)
                     .await?;
                 Ok(RotateOutcome::Rotated(old_record))
             }
         }
+    }
+
+    /// Run the `revoke_family` transaction, deleting every live member's `rt:`/`sd:` key, pruning
+    /// each from its owner's `sess:` SET, and dropping the family index — the reuse-detection
+    /// lockout of a stolen token's whole lineage.
+    async fn revoke_family_inner(
+        &self,
+        kind: SessionKind,
+        family_id: &str,
+    ) -> Result<(), RedisStoreError> {
+        // An empty family id has no index key; nothing to revoke.
+        if family_id.is_empty() {
+            return Ok(());
+        }
+        let prefixes = kind_prefixes(kind);
+        let keys = self.keys();
+        let fam_key = keys.key(prefixes.fam, family_id);
+        let mut conn = self.connection().await?;
+        script::REVOKE_FAMILY
+            .prepare()
+            .key(&fam_key)
+            .arg(keys.namespace())
+            .arg(prefixes.rt.as_str())
+            .arg(prefixes.sd.as_str())
+            .arg(prefixes.sess.as_str())
+            .invoke_async::<i64>(&mut conn)
+            .await?;
+        Ok(())
     }
 
     /// Move the session-index membership and detail from the old hash to the new hash after a
@@ -361,6 +433,56 @@ impl RedisStores {
         let present: bool = conn.exists(&key).await?;
         Ok(present)
     }
+
+    /// Read the user's token epoch (`ep:`/`pep:`), defaulting to `0` when no key exists — a
+    /// plain `GET` that never creates the key, so only a user who has actually been bumped
+    /// carries one.
+    async fn current_epoch_inner(
+        &self,
+        kind: SessionKind,
+        user_id: &str,
+    ) -> Result<u64, RedisStoreError> {
+        let key = self.keys().key(epoch_prefix(kind), user_id);
+        let mut conn = self.connection().await?;
+        let value: Option<u64> = conn.get(&key).await?;
+        Ok(value.unwrap_or(0))
+    }
+
+    /// Atomically increment the user's token epoch (`INCR`, creating it at `1` when absent) and
+    /// (re)apply its TTL, returning the new value. The TTL is deliberately far longer than any
+    /// access token lives, so a bump stays effective for the whole window a pre-bump token could
+    /// still be presented, while still bounding growth to a small integer per reset-affected user.
+    async fn bump_epoch_inner(
+        &self,
+        kind: SessionKind,
+        user_id: &str,
+    ) -> Result<u64, RedisStoreError> {
+        let key = self.keys().key(epoch_prefix(kind), user_id);
+        let mut conn = self.connection().await?;
+        let (new_value, _): (u64, bool) = redis::pipe()
+            .atomic()
+            .cmd("INCR")
+            .arg(&key)
+            .cmd("EXPIRE")
+            .arg(&key)
+            .arg(EPOCH_TTL_SECS)
+            .query_async(&mut conn)
+            .await?;
+        Ok(new_value)
+    }
+}
+
+/// TTL applied to a token-epoch key, in seconds (30 days). It must comfortably exceed the
+/// longest an access token can live so an epoch bump stays in force for every pre-bump token's
+/// remaining lifetime; a small fixed integer key per reset-affected user is negligible.
+const EPOCH_TTL_SECS: u64 = 30 * 24 * 60 * 60;
+
+/// The token-epoch key prefix for a session kind (`ep:` dashboard, `pep:` platform).
+fn epoch_prefix(kind: SessionKind) -> Prefix {
+    match kind {
+        SessionKind::Dashboard => Prefix::Ep,
+        SessionKind::Platform => Prefix::Pep,
+    }
 }
 
 #[async_trait]
@@ -440,6 +562,12 @@ impl SessionStore for RedisStores {
             .map_err(AuthError::from)
     }
 
+    async fn revoke_family(&self, kind: SessionKind, family_id: &str) -> Result<(), AuthError> {
+        self.revoke_family_inner(kind, family_id)
+            .await
+            .map_err(AuthError::from)
+    }
+
     async fn blacklist_access(
         &self,
         jti_or_hash: &str,
@@ -452,6 +580,18 @@ impl SessionStore for RedisStores {
 
     async fn is_blacklisted(&self, jti_or_hash: &str) -> Result<bool, AuthError> {
         self.is_blacklisted_inner(jti_or_hash)
+            .await
+            .map_err(AuthError::from)
+    }
+
+    async fn current_epoch(&self, kind: SessionKind, user_id: &str) -> Result<u64, AuthError> {
+        self.current_epoch_inner(kind, user_id)
+            .await
+            .map_err(AuthError::from)
+    }
+
+    async fn bump_epoch(&self, kind: SessionKind, user_id: &str) -> Result<u64, AuthError> {
+        self.bump_epoch_inner(kind, user_id)
             .await
             .map_err(AuthError::from)
     }
@@ -469,6 +609,7 @@ mod tests {
             device: "Chrome".to_owned(),
             ip: "203.0.113.4".to_owned(),
             created_at: OffsetDateTime::UNIX_EPOCH,
+            family_id: "fam-1".to_owned(),
         }
     }
 
@@ -506,6 +647,11 @@ mod tests {
         assert!(matches!(
             interpret_rotate(Some(format!("GRACE:{json}"))),
             Ok(RotateParsed::Grace(_))
+        ));
+        // A `REUSED:`-tagged reply carries the compromised family id verbatim (never JSON).
+        assert!(matches!(
+            interpret_rotate(Some("REUSED:fam-1".to_owned())),
+            Ok(RotateParsed::Reused(family)) if family == "fam-1"
         ));
         assert!(matches!(
             interpret_rotate(Some(json)),

@@ -44,7 +44,15 @@ iat: number,
 /**
  * Expiry (seconds since the Unix epoch).
  */
-exp: number, };
+exp: number, 
+/**
+ * The user's token **epoch** at issuance — a per-user generation counter the server bumps
+ * to invalidate every outstanding access token at once (a password reset or a full
+ * sign-out-everywhere). Verification rejects the token when its epoch is below the user's
+ * current stored epoch. Defaults to `0` on a legacy token that predates the field, which is
+ * never rejected while the stored epoch is also `0` (the mechanism is inert until a bump).
+ */
+epoch: number, };
 
 /**
  * Discriminator value for a dashboard access token. Serializes to `"dashboard"`.
@@ -128,7 +136,13 @@ iat: number,
 /**
  * Expiry (seconds since the Unix epoch).
  */
-exp: number, };
+exp: number, 
+/**
+ * The admin's token **epoch** at issuance — the platform-domain analogue of
+ * [`DashboardClaims::epoch`]: a per-admin generation counter the server bumps to invalidate
+ * every outstanding platform access token at once. Defaults to `0` on a legacy token.
+ */
+epoch: number, };
 
 /**
  * Discriminator value for a platform access token. Serializes to `"platform"`.

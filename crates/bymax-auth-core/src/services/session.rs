@@ -502,6 +502,7 @@ mod tests {
             device: "Chrome on macOS".to_owned(),
             ip: "203.0.113.4".to_owned(),
             created_at: created,
+            family_id: "fam-test".to_owned(),
         }
     }
 
@@ -1074,6 +1075,13 @@ mod tests {
         async fn revoke_all(&self, _kind: SessionKind, _user_id: &str) -> Result<(), AuthError> {
             Ok(())
         }
+        async fn revoke_family(
+            &self,
+            _kind: SessionKind,
+            _family_id: &str,
+        ) -> Result<(), AuthError> {
+            Ok(())
+        }
         async fn blacklist_access(
             &self,
             _jti_or_hash: &str,
@@ -1083,6 +1091,16 @@ mod tests {
         }
         async fn is_blacklisted(&self, _jti_or_hash: &str) -> Result<bool, AuthError> {
             Ok(false)
+        }
+        async fn current_epoch(
+            &self,
+            _kind: SessionKind,
+            _user_id: &str,
+        ) -> Result<u64, AuthError> {
+            Ok(0)
+        }
+        async fn bump_epoch(&self, _kind: SessionKind, _user_id: &str) -> Result<u64, AuthError> {
+            Ok(1)
         }
     }
 
@@ -1134,6 +1152,12 @@ mod tests {
                 .is_ok()
         );
         assert!(store.revoke_all(SessionKind::Dashboard, "u1").await.is_ok());
+        assert!(
+            store
+                .revoke_family(SessionKind::Dashboard, "fam-1")
+                .await
+                .is_ok()
+        );
         assert!(store.blacklist_access("jti", 60).await.is_ok());
         assert!(matches!(store.is_blacklisted("jti").await, Ok(false)));
     }

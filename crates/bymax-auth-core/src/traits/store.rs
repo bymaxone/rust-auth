@@ -64,6 +64,14 @@ pub struct SessionRecord {
     /// Session creation time.
     #[serde(with = "time::serde::rfc3339")]
     pub created_at: OffsetDateTime,
+    /// The refresh-token **family** (login lineage) this session belongs to. Minted at login
+    /// and inherited unchanged across every rotation, so all descendants of one login share it.
+    /// It is the unit of reuse-detection revocation: presenting an already-consumed refresh
+    /// token (post-grace) revokes the whole family (section 12.5.2). Empty on a legacy record
+    /// written before families existed — such a record simply carries no family and is never a
+    /// reuse-revocation target; it is omitted from the wire when empty for byte-parity.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub family_id: String,
 }
 
 /// One session's display detail, returned by [`SessionStore::list_sessions`]. The
@@ -132,7 +140,14 @@ pub enum RotateOutcome {
     /// The old token was already rotated but is inside the grace window; the caller mints
     /// a fresh token for this recovered record without planting a new grace pointer.
     Grace(SessionRecord),
-    /// Neither the live token nor a grace pointer was found — the refresh is invalid.
+    /// The old token was validly issued and already rotated, and its grace window has since
+    /// closed — a **reuse of a consumed refresh token**, the signature of a stolen token being
+    /// replayed. Carries the compromised **family id**; the caller revokes the whole family
+    /// (every live descendant of that login) and rejects the request, forcing re-authentication
+    /// (OWASP refresh-token rotation with automatic reuse detection, section 12.5.2).
+    Reused(String),
+    /// Neither the live token, a grace pointer, nor a consumed-family marker was found — the
+    /// refresh was never issued (or has fully aged out): a plain invalid refresh, not a reuse.
     Invalid,
 }
 
@@ -220,6 +235,12 @@ pub trait SessionStore: Send + Sync {
     /// Revoke every session for a user in one transaction.
     async fn revoke_all(&self, kind: SessionKind, user_id: &str) -> Result<(), AuthError>;
 
+    /// Revoke every live session in a refresh-token **family** (one login lineage), deleting
+    /// each descendant's refresh/detail keys and clearing the family index. Called on
+    /// reuse-detection ([`RotateOutcome::Reused`]) to lock out a stolen token's whole chain.
+    /// Idempotent: an unknown or already-cleared family is a no-op.
+    async fn revoke_family(&self, kind: SessionKind, family_id: &str) -> Result<(), AuthError>;
+
     /// Add a JTI (preferred) or full-JWT hash to the access-token blacklist for its
     /// remaining lifetime.
     async fn blacklist_access(
@@ -231,6 +252,18 @@ pub trait SessionStore: Send + Sync {
     /// Whether an access JTI or JWT hash is blacklisted — consulted on every protected
     /// request.
     async fn is_blacklisted(&self, jti_or_hash: &str) -> Result<bool, AuthError>;
+
+    /// The user's current token **epoch** (generation counter), or `0` when none is stored.
+    /// Stamped into a freshly-issued access token and re-read on every verification: a token
+    /// whose stamped epoch is below this value was issued before an invalidating event and is
+    /// rejected. The `0` default keeps the mechanism inert for a user who has never had a bump.
+    async fn current_epoch(&self, kind: SessionKind, user_id: &str) -> Result<u64, AuthError>;
+
+    /// Atomically increment the user's token epoch and return the new value, invalidating every
+    /// outstanding access token for that user at once (a password reset or a sign-out-everywhere).
+    /// Idempotent in effect: each call advances the generation, and only tokens stamped at or
+    /// above the new value remain valid.
+    async fn bump_epoch(&self, kind: SessionKind, user_id: &str) -> Result<u64, AuthError>;
 }
 
 /// One-time-password records for email verification and OTP-based password reset.
@@ -524,6 +557,7 @@ mod tests {
             device: "Chrome on macOS".into(),
             ip: "203.0.113.4".into(),
             created_at: OffsetDateTime::UNIX_EPOCH,
+            family_id: "fam-1".into(),
         }
     }
 
@@ -551,6 +585,8 @@ mod tests {
         assert!(json.contains("\"userId\":\"u1\""));
         assert!(json.contains("\"tenantId\":\"t1\""));
         assert!(json.contains("\"createdAt\":"));
+        // A present family id is on the wire as camelCase `familyId`.
+        assert!(json.contains("\"familyId\":\"fam-1\""));
 
         let platform = SessionRecord {
             tenant_id: None,
@@ -558,7 +594,18 @@ mod tests {
         };
         assert!(!serde_json::to_string(&platform)?.contains("tenantId"));
 
-        // Round-trip parity.
+        // An empty family id (a legacy record) is omitted from the wire for byte-parity, and a
+        // record with no `familyId` key deserializes back to an empty family.
+        let legacy = SessionRecord {
+            family_id: String::new(),
+            ..session_record()
+        };
+        let legacy_json = serde_json::to_string(&legacy)?;
+        assert!(!legacy_json.contains("familyId"));
+        let legacy_back: SessionRecord = serde_json::from_str(&legacy_json)?;
+        assert_eq!(legacy_back.family_id, "");
+
+        // Round-trip parity for the full record.
         let back: SessionRecord = serde_json::from_str(&json)?;
         assert_eq!(back, dashboard);
         Ok(())
@@ -627,6 +674,11 @@ mod tests {
         assert!(matches!(
             RotateOutcome::Rotated(record.clone()),
             RotateOutcome::Rotated(_)
+        ));
+        // Reuse carries the compromised family id the caller revokes.
+        assert!(matches!(
+            RotateOutcome::Reused("fam-1".to_owned()),
+            RotateOutcome::Reused(family) if family == "fam-1"
         ));
         assert!(matches!(
             RotateOutcome::Grace(record),

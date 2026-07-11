@@ -31,7 +31,9 @@ use bymax_auth_types::{AuthError, LoginResult};
 use secrecy::SecretString;
 use time::OffsetDateTime;
 
-/// A dashboard/platform session record for the given user.
+/// A dashboard/platform session record for the given user. All of a user's sessions share one
+/// family here, so a rotation (whose `new_record` is `record(user)`) inherits it and the whole
+/// lineage stays revocable together.
 fn record(user: &str) -> SessionRecord {
     SessionRecord {
         user_id: user.to_owned(),
@@ -40,6 +42,7 @@ fn record(user: &str) -> SessionRecord {
         device: "Chrome on macOS".to_owned(),
         ip: "203.0.113.4".to_owned(),
         created_at: OffsetDateTime::UNIX_EPOCH,
+        family_id: format!("fam-{user}"),
     }
 }
 
@@ -190,8 +193,143 @@ async fn rotate_with_zero_grace_writes_no_grace_pointer() {
     assert_eq!(redis.ttl("auth:rp:z1").await, -2);
     assert_eq!(redis.ttl("auth:rp:z2").await, -2);
 
-    // A replay of the consumed token cannot recover: with no grace pointer it is invalid,
-    // never a second live rotation.
+    // A replay of the consumed token cannot recover — and with no grace window it is not even
+    // race-tolerated: the consumed-family marker (which is planted regardless of the grace TTL)
+    // makes the replay a REUSE carrying the family, never a second live rotation.
+    assert!(matches!(
+        stores.rotate(kind, &rot).await,
+        Ok(RotateOutcome::Reused(family)) if family == "fam-zu"
+    ));
+}
+
+#[tokio::test]
+async fn reuse_past_grace_is_detected_and_revoke_family_kills_the_lineage() {
+    let Some(redis) = common::try_start().await else {
+        return;
+    };
+    let Some(stores) = redis.stores() else { return };
+    let kind = SessionKind::Dashboard;
+
+    // A login under `r1`, then a rotation r1 -> r2 within family "fam-fu": the old token is
+    // consumed (a grace pointer planted) and the family index moves to the live descendant r2.
+    assert!(
+        stores
+            .create_session(kind, "r1", &record("fu"), 3600)
+            .await
+            .is_ok()
+    );
+    assert!(matches!(
+        stores.rotate(kind, &rotation("r1", "r2", "fu")).await,
+        Ok(RotateOutcome::Rotated(old)) if old.user_id == "fu"
+    ));
+    // The family index exists (a positive TTL) and, while r2 is live, r2 is listed for the user.
+    assert!(redis.ttl("auth:fam:fam-fu").await > 0);
+    assert!(matches!(
+        stores.list_sessions(kind, "fu").await,
+        Ok(v) if v.len() == 1 && v[0].session_hash == "r2"
+    ));
+
+    // Simulate the grace window closing by dropping the grace pointer for the consumed token.
+    assert!(redis.del("auth:rp:r1").await);
+    // Replaying the consumed token is now caught as a REUSE carrying the compromised family.
+    assert!(matches!(
+        stores.rotate(kind, &rotation("r1", "rX", "fu")).await,
+        Ok(RotateOutcome::Reused(family)) if family == "fam-fu"
+    ));
+    // The failed reuse never minted a live token: `rX` was never persisted.
+    assert!(matches!(stores.find_session(kind, "rX").await, Ok(None)));
+
+    // Revoking the family deletes the live descendant r2, prunes it from the owner's `sess:` set,
+    // and drops the family index.
+    assert!(stores.revoke_family(kind, "fam-fu").await.is_ok());
+    assert!(matches!(stores.find_session(kind, "r2").await, Ok(None)));
+    assert!(matches!(stores.list_sessions(kind, "fu").await, Ok(v) if v.is_empty()));
+    assert_eq!(redis.ttl("auth:fam:fam-fu").await, -2);
+
+    // revoke_family is idempotent: an empty and an unknown family are both no-ops.
+    assert!(stores.revoke_family(kind, "").await.is_ok());
+    assert!(stores.revoke_family(kind, "unknown-family").await.is_ok());
+}
+
+#[tokio::test]
+async fn token_epoch_defaults_to_zero_bumps_monotonically_and_is_keyspace_disjoint() {
+    let Some(redis) = common::try_start().await else {
+        return;
+    };
+    let Some(stores) = redis.stores() else { return };
+    let kind = SessionKind::Dashboard;
+
+    // An unbumped user reads epoch 0, and the read never creates a key (only a bump does).
+    assert!(matches!(stores.current_epoch(kind, "eu").await, Ok(0)));
+    assert_eq!(redis.ttl("auth:ep:eu").await, -2, "a read plants no key");
+
+    // A bump increments (creating the key at 1), returns the new value, and carries a TTL.
+    assert!(matches!(stores.bump_epoch(kind, "eu").await, Ok(1)));
+    assert!(matches!(stores.current_epoch(kind, "eu").await, Ok(1)));
+    assert!(
+        redis.ttl("auth:ep:eu").await > 0,
+        "the epoch key carries a TTL"
+    );
+    assert!(matches!(stores.bump_epoch(kind, "eu").await, Ok(2)));
+    assert!(matches!(stores.current_epoch(kind, "eu").await, Ok(2)));
+
+    // The platform keyspace (`pep:`) is disjoint from the dashboard one (`ep:`): the same user
+    // id carries an independent epoch under each kind.
+    assert!(matches!(
+        stores.current_epoch(SessionKind::Platform, "eu").await,
+        Ok(0)
+    ));
+    assert!(matches!(
+        stores.bump_epoch(SessionKind::Platform, "eu").await,
+        Ok(1)
+    ));
+    assert!(redis.ttl("auth:pep:eu").await > 0);
+    // The dashboard epoch is unaffected by the platform bump.
+    assert!(matches!(stores.current_epoch(kind, "eu").await, Ok(2)));
+}
+
+#[tokio::test]
+async fn a_legacy_session_without_a_family_plants_no_family_keys() {
+    let Some(redis) = common::try_start().await else {
+        return;
+    };
+    let Some(stores) = redis.stores() else { return };
+    let kind = SessionKind::Dashboard;
+
+    // A legacy record (written before families existed) carries no family id, so create/rotate
+    // skip every family write: no `fam:` index and no `cf:` consumed marker are ever planted.
+    let legacy = SessionRecord {
+        family_id: String::new(),
+        ..record("lu")
+    };
+    assert!(
+        stores
+            .create_session(kind, "l1", &legacy, 3600)
+            .await
+            .is_ok()
+    );
+    assert_eq!(redis.ttl("auth:fam:fam-lu").await, -2, "no family index");
+
+    let rot = SessionRotation {
+        new_record: SessionRecord {
+            family_id: String::new(),
+            ..record("lu")
+        },
+        ..rotation("l1", "l2", "lu")
+    };
+    assert!(matches!(
+        stores.rotate(kind, &rot).await,
+        Ok(RotateOutcome::Rotated(old)) if old.user_id == "lu"
+    ));
+    assert_eq!(
+        redis.ttl("auth:cf:l1").await,
+        -2,
+        "no consumed marker planted"
+    );
+
+    // With no consumed marker, a post-grace replay is a plain Invalid, never a reuse. Drop the
+    // grace pointer to close the window first.
+    assert!(redis.del("auth:rp:l1").await);
     assert!(matches!(
         stores.rotate(kind, &rot).await,
         Ok(RotateOutcome::Invalid)
@@ -433,8 +571,8 @@ async fn keys_are_namespaced_no_pii_and_carry_a_ttl() {
     let keys = redis.all_keys().await;
     assert!(!keys.is_empty(), "operations should have written keys");
     let allowed = [
-        "rt", "rv", "rp", "sess", "sd", "lf", "otp", "resend", "wst", "pr", "prv", "inv", "prt",
-        "prp", "psess", "psd",
+        "rt", "rv", "ep", "pep", "rp", "cf", "fam", "sess", "sd", "lf", "otp", "resend", "wst",
+        "pr", "prv", "inv", "prt", "prp", "pcf", "pfam", "psess", "psd",
     ];
     for key in &keys {
         // Namespaced under the configured prefix, applied in exactly one place.
