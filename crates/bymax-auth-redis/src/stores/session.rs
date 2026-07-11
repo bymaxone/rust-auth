@@ -433,6 +433,56 @@ impl RedisStores {
         let present: bool = conn.exists(&key).await?;
         Ok(present)
     }
+
+    /// Read the user's token epoch (`ep:`/`pep:`), defaulting to `0` when no key exists — a
+    /// plain `GET` that never creates the key, so only a user who has actually been bumped
+    /// carries one.
+    async fn current_epoch_inner(
+        &self,
+        kind: SessionKind,
+        user_id: &str,
+    ) -> Result<u64, RedisStoreError> {
+        let key = self.keys().key(epoch_prefix(kind), user_id);
+        let mut conn = self.connection().await?;
+        let value: Option<u64> = conn.get(&key).await?;
+        Ok(value.unwrap_or(0))
+    }
+
+    /// Atomically increment the user's token epoch (`INCR`, creating it at `1` when absent) and
+    /// (re)apply its TTL, returning the new value. The TTL is deliberately far longer than any
+    /// access token lives, so a bump stays effective for the whole window a pre-bump token could
+    /// still be presented, while still bounding growth to a small integer per reset-affected user.
+    async fn bump_epoch_inner(
+        &self,
+        kind: SessionKind,
+        user_id: &str,
+    ) -> Result<u64, RedisStoreError> {
+        let key = self.keys().key(epoch_prefix(kind), user_id);
+        let mut conn = self.connection().await?;
+        let (new_value, _): (u64, bool) = redis::pipe()
+            .atomic()
+            .cmd("INCR")
+            .arg(&key)
+            .cmd("EXPIRE")
+            .arg(&key)
+            .arg(EPOCH_TTL_SECS)
+            .query_async(&mut conn)
+            .await?;
+        Ok(new_value)
+    }
+}
+
+/// TTL applied to a token-epoch key, in seconds (30 days). It must comfortably exceed the
+/// longest an access token can live so an epoch bump stays in force for every pre-bump token's
+/// remaining lifetime; a small fixed integer key per reset-affected user is negligible.
+const EPOCH_TTL_SECS: u64 = 30 * 24 * 60 * 60;
+
+/// The token-epoch key prefix for a session kind (`ep:` dashboard, `pep:` platform).
+fn epoch_prefix(kind: SessionKind) -> Prefix {
+    match kind {
+        SessionKind::Dashboard => Prefix::Ep,
+        SessionKind::Platform => Prefix::Pep,
+    }
 }
 
 #[async_trait]
@@ -530,6 +580,18 @@ impl SessionStore for RedisStores {
 
     async fn is_blacklisted(&self, jti_or_hash: &str) -> Result<bool, AuthError> {
         self.is_blacklisted_inner(jti_or_hash)
+            .await
+            .map_err(AuthError::from)
+    }
+
+    async fn current_epoch(&self, kind: SessionKind, user_id: &str) -> Result<u64, AuthError> {
+        self.current_epoch_inner(kind, user_id)
+            .await
+            .map_err(AuthError::from)
+    }
+
+    async fn bump_epoch(&self, kind: SessionKind, user_id: &str) -> Result<u64, AuthError> {
+        self.bump_epoch_inner(kind, user_id)
             .await
             .map_err(AuthError::from)
     }

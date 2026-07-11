@@ -28,6 +28,10 @@ pub enum Prefix {
     Rt,
     /// Access-JWT revocation blacklist (`rv`).
     Rv,
+    /// Dashboard per-user token epoch / generation counter (`ep`).
+    Ep,
+    /// Platform per-user token epoch / generation counter (`pep`).
+    Pep,
     /// Dashboard rotation grace pointer (`rp`).
     Rp,
     /// Dashboard consumed-token family marker for reuse detection (`cf`).
@@ -81,6 +85,8 @@ impl Prefix {
         match self {
             Self::Rt => "rt",
             Self::Rv => "rv",
+            Self::Ep => "ep",
+            Self::Pep => "pep",
             Self::Rp => "rp",
             Self::Cf => "cf",
             Self::Fam => "fam",
@@ -162,6 +168,8 @@ mod tests {
         let cases = [
             (Prefix::Rt, "auth:rt:abc"),
             (Prefix::Rv, "auth:rv:abc"),
+            (Prefix::Ep, "auth:ep:abc"),
+            (Prefix::Pep, "auth:pep:abc"),
             (Prefix::Rp, "auth:rp:abc"),
             (Prefix::Cf, "auth:cf:abc"),
             (Prefix::Fam, "auth:fam:abc"),

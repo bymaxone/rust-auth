@@ -1092,6 +1092,16 @@ mod tests {
         async fn is_blacklisted(&self, _jti_or_hash: &str) -> Result<bool, AuthError> {
             Ok(false)
         }
+        async fn current_epoch(
+            &self,
+            _kind: SessionKind,
+            _user_id: &str,
+        ) -> Result<u64, AuthError> {
+            Ok(0)
+        }
+        async fn bump_epoch(&self, _kind: SessionKind, _user_id: &str) -> Result<u64, AuthError> {
+            Ok(1)
+        }
     }
 
     #[tokio::test]

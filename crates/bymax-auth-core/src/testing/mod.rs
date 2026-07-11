@@ -304,6 +304,9 @@ pub struct InMemoryStores {
     /// `fam:` family index: a family id → the set of its live session hashes, so a whole
     /// lineage can be revoked on reuse detection. Keyed by `(kind, family_id)`.
     families: Mutex<HashMap<(SessionKind, String), HashSet<String>>>,
+    /// `ep:`/`pep:` per-user token epoch (generation counter), keyed by `(kind, user_id)`. A
+    /// bump invalidates every access token stamped below the new value. Absent reads as `0`.
+    epochs: Mutex<HashMap<(SessionKind, String), u64>>,
     blacklist: Mutex<HashSet<String>>,
     otps: Mutex<HashMap<(OtpPurpose, String), (String, u32)>>,
     resend: Mutex<HashSet<(OtpPurpose, String)>>,
@@ -526,6 +529,20 @@ impl SessionStore for InMemoryStores {
 
     async fn is_blacklisted(&self, jti_or_hash: &str) -> Result<bool, AuthError> {
         Ok(lock(&self.blacklist).contains(jti_or_hash))
+    }
+
+    async fn current_epoch(&self, kind: SessionKind, user_id: &str) -> Result<u64, AuthError> {
+        Ok(lock(&self.epochs)
+            .get(&(kind, user_id.to_owned()))
+            .copied()
+            .unwrap_or(0))
+    }
+
+    async fn bump_epoch(&self, kind: SessionKind, user_id: &str) -> Result<u64, AuthError> {
+        let mut epochs = lock(&self.epochs);
+        let entry = epochs.entry((kind, user_id.to_owned())).or_insert(0);
+        *entry += 1;
+        Ok(*entry)
     }
 }
 

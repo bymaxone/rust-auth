@@ -252,6 +252,18 @@ pub trait SessionStore: Send + Sync {
     /// Whether an access JTI or JWT hash is blacklisted — consulted on every protected
     /// request.
     async fn is_blacklisted(&self, jti_or_hash: &str) -> Result<bool, AuthError>;
+
+    /// The user's current token **epoch** (generation counter), or `0` when none is stored.
+    /// Stamped into a freshly-issued access token and re-read on every verification: a token
+    /// whose stamped epoch is below this value was issued before an invalidating event and is
+    /// rejected. The `0` default keeps the mechanism inert for a user who has never had a bump.
+    async fn current_epoch(&self, kind: SessionKind, user_id: &str) -> Result<u64, AuthError>;
+
+    /// Atomically increment the user's token epoch and return the new value, invalidating every
+    /// outstanding access token for that user at once (a password reset or a sign-out-everywhere).
+    /// Idempotent in effect: each call advances the generation, and only tokens stamped at or
+    /// above the new value remain valid.
+    async fn bump_epoch(&self, kind: SessionKind, user_id: &str) -> Result<u64, AuthError>;
 }
 
 /// One-time-password records for email verification and OTP-based password reset.

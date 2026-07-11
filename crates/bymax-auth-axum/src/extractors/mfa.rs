@@ -69,6 +69,7 @@ mod tests {
             mfa_verified: false,
             iat: 1_700_000_000,
             exp: future_exp(),
+            epoch: 0,
         };
         let unverified = mint_token(&claims);
         let mut parts = parts_with_cookie(&unverified);

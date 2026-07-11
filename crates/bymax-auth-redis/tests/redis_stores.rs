@@ -252,6 +252,43 @@ async fn reuse_past_grace_is_detected_and_revoke_family_kills_the_lineage() {
 }
 
 #[tokio::test]
+async fn token_epoch_defaults_to_zero_bumps_monotonically_and_is_keyspace_disjoint() {
+    let Some(redis) = common::try_start().await else {
+        return;
+    };
+    let Some(stores) = redis.stores() else { return };
+    let kind = SessionKind::Dashboard;
+
+    // An unbumped user reads epoch 0, and the read never creates a key (only a bump does).
+    assert!(matches!(stores.current_epoch(kind, "eu").await, Ok(0)));
+    assert_eq!(redis.ttl("auth:ep:eu").await, -2, "a read plants no key");
+
+    // A bump increments (creating the key at 1), returns the new value, and carries a TTL.
+    assert!(matches!(stores.bump_epoch(kind, "eu").await, Ok(1)));
+    assert!(matches!(stores.current_epoch(kind, "eu").await, Ok(1)));
+    assert!(
+        redis.ttl("auth:ep:eu").await > 0,
+        "the epoch key carries a TTL"
+    );
+    assert!(matches!(stores.bump_epoch(kind, "eu").await, Ok(2)));
+    assert!(matches!(stores.current_epoch(kind, "eu").await, Ok(2)));
+
+    // The platform keyspace (`pep:`) is disjoint from the dashboard one (`ep:`): the same user
+    // id carries an independent epoch under each kind.
+    assert!(matches!(
+        stores.current_epoch(SessionKind::Platform, "eu").await,
+        Ok(0)
+    ));
+    assert!(matches!(
+        stores.bump_epoch(SessionKind::Platform, "eu").await,
+        Ok(1)
+    ));
+    assert!(redis.ttl("auth:pep:eu").await > 0);
+    // The dashboard epoch is unaffected by the platform bump.
+    assert!(matches!(stores.current_epoch(kind, "eu").await, Ok(2)));
+}
+
+#[tokio::test]
 async fn a_legacy_session_without_a_family_plants_no_family_keys() {
     let Some(redis) = common::try_start().await else {
         return;
@@ -534,8 +571,8 @@ async fn keys_are_namespaced_no_pii_and_carry_a_ttl() {
     let keys = redis.all_keys().await;
     assert!(!keys.is_empty(), "operations should have written keys");
     let allowed = [
-        "rt", "rv", "rp", "cf", "fam", "sess", "sd", "lf", "otp", "resend", "wst", "pr", "prv",
-        "inv", "prt", "prp", "pcf", "pfam", "psess", "psd",
+        "rt", "rv", "ep", "pep", "rp", "cf", "fam", "sess", "sd", "lf", "otp", "resend", "wst",
+        "pr", "prv", "inv", "prt", "prp", "pcf", "pfam", "psess", "psd",
     ];
     for key in &keys {
         // Namespaced under the configured prefix, applied in exactly one place.

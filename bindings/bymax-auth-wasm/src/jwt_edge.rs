@@ -203,6 +203,7 @@ mod tests {
             mfa_verified: false,
             iat,
             exp,
+            epoch: 0,
         }
     }
 
@@ -233,6 +234,7 @@ mod tests {
             mfa_verified: true,
             iat: 1_000,
             exp: 2_000,
+            epoch: 0,
         };
         let token = sign(&claims, &HsKey::from_bytes(SECRET)).unwrap_or_default();
         let json = verify_claims_json(&token, secret_string(), 0, 1_500);
@@ -355,6 +357,7 @@ mod tests {
                 mfa_verified: true,
                 iat: 1_000,
                 exp: 2_000,
+                epoch: 0,
             },
             &HsKey::from_bytes(SECRET),
         )

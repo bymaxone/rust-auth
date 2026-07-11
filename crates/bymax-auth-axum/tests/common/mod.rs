@@ -244,6 +244,7 @@ pub fn mint_dashboard_token(sub: &str, role: &str, status: &str) -> String {
         mfa_verified: false,
         iat: 1_700_000_000,
         exp: 4_700_000_000,
+        epoch: 0,
     };
     let key = bymax_auth_jwt::HsKey::from_bytes(JWT_SECRET.as_bytes());
     bymax_auth_jwt::sign(&claims, &key).unwrap_or_default()
@@ -261,6 +262,7 @@ pub fn mint_platform_token(sub: &str, role: &str) -> String {
         mfa_verified: false,
         iat: 1_700_000_000,
         exp: 4_700_000_000,
+        epoch: 0,
     };
     let key = bymax_auth_jwt::HsKey::from_bytes(JWT_SECRET.as_bytes());
     bymax_auth_jwt::sign(&claims, &key).unwrap_or_default()
@@ -379,6 +381,20 @@ impl bymax_auth_core::traits::SessionStore for FailingStores {
             return Err(fail());
         }
         self.inner.is_blacklisted(jti_or_hash).await
+    }
+    async fn current_epoch(
+        &self,
+        kind: bymax_auth_core::traits::SessionKind,
+        user_id: &str,
+    ) -> Result<u64, bymax_auth_types::AuthError> {
+        self.inner.current_epoch(kind, user_id).await
+    }
+    async fn bump_epoch(
+        &self,
+        kind: bymax_auth_core::traits::SessionKind,
+        user_id: &str,
+    ) -> Result<u64, bymax_auth_types::AuthError> {
+        self.inner.bump_epoch(kind, user_id).await
     }
 }
 
