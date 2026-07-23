@@ -80,7 +80,7 @@
     "next": "^16.2.10",
     "prettier": "^3.9.4",
     "react": "^19.0.0",
-    "react-dom": "^19.0.0",
+    "react-dom": "^19.2.8",
     "tsup": "^8.3.5",
     "typedoc": "^0.28.20",
     "typescript": "^5.7.2",
