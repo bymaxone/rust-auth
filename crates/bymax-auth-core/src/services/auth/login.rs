@@ -531,6 +531,39 @@ mod tests {
             .login(login_input("unverified@example.com", "pw"), &ctx())
             .await;
         assert!(matches!(result, Err(AuthError::EmailNotVerified)));
+
+        // The gate needs *both* halves: with verification required, an account that HAS
+        // verified must still log in. Only this case separates the pair from an either-or,
+        // which would lock out every verified user the moment the requirement is switched on.
+        let _ = h.seed(SeedUser::active("verified@example.com", "pw")).await;
+        assert!(matches!(
+            h.engine
+                .login(login_input("verified@example.com", "pw"), &ctx())
+                .await,
+            Ok(LoginResult::Success(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn a_current_password_hash_is_not_rehashed_on_login() {
+        // The upgrade needs the toggle *and* a genuinely stale hash. Either alone must not
+        // rewrite a current one: a rehash on every login is a write on the hot path for no
+        // gain, and it would leave the toggle disabling nothing.
+        let Some(h) = active_harness(false).await else { return };
+        let id = h.seed(SeedUser::active("fresh@example.com", "pw")).await;
+        let before = h.users.find_by_id(&id, Some("t1")).await;
+        let Ok(Some(before)) = before else { return };
+        assert!(matches!(
+            h.engine
+                .login(login_input("fresh@example.com", "pw"), &ctx())
+                .await,
+            Ok(LoginResult::Success(_))
+        ));
+        // Long enough for a spawned rehash to have landed if one had been spawned.
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        let after = h.users.find_by_id(&id, Some("t1")).await;
+        let Ok(Some(after)) = after else { return };
+        assert_eq!(before.password_hash, after.password_hash);
     }
 
     #[tokio::test]

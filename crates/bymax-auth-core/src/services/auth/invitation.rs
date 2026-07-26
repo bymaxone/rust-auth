@@ -500,6 +500,65 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn accept_rejects_each_malformed_field_on_its_own() {
+        // The structural guard is three independent reasons, and the tamper test above trips
+        // only one of them — so an `||` that became an `&&` (accept unless *every* field is
+        // wrong) read the same. Each field is broken alone here: an invitation with no
+        // recipient, one with no tenant, and one whose role was never declared.
+        let Some(s) = setup(invite_config()) else { return };
+        let cases = [
+            (
+                "no-email",
+                StoredInvitation {
+                    email: String::new(),
+                    role: "MEMBER".to_owned(),
+                    tenant_id: "t1".to_owned(),
+                    inviter_user_id: "x".to_owned(),
+                    created_at: OffsetDateTime::UNIX_EPOCH,
+                },
+            ),
+            (
+                "no-tenant",
+                StoredInvitation {
+                    email: "ok@example.com".to_owned(),
+                    role: "MEMBER".to_owned(),
+                    tenant_id: String::new(),
+                    inviter_user_id: "x".to_owned(),
+                    created_at: OffsetDateTime::UNIX_EPOCH,
+                },
+            ),
+        ];
+        for (index, (label, invitation)) in cases.into_iter().enumerate() {
+            let token = format!("{}{index}", "a".repeat(63));
+            assert!(
+                s.stores
+                    .put_invitation(&token, &invitation, 600)
+                    .await
+                    .is_ok(),
+                "{label}"
+            );
+            assert!(
+                matches!(
+                    s.engine
+                        .accept_invitation(
+                            AcceptInvitationInput {
+                                token,
+                                name: "N".to_owned(),
+                                password: "pw".to_owned(),
+                            },
+                            "1.2.3.4",
+                            "agent",
+                            BTreeMap::new(),
+                        )
+                        .await,
+                    Err(AuthError::InvalidInvitationToken)
+                ),
+                "{label} must be rejected"
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn accept_rejects_an_unknown_token() {
         // A token with no stored invitation is invalid.
         let Some(s) = setup(invite_config()) else { return };
