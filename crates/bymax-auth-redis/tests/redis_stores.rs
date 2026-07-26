@@ -44,6 +44,7 @@ fn record(user: &str) -> SessionRecord {
         created_at: OffsetDateTime::UNIX_EPOCH,
         mfa_enabled: false,
         family_id: format!("fam-{user}"),
+        family_created_at: Some(OffsetDateTime::UNIX_EPOCH),
     }
 }
 
@@ -358,6 +359,7 @@ async fn a_legacy_session_without_a_family_plants_no_family_keys() {
     // skip every family write: no `fam:` index and no `cf:` consumed marker are ever planted.
     let legacy = SessionRecord {
         family_id: String::new(),
+        family_created_at: Some(OffsetDateTime::UNIX_EPOCH),
         ..record("lu")
     };
     assert!(
@@ -371,6 +373,7 @@ async fn a_legacy_session_without_a_family_plants_no_family_keys() {
     let rot = SessionRotation {
         new_record: SessionRecord {
             family_id: String::new(),
+            family_created_at: Some(OffsetDateTime::UNIX_EPOCH),
             ..record("lu")
         },
         ..rotation("l1", "l2", "lu")

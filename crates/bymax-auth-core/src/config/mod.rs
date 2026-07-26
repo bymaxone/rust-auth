@@ -140,6 +140,19 @@ pub struct JwtConfig {
     pub access_cookie_max_age: Duration,
     /// Refresh-token lifetime in days, default 7.
     pub refresh_expires_in_days: u32,
+    /// Hard cap on how long one login can be extended by rotation, in days. Default `0` — no
+    /// cap.
+    ///
+    /// `refresh_expires_in_days` bounds a single refresh token, not a session: a client that
+    /// rotates every fifteen minutes renews that lifetime indefinitely, so a session
+    /// established once never has to be established again. This caps the whole lineage — the
+    /// family's birth is stamped at login and carried through every rotation — and once it is
+    /// passed the rotation is refused and the user signs in again.
+    ///
+    /// Off by default because switching it on ends sessions already older than the cap, which
+    /// is a decision a deployment makes rather than one an upgrade makes for it. A record
+    /// written before the family birth time existed carries none and is not capped.
+    pub absolute_session_lifetime_days: u32,
     /// Pinned to HS256.
     pub algorithm: JwtAlgorithm,
     /// Grace window during which a rotated refresh token stays valid, default 30s.
@@ -156,6 +169,7 @@ impl Default for JwtConfig {
             access_expires_in: Duration::from_secs(15 * 60),
             access_cookie_max_age: Duration::from_secs(15 * 60),
             refresh_expires_in_days: 7,
+            absolute_session_lifetime_days: 0,
             algorithm: JwtAlgorithm::Hs256,
             refresh_grace_window: Duration::from_secs(30),
         }

@@ -240,6 +240,7 @@ impl AuthEngine {
             // the new-session hook / eviction projection (which keys on the session hash), so
             // this display record leaves it empty.
             family_id: String::new(),
+            family_created_at: None,
         };
         self.sessions()
             .after_session_created(&record, &new_hash, hook_ctx)

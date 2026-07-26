@@ -383,6 +383,7 @@ impl AuthEngineBuilder {
         // config is consumed by `ResolvedConfig::new`.
         let access_ttl = config.jwt.access_expires_in;
         let refresh_days = config.jwt.refresh_expires_in_days;
+        let absolute_session_lifetime_days = config.jwt.absolute_session_lifetime_days;
         let grace_window = config.jwt.refresh_grace_window;
         let brute_max_attempts = config.brute_force.max_attempts;
         let brute_window_secs = config.brute_force.window.as_secs();
@@ -406,6 +407,7 @@ impl AuthEngineBuilder {
             access_ttl,
             refresh_days,
             grace_window,
+            absolute_session_lifetime_days,
         );
         // Wire the MFA temp-token single-use support when an MFA store is supplied, so the
         // challenge token planted at login is store-backed and brute-force-capped.

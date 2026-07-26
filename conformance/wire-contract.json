@@ -119,10 +119,12 @@
         "ip",
         "createdAt",
         "mfaEnabled",
-        "familyId"
+        "familyId",
+        "familyCreatedAt"
       ],
       "createdAt": "iso8601-string",
       "familyId": "omitted from the record entirely when empty, never written as an empty string",
+      "familyCreatedAt": "iso8601-string; the FAMILY's birth, carried unchanged through every rotation — distinct from createdAt, which is this session's own and resets on each one. Omitted alongside familyId on a legacy record, which is then not subject to the absolute lifetime cap.",
       "$comment": "mfaEnabled must survive rotation: the MFA gate refuses only when mfaEnabled && !mfaVerified, so losing it turns one refresh into a silent second-factor bypass."
     },
     "sessionDetail": {

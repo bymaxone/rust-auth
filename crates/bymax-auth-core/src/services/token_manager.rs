@@ -95,6 +95,7 @@ pub struct TokenManagerService {
     access_ttl: Duration,
     refresh_ttl_secs: u64,
     grace_ttl_secs: u64,
+    absolute_lifetime_secs: u64,
     /// The MFA single-use temp-token support, wired only when an MFA store is supplied.
     #[cfg(feature = "mfa")]
     mfa: Option<MfaTokenSupport>,
@@ -109,6 +110,7 @@ impl TokenManagerService {
         access_ttl: Duration,
         refresh_expires_in_days: u32,
         grace_window: Duration,
+        absolute_session_lifetime_days: u32,
     ) -> Self {
         Self {
             key,
@@ -116,6 +118,7 @@ impl TokenManagerService {
             access_ttl,
             refresh_ttl_secs: u64::from(refresh_expires_in_days) * 86_400,
             grace_ttl_secs: grace_window.as_secs(),
+            absolute_lifetime_secs: u64::from(absolute_session_lifetime_days) * 86_400,
             #[cfg(feature = "mfa")]
             mfa: None,
         }
@@ -193,6 +196,8 @@ impl TokenManagerService {
             // A fresh login opens a new refresh-token family; every rotation inherits this id,
             // so the whole lineage can be revoked together on reuse detection.
             family_id: new_uuid_v4(),
+            // …and stamps the lineage's birth, which the absolute-lifetime cap measures from.
+            family_created_at: Some(now_offset()),
         };
         self.session_store
             .create_session(
@@ -243,6 +248,7 @@ impl TokenManagerService {
             .find_session(SessionKind::Dashboard, &old_hash)
             .await?;
         let seed = live.unwrap_or_else(|| placeholder_record(ip, user_agent));
+        self.assert_within_absolute_lifetime(&seed)?;
         let new_record = identity_record(&seed, ip, user_agent);
 
         let rotation = SessionRotation {
@@ -369,6 +375,7 @@ impl TokenManagerService {
             mfa_enabled: admin.mfa_enabled,
             // A fresh platform login opens a new refresh-token family (section 12.5.2).
             family_id: new_uuid_v4(),
+            family_created_at: Some(now_offset()),
         };
         self.session_store
             .create_session(
@@ -416,6 +423,7 @@ impl TokenManagerService {
             .find_session(SessionKind::Platform, &old_hash)
             .await?;
         let seed = live.unwrap_or_else(|| placeholder_record(ip, user_agent));
+        self.assert_within_absolute_lifetime(&seed)?;
         let new_record = platform_identity_record(&seed, ip, user_agent);
 
         let rotation = SessionRotation {
@@ -703,6 +711,36 @@ impl TokenManagerService {
         support.store.del_temp(&jti_hash(jti)).await
     }
 
+    /// Refuse a rotation once the login it descends from has outlived the absolute cap.
+    ///
+    /// `refresh_expires_in_days` bounds a single refresh token, not a session: a client
+    /// rotating every fifteen minutes renews that lifetime forever, so without this a session
+    /// established once never has to be established again. The cap measures from the
+    /// **family's** birth, which is carried unchanged through the lineage.
+    ///
+    /// A session with no birth time predates the field and is not capped — it ages out under
+    /// the refresh lifetime like any other. A cap of `0` disables the check.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AuthError::RefreshTokenInvalid`] once the cap is passed. The caller cannot
+    /// distinguish it from any other invalid refresh, which is deliberate: the remedy is the
+    /// same, and a distinct code would tell whoever holds the token how old the session is.
+    fn assert_within_absolute_lifetime(&self, record: &SessionRecord) -> Result<(), AuthError> {
+        if self.absolute_lifetime_secs == 0 {
+            return Ok(());
+        }
+        let Some(born_at) = record.family_created_at else {
+            return Ok(());
+        };
+        let age = now_offset() - born_at;
+        if age.whole_seconds().unsigned_abs() > self.absolute_lifetime_secs && age.is_positive() {
+            tracing::warn!("rotation refused: session outlived the absolute lifetime cap");
+            return Err(AuthError::RefreshTokenInvalid);
+        }
+        Ok(())
+    }
+
     /// Build the access claims for a rotated/recovered session. Rotation always drops
     /// `mfa_verified` (the user re-acquires it only via the MFA challenge) and issues an
     /// empty `status` — status guards consult the repository/status cache, not the rotated
@@ -764,6 +802,9 @@ fn identity_record(seed: &SessionRecord, ip: &str, user_agent: &str) -> SessionR
         // Rotation inherits the seed's family unchanged, so every descendant of one login
         // shares the id and the whole lineage is revocable together on reuse detection.
         family_id: seed.family_id.clone(),
+        // The birth time is inherited too — measuring from this record's own `created_at`
+        // would reset the clock on every rotation and make the cap unreachable.
+        family_created_at: seed.family_created_at,
     }
 }
 
@@ -784,6 +825,7 @@ fn platform_identity_record(seed: &SessionRecord, ip: &str, user_agent: &str) ->
         mfa_enabled: seed.mfa_enabled,
         // The platform rotation inherits the seed's family unchanged (section 12.5.2).
         family_id: seed.family_id.clone(),
+        family_created_at: seed.family_created_at,
     }
 }
 
@@ -802,8 +844,9 @@ fn placeholder_record(ip: &str, user_agent: &str) -> SessionRecord {
         created_at: now_offset(),
         mfa_enabled: false,
         // The placeholder is never stored (an absent live token yields only Grace/Reused/Invalid),
-        // so it carries no family.
+        // so it carries no family and no birth time.
         family_id: String::new(),
+        family_created_at: None,
     }
 }
 
@@ -824,6 +867,8 @@ mod tests {
             Duration::from_secs(900),
             7,
             Duration::from_secs(30),
+            // No absolute cap in the default fixture; the cap has its own tests.
+            0,
         )
     }
 
@@ -1364,6 +1409,7 @@ mod tests {
             Duration::from_secs(900),
             7,
             Duration::from_secs(30),
+            0,
         )
         .with_mfa_support(support)
     }
@@ -1471,5 +1517,149 @@ mod tests {
         );
         assert!(matches!(bf.is_locked(&challenge_id, 5).await, Ok(false)));
         assert!(matches!(bf.is_locked(&disable_id, 5).await, Ok(true)));
+    }
+}
+
+#[cfg(test)]
+mod absolute_lifetime_tests {
+    use super::*;
+    use crate::testing::InMemoryStores;
+    use time::Duration as TimeDuration;
+
+    /// A manager with a 30-day absolute cap.
+    fn capped(store: Arc<InMemoryStores>) -> TokenManagerService {
+        TokenManagerService::new(
+            HsKey::from_bytes(b"0123456789abcdef0123456789abcdef"),
+            store,
+            Duration::from_secs(900),
+            7,
+            Duration::from_secs(30),
+            30,
+        )
+    }
+
+    /// A session record born `days_ago`.
+    fn record_born(days_ago: i64) -> SessionRecord {
+        SessionRecord {
+            user_id: "u1".to_owned(),
+            tenant_id: Some("t1".to_owned()),
+            role: "MEMBER".to_owned(),
+            device: "Chrome".to_owned(),
+            ip: "203.0.113.4".to_owned(),
+            created_at: now_offset(),
+            mfa_enabled: false,
+            family_id: "fam-1".to_owned(),
+            family_created_at: Some(now_offset() - TimeDuration::days(days_ago)),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_rotation_is_refused_once_the_family_outlives_the_cap() {
+        // `refresh_expires_in_days` bounds a single token, not a session: a client rotating
+        // every fifteen minutes renews that lifetime forever. The cap is what ends the lineage.
+        let store = Arc::new(InMemoryStores::new());
+        let manager = capped(store.clone());
+        let old = RawRefreshToken::generate();
+        assert!(
+            store
+                .create_session(
+                    SessionKind::Dashboard,
+                    &old.redis_hash(),
+                    &record_born(31),
+                    3600
+                )
+                .await
+                .is_ok()
+        );
+
+        let refused = manager
+            .reissue_tokens(old.expose_secret(), "203.0.113.4", "Chrome")
+            .await;
+
+        assert!(matches!(refused, Err(AuthError::RefreshTokenInvalid)));
+        // Refused BEFORE the rotation ran, so nothing was consumed on the holder's behalf.
+        assert!(matches!(
+            store
+                .find_session(SessionKind::Dashboard, &old.redis_hash())
+                .await,
+            Ok(Some(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn a_family_inside_the_cap_still_rotates() {
+        // The boundary matters: an off-by-one here signs every user out a day early.
+        let store = Arc::new(InMemoryStores::new());
+        let manager = capped(store.clone());
+        let old = RawRefreshToken::generate();
+        assert!(
+            store
+                .create_session(
+                    SessionKind::Dashboard,
+                    &old.redis_hash(),
+                    &record_born(29),
+                    3600
+                )
+                .await
+                .is_ok()
+        );
+
+        assert!(
+            manager
+                .reissue_tokens(old.expose_secret(), "203.0.113.4", "Chrome")
+                .await
+                .is_ok()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_record_with_no_birth_time_and_a_zero_cap_both_rotate() {
+        // A record written before the field predates the mechanism and must not be ended by
+        // it; a zero cap disables the check outright. Both are the "not capped" answer.
+        let store = Arc::new(InMemoryStores::new());
+        let legacy = SessionRecord {
+            family_created_at: None,
+            ..record_born(365)
+        };
+        let old = RawRefreshToken::generate();
+        assert!(
+            store
+                .create_session(SessionKind::Dashboard, &old.redis_hash(), &legacy, 3600)
+                .await
+                .is_ok()
+        );
+        assert!(
+            capped(store.clone())
+                .reissue_tokens(old.expose_secret(), "203.0.113.4", "Chrome")
+                .await
+                .is_ok()
+        );
+
+        let uncapped = TokenManagerService::new(
+            HsKey::from_bytes(b"0123456789abcdef0123456789abcdef"),
+            store.clone(),
+            Duration::from_secs(900),
+            7,
+            Duration::from_secs(30),
+            0,
+        );
+        let ancient = RawRefreshToken::generate();
+        assert!(
+            store
+                .create_session(
+                    SessionKind::Dashboard,
+                    &ancient.redis_hash(),
+                    &record_born(365),
+                    3600
+                )
+                .await
+                .is_ok()
+        );
+        assert!(
+            uncapped
+                .reissue_tokens(ancient.expose_secret(), "203.0.113.4", "Chrome")
+                .await
+                .is_ok()
+        );
     }
 }

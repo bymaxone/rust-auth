@@ -86,6 +86,61 @@ pub struct SessionRecord {
     /// reuse-revocation target; it is omitted from the wire when empty for byte-parity.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub family_id: String,
+    /// When the **family** was born — the moment of the login this session descends from.
+    ///
+    /// Distinct from [`SessionRecord::created_at`], which is this session's own creation and is
+    /// reset on every rotation. Carried unchanged through the lineage so the absolute-lifetime
+    /// cap has something to measure: without it, a client rotating every fifteen minutes renews
+    /// its lifetime forever and a session established once never has to be established again.
+    ///
+    /// Serialized as an ISO-8601 string alongside `family_id`, and omitted with it on a legacy
+    /// record — such a session is simply not capped.
+    #[serde(
+        default,
+        with = "optional_rfc3339",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub family_created_at: Option<OffsetDateTime>,
+}
+
+/// Serde adapter for an optional RFC 3339 instant, so a legacy record with no family birth
+/// time round-trips as `None` rather than failing the whole record.
+pub mod optional_rfc3339 {
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+    use time::OffsetDateTime;
+    use time::format_description::well_known::Rfc3339;
+
+    /// Write the instant as an RFC 3339 string, or nothing when absent.
+    ///
+    /// # Errors
+    ///
+    /// Propagates whatever the serializer reports, or a formatting failure.
+    pub fn serialize<S>(value: &Option<OffsetDateTime>, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        match value {
+            Some(instant) => instant
+                .format(&Rfc3339)
+                .map_err(serde::ser::Error::custom)?
+                .serialize(serializer),
+            None => serializer.serialize_none(),
+        }
+    }
+
+    /// Read an RFC 3339 string back, treating an absent field as `None`.
+    ///
+    /// # Errors
+    ///
+    /// Returns a deserialization error when the field is present but not RFC 3339.
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<Option<OffsetDateTime>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let raw = Option::<String>::deserialize(deserializer)?;
+        raw.map(|value| OffsetDateTime::parse(&value, &Rfc3339).map_err(serde::de::Error::custom))
+            .transpose()
+    }
 }
 
 /// Serde adapter carrying an [`OffsetDateTime`] as a **Unix-millisecond number**.
@@ -639,7 +694,44 @@ mod tests {
             created_at: OffsetDateTime::UNIX_EPOCH,
             mfa_enabled: false,
             family_id: "fam-1".into(),
+            family_created_at: Some(OffsetDateTime::UNIX_EPOCH),
         }
+    }
+
+    #[test]
+    fn the_optional_birth_time_adapter_round_trips_both_arms() {
+        // On a `SessionRecord` the field is skipped when absent, so the `None` arm of the
+        // serializer is unreachable there. It is still the adapter's contract, and a caller
+        // that uses it without `skip_serializing_if` must get `null` rather than a panic —
+        // this pins both directions independently of how the record happens to use it.
+        #[derive(Serialize, Deserialize, PartialEq, Eq, Debug)]
+        struct Wrapper {
+            #[serde(with = "optional_rfc3339")]
+            at: Option<OffsetDateTime>,
+        }
+
+        let absent = Wrapper { at: None };
+        let json = serde_json::to_string(&absent).unwrap_or_default();
+        assert_eq!(json, r#"{"at":null}"#);
+        assert!(matches!(
+            serde_json::from_str::<Wrapper>(&json),
+            Ok(back) if back == absent
+        ));
+
+        let present = Wrapper {
+            at: Some(OffsetDateTime::UNIX_EPOCH),
+        };
+        let json = serde_json::to_string(&present).unwrap_or_default();
+        assert_eq!(json, r#"{"at":"1970-01-01T00:00:00Z"}"#);
+        assert!(matches!(
+            serde_json::from_str::<Wrapper>(&json),
+            Ok(back) if back == present
+        ));
+
+        // A present-but-malformed value is an error, not a silent `None`: a record whose birth
+        // time cannot be read is a record whose cap cannot be judged, and quietly dropping it
+        // would uncap the session.
+        assert!(serde_json::from_str::<Wrapper>(r#"{"at":"not-a-date"}"#).is_err());
     }
 
     #[test]
@@ -696,6 +788,7 @@ mod tests {
         // record with no `familyId` key deserializes back to an empty family.
         let legacy = SessionRecord {
             family_id: String::new(),
+            family_created_at: Some(OffsetDateTime::UNIX_EPOCH),
             ..session_record()
         };
         let legacy_json = serde_json::to_string(&legacy)?;

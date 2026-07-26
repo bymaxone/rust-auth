@@ -732,6 +732,7 @@ mod tests {
             created_at: OffsetDateTime::UNIX_EPOCH,
             mfa_enabled: false,
             family_id: "fam-1".to_owned(),
+            family_created_at: Some(OffsetDateTime::UNIX_EPOCH),
         }
     }
 

@@ -575,6 +575,7 @@ mod tests {
             created_at: time::OffsetDateTime::UNIX_EPOCH,
             mfa_enabled: false,
             family_id: "fam-test".to_owned(),
+            family_created_at: Some(time::OffsetDateTime::UNIX_EPOCH),
         };
         assert!(
             h.stores

@@ -995,6 +995,7 @@ fn service_over(store: Arc<dyn MfaStore>, users: Arc<InMemoryUserRepository>) ->
         Duration::from_secs(900),
         7,
         Duration::from_secs(30),
+        0,
     ));
     let sessions = Arc::new(SessionService::new(
         session_store.clone(),
