@@ -1409,6 +1409,36 @@ mod tests {
         assert!(matches!(store.redeem(&ticket).await, Ok(None)));
     }
 
+    #[cfg(feature = "mfa")]
+    #[tokio::test]
+    async fn mfa_store_reproduces_set_nx_and_getdel() {
+        // The double stands in for `SET NX` and `GETDEL`, and the enrolment gate is built on
+        // exactly those two: the first writer wins the setup slot, and the completion reads it
+        // away so only one caller can finish. A double that swallowed the value or always
+        // reported "already there" would make that gate untestable.
+        use crate::traits::MfaStore;
+        let store = InMemoryStores::new();
+        assert!(matches!(store.get_setup("uh").await, Ok(None)));
+        assert!(matches!(
+            store.put_setup_nx("uh", "enc-secret", 300).await,
+            Ok(true)
+        ));
+        assert!(matches!(store.get_setup("uh").await, Ok(Some(v)) if v == "enc-secret"));
+        // Second writer loses and does not overwrite.
+        assert!(matches!(
+            store.put_setup_nx("uh", "other", 300).await,
+            Ok(false)
+        ));
+        assert!(matches!(store.get_setup("uh").await, Ok(Some(v)) if v == "enc-secret"));
+        // GETDEL: the value comes back once, and the slot is free again.
+        assert!(matches!(store.take_setup("uh").await, Ok(Some(v)) if v == "enc-secret"));
+        assert!(matches!(store.take_setup("uh").await, Ok(None)));
+        assert!(matches!(
+            store.put_setup_nx("uh", "third", 300).await,
+            Ok(true)
+        ));
+    }
+
     #[cfg(feature = "oauth")]
     #[tokio::test]
     async fn oauth_state_store_consumes_state_single_use() {
