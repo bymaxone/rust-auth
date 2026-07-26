@@ -73,6 +73,12 @@ additional_cargo_args = ["--all-features"]
 #    subscriber in-process: a dev-dependency and ~60 lines of `Subscriber` boilerplate for a
 #    log line that carries no security signal. The mutants of any *real* provider a host wires
 #    are untouched by this pattern.
+# 8. The `AuthHooks` default notification bodies — each is literally `let _ = (args); Ok(())`,
+#    where the binding exists only to tell the compiler the arguments are deliberately unused.
+#    Replacing such a body with `Ok(())` is the same program. This is equivalence, not an
+#    untestable effect. The pattern matches the trait defaults only: an implementation's
+#    mutants are named `<impl AuthHooks for X>::…` and are still generated — which is what
+#    catches a real hook that stops firing (see the platform after-logout spy).
 exclude_re = [
     'replace \| with \^ in new_uuid_v4',
     'replace AuthEngine::builder -> AuthEngineBuilder with Default::default\(\)',
@@ -81,4 +87,5 @@ exclude_re = [
     'builder\.rs:212:9: replace AuthEngineBuilder::redis_stores',
     'token_manager\.rs:618:9: replace TokenManagerService::issue_mfa_temp_token',
     'replace <impl EmailProvider for NoOpEmailProvider>::\w+ -> Result<\(\), EmailError> with Ok\(\(\)\)',
+    'replace AuthHooks::\w+ -> Result<\(\), HookError> with Ok\(\(\)\)',
 ]
