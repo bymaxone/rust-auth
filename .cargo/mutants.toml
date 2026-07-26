@@ -1,5 +1,11 @@
 # cargo-mutants configuration — the PRE-RELEASE mutation gate.
 #
+# THE PATH IS PART OF THE CONTRACT: cargo-mutants reads `.cargo/mutants.toml` and nothing
+# else (any other location needs `--config <FILE>` on every invocation). At the repository
+# root this file is silently ignored — no warning, no error — and the sweep then mutates
+# `bindings/`, `examples/` and `fuzz/` while every exclusion below goes unapplied. Verify
+# with `cargo mutants --list --all-features`: every line must start with `crates/`.
+#
 # Mutation testing is the slow, high-signal gate that runs automatically post-merge
 # on `main` (and on demand) via the shared reusable (bymaxone/.github → rust-ci.yml),
 # never on every PR. The agreed floor is a
