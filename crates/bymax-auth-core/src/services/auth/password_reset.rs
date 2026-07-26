@@ -979,6 +979,26 @@ mod tests {
                 .await
                 .is_ok()
         );
+
+        // Resend canonicalizes its address like the other two entry points: a code requested
+        // under one spelling is filed where the confirm step will look for it. Every branch
+        // here answers `Ok(())`, so only the OTP record shows which one ran.
+        let identifier = h.engine.hashed_identifier("t1", "present@example.com");
+        assert!(
+            h.engine
+                .resend_reset_otp(ResendResetOtpInput {
+                    email: "PRESENT@Example.com".to_owned(),
+                    tenant_id: "t1".to_owned(),
+                })
+                .await
+                .is_ok()
+        );
+        assert!(
+            h.stores
+                .peek_otp(OtpPurpose::PasswordReset, &identifier)
+                .is_some(),
+            "the resent code must be filed under the canonical spelling"
+        );
     }
 
     #[tokio::test]
@@ -1112,6 +1132,193 @@ mod tests {
         ) -> Result<(), crate::traits::EmailError> {
             Ok(())
         }
+    }
+
+    /// An email provider that keeps the reset token it was asked to deliver, so a test can
+    /// drive the flow with the token a real recipient would have received.
+    #[derive(Default)]
+    struct CapturingResetEmail {
+        token: std::sync::Mutex<Option<String>>,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::traits::EmailProvider for CapturingResetEmail {
+        async fn send_password_reset_token(
+            &self,
+            _email: &str,
+            token: &str,
+            _locale: Option<&str>,
+        ) -> Result<(), crate::traits::EmailError> {
+            if let Ok(mut slot) = self.token.lock() {
+                *slot = Some(token.to_owned());
+            }
+            Ok(())
+        }
+        async fn send_password_reset_otp(
+            &self,
+            _email: &str,
+            _otp: &str,
+            _locale: Option<&str>,
+        ) -> Result<(), crate::traits::EmailError> {
+            Ok(())
+        }
+        async fn send_email_verification_otp(
+            &self,
+            _email: &str,
+            _otp: &str,
+            _locale: Option<&str>,
+        ) -> Result<(), crate::traits::EmailError> {
+            Ok(())
+        }
+        async fn send_mfa_enabled(
+            &self,
+            _email: &str,
+            _locale: Option<&str>,
+        ) -> Result<(), crate::traits::EmailError> {
+            Ok(())
+        }
+        async fn send_mfa_disabled(
+            &self,
+            _email: &str,
+            _locale: Option<&str>,
+        ) -> Result<(), crate::traits::EmailError> {
+            Ok(())
+        }
+        async fn send_new_session_alert(
+            &self,
+            _email: &str,
+            _session: &crate::traits::SessionInfo,
+            _locale: Option<&str>,
+        ) -> Result<(), crate::traits::EmailError> {
+            Ok(())
+        }
+        async fn send_invitation(
+            &self,
+            _email: &str,
+            _invite: &crate::traits::InviteData,
+            _locale: Option<&str>,
+        ) -> Result<(), crate::traits::EmailError> {
+            Ok(())
+        }
+    }
+
+    /// A hook spy recording the subject of every `after_password_reset` notification.
+    #[derive(Default)]
+    struct ResetHookSpy {
+        subjects: std::sync::Mutex<Vec<String>>,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::traits::AuthHooks for ResetHookSpy {
+        async fn after_password_reset(
+            &self,
+            user: &SafeAuthUser,
+            _ctx: &crate::traits::HookContext,
+        ) -> Result<(), crate::traits::HookError> {
+            if let Ok(mut subjects) = self.subjects.lock() {
+                subjects.push(user.id.clone());
+            }
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn a_completed_reset_notifies_the_hook_with_its_subject() {
+        // The projection feeding the hook can fail open — the reset has already succeeded by
+        // then, so the notification is simply skipped and nothing in the result says so. A
+        // deployment wires this to send the "your password changed" mail, which is the one
+        // signal a victim of an account takeover gets.
+        let spy = std::sync::Arc::new(ResetHookSpy::default());
+        let hooks: std::sync::Arc<dyn crate::traits::AuthHooks> = spy.clone();
+        let mut cfg = base_config();
+        cfg.password_reset.method = ResetMethod::Otp;
+        let Some(h) = harness(cfg, Some(hooks)) else { return };
+        let id = h.seed(SeedUser::active("hooked@example.com", "old")).await;
+        let identifier = h.engine.hashed_identifier("t1", "hooked@example.com");
+        assert!(
+            h.engine
+                .initiate_reset(forgot("hooked@example.com"))
+                .await
+                .is_ok()
+        );
+        let code = h
+            .stores
+            .peek_otp(OtpPurpose::PasswordReset, &identifier)
+            .unwrap_or_default();
+        assert!(!code.is_empty());
+        let reset = ResetPasswordInput {
+            email: "hooked@example.com".to_owned(),
+            tenant_id: "t1".to_owned(),
+            new_password: "brand-new".to_owned(),
+            token: None,
+            otp: Some(code),
+            verified_token: None,
+        };
+        assert!(h.engine.reset_password(reset).await.is_ok());
+        // Long enough for the detached notification to have run.
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        let seen = spy.subjects.lock().map(|s| s.clone()).unwrap_or_default();
+        assert_eq!(seen, vec![id]);
+    }
+
+    #[tokio::test]
+    async fn the_emailed_reset_token_is_the_one_that_works() {
+        // Driven with the token a real recipient receives, rather than one the test plants
+        // itself: that is the only version of this flow where the store write and the mail
+        // are both load-bearing. With a planted token, an \`initiate_reset\` that quietly
+        // stored and sent nothing would still pass.
+        let mut cfg = base_config();
+        cfg.password_reset.method = ResetMethod::Token;
+        let mailer = std::sync::Arc::new(CapturingResetEmail::default());
+        let users = std::sync::Arc::new(crate::testing::InMemoryUserRepository::new());
+        let stores = std::sync::Arc::new(crate::testing::InMemoryStores::new());
+        let built = AuthEngine::builder()
+            .config(cfg)
+            .environment(crate::config::Environment::Test)
+            .user_repository(users.clone())
+            .redis_stores(stores)
+            .email_provider(mailer.clone())
+            .build();
+        let Ok(engine) = built else { return };
+        let created = users
+            .create(bymax_auth_types::CreateUserData {
+                email: "mailed@example.com".to_owned(),
+                name: "M".to_owned(),
+                password_hash: Some("$scrypt$x".to_owned()),
+                role: Some("USER".to_owned()),
+                status: Some("ACTIVE".to_owned()),
+                tenant_id: "t1".to_owned(),
+                email_verified: Some(true),
+            })
+            .await;
+        let Ok(user) = created else { return };
+
+        assert!(
+            engine
+                .initiate_reset(forgot("mailed@example.com"))
+                .await
+                .is_ok()
+        );
+        let token = mailer.token.lock().ok().and_then(|t| t.clone());
+        let token = token.unwrap_or_default();
+        assert!(!token.is_empty(), "no reset token reached the recipient");
+
+        let reset = ResetPasswordInput {
+            email: "mailed@example.com".to_owned(),
+            tenant_id: "t1".to_owned(),
+            new_password: "the-new-one".to_owned(),
+            token: Some(token),
+            otp: None,
+            verified_token: None,
+        };
+        assert!(engine.reset_password(reset).await.is_ok());
+        let after = users
+            .find_by_id(&user.id, None)
+            .await
+            .ok()
+            .flatten()
+            .and_then(|u| u.password_hash);
+        assert!(after.is_some() && after != Some("$scrypt$x".to_owned()));
     }
 
     #[tokio::test]
