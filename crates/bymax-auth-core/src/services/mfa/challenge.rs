@@ -332,3 +332,28 @@ impl MfaService {
 fn is_totp_code(code: &str) -> bool {
     code.len() == 6 && code.bytes().all(|b| b.is_ascii_digit())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::is_totp_code;
+
+    #[test]
+    fn a_totp_code_is_six_digits_and_nothing_else() {
+        // This predicate routes a submitted code to the TOTP verifier or to the recovery-code
+        // scan, and both halves of it matter: six characters that are not digits, and digits
+        // that are not six characters, are both recovery-code shaped. Asserted directly
+        // because the two paths answer the same `MfaInvalidCode` for a wrong code, so a
+        // misrouted code is invisible from the outside.
+        assert!(is_totp_code("123456"));
+        assert!(is_totp_code("000000"));
+        // Right length, wrong alphabet.
+        assert!(!is_totp_code("abcdef"));
+        assert!(!is_totp_code("12345a"));
+        // Right alphabet, wrong length.
+        assert!(!is_totp_code("12345"));
+        assert!(!is_totp_code("1234567"));
+        assert!(!is_totp_code(""));
+        // A recovery code is neither.
+        assert!(!is_totp_code("ABCDE-FGHIJ-KLMNO-PQRST-UVWXY-Z2345"));
+    }
+}

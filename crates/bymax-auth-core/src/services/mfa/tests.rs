@@ -248,6 +248,14 @@ async fn full_dashboard_lifecycle() {
         mfa.challenge(&temp, &challenge_code, "1.2.3.4", "ua").await,
         Ok(LoginResultMfa::Dashboard(_))
     ));
+    // This harness has session tracking on, and the session the challenge issued has to be
+    // registered under the user — otherwise it is invisible to the session list, to the cap,
+    // and to "sign out everywhere". The returned tokens look identical either way.
+    let listed = h.engine.list_user_sessions(&uid, None).await;
+    assert!(
+        matches!(&listed, Ok(list) if !list.is_empty()),
+        "the challenge's session must be registered: {listed:?}"
+    );
 
     // Challenge via a recovery code; then prove the code is single-use.
     let recovery = setup.recovery_codes[0].clone();
