@@ -273,7 +273,10 @@ impl AuthEngine {
                     role: None,
                     status: None,
                     tenant_id: tenant_id.to_owned(),
-                    email_verified: Some(true),
+                    // What the provider actually asserted, not a convenient constant. An
+                    // account created from an unverified address belongs to whoever controls
+                    // the OAuth account, not to whoever controls the mailbox.
+                    email_verified: Some(profile.email_verified),
                     oauth_provider: provider_name.to_owned(),
                     oauth_provider_id: profile.provider_id.clone(),
                 };
@@ -1221,6 +1224,46 @@ mod tests {
         ));
     }
 
+    #[tokio::test]
+    async fn a_provider_that_did_not_verify_the_email_creates_an_unverified_account() {
+        // The account created from an unverified address belongs to whoever controls the OAuth
+        // account, not to whoever controls the mailbox. Marking it verified would make the
+        // consumer's "this email is proven" invariant false from the first login — which is how
+        // an account is taken over by registering with someone else's address at a provider
+        // that does not check. The bundled Google provider refuses such a profile outright, so
+        // this is driven through a provider that reports the address as unverified.
+        let users = Arc::new(InMemoryUserRepository::new());
+        let stores = Arc::new(InMemoryStores::new());
+        let mut cfg = base_config();
+        cfg.controllers.oauth = true;
+        let engine = AuthEngine::builder()
+            .config(cfg)
+            .environment(Environment::Test)
+            .user_repository(users.clone())
+            .redis_stores(stores.clone())
+            .hooks(Arc::new(DecisionHook(OAuthLoginResult::Create)))
+            .oauth_provider(Arc::new(crate::testing::MockOAuthProvider::unverified(
+                "google",
+            )))
+            .oauth_state_store(stores.clone())
+            .build();
+        let Ok(engine) = engine else { return };
+
+        let url = engine.oauth_initiate("google", "t1").await;
+        let Ok(url) = url else { return };
+        let state = extract_query_param(&url, "state").unwrap_or_default();
+        let outcome = engine
+            .oauth_callback("google", "auth-code", &state, &ctx())
+            .await;
+
+        assert!(matches!(&outcome, Ok(OAuthOutcome::Authenticated(_))));
+        let stored = users.find_by_email("mock@example.com", "t1").await;
+        assert!(
+            matches!(stored, Ok(Some(ref user)) if !user.email_verified),
+            "an unverified provider email must not create a verified account"
+        );
+    }
+
     #[test]
     fn name_or_local_part_prefers_the_profile_name() {
         // The profile name wins when present; otherwise the email local-part is used.
@@ -1228,6 +1271,7 @@ mod tests {
             provider: "google".to_owned(),
             provider_id: "1".to_owned(),
             email: "x@example.com".to_owned(),
+            email_verified: true,
             name: Some("Real Name".to_owned()),
             avatar: None,
         };

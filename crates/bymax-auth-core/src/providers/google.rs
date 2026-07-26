@@ -165,6 +165,8 @@ impl OAuthProvider for GoogleOAuthProvider {
             provider: "google".to_owned(),
             provider_id: parsed.id,
             email: parsed.email,
+            // Unconditionally true only because the guard above already refused everything else.
+            email_verified: true,
             name: parsed.name,
             avatar: parsed.picture,
         })

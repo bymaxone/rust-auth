@@ -838,13 +838,27 @@ impl HttpClient for MockHttpClient {
 #[derive(Debug, Clone)]
 pub struct MockOAuthProvider {
     name: String,
+    email_verified: bool,
 }
 
 impl MockOAuthProvider {
-    /// A provider registered under `name`.
+    /// A provider registered under `name`, reporting a verified email.
     #[must_use]
     pub fn new(name: impl Into<String>) -> Self {
-        Self { name: name.into() }
+        Self {
+            name: name.into(),
+            email_verified: true,
+        }
+    }
+
+    /// The same provider, but reporting an email it has **not** verified — the shape of a
+    /// provider like GitHub, which hands back unverified addresses.
+    #[must_use]
+    pub fn unverified(name: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            email_verified: false,
+        }
     }
 }
 
@@ -883,6 +897,7 @@ impl OAuthProvider for MockOAuthProvider {
             provider: self.name.clone(),
             provider_id: "mock-123".to_owned(),
             email: "mock@example.com".to_owned(),
+            email_verified: self.email_verified,
             name: Some("Mock User".to_owned()),
             avatar: None,
         })

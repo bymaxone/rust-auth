@@ -342,6 +342,7 @@ mod tests {
             provider: "google".into(),
             provider_id: "google-1".into(),
             email: "e@x.io".into(),
+            email_verified: true,
             name: Some("E".into()),
             avatar: None,
         }
