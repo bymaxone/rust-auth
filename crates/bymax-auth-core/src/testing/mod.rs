@@ -1066,6 +1066,15 @@ mod tests {
         );
         assert!(repo.update_password("p1", "$scrypt$y").await.is_ok());
         assert!(repo.update_status("p1", "SUSPENDED").await.is_ok());
+        // Read back rather than trusting the `Ok`: a fake that answers `Ok(())` and stores
+        // nothing lets every test built on it pass while asserting nothing.
+        let stored = repo.find_by_id("p1").await;
+        assert!(
+            matches!(&stored, Ok(Some(u)) if u.last_login_at.is_some()
+                && u.status == "SUSPENDED"
+                && u.password_hash == "$scrypt$y"
+                && u.mfa_enabled)
+        );
         // Absent-id no-ops.
         assert!(repo.update_last_login("missing").await.is_ok());
         assert!(
