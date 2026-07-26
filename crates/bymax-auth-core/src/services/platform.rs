@@ -707,6 +707,62 @@ mod tests {
         ));
     }
 
+    /// A hook spy that records the subject of every `after_logout` notification.
+    #[derive(Default)]
+    struct LogoutSpy {
+        subjects: std::sync::Mutex<Vec<String>>,
+    }
+
+    #[async_trait::async_trait]
+    impl AuthHooks for LogoutSpy {
+        async fn after_logout(
+            &self,
+            user_id: &str,
+            _ctx: &HookContext,
+        ) -> Result<(), crate::traits::HookError> {
+            if let Ok(mut subjects) = self.subjects.lock() {
+                subjects.push(user_id.to_owned());
+            }
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn logout_notifies_the_after_logout_hook_with_the_admin() {
+        // The notification is fire-and-forget, so nothing in the logout's own result reflects
+        // it — a hook that was never invoked looks exactly like one that was. A deployment
+        // wires this to send the "signed out on a new device" mail and to close down its own
+        // sessions, so silently dropping it is a real loss.
+        let spy = Arc::new(LogoutSpy::default());
+        let admins = Arc::new(InMemoryPlatformUserRepository::new());
+        let stores = Arc::new(InMemoryStores::new());
+        let hooks: Arc<dyn AuthHooks> = spy.clone();
+        let built = AuthEngine::builder()
+            .config(platform_config())
+            .environment(Environment::Test)
+            .user_repository(Arc::new(crate::testing::InMemoryUserRepository::new()))
+            .platform_user_repository(admins.clone())
+            .redis_stores(stores)
+            .hooks(hooks)
+            .build();
+        let Ok(engine) = built else { return };
+        let id = seed_admin(&admins, "hooked@admin.io", "pw");
+        let Some(svc) = engine.platform_auth() else { return };
+        let logged = svc.login("hooked@admin.io", "pw", "1.2.3.4", "agent").await;
+        let Ok(PlatformLoginResult::Success(auth)) = logged else {
+            return;
+        };
+        assert!(
+            svc.logout(&auth.access_token, &auth.refresh_token, &id)
+                .await
+                .is_ok()
+        );
+        // Long enough for the detached task to have run.
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        let seen = spy.subjects.lock().map(|s| s.clone()).unwrap_or_default();
+        assert_eq!(seen, vec![id]);
+    }
+
     #[tokio::test]
     async fn logout_blacklists_the_jti_and_revokes_the_session() {
         // After logout the platform access jti is blacklisted (verify rejects it) and the
