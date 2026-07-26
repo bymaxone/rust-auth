@@ -68,7 +68,11 @@ fn access_cookie(parts: &Parts, config: &ResolvedConfig) -> Option<String> {
 /// (`Cookie`), `Authorization: Bearer` only (`Bearer`), or cookie-first-else-header (`Both`).
 /// Returns `None` when no token is present on the accepted channel(s).
 pub(crate) fn source_access_token(parts: &Parts, config: &ResolvedConfig) -> Option<String> {
-    None /* ~ changed by cargo-mutants ~ */
+    match config.delivery {
+        TokenDelivery::Cookie => access_cookie(parts, config),
+        TokenDelivery::Bearer => bearer_from_header(parts),
+        TokenDelivery::Both => access_cookie(parts, config).or_else(|| bearer_from_header(parts)),
+    }
 }
 
 /// Source the **platform** access token. Unlike [`source_access_token`] this ignores the
