@@ -527,6 +527,22 @@ mod tests {
         {
             // No platform hierarchy is configured in the base fixture, so nothing is satisfied.
             assert!(!h.engine.platform_role_satisfies("SUPER_ADMIN", "SUPPORT"));
+
+            // And with one configured, the engine must actually consult it: asserted from
+            // both sides, because a delegator that always answered `false` would satisfy the
+            // negative case above on its own.
+            let mut with_hierarchy = base_config();
+            with_hierarchy.roles.platform_hierarchy = Some(std::collections::HashMap::from([
+                ("SUPER_ADMIN".to_owned(), vec!["SUPPORT".to_owned()]),
+                ("SUPPORT".to_owned(), Vec::new()),
+            ]));
+            let platform = harness(with_hierarchy, None);
+            assert!(platform.is_some(), "the platform fixture must assemble");
+            if let Some(p) = platform {
+                assert!(p.engine.platform_role_satisfies("SUPER_ADMIN", "SUPPORT"));
+                assert!(p.engine.platform_role_satisfies("SUPPORT", "SUPPORT"));
+                assert!(!p.engine.platform_role_satisfies("SUPPORT", "SUPER_ADMIN"));
+            }
         }
         let digest = h.engine.hashed_identifier_for("t1", "a@e.com");
         assert_eq!(digest.len(), 64);

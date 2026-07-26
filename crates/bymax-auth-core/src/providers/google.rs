@@ -322,6 +322,10 @@ mod tests {
         let p = provider(Arc::new(CapturingClient::ok(200, Vec::new())));
         let with = p.authorize_url("abc", Some("chal"));
         assert!(with.starts_with("https://accounts.google.com/o/oauth2/v2/auth?"));
+        // The query starts at the first parameter, not at a separator: a leading `&` makes
+        // an empty first pair, and Google answers a 400 to it.
+        assert!(!with.contains("auth?&"));
+        assert!(!with.contains("=&&"));
         assert!(with.contains("response_type=code"));
         assert!(with.contains("client_id=cid"));
         assert!(with.contains("redirect_uri=https%3A%2F%2Fapp.example.com%2Fcb"));
