@@ -702,6 +702,39 @@ async fn disable_locks_out_after_repeated_wrong_codes() {
             .await,
         Err(AuthError::AccountLocked { .. })
     ));
+
+    // The management counter is per user, and separate from the challenge one. A shared
+    // counter would let any account freeze every other account's MFA management by failing
+    // its own disable five times.
+    let Some(other) = register(&h.engine, "dislock2@example.com").await else {
+        return;
+    };
+    let Ok(other_setup) = mfa.setup(&other, MfaContext::Dashboard).await else {
+        return;
+    };
+    let base = now_secs();
+    assert!(
+        mfa.verify_and_enable(
+            &other,
+            &code_at(&other_setup.secret, base),
+            "1.2.3.4",
+            "ua",
+            MfaContext::Dashboard
+        )
+        .await
+        .is_ok()
+    );
+    assert!(
+        mfa.disable(
+            &other,
+            &code_at(&other_setup.secret, base + 30),
+            "1.2.3.4",
+            "ua",
+            MfaContext::Dashboard
+        )
+        .await
+        .is_ok()
+    );
 }
 
 #[tokio::test]
