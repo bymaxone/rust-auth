@@ -46,8 +46,14 @@ additional_cargo_args = ["--all-features"]
 # 3. `delete match arm "inactive" in assert_not_blocked` — the wildcard arm returns
 #    `AccountInactive`, the same error the deleted arm returns, so a host-defined status
 #    and `"inactive"` are indistinguishable by design.
+# 4. `replace == with != in validate_password` (the `active_algorithm == Scrypt` arm) — that
+#    arm lives behind `#[cfg(not(feature = "scrypt"))]`, and the gate builds with
+#    `--all-features`, so the mutated line is never compiled into the suite it is measured
+#    against. It is covered by the `not(feature = "scrypt")` test in the same module, which a
+#    default-feature run exercises.
 exclude_re = [
     'replace \| with \^ in new_uuid_v4',
     'replace AuthEngine::builder -> AuthEngineBuilder with Default::default\(\)',
     'delete match arm "inactive" in assert_not_blocked',
+    'replace == with != in validate_password',
 ]

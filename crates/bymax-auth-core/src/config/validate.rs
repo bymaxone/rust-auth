@@ -737,6 +737,13 @@ mod tests {
             too_small.validate(Environment::Production),
             Err(ConfigError::ScryptCostFactor { got: 8_192 })
         ));
+
+        // The floor is inclusive: 16384 is the documented minimum, not the first rejected
+        // value. Only a config sitting exactly on it can tell the two apart, and refusing it
+        // would reject the very parameters the error message tells an operator to use.
+        let mut at_floor = valid_config();
+        at_floor.password.scrypt.cost_factor = 16_384;
+        assert!(at_floor.validate(Environment::Production).is_ok());
     }
 
     #[cfg(feature = "argon2")]
@@ -756,6 +763,13 @@ mod tests {
             low_iter.validate(Environment::Production),
             Err(ConfigError::Argon2Iterations { got: 1 })
         ));
+
+        // Both floors are inclusive — a deployment configured at exactly the OWASP minimum
+        // is compliant, and rejecting it would contradict the error the rule raises.
+        let mut at_floor = valid_config();
+        at_floor.password.argon2.memory_kib = 19_456;
+        at_floor.password.argon2.iterations = 2;
+        assert!(at_floor.validate(Environment::Production).is_ok());
     }
 
     #[cfg(not(feature = "scrypt"))]
