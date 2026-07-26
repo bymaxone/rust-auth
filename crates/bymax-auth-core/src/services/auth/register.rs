@@ -220,6 +220,12 @@ mod tests {
         let _ = engine.register(input("dup@example.com"), &ctx()).await;
         let again = engine.register(input("dup@example.com"), &ctx()).await;
         assert!(matches!(again, Err(AuthError::EmailAlreadyExists)));
+
+        // And a different casing is the same address: without canonicalization the uniqueness
+        // check misses, the tenant ends up with one row per spelling, and a later lookup
+        // resolves to whichever it happens to hit.
+        let shouted = engine.register(input("DUP@Example.COM"), &ctx()).await;
+        assert!(matches!(shouted, Err(AuthError::EmailAlreadyExists)));
     }
 
     /// A hook that rejects registration, to drive the `before_register` deny path.
