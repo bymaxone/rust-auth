@@ -155,6 +155,41 @@
     "recoveryCodeDigestLegacy": "scrypt:{salt}:{hash}, still verified, never newly written"
   },
 
+  "rateLimits": {
+    "$comment": [
+      "The per-IP limit each auth route is served under, as `requests/windowSeconds`. Both",
+      "backends enforce these — nest-auth with a Redis fixed-window counter, rust-auth with a",
+      "per-route governor layer — so a deployment that puts the two behind one load balancer",
+      "gets the same answer whichever one serves the request. A value changed on one side only",
+      "is a silent divergence: the same client would be throttled at different points.",
+      "",
+      "The STORAGE differs deliberately and is not part of the contract: nest-auth's counter is",
+      "in Redis and therefore shared across instances, rust-auth's is in process memory and",
+      "therefore per-instance. The Redis one is the stricter of the two under horizontal scale."
+    ],
+    "login": "5/60",
+    "register": "10/3600",
+    "refresh": "10/60",
+    "forgotPassword": "3/300",
+    "resetPassword": "3/300",
+    "verifyOtp": "3/300",
+    "resendPasswordOtp": "3/300",
+    "verifyEmail": "5/60",
+    "resendVerification": "3/300",
+    "mfaSetup": "5/60",
+    "mfaVerifyEnable": "5/60",
+    "mfaChallenge": "5/60",
+    "mfaDisable": "3/300",
+    "platformLogin": "5/60",
+    "invitationCreate": "10/3600",
+    "invitationAccept": "5/60",
+    "listSessions": "30/60",
+    "revokeSession": "10/60",
+    "revokeAllSessions": "5/60",
+    "oauthInitiate": "10/60",
+    "oauthCallback": "10/60"
+  },
+
   "accessTokenClaims": {
     "$comment": [
       "Claims both sides stamp and both sides check. `epoch` is the per-user generation counter",

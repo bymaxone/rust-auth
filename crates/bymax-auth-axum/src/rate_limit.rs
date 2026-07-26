@@ -189,6 +189,72 @@ mod tests {
     use super::*;
     use http::StatusCode;
 
+    /// Read the shared cross-implementation wire contract's rate-limit table.
+    ///
+    /// Held byte-identical by nest-auth, which can serve the same deployment. Reading it here
+    /// rather than repeating the numbers means a limit changed on either side turns that side
+    /// red, instead of surfacing as the same client being throttled at different points
+    /// depending on which backend answered.
+    fn contract_limits() -> serde_json::Value {
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../conformance/wire-contract.json"
+        );
+        let raw = std::fs::read_to_string(path).unwrap_or_default();
+        let root: serde_json::Value = serde_json::from_str(&raw).unwrap_or(serde_json::Value::Null);
+        root.get("rateLimits")
+            .cloned()
+            .unwrap_or(serde_json::Value::Null)
+    }
+
+    #[test]
+    fn every_default_limit_matches_the_shared_wire_contract() {
+        let contract = contract_limits();
+        let defaults = RateLimitConfig::default();
+        let pairs: [(&str, Option<RateLimit>); 21] = [
+            ("login", defaults.login),
+            ("register", defaults.register),
+            ("refresh", defaults.refresh),
+            ("forgotPassword", defaults.forgot_password),
+            ("resetPassword", defaults.reset_password),
+            ("verifyOtp", defaults.verify_otp),
+            ("resendPasswordOtp", defaults.resend_password_otp),
+            ("verifyEmail", defaults.verify_email),
+            ("resendVerification", defaults.resend_verification),
+            ("mfaSetup", defaults.mfa_setup),
+            ("mfaVerifyEnable", defaults.mfa_verify_enable),
+            ("mfaChallenge", defaults.mfa_challenge),
+            ("mfaDisable", defaults.mfa_disable),
+            ("platformLogin", defaults.platform_login),
+            ("invitationCreate", defaults.invitation_create),
+            ("invitationAccept", defaults.invitation_accept),
+            ("listSessions", defaults.list_sessions),
+            ("revokeSession", defaults.revoke_session),
+            ("revokeAllSessions", defaults.revoke_all_sessions),
+            ("oauthInitiate", defaults.oauth_initiate),
+            ("oauthCallback", defaults.oauth_callback),
+        ];
+
+        for (name, limit) in pairs {
+            assert!(limit.is_some(), "{name} has no default limit");
+            let Some(limit) = limit else { continue };
+            let rendered = format!("{}/{}", limit.burst, limit.per_seconds);
+            assert_eq!(
+                contract.get(name).and_then(serde_json::Value::as_str),
+                Some(rendered.as_str()),
+                "limit for {name} drifted from the shared contract"
+            );
+        }
+
+        // And the contract names no route this catalog is missing: an entry on one side only
+        // is a route whose limit nobody agreed on.
+        let named = contract
+            .as_object()
+            .map(|table| table.keys().filter(|key| !key.starts_with('$')).count())
+            .unwrap_or_default();
+        assert_eq!(named, pairs.len());
+    }
+
     #[test]
     fn replenish_clamps_to_at_least_one_second() {
         // 5/60s replenishes one cell every 12s; a tiny window clamps to 1s (never 0).
