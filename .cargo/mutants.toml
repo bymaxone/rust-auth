@@ -65,10 +65,13 @@ additional_cargo_args = ["--all-features"]
 #    drop the compiled twin's mutant, which the suite does kill. If `builder.rs` shifts, the
 #    anchor stops matching and the mutant reappears as a survivor — a loud failure, not a
 #    silent one. Re-anchor it then.
+# 6. `token_manager.rs:618` `issue_mfa_temp_token` — the `cfg(not(feature = "mfa"))` twin of
+#    the method below it, anchored for the same reason as 5.
 exclude_re = [
     'replace \| with \^ in new_uuid_v4',
     'replace AuthEngine::builder -> AuthEngineBuilder with Default::default\(\)',
     'delete match arm "inactive" in assert_not_blocked',
     'replace == with != in validate_password',
     'builder\.rs:212:9: replace AuthEngineBuilder::redis_stores',
+    'token_manager\.rs:618:9: replace TokenManagerService::issue_mfa_temp_token',
 ]

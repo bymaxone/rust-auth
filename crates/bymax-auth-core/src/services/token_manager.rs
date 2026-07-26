@@ -1613,6 +1613,33 @@ mod absolute_lifetime_tests {
     }
 
     #[tokio::test]
+    async fn a_family_exactly_at_the_cap_still_rotates() {
+        // The cap is a maximum, not an exclusive bound: a session whose age reads as exactly
+        // 30 days is still inside it. Only a record sitting on the boundary can tell `>` from
+        // `>=`, and the difference is a whole day of sessions ended early.
+        let store = Arc::new(InMemoryStores::new());
+        let manager = capped(store.clone());
+        let old = RawRefreshToken::generate();
+        let exactly = SessionRecord {
+            family_created_at: Some(now_offset() - TimeDuration::days(30)),
+            ..record_born(1)
+        };
+        assert!(
+            store
+                .create_session(SessionKind::Dashboard, &old.redis_hash(), &exactly, 3600)
+                .await
+                .is_ok()
+        );
+
+        assert!(
+            manager
+                .reissue_tokens(old.expose_secret(), "203.0.113.4", "Chrome")
+                .await
+                .is_ok()
+        );
+    }
+
+    #[tokio::test]
     async fn a_record_with_no_birth_time_and_a_zero_cap_both_rotate() {
         // A record written before the field predates the mechanism and must not be ended by
         // it; a zero cap disables the check outright. Both are the "not capped" answer.
