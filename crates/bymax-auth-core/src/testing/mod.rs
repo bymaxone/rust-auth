@@ -618,11 +618,13 @@ impl BruteForceStore for InMemoryStores {
     }
 
     /// Returns the stored window while a counter exists (mirroring the real store, whose
-    /// counter key carries the window TTL from the first failure), else `0`.
+    /// counter key carries the window TTL from the first failure), else `0`. A stored counter
+    /// is always at least 1 — `record_failure` inserts and increments under one lock, and
+    /// `reset` removes the entry outright — so the entry's existence is the whole condition.
     async fn remaining_lockout_secs(&self, identifier: &str) -> Result<u64, AuthError> {
         Ok(lock(&self.brute_force)
             .get(identifier)
-            .map_or(0, |(count, window)| if *count > 0 { *window } else { 0 }))
+            .map_or(0, |(_, window)| *window))
     }
 }
 
@@ -1069,12 +1071,10 @@ mod tests {
         // Read back rather than trusting the `Ok`: a fake that answers `Ok(())` and stores
         // nothing lets every test built on it pass while asserting nothing.
         let stored = repo.find_by_id("p1").await;
-        assert!(
-            matches!(&stored, Ok(Some(u)) if u.last_login_at.is_some()
+        assert!(matches!(&stored, Ok(Some(u)) if u.last_login_at.is_some()
                 && u.status == "SUSPENDED"
                 && u.password_hash == "$scrypt$y"
-                && u.mfa_enabled)
-        );
+                && u.mfa_enabled));
         // Absent-id no-ops.
         assert!(repo.update_last_login("missing").await.is_ok());
         assert!(
@@ -1343,6 +1343,24 @@ mod tests {
             Ok(Some(c)) if c.email == "u@example.com"
         ));
         assert!(matches!(store.consume_verified("vtok").await, Ok(None)));
+
+        // Two live tokens do not collide: the key is derived from the token, so consuming one
+        // leaves the other intact. A double that keyed everything the same way would round-trip
+        // a single token perfectly and quietly lose the second.
+        let other = ResetContext {
+            user_id: "u2".to_owned(),
+            ..context.clone()
+        };
+        assert!(store.put_token("first", &context, 600).await.is_ok());
+        assert!(store.put_token("second", &other, 600).await.is_ok());
+        assert!(matches!(
+            store.consume_token("first").await,
+            Ok(Some(c)) if c.user_id == "u1"
+        ));
+        assert!(matches!(
+            store.consume_token("second").await,
+            Ok(Some(c)) if c.user_id == "u2"
+        ));
     }
 
     #[tokio::test]
