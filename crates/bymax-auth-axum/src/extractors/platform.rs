@@ -132,6 +132,7 @@ mod tests {
             mfa_verified: false,
             iat: 1_700_000_000,
             exp: 4_700_000_000,
+            epoch: 0,
         }
     }
 

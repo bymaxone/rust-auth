@@ -193,6 +193,7 @@ mod tests {
             mfa_verified: false,
             iat,
             exp,
+            epoch: 0,
         }
     }
 
@@ -224,6 +225,7 @@ mod tests {
             mfa_verified: true,
             iat: 1_000,
             exp: 2_000,
+            epoch: 0,
         };
         let ptoken = sign(&platform, &key).unwrap_or_default();
         assert_eq!(
@@ -509,6 +511,7 @@ mod tests {
             span in 1i64..100_000,
             mfa_enabled in any::<bool>(),
             mfa_verified in any::<bool>(),
+            epoch in any::<u64>(),
         ) {
             // For any well-formed claims, a signed token verifies back to the same
             // claims at a time within the validity window — the codec's core invariant.
@@ -517,7 +520,7 @@ mod tests {
             let claims = DashboardClaims {
                 sub, jti, tenant_id: "t".to_owned(), role,
                 token_type: DashboardType::Dashboard, status: "ACTIVE".to_owned(),
-                mfa_enabled, mfa_verified, iat, exp,
+                mfa_enabled, mfa_verified, iat, exp, epoch,
             };
             let token = sign(&claims, &key).unwrap_or_default();
             prop_assert_eq!(verify::<DashboardClaims>(&token, &key, &opts_at(iat)).ok(), Some(claims));

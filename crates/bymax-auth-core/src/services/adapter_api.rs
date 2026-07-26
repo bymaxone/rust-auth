@@ -214,6 +214,9 @@ impl AuthEngine {
             mfa_verified: snapshot.mfa_verified,
             iat: now,
             exp: now.saturating_add(i64::try_from(WS_TICKET_TTL_SECONDS).unwrap_or(i64::MAX)),
+            // This is a redeemed socket-authorization snapshot, never a re-verified access JWT, so
+            // the epoch is not consulted for it; it carries the inert default.
+            epoch: 0,
         })
     }
 
@@ -626,6 +629,7 @@ mod tests {
             mfa_verified: false,
             iat: now_unix(),
             exp: now_unix(),
+            epoch: 0,
         }
     }
 

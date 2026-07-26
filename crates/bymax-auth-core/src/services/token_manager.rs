@@ -157,6 +157,12 @@ impl TokenManagerService {
     ) -> Result<AuthResult, AuthError> {
         let refresh = RawRefreshToken::generate();
         let now = now_unix();
+        // Stamp the user's current token epoch so a later bump (a reset or sign-out-everywhere)
+        // invalidates this token at verification.
+        let epoch = self
+            .session_store
+            .current_epoch(SessionKind::Dashboard, &user.id)
+            .await?;
         let claims = DashboardClaims {
             sub: user.id.clone(),
             jti: new_uuid_v4(),
@@ -168,6 +174,7 @@ impl TokenManagerService {
             mfa_verified,
             iat: now,
             exp: now.saturating_add(self.access_ttl.as_secs().min(i64::MAX as u64) as i64),
+            epoch,
         };
         let access_token = self.issue_access(&claims)?;
 
@@ -183,6 +190,9 @@ impl TokenManagerService {
             ip: stored_ip,
             created_at: now_offset(),
             mfa_enabled: user.mfa_enabled,
+            // A fresh login opens a new refresh-token family; every rotation inherits this id,
+            // so the whole lineage can be revoked together on reuse detection.
+            family_id: new_uuid_v4(),
         };
         self.session_store
             .create_session(
@@ -250,7 +260,11 @@ impl TokenManagerService {
             .await?
         {
             RotateOutcome::Rotated(_old) => {
-                let access_token = self.issue_access(&self.rotated_claims(&new_record))?;
+                let epoch = self
+                    .session_store
+                    .current_epoch(SessionKind::Dashboard, &new_record.user_id)
+                    .await?;
+                let access_token = self.issue_access(&self.rotated_claims(&new_record, epoch))?;
                 Ok(RotatedTokens {
                     access_token,
                     refresh_token: new.expose_secret().to_owned(),
@@ -269,11 +283,25 @@ impl TokenManagerService {
                         self.refresh_ttl_secs,
                     )
                     .await?;
-                let access_token = self.issue_access(&self.rotated_claims(&fresh_record))?;
+                let epoch = self
+                    .session_store
+                    .current_epoch(SessionKind::Dashboard, &fresh_record.user_id)
+                    .await?;
+                let access_token = self.issue_access(&self.rotated_claims(&fresh_record, epoch))?;
                 Ok(RotatedTokens {
                     access_token,
                     refresh_token: fresh.expose_secret().to_owned(),
                 })
+            }
+            RotateOutcome::Reused(family) => {
+                // A consumed refresh token was replayed after its grace window closed — the
+                // signature of a stolen token. Revoke the whole family (every live descendant
+                // of that login) so the thief's chain dies too, then reject: every holder must
+                // re-authenticate (§12.5.2, OWASP rotation with automatic reuse detection).
+                self.session_store
+                    .revoke_family(SessionKind::Dashboard, &family)
+                    .await?;
+                Err(AuthError::RefreshTokenInvalid)
             }
             RotateOutcome::Invalid => Err(AuthError::RefreshTokenInvalid),
         }
@@ -310,6 +338,10 @@ impl TokenManagerService {
     ) -> Result<PlatformAuthResult, AuthError> {
         let refresh = RawRefreshToken::generate();
         let now = now_unix();
+        let epoch = self
+            .session_store
+            .current_epoch(SessionKind::Platform, &admin.id)
+            .await?;
         let claims = PlatformClaims {
             sub: admin.id.clone(),
             jti: new_uuid_v4(),
@@ -319,6 +351,7 @@ impl TokenManagerService {
             mfa_verified,
             iat: now,
             exp: now.saturating_add(self.access_ttl.as_secs().min(i64::MAX as u64) as i64),
+            epoch,
         };
         let access_token = self.issue_platform_access(&claims)?;
 
@@ -334,6 +367,8 @@ impl TokenManagerService {
             ip: stored_ip,
             created_at: now_offset(),
             mfa_enabled: admin.mfa_enabled,
+            // A fresh platform login opens a new refresh-token family (section 12.5.2).
+            family_id: new_uuid_v4(),
         };
         self.session_store
             .create_session(
@@ -398,8 +433,12 @@ impl TokenManagerService {
             .await?
         {
             RotateOutcome::Rotated(_old) => {
+                let epoch = self
+                    .session_store
+                    .current_epoch(SessionKind::Platform, &new_record.user_id)
+                    .await?;
                 let access_token =
-                    self.issue_platform_access(&self.rotated_platform_claims(&new_record))?;
+                    self.issue_platform_access(&self.rotated_platform_claims(&new_record, epoch))?;
                 Ok(RotatedTokens {
                     access_token,
                     refresh_token: new.expose_secret().to_owned(),
@@ -418,12 +457,24 @@ impl TokenManagerService {
                         self.refresh_ttl_secs,
                     )
                     .await?;
-                let access_token =
-                    self.issue_platform_access(&self.rotated_platform_claims(&fresh_record))?;
+                let epoch = self
+                    .session_store
+                    .current_epoch(SessionKind::Platform, &fresh_record.user_id)
+                    .await?;
+                let access_token = self
+                    .issue_platform_access(&self.rotated_platform_claims(&fresh_record, epoch))?;
                 Ok(RotatedTokens {
                     access_token,
                     refresh_token: fresh.expose_secret().to_owned(),
                 })
+            }
+            RotateOutcome::Reused(family) => {
+                // Post-grace replay of a consumed platform refresh token: revoke the whole
+                // family and reject, the platform-keyspace analogue of the dashboard path.
+                self.session_store
+                    .revoke_family(SessionKind::Platform, &family)
+                    .await?;
+                Err(AuthError::RefreshTokenInvalid)
             }
             RotateOutcome::Invalid => Err(AuthError::RefreshTokenInvalid),
         }
@@ -445,14 +496,25 @@ impl TokenManagerService {
         if self.session_store.is_blacklisted(&claims.jti).await? {
             return Err(AuthError::TokenRevoked);
         }
+        // A token stamped below the admin's current epoch predates an invalidating event (a
+        // password reset or sign-out-everywhere) and is revoked.
+        if claims.epoch
+            < self
+                .session_store
+                .current_epoch(SessionKind::Platform, &claims.sub)
+                .await?
+        {
+            return Err(AuthError::TokenRevoked);
+        }
         Ok(claims)
     }
 
     /// Build the platform access claims for a rotated/recovered session. As with the dashboard
     /// rotation, `mfa_verified` is dropped (re-acquired only via the MFA challenge) while
     /// `mfa_enabled` is carried over from the stored record; the claims carry no `tenant_id`.
+    /// The `epoch` is the admin's current generation, read at rotation time.
     #[cfg(feature = "platform")]
-    fn rotated_platform_claims(&self, record: &SessionRecord) -> PlatformClaims {
+    fn rotated_platform_claims(&self, record: &SessionRecord, epoch: u64) -> PlatformClaims {
         let now = now_unix();
         PlatformClaims {
             sub: record.user_id.clone(),
@@ -463,6 +525,7 @@ impl TokenManagerService {
             mfa_verified: false,
             iat: now,
             exp: now.saturating_add(self.access_ttl.as_secs().min(i64::MAX as u64) as i64),
+            epoch,
         }
     }
 
@@ -478,6 +541,16 @@ impl TokenManagerService {
         let claims = verify::<DashboardClaims>(token, &self.key, &VerifyOptions::default())
             .map_err(map_jwt_error)?;
         if self.session_store.is_blacklisted(&claims.jti).await? {
+            return Err(AuthError::TokenRevoked);
+        }
+        // A token stamped below the user's current epoch predates an invalidating event (a
+        // password reset or sign-out-everywhere) and is revoked.
+        if claims.epoch
+            < self
+                .session_store
+                .current_epoch(SessionKind::Dashboard, &claims.sub)
+                .await?
+        {
             return Err(AuthError::TokenRevoked);
         }
         Ok(claims)
@@ -633,13 +706,14 @@ impl TokenManagerService {
     /// Build the access claims for a rotated/recovered session. Rotation always drops
     /// `mfa_verified` (the user re-acquires it only via the MFA challenge) and issues an
     /// empty `status` — status guards consult the repository/status cache, not the rotated
-    /// JWT, because the stored session record carries no live status.
+    /// JWT, because the stored session record carries no live status. The `epoch` is the user's
+    /// current generation, read at rotation time.
     ///
     /// `mfa_enabled` is carried over from the stored record rather than reset: the MFA gate
     /// refuses a token only when `mfa_enabled && !mfa_verified`, so minting `false` here
     /// would let one routine refresh turn an enrolled account's token into one that clears
     /// every MFA-gated route without ever completing a challenge.
-    fn rotated_claims(&self, record: &SessionRecord) -> DashboardClaims {
+    fn rotated_claims(&self, record: &SessionRecord, epoch: u64) -> DashboardClaims {
         let now = now_unix();
         DashboardClaims {
             sub: record.user_id.clone(),
@@ -652,6 +726,7 @@ impl TokenManagerService {
             mfa_verified: false,
             iat: now,
             exp: now.saturating_add(self.access_ttl.as_secs().min(i64::MAX as u64) as i64),
+            epoch,
         }
     }
 }
@@ -686,6 +761,9 @@ fn identity_record(seed: &SessionRecord, ip: &str, user_agent: &str) -> SessionR
         ip: stored_ip,
         created_at: now_offset(),
         mfa_enabled: seed.mfa_enabled,
+        // Rotation inherits the seed's family unchanged, so every descendant of one login
+        // shares the id and the whole lineage is revocable together on reuse detection.
+        family_id: seed.family_id.clone(),
     }
 }
 
@@ -704,6 +782,8 @@ fn platform_identity_record(seed: &SessionRecord, ip: &str, user_agent: &str) ->
         ip: stored_ip,
         created_at: now_offset(),
         mfa_enabled: seed.mfa_enabled,
+        // The platform rotation inherits the seed's family unchanged (section 12.5.2).
+        family_id: seed.family_id.clone(),
     }
 }
 
@@ -721,6 +801,9 @@ fn placeholder_record(ip: &str, user_agent: &str) -> SessionRecord {
         ip: stored_ip,
         created_at: now_offset(),
         mfa_enabled: false,
+        // The placeholder is never stored (an absent live token yields only Grace/Reused/Invalid),
+        // so it carries no family.
+        family_id: String::new(),
     }
 }
 
@@ -842,6 +925,90 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn reused_refresh_token_after_grace_revokes_the_whole_family() {
+        // Issue → rotate (the old token is consumed, a grace pointer planted). Drop the grace
+        // pointer to simulate the grace window closing. Replaying the consumed old token is now
+        // caught as a reuse: it is rejected AND the whole family is revoked, so the live rotated
+        // token can no longer rotate either — a stolen token cannot keep a parallel chain alive.
+        let store = Arc::new(InMemoryStores::new());
+        let svc = service(store.clone());
+        let issued = svc
+            .issue_tokens(&user(), "10.0.0.1", "agent/1.0", false)
+            .await;
+        let Ok(issued) = issued else { return };
+        let old_hash = RawRefreshToken::from_raw(issued.refresh_token.clone()).redis_hash();
+        let rotated = svc
+            .reissue_tokens(&issued.refresh_token, "10.0.0.1", "agent/1.0")
+            .await;
+        let Ok(rotated) = rotated else { return };
+        // The freshly rotated token is live right up until the reuse is detected.
+        assert!(
+            store
+                .find_session(SessionKind::Dashboard, &rotated_hash(&rotated))
+                .await
+                .is_ok()
+        );
+        // Simulate the grace window elapsing so the old token is no longer grace-recoverable.
+        assert!(
+            store
+                .delete_grace_pointer(SessionKind::Dashboard, &old_hash)
+                .await
+                .is_ok()
+        );
+        // Replaying the consumed old token is rejected as a detected reuse...
+        assert!(matches!(
+            svc.reissue_tokens(&issued.refresh_token, "10.0.0.1", "agent/1.0")
+                .await,
+            Err(AuthError::RefreshTokenInvalid)
+        ));
+        // ...and the reuse revoked the whole family, so the live rotated token no longer rotates.
+        assert!(matches!(
+            svc.reissue_tokens(&rotated.refresh_token, "10.0.0.1", "agent/1.0")
+                .await,
+            Err(AuthError::RefreshTokenInvalid)
+        ));
+    }
+
+    /// The store hash of a rotated pair's refresh token.
+    fn rotated_hash(rotated: &RotatedTokens) -> String {
+        RawRefreshToken::from_raw(rotated.refresh_token.clone()).redis_hash()
+    }
+
+    #[cfg(feature = "platform")]
+    #[tokio::test]
+    async fn reused_platform_refresh_token_after_grace_revokes_the_family() {
+        // The platform-keyspace analogue: a replayed consumed platform refresh token, past its
+        // grace window, is rejected as a reuse and revokes the whole platform family.
+        let store = Arc::new(InMemoryStores::new());
+        let svc = service(store.clone());
+        let issued = svc
+            .issue_platform_tokens(&platform_admin(), "10.0.0.1", "agent/1.0", false)
+            .await;
+        let Ok(issued) = issued else { return };
+        let old_hash = RawRefreshToken::from_raw(issued.refresh_token.clone()).redis_hash();
+        let rotated = svc
+            .reissue_platform_tokens(&issued.refresh_token, "10.0.0.1", "agent/1.0")
+            .await;
+        let Ok(rotated) = rotated else { return };
+        assert!(
+            store
+                .delete_grace_pointer(SessionKind::Platform, &old_hash)
+                .await
+                .is_ok()
+        );
+        assert!(matches!(
+            svc.reissue_platform_tokens(&issued.refresh_token, "10.0.0.1", "agent/1.0")
+                .await,
+            Err(AuthError::RefreshTokenInvalid)
+        ));
+        assert!(matches!(
+            svc.reissue_platform_tokens(&rotated.refresh_token, "10.0.0.1", "agent/1.0")
+                .await,
+            Err(AuthError::RefreshTokenInvalid)
+        ));
+    }
+
+    #[tokio::test]
     async fn blacklist_rejects_a_revoked_access_token() {
         // After revoking the access jti, verify_access reports the internal-only
         // token_revoked (which collapses to token_invalid at the boundary).
@@ -857,6 +1024,66 @@ mod tests {
             svc.verify_access(&issued.access_token).await,
             Err(AuthError::TokenRevoked)
         ));
+    }
+
+    #[tokio::test]
+    async fn a_bumped_epoch_rejects_every_access_token_issued_before_the_bump() {
+        // A password reset / sign-out-everywhere bumps the user's token epoch. An access token
+        // stamped before the bump — a stateless JWT that logout's jti-blacklist could not reach
+        // without holding it — is now rejected on its next verification, so a reset takes effect
+        // immediately instead of lingering for the access-token lifetime.
+        let store = Arc::new(InMemoryStores::new());
+        let svc = service(store.clone());
+        let issued = svc
+            .issue_tokens(&user(), "10.0.0.1", "agent/1.0", false)
+            .await;
+        let Ok(issued) = issued else { return };
+        // Freshly issued: it verifies (stamped at the current epoch 0).
+        assert!(svc.verify_access(&issued.access_token).await.is_ok());
+        // Bump the epoch (what a password reset does), then the pre-bump token is revoked...
+        assert!(store.bump_epoch(SessionKind::Dashboard, "u1").await.is_ok());
+        assert!(matches!(
+            svc.verify_access(&issued.access_token).await,
+            Err(AuthError::TokenRevoked)
+        ));
+        // ...while a token issued AFTER the bump carries the new epoch and still verifies.
+        let after = svc
+            .issue_tokens(&user(), "10.0.0.1", "agent/1.0", false)
+            .await;
+        let Ok(after) = after else { return };
+        assert!(svc.verify_access(&after.access_token).await.is_ok());
+    }
+
+    #[cfg(feature = "platform")]
+    #[tokio::test]
+    async fn a_bumped_platform_epoch_rejects_a_pre_bump_platform_token() {
+        // The platform-keyspace analogue: bumping a platform admin's epoch invalidates every
+        // platform access token issued before it, and a later-issued token still verifies.
+        let store = Arc::new(InMemoryStores::new());
+        let svc = service(store.clone());
+        let issued = svc
+            .issue_platform_tokens(&platform_admin(), "10.0.0.1", "agent/1.0", false)
+            .await;
+        let Ok(issued) = issued else { return };
+        assert!(
+            svc.verify_platform_access(&issued.access_token)
+                .await
+                .is_ok()
+        );
+        assert!(store.bump_epoch(SessionKind::Platform, "p1").await.is_ok());
+        assert!(matches!(
+            svc.verify_platform_access(&issued.access_token).await,
+            Err(AuthError::TokenRevoked)
+        ));
+        let after = svc
+            .issue_platform_tokens(&platform_admin(), "10.0.0.1", "agent/1.0", false)
+            .await;
+        let Ok(after) = after else { return };
+        assert!(
+            svc.verify_platform_access(&after.access_token)
+                .await
+                .is_ok()
+        );
     }
 
     #[tokio::test]
@@ -882,6 +1109,7 @@ mod tests {
             mfa_verified: false,
             iat: now - 1_000,
             exp: now - 500,
+            epoch: 0,
         };
         let Ok(token) = svc.issue_access(&expired) else { return };
         assert!(matches!(

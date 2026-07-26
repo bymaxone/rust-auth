@@ -28,8 +28,18 @@ pub enum Prefix {
     Rt,
     /// Access-JWT revocation blacklist (`rv`).
     Rv,
+    /// Dashboard per-user token epoch / generation counter (`ep`).
+    Ep,
+    /// Platform per-user token epoch / generation counter (`pep`).
+    Pep,
     /// Dashboard rotation grace pointer (`rp`).
     Rp,
+    /// Dashboard consumed-token family marker for reuse detection (`cf`).
+    Cf,
+    /// Dashboard refresh-token family index SET (`fam`). Its members are bare `sha256` hashes,
+    /// not key suffixes: a family only ever indexes live `rt:` sessions, so the prefix is
+    /// implied by the index itself.
+    Fam,
     /// Dashboard active-session index SET (`sess`). Its members are full key **suffixes** —
     /// `rt:{hash}` for a live session, `rp:{oldHash}` for a rotation grace pointer — never bare
     /// hashes, matching nest-auth so either backend can revoke the other's sessions.
@@ -54,6 +64,11 @@ pub enum Prefix {
     Prt,
     /// Platform rotation grace pointer (`prp`).
     Prp,
+    /// Platform consumed-token family marker for reuse detection (`pcf`).
+    Pcf,
+    /// Platform refresh-token family index SET (`pfam`). Members are bare `sha256` hashes, as
+    /// on the dashboard plane.
+    Pfam,
     /// Platform active-session index SET (`psess`). Members are `prt:{hash}` / `prp:{oldHash}`
     /// key suffixes; the platform keyspace is deliberately separate from the dashboard one.
     Psess,
@@ -76,7 +91,11 @@ impl Prefix {
         match self {
             Self::Rt => "rt",
             Self::Rv => "rv",
+            Self::Ep => "ep",
+            Self::Pep => "pep",
             Self::Rp => "rp",
+            Self::Cf => "cf",
+            Self::Fam => "fam",
             Self::Sess => "sess",
             Self::Sd => "sd",
             Self::Lf => "lf",
@@ -88,6 +107,8 @@ impl Prefix {
             Self::Inv => "inv",
             Self::Prt => "prt",
             Self::Prp => "prp",
+            Self::Pcf => "pcf",
+            Self::Pfam => "pfam",
             Self::Psess => "psess",
             Self::Psd => "psd",
             Self::MfaSetup => "mfa_setup",
@@ -214,7 +235,11 @@ mod tests {
         let cases = [
             (Prefix::Rt, "auth:rt:abc"),
             (Prefix::Rv, "auth:rv:abc"),
+            (Prefix::Ep, "auth:ep:abc"),
+            (Prefix::Pep, "auth:pep:abc"),
             (Prefix::Rp, "auth:rp:abc"),
+            (Prefix::Cf, "auth:cf:abc"),
+            (Prefix::Fam, "auth:fam:abc"),
             (Prefix::Sess, "auth:sess:abc"),
             (Prefix::Sd, "auth:sd:abc"),
             (Prefix::Lf, "auth:lf:abc"),
@@ -226,6 +251,8 @@ mod tests {
             (Prefix::Inv, "auth:inv:abc"),
             (Prefix::Prt, "auth:prt:abc"),
             (Prefix::Prp, "auth:prp:abc"),
+            (Prefix::Pcf, "auth:pcf:abc"),
+            (Prefix::Pfam, "auth:pfam:abc"),
             (Prefix::Psess, "auth:psess:abc"),
             (Prefix::Psd, "auth:psd:abc"),
             (Prefix::MfaSetup, "auth:mfa_setup:abc"),
