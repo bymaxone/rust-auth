@@ -637,6 +637,19 @@ mod tests {
     }
 
     #[test]
+    fn admits_a_secret_whose_entropy_sits_exactly_on_the_floor() {
+        // The floor is inclusive: 3.5 bits/char is *acceptable*, not rejected. Built to land
+        // on the constant exactly — eight symbols twice (4 bits each) and four symbols four
+        // times (3 bits each) sum to 3.5 with no rounding — because only a secret at the
+        // boundary can tell `<` from `<=`, and rejecting one at the floor would refuse a
+        // configuration the documented rule admits.
+        let mut cfg = valid_config();
+        cfg.jwt.secret = SecretString::from("aabbccddeeffgghhiiiijjjjkkkkllll".to_owned());
+        assert!((shannon_entropy("aabbccddeeffgghhiiiijjjjkkkkllll") - 3.5).abs() < f64::EPSILON);
+        assert!(cfg.validate(Environment::Production).is_ok());
+    }
+
+    #[test]
     fn rejects_low_entropy_secret() {
         let mut cfg = valid_config();
         // 32 identical characters: length passes, entropy is 0.
@@ -767,6 +780,25 @@ mod tests {
             recovery_code_count: 8,
             totp_window: 1,
         }
+    }
+
+    #[cfg(feature = "mfa")]
+    #[test]
+    fn resolves_the_configured_mfa_key_and_none_without_mfa() {
+        // The key that comes back is the configured one, byte for byte — the stored TOTP
+        // secrets are sealed with it, so a resolver that answered with a fixed or zeroed key
+        // would seal every deployment's secrets under the same one and none of the MFA tests
+        // would notice: they only ever round-trip through the same resolver.
+        let key = base64::engine::general_purpose::STANDARD.encode([7u8; 32]);
+        let mut cfg = valid_config();
+        cfg.mfa = Some(mfa_with_key(&key));
+        let resolved = ResolvedConfig::new(cfg, Environment::Test, false);
+        let got = resolved.mfa_encryption_key();
+        assert!(matches!(&got, Some(k) if **k == [7u8; 32]));
+
+        // No MFA configured: no key at all, rather than a default one.
+        let plain = ResolvedConfig::new(valid_config(), Environment::Test, false);
+        assert!(plain.mfa_encryption_key().is_none());
     }
 
     #[test]
