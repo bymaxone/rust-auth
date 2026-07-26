@@ -400,6 +400,14 @@ impl AuthHooks for AlertSpy {
         self.push(format!("hook:disabled:{}", user.id));
         Ok(())
     }
+    async fn after_mfa_recovery_codes_regenerated(
+        &self,
+        user: &bymax_auth_types::SafeAuthUser,
+        _ctx: &HookContext,
+    ) -> Result<(), crate::traits::HookError> {
+        self.push(format!("hook:regenerated:{}", user.id));
+        Ok(())
+    }
 }
 
 #[tokio::test]
@@ -432,10 +440,24 @@ async fn disabling_mfa_alerts_the_account_owner() {
         .await
         .is_ok()
     );
+    // Regenerating the recovery codes invalidates the old set, which is equally worth
+    // telling the owner about: it is how an attacker locks the real owner out of their own
+    // fallback.
+    assert!(
+        mfa.regenerate_recovery_codes(
+            &uid,
+            &code_at(&setup.secret, base + 30),
+            "1.2.3.4",
+            "ua",
+            MfaContext::Dashboard
+        )
+        .await
+        .is_ok()
+    );
     assert!(
         mfa.disable(
             &uid,
-            &code_at(&setup.secret, base + 30),
+            &code_at(&setup.secret, base + 60),
             "1.2.3.4",
             "ua",
             MfaContext::Dashboard
@@ -453,6 +475,10 @@ async fn disabling_mfa_alerts_the_account_owner() {
     assert!(
         seen.contains(&format!("hook:disabled:{uid}")),
         "no disabled hook: {seen:?}"
+    );
+    assert!(
+        seen.contains(&format!("hook:regenerated:{uid}")),
+        "no regenerated hook: {seen:?}"
     );
 }
 
