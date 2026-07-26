@@ -362,9 +362,12 @@ jobs:
       - name: Validate the TypeDoc API surface renders
         working-directory: packages/rust-auth
         run: npx typedoc --emit none
-      - name: Run the Vitest suite
+      - name: Run the Vitest suite under the coverage ratchet
         working-directory: packages/rust-auth
-        run: npm test
+        # Thresholds live in vitest.config.ts and are pinned just under what the suite
+        # currently reaches, so this layer's coverage can only go up. The Rust crates are
+        # gated at 100% separately by the reusable workflow above.
+        run: npm run test:cov
 
   # ─────────────────────────────────────────────────────────────────────────────
   # Examples — the official examples form their OWN Cargo workspace (and their own
