@@ -7,12 +7,17 @@
 //! Secure-by-default, the refresh cookie path-scoped and `SameSite=Strict`, the access /
 //! signal cookies `SameSite=Lax`. Handlers never hand-roll a `Set-Cookie`; they delegate
 //! here. The MFA-temp cookie (planted on the MFA-gated OAuth callback) is also written here.
+//!
+//! The **platform** delivery is the one exception to the mode switch: it is always bearer
+//! (§7.11.1 — "`deliver_platform_auth` is **always bearer** regardless of mode"), because the
+//! operator dashboard is not a browser session. It never plants a cookie and its body is
+//! always `{ admin, accessToken, refreshToken }`.
 
 use axum::Json;
 use axum::response::{IntoResponse, Response};
 use bymax_auth_core::config::{SameSite as ConfigSameSite, TokenDelivery as DeliveryMode};
 use bymax_auth_types::constants::AUTH_HAS_SESSION_COOKIE_VALUE;
-use bymax_auth_types::{AuthResult, MfaChallengeResult, RotatedTokens, SafeAuthUser};
+use bymax_auth_types::{AuthResult, MfaChallengeResult, SafeAuthUser};
 use http::StatusCode;
 use serde::Serialize;
 use serde_json::json;
@@ -142,6 +147,28 @@ impl<'a> TokenDelivery<'a> {
         );
     }
 
+    /// Clear the ephemeral MFA-temp cookie, reusing the exact `Path` [`set_mfa_temp_cookie`]
+    /// scoped it to (a mismatched path leaves a ghost cookie the browser keeps sending).
+    ///
+    /// The challenge handler applies nest-auth's clearing policy verbatim (see
+    /// `mfa.controller.ts`): clear on SUCCESS (the JWT was consumed) and on
+    /// `mfa_temp_token_invalid` (forged/expired/unknown — a retry under the same cookie can
+    /// never succeed); KEEP the cookie on `mfa_invalid_code` / `account_locked` / a transient
+    /// failure, because the temp token is still alive in the store and the user can retry
+    /// inside its 5-minute TTL. The brute-force counter still caps how many wrong codes one
+    /// token accepts, so keeping it does not weaken the threat model.
+    ///
+    /// [`set_mfa_temp_cookie`]: TokenDelivery::set_mfa_temp_cookie
+    #[cfg(feature = "mfa")]
+    pub(crate) fn clear_mfa_temp_cookie(&self, cookies: &Cookies) {
+        use bymax_auth_types::constants::MFA_TEMP_COOKIE_NAME;
+        cookies.remove(
+            Cookie::build((MFA_TEMP_COOKIE_NAME.to_owned(), ""))
+                .path(self.cookies().mfa_temp_path.clone())
+                .build(),
+        );
+    }
+
     /// Deliver a successful authentication (login/register/invitation-accept). In `cookie`
     /// mode it sets the auth cookies and the body carries only the safe user; in `bearer`
     /// mode no cookies are set and the body carries the tokens; `both` does both. `status`
@@ -165,44 +192,29 @@ impl<'a> TokenDelivery<'a> {
         }
     }
 
-    /// Deliver a successful **platform** authentication. The platform result mirrors
-    /// `AuthResult` field-for-field, so the body shape and cookie behavior are identical to
-    /// [`TokenDelivery::deliver_auth`]; only the safe-user type differs.
+    /// Deliver a successful **platform** authentication (login / MFA challenge / refresh).
+    ///
+    /// Unlike [`TokenDelivery::deliver_auth`] this ignores the configured delivery mode
+    /// entirely: platform sessions are **always** bearer (§7.11.1), so no cookie is ever
+    /// planted and the body is always `{ admin, accessToken, refreshToken }`. The account key
+    /// is `admin` (not `user`), matching nest-auth's `PlatformBearerAuthResponse`.
     #[cfg(feature = "platform")]
     pub(crate) fn deliver_platform_auth(
         &self,
-        cookies: &Cookies,
         result: &bymax_auth_types::PlatformAuthResult,
         status: StatusCode,
     ) -> Response {
-        match self.config.delivery {
-            DeliveryMode::Cookie => {
-                self.set_auth_cookies(cookies, &result.access_token, &result.refresh_token);
-                (status, Json(json!({ "user": result.user }))).into_response()
-            }
-            DeliveryMode::Bearer => (status, Json(platform_bearer_body(result))).into_response(),
-            DeliveryMode::Both => {
-                self.set_auth_cookies(cookies, &result.access_token, &result.refresh_token);
-                (status, Json(platform_bearer_body(result))).into_response()
-            }
-        }
+        (status, Json(platform_bearer_body(result))).into_response()
     }
 
-    /// Deliver a refresh outcome (rotated token pair). In `cookie` mode the new cookies are
-    /// set and the body is empty `{}`; in `bearer` mode the body carries the new pair;
-    /// `both` does both.
-    pub(crate) fn deliver_refresh(&self, cookies: &Cookies, tokens: &RotatedTokens) -> Response {
-        match self.config.delivery {
-            DeliveryMode::Cookie => {
-                self.set_auth_cookies(cookies, &tokens.access_token, &tokens.refresh_token);
-                (StatusCode::OK, Json(json!({}))).into_response()
-            }
-            DeliveryMode::Bearer => (StatusCode::OK, Json(tokens)).into_response(),
-            DeliveryMode::Both => {
-                self.set_auth_cookies(cookies, &tokens.access_token, &tokens.refresh_token);
-                (StatusCode::OK, Json(tokens)).into_response()
-            }
-        }
+    /// Deliver a refresh outcome. The rotated pair is paired with the freshly fetched account
+    /// so the body matches nest-auth's `deliverRefreshResponse`, which delegates to the login
+    /// delivery and therefore echoes the user in every mode: `cookie` sets the new cookies and
+    /// returns `{ user }`, `bearer` returns `{ user, accessToken, refreshToken }`, `both` does
+    /// both. Kept as a distinct call site (as nest-auth does) so a reader can tell a rotation
+    /// from an initial login at the handler.
+    pub(crate) fn deliver_refresh(&self, cookies: &Cookies, result: &AuthResult) -> Response {
+        self.deliver_auth(cookies, result, StatusCode::OK)
     }
 
     /// Deliver an MFA challenge body (`{ mfaRequired: true, mfaTempToken }`) — the same in
@@ -221,19 +233,23 @@ fn bearer_body(result: &AuthResult) -> impl Serialize + '_ {
     })
 }
 
-/// The bearer/both platform auth body: the safe admin plus the token pair, camelCase.
+/// The platform auth body: the safe admin under the `admin` key plus the token pair,
+/// camelCase. The key is `admin`, not `user` — nest-auth's published
+/// `PlatformBearerAuthResponse` names it that way, and §7.11.1 of the spec agrees.
 #[cfg(feature = "platform")]
 fn platform_bearer_body(result: &bymax_auth_types::PlatformAuthResult) -> impl Serialize + '_ {
     json!({
-        "user": &result.user,
+        "admin": &result.user,
         "accessToken": &result.access_token,
         "refreshToken": &result.refresh_token,
     })
 }
 
-/// A safe-user body with no tokens (used by `me` and the cookie-mode auth body shape).
+/// The `GET /auth/me` body: the safe user as the **top-level** object, with no wrapper —
+/// nest-auth's `AuthController.me` returns the `SafeAuthUser` itself, and its published
+/// client (`createAuthClient().getMe()`) decodes the bare object.
 pub(crate) fn user_body(user: &SafeAuthUser) -> Json<serde_json::Value> {
-    Json(json!({ "user": user }))
+    Json(json!(user))
 }
 
 #[cfg(test)]
@@ -243,7 +259,7 @@ mod tests {
     use bymax_auth_core::config::SameSite as ConfigSS;
     #[cfg(feature = "platform")]
     use bymax_auth_types::{AuthPlatformUser, PlatformAuthResult, SafeAuthPlatformUser};
-    use bymax_auth_types::{AuthResult, AuthUser, MfaChallengeResult, RotatedTokens};
+    use bymax_auth_types::{AuthResult, AuthUser, MfaChallengeResult};
     use time::OffsetDateTime;
 
     fn safe_user() -> SafeAuthUser {
@@ -339,11 +355,10 @@ mod tests {
     }
 
     #[test]
-    fn deliver_refresh_in_every_mode() {
-        let tokens = RotatedTokens {
-            access_token: "na".to_owned(),
-            refresh_token: "nr".to_owned(),
-        };
+    fn deliver_refresh_sets_the_rotated_cookies_and_is_a_200_in_every_mode() {
+        // A rotation delivers exactly like a login (nest-auth's `deliverRefreshResponse`
+        // delegates to `deliverAuthResponse`): 200 in every mode, with the NEW pair planted as
+        // cookies in the two cookie-bearing modes and none in `bearer`.
         for mode in [
             DeliveryMode::Cookie,
             DeliveryMode::Bearer,
@@ -351,14 +366,21 @@ mod tests {
         ] {
             let cfg = resolved_config_with(mode, ConfigSS::Lax);
             let jar = cookies_jar();
-            let resp = TokenDelivery::new(&cfg).deliver_refresh(&jar, &tokens);
+            let resp = TokenDelivery::new(&cfg).deliver_refresh(&jar, &auth_result());
             assert_eq!(resp.status(), StatusCode::OK);
+            assert_eq!(
+                has_cookie(&jar, "access_token"),
+                mode != DeliveryMode::Bearer
+            );
         }
     }
 
     #[cfg(feature = "platform")]
     #[test]
-    fn deliver_platform_auth_in_every_mode() {
+    fn deliver_platform_auth_is_always_bearer_in_every_mode() {
+        // Platform delivery ignores the configured mode entirely (§7.11.1): even under
+        // `cookie`/`both` it plants NO cookie, because the operator dashboard is not a browser
+        // session. The status passes through so a caller can pick 200 or 201.
         for mode in [
             DeliveryMode::Cookie,
             DeliveryMode::Bearer,
@@ -366,13 +388,26 @@ mod tests {
         ] {
             let cfg = resolved_config_with(mode, ConfigSS::Lax);
             let jar = cookies_jar();
-            let resp = TokenDelivery::new(&cfg).deliver_platform_auth(
-                &jar,
-                &platform_result(),
-                StatusCode::OK,
-            );
+            let resp =
+                TokenDelivery::new(&cfg).deliver_platform_auth(&platform_result(), StatusCode::OK);
             assert_eq!(resp.status(), StatusCode::OK);
+            assert!(!has_cookie(&jar, "access_token"));
+            assert!(!has_cookie(&jar, "refresh_token"));
+            assert!(!has_cookie(&jar, "has_session"));
         }
+    }
+
+    #[cfg(feature = "platform")]
+    #[test]
+    fn platform_bearer_body_names_the_account_admin_not_user() {
+        // The platform body key is `admin` (nest-auth's `PlatformBearerAuthResponse`); a
+        // `user` key here would silently break every published platform client.
+        let result = platform_result();
+        let body = serde_json::to_value(platform_bearer_body(&result)).unwrap_or_default();
+        assert_eq!(body["admin"]["email"], "a@e.com");
+        assert!(body.get("user").is_none());
+        assert_eq!(body["accessToken"], "pacc");
+        assert_eq!(body["refreshToken"], "pref");
     }
 
     #[test]
@@ -408,8 +443,29 @@ mod tests {
             assert!(has_cookie(&jar2, "access_token"));
         }
 
-        // `user_body` shapes the safe user.
+        // `user_body` is the BARE safe user — no `{ user: … }` wrapper (nest-auth's `me`
+        // returns the object itself, and its published client decodes it unwrapped).
         let body = user_body(&safe_user());
-        assert_eq!(body.0["user"]["email"], "u@e.com");
+        assert_eq!(body.0["email"], "u@e.com");
+        assert!(body.0.get("user").is_none());
+    }
+
+    #[cfg(feature = "mfa")]
+    #[test]
+    fn clear_mfa_temp_cookie_removes_it_on_the_path_it_was_set_with() {
+        // The clear must reuse the MFA-temp path; a mismatched `Path` would leave a ghost
+        // cookie the browser keeps replaying at the challenge endpoint.
+        let cfg = resolved_config_with(DeliveryMode::Cookie, ConfigSS::Lax);
+        let delivery = TokenDelivery::new(&cfg);
+        let jar = cookies_jar();
+        jar.add(Cookie::new(
+            bymax_auth_types::constants::MFA_TEMP_COOKIE_NAME,
+            "temp.jwt",
+        ));
+        delivery.clear_mfa_temp_cookie(&jar);
+        assert!(!has_cookie(
+            &jar,
+            bymax_auth_types::constants::MFA_TEMP_COOKIE_NAME
+        ));
     }
 }

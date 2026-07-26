@@ -173,6 +173,27 @@ where
     }
 }
 
+/// The platform twin of [`PresentedAccessToken`]: the raw platform access token from the
+/// `Authorization: Bearer` header, or an empty string when absent. Platform sessions are always
+/// bearer, so this never consults a cookie — the access cookie on a platform request can only
+/// belong to the dashboard domain. Infallible (logout never blocks on a missing token).
+#[cfg(feature = "platform")]
+pub(crate) struct PresentedPlatformAccessToken(pub String);
+
+#[cfg(feature = "platform")]
+impl<S> FromRequestParts<S> for PresentedPlatformAccessToken
+where
+    S: Send + Sync,
+{
+    type Rejection = Infallible;
+
+    async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
+        Ok(Self(
+            crate::extractors::source_platform_access_token(parts).unwrap_or_default(),
+        ))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

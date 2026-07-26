@@ -146,13 +146,6 @@ pub struct ResetPasswordRequest {
     pub tenant_id: String,
 }
 
-/// The `{ user }`-wrapped body returned by `GET /auth/me`.
-#[derive(serde::Deserialize)]
-struct MeBody {
-    /// The credential-free user.
-    user: SafeAuthUser,
-}
-
 /// A typed, `reqwest`-backed client for a `bymax-auth-axum` backend.
 pub struct AuthClient {
     /// The shared HTTP client (a cheap-to-clone connection pool).
@@ -369,14 +362,14 @@ impl AuthClient {
         }
     }
 
-    /// `GET /auth/me` with the given bearer access token, parsing the `{ user }` wrapper.
+    /// `GET /auth/me` with the given bearer access token. The endpoint returns the safe user as
+    /// the top-level body (no `{ user }` wrapper), matching nest-auth's `AuthController.me`.
     async fn fetch_me(&self, access: &str) -> Result<SafeAuthUser, AuthClientError> {
         let request = self
             .http
             .get(format!("{}/auth/me", self.base_url))
             .header(AUTHORIZATION, format!("Bearer {access}"));
-        let body: MeBody = self.send_json(request).await?;
-        Ok(body.user)
+        self.send_json(request).await
     }
 
     /// Refresh under the single-flight lock so concurrent callers share one rotation. The
@@ -644,9 +637,9 @@ mod tests {
         )
     }
 
-    /// The `{ user }` body returned by `me`.
+    /// The body returned by `me`: the safe user itself, unwrapped.
     fn me_body() -> String {
-        r#"{"user":{"id":"u1","email":"u@e.com","name":"U","role":"USER","status":"ACTIVE","tenantId":"t1","emailVerified":true,"mfaEnabled":false,"lastLoginAt":null,"createdAt":"2020-01-01T00:00:00Z"}}"#.to_owned()
+        r#"{"id":"u1","email":"u@e.com","name":"U","role":"USER","status":"ACTIVE","tenantId":"t1","emailVerified":true,"mfaEnabled":false,"lastLoginAt":null,"createdAt":"2020-01-01T00:00:00Z"}"#.to_owned()
     }
 
     /// An `auth.*` error envelope body.

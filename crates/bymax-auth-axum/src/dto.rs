@@ -147,8 +147,16 @@ pub struct MfaVerifyDto {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct MfaChallengeDto {
     /// The short-lived MFA temp token issued by the password/OAuth step.
-    #[garde(length(min = 1))]
-    pub mfa_temp_token: String,
+    ///
+    /// **Optional**, exactly as in nest-auth's `MfaChallengeDto`: the browser-driven OAuth +
+    /// MFA flow leaves it out of the body because the callback planted it in the HttpOnly
+    /// `mfa_temp_token` cookie, which the challenge handler reads as the fallback. When it IS
+    /// present it must be non-empty and ≤ 512 chars — a compact HS256 JWT is ~200 chars, and
+    /// the cap keeps an oversized payload away from JWT verification on this public endpoint.
+    /// A request carrying neither channel is rejected by the handler as an invalid temp token,
+    /// not as a field-validation failure.
+    #[garde(inner(length(min = 1, max = 512)))]
+    pub mfa_temp_token: Option<String>,
     /// A 6-digit TOTP or a recovery code (≤ 128 prevents hash-bombing).
     #[garde(length(min = 1, max = 128))]
     pub code: String,

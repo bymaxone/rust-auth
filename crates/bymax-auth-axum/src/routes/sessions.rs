@@ -40,6 +40,9 @@ pub(crate) fn routes(config: &AxumAuthConfig, ip_source: ClientIpSource) -> Rout
 
 /// `GET /auth/sessions` (200). Requires [`AuthUser`] + [`UserStatus`]. The caller's own
 /// session is flagged when the request carries the matching refresh cookie.
+///
+/// The body is the bare JSON array, not a `{ sessions: [...] }` wrapper — nest-auth's
+/// `SessionController.listSessions` returns `SessionInfo[]` directly.
 async fn list(
     State(state): State<AuthState>,
     _status: UserStatus,
@@ -51,7 +54,7 @@ async fn list(
     match state.engine().list_user_sessions(&user.0.sub, raw).await {
         Ok(sessions) => {
             let body: Vec<Value> = sessions.iter().map(session_to_json).collect();
-            (StatusCode::OK, Json(json!({ "sessions": body }))).into_response()
+            (StatusCode::OK, Json(body)).into_response()
         }
         Err(error) => error_response(&error),
     }

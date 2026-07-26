@@ -75,6 +75,15 @@ pub(crate) fn source_access_token(parts: &Parts, config: &ResolvedConfig) -> Opt
     }
 }
 
+/// Source the **platform** access token. Unlike [`source_access_token`] this ignores the
+/// configured [`TokenDelivery`] mode and always reads `Authorization: Bearer` (§7.11.4):
+/// platform delivery never plants a cookie, so a cookie presented on a platform route can only
+/// be a dashboard credential — reading it would be a cross-domain confusion, not a convenience.
+#[cfg(feature = "platform")]
+pub(crate) fn source_platform_access_token(parts: &Parts) -> Option<String> {
+    bearer_from_header(parts)
+}
+
 /// Verify the dashboard access token once per request, caching the claims on
 /// `parts.extensions`. A subsequent stacked extractor reads the cached value rather than
 /// re-running the HMAC verification + revocation lookup. A missing token is the boundary

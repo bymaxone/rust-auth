@@ -187,6 +187,15 @@ impl Resp {
             .filter(|v| !v.is_empty())
             .unwrap_or_default()
     }
+    /// Whether the response emitted no `Set-Cookie` at all — the platform contract, which is
+    /// always bearer and must never plant a cookie.
+    fn sets_no_cookies(&self) -> bool {
+        self.headers
+            .get_all(header::SET_COOKIE)
+            .iter()
+            .next()
+            .is_none()
+    }
 }
 
 /// Drive a request through the router (peer IP injected; optional JSON body + cookies).
@@ -213,6 +222,53 @@ async fn call(
         }
     }
     builder = builder.header(header::CONTENT_TYPE, "application/json");
+    let mut request = match builder.body(body) {
+        Ok(request) => request,
+        Err(_) => return error_resp(),
+    };
+    if let Ok(addr) = PEER.parse::<SocketAddr>() {
+        request.extensions_mut().insert(ConnectInfo(addr));
+    }
+    match app.clone().oneshot(request).await {
+        Ok(response) => {
+            let status = response.status();
+            let headers = response.headers().clone();
+            let body = response
+                .into_body()
+                .collect()
+                .await
+                .map(|c| c.to_bytes().to_vec())
+                .unwrap_or_default();
+            Resp {
+                status,
+                headers,
+                body,
+            }
+        }
+        Err(_) => error_resp(),
+    }
+}
+
+/// Drive a request whose credential travels in the `Authorization: Bearer` header — the only
+/// channel a platform access token is ever accepted on.
+async fn bearer_call(
+    app: &Router,
+    method: Method,
+    path: &str,
+    body: Option<serde_json::Value>,
+    token: &str,
+) -> Resp {
+    let body = match body {
+        Some(value) => Body::from(value.to_string()),
+        None => Body::empty(),
+    };
+    let mut builder = Request::builder()
+        .method(method)
+        .uri(path)
+        .header(header::CONTENT_TYPE, "application/json");
+    if let Ok(value) = HeaderValue::from_str(&format!("Bearer {token}")) {
+        builder = builder.header(header::AUTHORIZATION, value);
+    }
     let mut request = match builder.body(body) {
         Ok(request) => request,
         Err(_) => return error_resp(),
@@ -290,7 +346,8 @@ async fn full_router_against_real_redis() {
     )
     .await;
     assert_eq!(me.status, StatusCode::OK);
-    assert_eq!(me.json()["user"]["email"], "r@e.com");
+    // The safe user is the top-level body — no `{ user: … }` wrapper (nest-auth parity).
+    assert_eq!(me.json()["email"], "r@e.com");
 
     let rotated = call(
         &app,
@@ -303,6 +360,8 @@ async fn full_router_against_real_redis() {
     assert_eq!(rotated.status, StatusCode::OK);
     let new_refresh = rotated.cookie_value("refresh_token");
     assert!(!new_refresh.is_empty());
+    // A rotation echoes the account, so a client never needs a follow-up `me` call.
+    assert_eq!(rotated.json()["user"]["email"], "r@e.com");
 
     // ---- sessions over real Redis ------------------------------------------------------
     let list = call(
@@ -314,7 +373,8 @@ async fn full_router_against_real_redis() {
     )
     .await;
     assert_eq!(list.status, StatusCode::OK);
-    assert!(list.json()["sessions"].is_array());
+    // The session list is the bare array, as nest-auth's `SessionController` returns it.
+    assert!(list.json().is_array());
 
     // ---- WS ticket mint + single-use redeem against real Redis -------------------------
     let mint = call(
@@ -390,16 +450,35 @@ async fn full_router_against_real_redis() {
     )
     .await;
     assert_eq!(plogin.status, StatusCode::OK);
-    let padmin_access = plogin.cookie_value("access_token");
-    let pme = call(
+    // Platform delivery is always bearer: the tokens come back in the body under `admin`, and
+    // no cookie is planted even though this engine runs in `cookie` mode.
+    assert!(plogin.sets_no_cookies());
+    assert_eq!(plogin.json()["admin"]["email"], "boss@e.com");
+    let padmin_access = plogin.json()["accessToken"]
+        .as_str()
+        .unwrap_or("")
+        .to_owned();
+    let padmin_refresh = plogin.json()["refreshToken"]
+        .as_str()
+        .unwrap_or("")
+        .to_owned();
+    let pme = bearer_call(&app, Method::GET, "/auth/platform/me", None, &padmin_access).await;
+    assert_eq!(pme.status, StatusCode::OK);
+    // `platform/me` returns the admin as the top-level body, no wrapper.
+    assert_eq!(pme.json()["email"], "boss@e.com");
+
+    // A platform refresh over real Redis rotates the pair from the BODY and echoes the admin.
+    let protated = call(
         &app,
-        Method::GET,
-        "/auth/platform/me",
-        None,
-        &[("access_token", &padmin_access)],
+        Method::POST,
+        "/auth/platform/refresh",
+        Some(serde_json::json!({ "refreshToken": padmin_refresh })),
+        &[],
     )
     .await;
-    assert_eq!(pme.status, StatusCode::OK);
+    assert_eq!(protated.status, StatusCode::OK);
+    assert_eq!(protated.json()["admin"]["email"], "boss@e.com");
+    assert!(protated.json()["accessToken"].is_string());
 
     // ---- invitations over real Redis ---------------------------------------------------
     seed_user(&users, "inviter@e.com", "ADMIN").await;
@@ -445,7 +524,8 @@ async fn full_router_against_real_redis() {
         &[("access_token", &mfa_access)],
     )
     .await;
-    assert_eq!(setup.status, StatusCode::OK);
+    // Enrolment answers 201 (Nest's `POST` default on `MfaController.setup`).
+    assert_eq!(setup.status, StatusCode::CREATED);
     let secret = setup.json()["secret"].as_str().unwrap_or("").to_owned();
     let raw = bymax_auth_crypto::totp::decode_secret_base32(&secret).unwrap_or_default();
     let now = std::time::SystemTime::now()

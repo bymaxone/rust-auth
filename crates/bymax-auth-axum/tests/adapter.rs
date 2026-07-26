@@ -43,6 +43,28 @@ async fn login_access_cookie(router: &axum::Router, email: &str, password: &str)
         .unwrap_or_default()
 }
 
+/// Log a platform admin in. Platform delivery is ALWAYS bearer, so the response plants no
+/// cookie and every platform token — access and refresh — travels in the JSON body.
+async fn platform_login(router: &axum::Router, email: &str) -> Captured {
+    Req::post("/auth/platform/login")
+        .json(serde_json::json!({ "email": email, "password": "adminpass123" }))
+        .send(router)
+        .await
+}
+
+/// The `accessToken` a platform login/refresh returned in its body.
+fn platform_access(resp: &Captured) -> String {
+    resp.json()["accessToken"].as_str().unwrap_or("").to_owned()
+}
+
+/// The `refreshToken` a platform login/refresh returned in its body.
+fn platform_refresh(resp: &Captured) -> String {
+    resp.json()["refreshToken"]
+        .as_str()
+        .unwrap_or("")
+        .to_owned()
+}
+
 // ----------------------------------------------------------------------------------------
 // Router skeleton + toggle/feature gating
 // ----------------------------------------------------------------------------------------
@@ -116,14 +138,17 @@ async fn register_login_me_logout_cookie_mode() {
     let signal = reg.cookie("has_session").unwrap_or_default();
     assert!(!signal.contains("HttpOnly"));
 
-    // `me` with the access cookie returns the user.
+    // `me` with the access cookie returns the safe user as the TOP-LEVEL body — no
+    // `{ user: … }` wrapper (nest-auth's `AuthController.me` returns the object itself, and
+    // its published client decodes it unwrapped).
     let access_value = reg.cookie_value("access_token").unwrap_or_default();
     let me = Req::get("/auth/me")
         .cookie("access_token", &access_value)
         .send(&app)
         .await;
     assert_eq!(me.status, StatusCode::OK);
-    assert_eq!(me.json()["user"]["email"], "a@e.com");
+    assert_eq!(me.json()["email"], "a@e.com");
+    assert!(me.json().get("user").is_none());
 
     // Logout clears the cookies (a cleared cookie has an empty value / expiry).
     let refresh_value = reg.cookie_value("refresh_token").unwrap_or_default();
@@ -215,6 +240,11 @@ async fn refresh_rotates_in_cookie_and_bearer_modes() {
         .await;
     assert_eq!(rotated.status, StatusCode::OK);
     assert!(rotated.has_cookie_value("refresh_token"));
+    // Cookie mode echoes the user in the body (nest-auth's refresh re-reads it via `getMe` and
+    // hands a full `AuthResult` to the delivery layer) instead of the old empty `{}`, so a
+    // client never needs a follow-up `GET /auth/me` after a rotation.
+    assert_eq!(rotated.json()["user"]["email"], "r@e.com");
+    assert!(rotated.json().get("accessToken").is_none());
 
     // Bearer mode: the refresh comes from the body.
     let spec = EngineSpec {
@@ -235,6 +265,9 @@ async fn refresh_rotates_in_cookie_and_bearer_modes() {
         .await;
     assert_eq!(rotated_b.status, StatusCode::OK);
     assert!(rotated_b.json()["accessToken"].is_string());
+    assert!(rotated_b.json()["refreshToken"].is_string());
+    // Bearer mode echoes the user alongside the new pair, the same body a bearer login returns.
+    assert_eq!(rotated_b.json()["user"]["email"], "rb@e.com");
 
     // An empty refresh body in bearer mode → no token → refresh-token-invalid.
     let empty = Req::post("/auth/refresh").send(&appb).await;
@@ -248,6 +281,113 @@ async fn refresh_rotates_in_cookie_and_bearer_modes() {
         .await;
     assert_eq!(bad.status, StatusCode::BAD_REQUEST);
     assert_eq!(bad.json()["error"]["code"], "auth.validation");
+}
+
+#[tokio::test]
+async fn bearer_mode_logout_revokes_the_refresh_session_from_the_body() {
+    // The security fix behind accepting `refreshToken` in the logout body: a bearer deployment
+    // plants NO cookie, so a logout that only read the cookie left the refresh session alive —
+    // the "logged out" client could keep rotating it indefinitely. With the body accepted, the
+    // session is gone and the token no longer rotates.
+    let spec = EngineSpec {
+        delivery: bymax_auth_core::config::TokenDelivery::Bearer,
+        ..EngineSpec::default()
+    };
+    let Some(h) = build(spec) else { return };
+    let app = router(&h);
+    seed_user(&h, "blo@e.com", "password123", "USER").await;
+    let session = login(&app, "blo@e.com", "password123").await;
+    let access = session.json()["accessToken"]
+        .as_str()
+        .unwrap_or("")
+        .to_owned();
+    let refresh = session.json()["refreshToken"]
+        .as_str()
+        .unwrap_or("")
+        .to_owned();
+    assert!(!refresh.is_empty());
+
+    let logout = Req::post("/auth/logout")
+        .bearer(&access)
+        .json(serde_json::json!({ "refreshToken": refresh }))
+        .send(&app)
+        .await;
+    assert_eq!(logout.status, StatusCode::NO_CONTENT);
+
+    // The revoked refresh token is dead: rotating it now fails.
+    let replay = Req::post("/auth/refresh")
+        .json(serde_json::json!({ "refreshToken": refresh }))
+        .send(&app)
+        .await;
+    assert_eq!(replay.status, StatusCode::UNAUTHORIZED);
+    assert_eq!(replay.json()["error"]["code"], "auth.refresh_token_invalid");
+}
+
+#[tokio::test]
+async fn logout_without_any_refresh_token_still_succeeds() {
+    // Logout stays best-effort and idempotent: neither an absent body nor an unparseable one
+    // blocks it (the access JTI is still blacklisted), so a client can always end its session.
+    let spec = EngineSpec {
+        delivery: bymax_auth_core::config::TokenDelivery::Bearer,
+        ..EngineSpec::default()
+    };
+    let Some(h) = build(spec) else { return };
+    let app = router(&h);
+    seed_user(&h, "nolo@e.com", "password123", "USER").await;
+
+    let first = login(&app, "nolo@e.com", "password123").await;
+    let access = first.json()["accessToken"]
+        .as_str()
+        .unwrap_or("")
+        .to_owned();
+    let bare = Req::post("/auth/logout").bearer(&access).send(&app).await;
+    assert_eq!(bare.status, StatusCode::NO_CONTENT);
+    // The access token was still revoked, so it no longer authenticates.
+    let after = Req::get("/auth/me").bearer(&access).send(&app).await;
+    assert_eq!(after.status, StatusCode::UNAUTHORIZED);
+
+    let second = login(&app, "nolo@e.com", "password123").await;
+    let access2 = second.json()["accessToken"]
+        .as_str()
+        .unwrap_or("")
+        .to_owned();
+    let junk = Req::post("/auth/logout")
+        .bearer(&access2)
+        .raw_body(b"{not json".to_vec(), "application/json")
+        .send(&app)
+        .await;
+    assert_eq!(junk.status, StatusCode::NO_CONTENT);
+}
+
+#[tokio::test]
+async fn platform_logout_revokes_the_refresh_session_from_the_body() {
+    // The platform twin of the logout gap: platform delivery never plants a cookie, so the
+    // refresh token can only arrive in the body. Reading it there is what actually kills the
+    // platform refresh session.
+    let Some(h) = build(EngineSpec {
+        platform: true,
+        ..EngineSpec::default()
+    }) else {
+        return;
+    };
+    let app = router(&h);
+    seed_admin(&h, "plo@e.com", "SUPER_ADMIN").await;
+    let session = platform_login(&app, "plo@e.com").await;
+    let access = platform_access(&session);
+    let refresh = platform_refresh(&session);
+
+    let logout = Req::post("/auth/platform/logout")
+        .bearer(&access)
+        .json(serde_json::json!({ "refreshToken": refresh }))
+        .send(&app)
+        .await;
+    assert_eq!(logout.status, StatusCode::NO_CONTENT);
+
+    let replay = Req::post("/auth/platform/refresh")
+        .json(serde_json::json!({ "refreshToken": refresh }))
+        .send(&app)
+        .await;
+    assert_eq!(replay.status, StatusCode::UNAUTHORIZED);
 }
 
 #[tokio::test]
@@ -451,18 +591,21 @@ async fn sessions_list_revoke_one_and_revoke_all() {
     let access = reg.cookie_value("access_token").unwrap_or_default();
     let refresh = reg.cookie_value("refresh_token").unwrap_or_default();
 
-    // List the caller's sessions; the current one is flagged.
+    // List the caller's sessions; the current one is flagged. The body is the BARE array —
+    // nest-auth's `SessionController.listSessions` returns `SessionInfo[]`, not a
+    // `{ sessions: [...] }` wrapper.
     let list = Req::get("/auth/sessions")
         .cookie("access_token", &access)
         .cookie("refresh_token", &refresh)
         .send(&app)
         .await;
     assert_eq!(list.status, StatusCode::OK);
-    let sessions = list.json()["sessions"]
-        .as_array()
-        .cloned()
-        .unwrap_or_default();
+    assert!(list.json().get("sessions").is_none());
+    let sessions = list.json().as_array().cloned().unwrap_or_default();
     assert!(!sessions.is_empty());
+    // The per-item shape is unchanged: the display id, the full hash, and the current flag.
+    assert!(sessions[0]["id"].is_string());
+    assert_eq!(sessions[0]["isCurrent"], true);
     let hash = sessions[0]["sessionHash"].as_str().unwrap_or("").to_owned();
 
     // The static `all` segment wins over the `{id}` capture.
@@ -516,12 +659,14 @@ async fn mfa_setup_verify_enable_and_challenge_error_arms() {
         .await;
     let access = reg.cookie_value("access_token").unwrap_or_default();
 
-    // setup returns the secret/qr/recovery codes (enrolment is reachable without MfaSatisfied).
+    // setup returns the secret/qr/recovery codes (enrolment is reachable without MfaSatisfied),
+    // with a 201 — nest-auth's `MfaController.setup` carries no `@HttpCode`, so it answers with
+    // Nest's `POST` default.
     let setup = Req::post("/auth/mfa/setup")
         .cookie("access_token", &access)
         .send(&app)
         .await;
-    assert_eq!(setup.status, StatusCode::OK);
+    assert_eq!(setup.status, StatusCode::CREATED);
     let secret = setup.json()["secret"].as_str().unwrap_or("").to_owned();
     assert!(!secret.is_empty());
 
@@ -599,22 +744,27 @@ async fn platform_login_me_logout_and_dashboard_token_is_rejected() {
     let app = router(&h);
     seed_admin(&h, "boss@e.com", "SUPER_ADMIN").await;
 
-    // Platform login (no tenant) returns a platform session.
-    let login = Req::post("/auth/platform/login")
-        .json(serde_json::json!({ "email": "boss@e.com", "password": "adminpass123" }))
-        .send(&app)
-        .await;
+    // Platform login (no tenant) returns a platform session in the BODY under `admin`, with
+    // the token pair alongside — nest-auth's `PlatformBearerAuthResponse`. Even though this
+    // engine is in `cookie` delivery mode, the platform path plants NO cookie at all.
+    let login = platform_login(&app, "boss@e.com").await;
     assert_eq!(login.status, StatusCode::OK);
-    let access = login.cookie_value("access_token").unwrap_or_default();
+    assert!(login.set_cookies.is_empty());
+    assert_eq!(login.json()["admin"]["email"], "boss@e.com");
+    assert!(login.json().get("user").is_none());
+    let access = platform_access(&login);
     assert!(!access.is_empty());
+    assert!(!platform_refresh(&login).is_empty());
 
-    // Platform `me` returns the admin (no tenantId).
+    // Platform `me` returns the admin as the top-level body (no wrapper, no tenantId), read
+    // via the bearer header — the only channel a platform token ever travels on.
     let me = Req::get("/auth/platform/me")
-        .cookie("access_token", &access)
+        .bearer(&access)
         .send(&app)
         .await;
     assert_eq!(me.status, StatusCode::OK);
-    assert_eq!(me.json()["user"]["email"], "boss@e.com");
+    assert_eq!(me.json()["email"], "boss@e.com");
+    assert!(me.json().get("user").is_none());
 
     // A dashboard token on a platform route is `platform_auth_required`.
     let dash = seed_user(&h, "tenant@e.com", "password123", "USER").await;
@@ -627,15 +777,23 @@ async fn platform_login_me_logout_and_dashboard_token_is_rejected() {
         .await;
     let dash_token = dash_login.cookie_value("access_token").unwrap_or_default();
     let wrong = Req::get("/auth/platform/me")
-        .cookie("access_token", &dash_token)
+        .bearer(&dash_token)
         .send(&app)
         .await;
     assert_eq!(wrong.status, StatusCode::UNAUTHORIZED);
     assert_eq!(wrong.json()["error"]["code"], "auth.platform_auth_required");
 
+    // The dashboard access COOKIE is never accepted on a platform route either, whatever it
+    // carries — platform extraction reads the bearer header only.
+    let via_cookie = Req::get("/auth/platform/me")
+        .cookie("access_token", &access)
+        .send(&app)
+        .await;
+    assert_eq!(via_cookie.status, StatusCode::UNAUTHORIZED);
+
     // Platform logout clears the session.
     let logout = Req::post("/auth/platform/logout")
-        .cookie("access_token", &access)
+        .bearer(&access)
         .send(&app)
         .await;
     assert_eq!(logout.status, StatusCode::NO_CONTENT);
@@ -663,18 +821,16 @@ async fn platform_mfa_setup_requires_platform_auth() {
     let setup = Req::post("/auth/platform/mfa/setup").send(&app).await;
     assert_eq!(setup.status, StatusCode::UNAUTHORIZED);
 
-    // With a platform token, setup returns the enrolment material.
+    // With a platform bearer token, setup returns the enrolment material with a 201 (the
+    // shared nest-auth `MfaController.setup` has no `@HttpCode`).
     seed_admin(&h, "padmin@e.com", "SUPER_ADMIN").await;
-    let login = Req::post("/auth/platform/login")
-        .json(serde_json::json!({ "email": "padmin@e.com", "password": "adminpass123" }))
-        .send(&app)
-        .await;
-    let access = login.cookie_value("access_token").unwrap_or_default();
+    let login = platform_login(&app, "padmin@e.com").await;
+    let access = platform_access(&login);
     let setup_ok = Req::post("/auth/platform/mfa/setup")
-        .cookie("access_token", &access)
+        .bearer(&access)
         .send(&app)
         .await;
-    assert_eq!(setup_ok.status, StatusCode::OK);
+    assert_eq!(setup_ok.status, StatusCode::CREATED);
     assert!(setup_ok.json()["secret"].is_string());
 }
 
@@ -939,19 +1095,21 @@ async fn platform_refresh_revoke_all_and_mfa_challenge_arms() {
     };
     let app = router(&h);
     seed_admin(&h, "ops@e.com", "SUPER_ADMIN").await;
-    let login = Req::post("/auth/platform/login")
-        .json(serde_json::json!({ "email": "ops@e.com", "password": "adminpass123" }))
-        .send(&app)
-        .await;
-    let access = login.cookie_value("access_token").unwrap_or_default();
-    let refresh = login.cookie_value("refresh_token").unwrap_or_default();
+    let login = platform_login(&app, "ops@e.com").await;
+    let access = platform_access(&login);
+    let refresh = platform_refresh(&login);
 
-    // Platform refresh rotates the pair from the cookie.
+    // Platform refresh rotates the pair from the BODY (platform never uses cookies) and echoes
+    // the admin alongside the new pair, matching `PlatformAuthController.refresh`.
     let rotated = Req::post("/auth/platform/refresh")
-        .cookie("refresh_token", &refresh)
+        .json(serde_json::json!({ "refreshToken": refresh }))
         .send(&app)
         .await;
     assert_eq!(rotated.status, StatusCode::OK);
+    assert!(rotated.set_cookies.is_empty());
+    assert_eq!(rotated.json()["admin"]["email"], "ops@e.com");
+    assert!(rotated.json()["accessToken"].is_string());
+    assert_ne!(platform_refresh(&rotated), refresh);
 
     // A malformed platform refresh body is a validation error.
     let bad = Req::post("/auth/platform/refresh")
@@ -962,7 +1120,7 @@ async fn platform_refresh_revoke_all_and_mfa_challenge_arms() {
 
     // revoke-all with a platform token succeeds.
     let revoke = Req::delete("/auth/platform/sessions")
-        .cookie("access_token", &access)
+        .bearer(&access)
         .send(&app)
         .await;
     assert_eq!(revoke.status, StatusCode::NO_CONTENT);
@@ -973,6 +1131,20 @@ async fn platform_refresh_revoke_all_and_mfa_challenge_arms() {
         .send(&app)
         .await;
     assert_eq!(challenge.status, StatusCode::UNAUTHORIZED);
+
+    // Omitting the temp token entirely is an INVALID-TEMP-TOKEN 401, not a validation 400:
+    // the shared DTO makes the field optional for the dashboard OAuth cookie flow, and the
+    // platform handler (which has no cookie flow) rejects the absence explicitly, exactly as
+    // `PlatformAuthController.mfaChallenge` does.
+    let missing = Req::post("/auth/platform/mfa/challenge")
+        .json(serde_json::json!({ "code": "123456" }))
+        .send(&app)
+        .await;
+    assert_eq!(missing.status, StatusCode::UNAUTHORIZED);
+    assert_eq!(
+        missing.json()["error"]["code"],
+        "auth.mfa_temp_token_invalid"
+    );
 }
 
 // ----------------------------------------------------------------------------------------
@@ -990,23 +1162,21 @@ async fn platform_mfa_full_lifecycle() {
     };
     let app = router(&h);
     seed_admin(&h, "padmin2@e.com", "SUPER_ADMIN").await;
-    let login = Req::post("/auth/platform/login")
-        .json(serde_json::json!({ "email": "padmin2@e.com", "password": "adminpass123" }))
-        .send(&app)
-        .await;
-    let access = login.cookie_value("access_token").unwrap_or_default();
+    let login = platform_login(&app, "padmin2@e.com").await;
+    let access = platform_access(&login);
 
+    // Enrolment answers 201 (Nest's `POST` default, since `MfaController.setup` sets no code).
     let setup = Req::post("/auth/platform/mfa/setup")
-        .cookie("access_token", &access)
+        .bearer(&access)
         .send(&app)
         .await;
-    assert_eq!(setup.status, StatusCode::OK);
+    assert_eq!(setup.status, StatusCode::CREATED);
     let secret = setup.json()["secret"].as_str().unwrap_or("").to_owned();
 
     // Each TOTP-gated step uses a distinct window offset so the per-window anti-replay never
     // rejects a reused code (the verifier's window tolerance accepts the near-future codes).
     let enable = Req::post("/auth/platform/mfa/verify-enable")
-        .cookie("access_token", &access)
+        .bearer(&access)
         .json(serde_json::json!({ "code": totp_at(&secret, 0) }))
         .send(&app)
         .await;
@@ -1014,7 +1184,7 @@ async fn platform_mfa_full_lifecycle() {
 
     // recovery-codes with a fresh-window TOTP returns a fresh set.
     let recov = Req::post("/auth/platform/mfa/recovery-codes")
-        .cookie("access_token", &access)
+        .bearer(&access)
         .json(serde_json::json!({ "code": totp_at(&secret, 30) }))
         .send(&app)
         .await;
@@ -1023,7 +1193,7 @@ async fn platform_mfa_full_lifecycle() {
 
     // disable with another fresh-window TOTP turns it off.
     let disable = Req::post("/auth/platform/mfa/disable")
-        .cookie("access_token", &access)
+        .bearer(&access)
         .json(serde_json::json!({ "code": totp_at(&secret, 60) }))
         .send(&app)
         .await;
@@ -1101,6 +1271,210 @@ async fn mfa_dashboard_challenge_success_issues_a_session() {
         .await;
     assert_eq!(challenge.status, StatusCode::OK);
     assert!(challenge.has_cookie_value("access_token"));
+}
+
+#[tokio::test]
+async fn mfa_challenge_falls_back_to_the_oauth_temp_cookie_and_clears_it() {
+    // The browser OAuth + MFA flow end to end: the callback plants the HttpOnly
+    // `mfa_temp_token` cookie and 302s to the MFA page, which can never read that cookie to
+    // echo it in a body. Requiring `mfaTempToken` in the body therefore made the flow
+    // impossible to complete. The cookie is now the fallback — and it is CLEARED once consumed
+    // so the spent token is not left in the browser.
+    let Some(h) = build(EngineSpec {
+        mfa: true,
+        oauth: true,
+        allow_oauth: true,
+        ..EngineSpec::default()
+    }) else {
+        return;
+    };
+    // The mock provider resolves to this account; enabling MFA makes the callback yield a
+    // challenge rather than a session.
+    let id = seed_user(&h, "mock@example.com", "password123", "USER").await;
+    let app = router(&h);
+
+    // Enrol MFA properly so a recovery code exists for the challenge.
+    let login0 = login(&app, "mock@example.com", "password123").await;
+    let access = login0.cookie_value("access_token").unwrap_or_default();
+    let setup = Req::post("/auth/mfa/setup")
+        .cookie("access_token", &access)
+        .send(&app)
+        .await;
+    let secret = setup.json()["secret"].as_str().unwrap_or("").to_owned();
+    let recovery = setup.json()["recoveryCodes"][0]
+        .as_str()
+        .unwrap_or("")
+        .to_owned();
+    let _ = Req::post("/auth/mfa/verify-enable")
+        .cookie("access_token", &access)
+        .json(serde_json::json!({ "code": current_totp(&secret) }))
+        .send(&app)
+        .await;
+    use bymax_auth_core::traits::UserRepository;
+    let _ = h.users.link_oauth(&id, "google", "mock-123").await;
+
+    // Drive the real OAuth callback so the temp cookie is planted by the adapter itself.
+    let initiate = Req::get("/auth/oauth/google?tenantId=t1").send(&app).await;
+    let location = initiate
+        .headers
+        .get(header::LOCATION)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_owned();
+    let state = location
+        .split("state=")
+        .nth(1)
+        .and_then(|s| s.split('&').next())
+        .unwrap_or("")
+        .to_owned();
+    let callback = Req::get(&format!(
+        "/auth/oauth/google/callback?code=abc&state={state}"
+    ))
+    .send(&app)
+    .await;
+    let temp_cookie = callback.cookie_value("mfa_temp_token").unwrap_or_default();
+    assert!(!temp_cookie.is_empty());
+
+    // The challenge body omits `mfaTempToken` entirely — the cookie carries it.
+    let challenge = Req::post("/auth/mfa/challenge")
+        .cookie("mfa_temp_token", &temp_cookie)
+        .json(serde_json::json!({ "code": recovery }))
+        .send(&app)
+        .await;
+    assert_eq!(challenge.status, StatusCode::OK);
+    assert!(challenge.has_cookie_value("access_token"));
+    // The consumed temp cookie is cleared (a `Set-Cookie` with an empty value).
+    assert!(challenge.cookie("mfa_temp_token").is_some());
+    assert!(!challenge.has_cookie_value("mfa_temp_token"));
+}
+
+#[tokio::test]
+async fn mfa_challenge_temp_token_sourcing_precedence_and_clearing_policy() {
+    // Three rules of the cookie fallback, all mirroring `mfa.controller.ts`:
+    //   1. neither channel supplied → `mfa_temp_token_invalid`, NOT a validation 400;
+    //   2. a dead cookie token → cleared (retrying under it can never succeed);
+    //   3. a live token + a WRONG code → cookie KEPT, so the user can retry inside its TTL.
+    let Some(h) = build(EngineSpec {
+        mfa: true,
+        ..EngineSpec::default()
+    }) else {
+        return;
+    };
+    let app = router(&h);
+
+    // 1. Neither body nor cookie.
+    let neither = Req::post("/auth/mfa/challenge")
+        .json(serde_json::json!({ "code": "123456" }))
+        .send(&app)
+        .await;
+    assert_eq!(neither.status, StatusCode::UNAUTHORIZED);
+    assert_eq!(
+        neither.json()["error"]["code"],
+        "auth.mfa_temp_token_invalid"
+    );
+
+    // 2. A forged cookie token is invalid → the cookie is cleared.
+    let dead = Req::post("/auth/mfa/challenge")
+        .cookie("mfa_temp_token", "bogus")
+        .json(serde_json::json!({ "code": "123456" }))
+        .send(&app)
+        .await;
+    assert_eq!(dead.status, StatusCode::UNAUTHORIZED);
+    assert!(dead.cookie("mfa_temp_token").is_some());
+    assert!(!dead.has_cookie_value("mfa_temp_token"));
+
+    // 3. A LIVE temp token from a real MFA login, submitted with a wrong code: the failure is
+    // recoverable, so the cookie must survive for the retry.
+    let reg = Req::post("/auth/register")
+        .json(serde_json::json!({
+            "email": "keep@e.com", "password": "password123", "name": "Kee", "tenantId": TENANT
+        }))
+        .send(&app)
+        .await;
+    let access = reg.cookie_value("access_token").unwrap_or_default();
+    let setup = Req::post("/auth/mfa/setup")
+        .cookie("access_token", &access)
+        .send(&app)
+        .await;
+    let secret = setup.json()["secret"].as_str().unwrap_or("").to_owned();
+    let _ = Req::post("/auth/mfa/verify-enable")
+        .cookie("access_token", &access)
+        .json(serde_json::json!({ "code": current_totp(&secret) }))
+        .send(&app)
+        .await;
+    let mfa_login = login(&app, "keep@e.com", "password123").await;
+    let temp = mfa_login.json()["mfaTempToken"]
+        .as_str()
+        .unwrap_or("")
+        .to_owned();
+    assert!(!temp.is_empty());
+    let wrong_code = Req::post("/auth/mfa/challenge")
+        .cookie("mfa_temp_token", &temp)
+        .json(serde_json::json!({ "code": "000000" }))
+        .send(&app)
+        .await;
+    assert_ne!(wrong_code.status, StatusCode::OK);
+    assert_eq!(
+        wrong_code.json()["error"]["code"],
+        "auth.mfa_invalid_code",
+        "a wrong code must not be reported as an invalid temp token"
+    );
+    assert!(wrong_code.cookie("mfa_temp_token").is_none());
+}
+
+#[tokio::test]
+async fn mfa_challenge_body_token_wins_over_a_stale_cookie() {
+    // The body is the historical channel of the password-login flow, so it takes precedence
+    // when both are present. On success the stale cookie is still cleared — nest-auth clears
+    // whenever a cookie was on the request, so a spent OAuth cookie never lingers after the
+    // challenge completes through the other channel.
+    let Some(h) = build(EngineSpec {
+        mfa: true,
+        ..EngineSpec::default()
+    }) else {
+        return;
+    };
+    let app = router(&h);
+    let reg = Req::post("/auth/register")
+        .json(serde_json::json!({
+            "email": "pref@e.com", "password": "password123", "name": "Pre", "tenantId": TENANT
+        }))
+        .send(&app)
+        .await;
+    let access = reg.cookie_value("access_token").unwrap_or_default();
+    let setup = Req::post("/auth/mfa/setup")
+        .cookie("access_token", &access)
+        .send(&app)
+        .await;
+    let secret = setup.json()["secret"].as_str().unwrap_or("").to_owned();
+    let recovery = setup.json()["recoveryCodes"][0]
+        .as_str()
+        .unwrap_or("")
+        .to_owned();
+    let _ = Req::post("/auth/mfa/verify-enable")
+        .cookie("access_token", &access)
+        .json(serde_json::json!({ "code": current_totp(&secret) }))
+        .send(&app)
+        .await;
+
+    let mfa_login = login(&app, "pref@e.com", "password123").await;
+    let temp = mfa_login.json()["mfaTempToken"]
+        .as_str()
+        .unwrap_or("")
+        .to_owned();
+
+    // The body carries the REAL token while the cookie carries garbage: the body wins, so the
+    // challenge succeeds (a cookie-first handler would have failed on the garbage value).
+    let challenge = Req::post("/auth/mfa/challenge")
+        .cookie("mfa_temp_token", "stale-and-ignored")
+        .json(serde_json::json!({ "mfaTempToken": temp, "code": recovery }))
+        .send(&app)
+        .await;
+    assert_eq!(challenge.status, StatusCode::OK);
+    assert!(challenge.has_cookie_value("access_token"));
+    // The stale cookie present on the request is cleared on success all the same.
+    assert!(challenge.cookie("mfa_temp_token").is_some());
+    assert!(!challenge.has_cookie_value("mfa_temp_token"));
 }
 
 // ----------------------------------------------------------------------------------------
@@ -1364,13 +1738,10 @@ async fn platform_login_mfa_challenge_success() {
     let admin_id = seed_admin(&h, "mfaboss@e.com", "SUPER_ADMIN").await;
 
     // Enrol platform MFA via setup + verify-enable.
-    let login0 = Req::post("/auth/platform/login")
-        .json(serde_json::json!({ "email": "mfaboss@e.com", "password": "adminpass123" }))
-        .send(&app)
-        .await;
-    let access = login0.cookie_value("access_token").unwrap_or_default();
+    let login0 = platform_login(&app, "mfaboss@e.com").await;
+    let access = platform_access(&login0);
     let setup = Req::post("/auth/platform/mfa/setup")
-        .cookie("access_token", &access)
+        .bearer(&access)
         .send(&app)
         .await;
     let secret = setup.json()["secret"].as_str().unwrap_or("").to_owned();
@@ -1379,30 +1750,30 @@ async fn platform_login_mfa_challenge_success() {
         .unwrap_or("")
         .to_owned();
     let _ = Req::post("/auth/platform/mfa/verify-enable")
-        .cookie("access_token", &access)
+        .bearer(&access)
         .json(serde_json::json!({ "code": current_totp(&secret) }))
         .send(&app)
         .await;
     let _ = admin_id;
 
     // A fresh login now returns a platform MFA challenge.
-    let login = Req::post("/auth/platform/login")
-        .json(serde_json::json!({ "email": "mfaboss@e.com", "password": "adminpass123" }))
-        .send(&app)
-        .await;
+    let login = platform_login(&app, "mfaboss@e.com").await;
     assert_eq!(login.json()["mfaRequired"], true);
     let temp = login.json()["mfaTempToken"]
         .as_str()
         .unwrap_or("")
         .to_owned();
 
-    // Completing the platform MFA challenge with a recovery code issues a platform session.
+    // Completing the platform MFA challenge with a recovery code issues a platform session —
+    // in the body under `admin`, with no cookie planted (platform is always bearer).
     let challenge = Req::post("/auth/platform/mfa/challenge")
         .json(serde_json::json!({ "mfaTempToken": temp, "code": recovery }))
         .send(&app)
         .await;
     assert_eq!(challenge.status, StatusCode::OK);
-    assert!(challenge.has_cookie_value("access_token"));
+    assert!(challenge.set_cookies.is_empty());
+    assert_eq!(challenge.json()["admin"]["email"], "mfaboss@e.com");
+    assert!(!platform_access(&challenge).is_empty());
 }
 
 #[tokio::test]
@@ -1511,7 +1882,7 @@ async fn platform_me_and_revoke_error_arms_with_a_ghost_admin() {
     let ghost = common::mint_platform_token("ghost-admin", "SUPER_ADMIN");
 
     let me = Req::get("/auth/platform/me")
-        .cookie("access_token", &ghost)
+        .bearer(&ghost)
         .send(&app)
         .await;
     assert_eq!(me.status, StatusCode::UNAUTHORIZED);
@@ -1520,12 +1891,12 @@ async fn platform_me_and_revoke_error_arms_with_a_ghost_admin() {
     // revoke-all for a ghost admin: the engine revokes nothing and returns Ok (204), but the
     // path is exercised; a logout for the ghost also runs.
     let revoke = Req::delete("/auth/platform/sessions")
-        .cookie("access_token", &ghost)
+        .bearer(&ghost)
         .send(&app)
         .await;
     assert_eq!(revoke.status, StatusCode::NO_CONTENT);
     let logout = Req::post("/auth/platform/logout")
-        .cookie("access_token", &ghost)
+        .bearer(&ghost)
         .send(&app)
         .await;
     assert_eq!(logout.status, StatusCode::NO_CONTENT);
@@ -1559,12 +1930,12 @@ async fn mfa_setup_error_arm_when_already_enabled() {
         .send(&app)
         .await;
     // setup again now hits the setup error arm; the exact status depends on the engine's
-    // re-enrolment policy, so assert only that it is no longer the 200 success.
+    // re-enrolment policy, so assert only that it is no longer the 201 success.
     let again = Req::post("/auth/mfa/setup")
         .cookie("access_token", &access)
         .send(&app)
         .await;
-    assert_ne!(again.status, StatusCode::OK);
+    assert_ne!(again.status, StatusCode::CREATED);
 }
 
 #[tokio::test]
@@ -1744,7 +2115,7 @@ async fn mfa_handler_error_arms_with_a_ghost_subject() {
         .cookie("access_token", &ghost)
         .send(&app)
         .await;
-    assert_ne!(setup.status, StatusCode::OK);
+    assert_ne!(setup.status, StatusCode::CREATED);
 
     let verify = Req::post("/auth/mfa/verify-enable")
         .cookie("access_token", &ghost)
@@ -1782,24 +2153,24 @@ async fn platform_mfa_handler_error_arms_with_a_ghost_admin() {
     let ghost = common::mint_platform_token("ghost-padmin", "SUPER_ADMIN");
 
     let setup = Req::post("/auth/platform/mfa/setup")
-        .cookie("access_token", &ghost)
+        .bearer(&ghost)
         .send(&app)
         .await;
-    assert_ne!(setup.status, StatusCode::OK);
+    assert_ne!(setup.status, StatusCode::CREATED);
     let verify = Req::post("/auth/platform/mfa/verify-enable")
-        .cookie("access_token", &ghost)
+        .bearer(&ghost)
         .json(serde_json::json!({ "code": "000000" }))
         .send(&app)
         .await;
     assert_ne!(verify.status, StatusCode::NO_CONTENT);
     let disable = Req::post("/auth/platform/mfa/disable")
-        .cookie("access_token", &ghost)
+        .bearer(&ghost)
         .json(serde_json::json!({ "code": "000000" }))
         .send(&app)
         .await;
     assert_ne!(disable.status, StatusCode::NO_CONTENT);
     let recov = Req::post("/auth/platform/mfa/recovery-codes")
-        .cookie("access_token", &ghost)
+        .bearer(&ghost)
         .json(serde_json::json!({ "code": "000000" }))
         .send(&app)
         .await;
@@ -1821,13 +2192,10 @@ async fn mfa_and_platform_challenge_context_mismatch_arms() {
 
     // Enrol a platform admin and obtain a platform MFA temp token via login.
     let admin = seed_admin(&h, "ctx@e.com", "SUPER_ADMIN").await;
-    let login0 = Req::post("/auth/platform/login")
-        .json(serde_json::json!({ "email": "ctx@e.com", "password": "adminpass123" }))
-        .send(&app)
-        .await;
-    let access = login0.cookie_value("access_token").unwrap_or_default();
+    let login0 = platform_login(&app, "ctx@e.com").await;
+    let access = platform_access(&login0);
     let setup = Req::post("/auth/platform/mfa/setup")
-        .cookie("access_token", &access)
+        .bearer(&access)
         .send(&app)
         .await;
     let secret = setup.json()["secret"].as_str().unwrap_or("").to_owned();
@@ -1836,15 +2204,12 @@ async fn mfa_and_platform_challenge_context_mismatch_arms() {
         .unwrap_or("")
         .to_owned();
     let _ = Req::post("/auth/platform/mfa/verify-enable")
-        .cookie("access_token", &access)
+        .bearer(&access)
         .json(serde_json::json!({ "code": current_totp(&secret) }))
         .send(&app)
         .await;
     let _ = admin;
-    let plogin = Req::post("/auth/platform/login")
-        .json(serde_json::json!({ "email": "ctx@e.com", "password": "adminpass123" }))
-        .send(&app)
-        .await;
+    let plogin = platform_login(&app, "ctx@e.com").await;
     let platform_temp = plogin.json()["mfaTempToken"]
         .as_str()
         .unwrap_or("")
@@ -1937,10 +2302,61 @@ async fn platform_revoke_all_store_failure_arm() {
     // store op fails → the platform revoke-all error arm renders a 500.
     let token = common::mint_platform_token("padmin", "SUPER_ADMIN");
     let revoke = Req::delete("/auth/platform/sessions")
-        .cookie("access_token", &token)
+        .bearer(&token)
         .send(&app)
         .await;
     assert_eq!(revoke.status, StatusCode::INTERNAL_SERVER_ERROR);
+}
+
+#[tokio::test]
+async fn refresh_surfaces_a_failure_to_re_read_the_account_after_rotation() {
+    // Echoing the account in the refresh body means the handler does a second step after the
+    // rotation succeeds: recover the subject from the new access token, then re-read the
+    // record. With the `rv:{jti}` revocation check failing (Redis down) that second step
+    // fails, and the request MUST surface the infrastructure error as a 500 — reporting a
+    // rotation whose body could not be built as a success would hand the client a body it
+    // cannot use.
+    let Some(h) = common::build_failing_blacklist() else {
+        return;
+    };
+    let app = router(&h);
+    let reg = Req::post("/auth/register")
+        .json(serde_json::json!({
+            "email": "rr@e.com", "password": "password123", "name": "Rr", "tenantId": TENANT
+        }))
+        .send(&app)
+        .await;
+    let refresh = reg.cookie_value("refresh_token").unwrap_or_default();
+    assert!(!refresh.is_empty());
+
+    let rotated = Req::post("/auth/refresh")
+        .cookie("refresh_token", &refresh)
+        .send(&app)
+        .await;
+    assert_eq!(rotated.status, StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(rotated.json()["error"]["code"], "auth.internal");
+}
+
+#[tokio::test]
+async fn platform_refresh_surfaces_a_failure_to_re_read_the_admin_after_rotation() {
+    // The platform twin of the above: the admin echo needs the freshly-minted platform token
+    // verified, so a failing revocation check turns the rotation into a 500 rather than a
+    // success with no `admin` in it.
+    let Some(h) = common::build_failing_blacklist() else {
+        return;
+    };
+    let app = router(&h);
+    seed_admin(&h, "rrp@e.com", "SUPER_ADMIN").await;
+    let session = platform_login(&app, "rrp@e.com").await;
+    let refresh = platform_refresh(&session);
+    assert!(!refresh.is_empty());
+
+    let rotated = Req::post("/auth/platform/refresh")
+        .json(serde_json::json!({ "refreshToken": refresh }))
+        .send(&app)
+        .await;
+    assert_eq!(rotated.status, StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(rotated.json()["error"]["code"], "auth.internal");
 }
 
 #[tokio::test]
@@ -1955,7 +2371,7 @@ async fn platform_extractor_propagates_internal_errors_but_masks_token_failures(
 
     let token = common::mint_platform_token("padmin", "SUPER_ADMIN");
     let internal = Req::get("/auth/platform/me")
-        .cookie("access_token", &token)
+        .bearer(&token)
         .send(&app)
         .await;
     assert_eq!(internal.status, StatusCode::INTERNAL_SERVER_ERROR);
@@ -1964,7 +2380,7 @@ async fn platform_extractor_propagates_internal_errors_but_masks_token_failures(
     // A token-auth failure (a malformed/invalid token) never reaches the revocation check, so it
     // still collapses to `platform_auth_required` (401) — the masking is correct for THIS case.
     let invalid = Req::get("/auth/platform/me")
-        .cookie("access_token", "not-a-jwt")
+        .bearer("not-a-jwt")
         .send(&app)
         .await;
     assert_eq!(invalid.status, StatusCode::UNAUTHORIZED);

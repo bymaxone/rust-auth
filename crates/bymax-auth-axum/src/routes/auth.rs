@@ -10,7 +10,7 @@ use axum::extract::State;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use bymax_auth_core::services::auth::{LoginInput, RegisterInput};
-use bymax_auth_types::{LoginResult, RotatedTokens};
+use bymax_auth_types::{AuthError, AuthResult, LoginResult, RotatedTokens};
 use http::StatusCode;
 use tower_cookies::Cookies;
 
@@ -104,13 +104,27 @@ async fn login(
 
 /// `POST /auth/logout` (204). Requires [`AuthUser`]. Revokes the access JTI and the refresh
 /// session, then clears the auth cookies.
+///
+/// The refresh token is sourced from the cookie **or** the request body, exactly as nest-auth
+/// does (`AuthController.logout` → `extractRefreshToken`). Reading only the cookie left a real
+/// gap: a bearer-mode deployment plants no cookie, so the refresh session survived logout and
+/// the "revoked" client could keep rotating it.
 async fn logout(
     State(state): State<AuthState>,
     cookies: Cookies,
     user: AuthUser,
     PresentedAccessToken(access_token): PresentedAccessToken,
+    body: axum::body::Bytes,
 ) -> Response {
-    let refresh = source_refresh_token(&cookies, &state.config().cookies.refresh_name, None);
+    // Logout is best-effort and idempotent end to end (the engine swallows store failures), so
+    // an unparseable body degrades to "no body-supplied token" rather than 400-ing and leaving
+    // the session alive — the cookie channel still gets its chance.
+    let dto = parse_optional_refresh_body(&body).unwrap_or_default();
+    let refresh = source_refresh_token(
+        &cookies,
+        &state.config().cookies.refresh_name,
+        dto.refresh_token.as_deref(),
+    );
     let _ = state
         .engine()
         .logout(&access_token, &refresh, &user.0.sub)
@@ -120,7 +134,10 @@ async fn logout(
 }
 
 /// `POST /auth/refresh` (200). Public. Rotates the refresh token (cookie or body) into a
-/// fresh pair and delivers it.
+/// fresh pair and delivers it **with the account echoed alongside**, as nest-auth does
+/// (`AuthController.refresh` re-reads the user via `getMe` and hands an `AuthResult` to the
+/// delivery layer). Returning the bare pair — or an empty `{}` in cookie mode — would force
+/// every client into a second `GET /auth/me` round trip after each rotation.
 async fn refresh(
     State(state): State<AuthState>,
     cookies: Cookies,
@@ -136,17 +153,22 @@ async fn refresh(
     let body_refresh = dto.refresh_token.as_deref();
     let refresh =
         source_refresh_token(&cookies, &state.config().cookies.refresh_name, body_refresh);
-    match state
+    let tokens = match state
         .engine()
         .refresh(&refresh, &ctx.ip, &ctx.user_agent)
         .await
     {
-        Ok(tokens) => deliver_refresh(&state, &cookies, &tokens),
+        Ok(tokens) => tokens,
+        Err(error) => return error_response(&error),
+    };
+    match rotated_into_auth_result(&state, tokens).await {
+        Ok(result) => TokenDelivery::new(state.config()).deliver_refresh(&cookies, &result),
         Err(error) => error_response(&error),
     }
 }
 
-/// `GET /auth/me` (200). Requires [`AuthUser`]. Returns the credential-free user.
+/// `GET /auth/me` (200). Requires [`AuthUser`]. Returns the credential-free user as the
+/// top-level body (no wrapper) — see [`user_body`].
 async fn me(State(state): State<AuthState>, user: AuthUser) -> Response {
     match state.engine().me(&user.0.sub).await {
         Ok(safe) => (StatusCode::OK, user_body(&safe)).into_response(),
@@ -199,7 +221,25 @@ fn deliver_login(
     }
 }
 
-/// Shared delivery for a refresh rotation.
-fn deliver_refresh(state: &AuthState, cookies: &Cookies, tokens: &RotatedTokens) -> Response {
-    TokenDelivery::new(state.config()).deliver_refresh(cookies, tokens)
+/// Pair a rotated token pair with the account it belongs to, producing the [`AuthResult`] the
+/// delivery layer shapes into the refresh body.
+///
+/// The engine's `refresh` returns only the pair, so the subject is recovered from the
+/// freshly-minted access token (it verifies by construction) and the account is re-read
+/// through `me` — the same "rotate, then `getMe`" sequence nest-auth's controller performs,
+/// which also guarantees the echoed record reflects any change made since the last issuance.
+async fn rotated_into_auth_result(
+    state: &AuthState,
+    tokens: RotatedTokens,
+) -> Result<AuthResult, AuthError> {
+    let claims = state
+        .engine()
+        .verify_access_token(&tokens.access_token)
+        .await?;
+    let user = state.engine().me(&claims.sub).await?;
+    Ok(AuthResult {
+        user,
+        access_token: tokens.access_token,
+        refresh_token: tokens.refresh_token,
+    })
 }

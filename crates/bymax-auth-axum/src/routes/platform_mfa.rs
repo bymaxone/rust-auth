@@ -42,7 +42,9 @@ pub(crate) fn routes(config: &AxumAuthConfig, ip_source: ClientIpSource) -> Rout
         )
 }
 
-/// `POST /auth/platform/mfa/setup` (200). Requires [`PlatformUser`].
+/// `POST /auth/platform/mfa/setup` (201). Requires [`PlatformUser`]. 201 for the same reason
+/// the dashboard enrolment is 201 — the shared nest-auth `MfaController.setup` has no
+/// `@HttpCode`, so it answers with Nest's `POST` default.
 async fn setup(State(state): State<AuthState>, user: PlatformUser) -> Response {
     match state
         .engine()
@@ -50,7 +52,7 @@ async fn setup(State(state): State<AuthState>, user: PlatformUser) -> Response {
         .await
     {
         Ok(result) => (
-            StatusCode::OK,
+            StatusCode::CREATED,
             Json(json!({
                 "secret": result.secret,
                 "qrCodeUri": result.qr_code_uri,

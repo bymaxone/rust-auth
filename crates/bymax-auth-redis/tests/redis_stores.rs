@@ -638,9 +638,11 @@ async fn keys_are_namespaced_no_pii_and_carry_a_ttl() {
 
     let keys = redis.all_keys().await;
     assert!(!keys.is_empty(), "operations should have written keys");
+    // The catalog is exhaustive on purpose: an unlisted prefix fails the test rather than
+    // passing silently, so adding a keyspace forces a deliberate decision here.
     let allowed = [
-        "rt", "rv", "rp", "sess", "sd", "lf", "otp", "resend", "wst", "pr", "prv", "inv", "prt",
-        "prp", "psess", "psd",
+        "rt", "rv", "rp", "sess", "sd", "lf", "otp", "resend", "wst", "pw_reset", "pw_vtok", "inv",
+        "prt", "prp", "psess", "psd",
     ];
     for key in &keys {
         // Namespaced under the configured prefix, applied in exactly one place.
