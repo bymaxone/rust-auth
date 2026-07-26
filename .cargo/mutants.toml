@@ -79,6 +79,12 @@ additional_cargo_args = ["--all-features"]
 #    untestable effect. The pattern matches the trait defaults only: an implementation's
 #    mutants are named `<impl AuthHooks for X>::…` and are still generated — which is what
 #    catches a real hook that stops firing (see the platform after-logout spy).
+# 9. The two `index < codes.len()` bounds guards before splicing a used recovery code out —
+#    the index is returned by a search over the very vector being spliced, and the vector is
+#    cloned from the same `AuthUser` value, so the guard can never be false and `<=` reaches
+#    the identical `remove`. It stays in the source as insurance against a future refactor
+#    deriving the index elsewhere: a panic here would be a denial of service on the MFA
+#    challenge path. Each function contains exactly one `<`, so the patterns are precise.
 exclude_re = [
     'replace \| with \^ in new_uuid_v4',
     'replace AuthEngine::builder -> AuthEngineBuilder with Default::default\(\)',
@@ -88,4 +94,6 @@ exclude_re = [
     'token_manager\.rs:618:9: replace TokenManagerService::issue_mfa_temp_token',
     'replace <impl EmailProvider for NoOpEmailProvider>::\w+ -> Result<\(\), EmailError> with Ok\(\(\)\)',
     'replace AuthHooks::\w+ -> Result<\(\), HookError> with Ok\(\(\)\)',
+    'replace < with <= in MfaService::challenge_platform',
+    'replace < with <= in MfaService::splice_recovery_code',
 ]
