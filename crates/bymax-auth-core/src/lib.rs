@@ -35,6 +35,7 @@ mod normalize;
 #[cfg(feature = "oauth")]
 pub mod providers;
 pub mod services;
+mod status_gate;
 pub mod traits;
 
 #[cfg(any(test, feature = "testing"))]

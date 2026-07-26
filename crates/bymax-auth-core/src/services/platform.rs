@@ -336,23 +336,10 @@ impl PlatformAuthService {
     }
 
     /// Map a platform admin's `status` (case-insensitive) against `blocked_statuses`, returning
-    /// the status-specific 403 when blocked and `Ok(())` otherwise. The mapping mirrors the
-    /// dashboard status gate.
+    /// the status-specific 403 when blocked and `Ok(())` otherwise. Delegates to the shared gate
+    /// so the platform plane can never drift from the dashboard one.
     fn assert_not_blocked(&self, status: &str) -> Result<(), AuthError> {
-        if !self
-            .blocked_statuses
-            .iter()
-            .any(|s| s.eq_ignore_ascii_case(status))
-        {
-            return Ok(());
-        }
-        Err(match status.to_ascii_lowercase().as_str() {
-            "banned" => AuthError::AccountBanned,
-            "inactive" => AuthError::AccountInactive,
-            "suspended" => AuthError::AccountSuspended,
-            "pending" | "pending_approval" => AuthError::PendingApproval,
-            _ => AuthError::AccountInactive,
-        })
+        crate::status_gate::assert_not_blocked(status, &self.blocked_statuses)
     }
 }
 

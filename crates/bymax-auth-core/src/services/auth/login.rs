@@ -17,6 +17,7 @@ use crate::services::auth::detached::{
     run_after_login, run_rehash_password, run_update_last_login,
 };
 use crate::services::auth::{LoginInput, map_repository_error, normalize_anti_enum, spawn_guarded};
+use crate::status_gate::assert_not_blocked;
 use crate::traits::HookContext;
 
 impl AuthEngine {
@@ -199,17 +200,7 @@ impl AuthEngine {
     ///
     /// Returns the status-specific [`AuthError`] when `status` is in the blocked set.
     pub(crate) fn assert_user_not_blocked(&self, status: &str) -> Result<(), AuthError> {
-        let blocked = &self.config().config().blocked_statuses;
-        if !blocked.iter().any(|s| s.eq_ignore_ascii_case(status)) {
-            return Ok(());
-        }
-        Err(match status.to_ascii_lowercase().as_str() {
-            "banned" => AuthError::AccountBanned,
-            "inactive" => AuthError::AccountInactive,
-            "suspended" => AuthError::AccountSuspended,
-            "pending" | "pending_approval" => AuthError::PendingApproval,
-            _ => AuthError::AccountInactive,
-        })
+        assert_not_blocked(status, &self.config().config().blocked_statuses)
     }
 }
 

@@ -545,6 +545,7 @@ fn build_mfa_service(wiring: MfaWiring<'_>) -> Option<crate::services::mfa::MfaS
         totp_window: mfa_config.totp_window,
         recovery_code_count: mfa_config.recovery_code_count,
         sessions_enabled: wiring.sessions_enabled,
+        blocked_statuses: wiring.config.config().blocked_statuses.clone(),
     };
     Some(crate::services::mfa::MfaService::new(deps))
 }

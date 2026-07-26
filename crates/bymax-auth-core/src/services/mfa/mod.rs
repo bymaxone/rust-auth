@@ -139,6 +139,9 @@ pub struct MfaService {
     totp_window: u8,
     recovery_code_count: u8,
     sessions_enabled: bool,
+    /// Statuses that deny authentication, re-checked when a challenge is completed: the temp
+    /// token outlives the login-time gate by its whole TTL.
+    blocked_statuses: Vec<String>,
 }
 
 /// The collaborators an [`MfaService`] is assembled from. Grouped into a struct so the
@@ -160,6 +163,7 @@ pub(crate) struct MfaServiceDeps {
     pub(crate) totp_window: u8,
     pub(crate) recovery_code_count: u8,
     pub(crate) sessions_enabled: bool,
+    pub(crate) blocked_statuses: Vec<String>,
 }
 
 impl MfaService {
@@ -181,6 +185,7 @@ impl MfaService {
             totp_window: deps.totp_window,
             recovery_code_count: deps.recovery_code_count,
             sessions_enabled: deps.sessions_enabled,
+            blocked_statuses: deps.blocked_statuses,
         }
     }
 

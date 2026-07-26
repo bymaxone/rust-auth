@@ -450,6 +450,35 @@ async fn challenge_rejects_when_mfa_is_not_enabled() {
 }
 
 #[tokio::test]
+async fn challenge_rejects_an_account_blocked_after_the_temp_token_was_issued() {
+    // The temp token outlives the login-time status gate by its whole TTL, so an account
+    // suspended inside that window must not be able to clear the second factor and walk away
+    // with a full session — revoking access cannot depend on how far through the login the
+    // holder had already got. The account here is not even MFA-enrolled, so getting the
+    // status error rather than MfaNotEnabled also pins that the gate runs first, before the
+    // MFA checks and before any key derivation.
+    let Some(h) = build(false, false) else { return };
+    let Some(uid) = register(&h.engine, "blocked-mid-challenge@example.com").await else {
+        return;
+    };
+    let Ok(temp) = h
+        .engine
+        .tokens()
+        .issue_mfa_temp_token(&uid, MfaContext::Dashboard)
+        .await
+    else {
+        return;
+    };
+    assert!(h.users.update_status(&uid, "SUSPENDED").await.is_ok());
+
+    let Some(mfa) = h.engine.mfa() else { return };
+    assert!(matches!(
+        mfa.challenge(&temp, "000000", "1.2.3.4", "ua").await,
+        Err(AuthError::AccountSuspended)
+    ));
+}
+
+#[tokio::test]
 async fn challenge_locks_out_after_repeated_wrong_codes() {
     // A single temp token (verify is non-consuming) absorbs repeated wrong codes; after the
     // fifth failure the sixth attempt is locked out. Non-numeric codes take the recovery path
@@ -991,6 +1020,7 @@ fn service_over(store: Arc<dyn MfaStore>, users: Arc<InMemoryUserRepository>) ->
         totp_window: 2,
         recovery_code_count: 8,
         sessions_enabled: false,
+        blocked_statuses: vec!["BANNED".to_owned(), "SUSPENDED".to_owned()],
     })
 }
 

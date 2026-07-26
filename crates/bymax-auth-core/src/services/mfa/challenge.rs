@@ -75,6 +75,14 @@ impl MfaService {
             .await
             .map_err(repository_error)?
             .ok_or(AuthError::MfaNotEnabled)?;
+
+        // Re-check the account status. Login gated it before minting the temp token, but that
+        // token stays valid for its whole TTL: an account blocked in between would otherwise
+        // clear the second factor and receive a full session. Revoking access must not depend
+        // on how far through the login the holder already was. Gating here also keeps a blocked
+        // account from spending the KDF — the recovery-code path costs one derivation per code.
+        crate::status_gate::assert_not_blocked(&user.status, &self.blocked_statuses)?;
+
         let Some(encrypted_secret) = user.mfa_secret.clone().filter(|_| user.mfa_enabled) else {
             return Err(AuthError::MfaNotEnabled);
         };
@@ -154,6 +162,14 @@ impl MfaService {
             .await
             .map_err(super::repository_error)?
             .ok_or(AuthError::MfaNotEnabled)?;
+
+        // Re-check the account status. Login gated it before minting the temp token, but that
+        // token stays valid for its whole TTL: an account blocked in between would otherwise
+        // clear the second factor and receive a full session. Revoking access must not depend
+        // on how far through the login the holder already was. Gating here also keeps a blocked
+        // account from spending the KDF — the recovery-code path costs one derivation per code.
+        crate::status_gate::assert_not_blocked(&admin.status, &self.blocked_statuses)?;
+
         let Some(encrypted_secret) = admin.mfa_secret.clone().filter(|_| admin.mfa_enabled) else {
             return Err(AuthError::MfaNotEnabled);
         };
