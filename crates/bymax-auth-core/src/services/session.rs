@@ -1008,6 +1008,37 @@ mod tests {
             parse_user_agent("some-internal-tool/1.0"),
             "Unknown Browser on Unknown OS"
         );
+        // Safari needs *both* its token and a `Version/`: either alone is not Safari. Every
+        // agent above carries both, so nothing distinguished the pair from an either-or.
+        assert_eq!(
+            parse_user_agent("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/605.1 Safari/605.1"),
+            "Unknown Browser on Linux"
+        );
+        assert_eq!(
+            parse_user_agent("SomeClient/1.0 (X11; Linux x86_64) Version/17.0"),
+            "Unknown Browser on Linux"
+        );
+        // Each Apple token stands on its own — an iPad and a bare `iOS` agent are iOS even
+        // though neither says `iPhone`.
+        assert_eq!(
+            parse_user_agent(
+                "Mozilla/5.0 (iPad; CPU OS 17_0 like Mac OS X) Version/17.0 Safari/605.1.15"
+            ),
+            "Safari on iOS"
+        );
+        assert_eq!(
+            parse_user_agent("MyApp/1.0 (iOS 17.0)"),
+            "Unknown Browser on iOS"
+        );
+        // And so does each macOS token: the desktop agents above happen to carry both.
+        assert_eq!(
+            parse_user_agent("Mozilla/5.0 (Macintosh; Intel) Firefox/121.0"),
+            "Firefox on macOS"
+        );
+        assert_eq!(
+            parse_user_agent("Mozilla/5.0 (Mac OS X 10_15) Firefox/121.0"),
+            "Firefox on macOS"
+        );
     }
 
     #[test]
