@@ -187,13 +187,26 @@ mod tests {
         for (name, prefix) in [
             ("dashboardRefreshSession", Prefix::Rt),
             ("dashboardGracePointer", Prefix::Rp),
+            ("dashboardConsumedFamilyMarker", Prefix::Cf),
+            ("dashboardFamilyIndex", Prefix::Fam),
             ("dashboardSessionIndex", Prefix::Sess),
             ("dashboardSessionDetail", Prefix::Sd),
+            ("dashboardTokenEpoch", Prefix::Ep),
+            ("platformRefreshSession", Prefix::Prt),
+            ("platformGracePointer", Prefix::Prp),
+            ("platformConsumedFamilyMarker", Prefix::Pcf),
+            ("platformFamilyIndex", Prefix::Pfam),
+            ("platformSessionIndex", Prefix::Psess),
+            ("platformSessionDetail", Prefix::Psd),
+            ("platformTokenEpoch", Prefix::Pep),
             ("accessTokenBlacklist", Prefix::Rv),
             ("failedLoginCounter", Prefix::Lf),
             ("oneTimePassword", Prefix::Otp),
             ("passwordResetToken", Prefix::PwReset),
             ("passwordResetVerifiedToken", Prefix::PwVtok),
+            ("totpReplayMarker", Prefix::Tu),
+            ("oauthState", Prefix::Os),
+            ("invitation", Prefix::Inv),
         ] {
             assert_eq!(
                 contract_value("redisKeyPrefixes", name),
@@ -215,6 +228,47 @@ mod tests {
         assert_ne!(
             contract_value("redisKeyPrefixes", "dashboardSessionDetail"),
             contract_value("redisKeyPrefixes", "platformSessionDetail"),
+        );
+    }
+
+    #[test]
+    fn the_family_index_takes_bare_hashes_and_the_session_index_does_not() {
+        // Two indexes, two member shapes, and the difference is load-bearing. A family only ever
+        // tracks live refresh sessions, so its members are bare hashes and the revocation script
+        // rebuilds `rt:{hash}` from them; the session index mixes live sessions with rotation
+        // grace pointers, so its members must carry their own prefix. Swapping either shape
+        // makes one backend unable to sweep what the other wrote.
+        assert_eq!(
+            contract_value("familyIndexMembers", "dashboardLive"),
+            "{sha256(refreshToken)}"
+        );
+        assert_eq!(
+            contract_value("familyIndexMembers", "platformLive"),
+            "{sha256(refreshToken)}"
+        );
+        assert!(
+            contract_value("sessionIndexMembers", "dashboardLive")
+                .starts_with(&format!("{}:", Prefix::Rt.as_str()))
+        );
+    }
+
+    #[test]
+    fn the_rotation_semantics_are_the_ones_this_crate_implements() {
+        // These are behaviours rather than bytes, but the two backends share the markers behind
+        // them: one side treating a replay as recoverable while the other treats it as theft
+        // would make the reaction depend on which backend the request happened to reach.
+        let rotate = include_str!("lua/refresh_rotate.lua");
+        assert!(
+            contract_value("rotationSemantics", "graceWindow").contains("single-shot"),
+            "the contract must declare the grace window single-shot"
+        );
+        // The pointer is consumed on use, which is what makes it single-shot.
+        assert!(rotate.contains("redis.call('DEL', KEYS[3])"));
+        // A replay past the window is reported as a reuse carrying its family.
+        assert!(rotate.contains("'REUSED:'"));
+        assert!(
+            contract_value("rotationSemantics", "reuseReaction")
+                .contains("revoke the whole family")
         );
     }
 

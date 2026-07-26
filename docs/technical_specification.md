@@ -1734,7 +1734,7 @@ Purpose: revoke the current access token (JTI blacklist) and delete the refresh 
 Algorithm:
 1. Decode the access token **without** verifying (it may already be expired at logout). On decode failure, skip the blacklist step.
 2. Compute `remaining_ttl = exp - now`. If `> 0`, `session_store.blacklist_access(&jti, remaining_ttl)` (the store owns the `rv:` prefix; §12.3).
-3. Revoke the refresh session: `session_hash = sha256(raw_refresh)`; `sessions.revoke_session(SessionKind::Dashboard, user_id, &session_hash)` removes the `rt:` record together with its `sess:` membership and `sd:` detail in one ownership-checked domain call (§12.3 / §12.5.2). Idempotent: `SessionNotFound` is ignored (the session may already have been rotated or evicted); any other error is logged.
+3. Revoke the refresh session: `session_hash = sha256(raw_refresh)`; `sessions.revoke_session(SessionKind::Dashboard, user_id, &session_hash)` removes the `rt:` record together with its `sess:` membership and `sd:` detail in one ownership-checked domain call (§12.3 / §12.5.3). Idempotent: `SessionNotFound` is ignored (the session may already have been rotated or evicted); any other error is logged.
 4. Spawn `after_logout(user_id, empty_ctx)` fire-and-forget.
 
 Security: the blacklist closes the window where a stolen, still-valid access token could be replayed after logout; refresh deletion is unconditional.
@@ -1953,25 +1953,26 @@ struct RefreshSession {
 
 Platform variant uses `prt:` and stores `tenant_id = ""`.
 
-#### 7.3.3 `reissue_tokens` (atomic rotation + grace window)
+#### 7.3.3 `reissue_tokens` (atomic rotation, grace window, reuse detection)
 
-Rotation is atomic at the read-and-delete step via Lua so a refresh token can never be double-spent into two live primary sessions.
-
-`ROTATE_LUA` (KEYS[1] = `rt:{old_hash}`): `GET` the old session; if absent return nil; else `DEL` it and return the old JSON. The new session is written **by Rust** afterwards using the parsed real user data, so no hollow placeholder is ever stored.
+Rotation runs as one Lua script (§12.5.1) so a refresh token can never be double-spent into two live sessions, and so the reuse bookkeeping cannot be lost to a crash between the two writes.
 
 Algorithm:
-1. `old_hash = sha256(old_refresh)`; pre-generate `new_raw = Uuid::new_v4()`, `new_hash = sha256(new_raw)`.
-2. `refresh_ttl = days*86400`; `grace_ttl = config.jwt.refresh_grace_window_seconds` (default 30).
-3. `old_json = session_store.rotate_take_old("rt:{old_hash}")` (runs `ROTATE_LUA`).
-4. **Primary path** (`Some(json)`): parse → `RefreshSession`; build new session (carry `mfa_enabled`); `set_session("rt:{new_hash}", json, refresh_ttl)`; write the grace pointer holding the **new session JSON** — never the raw refresh token — `set_session("rp:{old_hash}", new_json, grace_ttl)` (the `rp:`/`prp:` value is the `SessionRecord`, so a Redis compromise never exposes a live token; see §12.4 / §12.5.1); update the per-user set: `srem` old `rt:`, `sadd` new `rt:` and the `rp:{old_hash}` grace key, `expire` the set. Build `RotatedTokens`.
-5. **Grace path** (`None`): `getdel("rp:{old_hash}")`. If `Some`, this is a concurrent retry whose primary was already consumed — parse the pointed-to session JSON and **mint a fresh token** for that identity, but **do not** write another grace pointer (single-shot: chaining grace pointers would let a captured token keep a session alive indefinitely). `sadd` the new `rt:` to the set; `expire`. Build `RotatedTokens`.
-6. If both are `None`, return `RefreshTokenInvalid`.
 
-`parse_session` rejects malformed JSON or missing `user_id`/`role` with `RefreshTokenInvalid`; absent `mfa_enabled` defaults to `false`.
+1. Reject anything that is not a well-formed refresh token before hashing it — a malformed value could never match a stored hash, and this caps the work an arbitrary input can force.
+2. `old_hash = sha256(old_refresh)`; mint `new_raw` (32 CSPRNG bytes, hex) and `new_hash = sha256(new_raw)`.
+3. Read the presented session (`find_session`) to seed the rotated record. This is where the **family** comes from: the script plants the consumed marker and moves the family membership in the same step that consumes the token, so it needs the family up front. The read is non-destructive and cannot double-spend — the script re-reads and deletes the key itself. When the live key is already gone the seed is a placeholder the rotation never stores.
+4. Run `refresh_rotate` with the five keys and six arguments of §12.5.1, and match on the outcome:
+   - **`Rotated(old_record)`** — the script already wrote the new session, the grace pointer, and the family bookkeeping. Rust does the non-atomic index work: `SREM rt:{old_hash}`, `SADD rt:{new_hash}`, `SADD rp:{old_hash}` (so `revoke_all` can sweep the pointer), `DEL sd:{old_hash}`, `SET sd:{new_hash}`.
+   - **`Grace(record)`** — a concurrent retry whose primary was already consumed. The pointer was consumed by the script (single-shot), and the recovery is refused outright if the record's family index is gone. Otherwise mint a **fresh** token for the recovered identity, add it to the family index, and plant **no** new pointer: chaining pointers would let a captured token keep a session alive indefinitely.
+   - **`Reused(family)`** — a consumed token replayed after its window closed, i.e. a theft signal. Run `revoke_family` (§12.5.2) and return `RefreshTokenInvalid`. The user's other logins are separate families and are untouched.
+   - **`Invalid`** — never issued, or fully aged out. Return `RefreshTokenInvalid`; nothing is revoked.
 
-`build_rotated_result`: issues an access token with `status = ""` (the Redis session does not carry full user data — status guards must consult the repo/status cache, not the rotated JWT) and `mfa_verified = false` (rotation always drops verification; the user re-acquires it only via the MFA challenge), while `mfa_enabled` is carried from the session so the MFA guard keeps enforcing.
+`parse_session` rejects malformed JSON or missing `user_id`/`role` with `RefreshTokenInvalid`; absent `mfa_enabled` defaults to `false` and an absent `family_id` to empty, which is the legacy record written before families existed — it skips all family bookkeeping and can never trip reuse detection.
 
-Platform rotation (`reissue_platform_tokens`) mirrors this with `prt:`/`prp:` prefixes and `tenant_id = ""`.
+`build_rotated_result`: issues an access token with `status = ""` (the Redis session does not carry full user data — status guards must consult the repo/status cache, not the rotated JWT) and `mfa_verified = false` (rotation always drops verification; the user re-acquires it only via the MFA challenge), while `mfa_enabled` is carried from the session so the MFA guard keeps enforcing. The `epoch` claim is re-read at rotation time, so a password reset that lands mid-session is picked up by the very next rotation.
+
+Platform rotation (`reissue_platform_tokens`) mirrors this with `prt:`/`prp:`/`pcf:`/`pfam:` prefixes and `tenant_id = ""`.
 
 #### 7.3.4 Access-token revocation blacklist (JTI)
 
@@ -2060,7 +2061,7 @@ Constants: `MAX_IP_LENGTH: usize = 45` (IPv6 max — IP is truncated before stor
 5. `evict_count = len - limit`; choose the oldest `evict_count`, **excluding** `new_hash`.
 6. For each victim (best-effort, errors logged not propagated — the new session is already committed): `del("rt:{hash}")`, `srem("sess:{user_id}", "rt:{hash}")`, `del("sd:{hash}")`; spawn `on_session_evicted(user_id, hash, ctx)` fire-and-forget.
 
-> **Concurrency caveat & the `= 1` case.** The `SMEMBERS → read created_at → DEL` sequence is **best-effort, not atomic**: N simultaneous logins can transiently overshoot the cap by up to **N−1** sessions before eviction settles. This is acceptable for a *soft* cap (`default_max_sessions >= 2`), which is the documented behavior. For a **hard** cap — in particular `default_max_sessions = 1`, where any overshoot means a second concurrent session briefly coexists — best-effort FIFO is insufficient: enforcement MUST instead run as a single atomic `enforce_session_limit` Lua (`SMEMBERS` + conditional `DEL` of the over-limit members in one script, mirroring §12.5.2's ownership-checked pattern) so the live count can never exceed the limit even under a race. `rotate_session` already uses fully atomic Lua; `create_session`'s limit step is the one to harden when a strict cap is required.
+> **Concurrency caveat & the `= 1` case.** The `SMEMBERS → read created_at → DEL` sequence is **best-effort, not atomic**: N simultaneous logins can transiently overshoot the cap by up to **N−1** sessions before eviction settles. This is acceptable for a *soft* cap (`default_max_sessions >= 2`), which is the documented behavior. For a **hard** cap — in particular `default_max_sessions = 1`, where any overshoot means a second concurrent session briefly coexists — best-effort FIFO is insufficient: enforcement MUST instead run as a single atomic `enforce_session_limit` Lua (`SMEMBERS` + conditional `DEL` of the over-limit members in one script, mirroring §12.5.3's ownership-checked pattern) so the live count can never exceed the limit even under a race. `rotate_session` already uses fully atomic Lua; `create_session`'s limit step is the one to harden when a strict cap is required.
 
 #### 7.4.3 `list_sessions`
 
@@ -4231,7 +4232,7 @@ pub trait SessionStore: Send + Sync {
     async fn find_session(&self, kind: SessionKind, token_hash: &str) -> Result<Option<SessionRecord>, AuthError>;
     /// List all live sessions for a user (SMEMBERS + MGET of detail keys).
     async fn list_sessions(&self, kind: SessionKind, user_id: &str) -> Result<Vec<SessionDetail>, AuthError>;
-    /// Ownership-checked single revoke (Lua `session_revoke`, §12.5.2) → SESSION_NOT_FOUND if not owned.
+    /// Ownership-checked single revoke (Lua `session_revoke`, §12.5.3) → SESSION_NOT_FOUND if not owned.
     async fn revoke_session(&self, kind: SessionKind, user_id: &str, session_hash: &str) -> Result<(), AuthError>;
     /// Revoke every session for a user in one Lua transaction (`invalidate_user_sessions`).
     async fn revoke_all(&self, kind: SessionKind, user_id: &str) -> Result<(), AuthError>;
@@ -4245,7 +4246,7 @@ pub trait SessionStore: Send + Sync {
 #[async_trait::async_trait]
 pub trait OtpStore: Send + Sync {
     async fn put(&self, purpose: OtpPurpose, identifier: &str, code: &str, ttl_secs: u64) -> Result<(), AuthError>;
-    /// Atomic verify+attempts+consume (Lua `otp_verify`, §12.5.4).
+    /// Atomic verify+attempts+consume (Lua `otp_verify`, §12.5.5).
     async fn verify(&self, purpose: OtpPurpose, identifier: &str, code: &str, max_attempts: u32) -> Result<(), AuthError>;
     /// SET NX EX cooldown gate; false if a resend happened within the window.
     async fn try_begin_resend(&self, purpose: OtpPurpose, identifier: &str, cooldown_secs: u64) -> Result<bool, AuthError>;
@@ -4255,7 +4256,7 @@ pub trait OtpStore: Send + Sync {
 #[async_trait::async_trait]
 pub trait BruteForceStore: Send + Sync {
     async fn is_locked(&self, identifier: &str, max_attempts: u32) -> Result<bool, AuthError>;
-    /// Atomic INCR + EXPIRE-on-first (Lua `brute_force_incr`, §12.5.3).
+    /// Atomic INCR + EXPIRE-on-first (Lua `brute_force_incr`, §12.5.4).
     async fn record_failure(&self, identifier: &str, window_secs: u64) -> Result<i64, AuthError>;
     async fn reset(&self, identifier: &str) -> Result<(), AuthError>;
     async fn remaining_lockout_secs(&self, identifier: &str) -> Result<u64, AuthError>;
@@ -4270,10 +4271,14 @@ All keys are `{namespace}:{prefix}:{identifier}` (default namespace `auth`). Eve
 
 | Prefix | Key pattern | Value | TTL | Purpose |
 | --- | --- | --- | --- | --- |
-| `rt` | `auth:rt:{sha256(refresh_token)}` | JSON `SessionRecord` `{ userId, tenantId, role, device, ip, createdAt }` | `refresh_expires_in_days` × 86400 s | Dashboard refresh-token session. Holds everything needed to reissue an access token without a DB hit. |
+| `rt` | `auth:rt:{sha256(refresh_token)}` | JSON `SessionRecord` `{ userId, tenantId, role, device, ip, createdAt, mfaEnabled, familyId }` (`familyId` omitted when empty) | `refresh_expires_in_days` × 86400 s | Dashboard refresh-token session. Holds everything needed to reissue an access token without a DB hit. |
 | `rv` | `auth:rv:{jti}` (preferred) or `auth:rv:{sha256(jwt)}` | `"1"` | Remaining JWT lifetime computed from `exp − now` | Access-JWT revocation blacklist. Written on logout; consulted by `JwtAuthGuard`. `jti` keying avoids hashing the whole compact JWT. |
+| `ep` | `auth:ep:{userId}` | Numeric generation counter (string) | 30 days | Per-user token **epoch**. Every access token is stamped with the epoch current at issuance; verification rejects a token stamped below the stored value. A password reset advances it, invalidating every outstanding access token in one write — the stateless counterpart to `rv:`, which can only revoke tokens one `jti` at a time. The TTL far exceeds any access-token lifetime, so a bump stays in force for every pre-bump token's remaining life. |
+| `pep` | `auth:pep:{userId}` | Numeric generation counter (string) | 30 days | Platform per-admin token epoch. Analogue of `ep`; separate because the two planes' ids come from different repositories and may collide. |
 | `us` | `auth:us:{userId}` | Status string (`"ACTIVE"`, `"BANNED"`, …) | `user_status_cache_ttl_seconds` (default 60 s) | User-status cache. Avoids a DB read per request; invalidated on `update_status`. |
 | `rp` | `auth:rp:{sha256(old_refresh_token)}` | JSON `SessionRecord` — the **new** session, never the raw token | `refresh_grace_window_seconds` (default 30 s) | Rotation grace pointer. Lets a legitimately-concurrent request still carrying the old token recover the rotated identity and be issued a fresh token, instead of being logged out. Stores the session record (not the raw refresh token), so a Redis snapshot never leaks a live credential. |
+| `cf` | `auth:cf:{sha256(consumed_refresh_token)}` | `familyId` of the lineage the consumed token belonged to | `refresh_expires_in_days` × 86400 s | Consumed-token family marker. Planted in the same atomic step that consumes a token, and deliberately outliving the much shorter grace pointer: once the pointer is gone, the marker's presence is what proves a presented token was legitimately issued and already rotated — a **reuse**, not a random string (§12.5.1). |
+| `fam` | `auth:fam:{familyId}` | Redis SET of **bare** `sha256(refresh_token)` hashes | `refresh_expires_in_days` × 86400 s | Dashboard refresh-token family index: one login lineage, minted at login and inherited by every rotation. Members are bare hashes, unlike `sess:` — a family only ever tracks live `rt:` sessions, so the keyspace is implied. Deleting this key revokes the lineage and, as a side effect, refuses any grace recovery that still names it. |
 | `lf` | `auth:lf:{hmac_sha256(tenantId + ":" + email)}` | Numeric counter (string) | `window_seconds` (default 900 s) | Per-tenant failed-login counter. Fixed window — TTL set only on the 0→1 transition. Tenant scoping prevents cross-tenant lockout. |
 | `pw_reset` | `auth:pw_reset:{sha256(reset_token)}` | `userId` | `password_reset.token_ttl_seconds` (default 3600 s) | Password-reset token (`method = "token"`). Consumed on use. |
 | `otp` | `auth:otp:{purpose}:{hmac_sha256(tenantId + ":" + email)}` | JSON `{ code: string, attempts: number }` | `otp_ttl_seconds` (per purpose) | OTP record. `attempts` tracks failures (max 5). Purposes: `password_reset`, `email_verification`. Tenant-scoped to prevent collision. |
@@ -4284,8 +4289,10 @@ All keys are `{namespace}:{prefix}:{identifier}` (default namespace `auth`). Eve
 | `os` | `auth:os:{sha256(state)}` | JSON `{ tenantId, codeVerifier }` | 600 s (10 min) | OAuth CSRF `state` + PKCE `code_verifier`. Single-use; deleted on callback. |
 | `wst` | `auth:wst:{sha256(ws_ticket)}` | JSON `WsTicketSnapshot` `{ sub, tenantId, role, status, mfaEnabled, mfaVerified }` | `WS_TICKET_TTL_SECONDS` (30 s) | **rust-auth-only, feature `websocket`.** Single-use WebSocket upgrade ticket (§7.3.6 / §8.7). Minted from an already-authorized, MFA-satisfied session and redeemed once (`GETDEL`) at the WS handshake, so an access JWT never appears in a URL. The value is a verified-claims **snapshot**, never a token. This prefix is outside the nest-auth parity surface (nest-auth authenticates WebSockets via the `Authorization` header, not a ticket), so it is purely additive: a `nest-auth` server never reads or writes `wst:`, and cross-backend Redis sharing is unaffected. |
 | `tu` | `auth:tu:{hmac_sha256(userId + ":" + code)}` | `"1"` | 90 s (≈ 3 × TOTP window) | TOTP anti-replay. The key is the **HMAC of `userId:code`**, never the raw 6-digit code (which is low-entropy and would be reversible as a bare key) — matching §7.5.6. A code that just verified is marked so it cannot be replayed inside its drift window. |
-| `prt` | `auth:prt:{sha256(refresh_token)}` | JSON `{ userId, role, device, ip, createdAt }` | `refresh_expires_in_days` × 86400 s | Platform-admin refresh session. Platform analogue of `rt`. |
+| `prt` | `auth:prt:{sha256(refresh_token)}` | JSON `{ userId, role, device, ip, createdAt, mfaEnabled, familyId }` (`familyId` omitted when empty) | `refresh_expires_in_days` × 86400 s | Platform-admin refresh session. Platform analogue of `rt`. |
 | `prp` | `auth:prp:{sha256(old_refresh_token)}` | JSON `SessionRecord` — the new session, never the raw token | `refresh_grace_window_seconds` (default 30 s) | Platform rotation grace pointer. Analogue of `rp`. |
+| `pcf` | `auth:pcf:{sha256(consumed_refresh_token)}` | `familyId` | `refresh_expires_in_days` × 86400 s | Platform consumed-token family marker. Analogue of `cf`. |
+| `pfam` | `auth:pfam:{familyId}` | Redis SET of bare `sha256(refresh_token)` hashes | `refresh_expires_in_days` × 86400 s | Platform refresh-token family index. Analogue of `fam`. |
 | `pw_vtok` | `auth:pw_vtok:{sha256(verified_token)}` | JSON `{ email, tenantId }` | 300 s (5 min) | Password-reset OTP "verified" token (2-step OTP flow). Bridges verify-OTP → reset-password, closing the verify/reset race. Consumed on reset. |
 | `mfa_setup` | `auth:mfa_setup:{hmac_sha256(userId)}` | JSON `{ encryptedSecret, hashedCodes: string[], encryptedPlainCodes }` | 600 s (10 min) | MFA pending-setup data: AES-256-GCM-encrypted TOTP secret + HMAC-SHA-256-keyed recovery-code hashes + the AES-256-GCM-encrypted plaintext codes (so the idempotent `setup()` fast-path can re-return them), held between `setup()` and `verify_enable()`. Consumed on enable. The low-entropy `userId` is keyed via HMAC-SHA-256 (§12.2), matching §7.5.1. |
 | `psess` | `auth:psess:{userId}` | Redis SET of full key **suffixes**: `prt:{sha256(refresh_token)}` and `prp:{sha256(old_refresh_token)}` | max refresh TTL | Platform active-session index. Analogue of `sess`; the platform keyspace is deliberately separate. |
@@ -4298,19 +4305,30 @@ Values that are JSON are (de)serialized with `serde` + `serde_json`; the DTOs (`
 
 Each multi-step state transition that could race under concurrency runs as a single Lua script via `EVALSHA` (with transparent `EVAL` fallback on `NOSCRIPT`). Scripts are compiled once into `redis::Script` (or the `fred` equivalent) and cached. `KEYS` arrive already namespaced; scripts that must rebuild a member key receive the namespace in `ARGV`.
 
-#### 12.5.1 `refresh_rotate` — refresh rotation with grace window
+#### 12.5.1 `refresh_rotate` — rotation with a grace window and reuse detection
 
-Prevents the classic double-rotation race: two concurrent requests carrying the same refresh token must not both succeed and mint two live sessions. The check-delete-create sequence is atomic, and the grace pointer lets a legitimately-concurrent second request recover the already-minted token instead of being logged out.
+Prevents the classic double-rotation race — two concurrent requests carrying the same refresh token must not both mint a live session — and catches the replay of a token that was already consumed, which is the signature of a stolen refresh token (RFC 6819 / OWASP rotation with automatic reuse detection).
 
-- **KEYS** — `[1]` `rt:{sha256(old)}`, `[2]` `rt:{sha256(new)}`, `[3]` `rp:{sha256(old)}` (platform variant uses `prt`/`prp`).
-- **ARGV** — `[1]` new session JSON (`SessionRecord`), `[2]` refresh TTL (s), `[3]` grace TTL (s). The new **raw** token is generated in Rust and is **never** passed to the script or written to Redis.
+- **KEYS** — `[1]` `rt:{sha256(old)}`, `[2]` `rt:{sha256(new)}`, `[3]` `rp:{sha256(old)}`, `[4]` `cf:{sha256(old)}`, `[5]` `fam:{familyId}` (platform variant uses `prt`/`prp`/`pcf`/`pfam`).
+- **ARGV** — `[1]` new session JSON (`SessionRecord`), `[2]` refresh TTL (s), `[3]` grace TTL (s; `0` skips the pointer), `[4]` the presented session's `familyId` (`''` = legacy record, skip all family work), `[5]` `sha256(old)`, `[6]` `sha256(new)`. The new **raw** token is generated in Rust and is **never** passed to the script or written to Redis.
 - **Contract:**
-  1. `GET KEYS[1]`. If present → `DEL KEYS[1]`; `SET KEYS[3] = ARGV[1] EX ARGV[3]` (plant the grace pointer holding the **new session JSON**, never the raw token); `SET KEYS[2] = ARGV[1] EX ARGV[2]` (new session); **return the old session JSON** (caller derives `userId`, updates the `sess:` SET + `sd:` detail).
-  2. Else `GET KEYS[3]` (grace pointer). If present → **return `"GRACE:" .. session_json`**; the caller parses the pointed-to `SessionRecord` and mints a **fresh** token bound to that identity (it does *not* plant another grace pointer), so a benign concurrent retry succeeds without a logout.
-  3. Else → **return `nil`** ⇒ caller raises `AuthError::RefreshTokenInvalid`.
-- **Rust mapping:** `RotateOutcome::{ Rotated(SessionRecord), Grace(SessionRecord), Invalid }`. The `SessionStore::rotate` impl pattern-matches and performs the non-atomic SET bookkeeping outside the script — `SREM rt:{old_hash}`, `SADD rt:{new_hash}`, `SADD rp:{old_hash}` (the grace pointer is indexed too, so `revoke_all` can sweep it), `DEL sd:{old_hash}`, `SET sd:{new_hash}`; on `Grace` it mints a fresh token for the recovered `SessionRecord`. Storing the session record — not the raw token — keeps the "no raw secret in Redis" invariant intact for the grace pointer too.
+  1. `GET KEYS[1]`. If present → `SET KEYS[2] = ARGV[1] EX ARGV[2]` (new session); if the grace TTL is non-zero, `SET KEYS[3] = ARGV[1] EX ARGV[3]` (the pointer holds the **new session JSON**, never the raw token); if the family is non-empty, `SET KEYS[4] = ARGV[4] EX ARGV[2]` (consumed marker) and move the family membership `SREM KEYS[5] ARGV[5]` / `SADD KEYS[5] ARGV[6]` / `EXPIRE KEYS[5] ARGV[2]`; then `DEL KEYS[1]` and **return the old session JSON**. Every write happens **before** the old key is deleted: Redis does not roll back a script's earlier writes, so a failing write aborts with the old token still intact rather than consuming it without a successor or a reuse marker.
+  2. Else `GET KEYS[3]` (grace pointer). If present → `DEL KEYS[3]` and **return `"GRACE:" .. session_json`**. The window is **single-shot**: consuming the pointer stops one captured token minting a session on every request inside the window. The caller mints a fresh token bound to the recovered identity and plants no new pointer.
+  3. Else `GET KEYS[4]` (consumed-family marker). If present → **return `"REUSED:" .. familyId`**. The marker outlives the much shorter pointer, so reaching this branch proves the token was legitimately issued and already rotated.
+  4. Else → **return `nil`** ⇒ caller raises `AuthError::RefreshTokenInvalid`.
+- **Rust mapping:** `RotateOutcome::{ Rotated(SessionRecord), Grace(SessionRecord), Reused(String), Invalid }`. The store performs the non-atomic bookkeeping outside the script — `SREM rt:{old_hash}`, `SADD rt:{new_hash}`, `SADD rp:{old_hash}` (the pointer is indexed too, so `revoke_all` sweeps it), `DEL sd:{old_hash}`, `SET sd:{new_hash}` — and on `Grace` first checks that the recovered record's family index still **exists**, refusing the recovery when it does not: a pointer planted by an earlier rotation of the same lineage can still be live when a reuse revokes the family, and recovering from it would resurrect the lineage the revocation just killed. On `Reused` the caller runs `revoke_family` and rejects the request.
+- **No `cjson`:** the script never decodes a stored record. Both the grace record's family and the family owner's id are parsed by the caller with a real parser, which also keeps the script runnable on the in-memory Redis nest-auth drives its end-to-end tier with.
 
-#### 12.5.2 `session_revoke` — ownership-checked single revoke
+#### 12.5.2 `revoke_family` — reuse-detection lockout of one lineage
+
+Called when `refresh_rotate` reports a reuse. Kills every live descendant of the compromised login in one transaction, forcing each holder to re-authenticate — and deliberately **nothing else**: the user's other logins are separate families and survive, which is the OWASP-recommended scope. Revoking account-wide would let anyone holding one stolen token log the victim out of every device at will.
+
+- **KEYS** — `[1]` `fam:{familyId}` (or `pfam:{familyId}`), already namespaced.
+- **ARGV** — `[1]` namespace, `[2]` live prefix (`rt`/`prt`), `[3]` detail prefix (`sd`/`psd`), `[4]` the owner's session-index key, already namespaced, or `''` when no member record was readable.
+- **Contract:** `SMEMBERS KEYS[1]`; if empty → `DEL KEYS[1]`, return `0`. Otherwise, for each member hash: `DEL {ns}:{rt}:{hash}`, `DEL {ns}:{sd}:{hash}`, and — when an owner index was supplied — `SREM {ownerIndex} {rt}:{hash}` (the index stores full key **suffixes**, so pruning the bare hash would leave the revoked session listed until the index expired). Finally `DEL KEYS[1]`; return the member count.
+- **Owner resolution:** every member of one family descends from the same login, so the caller reads the first readable member record and passes the owner's index key in. That keeps the script free of `cjson`; the membership is still re-read inside the script, so a member added between the two steps is revoked too.
+
+#### 12.5.3 `session_revoke` — ownership-checked single revoke
 
 Closes an IDOR/BOLA hole: a user must not revoke a session hash they do not own.
 
@@ -4321,7 +4339,7 @@ Closes an IDOR/BOLA hole: a user must not revoke a session hash they do not own.
   2. Else `SREM KEYS[1] ARGV[1]`; `DEL KEYS[2]`; `DEL KEYS[3]` → **return `1`**.
 - **Rust mapping:** `bool`; `false` → `SessionNotFound`. The membership test and the deletes are one atomic unit, so a session cannot be half-revoked. (KEYS layout matches §7.4.4.)
 
-#### 12.5.3 `brute_force_incr` — fixed-window failure counter
+#### 12.5.4 `brute_force_incr` — fixed-window failure counter
 
 Guarantees the lockout window starts at the **first** failure and never slides forward, defeating the "one attempt just before expiry" evasion.
 
@@ -4330,7 +4348,7 @@ Guarantees the lockout window starts at the **first** failure and never slides f
 - **Contract:** `INCR KEYS[1]`; **if result == 1 then `EXPIRE KEYS[1] ARGV[1]`**; return the counter. TTL is set only on the 0→1 transition; subsequent failures never extend it.
 - **Rust mapping:** `i64` (new counter). `BruteForceStore::is_locked` compares against `max_attempts`; `record_failure` returns the counter so the caller can attach a `Retry-After` derived from `remaining_lockout_secs` when the threshold is crossed.
 
-#### 12.5.4 `otp_verify` — verify + attempts + consume
+#### 12.5.5 `otp_verify` — verify + attempts + consume
 
 Makes "compare code, bump attempts, consume on success, lock on max" a single atomic step so concurrent guesses cannot race past the attempt ceiling.
 
@@ -4780,7 +4798,7 @@ All codes, grouped by domain, with HTTP status, trigger, and client-facing Engli
 | `auth.refresh_token_invalid` | 401 | Refresh token absent from Redis (`rt:`/`prt:`) and outside the grace window. | Invalid or expired refresh token |
 | `auth.session_expired` | 401 | Session backing a refresh token no longer exists. | Session expired |
 | `auth.session_limit_reached` | 409 | Concurrent-session cap hit (informational; FIFO eviction normally handles this silently). | Session limit reached |
-| `auth.session_not_found` | 404 | Revoke targeted a session hash not owned by the caller (ownership-checked Lua, §12.5.2) — anti-IDOR. | Session not found |
+| `auth.session_not_found` | 404 | Revoke targeted a session hash not owned by the caller (ownership-checked Lua, §12.5.3) — anti-IDOR. | Session not found |
 
 #### Registration & email
 

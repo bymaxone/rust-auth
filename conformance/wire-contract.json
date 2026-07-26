@@ -43,12 +43,18 @@
     ],
     "dashboardRefreshSession": "rt",
     "dashboardGracePointer": "rp",
+    "dashboardConsumedFamilyMarker": "cf",
+    "dashboardFamilyIndex": "fam",
     "dashboardSessionIndex": "sess",
     "dashboardSessionDetail": "sd",
+    "dashboardTokenEpoch": "ep",
     "platformRefreshSession": "prt",
     "platformGracePointer": "prp",
+    "platformConsumedFamilyMarker": "pcf",
+    "platformFamilyIndex": "pfam",
     "platformSessionIndex": "psess",
     "platformSessionDetail": "psd",
+    "platformTokenEpoch": "pep",
     "accessTokenBlacklist": "rv",
     "failedLoginCounter": "lf",
     "oneTimePassword": "otp",
@@ -72,6 +78,31 @@
     "platformGrace": "prp:{sha256(supersededToken)}"
   },
 
+  "familyIndexMembers": {
+    "$comment": [
+      "A refresh-token FAMILY is one login lineage: minted at login, inherited unchanged by",
+      "every rotation, and the unit reuse detection revokes. Unlike the session index, its",
+      "members are BARE hashes — a family only ever tracks live refresh sessions, so the",
+      "keyspace is implied and does not need to be carried in the member."
+    ],
+    "dashboardLive": "{sha256(refreshToken)}",
+    "platformLive": "{sha256(refreshToken)}"
+  },
+
+  "rotationSemantics": {
+    "$comment": [
+      "What a presented refresh token can be, and what each outcome does. These are behaviours",
+      "rather than bytes, but they have to agree: the two backends share the markers below, so",
+      "one side treating a replay as recoverable while the other treats it as theft would make",
+      "the reaction depend on which backend the request happened to reach."
+    ],
+    "graceWindow": "single-shot — the pointer is consumed on use, so one captured token cannot mint a session repeatedly inside the window",
+    "graceRequiresLiveFamily": "a recovery is refused once its family index is gone, so a pointer that outlived a revocation cannot resurrect the lineage",
+    "reuseSignal": "a consumed token replayed after its grace window closed, detected by the consumed-family marker outliving the pointer",
+    "reuseReaction": "revoke the whole family (every live descendant of that login) and reject the request; the user's other logins are untouched",
+    "legacySessionWithoutFamily": "skips all family bookkeeping and can never trip reuse detection"
+  },
+
   "recordEncodings": {
     "$comment": [
       "Timestamp encoding differs per record and is NOT uniform — this is the trap. The session",
@@ -80,8 +111,18 @@
     ],
     "refreshSession": {
       "key": "{rt|prt}:{sha256(refreshToken)}",
-      "fields": ["userId", "tenantId", "role", "device", "ip", "createdAt", "mfaEnabled"],
+      "fields": [
+        "userId",
+        "tenantId",
+        "role",
+        "device",
+        "ip",
+        "createdAt",
+        "mfaEnabled",
+        "familyId"
+      ],
       "createdAt": "iso8601-string",
+      "familyId": "omitted from the record entirely when empty, never written as an empty string",
       "$comment": "mfaEnabled must survive rotation: the MFA gate refuses only when mfaEnabled && !mfaVerified, so losing it turns one refresh into a silent second-factor bypass."
     },
     "sessionDetail": {
@@ -112,6 +153,23 @@
     "totpSecretAtRest": "aes-256-gcm over the BASE32 TEXT of the secret",
     "recoveryCodeDigest": "hex hmac-sha256 of the code under the derived identifier key",
     "recoveryCodeDigestLegacy": "scrypt:{salt}:{hash}, still verified, never newly written"
+  },
+
+  "accessTokenClaims": {
+    "$comment": [
+      "Claims both sides stamp and both sides check. `epoch` is the per-user generation counter",
+      "behind bulk revocation: a password reset advances the stored epoch, and any token stamped",
+      "below it is rejected. A token that predates the claim reads as generation 0, which is",
+      "inert until the user's first bump. Absent from the MFA challenge token, which grants no",
+      "resource access on its own."
+    ],
+    "epoch": {
+      "claim": "epoch",
+      "type": "non-negative integer",
+      "storedUnder": "{ep|pep}:{userId}",
+      "absentReadsAs": 0,
+      "rejectWhen": "stampedEpoch < storedEpoch"
+    }
   },
 
   "errorEnvelope": {
