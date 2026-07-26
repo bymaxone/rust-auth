@@ -502,6 +502,7 @@ mod tests {
             device: "Chrome on macOS".to_owned(),
             ip: "203.0.113.4".to_owned(),
             created_at: created,
+            mfa_enabled: false,
         }
     }
 

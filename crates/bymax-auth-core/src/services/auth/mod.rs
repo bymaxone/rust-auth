@@ -235,6 +235,7 @@ impl AuthEngine {
             device,
             ip: stored_ip,
             created_at: now_offset(),
+            mfa_enabled: result.user.mfa_enabled,
         };
         self.sessions()
             .after_session_created(&record, &new_hash, hook_ctx)

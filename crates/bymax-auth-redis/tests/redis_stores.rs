@@ -40,6 +40,7 @@ fn record(user: &str) -> SessionRecord {
         device: "Chrome on macOS".to_owned(),
         ip: "203.0.113.4".to_owned(),
         created_at: OffsetDateTime::UNIX_EPOCH,
+        mfa_enabled: false,
     }
 }
 

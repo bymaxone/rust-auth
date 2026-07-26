@@ -64,6 +64,20 @@ pub struct SessionRecord {
     /// Session creation time.
     #[serde(with = "time::serde::rfc3339")]
     pub created_at: OffsetDateTime,
+    /// Whether MFA was enabled on the account when the session was created.
+    ///
+    /// Persisted so a rotation can propagate it into the rotated access claims. Without
+    /// it every rotation would mint `mfa_enabled: false`, and since the MFA gate only
+    /// refuses a token whose claims say `mfa_enabled && !mfa_verified`, one routine
+    /// refresh would silently disable second-factor enforcement for an enrolled account.
+    ///
+    /// `mfa_verified` is deliberately NOT stored: it must stay `false` in a rotated token
+    /// so clearing the second factor always goes back through the MFA challenge.
+    ///
+    /// `default` so a session written before this field existed deserializes as `false`
+    /// rather than failing the whole record — the same defensive read nest-auth performs.
+    #[serde(default)]
+    pub mfa_enabled: bool,
 }
 
 /// One session's display detail, returned by [`SessionStore::list_sessions`]. The
@@ -524,6 +538,7 @@ mod tests {
             device: "Chrome on macOS".into(),
             ip: "203.0.113.4".into(),
             created_at: OffsetDateTime::UNIX_EPOCH,
+            mfa_enabled: false,
         }
     }
 
@@ -532,6 +547,19 @@ mod tests {
         // The purpose segment is part of the Redis key contract shared with nest-auth.
         assert_eq!(OtpPurpose::PasswordReset.as_str(), "password_reset");
         assert_eq!(OtpPurpose::EmailVerification.as_str(), "email_verification");
+    }
+
+    #[test]
+    fn session_record_reads_a_legacy_payload_without_the_mfa_flag() {
+        // Sessions written before `mfaEnabled` existed are still live in Redis (refresh TTL is
+        // days). Deserialization must default them to `false` rather than fail: a hard error
+        // would reject every in-flight session at once and log the whole user base out.
+        let legacy = r#"{"userId":"u1","tenantId":"t1","role":"MEMBER",
+            "device":"Chrome","ip":"203.0.113.4","createdAt":"1970-01-01T00:00:00Z"}"#;
+
+        let parsed: Result<SessionRecord, _> = serde_json::from_str(legacy);
+
+        assert!(matches!(parsed, Ok(ref r) if !r.mfa_enabled && r.user_id == "u1"));
     }
 
     #[test]
@@ -557,6 +585,10 @@ mod tests {
             ..session_record()
         };
         assert!(!serde_json::to_string(&platform)?.contains("tenantId"));
+
+        // The MFA flag is always emitted (nest-auth writes it unconditionally), so the two
+        // implementations produce the same key set for the same session.
+        assert!(json.contains("\"mfaEnabled\":false"));
 
         // Round-trip parity.
         let back: SessionRecord = serde_json::from_str(&json)?;

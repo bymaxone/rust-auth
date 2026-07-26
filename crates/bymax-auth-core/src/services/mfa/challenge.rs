@@ -299,6 +299,7 @@ impl MfaService {
             device,
             ip: stored_ip,
             created_at: now_offset(),
+            mfa_enabled: safe.mfa_enabled,
         };
         let hook_ctx: HookContext = self.hook_context(&safe.id, email, ip, user_agent);
         self.sessions

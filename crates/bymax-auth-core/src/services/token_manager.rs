@@ -182,6 +182,7 @@ impl TokenManagerService {
             device,
             ip: stored_ip,
             created_at: now_offset(),
+            mfa_enabled: user.mfa_enabled,
         };
         self.session_store
             .create_session(
@@ -332,6 +333,7 @@ impl TokenManagerService {
             device,
             ip: stored_ip,
             created_at: now_offset(),
+            mfa_enabled: admin.mfa_enabled,
         };
         self.session_store
             .create_session(
@@ -447,8 +449,8 @@ impl TokenManagerService {
     }
 
     /// Build the platform access claims for a rotated/recovered session. As with the dashboard
-    /// rotation, `mfa_verified` is dropped (re-acquired only via the MFA challenge); the claims
-    /// carry no `tenant_id`.
+    /// rotation, `mfa_verified` is dropped (re-acquired only via the MFA challenge) while
+    /// `mfa_enabled` is carried over from the stored record; the claims carry no `tenant_id`.
     #[cfg(feature = "platform")]
     fn rotated_platform_claims(&self, record: &SessionRecord) -> PlatformClaims {
         let now = now_unix();
@@ -457,7 +459,7 @@ impl TokenManagerService {
             jti: new_uuid_v4(),
             role: record.role.clone(),
             token_type: PlatformType::Platform,
-            mfa_enabled: false,
+            mfa_enabled: record.mfa_enabled,
             mfa_verified: false,
             iat: now,
             exp: now.saturating_add(self.access_ttl.as_secs().min(i64::MAX as u64) as i64),
@@ -632,6 +634,11 @@ impl TokenManagerService {
     /// `mfa_verified` (the user re-acquires it only via the MFA challenge) and issues an
     /// empty `status` — status guards consult the repository/status cache, not the rotated
     /// JWT, because the stored session record carries no live status.
+    ///
+    /// `mfa_enabled` is carried over from the stored record rather than reset: the MFA gate
+    /// refuses a token only when `mfa_enabled && !mfa_verified`, so minting `false` here
+    /// would let one routine refresh turn an enrolled account's token into one that clears
+    /// every MFA-gated route without ever completing a challenge.
     fn rotated_claims(&self, record: &SessionRecord) -> DashboardClaims {
         let now = now_unix();
         DashboardClaims {
@@ -641,7 +648,7 @@ impl TokenManagerService {
             role: record.role.clone(),
             token_type: DashboardType::Dashboard,
             status: String::new(),
-            mfa_enabled: false,
+            mfa_enabled: record.mfa_enabled,
             mfa_verified: false,
             iat: now,
             exp: now.saturating_add(self.access_ttl.as_secs().min(i64::MAX as u64) as i64),
@@ -678,6 +685,7 @@ fn identity_record(seed: &SessionRecord, ip: &str, user_agent: &str) -> SessionR
         device,
         ip: stored_ip,
         created_at: now_offset(),
+        mfa_enabled: seed.mfa_enabled,
     }
 }
 
@@ -695,6 +703,7 @@ fn platform_identity_record(seed: &SessionRecord, ip: &str, user_agent: &str) ->
         device,
         ip: stored_ip,
         created_at: now_offset(),
+        mfa_enabled: seed.mfa_enabled,
     }
 }
 
@@ -711,6 +720,7 @@ fn placeholder_record(ip: &str, user_agent: &str) -> SessionRecord {
         device,
         ip: stored_ip,
         created_at: now_offset(),
+        mfa_enabled: false,
     }
 }
 
@@ -891,6 +901,80 @@ mod tests {
     }
 
     #[cfg(feature = "platform")]
+    #[tokio::test]
+    async fn rotation_preserves_mfa_enabled_so_the_gate_survives_a_refresh() {
+        // The MFA gate refuses a token only when `mfa_enabled && !mfa_verified`. If rotation
+        // reset `mfa_enabled` to false, one routine refresh (every ~15 min) would mint a token
+        // that clears every MFA-gated route without the holder ever completing a challenge —
+        // a silent bypass for an enrolled account. The flag must survive rotation; the
+        // `mfa_verified` proof must NOT, so the second factor is re-acquired via the challenge.
+        let store = Arc::new(InMemoryStores::new());
+        let svc = service(store);
+        let enrolled = SafeAuthUser {
+            mfa_enabled: true,
+            ..user()
+        };
+
+        let issued = svc
+            .issue_tokens(&enrolled, "10.0.0.1", "agent/1.0", true)
+            .await;
+        let Ok(issued) = issued else { return };
+
+        let rotated = svc
+            .reissue_tokens(&issued.refresh_token, "10.0.0.1", "agent/1.0")
+            .await;
+        let Ok(rotated) = rotated else { return };
+
+        let claims = svc.verify_access(&rotated.access_token).await;
+        assert!(matches!(&claims, Ok(c) if c.mfa_enabled && !c.mfa_verified));
+    }
+
+    #[tokio::test]
+    async fn rotation_keeps_mfa_enabled_false_for_an_unenrolled_user() {
+        // The mirror of the test above: carrying the flag over must read it from the stored
+        // record, not hardcode `true`. An account without MFA stays unenrolled across rotation.
+        let store = Arc::new(InMemoryStores::new());
+        let svc = service(store);
+
+        let issued = svc
+            .issue_tokens(&user(), "10.0.0.1", "agent/1.0", false)
+            .await;
+        let Ok(issued) = issued else { return };
+
+        let rotated = svc
+            .reissue_tokens(&issued.refresh_token, "10.0.0.1", "agent/1.0")
+            .await;
+        let Ok(rotated) = rotated else { return };
+
+        let claims = svc.verify_access(&rotated.access_token).await;
+        assert!(matches!(&claims, Ok(c) if !c.mfa_enabled));
+    }
+
+    #[tokio::test]
+    async fn platform_rotation_preserves_mfa_enabled() {
+        // Same invariant on the platform plane, where the blast radius is larger: a rotated
+        // operator token must keep demanding the second factor.
+        let store = Arc::new(InMemoryStores::new());
+        let svc = service(store);
+        let enrolled = SafeAuthPlatformUser {
+            mfa_enabled: true,
+            ..platform_admin()
+        };
+
+        let issued = svc
+            .issue_platform_tokens(&enrolled, "10.0.0.1", "agent/1.0", true)
+            .await;
+        let Ok(issued) = issued else { return };
+
+        let rotated = svc
+            .reissue_platform_tokens(&issued.refresh_token, "10.0.0.1", "agent/1.0")
+            .await;
+        let Ok(rotated) = rotated else { return };
+
+        let claims = svc.verify_platform_access(&rotated.access_token).await;
+        assert!(matches!(&claims, Ok(c) if c.mfa_enabled && !c.mfa_verified));
+    }
+
     fn platform_admin() -> SafeAuthPlatformUser {
         SafeAuthPlatformUser {
             id: "p1".to_owned(),
