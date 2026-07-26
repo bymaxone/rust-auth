@@ -12,6 +12,7 @@ use bymax_auth_types::{
 
 use crate::context::RequestContext;
 use crate::engine::AuthEngine;
+use crate::normalize::normalize_email;
 use crate::services::auth::detached::{
     run_after_login, run_rehash_password, run_update_last_login,
 };
@@ -33,6 +34,13 @@ impl AuthEngine {
         input: LoginInput,
         ctx: &RequestContext,
     ) -> Result<LoginResult, AuthError> {
+        // Canonicalize before ANY email-keyed value below is derived. The lockout identifier
+        // and the repository lookup must agree on one spelling, otherwise each casing of the
+        // same address is its own failure budget and the lockout never fires.
+        let input = LoginInput {
+            email: normalize_email(&input.email),
+            ..input
+        };
         let config = self.config().config();
         let tenant_id = self.resolve_tenant(&input.tenant_id, ctx).await?;
         let identifier = self.hashed_identifier(&tenant_id, &input.email);
@@ -368,6 +376,57 @@ mod tests {
                 retry_after_seconds: Some(_)
             })
         ));
+    }
+
+    #[tokio::test]
+    async fn rotating_the_email_case_cannot_reset_the_lockout_budget() {
+        // The case-rotation bypass. The lockout identifier is an HMAC of the email, so without
+        // canonicalization each casing is its own counter while every one of them resolves the
+        // same account — an attacker cycles the spelling and the lockout never fires. Spend the
+        // five-failure budget across five DIFFERENT casings; the sixth attempt must already be
+        // locked, proving all five landed in one bucket.
+        let Some(h) = active_harness(false).await else { return };
+        let _ = h.seed(SeedUser::active("case@example.com", "right")).await;
+
+        for spelling in [
+            "case@example.com",
+            "CASE@EXAMPLE.COM",
+            "Case@Example.Com",
+            "cAsE@eXaMpLe.CoM",
+            "  case@example.com  ",
+        ] {
+            let attempt = h.engine.login(login_input(spelling, "wrong"), &ctx()).await;
+            assert!(matches!(attempt, Err(AuthError::InvalidCredentials)));
+        }
+
+        let locked = h
+            .engine
+            .login(login_input("case@example.com", "right"), &ctx())
+            .await;
+        assert!(matches!(
+            locked,
+            Err(AuthError::AccountLocked {
+                retry_after_seconds: Some(_)
+            })
+        ));
+    }
+
+    #[tokio::test]
+    async fn login_resolves_an_account_under_any_casing() {
+        // The other half of canonicalization: the repository lookup uses the same canonical
+        // value, so an account seeded lowercase authenticates when the caller types it
+        // uppercase. Without this the fix would close the bypass by breaking real logins.
+        let Some(h) = active_harness(false).await else { return };
+        let _ = h
+            .seed(SeedUser::active("mixed@example.com", "s3cret-pass"))
+            .await;
+
+        let result = h
+            .engine
+            .login(login_input("  MiXeD@Example.COM ", "s3cret-pass"), &ctx())
+            .await;
+
+        assert!(matches!(&result, Ok(LoginResult::Success(_))));
     }
 
     #[tokio::test]

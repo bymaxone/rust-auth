@@ -31,6 +31,7 @@ pub mod config;
 pub mod context;
 pub mod engine;
 mod error;
+mod normalize;
 #[cfg(feature = "oauth")]
 pub mod providers;
 pub mod services;
@@ -45,6 +46,8 @@ pub use config::{AuthConfig, Environment};
 pub use engine::{AuthEngine, AuthEngineBuilder};
 #[doc(inline)]
 pub use error::{ConfigError, RepositoryError};
+#[doc(inline)]
+pub use normalize::normalize_email;
 #[cfg(feature = "oauth")]
 #[doc(inline)]
 pub use providers::GoogleOAuthProvider;

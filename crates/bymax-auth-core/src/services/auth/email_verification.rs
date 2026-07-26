@@ -9,6 +9,7 @@ use std::time::Instant;
 use bymax_auth_types::{AuthError, SafeAuthUser};
 
 use crate::engine::AuthEngine;
+use crate::normalize::normalize_email;
 use crate::services::auth::detached::{run_after_email_verified, run_send_verification_email};
 use crate::services::auth::{map_repository_error, normalize_anti_enum, spawn_guarded};
 use crate::traits::{HookContext, OtpPurpose};
@@ -35,6 +36,10 @@ impl AuthEngine {
         email: &str,
         otp: &str,
     ) -> Result<(), AuthError> {
+        // Canonicalize so the OTP identifier and the repository lookup agree on one
+        // spelling; a verification started under one casing must complete under any.
+        let email = normalize_email(email);
+        let email = email.as_str();
         let identifier = self.hashed_identifier(tenant_id, email);
         self.otp()
             .verify(OtpPurpose::EmailVerification, &identifier, otp)
@@ -79,6 +84,10 @@ impl AuthEngine {
         tenant_id: &str,
         email: &str,
     ) -> Result<(), AuthError> {
+        // Canonicalize so the OTP identifier and the repository lookup agree on one
+        // spelling; a verification started under one casing must complete under any.
+        let email = normalize_email(email);
+        let email = email.as_str();
         let started = Instant::now();
         let identifier = self.hashed_identifier(tenant_id, email);
 

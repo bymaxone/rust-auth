@@ -17,6 +17,7 @@ use time::OffsetDateTime;
 
 use crate::context::RequestContext;
 use crate::engine::AuthEngine;
+use crate::normalize::normalize_email;
 use crate::services::auth::detached::run_after_invitation_accepted;
 use crate::services::auth::{map_repository_error, spawn_guarded};
 use crate::traits::{HookContext, InviteData, StoredInvitation};
@@ -67,8 +68,11 @@ impl AuthEngine {
         tenant_name: Option<&str>,
     ) -> Result<(), AuthError> {
         // Normalize the email at the service boundary so the duplicate-guard and the stored
-        // payload use the same canonical form the accept flow will match against.
-        let email = email.trim().to_ascii_lowercase();
+        // payload use the same canonical form the accept flow will match against. Routed
+        // through the shared helper: an ASCII-only fold here would canonicalize a non-ASCII
+        // address differently from nest-auth's Unicode `toLowerCase()` and split the keyspace
+        // the two backends share.
+        let email = normalize_email(email);
         let hierarchy = &self.config().config().roles.hierarchy;
 
         // The invited role must be a declared role, and the inviter must hold a role at least

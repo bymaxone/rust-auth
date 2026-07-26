@@ -18,6 +18,7 @@ use bymax_auth_types::{AuthError, AuthUser, SafeAuthUser};
 
 use crate::config::ResetMethod;
 use crate::engine::AuthEngine;
+use crate::normalize::normalize_email;
 use crate::services::auth::detached::run_after_password_reset;
 use crate::services::auth::{map_repository_error, normalize_anti_enum, spawn_guarded};
 use crate::traits::{HookContext, OtpPurpose, ResetContext};
@@ -113,6 +114,13 @@ impl AuthEngine {
     /// timing floor is applied before the error is returned, so an infra error stays
     /// latency-indistinguishable from a normal response.
     pub async fn initiate_reset(&self, input: ForgotPasswordInput) -> Result<(), AuthError> {
+        // Canonicalize first: every key below (the OTP/cooldown identifier, the lookup,
+        // and the reset context written for the confirm step) must derive from one
+        // spelling, or a reset started under one casing cannot be completed under another.
+        let input = ForgotPasswordInput {
+            email: normalize_email(&input.email),
+            ..input
+        };
         let started = Instant::now();
         // Run the fallible body, then normalize the elapsed time on EVERY exit — including an
         // infrastructure error — before returning, so a backend failure cannot be told apart
@@ -161,6 +169,13 @@ impl AuthEngine {
     /// ([`AuthError::OtpInvalid`]/[`AuthError::OtpExpired`]/[`AuthError::OtpMaxAttempts`]) for a
     /// failed OTP; or a hashing/store [`AuthError`].
     pub async fn reset_password(&self, input: ResetPasswordInput) -> Result<(), AuthError> {
+        // Canonicalize first: every key below (the OTP/cooldown identifier, the lookup,
+        // and the reset context written for the confirm step) must derive from one
+        // spelling, or a reset started under one casing cannot be completed under another.
+        let input = ResetPasswordInput {
+            email: normalize_email(&input.email),
+            ..input
+        };
         // Classify the proofs: exactly one of token / otp / verified_token must be present.
         let proof = match (
             input.token.as_deref(),
@@ -253,6 +268,13 @@ impl AuthEngine {
     /// Returns the OTP error on a failed verify, [`AuthError::PasswordResetTokenInvalid`] for a
     /// vanished account, or a store [`AuthError`].
     pub async fn verify_reset_otp(&self, input: VerifyResetOtpInput) -> Result<String, AuthError> {
+        // Canonicalize first: every key below (the OTP/cooldown identifier, the lookup,
+        // and the reset context written for the confirm step) must derive from one
+        // spelling, or a reset started under one casing cannot be completed under another.
+        let input = VerifyResetOtpInput {
+            email: normalize_email(&input.email),
+            ..input
+        };
         let identifier = self.hashed_identifier(&input.tenant_id, &input.email);
         self.otp()
             .verify(OtpPurpose::PasswordReset, &identifier, &input.otp)
@@ -293,6 +315,13 @@ impl AuthEngine {
     /// floor is applied before the error is returned, so an infra error stays
     /// latency-indistinguishable from a normal response.
     pub async fn resend_reset_otp(&self, input: ResendResetOtpInput) -> Result<(), AuthError> {
+        // Canonicalize first: every key below (the OTP/cooldown identifier, the lookup,
+        // and the reset context written for the confirm step) must derive from one
+        // spelling, or a reset started under one casing cannot be completed under another.
+        let input = ResendResetOtpInput {
+            email: normalize_email(&input.email),
+            ..input
+        };
         let started = Instant::now();
         // Run the fallible body, then normalize the elapsed time on EVERY exit — the cooldown
         // short-circuit, the success path, and any infrastructure error — so a backend failure

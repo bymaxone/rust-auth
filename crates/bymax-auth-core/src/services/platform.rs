@@ -29,6 +29,7 @@ use bymax_auth_types::{
     SafeAuthPlatformUser,
 };
 
+use crate::normalize::normalize_email;
 use crate::services::auth::{normalize_anti_enum, spawn_guarded};
 use crate::services::brute_force::BruteForceService;
 use crate::services::password::PasswordService;
@@ -108,6 +109,10 @@ impl PlatformAuthService {
         ip: &str,
         user_agent: &str,
     ) -> Result<PlatformLoginResult, AuthError> {
+        // Canonicalize before the lockout identifier and the repository lookup are derived, so
+        // rotating the casing cannot mint a fresh failure budget for the same administrator.
+        let email = normalize_email(email);
+        let email = email.as_str();
         let identifier = self.brute_force_identifier(email);
 
         // Brute-force gate first, so an already-locked account never increments again.

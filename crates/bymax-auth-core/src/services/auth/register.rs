@@ -7,6 +7,7 @@ use bymax_auth_types::{AuthError, AuthUser, CreateUserData, LoginResult, SafeAut
 
 use crate::context::RequestContext;
 use crate::engine::AuthEngine;
+use crate::normalize::normalize_email;
 use crate::services::auth::detached::run_after_register;
 use crate::services::auth::{RegisterInput, map_repository_error, spawn_guarded};
 use crate::traits::{BeforeRegisterResult, HookContext, RegisterAttempt, RegisterOverrides};
@@ -25,6 +26,13 @@ impl AuthEngine {
         input: RegisterInput,
         ctx: &RequestContext,
     ) -> Result<LoginResult, AuthError> {
+        // Canonicalize before the uniqueness check and the stored identity are derived, so a
+        // single address cannot be registered once per casing and later resolve to whichever
+        // row a lookup happens to hit.
+        let input = RegisterInput {
+            email: normalize_email(&input.email),
+            ..input
+        };
         // The resolver, when present, is authoritative — the body tenant is ignored (§24.8).
         let tenant_id = self.resolve_tenant(&input.tenant_id, ctx).await?;
         let hook_ctx = HookContext::from_request(
