@@ -244,6 +244,11 @@ impl RedisStores {
             .arg(family)
             .arg(&rotation.old_hash)
             .arg(&rotation.new_hash)
+            // The grace branch rebuilds the family key of the record it recovered — which is not
+            // KEYS[5] (that one is the presented rotation's family, and an absent live token
+            // seeds an empty one) — so it needs the namespace and the family prefix by name.
+            .arg(keys.namespace())
+            .arg(prefixes.fam.as_str())
             .invoke_async(&mut conn)
             .await?;
 

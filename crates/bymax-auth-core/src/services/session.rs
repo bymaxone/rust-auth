@@ -1161,5 +1161,13 @@ mod tests {
         );
         assert!(store.blacklist_access("jti", 60).await.is_ok());
         assert!(matches!(store.is_blacklisted("jti").await, Ok(false)));
+        assert!(matches!(
+            store.current_epoch(SessionKind::Dashboard, "u1").await,
+            Ok(0)
+        ));
+        assert!(matches!(
+            store.bump_epoch(SessionKind::Dashboard, "u1").await,
+            Ok(1)
+        ));
     }
 }

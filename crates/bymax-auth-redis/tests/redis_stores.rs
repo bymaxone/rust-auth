@@ -253,6 +253,63 @@ async fn reuse_past_grace_is_detected_and_revoke_family_kills_the_lineage() {
 }
 
 #[tokio::test]
+async fn a_grace_pointer_cannot_resurrect_a_revoked_family() {
+    let Some(redis) = common::try_start().await else {
+        return;
+    };
+    let Some(stores) = redis.stores() else { return };
+    let kind = SessionKind::Dashboard;
+
+    // SECURITY REGRESSION GUARD. Revoking a family deletes its live sessions, but a grace
+    // pointer planted by an EARLIER rotation of the same lineage can still be inside its (much
+    // shorter) window when the reuse fires — the reuse is only detected once the REPLAYED
+    // token's own pointer expired, which says nothing about a younger sibling's. Recovering
+    // from that pointer would mint a fresh session carrying the revoked family id, handing the
+    // thief back the lineage the revocation just killed.
+    assert!(
+        stores
+            .create_session(kind, "k1", &record("ku"), 3600)
+            .await
+            .is_ok()
+    );
+    // k1 -> k2 -> k3: after this, `rp:k2` is live and holds a record of family "fam-ku".
+    assert!(matches!(
+        stores.rotate(kind, &rotation("k1", "k2", "ku")).await,
+        Ok(RotateOutcome::Rotated(_))
+    ));
+    assert!(matches!(
+        stores.rotate(kind, &rotation("k2", "k3", "ku")).await,
+        Ok(RotateOutcome::Rotated(_))
+    ));
+    assert!(
+        redis.ttl("auth:rp:k2").await > 0,
+        "the sibling pointer is live"
+    );
+
+    // The oldest token is replayed once its own grace window has closed: a reuse, and the
+    // family is revoked.
+    assert!(redis.del("auth:rp:k1").await);
+    assert!(matches!(
+        stores.rotate(kind, &rotation("k1", "kX", "ku")).await,
+        Ok(RotateOutcome::Reused(family)) if family == "fam-ku"
+    ));
+    assert!(stores.revoke_family(kind, "fam-ku").await.is_ok());
+
+    // The still-live sibling pointer must NOT recover a session: its family is gone, so the
+    // rotation reports the token invalid instead of handing back the revoked lineage.
+    assert!(
+        redis.ttl("auth:rp:k2").await > 0,
+        "the pointer itself survives"
+    );
+    assert!(matches!(
+        stores.rotate(kind, &rotation("k2", "kY", "ku")).await,
+        Ok(RotateOutcome::Invalid)
+    ));
+    assert!(matches!(stores.find_session(kind, "kY").await, Ok(None)));
+    assert!(matches!(stores.list_sessions(kind, "ku").await, Ok(v) if v.is_empty()));
+}
+
+#[tokio::test]
 async fn token_epoch_defaults_to_zero_bumps_monotonically_and_is_keyspace_disjoint() {
     let Some(redis) = common::try_start().await else {
         return;
