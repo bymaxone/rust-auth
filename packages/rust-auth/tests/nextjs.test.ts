@@ -4,6 +4,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { NextRequest } from "next/server";
+import type { NextResponse } from "next/server";
 import { describe, expect, it } from "vitest";
 
 import {
@@ -14,7 +15,7 @@ import {
   isTokenExpired,
   verifyJwtToken,
 } from "../src/nextjs/jwt";
-import { createAuthProxy, resolveSafeDestination } from "../src/nextjs/proxy";
+import { createAuthProxy, isBackgroundRequest, resolveSafeDestination } from "../src/nextjs/proxy";
 
 /** The shared HS256 secret used to sign and verify test tokens (server == edge). */
 const SECRET = "an-edge-test-hs256-secret-key-0123456789";
@@ -80,10 +81,33 @@ function protectedRequest(token: string): NextRequest {
   });
 }
 
+/**
+ * Build a GET request to a protected path carrying the given background headers (and,
+ * optionally, an access cookie) — the shape a forged RSC/prefetch/state-tree probe takes.
+ */
+function backgroundRequest(background: Record<string, string>, token = ""): NextRequest {
+  const cookie: Record<string, string> =
+    token.length > 0 ? { cookie: `access_token=${token}` } : {};
+  return new NextRequest("https://app.test/dashboard", {
+    headers: { ...background, ...cookie },
+  });
+}
+
 /** Flip the final signature character so the signature is wrong but the framing intact. */
 function tamperSignature(token: string): string {
   const last = token.slice(-1);
   return `${token.slice(0, -1)}${last === "A" ? "B" : "A"}`;
+}
+
+/** Whether a proxy response forwarded the UI-only x-user-id header (i.e. admitted). */
+function admittedUserId(response: { headers: Headers }): string | null {
+  return response.headers.get("x-middleware-request-x-user-id");
+}
+
+/** Whether a proxy response redirected to the sign-in path (i.e. rejected). */
+function redirectedToLogin(response: { headers: Headers }): boolean {
+  const location = response.headers.get("location");
+  return location !== null && location.includes("/login");
 }
 
 describe("verifyJwtToken — real WASM HS256 parity (server == edge)", () => {
@@ -172,17 +196,6 @@ describe("server-only enforcement", () => {
 });
 
 describe("createAuthProxy — fail-closed verification (S1) and token-type assertion (S2)", () => {
-  /** Whether a proxy response forwarded the UI-only x-user-id header (i.e. admitted). */
-  function admittedUserId(response: { headers: Headers }): string | null {
-    return response.headers.get("x-middleware-request-x-user-id");
-  }
-
-  /** Whether a proxy response redirected to the sign-in path (i.e. rejected). */
-  function redirectedToLogin(response: { headers: Headers }): boolean {
-    const location = response.headers.get("location");
-    return location !== null && location.includes("/login");
-  }
-
   it("admits a validly-signed access token when a non-empty secret is configured", async () => {
     // The happy path: an authoritative HS256 verification with the matching secret admits the
     // request and forwards the user id header; no sign-in redirect is issued.
@@ -221,5 +234,130 @@ describe("createAuthProxy — fail-closed verification (S1) and token-type asser
 
     expect(redirectedToLogin(response)).toBe(true);
     expect(admittedUserId(response)).toBeNull();
+  });
+});
+
+describe("createAuthProxy — forged background headers are not an auth bypass (RC10)", () => {
+  /**
+   * Whether a response is the bare, uncacheable 401 the proxy owes an unauthenticated
+   * background request — the nest-auth parity shape (`no-store, no-cache`).
+   */
+  function isBackgroundRefusal(response: NextResponse): boolean {
+    return (
+      response.status === 401 && response.headers.get("cache-control") === "no-store, no-cache"
+    );
+  }
+
+  it("answers a forged `RSC: 1` probe on a protected route with 401, never a pass-through", async () => {
+    // The core bypass: `RSC` is a plain request header, so an attacker can set it on a normal
+    // navigation. If the proxy answered `NextResponse.next()` the protected page's server
+    // components would render for a caller holding no session at all. It must refuse instead.
+    const { proxy } = createAuthProxy({ accessTokenSecret: SECRET });
+    const response = await proxy(backgroundRequest({ RSC: "1" }));
+
+    expect(isBackgroundRefusal(response)).toBe(true);
+    expect(admittedUserId(response)).toBeNull();
+    // Not a redirect either: a redirected RSC fetch would poison the router cache with the
+    // login document, which is why the refusal is a status code rather than a `Location`.
+    expect(redirectedToLogin(response)).toBe(false);
+  });
+
+  it("answers a forged `Next-Router-Prefetch: 1` probe with the same 401", async () => {
+    // The prefetch signal is equally forgeable, so it must reach the same refusal — closing
+    // `RSC` alone would leave an identical bypass one header name away.
+    const { proxy } = createAuthProxy({ accessTokenSecret: SECRET });
+    const response = await proxy(backgroundRequest({ "Next-Router-Prefetch": "1" }));
+
+    expect(isBackgroundRefusal(response)).toBe(true);
+    expect(admittedUserId(response)).toBeNull();
+  });
+
+  it("answers a forged `Next-Router-State-Tree` probe with the same 401", async () => {
+    // The partial-render signal carries a serialised tree rather than a flag, so detection
+    // keys off any non-empty value. Without it this variant would miss the background branch.
+    const { proxy } = createAuthProxy({ accessTokenSecret: SECRET });
+    const response = await proxy(backgroundRequest({ "Next-Router-State-Tree": '["",{}]' }));
+
+    expect(isBackgroundRefusal(response)).toBe(true);
+    expect(admittedUserId(response)).toBeNull();
+  });
+
+  it("refuses a forged background probe even when a `has_session` cookie is present", async () => {
+    // `has_session` is a non-HttpOnly UI hint and is likewise forgeable. It routes a normal
+    // navigation into the silent-refresh redirect, but it must not turn a background request
+    // into a pass-through — the caller still holds no verifiable access token.
+    const { proxy } = createAuthProxy({ accessTokenSecret: SECRET });
+    const request = new NextRequest("https://app.test/dashboard", {
+      headers: { RSC: "1", cookie: "has_session=1" },
+    });
+    const response = await proxy(request);
+
+    expect(isBackgroundRefusal(response)).toBe(true);
+    expect(admittedUserId(response)).toBeNull();
+  });
+
+  it("refuses a blocked account on a background request instead of passing it through", async () => {
+    // The account-status gate must not be escapable by adding a header: a SUSPENDED user who
+    // holds a genuinely-signed token would otherwise render the guarded page by sending
+    // `RSC: 1`. The blocked refusal is returned whatever the request shape.
+    const { proxy } = createAuthProxy({
+      accessTokenSecret: SECRET,
+      blockedStatuses: ["SUSPENDED"],
+    });
+    const response = await proxy(
+      backgroundRequest({ RSC: "1" }, dashboardToken({ status: "SUSPENDED" })),
+    );
+
+    expect(response.status).not.toBe(200);
+    expect(admittedUserId(response)).toBeNull();
+    expect(response.headers.get("location")).toContain("reason=blocked");
+  });
+
+  it("refuses an RBAC-forbidden role on a background request instead of passing it through", async () => {
+    // Same bypass one branch further along: a `member` token on an admin-only prefix must be
+    // refused even when the request claims to be a background fetch. Passing it through would
+    // hand a role-gated page to a user the rule denies.
+    const { proxy } = createAuthProxy({
+      accessTokenSecret: SECRET,
+      roleRules: [{ pathPrefix: "/dashboard", roles: ["admin"] }],
+    });
+    const response = await proxy(backgroundRequest({ RSC: "1" }, dashboardToken()));
+
+    expect(response.status).not.toBe(200);
+    expect(admittedUserId(response)).toBeNull();
+    expect(response.headers.get("location")).toContain("reason=forbidden");
+  });
+
+  it("still admits a genuine background request that carries a valid session", async () => {
+    // The regression guard for the fix: hardening the background branch must not break real
+    // prefetching. An authenticated RSC fetch is admitted with its user headers as before.
+    const { proxy } = createAuthProxy({ accessTokenSecret: SECRET });
+    const response = await proxy(backgroundRequest({ RSC: "1" }, dashboardToken()));
+
+    expect(response.status).toBe(200);
+    expect(admittedUserId(response)).toBe("u_1");
+  });
+});
+
+describe("isBackgroundRequest — signal coverage", () => {
+  it("detects the RSC, prefetch, state-tree, and Sec-Purpose signals", () => {
+    // Each header the Next router uses for a non-navigational fetch must be recognised, so
+    // the proxy answers every one of them with a 401 rather than a cache-poisoning redirect.
+    expect(isBackgroundRequest(backgroundRequest({ RSC: "1" }))).toBe(true);
+    expect(isBackgroundRequest(backgroundRequest({ "Next-Router-Prefetch": "1" }))).toBe(true);
+    expect(isBackgroundRequest(backgroundRequest({ "Next-Router-State-Tree": '["",{}]' }))).toBe(
+      true,
+    );
+    expect(isBackgroundRequest(backgroundRequest({ Purpose: "prefetch" }))).toBe(true);
+    expect(isBackgroundRequest(backgroundRequest({ "Sec-Purpose": "prefetch;prerender" }))).toBe(
+      true,
+    );
+  });
+
+  it("treats an empty state-tree header and a plain navigation as foreground", () => {
+    // An empty header value is not a state tree, so it must not flip the branch; a request
+    // with no signal at all is a top-level navigation that still deserves a redirect.
+    expect(isBackgroundRequest(backgroundRequest({ "Next-Router-State-Tree": "" }))).toBe(false);
+    expect(isBackgroundRequest(backgroundRequest({}))).toBe(false);
   });
 });

@@ -47,6 +47,13 @@ const DEFAULT_LOGIN_PATH = "/login";
 /** The default ceiling on redirect bounces before the proxy stops trying to recover. */
 const DEFAULT_MAX_REDIRECTS = 3;
 
+/**
+ * The `Cache-Control` value on every refusal the proxy emits for a background request. It
+ * stops a CDN or the client router cache from storing the 401 and replaying it to a later,
+ * genuinely authenticated visitor.
+ */
+const NO_STORE_CACHE_CONTROL = "no-store, no-cache";
+
 /** A single RBAC rule: the roles permitted under a path prefix. */
 export interface AuthProxyRoleRule {
   /** The path prefix this rule guards (e.g. `/admin`). */
@@ -184,10 +191,14 @@ function handleUnauthenticated(
   request: NextRequest,
   config: ResolvedAuthProxyConfig,
 ): NextResponse {
-  // A background (RSC/prefetch) request must never be redirected — that would poison the
-  // router cache with a login document. Let it through unauthenticated instead.
+  // A background (RSC/prefetch/state-tree) request must never be redirected — that would
+  // poison the router cache with a login document. It must never be let through either: the
+  // headers that mark a request as background are client-forgeable, so `NextResponse.next()`
+  // here would let anyone bypass this gate by sending `RSC: 1` and have the protected page's
+  // server components render for an unauthenticated caller. Refuse with a bare 401 instead;
+  // the client router falls back to a full navigation, where a redirect is appropriate.
   if (isBackgroundRequest(request)) {
-    return NextResponse.next();
+    return backgroundUnauthorized();
   }
 
   const bounces = redirectCount(request);
@@ -206,15 +217,30 @@ function handleUnauthenticated(
   return redirectToLogin(request, config.loginPath, "expired");
 }
 
-/** Build a sign-in redirect carrying a `reason` and a same-origin `redirectTo`; never a token. */
+/**
+ * The refusal returned to an unauthenticated background request: a bare 401 that is never
+ * cached. Returning `NextResponse.next()` here would turn the forgeable `RSC` /
+ * `Next-Router-Prefetch` / `Next-Router-State-Tree` headers into an auth bypass.
+ */
+function backgroundUnauthorized(): NextResponse {
+  return new NextResponse(null, {
+    status: 401,
+    headers: { "Cache-Control": NO_STORE_CACHE_CONTROL },
+  });
+}
+
+/**
+ * Build a sign-in redirect carrying a `reason` and a same-origin `redirectTo`; never a token.
+ *
+ * This applies to background requests too. A blocked account or a failed RBAC check must
+ * refuse the request whatever headers it carries — short-circuiting to `NextResponse.next()`
+ * for a background request would let a forged `RSC: 1` header render the guarded page.
+ */
 function redirectToLogin(
   request: NextRequest,
   loginPath: string,
   reason: string,
 ): NextResponse {
-  if (isBackgroundRequest(request)) {
-    return NextResponse.next();
-  }
   const url = new URL(loginPath, request.nextUrl.origin);
   url.searchParams.set("reason", reason);
   url.searchParams.set(
@@ -377,16 +403,25 @@ export function parseSetCookieHeader(raw: string): ParsedSetCookie {
 }
 
 /**
- * Whether a request is a framework background fetch (an RSC payload or a prefetch) that must
- * not be redirected, since redirecting it would corrupt the client router cache.
+ * Whether a request is a framework background fetch (an RSC payload, a router state-tree
+ * fetch, or a prefetch) that must not be redirected, since redirecting it would corrupt the
+ * client router cache.
+ *
+ * Every signal read here is a plain request header and therefore client-forgeable, so a
+ * `true` result is only ever a hint about response SHAPE (401 instead of a redirect) — never
+ * a reason to admit a request. Callers must still refuse an unauthenticated caller.
  *
  * @param request - The incoming request.
- * @returns `true` for RSC/prefetch background requests.
+ * @returns `true` for RSC/state-tree/prefetch background requests.
  */
 export function isBackgroundRequest(request: NextRequest): boolean {
   const headers = request.headers;
   if (headers.get("RSC") === "1") return true;
   if (headers.get("Next-Router-Prefetch") === "1") return true;
+  // The router state-tree header carries a serialised tree, not a flag, so any non-empty
+  // value marks the request as a partial-render fetch.
+  const stateTree = headers.get("Next-Router-State-Tree");
+  if (stateTree !== null && stateTree.length > 0) return true;
   const purpose = headers.get("Purpose") ?? headers.get("X-Purpose") ?? headers.get("X-Moz");
   if (purpose === "prefetch") return true;
   const secPurpose = headers.get("Sec-Purpose");
