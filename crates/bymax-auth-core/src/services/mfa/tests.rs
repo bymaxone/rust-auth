@@ -515,6 +515,89 @@ async fn challenge_locks_out_after_repeated_wrong_codes() {
         mfa.challenge(&temp, "no-such-code", "1.2.3.4", "ua").await,
         Err(AuthError::AccountLocked { .. })
     ));
+
+    // The counter is per user. A shared one would let anybody lock any account out of MFA by
+    // failing their own challenge five times — a denial of service with no credential needed.
+    let Some(other) = register(&h.engine, "other@example.com").await else {
+        return;
+    };
+    let Ok(other_setup) = mfa.setup(&other, MfaContext::Dashboard).await else {
+        return;
+    };
+    let base = now_secs();
+    assert!(
+        mfa.verify_and_enable(
+            &other,
+            &code_at(&other_setup.secret, base),
+            "1.2.3.4",
+            "ua",
+            MfaContext::Dashboard
+        )
+        .await
+        .is_ok()
+    );
+    let Some(other_temp) = login_temp_token(&h.engine, "other@example.com").await else {
+        return;
+    };
+    assert!(
+        mfa.challenge(
+            &other_temp,
+            &code_at(&other_setup.secret, base + 30),
+            "1.2.3.4",
+            "ua"
+        )
+        .await
+        .is_ok()
+    );
+}
+
+#[tokio::test]
+async fn two_users_setting_up_never_share_a_pending_record() {
+    // The pending-setup slot is keyed per user. On one shared key the second caller loses the
+    // SET NX race and is handed the *winner's* record — enrolling their authenticator against
+    // someone else's account, and learning that account's TOTP secret and recovery codes.
+    let Some(h) = build(false, false) else { return };
+    let Some(first) = register(&h.engine, "first@example.com").await else {
+        return;
+    };
+    let Some(second) = register(&h.engine, "second@example.com").await else {
+        return;
+    };
+    let Some(mfa) = h.engine.mfa() else { return };
+
+    let Ok(a) = mfa.setup(&first, MfaContext::Dashboard).await else {
+        return;
+    };
+    let Ok(b) = mfa.setup(&second, MfaContext::Dashboard).await else {
+        return;
+    };
+    assert_ne!(a.secret, b.secret);
+    assert_ne!(a.recovery_codes, b.recovery_codes);
+
+    // And each enables against their own secret, which a shared slot could not satisfy.
+    let base = now_secs();
+    assert!(
+        mfa.verify_and_enable(
+            &first,
+            &code_at(&a.secret, base),
+            "1.2.3.4",
+            "ua",
+            MfaContext::Dashboard
+        )
+        .await
+        .is_ok()
+    );
+    assert!(
+        mfa.verify_and_enable(
+            &second,
+            &code_at(&b.secret, base),
+            "1.2.3.4",
+            "ua",
+            MfaContext::Dashboard
+        )
+        .await
+        .is_ok()
+    );
 }
 
 #[tokio::test]
