@@ -37,7 +37,9 @@ jobs:
       run-msrv: true
       msrv-version: '1.90'
       run-mutation: true
-      mutation-command: cargo mutants --all-features --in-place
+      # No --all-features here: .cargo/mutants.toml already carries it in
+      # additional_cargo_args, and cargo rejects the flag twice.
+      mutation-command: cargo mutants --in-place
       # Match .cargo/mutants.toml examine_globs (logic crates only; bindings/** is
       # excluded there), so a bindings-only change never triggers the gate for
       # code cargo-mutants would not mutate.

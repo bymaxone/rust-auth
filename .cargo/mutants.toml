@@ -35,7 +35,9 @@ exclude_globs = [
 ]
 
 # Build the mutants with every feature so the suite that the catch-rate is measured
-# against exercises the same paths the mutated code lives on.
+# against exercises the same paths the mutated code lives on. This is the only place the
+# flag belongs: cargo refuses `--all-features` twice, so passing it on the command line as
+# well ("cargo mutants --all-features") fails the baseline build before any mutant runs.
 additional_cargo_args = ["--all-features"]
 
 # Documented equivalent mutants: mutants no test can kill because the change is
