@@ -982,12 +982,20 @@ mod tests {
 
         // Resend canonicalizes its address like the other two entry points: a code requested
         // under one spelling is filed where the confirm step will look for it. Every branch
-        // here answers `Ok(())`, so only the OTP record shows which one ran.
-        let identifier = h.engine.hashed_identifier("t1", "present@example.com");
+        // here answers `Ok(())`, so only the OTP record shows which one ran — and it has to be
+        // an account with no code on file yet, or an earlier `initiate` would have left one
+        // under that identifier and the assertion would hold either way.
+        let _ = h.seed(SeedUser::active("shout@example.com", "pw")).await;
+        let identifier = h.engine.hashed_identifier("t1", "shout@example.com");
+        assert!(
+            h.stores
+                .peek_otp(OtpPurpose::PasswordReset, &identifier)
+                .is_none()
+        );
         assert!(
             h.engine
                 .resend_reset_otp(ResendResetOtpInput {
-                    email: "PRESENT@Example.com".to_owned(),
+                    email: "SHOUT@Example.com".to_owned(),
                     tenant_id: "t1".to_owned(),
                 })
                 .await

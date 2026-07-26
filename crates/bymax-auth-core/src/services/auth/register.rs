@@ -221,11 +221,18 @@ mod tests {
         let again = engine.register(input("dup@example.com"), &ctx()).await;
         assert!(matches!(again, Err(AuthError::EmailAlreadyExists)));
 
-        // And a different casing is the same address: without canonicalization the uniqueness
-        // check misses, the tenant ends up with one row per spelling, and a later lookup
-        // resolves to whichever it happens to hit.
+        // And a different casing is the same address. The in-memory repository compares
+        // case-insensitively, so the conflict alone does not prove canonicalization — what
+        // proves it is the *stored* address: a row keyed by whatever the user shouted would
+        // resolve to a different identity on any store that compares bytes, which is most of
+        // them.
         let shouted = engine.register(input("DUP@Example.COM"), &ctx()).await;
         assert!(matches!(shouted, Err(AuthError::EmailAlreadyExists)));
+
+        let fresh = engine.register(input("MiXeD@Example.COM"), &ctx()).await;
+        assert!(matches!(&fresh, Ok(LoginResult::Success(_))));
+        let Ok(LoginResult::Success(auth)) = fresh else { return };
+        assert_eq!(auth.user.email, "mixed@example.com");
     }
 
     /// A hook that rejects registration, to drive the `before_register` deny path.

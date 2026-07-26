@@ -595,6 +595,56 @@ mod tests {
         Arc::new(InMemoryStores::new())
     }
 
+    #[tokio::test]
+    async fn the_session_service_gets_the_configured_refresh_lifetime() {
+        // The builder derives the session-touch TTL from `refresh_expires_in_days`, separately
+        // from the token manager's copy, and hands it to the session service — where it lands
+        // on every rotation. Nothing else observes that arithmetic, so a `+` in place of the
+        // `*` would silently store rotated sessions with a 24-hour-and-change lifetime.
+        let stores = stores();
+        let mut cfg = valid_config();
+        cfg.jwt.refresh_expires_in_days = 7;
+        let built = AuthEngine::builder()
+            .config(cfg)
+            .user_repository(user_repo())
+            .redis_stores(stores.clone())
+            .build();
+        let Ok(engine) = built else { return };
+
+        let old_hash = "a".repeat(64);
+        let new_hash = "b".repeat(64);
+        let record = crate::traits::SessionRecord {
+            user_id: "u1".to_owned(),
+            tenant_id: Some("t1".to_owned()),
+            role: "ADMIN".to_owned(),
+            device: "Chrome".to_owned(),
+            ip: "203.0.113.4".to_owned(),
+            created_at: time::OffsetDateTime::UNIX_EPOCH,
+            mfa_enabled: false,
+            family_id: String::new(),
+            family_created_at: None,
+        };
+        assert!(
+            stores
+                .create_session(
+                    crate::traits::SessionKind::Dashboard,
+                    &old_hash,
+                    &record,
+                    3600
+                )
+                .await
+                .is_ok()
+        );
+        assert!(
+            engine
+                .sessions()
+                .rotate_session(&old_hash, &new_hash, &record)
+                .await
+                .is_ok()
+        );
+        assert_eq!(stores.peek_rotate_ttl(), Some(7 * 86_400));
+    }
+
     #[test]
     fn builds_with_noop_defaults_and_exposes_every_accessor() {
         // A minimal valid wiring assembles, defaulting the email provider and hooks to the

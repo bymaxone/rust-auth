@@ -307,6 +307,9 @@ pub struct InMemoryStores {
     /// `ep:`/`pep:` per-user token epoch (generation counter), keyed by `(kind, user_id)`. A
     /// bump invalidates every access token stamped below the new value. Absent reads as `0`.
     epochs: Mutex<HashMap<(SessionKind, String), u64>>,
+    /// The refresh TTL the last `rotate` was given, in seconds — the session-touch path's
+    /// copy of the same lifetime, wired separately from the token manager's.
+    last_rotate_ttl_secs: Mutex<Option<u64>>,
     /// The TTL the last `create_session` was given, in seconds. The real store turns this
     /// into the key's expiry — the only thing that makes a session end on its own — so it is
     /// recorded rather than discarded, and read back through [`InMemoryStores::peek_session_ttl`].
@@ -347,6 +350,13 @@ impl InMemoryStores {
     #[must_use]
     pub fn peek_session_ttl(&self) -> Option<u64> {
         *lock(&self.last_session_ttl_secs)
+    }
+
+    /// The refresh TTL the last rotation was stored with, in seconds. A test-only inspection
+    /// helper, for the same reason as [`InMemoryStores::peek_session_ttl`].
+    #[must_use]
+    pub fn peek_rotate_ttl(&self) -> Option<u64> {
+        *lock(&self.last_rotate_ttl_secs)
     }
 
     /// Read the stored OTP code for a purpose + identifier without consuming it. A test-only
@@ -398,6 +408,7 @@ impl SessionStore for InMemoryStores {
         kind: SessionKind,
         rotation: &SessionRotation,
     ) -> Result<RotateOutcome, AuthError> {
+        *lock(&self.last_rotate_ttl_secs) = Some(rotation.refresh_ttl);
         let mut sessions = lock(&self.sessions);
         if let Some(old_record) = sessions.remove(&(kind, rotation.old_hash.clone())) {
             sessions.insert(

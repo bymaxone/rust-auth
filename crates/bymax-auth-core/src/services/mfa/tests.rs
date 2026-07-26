@@ -392,6 +392,15 @@ impl EmailProvider for AlertSpy {
 
 #[async_trait]
 impl AuthHooks for AlertSpy {
+    async fn on_new_session(
+        &self,
+        user: &bymax_auth_types::SafeAuthUser,
+        _session: &crate::traits::SessionInfo,
+        _ctx: &HookContext,
+    ) -> Result<(), crate::traits::HookError> {
+        self.push(format!("hook:new_session:{}", user.id));
+        Ok(())
+    }
     async fn after_mfa_enabled(
         &self,
         user: &bymax_auth_types::SafeAuthUser,
@@ -498,6 +507,53 @@ async fn every_mfa_state_change_alerts_the_account_owner() {
     assert!(
         seen.contains(&format!("hook:regenerated:{uid}")),
         "no regenerated hook: {seen:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_challenge_registers_its_session_with_the_session_service() {
+    // The challenge issues a session like a login does, and with tracking on it must go
+    // through the session service — that is what enforces the per-user cap and fires the
+    // new-session notification. The tokens it returns look identical either way, so the
+    // hook is the observation point.
+    let spy = Arc::new(AlertSpy::default());
+    let hooks: Arc<dyn AuthHooks> = spy.clone();
+    let Some(h) = build_with(true, false, None, Some(hooks)) else {
+        return;
+    };
+    let Some(uid) = register(&h.engine, "tracked@example.com").await else {
+        return;
+    };
+    let Some(mfa) = h.engine.mfa() else { return };
+    let Ok(setup) = mfa.setup(&uid, MfaContext::Dashboard).await else {
+        return;
+    };
+    let base = now_secs();
+    assert!(
+        mfa.verify_and_enable(
+            &uid,
+            &code_at(&setup.secret, base),
+            "1.2.3.4",
+            "ua",
+            MfaContext::Dashboard
+        )
+        .await
+        .is_ok()
+    );
+    let Some(temp) = login_temp_token(&h.engine, "tracked@example.com").await else {
+        return;
+    };
+    assert!(matches!(
+        mfa.challenge(&temp, &code_at(&setup.secret, base + 30), "1.2.3.4", "ua")
+            .await,
+        Ok(LoginResultMfa::Dashboard(_))
+    ));
+    // The notification is fire-and-forget.
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let seen = spy.seen();
+    assert!(
+        seen.contains(&format!("hook:new_session:{uid}")),
+        "the challenge's session never reached the session service: {seen:?}"
     );
 }
 
