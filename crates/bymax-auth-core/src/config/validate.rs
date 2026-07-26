@@ -1026,6 +1026,37 @@ mod tests {
         assert!(!other_resolved.secure_cookies());
     }
 
+    /// The first HMAC vector from the shared cross-implementation wire contract, as
+    /// `(secret, derived key hex, identifier message, identifier hex)`.
+    ///
+    /// The file at `conformance/wire-contract.json` is held byte-identical by nest-auth, which
+    /// derives the same key and reads the same Redis identifiers. Sourcing the vector from it
+    /// keeps one copy of the truth instead of two that can drift apart silently.
+    fn contract_hmac_vector() -> (String, String, String, String) {
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../conformance/wire-contract.json"
+        );
+        let raw = std::fs::read_to_string(path).unwrap_or_default();
+        let root: serde_json::Value = serde_json::from_str(&raw).unwrap_or(serde_json::Value::Null);
+        let field = |name: &str| -> String {
+            root.get("hmacKeyDerivation")
+                .and_then(|d| d.get("vectors"))
+                .and_then(serde_json::Value::as_array)
+                .and_then(|v| v.first())
+                .and_then(|v| v.get(name))
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default()
+                .to_owned()
+        };
+        (
+            field("secret"),
+            field("derivedKeyHex"),
+            field("identifierMessage"),
+            field("identifierHex"),
+        )
+    }
+
     /// Hex-encode for the test's independent recomputation of the derived key.
     fn to_hex_string(bytes: &[u8]) -> String {
         bytes.iter().map(|b| format!("{b:02x}")).collect()
@@ -1044,26 +1075,27 @@ mod tests {
         // hash, or the encoding it feeds the HMAC, exactly one of the two suites goes red
         // instead of the split appearing later as sessions and lockouts that silently miss
         // each other in production.
-        const SECRET: &str = "0123456789abcdef0123456789abcdef";
-        const EXPECTED_KEY: &str =
-            "0dd66555bd2d89e0eb4ce050f1fef427bea6799bec27fb8e313f69ab965048c1";
-        const IDENTIFIER_MESSAGE: &str = "tenant-a:user@example.com";
-        const EXPECTED_IDENTIFIER: &str =
-            "609a759522bd8b397748fad2dbde07957cea580fe4f4f1f0ce0f526485de2b6d";
+        // Read from the shared contract rather than repeating it: nest-auth holds the same file
+        // byte-identical, so a change to the derivation on either side turns that side red here.
+        let vector = contract_hmac_vector();
+        let secret = vector.0.as_str();
+        let expected_key = vector.1.as_str();
+        let identifier_message = vector.2.as_str();
+        let expected_identifier = vector.3.as_str();
 
         let mut cfg = valid_config();
-        cfg.jwt.secret = SecretString::from(SECRET.to_owned());
+        cfg.jwt.secret = SecretString::from(secret.to_owned());
         let resolved = ResolvedConfig::new(cfg, Environment::Production, true);
 
         // The key itself is the 64-character hex text, not the raw 32-byte digest.
-        assert_eq!(resolved.hmac_key().as_slice(), EXPECTED_KEY.as_bytes());
+        assert_eq!(resolved.hmac_key().as_slice(), expected_key.as_bytes());
 
         // And an identifier keyed with it matches byte for byte what nest-auth writes.
         let identifier = to_hex_string(&bymax_auth_crypto::mac::hmac_sha256(
             resolved.hmac_key(),
-            IDENTIFIER_MESSAGE.as_bytes(),
+            identifier_message.as_bytes(),
         ));
-        assert_eq!(identifier, EXPECTED_IDENTIFIER);
+        assert_eq!(identifier, expected_identifier);
     }
 
     #[test]

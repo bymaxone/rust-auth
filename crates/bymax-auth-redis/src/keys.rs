@@ -137,6 +137,66 @@ impl NamespacedRedis {
 mod tests {
     use super::*;
 
+    /// Read `{section}.{key}` from the shared cross-implementation wire contract.
+    ///
+    /// The file at `conformance/wire-contract.json` is held byte-identical by nest-auth, which
+    /// can back the same deployment over the same Redis. Reading it here rather than repeating
+    /// its values means a prefix rename on either side turns that side red immediately, instead
+    /// of surfacing later as a keyspace that silently split in production.
+    fn contract_value(section: &str, key: &str) -> String {
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../conformance/wire-contract.json"
+        );
+        let raw = std::fs::read_to_string(path).unwrap_or_default();
+        let root: serde_json::Value = serde_json::from_str(&raw).unwrap_or(serde_json::Value::Null);
+        root.get(section)
+            .and_then(|s| s.get(key))
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .to_owned()
+    }
+
+    #[test]
+    fn every_prefix_matches_the_shared_wire_contract() {
+        // The prefix each keyspace writes IS the contract with the sibling implementation. A
+        // rename landing on one side only splits the keyspace: a reset link emailed by one
+        // backend becomes invisible to the other, and a session index written by one is never
+        // swept by the other.
+        for (name, prefix) in [
+            ("dashboardRefreshSession", Prefix::Rt),
+            ("dashboardGracePointer", Prefix::Rp),
+            ("dashboardSessionIndex", Prefix::Sess),
+            ("dashboardSessionDetail", Prefix::Sd),
+            ("accessTokenBlacklist", Prefix::Rv),
+            ("failedLoginCounter", Prefix::Lf),
+            ("oneTimePassword", Prefix::Otp),
+            ("passwordResetToken", Prefix::PwReset),
+            ("passwordResetVerifiedToken", Prefix::PwVtok),
+        ] {
+            assert_eq!(
+                contract_value("redisKeyPrefixes", name),
+                prefix.as_str(),
+                "prefix for {name} drifted from the shared contract"
+            );
+        }
+    }
+
+    #[test]
+    fn the_two_identity_planes_never_share_a_prefix() {
+        // The planes are keyed by ids from different consumer repositories, which may
+        // legitimately collide. One shared index would let a revoke on one plane log the other
+        // out, so the separation is a correctness property, not a naming preference.
+        assert_ne!(
+            contract_value("redisKeyPrefixes", "dashboardSessionIndex"),
+            contract_value("redisKeyPrefixes", "platformSessionIndex"),
+        );
+        assert_ne!(
+            contract_value("redisKeyPrefixes", "dashboardSessionDetail"),
+            contract_value("redisKeyPrefixes", "platformSessionDetail"),
+        );
+    }
+
     #[test]
     fn to_hex_encodes_lower_case_two_chars_per_byte() {
         // The digest-to-suffix encoder must be lower-case, two chars per byte, and handle the

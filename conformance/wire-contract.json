@@ -1,0 +1,121 @@
+{
+  "$comment": [
+    "CROSS-IMPLEMENTATION WIRE CONTRACT — keep this file byte-identical in both repos:",
+    "  nest-auth/conformance/wire-contract.json",
+    "  rust-auth/conformance/wire-contract.json",
+    "",
+    "Both libraries can back the same deployment and share one Redis, so these values are a",
+    "contract between them rather than an implementation detail of either. Each repo has a",
+    "test that reads this file and asserts its own implementation matches, so a change on one",
+    "side turns that side's suite red immediately instead of surfacing months later as",
+    "sessions, lockouts, and reset links that silently miss each other in production.",
+    "",
+    "Changing a value here is a breaking change to the shared keyspace. Do it in both repos in",
+    "the same change, and only with a migration story for data already written in the old form."
+  ],
+  "version": 1,
+
+  "hmacKeyDerivation": {
+    "$comment": [
+      "The identifier-hashing key both sides derive from the JWT secret, and one identifier",
+      "keyed with it. Three things are pinned at once: the ':' separator between label and",
+      "secret, the SHA-256, and the fact that the HMAC is keyed with the hex TEXT of the digest",
+      "rather than its raw bytes. Any of the three drifting produces different Redis keys for",
+      "every lockout, OTP, resend cooldown, MFA setup, and anti-replay record."
+    ],
+    "label": "bymax-auth:hmac-key:v1",
+    "vectors": [
+      {
+        "secret": "0123456789abcdef0123456789abcdef",
+        "derivedKeyHex": "0dd66555bd2d89e0eb4ce050f1fef427bea6799bec27fb8e313f69ab965048c1",
+        "identifierMessage": "tenant-a:user@example.com",
+        "identifierHex": "609a759522bd8b397748fad2dbde07957cea580fe4f4f1f0ce0f526485de2b6d"
+      }
+    ]
+  },
+
+  "redisKeyPrefixes": {
+    "$comment": [
+      "The prefix each keyspace uses, under the configured namespace: {namespace}:{prefix}:{id}.",
+      "The dashboard and platform planes are deliberately separate — a consumer's user ids and",
+      "admin ids come from different repositories and may collide, so one shared index let a",
+      "revoke on one plane log the other out."
+    ],
+    "dashboardRefreshSession": "rt",
+    "dashboardGracePointer": "rp",
+    "dashboardSessionIndex": "sess",
+    "dashboardSessionDetail": "sd",
+    "platformRefreshSession": "prt",
+    "platformGracePointer": "prp",
+    "platformSessionIndex": "psess",
+    "platformSessionDetail": "psd",
+    "accessTokenBlacklist": "rv",
+    "failedLoginCounter": "lf",
+    "oneTimePassword": "otp",
+    "passwordResetToken": "pw_reset",
+    "passwordResetVerifiedToken": "pw_vtok",
+    "totpReplayMarker": "tu",
+    "oauthState": "os",
+    "invitation": "inv"
+  },
+
+  "sessionIndexMembers": {
+    "$comment": [
+      "Index members are FULL key suffixes, not bare hashes. The member has to name its own",
+      "keyspace: an atomic revoke rebuilds keys from members, and a bare hash cannot say whether",
+      "it is a live session or a rotation grace pointer. Grace pointers are members too, which is",
+      "what lets a revoke-all also kill a token that was rotated away but is still in its window."
+    ],
+    "dashboardLive": "rt:{sha256(refreshToken)}",
+    "dashboardGrace": "rp:{sha256(supersededToken)}",
+    "platformLive": "prt:{sha256(refreshToken)}",
+    "platformGrace": "prp:{sha256(supersededToken)}"
+  },
+
+  "recordEncodings": {
+    "$comment": [
+      "Timestamp encoding differs per record and is NOT uniform — this is the trap. The session",
+      "DETAIL uses epoch milliseconds because the reader guards on `typeof === 'number'` and",
+      "evicts a member whose detail fails to parse; everything else uses an ISO-8601 string."
+    ],
+    "refreshSession": {
+      "key": "{rt|prt}:{sha256(refreshToken)}",
+      "fields": ["userId", "tenantId", "role", "device", "ip", "createdAt", "mfaEnabled"],
+      "createdAt": "iso8601-string",
+      "$comment": "mfaEnabled must survive rotation: the MFA gate refuses only when mfaEnabled && !mfaVerified, so losing it turns one refresh into a silent second-factor bypass."
+    },
+    "sessionDetail": {
+      "key": "{sd|psd}:{sha256(refreshToken)}",
+      "fields": ["device", "ip", "createdAt", "lastActivityAt"],
+      "createdAt": "unix-milliseconds-number",
+      "lastActivityAt": "unix-milliseconds-number"
+    },
+    "invitation": {
+      "key": "inv:{sha256(token)}",
+      "fields": ["email", "role", "tenantId", "inviterUserId", "createdAt"],
+      "createdAt": "iso8601-string",
+      "$comment": "Consumption is a single-use GETDEL, so a record the reader rejects is destroyed rather than retried — a missing field loses the invitation outright."
+    },
+    "passwordResetContext": {
+      "key": "pw_reset:{sha256(token)}",
+      "fields": ["userId", "email", "tenantId"]
+    }
+  },
+
+  "credentialFormats": {
+    "$comment": [
+      "The shapes of the credentials themselves. Both sides must mint and accept the same ones",
+      "or a session started on one backend cannot continue on the other."
+    ],
+    "refreshToken": "64 lowercase hex characters (32 CSPRNG bytes)",
+    "refreshTokenLegacy": "uuid-v4, accepted for one refresh lifetime after convergence",
+    "totpSecretAtRest": "aes-256-gcm over the BASE32 TEXT of the secret",
+    "recoveryCodeDigest": "hex hmac-sha256 of the code under the derived identifier key",
+    "recoveryCodeDigestLegacy": "scrypt:{salt}:{hash}, still verified, never newly written"
+  },
+
+  "errorEnvelope": {
+    "$comment": "The body shape every auth error serializes to. `details` is present and null when the thrower supplied none.",
+    "shape": { "error": { "code": "string", "message": "string", "details": "object|null" } }
+  }
+}
