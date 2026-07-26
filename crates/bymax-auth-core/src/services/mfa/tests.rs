@@ -543,6 +543,12 @@ async fn a_challenge_registers_its_session_with_the_session_service() {
     let Some(temp) = login_temp_token(&h.engine, "tracked@example.com").await else {
         return;
     };
+    // Counted, not merely present: the registration at the top of this test already issued a
+    // session and fired this hook once, so an assertion on presence alone would hold with the
+    // challenge's own registration removed entirely.
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let event = format!("hook:new_session:{uid}");
+    let before = spy.seen().iter().filter(|e| **e == event).count();
     assert!(matches!(
         mfa.challenge(&temp, &code_at(&setup.secret, base + 30), "1.2.3.4", "ua")
             .await,
@@ -550,10 +556,11 @@ async fn a_challenge_registers_its_session_with_the_session_service() {
     ));
     // The notification is fire-and-forget.
     tokio::time::sleep(Duration::from_millis(500)).await;
-    let seen = spy.seen();
-    assert!(
-        seen.contains(&format!("hook:new_session:{uid}")),
-        "the challenge's session never reached the session service: {seen:?}"
+    let after = spy.seen().iter().filter(|e| **e == event).count();
+    assert_eq!(
+        after,
+        before + 1,
+        "the challenge's session never reached the session service"
     );
 }
 
