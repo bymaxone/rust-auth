@@ -620,6 +620,15 @@ mod tests {
                 retry_after_seconds: Some(_)
             })
         ));
+
+        // The counter is keyed per admin. One shared identifier would let any address lock
+        // every administrator out of the platform by failing its own login five times.
+        let _ = seed_admin(&h.admins, "other@admin.io", "right");
+        assert!(matches!(
+            svc.login("other@admin.io", "right", "1.2.3.4", "agent")
+                .await,
+            Ok(PlatformLoginResult::Success(_))
+        ));
     }
 
     #[tokio::test]
@@ -881,6 +890,28 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_current_hash_is_left_alone_on_login() {
+        // The upgrade needs *both* the toggle and a genuinely stale hash. Either one alone
+        // must not rewrite a current one: a rehash on every login is a write on the hot path
+        // for no gain, and it would leave the toggle disabling nothing.
+        let Some(h) = harness(platform_config()) else { return };
+        let id = seed_admin(&h.admins, "fresh@admin.io", "s3cret-pass");
+        let before = h.admins.find_by_id(&id).await;
+        let Ok(Some(before)) = before else { return };
+        let Some(svc) = h.engine.platform_auth() else { return };
+        assert!(matches!(
+            svc.login("fresh@admin.io", "s3cret-pass", "1.2.3.4", "agent")
+                .await,
+            Ok(PlatformLoginResult::Success(_))
+        ));
+        // Long enough for a spawned rehash to have landed if one had been spawned.
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        let after = h.admins.find_by_id(&id).await;
+        let Ok(Some(after)) = after else { return };
+        assert_eq!(before.password_hash, after.password_hash);
+    }
+
+    #[tokio::test]
     async fn rehash_on_verify_upgrades_a_weaker_admin_hash() {
         // A hash stored under weaker scrypt params is upgraded on a successful login; the
         // detached task replaces the stored hash with a stronger one.
@@ -922,6 +953,8 @@ mod tests {
             let stored = h.admins.find_by_id(&id).await;
             let Ok(Some(stored)) = stored else { return };
             assert_ne!(stored.password_hash, weak_hash);
+            // The other fire-and-forget task on this path: the successful login is stamped.
+            assert!(stored.last_login_at.is_some());
         }
     }
 }
