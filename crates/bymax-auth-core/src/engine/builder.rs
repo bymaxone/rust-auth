@@ -591,7 +591,7 @@ mod tests {
         assert!(!engine.config().secure_cookies());
         assert_eq!(engine.config().environment(), Environment::Development);
         assert_eq!(engine.config().config().jwt.refresh_expires_in_days, 7);
-        assert_eq!(engine.config().hmac_key().len(), 32);
+        assert_eq!(engine.config().hmac_key().len(), 64);
         // Required + defaulted collaborators are all reachable.
         let _ = engine.user_repository();
         assert!(engine.platform_user_repository().is_none());

@@ -49,7 +49,7 @@ pub struct MfaTempVerified {
 pub(crate) struct MfaTokenSupport {
     store: std::sync::Arc<dyn crate::traits::MfaStore>,
     brute_force: std::sync::Arc<dyn crate::traits::BruteForceStore>,
-    challenge_hmac_key: zeroize::Zeroizing<[u8; 32]>,
+    challenge_hmac_key: zeroize::Zeroizing<[u8; 64]>,
 }
 
 #[cfg(feature = "mfa")]
@@ -59,7 +59,7 @@ impl MfaTokenSupport {
     pub(crate) fn new(
         store: std::sync::Arc<dyn crate::traits::MfaStore>,
         brute_force: std::sync::Arc<dyn crate::traits::BruteForceStore>,
-        hmac_key: &[u8; 32],
+        hmac_key: &[u8; 64],
     ) -> Self {
         Self {
             store,
@@ -1129,7 +1129,7 @@ mod tests {
         // both the MFA-marker and brute-force seams), under a fixed identifier-hashing key.
         let brute_force: Arc<dyn crate::traits::BruteForceStore> = store.clone();
         let mfa_store: Arc<dyn crate::traits::MfaStore> = store.clone();
-        let support = MfaTokenSupport::new(mfa_store, brute_force, &[7u8; 32]);
+        let support = MfaTokenSupport::new(mfa_store, brute_force, &[7u8; 64]);
         TokenManagerService::new(
             key(),
             store,
@@ -1219,7 +1219,7 @@ mod tests {
         let store = Arc::new(InMemoryStores::new());
         let svc = service_with_mfa(store.clone());
         let bf: Arc<dyn crate::traits::BruteForceStore> = store.clone();
-        let key_bytes = [7u8; 32];
+        let key_bytes = [7u8; 64];
         let challenge_id = crate::services::to_hex(&bymax_auth_crypto::mac::hmac_sha256(
             &key_bytes,
             b"challenge:u1",

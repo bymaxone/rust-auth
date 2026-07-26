@@ -134,7 +134,7 @@ pub struct MfaService {
     encryption_key: Zeroizing<[u8; 32]>,
     /// The engine's identifier-hashing key, keying every `mfa_setup:`/`tu:` suffix, the
     /// `challenge:`/`disable:` brute-force ids, and the recovery-code digests.
-    identifier_key: Zeroizing<[u8; 32]>,
+    identifier_key: Zeroizing<[u8; 64]>,
     issuer: String,
     totp_window: u8,
     recovery_code_count: u8,
@@ -155,7 +155,7 @@ pub(crate) struct MfaServiceDeps {
     pub(crate) email: Arc<dyn EmailProvider>,
     pub(crate) hooks: Arc<dyn AuthHooks>,
     pub(crate) encryption_key: Zeroizing<[u8; 32]>,
-    pub(crate) identifier_key: Zeroizing<[u8; 32]>,
+    pub(crate) identifier_key: Zeroizing<[u8; 64]>,
     pub(crate) issuer: String,
     pub(crate) totp_window: u8,
     pub(crate) recovery_code_count: u8,

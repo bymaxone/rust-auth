@@ -31,7 +31,7 @@ pub struct ResolvedConfig {
     config: AuthConfig,
     environment: Environment,
     secure_cookies: bool,
-    hmac_key: SecretBox<[u8; 32]>,
+    hmac_key: SecretBox<[u8; 64]>,
 }
 
 impl ResolvedConfig {
@@ -66,11 +66,12 @@ impl ResolvedConfig {
         self.secure_cookies
     }
 
-    /// The derived identifier-hashing key (`SHA-256(label || jwt.secret)`), used to HMAC
-    /// low-entropy Redis identifiers so the signing key and the identifier-hashing key are
-    /// cryptographically independent.
+    /// The derived identifier-hashing key — the ASCII hex of `SHA-256("{label}:{jwt.secret}")`
+    /// — used to HMAC low-entropy Redis identifiers so the signing key and the
+    /// identifier-hashing key are cryptographically independent. See [`derive_hmac_key`] for
+    /// why the encoding is part of the contract rather than an implementation detail.
     #[must_use]
-    pub fn hmac_key(&self) -> &[u8; 32] {
+    pub fn hmac_key(&self) -> &[u8; 64] {
         self.hmac_key.expose_secret()
     }
 
@@ -112,13 +113,39 @@ impl ResolvedConfig {
     }
 }
 
-/// Derive the identifier-hashing key as `SHA-256(label || secret)`. The temporary buffer
-/// holding the raw secret bytes is zeroized on drop so it does not linger in freed memory.
-fn derive_hmac_key(secret: &str) -> SecretBox<[u8; 32]> {
-    let mut input = Zeroizing::new(Vec::with_capacity(HMAC_KEY_LABEL.len() + secret.len()));
+/// Lowercase hexadecimal alphabet, indexed by nibble value.
+const HEX_ALPHABET: &[u8; 16] = b"0123456789abcdef";
+
+/// Derive the identifier-hashing key as the lowercase hex encoding of
+/// `SHA-256("{label}:{secret}")`, in its 64-byte ASCII form.
+///
+/// Two details are load-bearing and must not drift, because nest-auth derives the same key
+/// and the two backends key the same Redis identifiers with it:
+///
+/// - the `:` between label and secret is explicit domain separation. Concatenating them
+///   directly makes the preimage ambiguous, so a different label/secret split could produce
+///   the same key.
+/// - the key is the **hex text**, not the raw digest. A raw-byte key would be equally sound
+///   cryptographically, but it would not match what nest-auth already uses, and every
+///   HMAC-derived key — brute-force lockout, OTP, resend cooldown, MFA setup, anti-replay —
+///   would land in a different Redis slot on each backend.
+///
+/// The buffer holding the secret and the intermediate digest are both zeroized on drop, and
+/// the hex is written straight into the fixed-size key so no heap copy of the key material
+/// outlives this call.
+fn derive_hmac_key(secret: &str) -> SecretBox<[u8; 64]> {
+    let mut input = Zeroizing::new(Vec::with_capacity(HMAC_KEY_LABEL.len() + 1 + secret.len()));
     input.extend_from_slice(HMAC_KEY_LABEL);
+    input.push(b':');
     input.extend_from_slice(secret.as_bytes());
-    SecretBox::new(Box::new(sha256(&input)))
+
+    let digest = Zeroizing::new(sha256(&input));
+    let mut key = [0u8; 64];
+    for (pair, byte) in key.chunks_exact_mut(2).zip(digest.iter()) {
+        pair[0] = HEX_ALPHABET[usize::from(byte >> 4)];
+        pair[1] = HEX_ALPHABET[usize::from(byte & 0x0f)];
+    }
+    SecretBox::new(Box::new(key))
 }
 
 impl AuthConfig {
@@ -983,17 +1010,60 @@ mod tests {
         assert_eq!(resolved.environment(), Environment::Production);
         assert_eq!(resolved.config().jwt.refresh_expires_in_days, 7);
 
-        // Recompute the key independently and compare.
+        // Recompute the key independently and compare, including the ':' separator and the
+        // hex encoding that make up the contract.
         let secret = "0123456789abcdef0123456789abcdef";
         let mut expected_input = HMAC_KEY_LABEL.to_vec();
+        expected_input.push(b':');
         expected_input.extend_from_slice(secret.as_bytes());
-        assert_eq!(resolved.hmac_key(), &sha256(&expected_input));
+        let expected_hex = to_hex_string(&sha256(&expected_input));
+        assert_eq!(resolved.hmac_key().as_slice(), expected_hex.as_bytes());
 
         let mut other = valid_config();
         other.jwt.secret = SecretString::from("fedcba9876543210fedcba9876543210".to_owned());
         let other_resolved = ResolvedConfig::new(other, Environment::Test, false);
         assert_ne!(resolved.hmac_key(), other_resolved.hmac_key());
         assert!(!other_resolved.secure_cookies());
+    }
+
+    /// Hex-encode for the test's independent recomputation of the derived key.
+    fn to_hex_string(bytes: &[u8]) -> String {
+        bytes.iter().map(|b| format!("{b:02x}")).collect()
+    }
+
+    #[test]
+    fn hmac_key_matches_the_nest_auth_known_answer() {
+        // CROSS-IMPLEMENTATION KNOWN-ANSWER TEST. The two backends key the same Redis
+        // identifiers with this value, so the derivation is a wire contract, not an internal
+        // detail. The constants below were produced by nest-auth's own primitives:
+        //
+        //   createHash('sha256').update(`${LABEL}:${secret}`, 'utf8').digest('hex')
+        //   createHmac('sha256', thatHexString).update(message, 'utf8').digest('hex')
+        //
+        // nest-auth carries the identical vectors. If either side changes its separator, its
+        // hash, or the encoding it feeds the HMAC, exactly one of the two suites goes red
+        // instead of the split appearing later as sessions and lockouts that silently miss
+        // each other in production.
+        const SECRET: &str = "0123456789abcdef0123456789abcdef";
+        const EXPECTED_KEY: &str =
+            "0dd66555bd2d89e0eb4ce050f1fef427bea6799bec27fb8e313f69ab965048c1";
+        const IDENTIFIER_MESSAGE: &str = "tenant-a:user@example.com";
+        const EXPECTED_IDENTIFIER: &str =
+            "609a759522bd8b397748fad2dbde07957cea580fe4f4f1f0ce0f526485de2b6d";
+
+        let mut cfg = valid_config();
+        cfg.jwt.secret = SecretString::from(SECRET.to_owned());
+        let resolved = ResolvedConfig::new(cfg, Environment::Production, true);
+
+        // The key itself is the 64-character hex text, not the raw 32-byte digest.
+        assert_eq!(resolved.hmac_key().as_slice(), EXPECTED_KEY.as_bytes());
+
+        // And an identifier keyed with it matches byte for byte what nest-auth writes.
+        let identifier = to_hex_string(&bymax_auth_crypto::mac::hmac_sha256(
+            resolved.hmac_key(),
+            IDENTIFIER_MESSAGE.as_bytes(),
+        ));
+        assert_eq!(identifier, EXPECTED_IDENTIFIER);
     }
 
     #[test]

@@ -52,7 +52,7 @@ pub struct PlatformAuthService {
     hooks: Arc<dyn AuthHooks>,
     /// The engine's derived identifier-hashing key, copied into a zeroizing buffer; it keys the
     /// `platform:{email}` brute-force identifier so no raw email reaches a store key.
-    identifier_key: zeroize::Zeroizing<[u8; 32]>,
+    identifier_key: zeroize::Zeroizing<[u8; 64]>,
     /// Whether this build wires the MFA challenge surface; when `false`, an MFA-enabled admin
     /// cannot complete a login (fail-closed) because there is no challenge flow to route to.
     mfa_enabled_for_build: bool,
@@ -70,7 +70,7 @@ pub(crate) struct PlatformAuthDeps {
     pub(crate) passwords: Arc<PasswordService>,
     pub(crate) brute_force: Arc<BruteForceService>,
     pub(crate) hooks: Arc<dyn AuthHooks>,
-    pub(crate) identifier_key: zeroize::Zeroizing<[u8; 32]>,
+    pub(crate) identifier_key: zeroize::Zeroizing<[u8; 64]>,
     pub(crate) mfa_enabled_for_build: bool,
     pub(crate) blocked_statuses: Vec<String>,
 }

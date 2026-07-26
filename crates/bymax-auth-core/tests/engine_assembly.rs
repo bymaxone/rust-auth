@@ -39,7 +39,7 @@ fn assembles_a_full_engine_from_the_builder() {
     let Ok(engine) = result else { return };
     // Production resolves secure cookies on, and the derived HMAC key is present.
     assert!(engine.config().secure_cookies());
-    assert_eq!(engine.config().hmac_key().len(), 32);
+    assert_eq!(engine.config().hmac_key().len(), 64);
     assert_eq!(engine.config().config().route_prefix, "auth");
 }
 

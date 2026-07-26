@@ -986,7 +986,7 @@ fn service_over(store: Arc<dyn MfaStore>, users: Arc<InMemoryUserRepository>) ->
         email: Arc::new(NoOpEmailProvider),
         hooks: Arc::new(NoOpAuthHooks),
         encryption_key: zeroize::Zeroizing::new([7u8; 32]),
-        identifier_key: zeroize::Zeroizing::new([9u8; 32]),
+        identifier_key: zeroize::Zeroizing::new([9u8; 64]),
         issuer: "Bymax One".to_owned(),
         totp_window: 2,
         recovery_code_count: 8,
