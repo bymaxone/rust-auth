@@ -189,6 +189,18 @@ mod scrypt_tests {
             .is_err()
         );
         assert!(ScryptParams::default().validate().is_ok());
+        // The floor is inclusive: 2^14 is the documented minimum, not the first rejected
+        // value. Only a config sitting exactly on it separates `<` from `<=`, and refusing it
+        // would reject the very parameters the constant advertises.
+        assert!(
+            ScryptParams {
+                cost_factor: ScryptParams::MIN_COST_FACTOR,
+                ..ScryptParams::default()
+            }
+            .validate()
+            .is_ok()
+        );
+        assert_eq!(ScryptParams::MIN_COST_FACTOR, 16_384);
 
         let weak = PasswordParams {
             scrypt: ScryptParams {
