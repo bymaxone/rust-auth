@@ -104,6 +104,10 @@ pub enum AuthErrorCode {
     /// New password fails the minimum policy.
     #[serde(rename = "auth.password_too_weak")]
     PasswordTooWeak,
+    /// The password appears in a known-breach corpus. Distinct from `PasswordTooWeak`: it may
+    /// satisfy every complexity rule and still be one an attacker tries first.
+    #[serde(rename = "auth.password_compromised")]
+    PasswordCompromised,
     /// Reset token absent from the store.
     #[serde(rename = "auth.password_reset_token_invalid")]
     PasswordResetTokenInvalid,
@@ -208,6 +212,7 @@ impl AuthErrorCode {
             Self::MfaNotEnabled
             | Self::MfaSetupRequired
             | Self::PasswordTooWeak
+            | Self::PasswordCompromised
             | Self::PasswordResetTokenInvalid
             | Self::PasswordResetTokenExpired
             | Self::InvalidInvitationToken
@@ -247,6 +252,9 @@ impl AuthErrorCode {
             Self::MfaTempTokenInvalid => "Invalid or expired temporary MFA token",
             Self::RecoveryCodeInvalid => "Invalid recovery code",
             Self::PasswordTooWeak => "Password too weak",
+            Self::PasswordCompromised => {
+                "This password has appeared in a data breach. Please choose a different one."
+            }
             Self::PasswordResetTokenInvalid => "Invalid password reset token",
             Self::PasswordResetTokenExpired => "Expired password reset token",
             Self::OtpInvalid => "Invalid OTP code",
@@ -429,6 +437,9 @@ pub enum AuthError {
     /// New password fails the minimum policy.
     #[error("password too weak")]
     PasswordTooWeak,
+    /// The password appears in a known-breach corpus.
+    #[error("password compromised")]
+    PasswordCompromised,
     /// Reset token absent from the store.
     #[error("password reset token invalid")]
     PasswordResetTokenInvalid,
@@ -525,6 +536,7 @@ impl AuthError {
             Self::MfaTempTokenInvalid => AuthErrorCode::MfaTempTokenInvalid,
             Self::RecoveryCodeInvalid => AuthErrorCode::RecoveryCodeInvalid,
             Self::PasswordTooWeak => AuthErrorCode::PasswordTooWeak,
+            Self::PasswordCompromised => AuthErrorCode::PasswordCompromised,
             Self::PasswordResetTokenInvalid => AuthErrorCode::PasswordResetTokenInvalid,
             Self::PasswordResetTokenExpired => AuthErrorCode::PasswordResetTokenExpired,
             Self::OtpInvalid => AuthErrorCode::OtpInvalid,

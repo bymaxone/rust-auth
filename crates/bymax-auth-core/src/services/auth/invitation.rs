@@ -175,6 +175,9 @@ impl AuthEngine {
         }
 
         // Token possession implies email ownership, so the new account is created verified.
+        self.passwords()
+            .assert_not_compromised(&input.password)
+            .await?;
         let password_hash = self.passwords().hash(&input.password).await?;
         let user = self
             .user_repository()

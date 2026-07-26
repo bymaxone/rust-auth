@@ -61,6 +61,9 @@ default = ["scrypt"]
 scrypt = ["dep:scrypt"]
 argon2 = ["dep:argon2"]
 mfa = ["dep:aes-gcm", "dep:sha1", "dep:data-encoding"]
+# SHA-1 on its own, for the breach-corpus range query. SHA-1 is the corpus index there,
+# never a security primitive — passwords are still stored under the configured KDF.
+breach = ["dep:sha1"]
 # Selects `getrandom`'s browser (Web Crypto) backend so this crate — and its own
 # wasm tests — can build and run on `wasm32-unknown-unknown`. OFF by default: a
 # reusable library must not pick a wasm RNG backend for its consumers (it would

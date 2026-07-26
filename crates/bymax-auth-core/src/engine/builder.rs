@@ -19,9 +19,9 @@ use crate::services::token_manager::TokenManagerService;
 #[cfg(feature = "mfa")]
 use crate::traits::MfaStore;
 use crate::traits::{
-    AuthHooks, BruteForceStore, EmailProvider, HttpClient, InvitationStore, NoOpAuthHooks,
-    NoOpEmailProvider, OAuthProvider, OtpStore, PasswordResetStore, PlatformUserRepository,
-    SessionStore, UserRepository, WsTicketStore,
+    AllowAllBreachChecker, AuthHooks, BruteForceStore, EmailProvider, HttpClient, InvitationStore,
+    NoOpAuthHooks, NoOpEmailProvider, OAuthProvider, OtpStore, PasswordBreachChecker,
+    PasswordResetStore, PlatformUserRepository, SessionStore, UserRepository, WsTicketStore,
 };
 
 /// Assembles an [`AuthEngine`] from a configuration plus the host's trait implementations.
@@ -33,6 +33,7 @@ pub struct AuthEngineBuilder {
     user_repository: Option<Arc<dyn UserRepository>>,
     platform_user_repository: Option<Arc<dyn PlatformUserRepository>>,
     email_provider: Option<Arc<dyn EmailProvider>>,
+    breach_checker: Option<Arc<dyn PasswordBreachChecker>>,
     hooks: Option<Arc<dyn AuthHooks>>,
     session_store: Option<Arc<dyn SessionStore>>,
     otp_store: Option<Arc<dyn OtpStore>>,
@@ -65,6 +66,7 @@ impl AuthEngineBuilder {
             user_repository: None,
             platform_user_repository: None,
             email_provider: None,
+            breach_checker: None,
             hooks: None,
             session_store: None,
             otp_store: None,
@@ -115,6 +117,18 @@ impl AuthEngineBuilder {
     #[must_use]
     pub fn email_provider(mut self, provider: Arc<dyn EmailProvider>) -> Self {
         self.email_provider = Some(provider);
+        self
+    }
+
+    /// Set the breach checker consulted wherever a password is set (defaults to
+    /// [`AllowAllBreachChecker`], which approves everything and touches no network).
+    ///
+    /// Wiring one is opt-in on purpose: a crate should not start talking to a third-party
+    /// corpus because it was upgraded. The bundled [`HibpBreachChecker`] (feature `breach`)
+    /// runs over the same [`HttpClient`](crate::traits::HttpClient) seam the OAuth flows use.
+    #[must_use]
+    pub fn breach_checker(mut self, checker: Arc<dyn PasswordBreachChecker>) -> Self {
+        self.breach_checker = Some(checker);
         self
     }
 
@@ -285,6 +299,7 @@ impl AuthEngineBuilder {
             user_repository,
             platform_user_repository,
             email_provider,
+            breach_checker,
             hooks,
             session_store,
             otp_store,
@@ -360,7 +375,9 @@ impl AuthEngineBuilder {
 
         // Build the password service (and its startup sentinel hash) from the validated
         // password config before it is moved into the resolved bundle.
-        let passwords = Arc::new(PasswordService::new(&config.password)?);
+        let breach_checker = breach_checker
+            .unwrap_or_else(|| Arc::new(AllowAllBreachChecker) as Arc<dyn PasswordBreachChecker>);
+        let passwords = Arc::new(PasswordService::new(&config.password, breach_checker)?);
 
         // Capture the scalar token/brute-force settings and the signing key before the
         // config is consumed by `ResolvedConfig::new`.

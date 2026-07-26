@@ -385,13 +385,87 @@ async fn a_legacy_session_without_a_family_plants_no_family_keys() {
         "no consumed marker planted"
     );
 
-    // With no consumed marker, a post-grace replay is a plain Invalid, never a reuse. Drop the
-    // grace pointer to close the window first.
-    assert!(redis.del("auth:rp:l1").await);
+    // A legacy record still recovers through its grace window: the family-alive check has no
+    // family to check, so it must not refuse a session that predates the mechanism entirely.
+    assert!(matches!(
+        stores.rotate(kind, &rot).await,
+        Ok(RotateOutcome::Grace(r)) if r.user_id == "lu"
+    ));
+
+    // With no consumed marker, a post-grace replay is a plain Invalid, never a reuse. The
+    // grace pointer was consumed by the recovery above, so the window is already closed.
     assert!(matches!(
         stores.rotate(kind, &rot).await,
         Ok(RotateOutcome::Invalid)
     ));
+}
+
+#[tokio::test]
+async fn revoking_a_family_resolves_the_owner_past_unreadable_members() {
+    let Some(redis) = common::try_start().await else {
+        return;
+    };
+    let Some(stores) = redis.stores() else { return };
+    let kind = SessionKind::Dashboard;
+
+    // A family outlives its individual sessions, so the first member is not always the one
+    // that still names its owner. The owner lookup has to walk past a member whose record has
+    // expired and one whose record is unreadable, or the revocation would prune nothing from
+    // the index and leave every revoked session listed until the index itself expired.
+    assert!(
+        stores
+            .create_session(kind, "o1", &record("ou"), 3600)
+            .await
+            .is_ok()
+    );
+    assert!(
+        stores
+            .create_session(kind, "o2", &record("ou"), 3600)
+            .await
+            .is_ok()
+    );
+    assert!(
+        stores
+            .create_session(kind, "o3", &record("ou"), 3600)
+            .await
+            .is_ok()
+    );
+    // o1's record is gone; o2's is unparseable; o3 parses but names no owner at all — an
+    // empty id would build `sess:` with nothing after the colon, a key every ownerless family
+    // would share, so it has to be skipped like the other two. o4 is the one that answers.
+    assert!(
+        stores
+            .create_session(kind, "o4", &record("ou"), 3600)
+            .await
+            .is_ok()
+    );
+    assert!(redis.del("auth:rt:o1").await);
+    assert!(redis.set_raw("auth:rt:o2", "not-json{{{").await);
+    let ownerless = serde_json::to_string(&SessionRecord {
+        user_id: String::new(),
+        ..record("ou")
+    })
+    .unwrap_or_default();
+    assert!(redis.set_raw("auth:rt:o3", &ownerless).await);
+
+    assert!(stores.revoke_family(kind, "fam-ou").await.is_ok());
+
+    // Every member key is gone and the owner's index was pruned, which is only possible if the
+    // walk reached o4.
+    assert_eq!(redis.ttl("auth:rt:o4").await, -2);
+    assert!(redis.smembers("auth:sess:ou").await.is_empty());
+
+    // And when NO member names an owner — every record already expired — the revocation still
+    // drops the family index rather than failing. There is simply no index left to prune.
+    assert!(
+        stores
+            .create_session(kind, "g1", &record("gu2"), 3600)
+            .await
+            .is_ok()
+    );
+    assert!(redis.del("auth:rt:g1").await);
+    assert!(stores.revoke_family(kind, "fam-gu2").await.is_ok());
+    assert_eq!(redis.ttl("auth:fam:fam-gu2").await, -2);
 }
 
 #[tokio::test]

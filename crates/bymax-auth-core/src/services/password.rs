@@ -9,6 +9,8 @@
 //! blocking pool (§7.2). Construction is the one exception: the sentinel is computed once,
 //! synchronously, while the engine is still being assembled.
 
+use std::sync::Arc;
+
 use bymax_auth_crypto::CryptoError;
 use bymax_auth_crypto::password::{PasswordParams, hash, needs_rehash, verify};
 use bymax_auth_types::AuthError;
@@ -17,6 +19,9 @@ use tokio::task::JoinError;
 use crate::ConfigError;
 use crate::config::PasswordConfig;
 use crate::services::internal_error;
+#[cfg(test)]
+use crate::traits::breach::AllowAllBreachChecker;
+use crate::traits::breach::PasswordBreachChecker;
 
 /// A fixed, non-secret plaintext hashed once at startup into the [`PasswordService`]
 /// sentinel. Its only purpose is to give the absent-user login path a real PHC string to
@@ -42,6 +47,7 @@ pub struct PasswordService {
     params: PasswordParams,
     rehash_on_verify: bool,
     sentinel: String,
+    breach_checker: Arc<dyn PasswordBreachChecker>,
 }
 
 impl PasswordService {
@@ -53,7 +59,10 @@ impl PasswordService {
     /// Returns [`ConfigError::SentinelHashFailed`] if the KDF rejects the (already
     /// validated) parameters while hashing the sentinel — effectively unreachable once
     /// startup validation has accepted the configuration.
-    pub(crate) fn new(config: &PasswordConfig) -> Result<Self, ConfigError> {
+    pub(crate) fn new(
+        config: &PasswordConfig,
+        breach_checker: Arc<dyn PasswordBreachChecker>,
+    ) -> Result<Self, ConfigError> {
         let params = to_crypto_params(config);
         let sentinel =
             hash(SENTINEL_PLAINTEXT, &params).map_err(|_| ConfigError::SentinelHashFailed)?;
@@ -61,7 +70,27 @@ impl PasswordService {
             params,
             rehash_on_verify: config.rehash_on_verify,
             sentinel,
+            breach_checker,
         })
+    }
+
+    /// Reject a password that appears in a known-breach corpus.
+    ///
+    /// Called wherever a password is being *set* — registration, reset, invitation acceptance —
+    /// and never on login: refusing a breached password someone already has would lock them out
+    /// of the account they need to get into in order to change it.
+    ///
+    /// The checker fails open by contract, so an unreachable corpus admits the password rather
+    /// than blocking the credential path.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AuthError::PasswordCompromised`] when the corpus knows the password.
+    pub(crate) async fn assert_not_compromised(&self, password: &str) -> Result<(), AuthError> {
+        if self.breach_checker.is_breached(password).await {
+            return Err(AuthError::PasswordCompromised);
+        }
+        Ok(())
     }
 
     /// Whether rehash-on-verify is enabled, so the caller upgrades a stale-but-valid hash.
@@ -196,7 +225,7 @@ mod tests {
     /// somehow failed (unreachable for the fixture), so callers stay panic-free with
     /// `let-else`.
     fn service() -> Option<PasswordService> {
-        PasswordService::new(&config()).ok()
+        PasswordService::new(&config(), Arc::new(AllowAllBreachChecker)).ok()
     }
 
     #[tokio::test]
@@ -263,7 +292,7 @@ mod tests {
         // The toggle is surfaced so the login flow can gate the fire-and-forget upgrade.
         let mut cfg = config();
         cfg.rehash_on_verify = false;
-        let off = PasswordService::new(&cfg);
+        let off = PasswordService::new(&cfg, Arc::new(AllowAllBreachChecker));
         assert!(matches!(off, Ok(s) if !s.rehash_on_verify()));
         let Some(on) = service() else { return };
         assert!(on.rehash_on_verify());
@@ -281,7 +310,7 @@ mod tests {
             };
             cfg.scrypt.cost_factor = 3; // not a power of two and below the floor
             assert!(matches!(
-                PasswordService::new(&cfg),
+                PasswordService::new(&cfg, Arc::new(AllowAllBreachChecker)),
                 Err(ConfigError::SentinelHashFailed)
             ));
         }

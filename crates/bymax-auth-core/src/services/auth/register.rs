@@ -100,6 +100,9 @@ impl AuthEngine {
         overrides: RegisterOverrides,
     ) -> Result<AuthUser, AuthError> {
         let verification_required = self.config().config().email_verification.required;
+        self.passwords()
+            .assert_not_compromised(&input.password)
+            .await?;
         let password_hash = self.passwords().hash(&input.password).await?;
 
         // When verification is required the new account is forced unverified; otherwise an

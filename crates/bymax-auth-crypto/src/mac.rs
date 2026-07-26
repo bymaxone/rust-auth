@@ -94,6 +94,31 @@ pub fn verify_digest(a: &[u8; DIGEST_LEN], b: &[u8; DIGEST_LEN]) -> bool {
     constant_time_eq(a, b)
 }
 
+/// SHA-1 of `input`.
+///
+/// Present for exactly one purpose: the breach-corpus range query, whose index is SHA-1. It is
+/// **not** a security primitive here and must not be used as one — passwords are stored under
+/// the configured KDF, and every identifier hash in the keyspace is SHA-256 or an HMAC.
+///
+/// # Examples
+///
+/// ```
+/// use bymax_auth_crypto::mac::sha1;
+///
+/// // Known-answer vector: SHA-1("abc") = a9993e364706816aba3e25717850c26c9cd0d89d.
+/// let digest = sha1(b"abc");
+/// assert_eq!(digest[0], 0xa9);
+/// assert_eq!(digest[19], 0x9d);
+/// ```
+#[cfg(feature = "breach")]
+#[must_use]
+pub fn sha1(input: &[u8]) -> [u8; 20] {
+    use sha1::Digest as _;
+    let mut hasher = sha1::Sha1::new();
+    hasher.update(input);
+    hasher.finalize().into()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

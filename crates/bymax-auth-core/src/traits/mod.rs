@@ -4,6 +4,7 @@
 //! Redis-store abstraction, the OAuth providers, and the dependency-free
 //! [`HttpClient`] transport.
 
+pub mod breach;
 pub mod email;
 pub mod hooks;
 pub mod http;
@@ -11,6 +12,11 @@ pub mod oauth;
 pub mod repository;
 pub mod store;
 
+#[cfg(feature = "breach")]
+#[doc(inline)]
+pub use breach::HibpBreachChecker;
+#[doc(inline)]
+pub use breach::{AllowAllBreachChecker, PasswordBreachChecker};
 #[doc(inline)]
 pub use email::{EmailError, EmailProvider, InviteData, NoOpEmailProvider, SessionInfo};
 #[doc(inline)]

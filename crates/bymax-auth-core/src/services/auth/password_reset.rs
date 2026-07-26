@@ -429,6 +429,9 @@ impl AuthEngine {
         context: &ResetContext,
         new_password: &str,
     ) -> Result<(), AuthError> {
+        self.passwords()
+            .assert_not_compromised(new_password)
+            .await?;
         let new_hash = self.passwords().hash(new_password).await?;
         self.user_repository()
             .update_password(&context.user_id, &new_hash)
