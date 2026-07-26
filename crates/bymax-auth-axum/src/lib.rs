@@ -30,6 +30,7 @@ mod response;
 mod router;
 mod routes;
 mod state;
+mod trusted_origin;
 mod validation;
 
 #[cfg(feature = "websocket")]

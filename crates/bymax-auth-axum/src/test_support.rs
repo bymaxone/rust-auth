@@ -98,6 +98,9 @@ pub(crate) fn resolved_config_with(
             mfa_temp_path: "/auth/mfa".to_owned(),
             secure: true,
             same_site,
+            // The suite drives same-origin requests, which the origin check admits without
+            // consulting the list; a `SameSite::None` case names its own origin explicitly.
+            trusted_origins: vec!["https://app.example.com".to_owned()],
             access_max_age_secs: 900,
             refresh_max_age_secs: 604_800,
         },

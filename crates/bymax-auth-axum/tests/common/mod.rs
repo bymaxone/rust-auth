@@ -67,6 +67,9 @@ pub struct EngineSpec {
     pub sessions: bool,
     pub verification_required: bool,
     pub allow_oauth: bool,
+    /// Origins the deployment trusts for cross-site, cookie-authenticated writes. Setting any
+    /// switches `SameSite` to `None`, since the two are only valid together.
+    pub trusted_origins: &'static [&'static str],
 }
 
 impl Default for EngineSpec {
@@ -80,6 +83,7 @@ impl Default for EngineSpec {
             sessions: false,
             verification_required: false,
             allow_oauth: false,
+            trusted_origins: &[],
         }
     }
 }
@@ -124,6 +128,15 @@ pub fn build(spec: EngineSpec) -> Option<Harness> {
     config.controllers.invitations = spec.invitations;
     config.invitations.enabled = spec.invitations;
     config.controllers.oauth = spec.oauth;
+    if !spec.trusted_origins.is_empty() {
+        config.cookies.same_site = bymax_auth_core::config::SameSite::None;
+        config.cookies.trusted_origins = spec
+            .trusted_origins
+            .iter()
+            .map(|origin| (*origin).to_owned())
+            .collect();
+        config.secure_cookies = Some(true);
+    }
 
     if spec.mfa {
         config.mfa = Some(MfaConfig {

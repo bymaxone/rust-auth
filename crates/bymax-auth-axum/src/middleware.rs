@@ -24,6 +24,7 @@ use crate::state::AuthState;
 /// handler.
 pub(crate) fn apply_middleware(
     router: Router<AuthState>,
+    state: AuthState,
     max_body_bytes: usize,
     cors: Option<tower_http::cors::CorsLayer>,
 ) -> Router<AuthState> {
@@ -35,7 +36,14 @@ pub(crate) fn apply_middleware(
 
     // Layered innermost-last: the cookie manager runs closest to the handler so the jar is
     // ready, then body-limit, redaction, optional CORS, and tracing wrap outward.
+    // The cross-site check sits innermost, next to the handlers: it must see the request
+    // exactly as the handler would, and it must not answer a CORS preflight (which the CORS
+    // layer above already handles before this ever runs).
     let router = router
+        .layer(axum::middleware::from_fn_with_state(
+            state,
+            crate::trusted_origin::enforce_trusted_origin,
+        ))
         .layer(CookieManagerLayer::new())
         .layer(RequestBodyLimitLayer::new(max_body_bytes))
         .layer(sensitive);

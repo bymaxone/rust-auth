@@ -25,7 +25,7 @@ use common::{
     Captured, EngineSpec, Req, TENANT, build, build_oauth_with_redirects, current_totp,
     enable_mfa_flag, router, seed_admin, seed_user, set_status, totp_at,
 };
-use http::{Method, StatusCode, header};
+use http::{HeaderName, Method, StatusCode, header};
 
 /// Log in and return the captured response (cookie mode) for a seeded active user.
 async fn login(router: &axum::Router, email: &str, password: &str) -> Captured {
@@ -2388,4 +2388,114 @@ async fn platform_extractor_propagates_internal_errors_but_masks_token_failures(
         invalid.json()["error"]["code"],
         "auth.platform_auth_required"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Cross-site request check
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn a_cookie_authenticated_write_from_an_untrusted_origin_is_refused() {
+    // The attack this exists for: under `SameSite=None` the browser attaches the session
+    // cookie to a POST issued by a page on another origin, and without the check that request
+    // is authenticated. `Lax`/`Strict` never send the cookie cross-site, so the exposure is
+    // exactly the `None` deployment — which is the one configured here.
+    let Some(h) = build(EngineSpec {
+        trusted_origins: &["https://app.example.com"],
+        ..EngineSpec::default()
+    }) else {
+        return;
+    };
+    let app = router(&h);
+    seed_user(&h, "csrf@e.com", "password123", "USER").await;
+    let access = login_access_cookie(&app, "csrf@e.com", "password123").await;
+
+    let refused = Req::post("/auth/logout")
+        .cookie("access_token", &access)
+        .header(header::ORIGIN, "https://evil.example.com")
+        .header(HeaderName::from_static("sec-fetch-site"), "cross-site")
+        .send(&app)
+        .await;
+
+    assert_eq!(refused.status, StatusCode::FORBIDDEN);
+    assert_eq!(
+        refused.json()["error"]["code"],
+        serde_json::json!("auth.untrusted_origin")
+    );
+}
+
+#[tokio::test]
+async fn the_cross_site_check_admits_what_it_should() {
+    let Some(h) = build(EngineSpec {
+        trusted_origins: &["https://app.example.com"],
+        ..EngineSpec::default()
+    }) else {
+        return;
+    };
+    let app = router(&h);
+    seed_user(&h, "origin@e.com", "password123", "USER").await;
+
+    // A listed origin is what the allow-list is for.
+    let access = login_access_cookie(&app, "origin@e.com", "password123").await;
+    let allowed = Req::post("/auth/logout")
+        .cookie("access_token", &access)
+        .header(header::ORIGIN, "https://app.example.com")
+        .send(&app)
+        .await;
+    assert_eq!(allowed.status, StatusCode::NO_CONTENT);
+
+    // The app calling itself never consults the list — which is what keeps a same-origin
+    // deployment working with nothing configured.
+    let access = login_access_cookie(&app, "origin@e.com", "password123").await;
+    let same_origin = Req::post("/auth/logout")
+        .cookie("access_token", &access)
+        .header(header::ORIGIN, "https://evil.example.com")
+        .header(HeaderName::from_static("sec-fetch-site"), "same-origin")
+        .send(&app)
+        .await;
+    assert_eq!(same_origin.status, StatusCode::NO_CONTENT);
+
+    // A bearer client has no ambient credential for a page to spend, so the check does not
+    // apply to it at all — blocking it would break every non-browser caller for no gain.
+    let bearer = Req::post("/auth/logout")
+        .header(header::ORIGIN, "https://evil.example.com")
+        .json(serde_json::json!({ "refreshToken": "r".repeat(64) }))
+        .send(&app)
+        .await;
+    assert_ne!(bearer.status, StatusCode::FORBIDDEN);
+
+    // A read changes nothing and is never a target.
+    let read = Req::get("/auth/me")
+        .cookie(
+            "access_token",
+            &login_access_cookie(&app, "origin@e.com", "password123").await,
+        )
+        .header(header::ORIGIN, "https://evil.example.com")
+        .send(&app)
+        .await;
+    assert_eq!(read.status, StatusCode::OK);
+}
+
+#[tokio::test]
+async fn a_cross_site_fetch_with_no_origin_header_is_refused() {
+    // A browser that sends `Sec-Fetch-Site` sends `Origin` too on a state-changing request, so
+    // this shape is malformed rather than a legitimate caller — and admitting it would be a
+    // trivial way around the check.
+    let Some(h) = build(EngineSpec {
+        trusted_origins: &["https://app.example.com"],
+        ..EngineSpec::default()
+    }) else {
+        return;
+    };
+    let app = router(&h);
+    seed_user(&h, "nohdr@e.com", "password123", "USER").await;
+    let access = login_access_cookie(&app, "nohdr@e.com", "password123").await;
+
+    let refused = Req::post("/auth/logout")
+        .cookie("access_token", &access)
+        .header(HeaderName::from_static("sec-fetch-site"), "same-site")
+        .send(&app)
+        .await;
+
+    assert_eq!(refused.status, StatusCode::FORBIDDEN);
 }

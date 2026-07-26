@@ -68,7 +68,12 @@ impl AuthRouter {
         // Nest the grouped routes under the configured prefix, apply the middleware stack,
         // then bind the shared state so the router is self-contained.
         let nested: Router<AuthState> = Router::new().nest(&prefix, grouped);
-        let nested = apply_middleware(nested, config.max_body_bytes, config.cors.clone());
+        let nested = apply_middleware(
+            nested,
+            state.clone(),
+            config.max_body_bytes,
+            config.cors.clone(),
+        );
         let router = nested.with_state(state);
 
         Self { router, groups }
@@ -153,6 +158,7 @@ fn resolve_config(engine: &AuthEngine, config: &AxumAuthConfig) -> ResolvedConfi
         mfa_temp_path: auth_config.cookies.mfa_temp_cookie_path.clone(),
         secure: resolved.secure_cookies(),
         same_site: auth_config.cookies.same_site,
+        trusted_origins: auth_config.cookies.trusted_origins.clone(),
         access_max_age_secs: clamp_secs(auth_config.jwt.access_cookie_max_age.as_secs()),
         refresh_max_age_secs: refresh_max_age_secs(auth_config.jwt.refresh_expires_in_days),
     };

@@ -211,6 +211,20 @@ pub struct CookieConfig {
     pub mfa_temp_cookie_path: String,
     /// `SameSite` attribute, default `Lax`.
     pub same_site: SameSite,
+    /// Origins allowed to make state-changing requests that carry the session cookie,
+    /// default empty.
+    ///
+    /// Each entry is a full origin — scheme, host and, when non-default, port
+    /// (`https://app.example.com`, `http://localhost:3000`) — compared verbatim against the
+    /// request's `Origin` header. There are no wildcards: an allowlist matched by pattern is
+    /// one typo away from admitting an attacker-controlled subdomain.
+    ///
+    /// This only matters under [`SameSite::None`], the one posture where the browser sends the
+    /// session cookie on a cross-site request and there is therefore a cross-origin caller to
+    /// authorize. Validation refuses either half without the other, because both fail quietly:
+    /// `None` with no list rejects every cross-site call, and a list under `Lax`/`Strict` is
+    /// never consulted.
+    pub trusted_origins: Vec<String>,
     /// Optional resolver for the cookie `Domain`(s), derived from the request host.
     pub resolve_domains: Option<Arc<dyn CookieDomainResolver>>,
 }
@@ -224,6 +238,7 @@ impl Default for CookieConfig {
             refresh_cookie_path: "/auth".to_owned(),
             mfa_temp_cookie_path: "/auth/mfa".to_owned(),
             same_site: SameSite::Lax,
+            trusted_origins: Vec::new(),
             resolve_domains: None,
         }
     }

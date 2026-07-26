@@ -243,6 +243,12 @@ impl AuthConfig {
             return Err(ConfigError::SameSiteNoneRequiresSecure);
         }
 
+        // Rule 19b: the trusted-origin allow-list and the SameSite posture must agree. The
+        // list only ever matters under `None` — the one posture where the browser sends the
+        // session cookie on a cross-site request — so either half without the other is a
+        // configuration that fails quietly rather than loudly.
+        self.validate_trusted_origins()?;
+
         // Rule 20: a non-default route prefix requires an explicit refresh cookie path.
         if self.route_prefix != "auth" && self.cookies.refresh_cookie_path == "/auth" {
             return Err(ConfigError::RefreshPathMismatch {
@@ -251,6 +257,33 @@ impl AuthConfig {
         }
 
         Ok(secure_cookies)
+    }
+
+    /// Validate that `cookies.trusted_origins` and `cookies.same_site` agree, and that every
+    /// entry is a bare absolute origin.
+    ///
+    /// The shape check is deliberately strict: an entry must be exactly scheme, host and an
+    /// optional port, with nothing after the authority. A trailing slash, a path, or a naked
+    /// hostname would all be silently blocked at request time instead — an `Origin` header is
+    /// never any of those — so they are refused here where the message can say why.
+    fn validate_trusted_origins(&self) -> Result<(), ConfigError> {
+        let cross_site = self.cookies.same_site == SameSite::None;
+        let listed = !self.cookies.trusted_origins.is_empty();
+
+        if cross_site && !listed {
+            return Err(ConfigError::TrustedOriginsRequired);
+        }
+        if !cross_site && listed {
+            return Err(ConfigError::TrustedOriginsUnused);
+        }
+        for origin in &self.cookies.trusted_origins {
+            if !is_bare_origin(origin) {
+                return Err(ConfigError::TrustedOriginMalformed {
+                    origin: origin.clone(),
+                });
+            }
+        }
+        Ok(())
     }
 
     /// Validate the OAuth provider fields (rule 15), the production callback-https rule
@@ -444,6 +477,30 @@ fn decode_base64_any(s: &str) -> Option<Vec<u8>> {
         .or_else(|| URL_SAFE.decode(s).ok())
         .or_else(|| STANDARD_NO_PAD.decode(s).ok())
         .or_else(|| URL_SAFE_NO_PAD.decode(s).ok())
+}
+
+/// Whether `value` is exactly an origin: `scheme://host` with an optional `:port` and
+/// nothing after the authority.
+///
+/// The `Origin` header a browser sends is always in this form, and the comparison against it
+/// is verbatim, so anything else configured here can never match. Userinfo is rejected too —
+/// it never appears in an `Origin`, and `https://evil.com@app.example.com` reading as
+/// "app.example.com" to a careless parser is precisely the confusion worth refusing outright.
+fn is_bare_origin(value: &str) -> bool {
+    let Some((scheme, rest)) = value.split_once("://") else {
+        return false;
+    };
+    if scheme.is_empty()
+        || !scheme
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '+' || c == '-' || c == '.')
+    {
+        return false;
+    }
+    if rest.is_empty() || rest.contains(['/', '?', '#', '\\', '@']) {
+        return false;
+    }
+    url_host(value).is_some()
 }
 
 /// Whether `url` is an absolute `https` URL with a non-empty host. An empty authority
@@ -913,14 +970,78 @@ mod tests {
     fn rejects_samesite_none_without_secure() {
         let mut cfg = valid_config();
         cfg.cookies.same_site = SameSite::None;
+        cfg.cookies.trusted_origins = vec!["https://app.example.com".to_owned()];
         cfg.secure_cookies = Some(false);
         assert!(matches!(
             cfg.validate(Environment::Production),
             Err(ConfigError::SameSiteNoneRequiresSecure)
         ));
-        // SameSite=None is fine once cookies are secure.
+        // SameSite=None is fine once cookies are secure and an origin is named.
         cfg.secure_cookies = Some(true);
         assert!(cfg.validate(Environment::Production).is_ok());
+    }
+
+    #[test]
+    fn the_trusted_origin_list_and_the_same_site_posture_must_agree() {
+        // The list only matters under `None`: that is the one posture where the browser sends
+        // the session cookie cross-site, so it is the only one with a cross-origin caller to
+        // authorize. Either half without the other fails quietly — `None` with no list rejects
+        // every cross-site call, a list under `Lax` is never consulted — so both are refused.
+        let mut none_without_list = valid_config();
+        none_without_list.cookies.same_site = SameSite::None;
+        none_without_list.secure_cookies = Some(true);
+        assert!(matches!(
+            none_without_list.validate(Environment::Production),
+            Err(ConfigError::TrustedOriginsRequired)
+        ));
+
+        let mut list_without_none = valid_config();
+        list_without_none.cookies.trusted_origins = vec!["https://app.example.com".to_owned()];
+        assert!(matches!(
+            list_without_none.validate(Environment::Production),
+            Err(ConfigError::TrustedOriginsUnused)
+        ));
+    }
+
+    #[test]
+    fn rejects_a_trusted_origin_that_is_not_a_bare_origin() {
+        // Every entry is compared verbatim against the `Origin` header, which is always
+        // `scheme://host[:port]`. A trailing slash, a path, a naked hostname or embedded
+        // userinfo can never match, so the origin they were meant to allow would be silently
+        // blocked — refused here instead, where the message can say why.
+        for malformed in [
+            "https://app.example.com/",
+            "https://app.example.com/callback",
+            "app.example.com",
+            "https://evil.example.com@app.example.com",
+            "https://",
+            "not a url",
+            "://app.example.com",
+        ] {
+            let mut cfg = valid_config();
+            cfg.cookies.same_site = SameSite::None;
+            cfg.secure_cookies = Some(true);
+            cfg.cookies.trusted_origins = vec![malformed.to_owned()];
+            assert!(
+                matches!(
+                    cfg.validate(Environment::Production),
+                    Err(ConfigError::TrustedOriginMalformed { ref origin }) if origin == malformed
+                ),
+                "expected {malformed} to be rejected"
+            );
+        }
+
+        // A port and an IPv6 literal are both part of an origin and must survive.
+        for accepted in ["http://localhost:3000", "https://[::1]:8443"] {
+            let mut cfg = valid_config();
+            cfg.cookies.same_site = SameSite::None;
+            cfg.secure_cookies = Some(true);
+            cfg.cookies.trusted_origins = vec![accepted.to_owned()];
+            assert!(
+                cfg.validate(Environment::Production).is_ok(),
+                "expected {accepted} to be accepted"
+            );
+        }
     }
 
     #[test]

@@ -130,6 +130,10 @@ pub enum AuthErrorCode {
     /// Generic access-denied fallback.
     #[serde(rename = "auth.forbidden")]
     Forbidden,
+    /// A state-changing request carrying the session cookie came from an origin the
+    /// deployment does not trust.
+    #[serde(rename = "auth.untrusted_origin")]
+    UntrustedOrigin,
 
     // Invitations
     /// Invitation token absent from the store — invalid or expired.
@@ -194,7 +198,8 @@ impl AuthErrorCode {
             | Self::EmailNotVerified
             | Self::MfaRequired
             | Self::InsufficientRole
-            | Self::Forbidden => 403,
+            | Self::Forbidden
+            | Self::UntrustedOrigin => 403,
             Self::SessionNotFound => 404,
             Self::EmailAlreadyExists
             | Self::SessionLimitReached
@@ -249,6 +254,7 @@ impl AuthErrorCode {
             Self::OtpMaxAttempts => "Maximum number of attempts exceeded",
             Self::InsufficientRole => "Insufficient permission",
             Self::Forbidden => "Access denied",
+            Self::UntrustedOrigin => "Request origin not allowed",
             Self::InvalidInvitationToken => "Invalid or expired invitation token",
             Self::OauthFailed => "OAuth authentication failed",
             Self::OauthEmailMismatch => "OAuth email does not match",
@@ -448,6 +454,9 @@ pub enum AuthError {
     /// Generic access-denied fallback.
     #[error("forbidden")]
     Forbidden,
+    /// A state-changing request carrying the session cookie came from an untrusted origin.
+    #[error("untrusted origin")]
+    UntrustedOrigin,
 
     // Invitations
     /// Invitation token absent — invalid or expired.
@@ -523,6 +532,7 @@ impl AuthError {
             Self::OtpMaxAttempts => AuthErrorCode::OtpMaxAttempts,
             Self::InsufficientRole => AuthErrorCode::InsufficientRole,
             Self::Forbidden => AuthErrorCode::Forbidden,
+            Self::UntrustedOrigin => AuthErrorCode::UntrustedOrigin,
             Self::InvalidInvitationToken => AuthErrorCode::InvalidInvitationToken,
             Self::OauthFailed => AuthErrorCode::OauthFailed,
             Self::OauthEmailMismatch => AuthErrorCode::OauthEmailMismatch,

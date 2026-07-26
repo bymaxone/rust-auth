@@ -126,6 +126,8 @@ pub struct ResolvedCookies {
     pub secure: bool,
     /// The configured `SameSite` for the access/signal cookies.
     pub same_site: SameSite,
+    /// Origins allowed to make a state-changing request that carries the session cookie.
+    pub trusted_origins: Vec<String>,
     /// `Max-Age` (seconds) of the access cookie, from `jwt.access_cookie_max_age`.
     pub access_max_age_secs: i64,
     /// `Max-Age` (seconds) of the refresh / session-signal cookies, from the refresh lifetime.

@@ -149,6 +149,21 @@ pub enum ConfigError {
     /// browsers reject.
     #[error("cookies.same_site = None requires secure_cookies = true")]
     SameSiteNoneRequiresSecure,
+    /// `cookies.same_site = None` was resolved with an empty `cookies.trusted_origins`, so
+    /// every cross-site state-changing request would be rejected.
+    #[error("cookies.same_site = None requires a non-empty cookies.trusted_origins")]
+    TrustedOriginsRequired,
+    /// `cookies.trusted_origins` was set under a `SameSite` posture that never sends the
+    /// session cookie cross-site, so the allow-list could never be consulted.
+    #[error("cookies.trusted_origins is set but cookies.same_site is not None")]
+    TrustedOriginsUnused,
+    /// An entry in `cookies.trusted_origins` is not a bare absolute origin, so it can never
+    /// equal an `Origin` header.
+    #[error("cookies.trusted_origins entry '{origin}' is not an absolute origin")]
+    TrustedOriginMalformed {
+        /// The offending entry.
+        origin: String,
+    },
     /// `route_prefix` was changed from its default without an explicit
     /// `cookies.refresh_cookie_path`, so the refresh cookie would no longer be scoped to
     /// the refresh endpoint.
