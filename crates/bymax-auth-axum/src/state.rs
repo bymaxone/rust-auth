@@ -212,7 +212,11 @@ mod tests {
         // The config default carries the canonical prefix/body-limit and the safe IP source.
         let config = AxumAuthConfig::default();
         assert_eq!(config.route_prefix, "auth");
+        // Pinned to the literal, not to the constant: a body cap is a security bound, and
+        // asserting it against itself would accept any value the expression happened to
+        // produce.
         assert_eq!(config.max_body_bytes, DEFAULT_MAX_BODY_BYTES);
+        assert_eq!(DEFAULT_MAX_BODY_BYTES, 1_048_576);
         assert_eq!(config.client_ip_source, ClientIpSource::PeerAddr);
         assert!(config.cors.is_none());
         assert_eq!(ClientIpSource::default(), ClientIpSource::PeerAddr);

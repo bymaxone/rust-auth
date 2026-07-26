@@ -138,6 +138,14 @@ async fn register_login_me_logout_cookie_mode() {
     let signal = reg.cookie("has_session").unwrap_or_default();
     assert!(!signal.contains("HttpOnly"));
 
+    // Max-Age is what makes each cookie outlive the response: the access cookie tracks the
+    // access-token lifetime (15 min), the refresh and signal cookies the refresh lifetime
+    // (7 days). A session cookie instead — or one capped at a second — would log every user
+    // out when they closed the tab.
+    assert!(access.contains("Max-Age=900"), "access: {access}");
+    assert!(refresh.contains("Max-Age=604800"), "refresh: {refresh}");
+    assert!(signal.contains("Max-Age=604800"), "signal: {signal}");
+
     // `me` with the access cookie returns the safe user as the TOP-LEVEL body — no
     // `{ user: … }` wrapper (nest-auth's `AuthController.me` returns the object itself, and
     // its published client decodes it unwrapped).
@@ -152,13 +160,34 @@ async fn register_login_me_logout_cookie_mode() {
 
     // Logout clears the cookies (a cleared cookie has an empty value / expiry).
     let refresh_value = reg.cookie_value("refresh_token").unwrap_or_default();
+    // The browser sends all three cookies back (the signal one is Path=/ and merely
+    // JS-readable, not omitted), so the logout is exercised with the jar it actually sees.
     let logout = Req::post("/auth/logout")
         .cookie("access_token", &access_value)
         .cookie("refresh_token", &refresh_value)
+        .cookie("has_session", "1")
         .send(&app)
         .await;
     assert_eq!(logout.status, StatusCode::NO_CONTENT);
-    assert!(!logout.has_cookie_value("access_token"));
+    // Every cookie the login planted is expired back, each on the Path it was set with — a
+    // clearing header on the wrong path leaves a ghost cookie the browser keeps sending. The
+    // absence of a `Set-Cookie` is not a logout: the browser would keep the credential.
+    for (name, path) in [
+        ("access_token", "Path=/"),
+        ("refresh_token", "Path=/auth"),
+        ("has_session", "Path=/"),
+    ] {
+        let cleared = logout.cookie(name).unwrap_or_default();
+        assert!(
+            cleared.contains("Max-Age=0"),
+            "{name} not expired: {cleared}"
+        );
+        assert!(
+            cleared.contains(path),
+            "{name} cleared on the wrong path: {cleared}"
+        );
+        assert!(!logout.has_cookie_value(name));
+    }
 }
 
 #[tokio::test]
@@ -509,6 +538,9 @@ async fn password_reset_endpoints_are_anti_enumerating() {
         .send(&app)
         .await;
     assert_eq!(forgot.status, StatusCode::OK);
+    // The uniform body is half the anti-enumeration contract: an empty response would be as
+    // distinguishable to a prober as a 404.
+    assert_eq!(forgot.json(), serde_json::json!({}));
 
     // resend-otp likewise.
     let resend = Req::post("/auth/password/resend-otp")
@@ -516,6 +548,7 @@ async fn password_reset_endpoints_are_anti_enumerating() {
         .send(&app)
         .await;
     assert_eq!(resend.status, StatusCode::OK);
+    assert_eq!(resend.json(), serde_json::json!({}));
 
     // verify-otp with a bogus code is an OTP error (the record is absent).
     let verify = Req::post("/auth/password/verify-otp")
@@ -1640,10 +1673,11 @@ async fn password_reset_otp_two_step_success_flow() {
         .await;
 
     // Recover the OTP from the in-memory store (the engine derives the identifier internally).
-    let Some(otp) = common::peek_otp(&h, OtpPurpose::PasswordReset, "pw@e.com") else {
-        // The reset flow may use a link token rather than an OTP depending on config; skip.
-        return;
-    };
+    // Asserted rather than skipped: the OTP existing is what proves the route reached the
+    // engine at all, and a skip here would pass just as happily against a handler that did
+    // nothing but answer 200.
+    let otp = common::peek_otp(&h, OtpPurpose::PasswordReset, "pw@e.com").unwrap_or_default();
+    assert!(!otp.is_empty(), "forgot-password minted no reset OTP");
 
     let verify = Req::post("/auth/password/verify-otp")
         .json(serde_json::json!({ "email": "pw@e.com", "otp": otp, "tenantId": TENANT }))
@@ -2422,6 +2456,15 @@ async fn a_cookie_authenticated_write_from_an_untrusted_origin_is_refused() {
         refused.json()["error"]["code"],
         serde_json::json!("auth.untrusted_origin")
     );
+
+    // The refresh cookie is a credential in its own right — it mints access tokens — so a
+    // request carrying only that one is as much a target as one carrying the access cookie.
+    let refresh_only = Req::post("/auth/logout")
+        .cookie("refresh_token", &"r".repeat(64))
+        .header(header::ORIGIN, "https://evil.example.com")
+        .send(&app)
+        .await;
+    assert_eq!(refresh_only.status, StatusCode::FORBIDDEN);
 }
 
 #[tokio::test]
@@ -2463,6 +2506,16 @@ async fn the_cross_site_check_admits_what_it_should() {
         .send(&app)
         .await;
     assert_ne!(bearer.status, StatusCode::FORBIDDEN);
+
+    // The session-signal cookie is readable by JavaScript by design and authenticates
+    // nothing, so a request carrying only that one has no ambient credential for an attacker
+    // page to spend — counting it would reject cross-site calls that cannot do any harm.
+    let signal_only = Req::post("/auth/logout")
+        .cookie("has_session", "1")
+        .header(header::ORIGIN, "https://evil.example.com")
+        .send(&app)
+        .await;
+    assert_ne!(signal_only.status, StatusCode::FORBIDDEN);
 
     // A read changes nothing and is never a target.
     let read = Req::get("/auth/me")
