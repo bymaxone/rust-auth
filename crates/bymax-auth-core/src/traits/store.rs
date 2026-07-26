@@ -703,17 +703,18 @@ mod tests {
         assert!(!json.contains("\"createdAt\":\""));
 
         // A nest-auth-written record (numbers, sub-second precision) reads back exactly.
-        let from_nest: SessionDetail = serde_json::from_str(
+        // Asserted on the `Result` rather than unwrapped with `?`: the literal always parses,
+        // so the `?` operator's error arm would sit on its own line as dead, uncovered code.
+        let from_nest: serde_json::Result<SessionDetail> = serde_json::from_str(
             r#"{"sessionHash":"abc123","device":"Firefox","ip":"198.51.100.7","createdAt":1700000000123,"lastActivityAt":1700000060456}"#,
-        )?;
-        assert_eq!(
-            from_nest.created_at.unix_timestamp_nanos() / 1_000_000,
-            1_700_000_000_123
         );
-        assert_eq!(
-            from_nest.last_activity_at.unix_timestamp_nanos() / 1_000_000,
-            1_700_000_060_456
-        );
+        assert!(matches!(
+            from_nest,
+            Ok(ref detail)
+                if detail.created_at.unix_timestamp_nanos() / 1_000_000 == 1_700_000_000_123
+                    && detail.last_activity_at.unix_timestamp_nanos() / 1_000_000
+                        == 1_700_000_060_456
+        ));
         Ok(())
     }
 
@@ -847,11 +848,16 @@ mod tests {
         let json = serde_json::to_string(&invitation)?;
         assert!(json.contains("\"createdAt\":\"2023-11-14T22:13:20"));
 
-        let from_nest: StoredInvitation = serde_json::from_str(
+        // Same idiom as above: assert on the `Result` so the `?` error arm is not left as an
+        // uncovered line the 100% gate then trips over.
+        let from_nest: serde_json::Result<StoredInvitation> = serde_json::from_str(
             r#"{"email":"invitee@example.com","role":"MEMBER","tenantId":"t1","inviterUserId":"owner-1","createdAt":"2023-11-14T22:13:20.000Z"}"#,
-        )?;
-        assert_eq!(from_nest.created_at, invitation.created_at);
-        assert_eq!(from_nest.inviter_user_id, "owner-1");
+        );
+        assert!(matches!(
+            from_nest,
+            Ok(ref stored)
+                if stored.created_at == invitation.created_at && stored.inviter_user_id == "owner-1"
+        ));
         Ok(())
     }
 }
