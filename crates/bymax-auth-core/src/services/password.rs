@@ -287,6 +287,33 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn verify_sentinel_actually_spends_the_kdf_time() {
+        // The sentinel exists only to spend the KDF's time, so the one thing that can prove it
+        // ran is that it costs what a verify costs — an `Ok(())` in its place returns in
+        // microseconds and silently removes the user-enumeration defence.
+        //
+        // Compared against a real verify measured in the same test, as a *lower* bound: a
+        // loaded machine slows both, and can never make the sentinel finish faster than a
+        // quarter of a real verify. The comparison cannot flake in the failing direction.
+        let Some(svc) = service() else { return };
+        let hashed = svc.hash("correct horse battery staple").await;
+        let Ok(phc) = hashed else { return };
+
+        let started = std::time::Instant::now();
+        let _ = svc.verify("correct horse battery staple", &phc).await;
+        let real = started.elapsed();
+
+        let started = std::time::Instant::now();
+        let _ = svc.verify_sentinel("whatever the attacker tried").await;
+        let sentinel = started.elapsed();
+
+        assert!(
+            sentinel * 4 >= real,
+            "sentinel took {sentinel:?} against a real verify's {real:?} — it did no work"
+        );
+    }
+
     #[test]
     fn rehash_on_verify_reflects_the_config_toggle() {
         // The toggle is surfaced so the login flow can gate the fire-and-forget upgrade.
