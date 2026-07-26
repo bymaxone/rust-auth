@@ -85,6 +85,10 @@ additional_cargo_args = ["--all-features"]
 #    the identical `remove`. It stays in the source as insurance against a future refactor
 #    deriving the index elsewhere: a panic here would be a denial of service on the MFA
 #    challenge path. Each function contains exactly one `<`, so the patterns are precise.
+# 10. `replace | with ^ in hotp` — the dynamic-truncation assembly ORs four byte lanes that
+#     were shifted into disjoint bit ranges (`<< 24`, `<< 16`, `<< 8`, none), so no two
+#     operands share a set bit and XOR produces the identical word. The `| with &` mutants of
+#     the same expression are NOT equivalent and the RFC 4226 vectors kill them.
 exclude_re = [
     'replace \| with \^ in new_uuid_v4',
     'replace AuthEngine::builder -> AuthEngineBuilder with Default::default\(\)',
@@ -96,4 +100,5 @@ exclude_re = [
     'replace AuthHooks::\w+ -> Result<\(\), HookError> with Ok\(\(\)\)',
     'replace < with <= in MfaService::challenge_platform',
     'replace < with <= in MfaService::splice_recovery_code',
+    'replace \| with \^ in hotp',
 ]
