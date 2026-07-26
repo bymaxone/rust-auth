@@ -94,6 +94,9 @@ additional_cargo_args = ["--all-features"]
 #     fallback it short-circuits answers `true` for exactly the same inputs. The `with true`
 #     mutant of the same function is NOT equivalent (it would flag every current hash as
 #     stale) and is killed.
+# 12. `replace | with ^ in decode_hex` — same shape as 1 and 10: `(hi << 4) | lo` combines a
+#     high nibble with a value `hex_nibble` bounds to 0..=15, so the two never share a set bit
+#     and XOR writes the identical byte.
 exclude_re = [
     'replace \| with \^ in new_uuid_v4',
     'replace AuthEngine::builder -> AuthEngineBuilder with Default::default\(\)',
@@ -107,4 +110,5 @@ exclude_re = [
     'replace < with <= in MfaService::splice_recovery_code',
     'replace \| with \^ in hotp',
     'replace is_legacy -> bool with false',
+    'replace \| with \^ in decode_hex',
 ]
