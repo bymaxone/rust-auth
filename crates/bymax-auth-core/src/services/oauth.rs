@@ -742,6 +742,13 @@ mod tests {
         assert!(url.contains("code_challenge_method=S256"));
         let state = extract_query_param(&url, "state").unwrap_or_default();
         assert_eq!(state.len(), 64, "state is 64 hex chars");
+        // The record is bound to *this* state and to nothing else — that binding is the CSRF
+        // protection. Checked before the real read, because a key that ignored the state
+        // would let this lookup consume the record and then read as a clean hit below.
+        assert!(matches!(
+            h.stores.take_state(&state_key("another-state")).await,
+            Ok(None)
+        ));
         // The os: record exists under sha256(state).
         assert!(matches!(
             h.stores.take_state(&state_key(&state)).await,
