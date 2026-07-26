@@ -190,22 +190,27 @@ mod tests {
     fn new_uuid_v4_has_the_canonical_version_4_layout() {
         // 8-4-4-4-12 hyphenation, the version nibble pinned to '4', and the variant nibble
         // in {8,9,a,b} — the structural proof a minted value is a v4 UUID (§24 invariant 2).
-        let id = new_uuid_v4();
-        assert_eq!(id.len(), 36);
-        let bytes = id.as_bytes();
-        assert_eq!(bytes[8], b'-');
-        assert_eq!(bytes[13], b'-');
-        assert_eq!(bytes[18], b'-');
-        assert_eq!(bytes[23], b'-');
-        assert_eq!(bytes[14], b'4', "version nibble must be 4");
-        assert!(
-            matches!(bytes[19], b'8' | b'9' | b'a' | b'b'),
-            "variant nibble"
-        );
-        assert!(
-            id.bytes()
-                .all(|c| c == b'-' || (c.is_ascii_hexdigit() && !c.is_ascii_uppercase()))
-        );
+        // Drawn repeatedly rather than once: the version and variant nibbles are forced on
+        // top of CSPRNG bytes, so a masking bug leaves them correct for a good fraction of
+        // draws. A single sample would pass by luck.
+        for _ in 0..64 {
+            let id = new_uuid_v4();
+            assert_eq!(id.len(), 36);
+            let bytes = id.as_bytes();
+            assert_eq!(bytes[8], b'-');
+            assert_eq!(bytes[13], b'-');
+            assert_eq!(bytes[18], b'-');
+            assert_eq!(bytes[23], b'-');
+            assert_eq!(bytes[14], b'4', "version nibble must be 4: {id}");
+            assert!(
+                matches!(bytes[19], b'8' | b'9' | b'a' | b'b'),
+                "variant nibble: {id}"
+            );
+            assert!(
+                id.bytes()
+                    .all(|c| c == b'-' || (c.is_ascii_hexdigit() && !c.is_ascii_uppercase()))
+            );
+        }
         // Two successive draws differ (CSPRNG).
         assert_ne!(new_uuid_v4(), new_uuid_v4());
     }

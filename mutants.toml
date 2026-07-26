@@ -32,6 +32,22 @@ exclude_globs = [
 # against exercises the same paths the mutated code lives on.
 additional_cargo_args = ["--all-features"]
 
-# Documented equivalent mutants (mutants that cannot be killed because the change is
-# behaviour-preserving) are listed under [[skip]] entries with a `reason`. None are
-# recorded yet — every surviving mutant must first be triaged before being skipped.
+# Documented equivalent mutants: mutants no test can kill because the change is
+# behaviour-preserving. Each entry names the reason it is equivalent, and the pattern is
+# kept narrow enough that other mutants of the same function are still generated — a
+# blanket `#[mutants::skip]` on the function would hide the killable ones alongside it.
+#
+# 1. `replace | with ^ in new_uuid_v4` — the version and variant bits are set on a byte
+#    whose target bits were just cleared (`b[6] & 0x0f`, `b[8] & 0x3f`), so XOR and OR
+#    write the same byte. The neighbouring `&` mutants are NOT equivalent and are killed
+#    by drawing the UUID repeatedly in the layout test.
+# 2. `replace AuthEngine::builder -> AuthEngineBuilder with Default::default()` — the
+#    `Default` impl for the builder calls `Self::new()`, which is the body being replaced.
+# 3. `delete match arm "inactive" in assert_not_blocked` — the wildcard arm returns
+#    `AccountInactive`, the same error the deleted arm returns, so a host-defined status
+#    and `"inactive"` are indistinguishable by design.
+exclude_re = [
+    'replace \| with \^ in new_uuid_v4',
+    'replace AuthEngine::builder -> AuthEngineBuilder with Default::default\(\)',
+    'delete match arm "inactive" in assert_not_blocked',
+]

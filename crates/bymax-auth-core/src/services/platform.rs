@@ -527,6 +527,23 @@ mod tests {
         assert!(matches!(&built, Ok(engine) if engine.platform_auth().is_none()));
     }
 
+    #[test]
+    fn engine_exposes_the_platform_service_when_the_domain_is_enabled() {
+        // The inverse, built the same way so nothing can skip: every platform test below
+        // recovers the service with `let Some(..) else { return }`, so an engine that stopped
+        // handing it back would quietly skip the whole platform tier rather than fail it.
+        let admins = Arc::new(InMemoryPlatformUserRepository::new());
+        let stores = Arc::new(InMemoryStores::new());
+        let built = AuthEngine::builder()
+            .config(platform_config())
+            .environment(Environment::Test)
+            .user_repository(Arc::new(crate::testing::InMemoryUserRepository::new()))
+            .platform_user_repository(admins)
+            .redis_stores(stores)
+            .build();
+        assert!(matches!(&built, Ok(engine) if engine.platform_auth().is_some()));
+    }
+
     #[tokio::test]
     async fn login_issues_a_platform_session_with_no_tenant() {
         // A correct password for an active admin returns a full platform session; me/refresh
