@@ -1327,6 +1327,42 @@ mod tests {
             .flatten()
             .and_then(|u| u.password_hash);
         assert!(after.is_some() && after != Some("$scrypt$x".to_owned()));
+
+        // Exercise the rest of the capturing double's surface so the object-safe impl is
+        // fully covered; only the reset-token send is load-bearing above.
+        let provider = CapturingResetEmail::default();
+        assert!(
+            provider
+                .send_password_reset_otp("e", "o", None)
+                .await
+                .is_ok()
+        );
+        assert!(
+            provider
+                .send_email_verification_otp("e", "o", None)
+                .await
+                .is_ok()
+        );
+        assert!(provider.send_mfa_enabled("e", None).await.is_ok());
+        assert!(provider.send_mfa_disabled("e", None).await.is_ok());
+        let session = crate::traits::SessionInfo {
+            device: "d".to_owned(),
+            ip: "i".to_owned(),
+            session_hash: "h".to_owned(),
+        };
+        assert!(
+            provider
+                .send_new_session_alert("e", &session, None)
+                .await
+                .is_ok()
+        );
+        let invite = crate::traits::InviteData {
+            inviter_name: "n".to_owned(),
+            tenant_name: "t".to_owned(),
+            invite_token: "tok".to_owned(),
+            expires_at: time::OffsetDateTime::UNIX_EPOCH,
+        };
+        assert!(provider.send_invitation("e", &invite, None).await.is_ok());
     }
 
     #[tokio::test]

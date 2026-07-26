@@ -530,31 +530,23 @@ mod tests {
         ];
         for (index, (label, invitation)) in cases.into_iter().enumerate() {
             let token = format!("{}{index}", "a".repeat(63));
-            assert!(
-                s.stores
-                    .put_invitation(&token, &invitation, 600)
-                    .await
-                    .is_ok(),
-                "{label}"
-            );
-            assert!(
-                matches!(
-                    s.engine
-                        .accept_invitation(
-                            AcceptInvitationInput {
-                                token,
-                                name: "N".to_owned(),
-                                password: "pw".to_owned(),
-                            },
-                            "1.2.3.4",
-                            "agent",
-                            BTreeMap::new(),
-                        )
-                        .await,
-                    Err(AuthError::InvalidInvitationToken)
-                ),
-                "{label} must be rejected"
-            );
+            let stored = s.stores.put_invitation(&token, &invitation, 600).await;
+            assert!(stored.is_ok(), "{label} could not be stored");
+            let outcome = s
+                .engine
+                .accept_invitation(
+                    AcceptInvitationInput {
+                        token,
+                        name: "N".to_owned(),
+                        password: "pw".to_owned(),
+                    },
+                    "1.2.3.4",
+                    "agent",
+                    BTreeMap::new(),
+                )
+                .await;
+            let rejected = matches!(outcome, Err(AuthError::InvalidInvitationToken));
+            assert!(rejected, "{label} was accepted");
         }
     }
 

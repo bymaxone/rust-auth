@@ -536,13 +536,14 @@ mod tests {
                 ("SUPER_ADMIN".to_owned(), vec!["SUPPORT".to_owned()]),
                 ("SUPPORT".to_owned(), Vec::new()),
             ]));
-            let platform = harness(with_hierarchy, None);
-            assert!(platform.is_some(), "the platform fixture must assemble");
-            if let Some(p) = platform {
-                assert!(p.engine.platform_role_satisfies("SUPER_ADMIN", "SUPPORT"));
-                assert!(p.engine.platform_role_satisfies("SUPPORT", "SUPPORT"));
-                assert!(!p.engine.platform_role_satisfies("SUPPORT", "SUPER_ADMIN"));
-            }
+            let consulted = harness(with_hierarchy, None).map(|p| {
+                (
+                    p.engine.platform_role_satisfies("SUPER_ADMIN", "SUPPORT"),
+                    p.engine.platform_role_satisfies("SUPPORT", "SUPPORT"),
+                    p.engine.platform_role_satisfies("SUPPORT", "SUPER_ADMIN"),
+                )
+            });
+            assert_eq!(consulted, Some((true, true, false)));
         }
         let digest = h.engine.hashed_identifier_for("t1", "a@e.com");
         assert_eq!(digest.len(), 64);
@@ -638,9 +639,7 @@ mod tests {
             )
             .await;
         assert!(matches!(&second, Ok(LoginResult::Success(_))));
-        let Ok(LoginResult::Success(second)) = second else {
-            return;
-        };
+        let Ok(LoginResult::Success(second)) = second else { return };
         assert!(matches!(
             h.engine.list_user_sessions(&sub, None).await,
             Ok(list) if list.len() == 2

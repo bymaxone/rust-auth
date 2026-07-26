@@ -749,9 +749,7 @@ mod tests {
         let id = seed_admin(&admins, "hooked@admin.io", "pw");
         let Some(svc) = engine.platform_auth() else { return };
         let logged = svc.login("hooked@admin.io", "pw", "1.2.3.4", "agent").await;
-        let Ok(PlatformLoginResult::Success(auth)) = logged else {
-            return;
-        };
+        let Ok(PlatformLoginResult::Success(auth)) = logged else { return };
         assert!(
             svc.logout(&auth.access_token, &auth.refresh_token, &id)
                 .await
