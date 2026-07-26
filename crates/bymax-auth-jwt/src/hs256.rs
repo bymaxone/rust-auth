@@ -381,6 +381,21 @@ mod tests {
         let key = key();
         let token = sign(&dashboard(0, i64::MAX), &key).unwrap_or_default();
         assert!(verify::<DashboardClaims>(&token, &key, &VerifyOptions::default()).is_ok());
+
+        // And the other side, which is the one that matters: a token that expired a minute
+        // ago under the *real* clock is rejected. Without it a clock stuck at the epoch — or
+        // at any fixed point in the past — would keep accepting every expired token, and the
+        // far-future assertion above would still pass.
+        let real_now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        assert!(real_now > 1_700_000_000, "the host clock looks wrong");
+        let expired = sign(&dashboard(real_now - 120, real_now - 60), &key).unwrap_or_default();
+        assert_eq!(
+            verify::<DashboardClaims>(&expired, &key, &VerifyOptions::default()),
+            Err(JwtError::Expired)
+        );
     }
 
     #[test]
