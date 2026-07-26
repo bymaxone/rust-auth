@@ -827,6 +827,40 @@ mod tests {
         // The password really changed: the stored hash is not the seeded one.
         let after = stored_hash(&h, &id).await;
         assert!(after.is_some() && after != before);
+
+        // The verified-token bridge canonicalizes too, so the OTP minted under one spelling
+        // verifies under another and the token it returns completes the reset.
+        assert!(
+            h.engine
+                .initiate_reset(forgot("case@example.com"))
+                .await
+                .is_ok()
+        );
+        let second = h
+            .stores
+            .peek_otp(OtpPurpose::PasswordReset, &identifier)
+            .unwrap_or_default();
+        assert!(!second.is_empty());
+        let verified = h
+            .engine
+            .verify_reset_otp(VerifyResetOtpInput {
+                email: "cAsE@eXaMpLe.CoM".to_owned(),
+                tenant_id: "t1".to_owned(),
+                otp: second,
+            })
+            .await;
+        assert!(verified.is_ok(), "the OTP must verify under any spelling");
+        let Ok(verified_token) = verified else { return };
+        let bridged = ResetPasswordInput {
+            email: "CASE@example.com".to_owned(),
+            tenant_id: "t1".to_owned(),
+            new_password: "new-again".to_owned(),
+            token: None,
+            otp: None,
+            verified_token: Some(verified_token),
+        };
+        assert!(h.engine.reset_password(bridged).await.is_ok());
+        assert!(stored_hash(&h, &id).await != after);
     }
 
     #[tokio::test]
