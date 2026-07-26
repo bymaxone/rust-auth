@@ -244,17 +244,21 @@ impl RedisStores {
             .arg(family)
             .arg(&rotation.old_hash)
             .arg(&rotation.new_hash)
-            // The grace branch rebuilds the family key of the record it recovered — which is not
-            // KEYS[5] (that one is the presented rotation's family, and an absent live token
-            // seeds an empty one) — so it needs the namespace and the family prefix by name.
-            .arg(keys.namespace())
-            .arg(prefixes.fam.as_str())
             .invoke_async(&mut conn)
             .await?;
 
         match interpret_rotate(raw)? {
             RotateParsed::Invalid => Ok(RotateOutcome::Invalid),
-            RotateParsed::Grace(record) => Ok(RotateOutcome::Grace(record)),
+            RotateParsed::Grace(record) => {
+                if self
+                    .family_is_alive(&mut conn, prefixes.fam, &record)
+                    .await?
+                {
+                    Ok(RotateOutcome::Grace(record))
+                } else {
+                    Ok(RotateOutcome::Invalid)
+                }
+            }
             RotateParsed::Reused(family) => Ok(RotateOutcome::Reused(family)),
             RotateParsed::Rotated(old_record) => {
                 self.move_session_member(&mut conn, &prefixes, rotation, &old_record.user_id)
@@ -264,9 +268,37 @@ impl RedisStores {
         }
     }
 
+    /// Whether the lineage a recovered grace record belongs to is still alive.
+    ///
+    /// A grace pointer can outlive its own lineage: reuse detection revokes the family's live
+    /// sessions, but a pointer planted by an *earlier* rotation of that same lineage can still be
+    /// inside its (much shorter) window at that moment — detection only proves the replayed
+    /// token's own pointer expired, which says nothing about a younger sibling's. Recovering from
+    /// such a pointer would mint a fresh session carrying the revoked family id and hand the thief
+    /// back the lineage the revocation just killed.
+    ///
+    /// A record written before families existed carries none and recovers as before.
+    async fn family_is_alive(
+        &self,
+        conn: &mut Connection,
+        fam: Prefix,
+        record: &SessionRecord,
+    ) -> Result<bool, RedisStoreError> {
+        if record.family_id.is_empty() {
+            return Ok(true);
+        }
+        let fam_key = self.keys().key(fam, &record.family_id);
+        let present: bool = conn.exists(&fam_key).await?;
+        Ok(present)
+    }
+
     /// Run the `revoke_family` transaction, deleting every live member's `rt:`/`sd:` key, pruning
     /// each from its owner's `sess:` SET, and dropping the family index — the reuse-detection
     /// lockout of a stolen token's whole lineage.
+    ///
+    /// The owner is resolved here rather than decoded inside the script: every member of one
+    /// family belongs to the same login, so the first readable record names it, and reading it
+    /// with a real parser keeps the script free of `cjson`.
     async fn revoke_family_inner(
         &self,
         kind: SessionKind,
@@ -280,16 +312,43 @@ impl RedisStores {
         let keys = self.keys();
         let fam_key = keys.key(prefixes.fam, family_id);
         let mut conn = self.connection().await?;
+        let members: Vec<String> = conn.smembers(&fam_key).await?;
+        let owner_index = self
+            .resolve_family_owner_index(&mut conn, &prefixes, &members)
+            .await?;
         script::REVOKE_FAMILY
             .prepare()
             .key(&fam_key)
             .arg(keys.namespace())
             .arg(prefixes.rt.as_str())
             .arg(prefixes.sd.as_str())
-            .arg(prefixes.sess.as_str())
+            .arg(&owner_index)
             .invoke_async::<i64>(&mut conn)
             .await?;
         Ok(())
+    }
+
+    /// Resolve the namespaced session-index key of the user a family belongs to, or an empty
+    /// string when no member record is readable — every member may have already expired, in
+    /// which case there is no index left to prune.
+    async fn resolve_family_owner_index(
+        &self,
+        conn: &mut Connection,
+        prefixes: &KindPrefixes,
+        members: &[String],
+    ) -> Result<String, RedisStoreError> {
+        let keys = self.keys();
+        for hash in members {
+            let raw: Option<String> = conn.get(keys.key(prefixes.rt, hash)).await?;
+            let Some(raw) = raw else { continue };
+            let Ok(record) = serde_json::from_str::<SessionRecord>(&raw) else {
+                continue;
+            };
+            if !record.user_id.is_empty() {
+                return Ok(keys.key(prefixes.sess, &record.user_id));
+            }
+        }
+        Ok(String::new())
     }
 
     /// Move the session-index membership and detail from the old hash to the new hash after a

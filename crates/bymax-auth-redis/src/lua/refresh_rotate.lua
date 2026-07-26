@@ -14,8 +14,11 @@
 -- ARGV[4] = family id of the presented session ('' means "legacy, no family": skip family work)
 -- ARGV[5] = sha256(old)  the SET member to move out of the family
 -- ARGV[6] = sha256(new)  the SET member to move into the family
--- ARGV[7] = namespace    e.g. "auth", to rebuild the grace record's own family key
--- ARGV[8] = family prefix "fam" (dashboard) or "pfam" (platform)
+--
+-- The script never decodes a stored record: every JSON value it touches is handed back to the
+-- caller and parsed there, by a real parser rather than Lua's `cjson`. That keeps it byte-for-byte
+-- runnable on any EVAL-capable backend, including the in-memory Redis nest-auth drives its
+-- end-to-end tier with.
 --
 -- Returns the consumed old-session JSON on a live rotation; "GRACE:" .. json when the old token
 -- was already rotated but is still inside the grace window; "REUSED:" .. family when the old
@@ -50,19 +53,10 @@ if old then
 end
 local grace = redis.call('GET', KEYS[3])
 if grace then
-    -- A grace pointer may outlive its own lineage: reuse detection revokes the family's live
-    -- sessions, but a pointer planted by the *previous* rotation can still be inside its (much
-    -- shorter) window at that moment. Recovering from it would mint a fresh session carrying the
-    -- revoked family id and resurrect the lineage the revocation just killed. So a recovery is
-    -- valid only while the family index is still alive. A legacy record with no family predates
-    -- the mechanism and is recovered as before.
-    local ok, decoded = pcall(cjson.decode, grace)
-    if ok and type(decoded) == 'table' and decoded.familyId and decoded.familyId ~= '' then
-        local fam_key = ARGV[7] .. ':' .. ARGV[8] .. ':' .. decoded.familyId
-        if redis.call('EXISTS', fam_key) == 0 then
-            return false
-        end
-    end
+    -- The window is single-shot: consume the pointer so one captured token cannot mint a fresh
+    -- session on every request for the whole window. It exists to cover the one retry where the
+    -- old token was consumed but the client never received the new one.
+    redis.call('DEL', KEYS[3])
     return 'GRACE:' .. grace
 end
 -- Post-grace reuse: the consumed-family marker outlives the grace pointer, so its presence here

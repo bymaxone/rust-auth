@@ -6,7 +6,13 @@
 -- ARGV[1] = namespace        e.g. "auth"
 -- ARGV[2] = refresh prefix   "rt" (dashboard) or "prt" (platform)
 -- ARGV[3] = detail prefix    "sd" (dashboard) or "psd" (platform)
--- ARGV[4] = session prefix   "sess" (dashboard) or "psess" (platform)
+-- ARGV[4] = the owner's session-index key (already namespaced), or '' when no member record was
+--           readable and there is therefore no index left to prune
+--
+-- The owner is resolved by the caller rather than decoded here: every member of one family
+-- belongs to the same login, so reading one record in the host language keeps this script free
+-- of `cjson`. The membership is still re-read here, so a member added between the two steps is
+-- revoked too.
 --
 -- Returns the number of family members that were removed. Idempotent: an unknown or empty
 -- family removes nothing.
@@ -15,24 +21,11 @@ if #members == 0 then
     redis.call('DEL', KEYS[1])
     return 0
 end
-local ns, rt, sd, sess = ARGV[1], ARGV[2], ARGV[3], ARGV[4]
--- Every member of one family belongs to the same user; resolve that user's `sess:` SET from the
--- first member whose record is still readable, so the deleted hashes can be pruned from it too.
-local sess_key = nil
-for _, hash in ipairs(members) do
-    local record = redis.call('GET', ns .. ':' .. rt .. ':' .. hash)
-    if record then
-        local ok, decoded = pcall(cjson.decode, record)
-        if ok and decoded.userId then
-            sess_key = ns .. ':' .. sess .. ':' .. decoded.userId
-            break
-        end
-    end
-end
+local ns, rt, sd, sess_key = ARGV[1], ARGV[2], ARGV[3], ARGV[4]
 for _, hash in ipairs(members) do
     redis.call('DEL', ns .. ':' .. rt .. ':' .. hash)
     redis.call('DEL', ns .. ':' .. sd .. ':' .. hash)
-    if sess_key then
+    if sess_key ~= '' then
         -- The session index stores full key **suffixes**, not bare hashes, so the member to
         -- prune is `rt:{hash}` (`prt:{hash}` on the platform plane). Removing the bare hash
         -- would leave the revoked session listed forever, until the index itself expired.
