@@ -307,6 +307,10 @@ pub struct InMemoryStores {
     /// `ep:`/`pep:` per-user token epoch (generation counter), keyed by `(kind, user_id)`. A
     /// bump invalidates every access token stamped below the new value. Absent reads as `0`.
     epochs: Mutex<HashMap<(SessionKind, String), u64>>,
+    /// The TTL the last `create_session` was given, in seconds. The real store turns this
+    /// into the key's expiry — the only thing that makes a session end on its own — so it is
+    /// recorded rather than discarded, and read back through [`InMemoryStores::peek_session_ttl`].
+    last_session_ttl_secs: Mutex<Option<u64>>,
     blacklist: Mutex<HashSet<String>>,
     otps: Mutex<HashMap<(OtpPurpose, String), (String, u32)>>,
     resend: Mutex<HashSet<(OtpPurpose, String)>>,
@@ -337,6 +341,14 @@ impl InMemoryStores {
         Self::default()
     }
 
+    /// The TTL the last created session was stored with, in seconds. A test-only inspection
+    /// helper: the double cannot expire anything, so without this the lifetime the engine
+    /// computes would be unobservable.
+    #[must_use]
+    pub fn peek_session_ttl(&self) -> Option<u64> {
+        *lock(&self.last_session_ttl_secs)
+    }
+
     /// Read the stored OTP code for a purpose + identifier without consuming it. A test-only
     /// inspection helper (the real store never exposes a stored code), used to drive the
     /// verification flow end to end against the in-memory double.
@@ -355,8 +367,9 @@ impl SessionStore for InMemoryStores {
         kind: SessionKind,
         token_hash: &str,
         detail: &SessionRecord,
-        _ttl_secs: u64,
+        ttl_secs: u64,
     ) -> Result<(), AuthError> {
+        *lock(&self.last_session_ttl_secs) = Some(ttl_secs);
         lock(&self.sessions).insert((kind, token_hash.to_owned()), detail.clone());
         lock(&self.session_index)
             .entry((kind, detail.user_id.clone()))

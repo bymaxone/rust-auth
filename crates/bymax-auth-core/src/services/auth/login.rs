@@ -246,6 +246,11 @@ mod tests {
         let Ok(LoginResult::Success(auth)) = result else { return };
         assert_eq!(auth.user.email, "ok@example.com");
         assert!(!auth.access_token.is_empty());
+        // The refresh session is stored with the configured lifetime, in seconds. The double
+        // cannot expire anything, so without this the arithmetic that turns days into the
+        // key's TTL is unobservable — a session that never expired, or expired at once, would
+        // look exactly like this one.
+        assert_eq!(h.stores.peek_session_ttl(), Some(7 * 86_400));
     }
 
     #[tokio::test]
