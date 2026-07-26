@@ -789,6 +789,47 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_reset_started_in_one_casing_completes_in_another() {
+        // Both entry points canonicalize the address before anything derives a key from it.
+        // Without that, the OTP identifier written by `initiate_reset` and the one read by
+        // `reset_password` disagree whenever the user types their address differently — and
+        // every test above happens to use one spelling throughout, so nothing noticed.
+        let Some(h) = otp_harness() else { return };
+        let id = h.seed(SeedUser::active("case@example.com", "old")).await;
+        let before = stored_hash(&h, &id).await;
+        // Started with the address shouted.
+        assert!(
+            h.engine
+                .initiate_reset(forgot("CASE@Example.COM"))
+                .await
+                .is_ok()
+        );
+        // The OTP is filed under the canonical spelling, whatever was typed.
+        let identifier = h.engine.hashed_identifier("t1", "case@example.com");
+        let code = h
+            .stores
+            .peek_otp(OtpPurpose::PasswordReset, &identifier)
+            .unwrap_or_default();
+        assert!(
+            !code.is_empty(),
+            "no reset OTP was minted under the canonical spelling"
+        );
+        // And completed with yet another spelling.
+        let reset = ResetPasswordInput {
+            email: "Case@Example.com".to_owned(),
+            tenant_id: "t1".to_owned(),
+            new_password: "new-after-case-change".to_owned(),
+            token: None,
+            otp: Some(code),
+            verified_token: None,
+        };
+        assert!(h.engine.reset_password(reset).await.is_ok());
+        // The password really changed: the stored hash is not the seeded one.
+        let after = stored_hash(&h, &id).await;
+        assert!(after.is_some() && after != before);
+    }
+
+    #[tokio::test]
     async fn reset_password_rejects_zero_or_multiple_proofs_and_method_mismatch() {
         // No proof, two proofs, and a token presented to the OTP method are all rejected.
         let Some(h) = otp_harness() else { return };
