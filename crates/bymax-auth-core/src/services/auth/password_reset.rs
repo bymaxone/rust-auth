@@ -387,7 +387,7 @@ impl AuthEngine {
         tenant_id: &str,
     ) -> Result<(), AuthError> {
         let Some(store) = self.password_reset_store() else {
-            // A misconfiguration: the token method is selected but no `pr:` store is wired.
+            // A misconfiguration: the token method is selected but no `pw_reset:` store is wired.
             // Surfaced to the caller (which swallows it on the anti-enumerating path) and
             // logged so a deployment running the token method without its store is observable.
             tracing::warn!("password reset token method selected but no PasswordResetStore wired");
@@ -472,20 +472,20 @@ impl AuthEngine {
 /// The single reset proof carried by a request, classified from the mutually-exclusive
 /// `token` / `otp` / `verified_token` fields.
 enum Proof<'a> {
-    /// A reset link token (`pr:`).
+    /// A reset link token (`pw_reset:`).
     Token(&'a str),
     /// A direct OTP.
     Otp(&'a str),
-    /// An OTP-flow verified token (`prv:`).
+    /// An OTP-flow verified token (`pw_vtok:`).
     Verified(&'a str),
 }
 
 /// Which opaque-token keyspace a stored reset proof lives in.
 #[derive(Clone, Copy)]
 enum ProofKind {
-    /// The reset link token (`pr:`).
+    /// The reset link token (`pw_reset:`).
     Token,
-    /// The OTP-flow verified token (`prv:`).
+    /// The OTP-flow verified token (`pw_vtok:`).
     Verified,
 }
 
@@ -988,7 +988,7 @@ mod tests {
 
     #[tokio::test]
     async fn token_send_failure_deletes_the_unusable_token() {
-        // On an undeliverable reset email the stored `pr:` token is deleted so it cannot
+        // On an undeliverable reset email the stored `pw_reset:` token is deleted so it cannot
         // linger; a subsequent reset with that token is therefore invalid.
         let mut cfg = base_config();
         cfg.password_reset.method = ResetMethod::Token;

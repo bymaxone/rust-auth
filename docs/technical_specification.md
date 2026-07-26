@@ -2255,7 +2255,7 @@ impl PasswordResetService {
 }
 ```
 
-Constants: `ANTI_ENUM_MIN_MS = 300`; `VERIFIED_TOKEN_TTL_SECONDS = 300`; purpose `"password_reset"`. Redis keys: `pr:{sha256(token)}`, `prv:{sha256(verified_token)}` (the §12.4 catalog prefixes), both storing `ResetContext { user_id, email, tenant_id }`. OTP identifier: `hmac_sha256("{tenant_id}:{email}", hmac_key)`.
+Constants: `ANTI_ENUM_MIN_MS = 300`; `VERIFIED_TOKEN_TTL_SECONDS = 300`; purpose `"password_reset"`. Redis keys: `pw_reset:{sha256(token)}`, `pw_vtok:{sha256(verified_token)}` (the §12.4 catalog prefixes), both storing `ResetContext { user_id, email, tenant_id }`. OTP identifier: `hmac_sha256("{tenant_id}:{email}", hmac_key)`.
 
 #### 7.8.1 `initiate_reset` (anti-enumeration)
 
@@ -2265,7 +2265,7 @@ Always returns `Ok(())`, even on unknown email, blocked account, or email-provid
 3. Catch and log any error.
 4. Sleep to `ANTI_ENUM_MIN_MS`; return.
 
-`send_token`: `raw = generate_secure_token(32)`; store `ResetContext` under `pr:{sha256(raw)}` with `token_ttl_seconds`; spawn `email.send_password_reset_token(email, raw)`; **on send failure, delete the Redis key** (so an undeliverable token doesn't linger in a Redis snapshot).
+`send_token`: `raw = generate_secure_token(32)`; store `ResetContext` under `pw_reset:{sha256(raw)}` with `token_ttl_seconds`; spawn `email.send_password_reset_token(email, raw)`; **on send failure, delete the Redis key** (so an undeliverable token doesn't linger in a Redis snapshot).
 `send_otp`: `otp = generate(otp_length)`; `otp.store("password_reset", id, otp, otp_ttl_seconds)`; spawn `email.send_password_reset_otp(email, otp)`. (Email is fire-and-forget so its RTT does not perturb the normalized timing.)
 
 #### 7.8.2 `reset_password`
@@ -2282,7 +2282,7 @@ Exactly one proof field must be present.
 
 1. `otp.verify("password_reset", id, dto.otp)` (consumes on success).
 2. `find_by_email`; if `None`, `PasswordResetTokenInvalid` (don't issue a verified token for a vanished account).
-3. `raw_verified = generate_secure_token()`; store `ResetContext` under `prv:{sha256(raw_verified)}` with 300 s TTL; return `raw_verified`.
+3. `raw_verified = generate_secure_token()`; store `ResetContext` under `pw_vtok:{sha256(raw_verified)}` with 300 s TTL; return `raw_verified`.
 
 #### 7.8.4 `resend_otp`
 
@@ -4275,21 +4275,21 @@ All keys are `{namespace}:{prefix}:{identifier}` (default namespace `auth`). Eve
 | `us` | `auth:us:{userId}` | Status string (`"ACTIVE"`, `"BANNED"`, …) | `user_status_cache_ttl_seconds` (default 60 s) | User-status cache. Avoids a DB read per request; invalidated on `update_status`. |
 | `rp` | `auth:rp:{sha256(old_refresh_token)}` | JSON `SessionRecord` — the **new** session, never the raw token | `refresh_grace_window_seconds` (default 30 s) | Rotation grace pointer. Lets a legitimately-concurrent request still carrying the old token recover the rotated identity and be issued a fresh token, instead of being logged out. Stores the session record (not the raw refresh token), so a Redis snapshot never leaks a live credential. |
 | `lf` | `auth:lf:{hmac_sha256(tenantId + ":" + email)}` | Numeric counter (string) | `window_seconds` (default 900 s) | Per-tenant failed-login counter. Fixed window — TTL set only on the 0→1 transition. Tenant scoping prevents cross-tenant lockout. |
-| `pr` | `auth:pr:{sha256(reset_token)}` | `userId` | `password_reset.token_ttl_seconds` (default 3600 s) | Password-reset token (`method = "token"`). Consumed on use. |
+| `pw_reset` | `auth:pw_reset:{sha256(reset_token)}` | `userId` | `password_reset.token_ttl_seconds` (default 3600 s) | Password-reset token (`method = "token"`). Consumed on use. |
 | `otp` | `auth:otp:{purpose}:{hmac_sha256(tenantId + ":" + email)}` | JSON `{ code: string, attempts: number }` | `otp_ttl_seconds` (per purpose) | OTP record. `attempts` tracks failures (max 5). Purposes: `password_reset`, `email_verification`. Tenant-scoped to prevent collision. |
 | `mfa` | `auth:mfa:{sha256(mfa_temp_token)}` | `userId` | 300 s (5 min) | MFA temp-token anti-replay/consumption marker. Issued after password step when MFA is enabled; deleted when the challenge succeeds or after the lockout threshold. |
-| `sess` | `auth:sess:{userId}` | Redis SET of `sha256(refresh_token)` members | max refresh TTL | Dashboard active-session index. Drives listing, counting and FIFO eviction. |
-| `sd` | `auth:sd:{sessionHash}` | JSON `{ device, ip, createdAt, lastActivityAt }` | max refresh TTL | Dashboard per-session detail (one member of `sess:{userId}`). |
-| `inv` | `auth:inv:{sha256(invitation_token)}` | JSON `{ email, role, tenantId, inviterId }` | `invitations.token_ttl_seconds` (default 604800 s) | Pending invitation. Consumed on accept. |
+| `sess` | `auth:sess:{userId}` | Redis SET whose members are full key **suffixes**: `rt:{sha256(refresh_token)}` for a live session and `rp:{sha256(old_refresh_token)}` for a rotation grace pointer | max refresh TTL | Dashboard active-session index. Drives listing (filtered to `rt:` members), counting and FIFO eviction. The prefixed-suffix member format is byte-identical to nest-auth, so revoke-all can delete `{namespace}:{member}` verbatim — including the grace pointers, which a bare-hash member could not identify. |
+| `sd` | `auth:sd:{sessionHash}` | JSON `{ device, ip, createdAt, lastActivityAt }` — the two timestamps are **Unix-millisecond numbers** (nest-auth writes `Date.now()` and discards a record whose timestamps are not numbers), keyed by the **bare** hash, not the `sess:` member | max refresh TTL | Dashboard per-session detail (one `rt:` member of `sess:{userId}`). |
+| `inv` | `auth:inv:{sha256(invitation_token)}` | JSON `{ email, role, tenantId, inviterUserId, createdAt }` (`createdAt` is an ISO-8601 string) | `invitations.token_ttl_seconds` (default 604800 s) | Pending invitation. Consumed on accept. `createdAt` is **mandatory**: nest-auth's record guard rejects a record without it, and because accept consumes the token with a single-use `GETDEL` the rejection would destroy the invitation rather than merely fail it. |
 | `os` | `auth:os:{sha256(state)}` | JSON `{ tenantId, codeVerifier }` | 600 s (10 min) | OAuth CSRF `state` + PKCE `code_verifier`. Single-use; deleted on callback. |
 | `wst` | `auth:wst:{sha256(ws_ticket)}` | JSON `WsTicketSnapshot` `{ sub, tenantId, role, status, mfaEnabled, mfaVerified }` | `WS_TICKET_TTL_SECONDS` (30 s) | **rust-auth-only, feature `websocket`.** Single-use WebSocket upgrade ticket (§7.3.6 / §8.7). Minted from an already-authorized, MFA-satisfied session and redeemed once (`GETDEL`) at the WS handshake, so an access JWT never appears in a URL. The value is a verified-claims **snapshot**, never a token. This prefix is outside the nest-auth parity surface (nest-auth authenticates WebSockets via the `Authorization` header, not a ticket), so it is purely additive: a `nest-auth` server never reads or writes `wst:`, and cross-backend Redis sharing is unaffected. |
 | `tu` | `auth:tu:{hmac_sha256(userId + ":" + code)}` | `"1"` | 90 s (≈ 3 × TOTP window) | TOTP anti-replay. The key is the **HMAC of `userId:code`**, never the raw 6-digit code (which is low-entropy and would be reversible as a bare key) — matching §7.5.6. A code that just verified is marked so it cannot be replayed inside its drift window. |
 | `prt` | `auth:prt:{sha256(refresh_token)}` | JSON `{ userId, role, device, ip, createdAt }` | `refresh_expires_in_days` × 86400 s | Platform-admin refresh session. Platform analogue of `rt`. |
 | `prp` | `auth:prp:{sha256(old_refresh_token)}` | JSON `SessionRecord` — the new session, never the raw token | `refresh_grace_window_seconds` (default 30 s) | Platform rotation grace pointer. Analogue of `rp`. |
-| `prv` | `auth:prv:{sha256(verified_token)}` | JSON `{ email, tenantId }` | 300 s (5 min) | Password-reset OTP "verified" token (2-step OTP flow). Bridges verify-OTP → reset-password, closing the verify/reset race. Consumed on reset. |
+| `pw_vtok` | `auth:pw_vtok:{sha256(verified_token)}` | JSON `{ email, tenantId }` | 300 s (5 min) | Password-reset OTP "verified" token (2-step OTP flow). Bridges verify-OTP → reset-password, closing the verify/reset race. Consumed on reset. |
 | `mfa_setup` | `auth:mfa_setup:{hmac_sha256(userId)}` | JSON `{ encryptedSecret, hashedCodes: string[], encryptedPlainCodes }` | 600 s (10 min) | MFA pending-setup data: AES-256-GCM-encrypted TOTP secret + HMAC-SHA-256-keyed recovery-code hashes + the AES-256-GCM-encrypted plaintext codes (so the idempotent `setup()` fast-path can re-return them), held between `setup()` and `verify_enable()`. Consumed on enable. The low-entropy `userId` is keyed via HMAC-SHA-256 (§12.2), matching §7.5.1. |
-| `psess` | `auth:psess:{userId}` | Redis SET of platform `sha256(refresh_token)` members | max refresh TTL | Platform active-session index. Analogue of `sess`. |
-| `psd` | `auth:psd:{sessionHash}` | JSON `{ device, ip, createdAt, lastActivityAt }` | max refresh TTL | Platform per-session detail. Analogue of `sd`. |
+| `psess` | `auth:psess:{userId}` | Redis SET of full key **suffixes**: `prt:{sha256(refresh_token)}` and `prp:{sha256(old_refresh_token)}` | max refresh TTL | Platform active-session index. Analogue of `sess`; the platform keyspace is deliberately separate. |
+| `psd` | `auth:psd:{sessionHash}` | JSON `{ device, ip, createdAt, lastActivityAt }` (Unix-millisecond timestamps, as `sd`) | max refresh TTL | Platform per-session detail. Analogue of `sd`. |
 | `resend` | `auth:resend:{purpose}:{hmac_sha256(tenantId + ":" + email)}` | `"1"` | 60 s | OTP-resend cooldown. Stops an attacker from resetting the `attempts` counter by spamming resends. Purposes: `password_reset`, `email_verification`. |
 
 Values that are JSON are (de)serialized with `serde` + `serde_json`; the DTOs (`SessionRecord`, `SessionDetail`, the OTP record, the invitation record, the MFA-setup record) live in `bymax-auth-types` so the wire shape is shared and version-checked. Field names are camelCase to remain byte-identical with nest-auth payloads already in Redis.
@@ -4308,14 +4308,14 @@ Prevents the classic double-rotation race: two concurrent requests carrying the 
   1. `GET KEYS[1]`. If present → `DEL KEYS[1]`; `SET KEYS[3] = ARGV[1] EX ARGV[3]` (plant the grace pointer holding the **new session JSON**, never the raw token); `SET KEYS[2] = ARGV[1] EX ARGV[2]` (new session); **return the old session JSON** (caller derives `userId`, updates the `sess:` SET + `sd:` detail).
   2. Else `GET KEYS[3]` (grace pointer). If present → **return `"GRACE:" .. session_json`**; the caller parses the pointed-to `SessionRecord` and mints a **fresh** token bound to that identity (it does *not* plant another grace pointer), so a benign concurrent retry succeeds without a logout.
   3. Else → **return `nil`** ⇒ caller raises `AuthError::RefreshTokenInvalid`.
-- **Rust mapping:** `RotateOutcome::{ Rotated(SessionRecord), Grace(SessionRecord), Invalid }`. The `SessionStore::rotate` impl pattern-matches and performs the non-atomic SET bookkeeping (`SADD sess`, `SET sd`, `SREM` of the old hash) outside the script; on `Grace` it mints a fresh token for the recovered `SessionRecord`. Storing the session record — not the raw token — keeps the "no raw secret in Redis" invariant intact for the grace pointer too.
+- **Rust mapping:** `RotateOutcome::{ Rotated(SessionRecord), Grace(SessionRecord), Invalid }`. The `SessionStore::rotate` impl pattern-matches and performs the non-atomic SET bookkeeping outside the script — `SREM rt:{old_hash}`, `SADD rt:{new_hash}`, `SADD rp:{old_hash}` (the grace pointer is indexed too, so `revoke_all` can sweep it), `DEL sd:{old_hash}`, `SET sd:{new_hash}`; on `Grace` it mints a fresh token for the recovered `SessionRecord`. Storing the session record — not the raw token — keeps the "no raw secret in Redis" invariant intact for the grace pointer too.
 
 #### 12.5.2 `session_revoke` — ownership-checked single revoke
 
 Closes an IDOR/BOLA hole: a user must not revoke a session hash they do not own.
 
 - **KEYS** — `[1]` `sess:{userId}` (or `psess:{userId}`), `[2]` `rt:{sessionHash}` (or `prt:{sessionHash}`), `[3]` `sd:{sessionHash}` (or `psd:{sessionHash}`). All three arrive fully namespaced (built by `NamespacedRedis`), so **every** key the script touches is declared in `KEYS` — required for Redis Cluster key routing.
-- **ARGV** — `[1]` `sessionHash` (the `sess:`-set member).
+- **ARGV** — `[1]` `rt:{sessionHash}` (or `prt:{sessionHash}`) — the `sess:`-set member, which is the full key suffix, not a bare hash.
 - **Contract:**
   1. `SISMEMBER KEYS[1] ARGV[1]`. If `0` → **return `0`** ⇒ caller raises `AuthError::SessionNotFound` (404).
   2. Else `SREM KEYS[1] ARGV[1]`; `DEL KEYS[2]`; `DEL KEYS[3]` → **return `1`**.
@@ -4806,7 +4806,7 @@ All codes, grouped by domain, with HTTP status, trigger, and client-facing Engli
 | Code | HTTP | When raised | Client message |
 | --- | --- | --- | --- |
 | `auth.password_too_weak` | 400 | New password fails minimum policy (e.g. < 8 chars). | Password too weak |
-| `auth.password_reset_token_invalid` | 400 | Reset token absent from Redis (`pr:`). | Invalid password reset token |
+| `auth.password_reset_token_invalid` | 400 | Reset token absent from Redis (`pw_reset:`). | Invalid password reset token |
 | `auth.password_reset_token_expired` | 400 | **Internal only / unreachable by design.** The reset flow consumes the token with `GETDEL` (§7.8.2), which cannot distinguish *expired* from *missing* — both map to `auth.password_reset_token_invalid` (anti-enumeration). This code is defined for completeness but is never returned unless a deployment adds an explicit TTL pre-check. | Expired password reset token |
 
 #### OTP

@@ -80,9 +80,64 @@ pub struct SessionRecord {
     pub mfa_enabled: bool,
 }
 
+/// Serde adapter carrying an [`OffsetDateTime`] as a **Unix-millisecond number**.
+///
+/// This is the encoding nest-auth uses for the `sd:`/`psd:` per-session detail record: it
+/// writes `createdAt`/`lastActivityAt` with `Date.now()` and re-reads them under a
+/// `typeof === 'number'` guard, so an RFC 3339 string in those fields makes the record
+/// unreadable — and, because a member whose detail fails to parse is treated as stale, it
+/// makes the session disappear from the other backend's listing. Both backends must therefore
+/// agree on the numeric form for the shared-Redis promise to hold.
+///
+/// Note this is deliberately **not** how [`SessionRecord::created_at`] is encoded: nest-auth
+/// writes that one as an ISO-8601 string (`new Date().toISOString()`), so `rt:`/`prt:` records
+/// keep the RFC 3339 adapter.
+pub mod unix_millis {
+    use serde::{Deserialize, Deserializer, Serializer};
+    use time::OffsetDateTime;
+
+    /// Nanoseconds in one millisecond — the scale factor between `time`'s native
+    /// `unix_timestamp_nanos` and the millisecond wire form.
+    const NANOS_PER_MILLI: i128 = 1_000_000;
+
+    /// Write the instant as a Unix-millisecond `i64`, saturating at the `i64` bounds. The
+    /// clamp preserves the sign, so a pre-epoch instant stays negative instead of flipping to
+    /// `i64::MAX` on overflow.
+    ///
+    /// # Errors
+    ///
+    /// Propagates whatever the serializer reports while emitting the number.
+    pub fn serialize<S>(value: &OffsetDateTime, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let millis = (value.unix_timestamp_nanos() / NANOS_PER_MILLI)
+            .clamp(i128::from(i64::MIN), i128::from(i64::MAX)) as i64;
+        serializer.serialize_i64(millis)
+    }
+
+    /// Read a Unix-millisecond number back into an instant.
+    ///
+    /// # Errors
+    ///
+    /// Returns a deserialization error when the field is not an integer, or when the
+    /// millisecond count is outside the range `OffsetDateTime` can represent.
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<OffsetDateTime, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let millis = i64::deserialize(deserializer)?;
+        OffsetDateTime::from_unix_timestamp_nanos(i128::from(millis) * NANOS_PER_MILLI)
+            .map_err(serde::de::Error::custom)
+    }
+}
+
 /// One session's display detail, returned by [`SessionStore::list_sessions`]. The
-/// `session_hash` is the `sess:`-set member (a SHA-256 hex of the refresh token), never
-/// the raw token.
+/// `session_hash` is the bare SHA-256 hex of the refresh token (the `sess:`-set member is that
+/// hash under its `rt:`/`prt:` prefix), never the raw token.
+///
+/// The two timestamps are Unix-millisecond numbers on the wire — the encoding nest-auth writes
+/// for `sd:`/`psd:` (see [`unix_millis`]).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SessionDetail {
@@ -92,11 +147,11 @@ pub struct SessionDetail {
     pub device: String,
     /// Originating IP.
     pub ip: String,
-    /// Session creation time.
-    #[serde(with = "time::serde::rfc3339")]
+    /// Session creation time, as Unix milliseconds on the wire.
+    #[serde(with = "unix_millis")]
     pub created_at: OffsetDateTime,
-    /// Last observed activity time.
-    #[serde(with = "time::serde::rfc3339")]
+    /// Last observed activity time, as Unix milliseconds on the wire.
+    #[serde(with = "unix_millis")]
     pub last_activity_at: OffsetDateTime,
 }
 
@@ -327,7 +382,7 @@ pub trait WsTicketStore: Send + Sync {
 }
 
 /// The identity bound to a password-reset proof (a link token or the OTP-flow verified
-/// token). Stored under `pr:`/`prv:` keyed by `sha256(token)` — the raw token is never a
+/// token). Stored under `pw_reset:`/`pw_vtok:` keyed by `sha256(token)` — the raw token is never a
 /// key — and read back on consume so the reset can re-bind the proof to the same account.
 /// JSON is camelCase for parity with nest-auth payloads already in Redis.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -357,10 +412,21 @@ pub struct StoredInvitation {
     pub tenant_id: String,
     /// The user id of the inviter (for audit / the accepted hook).
     pub inviter_user_id: String,
+    /// When the invitation was issued, as an RFC 3339 string on the wire.
+    ///
+    /// Mandatory for cross-backend parity: nest-auth writes `createdAt` (an
+    /// ISO-8601 string from `new Date().toISOString()`) and its `isStoredInvitation` guard
+    /// **rejects** a record without it. Because acceptance consumes the record with a
+    /// single-use `GETDEL`, a nest-auth backend reading an invitation that lacks the field
+    /// fails validation *after* the token is already gone — destroying the invitation
+    /// instead of accepting it. Encoded as RFC 3339 (not Unix millis like `sd:`) because
+    /// that is what nest-auth stores here.
+    #[serde(with = "time::serde::rfc3339")]
+    pub created_at: OffsetDateTime,
 }
 
-/// Single-use password-reset proof storage: the link token (`pr:`) and the OTP-flow
-/// verified token (`prv:`). Both store a [`ResetContext`] keyed by `sha256(token)` and are
+/// Single-use password-reset proof storage: the link token (`pw_reset:`) and the OTP-flow
+/// verified token (`pw_vtok:`). Both store a [`ResetContext`] keyed by `sha256(token)` and are
 /// consumed atomically with `getdel`, so a proof is valid exactly once. The OTP records
 /// themselves are owned by [`OtpStore`] — this store backs only the two opaque-token
 /// keyspaces.
@@ -371,7 +437,7 @@ pub struct StoredInvitation {
 /// proof is the non-error `Ok(None)`, not an error.
 #[async_trait]
 pub trait PasswordResetStore: Send + Sync {
-    /// Store a reset-link-token context under `pr:{sha256(token)}` with a TTL.
+    /// Store a reset-link-token context under `pw_reset:{sha256(token)}` with a TTL.
     async fn put_token(
         &self,
         token: &str,
@@ -387,7 +453,7 @@ pub trait PasswordResetStore: Send + Sync {
     /// undeliverable email so an unusable token does not linger in a Redis snapshot.
     async fn delete_token(&self, token: &str) -> Result<(), AuthError>;
 
-    /// Store an OTP-flow verified-token context under `prv:{sha256(token)}` with a TTL.
+    /// Store an OTP-flow verified-token context under `pw_vtok:{sha256(token)}` with a TTL.
     async fn put_verified(
         &self,
         token: &str,
@@ -616,6 +682,66 @@ mod tests {
     }
 
     #[test]
+    fn session_detail_timestamps_are_unix_millisecond_numbers() -> serde_json::Result<()> {
+        // Parity gate for the `sd:`/`psd:` record: nest-auth writes `createdAt`/`lastActivityAt`
+        // as `Date.now()` NUMBERS and drops any detail record whose fields are not numbers, so an
+        // RFC 3339 string here would make every rust-written session invisible to nest-auth (and
+        // vice versa). Pin the numeric encoding in both directions.
+        let detail = SessionDetail {
+            session_hash: "abc123".into(),
+            device: "Firefox".into(),
+            ip: "198.51.100.7".into(),
+            created_at: OffsetDateTime::from_unix_timestamp(1_700_000_000)
+                .unwrap_or(OffsetDateTime::UNIX_EPOCH),
+            last_activity_at: OffsetDateTime::from_unix_timestamp(1_700_000_060)
+                .unwrap_or(OffsetDateTime::UNIX_EPOCH),
+        };
+        let json = serde_json::to_string(&detail)?;
+        assert!(json.contains("\"createdAt\":1700000000000"));
+        assert!(json.contains("\"lastActivityAt\":1700000060000"));
+        // No quotes around the values — a stringly-typed timestamp is exactly the divergence.
+        assert!(!json.contains("\"createdAt\":\""));
+
+        // A nest-auth-written record (numbers, sub-second precision) reads back exactly.
+        let from_nest: SessionDetail = serde_json::from_str(
+            r#"{"sessionHash":"abc123","device":"Firefox","ip":"198.51.100.7","createdAt":1700000000123,"lastActivityAt":1700000060456}"#,
+        )?;
+        assert_eq!(
+            from_nest.created_at.unix_timestamp_nanos() / 1_000_000,
+            1_700_000_000_123
+        );
+        assert_eq!(
+            from_nest.last_activity_at.unix_timestamp_nanos() / 1_000_000,
+            1_700_000_060_456
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn unix_millis_preserves_pre_epoch_instants_and_rejects_non_numbers() {
+        // The clamp in `unix_millis::serialize` must keep a pre-epoch instant NEGATIVE rather
+        // than saturating it to `i64::MAX`, and the reader must refuse a stringly-typed
+        // timestamp instead of silently defaulting — a legacy RFC 3339 `sd:` record has to fail
+        // loudly (and be swept as stale) rather than decode to a bogus time.
+        let detail = SessionDetail {
+            session_hash: "abc123".into(),
+            device: "Firefox".into(),
+            ip: "198.51.100.7".into(),
+            created_at: OffsetDateTime::from_unix_timestamp(-1_000)
+                .unwrap_or(OffsetDateTime::UNIX_EPOCH),
+            last_activity_at: OffsetDateTime::UNIX_EPOCH,
+        };
+        let json = serde_json::to_string(&detail).unwrap_or_default();
+        assert!(json.contains("\"createdAt\":-1000000"));
+        assert!(json.contains("\"lastActivityAt\":0"));
+
+        let legacy: Result<SessionDetail, _> = serde_json::from_str(
+            r#"{"sessionHash":"abc123","device":"Firefox","ip":"198.51.100.7","createdAt":"1970-01-01T00:00:00Z","lastActivityAt":0}"#,
+        );
+        assert!(legacy.is_err());
+    }
+
+    #[test]
     fn ws_ticket_snapshot_round_trips() -> serde_json::Result<()> {
         // The snapshot is the stored ticket value; camelCase + omit-absent-tenant parity.
         let snap = WsTicketSnapshot {
@@ -669,7 +795,7 @@ mod tests {
 
     #[test]
     fn reset_context_round_trips_camel_case() -> serde_json::Result<()> {
-        // The `pr:`/`prv:` value is camelCase and round-trips every field so the consume
+        // The `pw_reset:`/`pw_vtok:` value is camelCase and round-trips every field so the consume
         // path can re-bind the proof to the same account.
         let context = ResetContext {
             user_id: "u1".into(),
@@ -692,12 +818,40 @@ mod tests {
             role: "MEMBER".into(),
             tenant_id: "t1".into(),
             inviter_user_id: "owner-1".into(),
+            created_at: OffsetDateTime::UNIX_EPOCH,
         };
         let json = serde_json::to_string(&invitation)?;
         assert!(json.contains("\"tenantId\":\"t1\""));
         assert!(json.contains("\"inviterUserId\":\"owner-1\""));
         let back: StoredInvitation = serde_json::from_str(&json)?;
         assert_eq!(back, invitation);
+        Ok(())
+    }
+
+    #[test]
+    fn stored_invitation_carries_created_at_and_reads_a_nest_written_record()
+    -> serde_json::Result<()> {
+        // Parity gate for the `inv:` value. nest-auth's `isStoredInvitation` requires a STRING
+        // `createdAt`; omitting it made a nest-auth accept of a rust-written invitation fail
+        // validation *after* the single-use `GETDEL` had already removed the token — destroying
+        // the invitation. Assert the field is emitted as a string and that a record written by
+        // nest-auth (ISO-8601 with a `Z` offset) deserializes.
+        let invitation = StoredInvitation {
+            email: "invitee@example.com".into(),
+            role: "MEMBER".into(),
+            tenant_id: "t1".into(),
+            inviter_user_id: "owner-1".into(),
+            created_at: OffsetDateTime::from_unix_timestamp(1_700_000_000)
+                .unwrap_or(OffsetDateTime::UNIX_EPOCH),
+        };
+        let json = serde_json::to_string(&invitation)?;
+        assert!(json.contains("\"createdAt\":\"2023-11-14T22:13:20"));
+
+        let from_nest: StoredInvitation = serde_json::from_str(
+            r#"{"email":"invitee@example.com","role":"MEMBER","tenantId":"t1","inviterUserId":"owner-1","createdAt":"2023-11-14T22:13:20.000Z"}"#,
+        )?;
+        assert_eq!(from_nest.created_at, invitation.created_at);
+        assert_eq!(from_nest.inviter_user_id, "owner-1");
         Ok(())
     }
 }

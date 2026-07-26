@@ -81,6 +81,39 @@ impl TestRedis {
             .flatten()
     }
 
+    /// Write a raw string value out-of-band with a short TTL. Used to plant a record in exactly
+    /// the shape the *other* backend (nest-auth) would write it, so the read path can be proven
+    /// to decode it. Returns whether the command succeeded.
+    pub async fn set_raw(&self, key: &str, value: &str) -> bool {
+        let Some(mut conn) = self.raw().await else {
+            return false;
+        };
+        redis::cmd("SET")
+            .arg(key)
+            .arg(value)
+            .arg("EX")
+            .arg(3600)
+            .query_async::<()>(&mut conn)
+            .await
+            .is_ok()
+    }
+
+    /// The members of a SET, sorted for a stable comparison. Used to assert the exact wire
+    /// format of the `sess:`/`psess:` session-index members, which must be full key suffixes
+    /// (`rt:{hash}`, `rp:{oldHash}`, …) byte-identical to what nest-auth writes.
+    pub async fn smembers(&self, key: &str) -> Vec<String> {
+        let Some(mut conn) = self.raw().await else {
+            return Vec::new();
+        };
+        let mut members: Vec<String> = redis::cmd("SMEMBERS")
+            .arg(key)
+            .query_async(&mut conn)
+            .await
+            .unwrap_or_default();
+        members.sort();
+        members
+    }
+
     /// The TTL (seconds) of a key: `-2` when absent, `-1` when it has no expiry.
     pub async fn ttl(&self, key: &str) -> i64 {
         let Some(mut conn) = self.raw().await else {

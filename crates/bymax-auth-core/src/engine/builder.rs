@@ -153,7 +153,7 @@ impl AuthEngineBuilder {
         self
     }
 
-    /// Set the password-reset proof store (`pr:`/`prv:` single-use tokens). Required only when
+    /// Set the password-reset proof store (`pw_reset:`/`pw_vtok:` single-use tokens). Required only when
     /// the password-reset flow uses the token method or the OTP verified-token bridge.
     #[must_use]
     pub fn password_reset_store(mut self, store: Arc<dyn PasswordResetStore>) -> Self {

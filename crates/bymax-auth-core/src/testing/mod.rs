@@ -1176,6 +1176,7 @@ mod tests {
             role: "MEMBER".to_owned(),
             tenant_id: "t1".to_owned(),
             inviter_user_id: "owner".to_owned(),
+            created_at: OffsetDateTime::UNIX_EPOCH,
         };
         assert!(
             store

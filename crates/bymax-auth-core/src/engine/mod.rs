@@ -114,7 +114,7 @@ impl AuthEngine {
         self.platform_auth.as_ref()
     }
 
-    /// The password-reset proof store (`pr:`/`prv:` single-use tokens), present only when the
+    /// The password-reset proof store (`pw_reset:`/`pw_vtok:` single-use tokens), present only when the
     /// password-reset flow is wired.
     pub(crate) fn password_reset_store(&self) -> Option<&Arc<dyn PasswordResetStore>> {
         self.password_reset_store.as_ref()

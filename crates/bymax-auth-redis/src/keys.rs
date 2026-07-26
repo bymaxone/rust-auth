@@ -30,7 +30,9 @@ pub enum Prefix {
     Rv,
     /// Dashboard rotation grace pointer (`rp`).
     Rp,
-    /// Dashboard active-session index SET (`sess`).
+    /// Dashboard active-session index SET (`sess`). Its members are full key **suffixes** —
+    /// `rt:{hash}` for a live session, `rp:{oldHash}` for a rotation grace pointer — never bare
+    /// hashes, matching nest-auth so either backend can revoke the other's sessions.
     Sess,
     /// Dashboard per-session detail (`sd`).
     Sd,
@@ -42,17 +44,18 @@ pub enum Prefix {
     Resend,
     /// Single-use WebSocket upgrade ticket (`wst`).
     Wst,
-    /// Password-reset link token (`pr`).
-    Pr,
-    /// Password-reset OTP "verified" token (`prv`).
-    Prv,
+    /// Password-reset link token (`pw_reset`).
+    PwReset,
+    /// Password-reset OTP "verified" token (`pw_vtok`).
+    PwVtok,
     /// Pending invitation (`inv`).
     Inv,
     /// Platform-admin refresh session (`prt`).
     Prt,
     /// Platform rotation grace pointer (`prp`).
     Prp,
-    /// Platform active-session index SET (`psess`).
+    /// Platform active-session index SET (`psess`). Members are `prt:{hash}` / `prp:{oldHash}`
+    /// key suffixes; the platform keyspace is deliberately separate from the dashboard one.
     Psess,
     /// Platform per-session detail (`psd`).
     Psd,
@@ -80,8 +83,8 @@ impl Prefix {
             Self::Otp => "otp",
             Self::Resend => "resend",
             Self::Wst => "wst",
-            Self::Pr => "pr",
-            Self::Prv => "prv",
+            Self::PwReset => "pw_reset",
+            Self::PwVtok => "pw_vtok",
             Self::Inv => "inv",
             Self::Prt => "prt",
             Self::Prp => "prp",
@@ -115,7 +118,8 @@ impl NamespacedRedis {
     }
 
     /// The configured namespace, passed as an `ARGV` element to the scripts that rebuild a
-    /// member key from a SET (`invalidate_user_sessions`).
+    /// member key from a SET (`invalidate_user_sessions`, which deletes `{namespace}:{member}`
+    /// for each member — the member already carries its own prefix).
     #[must_use]
     pub fn namespace(&self) -> &str {
         &self.namespace
@@ -157,8 +161,8 @@ mod tests {
             (Prefix::Otp, "auth:otp:abc"),
             (Prefix::Resend, "auth:resend:abc"),
             (Prefix::Wst, "auth:wst:abc"),
-            (Prefix::Pr, "auth:pr:abc"),
-            (Prefix::Prv, "auth:prv:abc"),
+            (Prefix::PwReset, "auth:pw_reset:abc"),
+            (Prefix::PwVtok, "auth:pw_vtok:abc"),
             (Prefix::Inv, "auth:inv:abc"),
             (Prefix::Prt, "auth:prt:abc"),
             (Prefix::Prp, "auth:prp:abc"),

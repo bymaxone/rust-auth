@@ -3,6 +3,7 @@
 //! (`jti`) blacklist — all keyed by [`SessionKind`] (section 12).
 
 use async_trait::async_trait;
+use bymax_auth_core::traits::store::unix_millis;
 use bymax_auth_core::traits::{
     RotateOutcome, SessionDetail, SessionKind, SessionRecord, SessionRotation, SessionStore,
 };
@@ -23,6 +24,11 @@ const GRACE_TAG: &str = "GRACE:";
 
 /// The stored `sd:`/`psd:` per-session detail value. The `session_hash` lives in the key, so
 /// it is absent here; the field set is byte-identical to nest-auth.
+///
+/// The timestamps are Unix-millisecond numbers, not RFC 3339 strings: nest-auth writes them
+/// with `Date.now()` and discards any detail record whose `createdAt`/`lastActivityAt` are not
+/// numbers, so the string form made every rust-written session invisible in a nest-auth
+/// listing (and vice versa) on a shared Redis.
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct SessionDetailValue {
@@ -30,11 +36,11 @@ struct SessionDetailValue {
     device: String,
     /// Originating IP.
     ip: String,
-    /// Session creation time.
-    #[serde(with = "time::serde::rfc3339")]
+    /// Session creation time, as Unix milliseconds.
+    #[serde(with = "unix_millis")]
     created_at: OffsetDateTime,
-    /// Last observed activity time.
-    #[serde(with = "time::serde::rfc3339")]
+    /// Last observed activity time, as Unix milliseconds.
+    #[serde(with = "unix_millis")]
     last_activity_at: OffsetDateTime,
 }
 
@@ -58,6 +64,29 @@ struct KindPrefixes {
     rp: Prefix,
     sess: Prefix,
     sd: Prefix,
+}
+
+/// Build a session-index SET member: the full key **suffix** `{prefix}:{hash}`.
+///
+/// Members are stored this way — never as a bare hash — for two reasons. First, parity: it is
+/// byte-identical to what nest-auth writes (`rt:{hash}`, `prt:{hash}`, `rp:{oldHash}`,
+/// `prp:{oldHash}`), so on a shared Redis either backend can revoke a session the other
+/// created. Second, security: a bare hash cannot say which keyspace it belongs to, so a
+/// revoke-all could not distinguish a live `rt:` session from an `rp:` rotation grace pointer
+/// and therefore could not delete the latter — leaving a rotated-away refresh token able to
+/// recover a session for its whole grace window after the user logged everything out.
+fn index_member(prefix: Prefix, hash: &str) -> String {
+    format!("{}:{}", prefix.as_str(), hash)
+}
+
+/// Recover the bare session hash from a **live-session** index member, or `None` when the
+/// member belongs to another keyspace. Used by listing to keep grace pointers (`rp:`/`prp:`)
+/// out of the user-visible session list and to rebuild the `sd:`/`psd:` detail key, which is
+/// keyed by the bare hash.
+fn live_member_hash(member: &str, live: Prefix) -> Option<&str> {
+    member
+        .strip_prefix(live.as_str())
+        .and_then(|rest| rest.strip_prefix(':'))
 }
 
 /// Map a [`SessionKind`] onto its prefix quartet (`rt`/`rp`/`sess`/`sd` for dashboard,
@@ -103,8 +132,8 @@ fn interpret_rotate(raw: Option<String>) -> Result<RotateParsed, RedisStoreError
 }
 
 impl RedisStores {
-    /// Persist a freshly-issued refresh session: the record under `rt:`, the hash in the
-    /// user's `sess:` SET, and the detail under `sd:`, each with the refresh TTL.
+    /// Persist a freshly-issued refresh session: the record under `rt:`, the `rt:{hash}`
+    /// member in the user's `sess:` SET, and the detail under `sd:`, each with the refresh TTL.
     async fn create_session_inner(
         &self,
         kind: SessionKind,
@@ -117,6 +146,7 @@ impl RedisStores {
         let rt_key = keys.key(prefixes.rt, token_hash);
         let sess_key = keys.key(prefixes.sess, &detail.user_id);
         let sd_key = keys.key(prefixes.sd, token_hash);
+        let live_member = index_member(prefixes.rt, token_hash);
         let record_json = serde_json::to_string(detail)?;
         let detail_json = serde_json::to_string(&SessionDetailValue::at_creation(detail))?;
         let ttl_window = i64::try_from(ttl_secs).unwrap_or(i64::MAX);
@@ -131,7 +161,7 @@ impl RedisStores {
             .ignore()
             .cmd("SADD")
             .arg(&sess_key)
-            .arg(token_hash)
+            .arg(&live_member)
             .ignore()
             .cmd("SET")
             .arg(&sd_key)
@@ -187,6 +217,13 @@ impl RedisStores {
 
     /// Move the session-index membership and detail from the old hash to the new hash after a
     /// live rotation — the non-atomic bookkeeping the rotation script leaves to the caller.
+    ///
+    /// The rotation grace pointer written by the script (`rp:{oldHash}` / `prp:{oldHash}`) is
+    /// **also** added to the index, exactly as nest-auth does. That membership is what lets
+    /// `revoke_all` delete the grace pointer: without it a token that was just rotated away
+    /// could still recover a live session through the grace window for the whole grace TTL,
+    /// even after the user revoked every session. A zero-width grace window writes no pointer,
+    /// so no member is added for it.
     async fn move_session_member(
         &self,
         conn: &mut Connection,
@@ -198,22 +235,30 @@ impl RedisStores {
         let sess_key = keys.key(prefixes.sess, user_id);
         let sd_old = keys.key(prefixes.sd, &rotation.old_hash);
         let sd_new = keys.key(prefixes.sd, &rotation.new_hash);
+        let old_member = index_member(prefixes.rt, &rotation.old_hash);
+        let new_member = index_member(prefixes.rt, &rotation.new_hash);
         let detail_json =
             serde_json::to_string(&SessionDetailValue::at_creation(&rotation.new_record))?;
         let ttl_window = i64::try_from(rotation.refresh_ttl).unwrap_or(i64::MAX);
-        redis::pipe()
-            .cmd("SREM")
+        let mut pipe = redis::pipe();
+        pipe.cmd("SREM")
             .arg(&sess_key)
-            .arg(&rotation.old_hash)
+            .arg(&old_member)
             .ignore()
             .cmd("DEL")
             .arg(&sd_old)
             .ignore()
             .cmd("SADD")
             .arg(&sess_key)
-            .arg(&rotation.new_hash)
-            .ignore()
-            .cmd("SET")
+            .arg(&new_member)
+            .ignore();
+        if rotation.grace_ttl > 0 {
+            pipe.cmd("SADD")
+                .arg(&sess_key)
+                .arg(index_member(prefixes.rp, &rotation.old_hash))
+                .ignore();
+        }
+        pipe.cmd("SET")
             .arg(&sd_new)
             .arg(&detail_json)
             .arg("EX")
@@ -245,6 +290,10 @@ impl RedisStores {
     }
 
     /// List a user's live sessions by reading the `sess:` SET and each member's `sd:` detail.
+    ///
+    /// Only `rt:`/`prt:` members are live sessions; the `rp:`/`prp:` rotation grace pointers
+    /// share the index (so `revoke_all` can sweep them) but are not sessions and are filtered
+    /// out here, matching nest-auth's `members.filter(m => m.startsWith('rt:'))`.
     async fn list_sessions_inner(
         &self,
         kind: SessionKind,
@@ -256,13 +305,17 @@ impl RedisStores {
         let mut conn = self.connection().await?;
         let members: Vec<String> = conn.smembers(&sess_key).await?;
         let mut details = Vec::with_capacity(members.len());
-        for member in members {
-            let sd_key = keys.key(prefixes.sd, &member);
+        for member in &members {
+            let Some(hash) = live_member_hash(member, prefixes.rt) else {
+                continue;
+            };
+            // The detail record is keyed by the BARE hash, so the member's prefix is stripped.
+            let sd_key = keys.key(prefixes.sd, hash);
             let raw: Option<String> = conn.get(&sd_key).await?;
             if let Some(json) = raw {
                 let value: SessionDetailValue = serde_json::from_str(&json)?;
                 details.push(SessionDetail {
-                    session_hash: member,
+                    session_hash: hash.to_owned(),
                     device: value.device,
                     ip: value.ip,
                     created_at: value.created_at,
@@ -285,13 +338,16 @@ impl RedisStores {
         let sess_key = keys.key(prefixes.sess, user_id);
         let rt_key = keys.key(prefixes.rt, session_hash);
         let sd_key = keys.key(prefixes.sd, session_hash);
+        // The ownership check is a SISMEMBER against the index, whose members are full key
+        // suffixes — so the ARGV is `rt:{hash}`, not the bare hash.
+        let member = index_member(prefixes.rt, session_hash);
         let mut conn = self.connection().await?;
         let owned: bool = script::SESSION_REVOKE
             .prepare()
             .key(&sess_key)
             .key(&rt_key)
             .key(&sd_key)
-            .arg(session_hash)
+            .arg(&member)
             .invoke_async(&mut conn)
             .await?;
         Ok(owned)
@@ -315,8 +371,9 @@ impl RedisStores {
         Ok(())
     }
 
-    /// Run the `invalidate_user_sessions` transaction, deleting every member's `rt:`/`sd:`
-    /// key and the `sess:` SET in one atomic step.
+    /// Run the `invalidate_user_sessions` transaction, deleting the key each member names
+    /// (`rt:`/`prt:` live sessions **and** `rp:`/`prp:` grace pointers), each live member's
+    /// `sd:`/`psd:` detail, and the `sess:` SET itself in one atomic step.
     async fn revoke_all_inner(
         &self,
         kind: SessionKind,
@@ -527,5 +584,84 @@ mod tests {
         assert!(!json.contains("sessionHash"));
         let back: Result<SessionDetailValue, _> = serde_json::from_str(&json);
         assert!(matches!(back, Ok(v) if v.device == "Chrome"));
+    }
+
+    #[test]
+    fn session_detail_value_encodes_timestamps_as_unix_millisecond_numbers() {
+        // Cross-backend parity for the `sd:`/`psd:` value: nest-auth writes
+        // `createdAt`/`lastActivityAt` as `Date.now()` numbers and treats any record whose
+        // fields are not numbers as stale (dropping the session from its listing and SREM-ing the
+        // member). The RFC 3339 string this used to emit therefore made every rust-written
+        // session vanish from a nest-auth listing on a shared Redis — and made nest-written
+        // details undecodable here. Pin the numeric form in both directions.
+        let value = SessionDetailValue::at_creation(&SessionRecord {
+            created_at: OffsetDateTime::from_unix_timestamp(1_700_000_000)
+                .unwrap_or(OffsetDateTime::UNIX_EPOCH),
+            ..record()
+        });
+        let json = serde_json::to_string(&value).unwrap_or_default();
+        assert!(json.contains("\"createdAt\":1700000000000"));
+        assert!(json.contains("\"lastActivityAt\":1700000000000"));
+        assert!(!json.contains("\"createdAt\":\""));
+
+        // A detail record written by nest-auth (numbers, millisecond precision) decodes here.
+        let from_nest: Result<SessionDetailValue, _> = serde_json::from_str(
+            r#"{"device":"Safari","ip":"198.51.100.9","createdAt":1700000000123,"lastActivityAt":1700000060456}"#,
+        );
+        assert!(matches!(
+            from_nest,
+            Ok(v)
+                if v.device == "Safari"
+                && v.created_at.unix_timestamp_nanos() / 1_000_000 == 1_700_000_000_123
+                && v.last_activity_at.unix_timestamp_nanos() / 1_000_000 == 1_700_000_060_456
+        ));
+    }
+
+    #[test]
+    fn index_member_renders_the_full_key_suffix_for_every_keyspace() {
+        // The `sess:`/`psess:` SET members are key SUFFIXES, byte-identical to nest-auth's
+        // `rt:{hash}` / `prt:{hash}` / `rp:{oldHash}` / `prp:{oldHash}`. This is what makes a
+        // cross-backend revoke work at all (each backend deletes `{ns}:{member}` verbatim) and
+        // what makes a grace pointer distinguishable from a live session inside revoke-all.
+        assert_eq!(index_member(Prefix::Rt, "deadbeef"), "rt:deadbeef");
+        assert_eq!(index_member(Prefix::Prt, "deadbeef"), "prt:deadbeef");
+        assert_eq!(index_member(Prefix::Rp, "deadbeef"), "rp:deadbeef");
+        assert_eq!(index_member(Prefix::Prp, "deadbeef"), "prp:deadbeef");
+        // A bare hash is never a valid member — the regression this format replaced.
+        assert_ne!(index_member(Prefix::Rt, "deadbeef"), "deadbeef");
+    }
+
+    #[test]
+    fn live_member_hash_accepts_only_the_matching_live_prefix() {
+        // Listing must yield live sessions only: a `rp:`/`prp:` grace pointer shares the index
+        // (so revoke-all can sweep it) but is not a session and must not surface as one. The
+        // helper also strips the prefix, because the `sd:`/`psd:` detail key is keyed by the
+        // BARE hash — reusing the member verbatim would look up `sd:rt:{hash}` and find nothing.
+        assert_eq!(live_member_hash("rt:abc123", Prefix::Rt), Some("abc123"));
+        assert_eq!(live_member_hash("prt:abc123", Prefix::Prt), Some("abc123"));
+        // Grace pointers are rejected for their own keyspace's live prefix.
+        assert_eq!(live_member_hash("rp:abc123", Prefix::Rt), None);
+        assert_eq!(live_member_hash("prp:abc123", Prefix::Prt), None);
+        // Cross-keyspace members are rejected: `prt:` must not be read as a dashboard session,
+        // and `rt:` is not a prefix of `prt:` so the platform side rejects it too.
+        assert_eq!(live_member_hash("prt:abc123", Prefix::Rt), None);
+        assert_eq!(live_member_hash("rt:abc123", Prefix::Prt), None);
+        // A legacy bare-hash member (the old format) is not a live member and is skipped.
+        assert_eq!(live_member_hash("abc123", Prefix::Rt), None);
+        // The separator is required — a prefix match without the colon is not a member.
+        assert_eq!(live_member_hash("rtabc123", Prefix::Rt), None);
+    }
+
+    #[test]
+    fn invalidate_user_sessions_script_deletes_the_member_key_directly() {
+        // Static guard on the revoke-all Lua: it must delete `{namespace}:{member}` (the member
+        // already names its keyspace) instead of re-prefixing a bare hash with the live prefix.
+        // Re-prefixing is what made grace pointers unsweepable — a rotated-away refresh token
+        // survived logout-all for its whole grace window. Also assert the detail key is still
+        // rebuilt from the stripped hash, so `sd:`/`psd:` records are not orphaned.
+        let source = include_str!("../lua/invalidate_user_sessions.lua");
+        assert!(source.contains("redis.call('DEL', ARGV[1] .. ':' .. member)"));
+        assert!(!source.contains("ARGV[1] .. ':' .. ARGV[2] .. ':' .. member"));
+        assert!(source.contains("string.sub(member, #live + 1)"));
     }
 }

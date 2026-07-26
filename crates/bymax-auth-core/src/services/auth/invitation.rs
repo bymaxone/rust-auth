@@ -100,6 +100,10 @@ impl AuthEngine {
             role: role.to_owned(),
             tenant_id: tenant_id.to_owned(),
             inviter_user_id: inviter_user_id.to_owned(),
+            // Required by nest-auth's record guard: an invitation without `createdAt` is
+            // rejected on accept, and because accept consumes the token with `GETDEL` the
+            // rejection would destroy the invitation rather than merely fail it.
+            created_at: OffsetDateTime::now_utc(),
         };
         store.put_invitation(&raw, &invitation, ttl).await?;
 
@@ -321,6 +325,7 @@ mod tests {
                         role: "MEMBER".to_owned(),
                         tenant_id: "t1".to_owned(),
                         inviter_user_id: inviter.clone(),
+                        created_at: OffsetDateTime::UNIX_EPOCH,
                     },
                     600
                 )
@@ -432,6 +437,7 @@ mod tests {
                         role: "SUPERADMIN".to_owned(),
                         tenant_id: "t1".to_owned(),
                         inviter_user_id: "x".to_owned(),
+                        created_at: OffsetDateTime::UNIX_EPOCH,
                     },
                     600
                 )
@@ -466,6 +472,7 @@ mod tests {
                         role: "MEMBER".to_owned(),
                         tenant_id: "t1".to_owned(),
                         inviter_user_id: "x".to_owned(),
+                        created_at: OffsetDateTime::UNIX_EPOCH,
                     },
                     600
                 )

@@ -1332,6 +1332,7 @@ async fn invitation_accept_success_creates_a_session() {
         role: "USER".to_owned(),
         tenant_id: TENANT.to_owned(),
         inviter_user_id: inviter,
+        created_at: time::OffsetDateTime::UNIX_EPOCH,
     };
     let _ = h
         .stores

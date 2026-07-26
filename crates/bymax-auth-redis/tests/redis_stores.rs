@@ -228,6 +228,210 @@ async fn platform_sessions_use_the_platform_keyspace() {
 }
 
 #[tokio::test]
+async fn session_index_members_are_prefixed_key_suffixes() {
+    let Some(redis) = common::try_start().await else {
+        return;
+    };
+    let Some(stores) = redis.stores() else { return };
+
+    // Cross-backend parity: nest-auth stores the `sess:`/`psess:` members as full key SUFFIXES
+    // (`rt:{hash}`, `prt:{hash}`) and its revoke-all Lua deletes `{namespace}:{member}`
+    // verbatim. A bare hash — the format this replaced — is unrevokable from the other backend
+    // on a shared Redis, and unrevokable *here* for anything the other backend wrote.
+    assert!(
+        stores
+            .create_session(SessionKind::Dashboard, "m1", &record("mu"), 3600)
+            .await
+            .is_ok()
+    );
+    assert_eq!(redis.smembers("auth:sess:mu").await, vec!["rt:m1"]);
+
+    // The platform keyspace stays SEPARATE (`psess:` not `sess:`) and uses its own `prt:` member.
+    assert!(
+        stores
+            .create_session(SessionKind::Platform, "p1", &record("pu"), 3600)
+            .await
+            .is_ok()
+    );
+    assert_eq!(redis.smembers("auth:psess:pu").await, vec!["prt:p1"]);
+    assert!(redis.smembers("auth:sess:pu").await.is_empty());
+
+    // Listing strips the prefix so `session_hash` stays the bare hash the domain layer
+    // validates as 64-hex, and so the `sd:` detail key (keyed by the bare hash) resolves.
+    assert!(matches!(
+        stores.list_sessions(SessionKind::Dashboard, "mu").await,
+        Ok(v) if v.len() == 1 && v[0].session_hash == "m1"
+    ));
+
+    // Revoke is ownership-checked against the prefixed member; it must still match.
+    assert!(
+        stores
+            .revoke_session(SessionKind::Dashboard, "mu", "m1")
+            .await
+            .is_ok()
+    );
+    assert!(redis.smembers("auth:sess:mu").await.is_empty());
+}
+
+#[tokio::test]
+async fn revoke_all_sweeps_rotation_grace_pointers() {
+    let Some(redis) = common::try_start().await else {
+        return;
+    };
+    let Some(stores) = redis.stores() else { return };
+    let kind = SessionKind::Dashboard;
+
+    // SECURITY REGRESSION GUARD. A rotation plants an `rp:{oldHash}` grace pointer that can
+    // still mint a live session for the whole grace window. With bare-hash SET members the
+    // revoke-all script could not tell an `rt:` hash from an `rp:` one, so it could not delete
+    // the pointer — a rotated-away refresh token survived "log out everywhere" and kept
+    // recovering sessions. Indexing the pointer as `rp:{oldHash}` is what makes it sweepable.
+    assert!(
+        stores
+            .create_session(kind, "g1", &record("gu"), 3600)
+            .await
+            .is_ok()
+    );
+    assert!(matches!(
+        stores.rotate(kind, &rotation("g1", "g2", "gu")).await,
+        Ok(RotateOutcome::Rotated(_))
+    ));
+
+    // Post-rotation the index holds the new live session AND the grace pointer for the old one.
+    assert_eq!(redis.smembers("auth:sess:gu").await, vec!["rp:g1", "rt:g2"]);
+    assert!(redis.ttl("auth:rp:g1").await > 0);
+    // The grace pointer is not a session, so it must not appear in the user's session list.
+    assert!(matches!(
+        stores.list_sessions(kind, "gu").await,
+        Ok(v) if v.len() == 1 && v[0].session_hash == "g2"
+    ));
+
+    assert!(stores.revoke_all(kind, "gu").await.is_ok());
+
+    // The grace pointer key is GONE (`-2` = absent), not merely orphaned in the index.
+    assert_eq!(redis.ttl("auth:rp:g1").await, -2);
+    // …and so are the live session, its detail, and the index itself.
+    assert_eq!(redis.ttl("auth:rt:g2").await, -2);
+    assert_eq!(redis.ttl("auth:sd:g2").await, -2);
+    assert!(redis.smembers("auth:sess:gu").await.is_empty());
+
+    // The security property, observed through the API: replaying the rotated-away token can no
+    // longer recover a session through the grace window after a revoke-all.
+    assert!(matches!(
+        stores.rotate(kind, &rotation("g1", "g3", "gu")).await,
+        Ok(RotateOutcome::Invalid)
+    ));
+}
+
+#[tokio::test]
+async fn platform_revoke_all_sweeps_its_own_grace_pointers() {
+    let Some(redis) = common::try_start().await else {
+        return;
+    };
+    let Some(stores) = redis.stores() else { return };
+    let kind = SessionKind::Platform;
+
+    // The same grace-pointer sweep must hold for the platform keyspace, which keeps its own
+    // SEPARATE index (`psess:`) and its own prefixes (`prt:`/`prp:`/`psd:`) — the separation is
+    // deliberate, only the member FORMAT is shared with the dashboard side.
+    assert!(
+        stores
+            .create_session(kind, "pg1", &record("pgu"), 3600)
+            .await
+            .is_ok()
+    );
+    assert!(matches!(
+        stores.rotate(kind, &rotation("pg1", "pg2", "pgu")).await,
+        Ok(RotateOutcome::Rotated(_))
+    ));
+    assert_eq!(
+        redis.smembers("auth:psess:pgu").await,
+        vec!["prp:pg1", "prt:pg2"]
+    );
+    assert!(redis.ttl("auth:prp:pg1").await > 0);
+
+    assert!(stores.revoke_all(kind, "pgu").await.is_ok());
+    assert_eq!(redis.ttl("auth:prp:pg1").await, -2);
+    assert_eq!(redis.ttl("auth:prt:pg2").await, -2);
+    assert_eq!(redis.ttl("auth:psd:pg2").await, -2);
+    // The dashboard index was never touched — the keyspaces stay independent.
+    assert!(redis.smembers("auth:sess:pgu").await.is_empty());
+}
+
+#[tokio::test]
+async fn zero_grace_rotation_indexes_no_grace_member() {
+    let Some(redis) = common::try_start().await else {
+        return;
+    };
+    let Some(stores) = redis.stores() else { return };
+    let kind = SessionKind::Dashboard;
+
+    // A zero-width grace window writes no `rp:` key, so indexing an `rp:` member for it would
+    // leave a member pointing at nothing. Only the live session is indexed.
+    assert!(
+        stores
+            .create_session(kind, "n1", &record("nu"), 3600)
+            .await
+            .is_ok()
+    );
+    assert!(matches!(
+        stores
+            .rotate(kind, &rotation_with_grace("n1", "n2", "nu", 0))
+            .await,
+        Ok(RotateOutcome::Rotated(_))
+    ));
+    assert_eq!(redis.smembers("auth:sess:nu").await, vec!["rt:n2"]);
+}
+
+#[tokio::test]
+async fn session_detail_is_stored_with_unix_millisecond_timestamps() {
+    let Some(redis) = common::try_start().await else {
+        return;
+    };
+    let Some(stores) = redis.stores() else { return };
+
+    // Wire-format parity for `sd:`: nest-auth writes `createdAt`/`lastActivityAt` as numbers and
+    // discards a detail record whose fields are not numbers. Assert what actually lands in
+    // Redis, not just what the DTO round-trips — this is the byte-level shared-Redis contract.
+    let rec = SessionRecord {
+        created_at: OffsetDateTime::from_unix_timestamp(1_700_000_000)
+            .unwrap_or(OffsetDateTime::UNIX_EPOCH),
+        ..record("tu")
+    };
+    assert!(
+        stores
+            .create_session(SessionKind::Dashboard, "t1", &rec, 3600)
+            .await
+            .is_ok()
+    );
+    let raw = redis.get("auth:sd:t1").await.unwrap_or_default();
+    assert!(raw.contains("\"createdAt\":1700000000000"), "got {raw}");
+    assert!(
+        raw.contains("\"lastActivityAt\":1700000000000"),
+        "got {raw}"
+    );
+    assert!(!raw.contains("\"createdAt\":\""), "got {raw}");
+
+    // A detail record written by nest-auth (numeric timestamps) is readable here: the session
+    // shows up in the listing with the exact instants nest-auth recorded.
+    assert!(
+        redis
+            .set_raw(
+                "auth:sd:t1",
+                r#"{"device":"Safari","ip":"198.51.100.9","createdAt":1700000000123,"lastActivityAt":1700000060456}"#,
+            )
+            .await
+    );
+    assert!(matches!(
+        stores.list_sessions(SessionKind::Dashboard, "tu").await,
+        Ok(v) if v.len() == 1
+            && v[0].device == "Safari"
+            && v[0].created_at.unix_timestamp_nanos() / 1_000_000 == 1_700_000_000_123
+            && v[0].last_activity_at.unix_timestamp_nanos() / 1_000_000 == 1_700_000_060_456
+    ));
+}
+
+#[tokio::test]
 async fn otp_put_verify_outcomes_and_resend() {
     let Some(redis) = common::try_start().await else {
         return;
@@ -394,7 +598,7 @@ async fn keys_are_namespaced_no_pii_and_carry_a_ttl() {
     ));
     assert!(matches!(stores.record_failure("bfhmac", 900).await, Ok(1)));
     assert!(stores.blacklist_access("jti-xyz", 60).await.is_ok());
-    // The single-use opaque-token keyspaces (`pr:`/`prv:`/`inv:`) also appear, hashed by
+    // The single-use opaque-token keyspaces (`pw_reset:`/`pw_vtok:`/`inv:`) also appear, hashed by
     // sha256(token) so a raw token (which could contain attacker-chosen bytes) is never a key.
     let reset_context = ResetContext {
         user_id: "user-42".to_owned(),
@@ -422,6 +626,7 @@ async fn keys_are_namespaced_no_pii_and_carry_a_ttl() {
                     role: "MEMBER".to_owned(),
                     tenant_id: "t1".to_owned(),
                     inviter_user_id: "user-42".to_owned(),
+                    created_at: OffsetDateTime::UNIX_EPOCH,
                 },
                 604800,
             )
@@ -462,7 +667,7 @@ async fn password_reset_and_invitation_stores_are_single_use_via_getdel() {
     };
     let Some(stores) = redis.stores() else { return };
 
-    // Reset link token: stored under `pr:`, consumed once.
+    // Reset link token: stored under `pw_reset:`, consumed once.
     let reset = ResetContext {
         user_id: "u1".to_owned(),
         email: "u@example.com".to_owned(),
@@ -484,7 +689,7 @@ async fn password_reset_and_invitation_stores_are_single_use_via_getdel() {
         Ok(None)
     ));
 
-    // Verified token: stored under `prv:`, consumed once.
+    // Verified token: stored under `pw_vtok:`, consumed once.
     assert!(stores.put_verified("vt-secret", &reset, 300).await.is_ok());
     assert!(matches!(
         stores.consume_verified("vt-secret").await,
@@ -502,6 +707,7 @@ async fn password_reset_and_invitation_stores_are_single_use_via_getdel() {
         role: "MEMBER".to_owned(),
         tenant_id: "t1".to_owned(),
         inviter_user_id: "owner".to_owned(),
+        created_at: OffsetDateTime::UNIX_EPOCH,
     };
     assert!(
         stores
@@ -565,7 +771,7 @@ async fn engine_runs_password_reset_via_token_against_redis() {
         return;
     };
 
-    // Initiate stores a reset token under `pr:` (best-effort); the raw token is opaque to the
+    // Initiate stores a reset token under `pw_reset:` (best-effort); the raw token is opaque to the
     // test, so plant a known token via the store to drive the reset deterministically.
     assert!(
         engine
@@ -945,6 +1151,7 @@ async fn engine_runs_invitation_accept_against_redis() {
                     role: "MEMBER".to_owned(),
                     tenant_id: "t1".to_owned(),
                     inviter_user_id: admin.id.clone(),
+                    created_at: OffsetDateTime::UNIX_EPOCH,
                 },
                 604800,
             )

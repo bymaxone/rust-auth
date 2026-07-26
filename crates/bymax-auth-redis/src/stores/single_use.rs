@@ -1,5 +1,5 @@
 //! [`PasswordResetStore`] and [`InvitationStore`] over Redis: the small single-use
-//! opaque-token keyspaces (`pr:`/`prv:`/`inv:`, section 12.4). Each stores a JSON value keyed
+//! opaque-token keyspaces (`pw_reset:`/`pw_vtok:`/`inv:`, section 12.4). Each stores a JSON value keyed
 //! by `sha256(token)` — the raw token is never a key — with a TTL, and consumes it atomically
 //! with `GETDEL` so a proof or invitation is valid exactly once. The reset link token also
 //! supports an out-of-band `DEL` used to clean up after an undeliverable email.
@@ -83,19 +83,19 @@ impl PasswordResetStore for RedisStores {
         context: &ResetContext,
         ttl_secs: u64,
     ) -> Result<(), AuthError> {
-        self.put_value(Prefix::Pr, token, context, ttl_secs)
+        self.put_value(Prefix::PwReset, token, context, ttl_secs)
             .await
             .map_err(AuthError::from)
     }
 
     async fn consume_token(&self, token: &str) -> Result<Option<ResetContext>, AuthError> {
-        self.consume_value(Prefix::Pr, token)
+        self.consume_value(Prefix::PwReset, token)
             .await
             .map_err(AuthError::from)
     }
 
     async fn delete_token(&self, token: &str) -> Result<(), AuthError> {
-        self.delete_value(Prefix::Pr, token)
+        self.delete_value(Prefix::PwReset, token)
             .await
             .map_err(AuthError::from)
     }
@@ -106,13 +106,13 @@ impl PasswordResetStore for RedisStores {
         context: &ResetContext,
         ttl_secs: u64,
     ) -> Result<(), AuthError> {
-        self.put_value(Prefix::Prv, token, context, ttl_secs)
+        self.put_value(Prefix::PwVtok, token, context, ttl_secs)
             .await
             .map_err(AuthError::from)
     }
 
     async fn consume_verified(&self, token: &str) -> Result<Option<ResetContext>, AuthError> {
-        self.consume_value(Prefix::Prv, token)
+        self.consume_value(Prefix::PwVtok, token)
             .await
             .map_err(AuthError::from)
     }
