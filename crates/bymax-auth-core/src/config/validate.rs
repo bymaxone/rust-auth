@@ -1063,6 +1063,9 @@ mod tests {
             "https://",
             "not a url",
             "://app.example.com",
+            // Punctuation the scheme grammar does not admit — accepting it would widen what
+            // counts as an origin beyond what a browser can ever send.
+            "ht!tp://app.example.com",
         ] {
             let mut cfg = valid_config();
             cfg.cookies.same_site = SameSite::None;
@@ -1077,8 +1080,17 @@ mod tests {
             );
         }
 
-        // A port and an IPv6 literal are both part of an origin and must survive.
-        for accepted in ["http://localhost:3000", "https://[::1]:8443"] {
+        // A port and an IPv6 literal are both part of an origin and must survive, and so do
+        // the punctuation-bearing schemes a browser really sends: an extension page's
+        // `Origin` is `chrome-extension://<id>`, and the scheme grammar admits `+`, `-` and
+        // `.` alongside the alphanumerics.
+        for accepted in [
+            "http://localhost:3000",
+            "https://[::1]:8443",
+            "chrome-extension://abcdefghijklmnop",
+            "coap+tcp://gateway.example.com",
+            "web.socket://relay.example.com",
+        ] {
             let mut cfg = valid_config();
             cfg.cookies.same_site = SameSite::None;
             cfg.secure_cookies = Some(true);
