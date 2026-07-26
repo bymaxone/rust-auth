@@ -67,6 +67,12 @@ additional_cargo_args = ["--all-features"]
 #    silent one. Re-anchor it then.
 # 6. `token_manager.rs:618` `issue_mfa_temp_token` — the `cfg(not(feature = "mfa"))` twin of
 #    the method below it, anchored for the same reason as 5.
+# 7. The seven `NoOpEmailProvider` sends — the provider's whole job is to do nothing, and each
+#    body is one `tracing::debug!` line followed by `Ok(())`. Replacing a body with `Ok(())`
+#    removes only that debug line, which no assertion reaches without installing a `tracing`
+#    subscriber in-process: a dev-dependency and ~60 lines of `Subscriber` boilerplate for a
+#    log line that carries no security signal. The mutants of any *real* provider a host wires
+#    are untouched by this pattern.
 exclude_re = [
     'replace \| with \^ in new_uuid_v4',
     'replace AuthEngine::builder -> AuthEngineBuilder with Default::default\(\)',
@@ -74,4 +80,5 @@ exclude_re = [
     'replace == with != in validate_password',
     'builder\.rs:212:9: replace AuthEngineBuilder::redis_stores',
     'token_manager\.rs:618:9: replace TokenManagerService::issue_mfa_temp_token',
+    'replace <impl EmailProvider for NoOpEmailProvider>::\w+ -> Result<\(\), EmailError> with Ok\(\(\)\)',
 ]
