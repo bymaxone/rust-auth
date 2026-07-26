@@ -286,12 +286,27 @@ mod tests {
                 .is_ok()
         );
         assert!(started.elapsed() >= Duration::from_millis(300));
+        // Every branch here answers `Ok(())` by design — that uniformity is the
+        // anti-enumeration contract — so the response cannot say which one ran. The OTP
+        // record is what distinguishes them: an unverified account gets one.
+        let identifier = h.engine.hashed_identifier_for("t1", "r@example.com");
+        let minted = h
+            .stores
+            .peek_otp(crate::traits::OtpPurpose::EmailVerification, &identifier);
+        assert!(minted.is_some(), "the unverified account must get an OTP");
+
         // Second resend within the cooldown is the silent-success branch.
         assert!(
             h.engine
                 .resend_verification_email("t1", "r@example.com")
                 .await
                 .is_ok()
+        );
+        // Silent means silent: no second code was minted.
+        assert_eq!(
+            h.stores
+                .peek_otp(crate::traits::OtpPurpose::EmailVerification, &identifier),
+            minted
         );
         // An absent account is indistinguishable (uniform Ok).
         assert!(
@@ -307,6 +322,13 @@ mod tests {
                 .resend_verification_email("t1", "done@example.com")
                 .await
                 .is_ok()
+        );
+        // And mints nothing — there is nothing left to verify.
+        let done = h.engine.hashed_identifier_for("t1", "done@example.com");
+        assert!(
+            h.stores
+                .peek_otp(crate::traits::OtpPurpose::EmailVerification, &done)
+                .is_none()
         );
     }
 }
