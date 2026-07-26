@@ -946,6 +946,28 @@ mod tests {
     }
 
     #[test]
+    fn normalize_session_metadata_pairs_the_device_with_the_bounded_ip() {
+        // The pair is what reaches the store and the hook payloads. Both halves are exercised
+        // on their own elsewhere, but nothing asserted that the composition carries them — so
+        // returning two empty strings, and losing every device label and IP on record, was
+        // invisible. Asserted with a literal on each side, in order.
+        let (device, ip) = normalize_session_metadata(
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15) Chrome/120.0 Safari/537.36",
+            "203.0.113.9",
+        );
+        assert_eq!(device, "Chrome on macOS");
+        assert_eq!(ip, "203.0.113.9");
+
+        // An over-long IP is bounded on the way through, and the two halves are not swapped.
+        let (device, ip) = normalize_session_metadata(
+            "Mozilla/5.0 (Windows NT 10.0) Gecko/20100101 Firefox/121.0",
+            &"2001:db8:".repeat(20),
+        );
+        assert_eq!(device, "Firefox on Windows");
+        assert_eq!(ip.len(), MAX_IP_LENGTH);
+    }
+
+    #[test]
     fn parse_user_agent_resolves_browser_and_os_precedence() {
         // Edge and Opera win over the Chrome token they also carry; Chrome over Safari; Safari
         // requires a Version/ token; mobile OS wins over the embedded desktop token.
