@@ -143,6 +143,17 @@ mod scrypt_tests {
             parse_legacy("scrypt:0a0b:0c0d"),
             Some((vec![0x0a, 0x0b], vec![0x0c, 0x0d]))
         );
+        // Upper-case hex decodes to the same bytes — nest-auth's corpus contains both, and a
+        // decoder that dropped the A–F arm would reject those rows as malformed. Asserted on
+        // the decoded value, because through `verify` it looks like a wrong password.
+        assert_eq!(
+            parse_legacy("scrypt:AABB:CCDD"),
+            Some((vec![0xaa, 0xbb], vec![0xcc, 0xdd]))
+        );
+        assert_eq!(
+            parse_legacy("scrypt:AABB:CCDD"),
+            parse_legacy("scrypt:aabb:ccdd")
+        );
     }
 
     #[test]
