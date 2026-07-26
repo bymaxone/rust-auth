@@ -82,6 +82,12 @@ pnpm add @bymax-one/rust-auth
 - ✅ **Constant-Time Comparisons** — Every secret/token/OTP/recovery-code compare goes through `subtle` — never `==` on secret bytes
 - ✅ **JWT Revocation** — Instant access-token revocation via a Redis `jti` blacklist
 - ✅ **Anti-Enumeration** — Identical status, body, and timing for known vs. unknown accounts, with an always-run sentinel hash
+- ✅ **Refresh-Token Reuse Detection** — Replaying a consumed token revokes that login's whole lineage, and only that lineage
+- ✅ **Bulk Access-Token Revocation** — A password reset advances a per-user token epoch, invalidating every outstanding access token in one write
+- ✅ **Absolute Session Lifetime** — Optional hard cap on how long one login can be extended by rotation
+- ✅ **Cross-Site Request Refusal** — Cookie-authenticated writes from an untrusted origin are rejected (matters under `SameSite=None`)
+- ✅ **Breached-Password Refusal** — Optional Have I Been Pwned check by k-anonymity range, over the crate's own `HttpClient` seam
+- ✅ **Per-Route Rate Limiting** — A governor layer per route, values pinned to the shared cross-implementation contract
 
 ### 🏢 Multi-Tenant & Platform
 
