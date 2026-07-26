@@ -100,7 +100,7 @@ impl MfaService {
         let data: MfaSetupData =
             serde_json::from_str(&record_json).map_err(|_| AuthError::MfaSetupRequired)?;
         let raw_secret = self
-            .decrypt(&data.encrypted_secret)
+            .decrypt_secret(&data.encrypted_secret)
             .ok_or(AuthError::MfaSetupRequired)?;
 
         // Verify the code with anti-replay before the completion gate, so an invalid code never

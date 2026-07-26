@@ -86,7 +86,7 @@ impl MfaService {
         let Some(encrypted_secret) = user.mfa_secret.clone().filter(|_| user.mfa_enabled) else {
             return Err(AuthError::MfaNotEnabled);
         };
-        let Some(raw_secret) = self.decrypt(&encrypted_secret) else {
+        let Some(raw_secret) = self.decrypt_secret(&encrypted_secret) else {
             // A secret that will not decrypt is an opaque failure (no decrypt oracle).
             return Err(AuthError::TokenInvalid);
         };
@@ -173,7 +173,7 @@ impl MfaService {
         let Some(encrypted_secret) = admin.mfa_secret.clone().filter(|_| admin.mfa_enabled) else {
             return Err(AuthError::MfaNotEnabled);
         };
-        let Some(raw_secret) = self.decrypt(&encrypted_secret) else {
+        let Some(raw_secret) = self.decrypt_secret(&encrypted_secret) else {
             return Err(AuthError::TokenInvalid);
         };
 

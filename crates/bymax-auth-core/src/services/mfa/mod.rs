@@ -266,6 +266,18 @@ impl MfaService {
         aead::decrypt(wire, &self.encryption_key).ok()
     }
 
+    /// Decrypt a stored TOTP secret back to the raw bytes the HMAC uses as its key.
+    ///
+    /// The at-rest form is the encrypted Base32 TEXT (see [`Self::generate_setup_material`]),
+    /// so recovering the key means decrypting and then decoding. Returns `None` on every
+    /// failure — wrong key, tampered ciphertext, non-UTF-8, or invalid Base32 — so the caller
+    /// surfaces one opaque error and no decrypt/format oracle distinguishes them.
+    fn decrypt_secret(&self, wire: &str) -> Option<Vec<u8>> {
+        let encoded = self.decrypt(wire)?;
+        let text = String::from_utf8(encoded).ok()?;
+        totp::decode_secret_base32(&text).ok()
+    }
+
     /// Verify a 6-digit TOTP `code` against `secret` and, on success, atomically mark it used
     /// (the standalone `tu:` marker, `NX EX` with the window-derived TTL from
     /// [`Self::anti_replay_ttl_seconds`]). A code that verifies but was already seen returns
@@ -429,7 +441,14 @@ impl MfaService {
             .ok()
             .ok_or(internal_error("mfa codes encode"))?;
         let data = MfaSetupData {
-            encrypted_secret: self.encrypt(&raw_secret)?,
+            // The Base32 TEXT is what goes under the cipher, not the raw bytes. nest-auth
+            // encrypts `generateTotpSecret().base32` and both backends read the same
+            // `mfaSecret` column and the same `mfa_setup:` record: decrypting a nest-written
+            // secret as raw bytes would hand base32 ASCII to HMAC-SHA-1 as the key and reject
+            // every code the user's authenticator produces. Encrypting the presentation form
+            // is marginally redundant, but the published side already stores it that way and
+            // re-encrypting live MFA credentials to save 12 bytes is not a trade worth making.
+            encrypted_secret: self.encrypt(totp::encode_secret_base32(&raw_secret).as_bytes())?,
             hashed_codes,
             encrypted_plain_codes: self.encrypt(plain_json.as_bytes())?,
         };
@@ -453,7 +472,7 @@ impl MfaService {
         let data: MfaSetupData = serde_json::from_str(record_json)
             .map_err(|_| internal_error("mfa setup record decode"))?;
         let raw_secret = self
-            .decrypt(&data.encrypted_secret)
+            .decrypt_secret(&data.encrypted_secret)
             .ok_or_else(|| internal_error("mfa setup record secret decrypt"))?;
         let plain_json = self
             .decrypt(&data.encrypted_plain_codes)

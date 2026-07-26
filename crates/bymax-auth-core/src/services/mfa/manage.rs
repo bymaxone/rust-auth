@@ -100,7 +100,9 @@ impl MfaService {
         self.assert_not_locked(&bf_id).await?;
         // An enabled account with no stored secret is an inconsistency, not a user error.
         let encrypted = view.mfa_secret.clone().ok_or(AuthError::TokenInvalid)?;
-        let raw_secret = self.decrypt(&encrypted).ok_or(AuthError::TokenInvalid)?;
+        let raw_secret = self
+            .decrypt_secret(&encrypted)
+            .ok_or(AuthError::TokenInvalid)?;
         if !self
             .verify_totp_with_anti_replay(user_id, &raw_secret, code)
             .await?

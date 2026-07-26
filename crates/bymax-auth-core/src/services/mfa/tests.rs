@@ -1053,7 +1053,10 @@ fn record_with(secret_wire: String, plain_wire: String) -> String {
 
 /// A valid encrypted-secret wire (the raw secret `[1u8; 20]` under `[7u8; 32]`).
 fn good_secret_wire() -> String {
-    bymax_auth_crypto::aead::encrypt(&[1u8; 20], &[7u8; 32]).unwrap_or_default()
+    // The at-rest form is the encrypted Base32 TEXT, not the raw bytes — the same shape
+    // nest-auth writes, so the two backends can read one another's `mfaSecret`.
+    let base32 = bymax_auth_crypto::totp::encode_secret_base32(&[1u8; 20]);
+    bymax_auth_crypto::aead::encrypt(base32.as_bytes(), &[7u8; 32]).unwrap_or_default()
 }
 
 /// A valid pending-setup record encrypted under `[7u8; 32]`, carrying `recovery` as the single
