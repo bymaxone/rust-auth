@@ -1259,6 +1259,12 @@ mod tests {
             Err(AuthError::OtpExpired)
         ));
         assert!(store.put(purpose, "id", "123456", 600).await.is_ok());
+        // `peek_otp` is how the adapter suites drive a verification flow end to end, and it
+        // is only ever read back through itself there — so it is pinned here, in the crate
+        // that owns it, where the mutation gate can see it.
+        assert_eq!(store.peek_otp(purpose, "id"), Some("123456".to_owned()));
+        assert_eq!(store.peek_otp(purpose, "absent"), None);
+        assert_eq!(store.peek_otp(OtpPurpose::PasswordReset, "id"), None);
         // A wrong code bumps attempts; the right code consumes.
         assert!(matches!(
             store.verify(purpose, "id", "000000", 5).await,
@@ -1270,6 +1276,7 @@ mod tests {
             store.verify(purpose, "id", "123456", 5).await,
             Err(AuthError::OtpExpired)
         ));
+        assert_eq!(store.peek_otp(purpose, "id"), None);
         // Max-attempts path: cap at 1, one wrong guess exhausts it.
         assert!(store.put(purpose, "max", "123456", 600).await.is_ok());
         assert!(matches!(
