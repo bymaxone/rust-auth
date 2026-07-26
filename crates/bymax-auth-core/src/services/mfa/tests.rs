@@ -52,6 +52,17 @@ struct Harness {
 /// repository (without enabling the platform domain) so the platform-context routing is
 /// exercised.
 fn build(sessions: bool, wire_platform: bool) -> Option<Harness> {
+    build_with(sessions, wire_platform, None, None)
+}
+
+/// The same harness, with an optional email provider and hooks so the fire-and-forget
+/// notifications the MFA flows emit can be observed.
+fn build_with(
+    sessions: bool,
+    wire_platform: bool,
+    email: Option<Arc<dyn EmailProvider>>,
+    hooks: Option<Arc<dyn AuthHooks>>,
+) -> Option<Harness> {
     let users = Arc::new(InMemoryUserRepository::new());
     let stores = Arc::new(InMemoryStores::new());
     let platform = Arc::new(InMemoryPlatformUserRepository::new());
@@ -75,6 +86,12 @@ fn build(sessions: bool, wire_platform: bool) -> Option<Harness> {
         .redis_stores(stores);
     if wire_platform {
         builder = builder.platform_user_repository(platform.clone());
+    }
+    if let Some(email) = email {
+        builder = builder.email_provider(email);
+    }
+    if let Some(hooks) = hooks {
+        builder = builder.hooks(hooks);
     }
     let engine = builder.build().ok()?;
     Some(Harness {
@@ -293,6 +310,150 @@ async fn full_dashboard_lifecycle() {
     // After disable the user is no longer MFA-enabled.
     let after = h.users.find_by_id(&uid, None).await;
     assert!(matches!(after, Ok(Some(u)) if !u.mfa_enabled && u.mfa_secret.is_none()));
+}
+
+/// An email + hook spy recording the security alerts the MFA management flows emit.
+#[derive(Default)]
+struct AlertSpy {
+    alerts: Mutex<Vec<String>>,
+}
+
+impl AlertSpy {
+    fn push(&self, alert: String) {
+        if let Ok(mut alerts) = self.alerts.lock() {
+            alerts.push(alert);
+        }
+    }
+
+    fn seen(&self) -> Vec<String> {
+        self.alerts.lock().map(|a| a.clone()).unwrap_or_default()
+    }
+}
+
+#[async_trait]
+impl EmailProvider for AlertSpy {
+    async fn send_password_reset_token(
+        &self,
+        _email: &str,
+        _token: &str,
+        _locale: Option<&str>,
+    ) -> Result<(), crate::traits::EmailError> {
+        Ok(())
+    }
+    async fn send_password_reset_otp(
+        &self,
+        _email: &str,
+        _otp: &str,
+        _locale: Option<&str>,
+    ) -> Result<(), crate::traits::EmailError> {
+        Ok(())
+    }
+    async fn send_email_verification_otp(
+        &self,
+        _email: &str,
+        _otp: &str,
+        _locale: Option<&str>,
+    ) -> Result<(), crate::traits::EmailError> {
+        Ok(())
+    }
+    async fn send_mfa_enabled(
+        &self,
+        email: &str,
+        _locale: Option<&str>,
+    ) -> Result<(), crate::traits::EmailError> {
+        self.push(format!("mail:enabled:{email}"));
+        Ok(())
+    }
+    async fn send_mfa_disabled(
+        &self,
+        email: &str,
+        _locale: Option<&str>,
+    ) -> Result<(), crate::traits::EmailError> {
+        self.push(format!("mail:disabled:{email}"));
+        Ok(())
+    }
+    async fn send_new_session_alert(
+        &self,
+        _email: &str,
+        _session: &crate::traits::SessionInfo,
+        _locale: Option<&str>,
+    ) -> Result<(), crate::traits::EmailError> {
+        Ok(())
+    }
+    async fn send_invitation(
+        &self,
+        _email: &str,
+        _invite: &crate::traits::InviteData,
+        _locale: Option<&str>,
+    ) -> Result<(), crate::traits::EmailError> {
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl AuthHooks for AlertSpy {
+    async fn after_mfa_disabled(
+        &self,
+        user: &bymax_auth_types::SafeAuthUser,
+        _ctx: &HookContext,
+    ) -> Result<(), crate::traits::HookError> {
+        self.push(format!("hook:disabled:{}", user.id));
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn disabling_mfa_alerts_the_account_owner() {
+    // Turning off a second factor is exactly what an attacker who has the password does, so
+    // the mail and the hook are the owner's only warning. Both are fire-and-forget, so
+    // `disable` returns the same `Ok(())` whether they fired or not.
+    let spy = Arc::new(AlertSpy::default());
+    let email: Arc<dyn EmailProvider> = spy.clone();
+    let hooks: Arc<dyn AuthHooks> = spy.clone();
+    let Some(h) = build_with(false, false, Some(email), Some(hooks)) else {
+        return;
+    };
+    let Some(uid) = register(&h.engine, "alert@example.com").await else {
+        return;
+    };
+    let Some(mfa) = h.engine.mfa() else { return };
+    let Ok(setup) = mfa.setup(&uid, MfaContext::Dashboard).await else {
+        return;
+    };
+    let base = now_secs();
+    assert!(
+        mfa.verify_and_enable(
+            &uid,
+            &code_at(&setup.secret, base),
+            "1.2.3.4",
+            "ua",
+            MfaContext::Dashboard
+        )
+        .await
+        .is_ok()
+    );
+    assert!(
+        mfa.disable(
+            &uid,
+            &code_at(&setup.secret, base + 30),
+            "1.2.3.4",
+            "ua",
+            MfaContext::Dashboard
+        )
+        .await
+        .is_ok()
+    );
+    // Long enough for the detached notifications to have run.
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let seen = spy.seen();
+    assert!(
+        seen.contains(&"mail:disabled:alert@example.com".to_owned()),
+        "no disabled mail: {seen:?}"
+    );
+    assert!(
+        seen.contains(&format!("hook:disabled:{uid}")),
+        "no disabled hook: {seen:?}"
+    );
 }
 
 #[tokio::test]
