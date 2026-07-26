@@ -120,6 +120,32 @@ mod scrypt_tests {
     }
 
     #[test]
+    fn legacy_parser_bounds_each_field_on_its_own() {
+        // Through `verify` every rejection above collapses to `Ok(false)` — which a wrong
+        // password produces too — so the guard itself is asserted at the parser, where the
+        // three conditions can be told apart and the cap has a boundary.
+        use crate::password::phc::parse_legacy;
+        assert!(parse_legacy("scrypt::00").is_none(), "empty salt alone");
+        assert!(parse_legacy("scrypt:aa:").is_none(), "empty hash alone");
+        // The cap is inclusive: exactly 64 bytes is the largest accepted key, and 65 is out.
+        let at_cap = format!("scrypt:aa:{}", "ab".repeat(64));
+        assert!(
+            parse_legacy(&at_cap).is_some(),
+            "64 bytes is within the cap"
+        );
+        let over_cap = format!("scrypt:aa:{}", "ab".repeat(65));
+        assert!(
+            parse_legacy(&over_cap).is_none(),
+            "65 bytes is over the cap"
+        );
+        // A well-formed pair decodes to its bytes.
+        assert_eq!(
+            parse_legacy("scrypt:0a0b:0c0d"),
+            Some((vec![0x0a, 0x0b], vec![0x0c, 0x0d]))
+        );
+    }
+
+    #[test]
     fn needs_rehash_is_false_for_a_current_scrypt_hash() {
         // A hash written with the current params is not stale — rehash-on-verify must
         // not fire pointlessly on an up-to-date hash.
