@@ -392,6 +392,14 @@ impl EmailProvider for AlertSpy {
 
 #[async_trait]
 impl AuthHooks for AlertSpy {
+    async fn after_mfa_enabled(
+        &self,
+        user: &bymax_auth_types::SafeAuthUser,
+        _ctx: &HookContext,
+    ) -> Result<(), crate::traits::HookError> {
+        self.push(format!("hook:enabled:{}", user.id));
+        Ok(())
+    }
     async fn after_mfa_disabled(
         &self,
         user: &bymax_auth_types::SafeAuthUser,
@@ -411,10 +419,11 @@ impl AuthHooks for AlertSpy {
 }
 
 #[tokio::test]
-async fn disabling_mfa_alerts_the_account_owner() {
-    // Turning off a second factor is exactly what an attacker who has the password does, so
-    // the mail and the hook are the owner's only warning. Both are fire-and-forget, so
-    // `disable` returns the same `Ok(())` whether they fired or not.
+async fn every_mfa_state_change_alerts_the_account_owner() {
+    // Enabling, regenerating and disabling a second factor are all account-security changes,
+    // and each one's mail and hook are the owner's only warning — turning MFA off is exactly
+    // what an attacker holding the password does. Every notification is fire-and-forget, so
+    // each call returns the same `Ok(())` whether it fired or not.
     let spy = Arc::new(AlertSpy::default());
     let email: Arc<dyn EmailProvider> = spy.clone();
     let hooks: Arc<dyn AuthHooks> = spy.clone();
@@ -468,6 +477,16 @@ async fn disabling_mfa_alerts_the_account_owner() {
     // Long enough for the detached notifications to have run.
     tokio::time::sleep(Duration::from_millis(500)).await;
     let seen = spy.seen();
+    // Enabling is an account-security change too: a second factor appearing on an account
+    // is the owner's cue that either they did it or someone else did.
+    assert!(
+        seen.contains(&"mail:enabled:alert@example.com".to_owned()),
+        "no enabled mail: {seen:?}"
+    );
+    assert!(
+        seen.contains(&format!("hook:enabled:{uid}")),
+        "no enabled hook: {seen:?}"
+    );
     assert!(
         seen.contains(&"mail:disabled:alert@example.com".to_owned()),
         "no disabled mail: {seen:?}"
