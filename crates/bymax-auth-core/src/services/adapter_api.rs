@@ -559,6 +559,7 @@ mod tests {
     async fn verify_status_and_session_delegations_run_against_a_real_session() {
         use crate::context::RequestContext;
         use crate::services::auth::RegisterInput;
+        use crate::services::auth::test_support::SeedUser;
         use bymax_auth_types::LoginResult;
 
         let mut cfg = base_config();
@@ -596,6 +597,25 @@ mod tests {
             Err(AuthError::TokenInvalid)
         ));
 
+        // The gate has to refuse as well as admit: an unknown subject and a banned account
+        // are both rejected. Asserting only the admitting side would pass against a gate
+        // that admitted everything — which is the whole failure this guards.
+        assert!(matches!(
+            h.engine.assert_user_active("no-such-user").await,
+            Err(AuthError::TokenInvalid)
+        ));
+        let banned = h
+            .seed(SeedUser {
+                email: "banned@e.com".to_owned(),
+                status: "BANNED".to_owned(),
+                ..SeedUser::active("banned@e.com", "correct horse battery staple")
+            })
+            .await;
+        assert!(matches!(
+            h.engine.assert_user_active(&banned).await,
+            Err(AuthError::AccountBanned)
+        ));
+
         // The session lists, with the current session flagged via the presented refresh token.
         let sessions = h
             .engine
@@ -604,12 +624,40 @@ mod tests {
         assert!(matches!(&sessions, Ok(list) if list.iter().any(|s| s.is_current)));
 
         // Revoking all-but-current with the real refresh token takes the current-hash branch.
+        // A second login gives it something to revoke: with one session alive the call is a
+        // no-op either way, and the assertion would hold against a delegator that did nothing.
+        let second = h
+            .engine
+            .login(
+                crate::services::auth::LoginInput {
+                    email: "adapter@e.com".to_owned(),
+                    password: "correct horse battery staple".to_owned(),
+                    tenant_id: "t1".to_owned(),
+                },
+                &ctx,
+            )
+            .await;
+        assert!(matches!(&second, Ok(LoginResult::Success(_))));
+        let Ok(LoginResult::Success(second)) = second else {
+            return;
+        };
+        assert!(matches!(
+            h.engine.list_user_sessions(&sub, None).await,
+            Ok(list) if list.len() == 2
+        ));
         assert!(
             h.engine
-                .revoke_other_user_sessions(&sub, Some(&auth.refresh_token))
+                .revoke_other_user_sessions(&sub, Some(&second.refresh_token))
                 .await
                 .is_ok()
         );
+        // Only the session that presented the token survives.
+        assert!(matches!(
+            h.engine
+                .list_user_sessions(&sub, Some(&second.refresh_token))
+                .await,
+            Ok(list) if list.len() == 1 && list[0].is_current
+        ));
 
         // A malformed/unowned session hash revokes as not-found (no IDOR oracle).
         assert!(matches!(
