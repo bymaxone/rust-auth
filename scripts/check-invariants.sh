@@ -104,8 +104,16 @@ done < <(find crates bindings -name lib.rs)
 
 # ── Invariant 4: bearer/refresh credentials are never read from the query string. ──
 # Flag any extractor that pulls an access/refresh token out of a query map.
-if grep -rEn 'query[^;]*(access_token|refresh_token|bearer)' "${SRC_GLOB[@]}" \
-     --include='*.rs' -i >/dev/null 2>&1; then
+#
+# Comment lines are stripped first. The pattern is deliberately loose — it has to catch an
+# extractor written in a shape nobody predicted — and that looseness makes it match prose
+# that *documents* the invariant just as readily as code that breaks it. Punishing the
+# documentation would push the next author to describe this rule less clearly, or not at
+# all, which is the opposite of what a security gate is for. Code is never a comment, so
+# nothing that could actually read a token is skipped here.
+if grep -rEn -i 'query[^;]*(access_token|refresh_token|bearer)' "${SRC_GLOB[@]}" \
+     --include='*.rs' 2>/dev/null \
+     | grep -qvE '^[^:]+:[0-9]+:[[:space:]]*//'; then
   note "invariant 4: a token must never be read from the query string"
 else
   pass "invariant 4: no token read from a query string"

@@ -124,7 +124,7 @@ impl AuthEngineBuilder {
     /// [`AllowAllBreachChecker`], which approves everything and touches no network).
     ///
     /// Wiring one is opt-in on purpose: a crate should not start talking to a third-party
-    /// corpus because it was upgraded. The bundled [`HibpBreachChecker`] (feature `breach`)
+    /// corpus because it was upgraded. The bundled `HibpBreachChecker` (feature `breach`)
     /// runs over the same [`HttpClient`](crate::traits::HttpClient) seam the OAuth flows use.
     #[must_use]
     pub fn breach_checker(mut self, checker: Arc<dyn PasswordBreachChecker>) -> Self {

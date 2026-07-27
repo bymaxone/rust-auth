@@ -68,8 +68,10 @@ impl ResolvedConfig {
 
     /// The derived identifier-hashing key — the ASCII hex of `SHA-256("{label}:{jwt.secret}")`
     /// — used to HMAC low-entropy Redis identifiers so the signing key and the
-    /// identifier-hashing key are cryptographically independent. See [`derive_hmac_key`] for
-    /// why the encoding is part of the contract rather than an implementation detail.
+    /// identifier-hashing key are cryptographically independent. The 64-byte ASCII-hex
+    /// encoding is part of the cross-implementation contract, not an implementation detail:
+    /// `nest-auth` derives the same key the same way, so a key derived from the raw digest
+    /// would silently hash every identifier differently and split the shared keyspace.
     #[must_use]
     pub fn hmac_key(&self) -> &[u8; 64] {
         self.hmac_key.expose_secret()

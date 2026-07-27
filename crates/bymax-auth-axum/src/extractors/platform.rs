@@ -12,9 +12,9 @@ use crate::response::AuthRejection;
 use crate::state::AuthState;
 
 /// Verify the platform access token once per request, caching the claims on
-/// `parts.extensions`. The token is sourced from the `Authorization: Bearer` header only
-/// (never a cookie, never a query string) because platform sessions are always bearer; a
-/// dashboard token presented here fails the `type == platform` assertion and is mapped to
+/// `parts.extensions`. The token is sourced from the `Authorization: Bearer` header only —
+/// never a cookie, and never a query string, since platform sessions carry no cookie at all.
+/// A dashboard token presented here fails the `type == platform` assertion and is mapped to
 /// `PlatformAuthRequired`.
 async fn verified_platform_claims(
     parts: &mut Parts,

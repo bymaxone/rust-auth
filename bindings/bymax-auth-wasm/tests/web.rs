@@ -26,6 +26,11 @@ fn sign_dashboard(iat: i64, exp: i64) -> String {
         status: "ACTIVE".to_owned(),
         mfa_enabled: true,
         mfa_verified: false,
+        // Generation 0 — the value a server that has never bumped a user's epoch issues, and
+        // the one the edge verifier must accept without any knowledge of the current epoch:
+        // the check that compares them lives on the server, which is the only side with the
+        // stored counter.
+        epoch: 0,
         iat,
         exp,
     };

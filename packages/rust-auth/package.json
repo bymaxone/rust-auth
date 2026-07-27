@@ -2,7 +2,7 @@
   "name": "@bymax-one/rust-auth",
   "version": "0.0.0",
   "type": "module",
-  "description": "Frontend (React/Next.js) auth + edge JWT for the rust-auth backend \u2014 the byte-for-byte npm counterpart of @bymax-one/nest-auth.",
+  "description": "Frontend (React/Next.js) auth + edge JWT for the rust-auth backend — the byte-for-byte npm counterpart of @bymax-one/nest-auth.",
   "license": "MIT",
   "repository": {
     "type": "git",
@@ -75,6 +75,7 @@
     "@types/node": "^26.1.1",
     "@types/react": "^19.0.2",
     "@types/react-dom": "^19.0.2",
+    "@vitest/coverage-v8": "^4.1.10",
     "eslint": "^10.6.0",
     "eslint-plugin-security": "^4.0.1",
     "jsdom": "^29.1.1",
