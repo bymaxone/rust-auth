@@ -16,7 +16,7 @@
   <a href="https://docs.rs/bymax-auth"><img src="https://img.shields.io/docsrs/bymax-auth?style=flat-square&colorA=000000&label=docs.rs" alt="docs.rs" /></a>
   <a href="https://github.com/bymaxone/rust-auth/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/bymaxone/rust-auth/ci.yml?branch=main&style=flat-square&colorA=000000&label=CI" alt="CI status" /></a>
   <a href="https://github.com/bymaxone/rust-auth/actions/workflows/ci.yml"><img src="https://img.shields.io/badge/coverage-100%25%20lines-brightgreen?style=flat-square&colorA=000000" alt="coverage" /></a>
-  <a href="https://github.com/bymaxone/rust-auth/blob/main/.cargo/mutants.toml"><img src="https://img.shields.io/badge/mutation-gated-brightgreen?style=flat-square&colorA=000000" alt="mutation gate" /></a>
+  <a href="https://github.com/bymaxone/rust-auth/blob/main/.cargo/mutants.toml"><img src="https://img.shields.io/badge/mutation-100%25-brightgreen?style=flat-square&colorA=000000" alt="mutation gate" /></a>
   <a href="https://scorecard.dev/viewer/?uri=github.com/bymaxone/rust-auth"><img src="https://api.scorecard.dev/projects/github.com/bymaxone/rust-auth/badge?style=flat-square" alt="OpenSSF Scorecard" /></a>
   <a href="https://rustsec.org/"><img src="https://img.shields.io/badge/audit-RustSec-000000?style=flat-square" alt="RustSec audit" /></a>
   <a href="https://github.com/bymaxone/rust-auth/attestations"><img src="https://img.shields.io/badge/provenance-attested-000000?style=flat-square" alt="build provenance" /></a>
@@ -630,7 +630,7 @@ Tracked with [Criterion](https://github.com/bheisler/criterion.rs) so a regressi
 Authentication is critical infrastructure, so the suite is held to a bar beyond "it compiles" — every behavior is pinned so a regression **fails a test**.
 
 - ✅ **100% line and function coverage** — enforced as a release gate via [`cargo-llvm-cov --fail-under-lines 100`](https://github.com/taiki-e/cargo-llvm-cov) across the full `cargo-hack` feature matrix
-- ✅ **Mutation-gated** — [`cargo-mutants`](https://mutants.rs/) seeds faults into the source and the suite must catch them; every surviving mutant is either killed by a new test or recorded in [`.cargo/mutants.toml`](.cargo/mutants.toml) with the reason it cannot be. The sweep runs post-merge on `main`, never on a PR (it takes hours: the Redis stores are exercised against a real container)
+- ✅ **100% mutation score** — [`cargo-mutants`](https://mutants.rs/) seeds faults into the source and the suite must catch them. The last full sweep: **1,630 mutants, 1,242 caught, 95 detected by timeout, 293 unviable — zero survivors**. The handful that no test can kill is recorded in [`.cargo/mutants.toml`](.cargo/mutants.toml) with the reason each is equivalent. The sweep runs post-merge on `main`, never on a PR: it takes ~8 hours, because the Redis stores are exercised against a real container and a mutation there is detected by hanging
 - ✅ **Property tests + fuzzing** — `proptest` round-trips and `cargo-fuzz` smoke runs over the trust-boundary parsers (JWT, PHC, base32)
 - ✅ **Real-Redis E2E** — atomic Lua, rotation/grace, and revocation proven against `redis:8` via [`testcontainers`](https://github.com/testcontainers/testcontainers-rs)
 - ✅ **Edge parity** — `wasm-bindgen-test` confirms the WASM verifier accepts a token signed by the backend

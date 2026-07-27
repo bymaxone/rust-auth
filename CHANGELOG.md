@@ -102,6 +102,15 @@ version bump.
 - Every surviving mutant the sweep reported is closed — killed by a new test or
   recorded in `.cargo/mutants.toml` with the reason it cannot be. Re-running the
   sweep over the survivors is what caught four fixes that asserted the wrong
-  thing, so each of those is red-checked by hand.
+  thing, so each of those is red-checked by hand. The first full sweep under the
+  corrected configuration confirms it: **1,630 mutants, 1,242 caught, 95 detected
+  by timeout, 293 unviable, zero survivors** (8 h wall clock).
+- Recorded for whoever tunes the gate next: 95 of the 95 timeouts sit in the
+  container-backed stores (`bymax-auth-redis`, 90 of them, and three in
+  `bymax-auth-client`). A mutation there is detected by the suite *hanging* rather
+  than asserting, and each one spends the full 119 s window — roughly half the
+  run's wall clock. Shortening the window would buy hours at the cost of gate
+  integrity, since a legitimately slow test cut short is reported as detected and
+  would hide a survivor; the sound fix is making those tests fail fast instead.
 
 [Unreleased]: https://github.com/bymaxone/rust-auth/commits/main
