@@ -411,7 +411,15 @@ impl AuthEngine {
             .await
             .is_err()
         {
-            let _ = store.delete_token(&raw).await;
+            // The caller must not learn that the address exists, so the failure is swallowed on
+            // the response path — which makes the log the only place an operator can see that
+            // reset links are not reaching anyone.
+            tracing::error!(user_id = %user.id, "password reset: token delivery failed");
+            if let Err(error) = store.delete_token(&raw).await {
+                // The rollback is what keeps an undeliverable token from lingering in a Redis
+                // snapshot for its whole TTL.
+                tracing::error!(%error, "password reset: rollback of the stored token failed");
+            }
         }
         Ok(())
     }
@@ -449,6 +457,10 @@ impl AuthEngine {
         self.session_store()
             .bump_epoch(crate::traits::SessionKind::Dashboard, &context.user_id)
             .await?;
+        // A completed reset is the event an operator correlates an account takeover against:
+        // it revokes every session the account had and invalidates its outstanding access
+        // tokens, so it belongs in the audit trail even when nothing failed.
+        tracing::info!(user_id = %context.user_id, "password reset: completed, all sessions revoked");
 
         let hook_ctx = reset_context_hooks(context);
         let safe = self.project_user_for_hook(context).await;
@@ -1396,6 +1408,18 @@ mod tests {
                 .is_ok()
         );
         // initiate_reset drives send_reset_token, whose send fails and triggers the cleanup.
+        assert!(
+            engine
+                .initiate_reset(forgot("fail@example.com"))
+                .await
+                .is_ok()
+        );
+
+        // …and again with the rollback itself refused. The caller still sees the same
+        // anti-enumerating success — it must not learn that the address exists, let alone that
+        // the store is down — so the log is the only place a token now stranded in Redis for
+        // its whole TTL can surface at all.
+        stores.fail_next_cleanup_writes(1);
         assert!(
             engine
                 .initiate_reset(forgot("fail@example.com"))

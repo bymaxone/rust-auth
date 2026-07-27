@@ -61,6 +61,7 @@ impl AuthEngine {
             .await
             .map_err(map_repository_error)?;
 
+        tracing::info!(user_id = %user.id, %tenant_id, "verify email: address verified");
         let hook_ctx = verification_context(&user.id, &user.email, tenant_id);
         let safe = SafeAuthUser::from(user);
         spawn_guarded(run_after_email_verified(

@@ -49,16 +49,30 @@ impl AuthEngine {
         // malformed/oversized token is skipped before hashing — it owns no session anyway.
         if is_refresh_token_shape(raw_refresh) {
             let session_hash = RawRefreshToken::from_raw(raw_refresh.to_owned()).redis_hash();
-            let _ = self
+            if let Err(error) = self
                 .session_store()
                 .revoke_session(SessionKind::Dashboard, user_id, &session_hash)
-                .await;
-            let _ = self
+                .await
+            {
+                // Swallowed by design, but not silently: an operator seeing repeated cleanup
+                // failures is looking at sessions that outlive the logout that asked for them.
+                // `SessionNotFound` is the expected outcome for a session already rotated or
+                // evicted, so it is not worth an operator's attention — the same distinction
+                // nest-auth draws before logging.
+                if !matches!(error, AuthError::SessionNotFound) {
+                    tracing::warn!(%error, "logout: session cleanup failed");
+                }
+            }
+            if let Err(error) = self
                 .session_store()
                 .delete_grace_pointer(SessionKind::Dashboard, &session_hash)
-                .await;
+                .await
+            {
+                tracing::warn!(%error, "logout: grace pointer cleanup failed");
+            }
         }
 
+        tracing::info!(%user_id, "logout: session closed");
         let hook_ctx = identity_only_context(user_id, None, None);
         spawn_guarded(run_after_logout(
             self.hooks().clone(),
@@ -406,5 +420,62 @@ mod tests {
                 .await,
             Err(AuthError::MfaRequired)
         ));
+    }
+
+    #[tokio::test]
+    async fn logout_survives_a_store_that_refuses_both_cleanups() {
+        // A backend outage during logout must not fail the logout: the access token is already
+        // blacklisted, and the caller has no way to retry the parts that failed. What it must
+        // not do is pass silently — an operator with a store that keeps refusing is looking at
+        // refresh sessions and grace pointers outliving the logouts that asked for them, and the
+        // response says nothing. Both cleanups are armed to fail, so both report.
+        let mut cfg = base_config();
+        cfg.email_verification.required = false;
+        let Some(h) = harness(cfg, None) else { return };
+        let Some((id, auth)) = logged_in(&h, "down@x.io", "pw").await else { return };
+
+        h.stores.fail_next_cleanup_writes(2);
+        assert!(
+            h.engine
+                .logout(&auth.access_token, &auth.refresh_token, &id)
+                .await
+                .is_ok()
+        );
+
+        // The failures were consumed by the two cleanup calls, and the session survives them —
+        // which is what makes the swallowed error worth reporting rather than ignoring.
+        let store: &dyn crate::traits::SessionStore = h.stores.as_ref();
+        assert!(matches!(
+            store
+                .find_session(
+                    crate::traits::SessionKind::Dashboard,
+                    &RawRefreshToken::from_raw(auth.refresh_token.clone()).redis_hash(),
+                )
+                .await,
+            Ok(Some(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn logout_stays_quiet_when_the_session_was_already_gone() {
+        // `SessionNotFound` is the ordinary outcome for a session already rotated or evicted, so
+        // it takes the swallow path WITHOUT the warning an outage gets. Logging it would drown
+        // the real signal in noise on every double logout.
+        let mut cfg = base_config();
+        cfg.email_verification.required = false;
+        let Some(h) = harness(cfg, None) else { return };
+        let Some((id, auth)) = logged_in(&h, "twice@x.io", "pw").await else { return };
+        assert!(
+            h.engine
+                .logout(&auth.access_token, &auth.refresh_token, &id)
+                .await
+                .is_ok()
+        );
+        assert!(
+            h.engine
+                .logout(&auth.access_token, &auth.refresh_token, &id)
+                .await
+                .is_ok()
+        );
     }
 }

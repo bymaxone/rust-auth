@@ -152,10 +152,16 @@ impl SessionService {
             // Ownership-checked revoke; a SessionNotFound (a concurrent logout already removed
             // it) or any other store error is swallowed — the new session is already committed,
             // so eviction must never fail the operation that scheduled it.
-            let _ = self
+            if let Err(error) = self
                 .store
                 .revoke_session(SessionKind::Dashboard, user_id, &victim.session_hash)
-                .await;
+                .await
+                && !matches!(error, AuthError::SessionNotFound)
+            {
+                // Swallowed, but visible: a store that keeps refusing the eviction is a cap
+                // that is not being enforced, which reads as "no error" on every response.
+                tracing::warn!(%error, %user_id, "sessions: eviction of an over-cap session failed");
+            }
             self.fire_session_evicted(user_id, &victim.session_hash, ctx)
                 .await;
         }
@@ -308,15 +314,20 @@ impl SessionService {
             session_hash: short_hash(new_hash),
         };
         // Errors are swallowed: a slow or failing notification must never affect the session.
-        let _ = self.hooks.on_new_session(&safe, &session, ctx).await;
+        if let Err(error) = self.hooks.on_new_session(&safe, &session, ctx).await {
+            tracing::error!(%error, "sessions: on_new_session hook returned an error (ignored)");
+        }
     }
 
     /// Fire the fire-and-forget session-evicted hook with the short (eight-char) evicted hash.
     async fn fire_session_evicted(&self, user_id: &str, evicted_hash: &str, ctx: &HookContext) {
-        let _ = self
+        if let Err(error) = self
             .hooks
             .on_session_evicted(user_id, &short_hash(evicted_hash), ctx)
-            .await;
+            .await
+        {
+            tracing::error!(%error, "sessions: on_session_evicted hook returned an error (ignored)");
+        }
     }
 }
 
@@ -476,6 +487,35 @@ mod tests {
             assert!(evicted_session_hash.len() <= 8);
             self.evictions.fetch_add(1, Ordering::Relaxed);
             Ok(())
+        }
+    }
+
+    /// A hook spy whose notifications both fail, so the swallow-and-report path is observable.
+    /// A host's hook is arbitrary code — a webhook, an audit write — and the library must not
+    /// let its failure reach the session it was merely notifying about.
+    struct ErroringHooks;
+
+    #[async_trait::async_trait]
+    impl AuthHooks for ErroringHooks {
+        async fn on_new_session(
+            &self,
+            _user: &bymax_auth_types::SafeAuthUser,
+            _session: &crate::traits::email::SessionInfo,
+            _ctx: &HookContext,
+        ) -> Result<(), crate::traits::HookError> {
+            Err(crate::traits::HookError::Rejected(
+                "new-session sink unavailable".to_owned(),
+            ))
+        }
+        async fn on_session_evicted(
+            &self,
+            _user_id: &str,
+            _evicted_session_hash: &str,
+            _ctx: &HookContext,
+        ) -> Result<(), crate::traits::HookError> {
+            Err(crate::traits::HookError::Rejected(
+                "eviction sink unavailable".to_owned(),
+            ))
         }
     }
 
@@ -1223,5 +1263,52 @@ mod tests {
             store.bump_epoch(SessionKind::Dashboard, "u1").await,
             Ok(1)
         ));
+    }
+
+    #[tokio::test]
+    async fn eviction_survives_a_failing_store_and_failing_hooks() {
+        // Two independent swallow paths meet here: the store refuses the eviction, and both
+        // notifications error. Neither may fail `after_session_created` — the new session is
+        // already committed, and a host's hook is arbitrary code. What must NOT happen is
+        // silence: a cap that stops being enforced, or an audit sink that stops receiving, is
+        // invisible in the response and only reachable through the log.
+        let store = Arc::new(InMemoryStores::new());
+        let users = Arc::new(InMemoryUserRepository::new());
+        let uid = seed_user(&users, "swallow").await;
+
+        let old = hash("dddd");
+        let new = hash("eeee");
+        let base = OffsetDateTime::UNIX_EPOCH;
+        assert!(
+            store
+                .create_session(SessionKind::Dashboard, &old, &record(&uid, base), 3600)
+                .await
+                .is_ok()
+        );
+        let new_record = record(&uid, base + time::Duration::seconds(1));
+        assert!(
+            store
+                .create_session(SessionKind::Dashboard, &new, &new_record, 3600)
+                .await
+                .is_ok()
+        );
+
+        // One armed failure for the single over-cap revoke this drives.
+        store.fail_next_cleanup_writes(1);
+        let svc = service(
+            store.clone(),
+            users,
+            Arc::new(ErroringHooks),
+            config(1, None),
+        );
+        assert!(
+            svc.after_session_created(&new_record, &new, &ctx())
+                .await
+                .is_ok()
+        );
+
+        // The refused eviction left the over-cap session in place — the outcome the warning
+        // exists to make visible.
+        assert!(matches!(svc.list_sessions(&uid, Some(&new)).await, Ok(v) if v.len() == 2));
     }
 }

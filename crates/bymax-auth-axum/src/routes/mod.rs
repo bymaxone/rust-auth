@@ -38,13 +38,75 @@ use crate::dto::RefreshDto;
 use crate::extractors::source_access_token;
 use crate::state::AuthState;
 
-/// The set of request headers that must never enter a `RequestContext`'s sanitized map (the
-/// credential-bearing ones). Lowercased to match the normalized header keys. This is the
-/// single source of truth for "sensitive" headers: both [`sanitize_headers`] (which drops
-/// them from the engine context) and the tracing redaction layer
-/// ([`sensitive_header_names`]) derive from it, so a header is never redacted in one path but
-/// recorded in the other.
-const SENSITIVE_HEADERS: [&str; 3] = ["authorization", "cookie", "x-csrf-token"];
+/// The set of request headers that must never enter a `RequestContext`'s sanitized map.
+/// Lowercased to match the normalized header keys. This is the single source of truth for
+/// "sensitive" headers: both [`sanitize_headers`] (which drops them from the engine context)
+/// and the tracing redaction layer ([`sensitive_header_names`]) derive from it, so a header is
+/// never redacted in one path but recorded in the other.
+///
+/// The list is nest-auth's `BLOCKED_HEADERS`, entry for entry, because the sanitized map is
+/// handed to host-supplied hooks: a host that wires the same audit sink behind both backends
+/// must not receive a header from one that the other withholds. Two categories are stripped:
+///
+/// - **Credential-bearing** (`authorization`, `cookie`, `proxy-authorization`,
+///   `www-authenticate`, `x-api-key`, `x-auth-token`, `x-csrf-token`, `x-session-id`) — these
+///   are secrets, and a hook that logs its context would persist them verbatim.
+/// - **Forwarded-identity** (`x-forwarded-for`, `x-forwarded-host`, `x-real-ip`,
+///   `x-original-forwarded-for`, `cf-connecting-ip`, `true-client-ip`, `x-cluster-client-ip`)
+///   — trivially spoofed by the client. A hook must take the address from
+///   [`RequestContext::ip`], which the adapter resolves from the peer socket, never from a
+///   header the caller chose.
+const SENSITIVE_HEADERS: [&str; 15] = [
+    "authorization",
+    "cookie",
+    "proxy-authorization",
+    "www-authenticate",
+    "x-api-key",
+    "x-auth-token",
+    "x-csrf-token",
+    "x-session-id",
+    "x-forwarded-for",
+    "x-forwarded-host",
+    "x-real-ip",
+    "x-original-forwarded-for",
+    "cf-connecting-ip",
+    "true-client-ip",
+    "x-cluster-client-ip",
+];
+
+/// Suffixes that mark a custom `x-`-prefixed header as secret-bearing.
+///
+/// This is the second half of nest-auth's filter, whose regex is
+/// `^x-.*-(token|secret|key|password|credential|auth|bearer|signature|hmac)$`. Expressed as
+/// suffixes rather than a pattern so the crate keeps its dependency surface, matching the
+/// regex exactly: the leading `x-` is stripped first and the REMAINDER must end with a
+/// dash-prefixed suffix, so `x-request-token` is stripped while `x-token` — which the regex
+/// also declines, since its `.*-` needs a dash of its own — is kept.
+const SENSITIVE_HEADER_SUFFIXES: [&str; 9] = [
+    "-token",
+    "-secret",
+    "-key",
+    "-password",
+    "-credential",
+    "-auth",
+    "-bearer",
+    "-signature",
+    "-hmac",
+];
+
+/// Whether a lowercased header name must be withheld from the sanitized map.
+///
+/// The blocklist is the floor; the suffix rule is what keeps a host's own convention
+/// (`x-internal-service-key`, `x-webhook-signature`) from leaking through a filter that only
+/// knew the names this library ships with.
+fn is_sensitive_header(key: &str) -> bool {
+    SENSITIVE_HEADERS.contains(&key)
+        || key.strip_prefix("x-").is_some_and(|rest| {
+            SENSITIVE_HEADER_SUFFIXES
+                .iter()
+                .any(|suffix| rest.ends_with(suffix))
+        })
+}
 
 /// The sensitive headers as typed [`HeaderName`]s, for the `SetSensitiveRequestHeadersLayer`
 /// that masks them in `tracing` spans/events. Derived from [`SENSITIVE_HEADERS`] so the
@@ -90,7 +152,7 @@ fn sanitize_headers(parts: &Parts) -> BTreeMap<String, String> {
     let mut map = BTreeMap::new();
     for (name, value) in parts.headers.iter() {
         let key = name.as_str().to_ascii_lowercase();
-        if SENSITIVE_HEADERS.contains(&key.as_str()) {
+        if is_sensitive_header(&key) {
             continue;
         }
         if let Ok(text) = value.to_str() {
@@ -249,6 +311,94 @@ mod tests {
         }
         assert!(names.iter().any(|name| name == "x-csrf-token"));
         assert_eq!(names.len(), SENSITIVE_HEADERS.len());
+    }
+
+    #[test]
+    fn the_blocklist_matches_nest_auths_entry_for_entry() {
+        // The sanitized map goes to host-supplied hooks. A host wiring one audit sink behind
+        // both backends must not receive from one what the other withholds, so the list is
+        // pinned by name rather than by count alone.
+        for blocked in [
+            "authorization",
+            "cookie",
+            "proxy-authorization",
+            "www-authenticate",
+            "x-api-key",
+            "x-auth-token",
+            "x-csrf-token",
+            "x-session-id",
+            "x-forwarded-for",
+            "x-forwarded-host",
+            "x-real-ip",
+            "x-original-forwarded-for",
+            "cf-connecting-ip",
+            "true-client-ip",
+            "x-cluster-client-ip",
+        ] {
+            assert!(
+                is_sensitive_header(blocked),
+                "{blocked} is on nest-auth's blocklist but reaches the hook context here"
+            );
+        }
+    }
+
+    #[test]
+    fn the_suffix_rule_reproduces_nest_auths_pattern() {
+        // Every suffix the pattern names, on a custom header a host might define.
+        for sensitive in [
+            "x-refresh-token",
+            "x-client-secret",
+            "x-service-key",
+            "x-api-password",
+            "x-service-credential",
+            "x-service-auth",
+            "x-custom-bearer",
+            "x-webhook-signature",
+            "x-service-hmac",
+        ] {
+            assert!(is_sensitive_header(sensitive), "{sensitive} leaked");
+        }
+
+        // …and the boundaries, which are where a suffix rule and the regex it stands in for
+        // could quietly disagree. The regex requires a dash of its own before the suffix, so a
+        // bare `x-token` is NOT sensitive; a non-`x-` header is never matched by the pattern
+        // however it ends; and an ordinary header is untouched.
+        for benign in [
+            "x-token",
+            "x-key",
+            "content-type",
+            "x-request-id",
+            "user-agent",
+            "session-token",
+            "accept",
+        ] {
+            assert!(
+                !is_sensitive_header(benign),
+                "{benign} was stripped, but nest-auth forwards it"
+            );
+        }
+    }
+
+    #[test]
+    fn a_custom_secret_header_never_reaches_the_hook_context() {
+        // End to end through the real context builder: the blocklist, the suffix rule, and a
+        // benign header, so the filter is pinned where it is actually applied.
+        let parts = parts_with(&[
+            ("x-api-key", "k-1"),
+            ("proxy-authorization", "Basic abc"),
+            ("x-internal-service-key", "s-1"),
+            ("x-request-id", "req-1"),
+        ]);
+        let ctx = request_context(&parts);
+        assert!(!ctx.sanitized_headers.contains_key("x-api-key"));
+        assert!(!ctx.sanitized_headers.contains_key("proxy-authorization"));
+        assert!(!ctx.sanitized_headers.contains_key("x-internal-service-key"));
+        assert_eq!(
+            ctx.sanitized_headers
+                .get("x-request-id")
+                .map(String::as_str),
+            Some("req-1")
+        );
     }
 
     #[test]

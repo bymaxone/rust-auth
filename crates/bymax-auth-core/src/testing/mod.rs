@@ -304,6 +304,10 @@ pub struct InMemoryStores {
     /// `fam:` family index: a family id → the set of its live session hashes, so a whole
     /// lineage can be revoked on reuse detection. Keyed by `(kind, family_id)`.
     families: Mutex<HashMap<(SessionKind, String), HashSet<String>>>,
+    /// How many upcoming best-effort cleanup writes must fail with a backend error, set
+    /// through [`InMemoryStores::fail_next_cleanup_writes`]. Zero — the default — means every
+    /// call behaves normally.
+    forced_write_failures: Mutex<usize>,
     /// `ep:`/`pep:` per-user token epoch (generation counter), keyed by `(kind, user_id)`. A
     /// bump invalidates every access token stamped below the new value. Absent reads as `0`.
     epochs: Mutex<HashMap<(SessionKind, String), u64>>,
@@ -342,6 +346,29 @@ impl InMemoryStores {
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Make the next `count` best-effort cleanup writes fail with a backend error.
+    ///
+    /// Covers the calls the library deliberately swallows — `revoke_session`,
+    /// `delete_grace_pointer`, and the reset-token rollback `delete_token` — because logout,
+    /// over-cap eviction, and an undeliverable reset link must not fail on the store's account.
+    /// That swallowing leaves those paths unreachable against a double that always succeeds,
+    /// and so unasserted. Arming a finite number of failures is what lets a test prove the
+    /// failure is handled and reported rather than merely assumed to be. Counts down per
+    /// affected call; the default of zero leaves every call behaving normally.
+    pub fn fail_next_cleanup_writes(&self, count: usize) {
+        *lock(&self.forced_write_failures) = count;
+    }
+
+    /// Consume one armed failure, if any, returning the error the caller should surface.
+    fn take_forced_failure(&self) -> Result<(), AuthError> {
+        let mut remaining = lock(&self.forced_write_failures);
+        if *remaining == 0 {
+            return Ok(());
+        }
+        *remaining -= 1;
+        Err(AuthError::Internal("session store unavailable".into()))
     }
 
     /// The TTL the last created session was stored with, in seconds. A test-only inspection
@@ -501,6 +528,7 @@ impl SessionStore for InMemoryStores {
         user_id: &str,
         session_hash: &str,
     ) -> Result<(), AuthError> {
+        self.take_forced_failure()?;
         let mut index = lock(&self.session_index);
         let details = index
             .get_mut(&(kind, user_id.to_owned()))
@@ -519,6 +547,7 @@ impl SessionStore for InMemoryStores {
         kind: SessionKind,
         session_hash: &str,
     ) -> Result<(), AuthError> {
+        self.take_forced_failure()?;
         // The grace pointer is keyed by the OLD token's hash; deleting it (idempotently) blocks a
         // post-logout grace-window recovery, mirroring the real store's `DEL rp:`/`prp:`.
         lock(&self.grace).remove(&(kind, session_hash.to_owned()));
@@ -712,6 +741,7 @@ impl PasswordResetStore for InMemoryStores {
     }
 
     async fn delete_token(&self, token: &str) -> Result<(), AuthError> {
+        self.take_forced_failure()?;
         lock(&self.reset_tokens).remove(&token_key(token));
         Ok(())
     }

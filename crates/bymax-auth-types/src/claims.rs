@@ -298,4 +298,78 @@ mod tests {
             Some(MfaContext::Dashboard)
         );
     }
+
+    #[test]
+    fn the_epoch_claim_matches_the_shared_wire_contract() {
+        // The `accessTokenClaims` section of `conformance/wire-contract.json` — held
+        // byte-identical by nest-auth — is what makes bulk revocation work across both backends:
+        // one side stamps the generation and the other rejects on it. Reading the declaration
+        // rather than repeating it means a rename, a type change, or a flipped comparison on
+        // either side turns that side red instead of quietly un-revoking tokens in production.
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../conformance/wire-contract.json"
+        );
+        let raw = std::fs::read_to_string(path).unwrap_or_default();
+        let root: serde_json::Value = serde_json::from_str(&raw).unwrap_or(serde_json::Value::Null);
+        let epoch = root
+            .get("accessTokenClaims")
+            .and_then(|c| c.get("epoch"))
+            .cloned()
+            .unwrap_or(serde_json::Value::Null);
+        assert!(
+            epoch.is_object(),
+            "the wire contract declared no `accessTokenClaims.epoch` — it did not load"
+        );
+
+        // The claim is spelled exactly as declared, and both planes stamp it.
+        let name = epoch.get("claim").and_then(serde_json::Value::as_str);
+        assert_eq!(name, Some("epoch"));
+        let dashboard = serde_json::to_value(dashboard_claims()).unwrap_or_default();
+        assert_eq!(dashboard.get("epoch"), Some(&serde_json::json!(3)));
+        let platform = serde_json::to_value(PlatformClaims {
+            sub: "p_1".to_owned(),
+            jti: "jti-2".to_owned(),
+            role: "super_admin".to_owned(),
+            token_type: PlatformType::Platform,
+            mfa_enabled: false,
+            mfa_verified: false,
+            iat: 1,
+            exp: 2,
+            epoch: 7,
+        })
+        .unwrap_or_default();
+        assert_eq!(platform.get("epoch"), Some(&serde_json::json!(7)));
+
+        // A non-negative integer on the wire: `u64` cannot go negative, and the JSON must carry
+        // it as a bare number rather than a string a sibling reader would compare lexically.
+        assert_eq!(
+            epoch.get("type").and_then(serde_json::Value::as_str),
+            Some("non-negative integer")
+        );
+        assert!(
+            dashboard
+                .get("epoch")
+                .is_some_and(serde_json::Value::is_u64)
+        );
+
+        // The two rules a verifier implements. `absentReadsAs` is pinned by the legacy-token test
+        // above; the rejection is strict `<`, so a token stamped AT the current generation still
+        // verifies — an off-by-one here would log every user out on their first bump.
+        assert_eq!(
+            epoch.get("absentReadsAs"),
+            Some(&serde_json::json!(0)),
+            "an absent claim reading as anything but 0 would make the mechanism fire on legacy tokens"
+        );
+        assert_eq!(
+            epoch.get("rejectWhen").and_then(serde_json::Value::as_str),
+            Some("stampedEpoch < storedEpoch")
+        );
+
+        // The stored side of the contract: the key the generation is read back from.
+        assert_eq!(
+            epoch.get("storedUnder").and_then(serde_json::Value::as_str),
+            Some("{ep|pep}:{userId}")
+        );
+    }
 }

@@ -408,9 +408,18 @@ impl MfaService {
     ///
     /// Returns [`AuthError::AccountLocked`] when the window is tripped, or a store
     /// [`AuthError`] on failure.
-    async fn assert_not_locked(&self, bf_id: &str) -> Result<(), AuthError> {
+    async fn assert_not_locked(
+        &self,
+        flow: &str,
+        user_id: &str,
+        bf_id: &str,
+    ) -> Result<(), AuthError> {
         if self.brute_force.is_locked(bf_id).await? {
             let retry = self.brute_force.remaining_lockout_secs(bf_id).await?;
+            // The lockout itself is the security event an operator watches for: repeated hits
+            // on one account are a second-factor guessing campaign. The identifier is the
+            // caller's user id, never the hashed brute-force key, which says nothing on its own.
+            tracing::warn!(%flow, %user_id, "mfa: account locked");
             return Err(AuthError::AccountLocked {
                 retry_after_seconds: Some(retry),
             });

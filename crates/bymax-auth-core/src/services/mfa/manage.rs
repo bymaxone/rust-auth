@@ -99,7 +99,7 @@ impl MfaService {
             return Err(AuthError::MfaNotEnabled);
         }
         let bf_id = self.disable_bf_id(user_id);
-        self.assert_not_locked(&bf_id).await?;
+        self.assert_not_locked("disable", user_id, &bf_id).await?;
         // An enabled account with no stored secret is an inconsistency, not a user error.
         let encrypted = view.mfa_secret.clone().ok_or(AuthError::TokenInvalid)?;
         let raw_secret = self
@@ -109,10 +109,12 @@ impl MfaService {
             .verify_totp_with_anti_replay(user_id, &raw_secret, code)
             .await?
         {
+            tracing::warn!(%user_id, "mfa disable: invalid code");
             self.brute_force.record_failure(&bf_id).await?;
             return Err(AuthError::MfaInvalidCode);
         }
         self.brute_force.reset(&bf_id).await?;
+        tracing::info!(%user_id, "mfa: disabled");
         Ok(())
     }
 

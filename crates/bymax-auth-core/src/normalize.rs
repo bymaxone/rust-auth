@@ -28,9 +28,37 @@ pub fn normalize_email(email: &str) -> String {
     email.trim().to_lowercase()
 }
 
+/// Mask an email address for safe inclusion in a log line.
+///
+/// Keeps the first character of the local part and the whole domain, so an operator reading a
+/// lockout or failed-login warning can tell which account it is about without the log becoming a
+/// store of personal data. A value with no local part — no `@`, or one in the first position —
+/// masks entirely rather than leaking the fragment it does have.
+///
+/// Byte-for-byte the same rule as nest-auth's `maskEmail`, so one log pipeline fed by both
+/// backends shows one spelling for one account.
+///
+/// # Examples
+///
+/// ```
+/// # use bymax_auth_core::mask_email;
+/// assert_eq!(mask_email("john.doe@example.com"), "j***@example.com");
+/// assert_eq!(mask_email("@example.com"), "***");
+/// ```
+#[must_use]
+pub fn mask_email(email: &str) -> String {
+    match email.find('@') {
+        Some(at) if at > 0 => {
+            let first = email.chars().next().unwrap_or_default();
+            format!("{first}***{}", &email[at..])
+        }
+        _ => "***".to_owned(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::normalize_email;
+    use super::{mask_email, normalize_email};
 
     #[test]
     fn trims_and_lowercases() {
@@ -76,6 +104,33 @@ mod tests {
         assert_eq!(
             normalize_email("a.b+tag@example.com"),
             "a.b+tag@example.com"
+        );
+    }
+
+    #[test]
+    fn masking_keeps_the_first_character_and_the_domain() {
+        // What an operator needs from a lockout warning is which account and which domain —
+        // never the full address, which would turn the log into a store of personal data.
+        assert_eq!(mask_email("john.doe@example.com"), "j***@example.com");
+        assert_eq!(mask_email("a@b.co"), "a***@b.co");
+    }
+
+    #[test]
+    fn masking_hides_a_value_with_no_local_part() {
+        // No `@` at all, or one in the first position, means there is no local part to keep a
+        // character of — so nothing is echoed rather than the fragment that does exist.
+        assert_eq!(mask_email("@example.com"), "***");
+        assert_eq!(mask_email("not-an-email"), "***");
+        assert_eq!(mask_email(""), "***");
+    }
+
+    #[test]
+    fn masking_survives_a_multibyte_local_part() {
+        // The domain is sliced at the byte index of `@`, and the kept character is taken as a
+        // char: a non-ASCII first character must not panic on a byte boundary.
+        assert_eq!(
+            mask_email("\u{e9}lise@example.com"),
+            "\u{e9}***@example.com"
         );
     }
 }

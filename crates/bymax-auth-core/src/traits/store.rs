@@ -846,7 +846,29 @@ mod tests {
             last_activity_at: OffsetDateTime::from_unix_timestamp(1_700_000_060)
                 .unwrap_or(OffsetDateTime::UNIX_EPOCH),
         };
+        // Anchored to the shared contract, which declares this record's timestamps numeric while
+        // declaring the refresh session's ISO-8601: the two disagree deliberately, and reading the
+        // declaration here is what stops a well-meaning "make the encodings uniform" change from
+        // passing both suites while splitting the keyspace.
+        assert_eq!(
+            contract_section("sessionDetail")
+                .get("createdAt")
+                .and_then(serde_json::Value::as_str),
+            Some("unix-milliseconds-number")
+        );
+        assert_eq!(
+            contract_section("sessionDetail")
+                .get("lastActivityAt")
+                .and_then(serde_json::Value::as_str),
+            Some("unix-milliseconds-number")
+        );
         let json = serde_json::to_string(&detail)?;
+        for field in contract_fields("sessionDetail") {
+            assert!(
+                json.contains(&format!("\"{field}\":")),
+                "sessionDetail field `{field}` is named in the wire contract but absent from the record"
+            );
+        }
         assert!(json.contains("\"createdAt\":1700000000000"));
         assert!(json.contains("\"lastActivityAt\":1700000060000"));
         // No quotes around the values — a stringly-typed timestamp is exactly the divergence.
@@ -1013,6 +1035,140 @@ mod tests {
             Ok(ref stored)
                 if stored.created_at == invitation.created_at && stored.inviter_user_id == "owner-1"
         ));
+        Ok(())
+    }
+
+    /// Read a section of the shared cross-implementation wire contract.
+    ///
+    /// The file at `conformance/wire-contract.json` is held byte-identical by nest-auth, which
+    /// can back the same deployment over the same Redis. Reading it here rather than repeating
+    /// its values means a field rename or an encoding change on either side turns that side red
+    /// immediately, instead of surfacing later as a record the sibling backend cannot parse.
+    fn contract_section(section: &str) -> serde_json::Value {
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../conformance/wire-contract.json"
+        );
+        let raw = std::fs::read_to_string(path).unwrap_or_default();
+        let root: serde_json::Value = serde_json::from_str(&raw).unwrap_or(serde_json::Value::Null);
+        root.get("recordEncodings")
+            .and_then(|r| r.get(section))
+            .cloned()
+            .unwrap_or(serde_json::Value::Null)
+    }
+
+    /// The field names the contract declares for one record, in declaration order.
+    ///
+    /// Panics on an empty list. A contract that failed to load reads as "no fields to check",
+    /// which would make every assertion below pass over nothing — the one failure mode a
+    /// conformance test cannot afford, since it looks identical to conformance.
+    fn contract_fields(section: &str) -> Vec<String> {
+        let fields: Vec<String> = contract_section(section)
+            .get("fields")
+            .and_then(serde_json::Value::as_array)
+            .map(|fields| {
+                fields
+                    .iter()
+                    .filter_map(serde_json::Value::as_str)
+                    .map(str::to_owned)
+                    .collect()
+            })
+            .unwrap_or_default();
+        assert!(
+            !fields.is_empty(),
+            "the wire contract declared no fields for `{section}` — it did not load"
+        );
+        fields
+    }
+
+    #[test]
+    fn the_refresh_session_record_matches_the_shared_wire_contract() -> serde_json::Result<()> {
+        // Every field the contract names must be on the wire, spelled the way the contract spells
+        // it. A record the sibling backend cannot read is not a parse error there — the reader
+        // evicts what it cannot parse, so a drifted field name silently logs the user out.
+        let json: serde_json::Value = serde_json::to_value(session_record())?;
+        for field in contract_fields("refreshSession") {
+            assert!(
+                json.get(&field).is_some(),
+                "refreshSession field `{field}` is named in the wire contract but absent from the record"
+            );
+        }
+
+        // `createdAt` is an ISO-8601 string here, unlike the session DETAIL below. The split is
+        // the trap the contract exists to pin: the two records disagree on purpose.
+        assert_eq!(
+            contract_section("refreshSession")
+                .get("createdAt")
+                .and_then(serde_json::Value::as_str),
+            Some("iso8601-string")
+        );
+        assert_eq!(
+            json.get("createdAt").and_then(serde_json::Value::as_str),
+            Some("1970-01-01T00:00:00Z")
+        );
+        assert_eq!(
+            json.get("familyCreatedAt")
+                .and_then(serde_json::Value::as_str),
+            Some("1970-01-01T00:00:00Z")
+        );
+
+        // `mfaEnabled` must survive a rotation: the MFA gate refuses only a token whose claims
+        // say `mfaEnabled && !mfaVerified`, so a record that drops it turns one routine refresh
+        // into a silent second-factor bypass.
+        assert_eq!(
+            json.get("mfaEnabled"),
+            Some(&serde_json::Value::Bool(false))
+        );
+
+        // An empty family is omitted from the wire entirely, never written as `""` — nest-auth
+        // omits it the same way, and a record differing by that one key is not byte-identical.
+        let legacy = SessionRecord {
+            family_id: String::new(),
+            family_created_at: None,
+            ..session_record()
+        };
+        let legacy_json: serde_json::Value = serde_json::to_value(legacy)?;
+        assert!(legacy_json.get("familyId").is_none());
+        assert!(legacy_json.get("familyCreatedAt").is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn the_invitation_and_reset_context_records_match_the_shared_wire_contract()
+    -> serde_json::Result<()> {
+        // An invitation is consumed with a single-use GETDEL, so a record the reader rejects is
+        // destroyed rather than retried: a missing field loses the invitation outright.
+        let invitation = StoredInvitation {
+            email: "invitee@example.com".into(),
+            role: "MEMBER".into(),
+            tenant_id: "t1".into(),
+            inviter_user_id: "owner-1".into(),
+            created_at: OffsetDateTime::UNIX_EPOCH,
+        };
+        let json: serde_json::Value = serde_json::to_value(invitation)?;
+        for field in contract_fields("invitation") {
+            assert!(
+                json.get(&field).is_some(),
+                "invitation field `{field}` is named in the wire contract but absent from the record"
+            );
+        }
+        assert_eq!(
+            json.get("createdAt").and_then(serde_json::Value::as_str),
+            Some("1970-01-01T00:00:00Z")
+        );
+
+        let context = ResetContext {
+            user_id: "u1".into(),
+            email: "u1@example.com".into(),
+            tenant_id: "t1".into(),
+        };
+        let json: serde_json::Value = serde_json::to_value(context)?;
+        for field in contract_fields("passwordResetContext") {
+            assert!(
+                json.get(&field).is_some(),
+                "passwordResetContext field `{field}` is named in the wire contract but absent from the record"
+            );
+        }
         Ok(())
     }
 }

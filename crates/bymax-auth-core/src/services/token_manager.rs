@@ -304,12 +304,18 @@ impl TokenManagerService {
                 // signature of a stolen token. Revoke the whole family (every live descendant
                 // of that login) so the thief's chain dies too, then reject: every holder must
                 // re-authenticate (§12.5.2, OWASP rotation with automatic reuse detection).
+                tracing::warn!(
+                    "refresh: reuse of a consumed refresh token detected — revoking the token family"
+                );
                 self.session_store
                     .revoke_family(SessionKind::Dashboard, &family)
                     .await?;
                 Err(AuthError::RefreshTokenInvalid)
             }
-            RotateOutcome::Invalid => Err(AuthError::RefreshTokenInvalid),
+            RotateOutcome::Invalid => {
+                tracing::warn!("refresh: no live session or grace window for the presented token");
+                Err(AuthError::RefreshTokenInvalid)
+            }
         }
     }
 
@@ -479,12 +485,20 @@ impl TokenManagerService {
             RotateOutcome::Reused(family) => {
                 // Post-grace replay of a consumed platform refresh token: revoke the whole
                 // family and reject, the platform-keyspace analogue of the dashboard path.
+                tracing::warn!(
+                    "platform refresh: reuse of a consumed refresh token detected — revoking the token family"
+                );
                 self.session_store
                     .revoke_family(SessionKind::Platform, &family)
                     .await?;
                 Err(AuthError::RefreshTokenInvalid)
             }
-            RotateOutcome::Invalid => Err(AuthError::RefreshTokenInvalid),
+            RotateOutcome::Invalid => {
+                tracing::warn!(
+                    "platform refresh: no live session or grace window for the presented token"
+                );
+                Err(AuthError::RefreshTokenInvalid)
+            }
         }
     }
 

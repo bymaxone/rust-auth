@@ -12,7 +12,7 @@ use bymax_auth_types::{
 
 use crate::context::RequestContext;
 use crate::engine::AuthEngine;
-use crate::normalize::normalize_email;
+use crate::normalize::{mask_email, normalize_email};
 use crate::services::auth::detached::{
     run_after_login, run_rehash_password, run_update_last_login,
 };
@@ -47,7 +47,13 @@ impl AuthEngine {
         let identifier = self.hashed_identifier(&tenant_id, &input.email);
 
         // Brute-force gate first (so an already-locked account never increments again).
-        self.assert_not_locked(&identifier).await?;
+        if let Err(error) = self.assert_not_locked(&identifier).await {
+            // Kept on one line on purpose: a `tracing` field expression on its own line is
+            // never evaluated without an installed subscriber, so it would read as an
+            // uncovered line under the 100% gate while being perfectly exercised.
+            tracing::warn!(email = %mask_email(&input.email), %tenant_id, "login: account locked");
+            return Err(error);
+        }
 
         let hook_ctx = HookContext::from_request(
             ctx,
@@ -111,6 +117,7 @@ impl AuthEngine {
                 .tokens()
                 .issue_mfa_temp_token(&user.id, MfaContext::Dashboard)
                 .await?;
+            tracing::info!(user_id = %user.id, tenant_id = %tenant_id, "login: MFA challenge issued");
             return Ok(LoginResult::MfaChallenge(MfaChallengeResult {
                 mfa_required: true,
                 mfa_temp_token,
@@ -118,6 +125,7 @@ impl AuthEngine {
         }
 
         // A fresh session is minted on success (session-fixation resistance).
+        tracing::info!(user_id = %user.id, tenant_id = %tenant_id, "login: success");
         self.issue_session_result(user, &ctx.ip, &ctx.user_agent, hook_ctx)
             .await
     }
@@ -135,6 +143,7 @@ impl AuthEngine {
         identifier: &str,
         started: Instant,
     ) -> Result<T, AuthError> {
+        tracing::warn!("login: invalid credentials");
         self.brute_force().record_failure(identifier).await?;
         normalize_anti_enum(started).await;
         Err(AuthError::InvalidCredentials)

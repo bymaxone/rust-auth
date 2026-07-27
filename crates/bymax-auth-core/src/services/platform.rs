@@ -29,7 +29,7 @@ use bymax_auth_types::{
     SafeAuthPlatformUser,
 };
 
-use crate::normalize::normalize_email;
+use crate::normalize::{mask_email, normalize_email};
 use crate::services::auth::{normalize_anti_enum, spawn_guarded};
 use crate::services::brute_force::BruteForceService;
 use crate::services::password::PasswordService;
@@ -116,7 +116,10 @@ impl PlatformAuthService {
         let identifier = self.brute_force_identifier(email);
 
         // Brute-force gate first, so an already-locked account never increments again.
-        self.assert_not_locked(&identifier).await?;
+        if let Err(error) = self.assert_not_locked(&identifier).await {
+            tracing::warn!(email = %mask_email(email), "platform login: account locked");
+            return Err(error);
+        }
 
         // The timing floor starts here so the unknown-admin and wrong-password paths are
         // indistinguishable in elapsed time, not just in status/body.
@@ -173,6 +176,7 @@ impl PlatformAuthService {
                 .tokens
                 .issue_mfa_temp_token(&admin.id, MfaContext::Platform)
                 .await?;
+            tracing::info!(admin_id = %admin.id, "platform login: MFA challenge issued");
             return Ok(PlatformLoginResult::MfaChallenge(MfaChallengeResult {
                 mfa_required: true,
                 mfa_temp_token,
@@ -307,6 +311,7 @@ impl PlatformAuthService {
             .tokens
             .issue_platform_tokens(&safe, ip, user_agent, false)
             .await?;
+        tracing::info!(%admin_id, "platform login: success");
         spawn_guarded(run_update_platform_last_login(self.repo.clone(), admin_id));
         Ok(PlatformLoginResult::Success(Box::new(result)))
     }
@@ -319,6 +324,7 @@ impl PlatformAuthService {
         identifier: &str,
         started: Instant,
     ) -> Result<T, AuthError> {
+        tracing::warn!("platform login: invalid credentials");
         self.brute_force.record_failure(identifier).await?;
         normalize_anti_enum(started).await;
         Err(AuthError::InvalidCredentials)

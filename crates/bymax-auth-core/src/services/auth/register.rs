@@ -69,6 +69,7 @@ impl AuthEngine {
             .await?;
 
         let safe = SafeAuthUser::from(user);
+        tracing::info!(user_id = %safe.id, tenant_id = %tenant_id, "register: user registered");
         let result = self
             .tokens()
             .issue_tokens(&safe, &ctx.ip, &ctx.user_agent, false)

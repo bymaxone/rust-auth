@@ -65,7 +65,8 @@ impl MfaService {
     ) -> Result<LoginResultMfa, AuthError> {
         let MfaTempVerified { user_id, jti, .. } = verified;
         let bf_id = self.challenge_bf_id(&user_id);
-        self.assert_not_locked(&bf_id).await?;
+        self.assert_not_locked("challenge", &user_id, &bf_id)
+            .await?;
 
         // Fetch the dashboard user concretely; the combined guard rejects both a missing user
         // and one without MFA configured.
@@ -96,7 +97,7 @@ impl MfaService {
         // (retryable within its TTL) and only the failure counter advances.
         let recovery_index = if is_totp_code(code) {
             if !self.accept_totp(&user_id, &raw_secret, code, &jti).await? {
-                return self.reject_code(&bf_id).await;
+                return self.reject_code("challenge", &user_id, &bf_id).await;
             }
             None
         } else {
@@ -107,7 +108,7 @@ impl MfaService {
                     self.tokens.consume_mfa_temp_token(&jti).await?;
                     Some(index)
                 }
-                None => return self.reject_code(&bf_id).await,
+                None => return self.reject_code("challenge", &user_id, &bf_id).await,
             }
         };
 
@@ -130,6 +131,7 @@ impl MfaService {
             .await?;
         let hook_ctx = self.hook_context(&user_id, &email, ip, user_agent);
         spawn_guarded(run_after_login(self.hooks.clone(), safe, hook_ctx));
+        tracing::info!(user_id = %user_id, "mfa: challenge passed");
         Ok(LoginResultMfa::Dashboard(result))
     }
 
@@ -148,7 +150,8 @@ impl MfaService {
     ) -> Result<LoginResultMfa, AuthError> {
         let MfaTempVerified { user_id, jti, .. } = verified;
         let bf_id = self.challenge_bf_id(&user_id);
-        self.assert_not_locked(&bf_id).await?;
+        self.assert_not_locked("platform challenge", &user_id, &bf_id)
+            .await?;
 
         // The platform repository is required for a platform challenge; without it the build has
         // no platform surface, so the challenge fails closed (never persist a platform secret on
@@ -183,7 +186,9 @@ impl MfaService {
         let recovery_codes = admin.mfa_recovery_codes.clone().unwrap_or_default();
         let recovery_index = if is_totp_code(code) {
             if !self.accept_totp(&user_id, &raw_secret, code, &jti).await? {
-                return self.reject_code(&bf_id).await;
+                return self
+                    .reject_code("platform challenge", &user_id, &bf_id)
+                    .await;
             }
             None
         } else {
@@ -194,7 +199,11 @@ impl MfaService {
                     self.tokens.consume_mfa_temp_token(&jti).await?;
                     Some(index)
                 }
-                None => return self.reject_code(&bf_id).await,
+                None => {
+                    return self
+                        .reject_code("platform challenge", &user_id, &bf_id)
+                        .await;
+                }
             }
         };
 
@@ -223,6 +232,7 @@ impl MfaService {
             .tokens
             .issue_platform_tokens(&safe, ip, user_agent, true)
             .await?;
+        tracing::info!(user_id = %user_id, "mfa: platform challenge passed");
         Ok(LoginResultMfa::Platform(result))
     }
 
@@ -288,7 +298,13 @@ impl MfaService {
 
     /// Record a failed challenge attempt and return the retryable [`AuthError::MfaInvalidCode`]
     /// (the temp token stays alive; the lockout eventually fires).
-    async fn reject_code(&self, bf_id: &str) -> Result<LoginResultMfa, AuthError> {
+    async fn reject_code(
+        &self,
+        flow: &str,
+        user_id: &str,
+        bf_id: &str,
+    ) -> Result<LoginResultMfa, AuthError> {
+        tracing::warn!(%flow, %user_id, "mfa: invalid code");
         self.brute_force.record_failure(bf_id).await?;
         Err(AuthError::MfaInvalidCode)
     }

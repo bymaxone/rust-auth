@@ -120,10 +120,14 @@ impl AuthEngine {
             expires_at,
         };
         // Best-effort delivery: a send failure does not roll back the persisted invitation.
-        let _ = self
+        if let Err(error) = self
             .email_provider()
             .send_invitation(&email, &invite_data, None)
-            .await;
+            .await
+        {
+            tracing::error!(%error, "invitation: delivery failed (the invitation stands)");
+        }
+        tracing::info!(%tenant_id, role = %invitation.role, "invitation: created");
         Ok(())
     }
 
@@ -160,6 +164,12 @@ impl AuthEngine {
             || invitation.tenant_id.is_empty()
             || !hierarchy.contains_key(&invitation.role)
         {
+            // The consume is a single-use GETDEL, so the record is already gone: a rejection
+            // here destroys the invitation rather than merely failing it, and an undeclared role
+            // is what a tampered token looks like. Both are worth an operator's attention.
+            tracing::warn!(
+                "invitation: stored record rejected as empty or carrying an undeclared role"
+            );
             return Err(AuthError::InvalidInvitationToken);
         }
 
@@ -211,6 +221,7 @@ impl AuthEngine {
         self.enforce_sessions_after_issue(&result, ip, user_agent, &hook_ctx)
             .await?;
 
+        tracing::info!(user_id = %safe.id, tenant_id = %safe.tenant_id, "invitation: accepted");
         spawn_guarded(run_after_invitation_accepted(
             self.hooks().clone(),
             safe,
@@ -238,7 +249,9 @@ mod tests {
     use super::*;
     use crate::config::{AuthConfig, Environment};
     use crate::testing::{InMemoryStores, InMemoryUserRepository};
-    use crate::traits::{InvitationStore, SessionKind, SessionStore, UserRepository};
+    use crate::traits::{
+        EmailProvider, InvitationStore, SessionKind, SessionStore, UserRepository,
+    };
     use secrecy::SecretString;
     use std::sync::Arc;
 
@@ -644,5 +657,139 @@ mod tests {
         assert!(!dbg.contains("live-invite-token"));
         assert!(!dbg.contains("super-secret"));
         assert!(dbg.contains("Ada"));
+    }
+
+    /// An email provider whose invitation send always fails, so the best-effort delivery path
+    /// is observable. Every other method succeeds — only the send under test errors.
+    struct FailingInviteEmail;
+
+    #[async_trait::async_trait]
+    impl crate::traits::EmailProvider for FailingInviteEmail {
+        async fn send_password_reset_token(
+            &self,
+            _email: &str,
+            _token: &str,
+            _locale: Option<&str>,
+        ) -> Result<(), crate::traits::EmailError> {
+            Ok(())
+        }
+        async fn send_password_reset_otp(
+            &self,
+            _email: &str,
+            _otp: &str,
+            _locale: Option<&str>,
+        ) -> Result<(), crate::traits::EmailError> {
+            Ok(())
+        }
+        async fn send_email_verification_otp(
+            &self,
+            _email: &str,
+            _otp: &str,
+            _locale: Option<&str>,
+        ) -> Result<(), crate::traits::EmailError> {
+            Ok(())
+        }
+        async fn send_mfa_enabled(
+            &self,
+            _email: &str,
+            _locale: Option<&str>,
+        ) -> Result<(), crate::traits::EmailError> {
+            Ok(())
+        }
+        async fn send_mfa_disabled(
+            &self,
+            _email: &str,
+            _locale: Option<&str>,
+        ) -> Result<(), crate::traits::EmailError> {
+            Ok(())
+        }
+        async fn send_new_session_alert(
+            &self,
+            _email: &str,
+            _session: &crate::traits::email::SessionInfo,
+            _locale: Option<&str>,
+        ) -> Result<(), crate::traits::EmailError> {
+            Ok(())
+        }
+        async fn send_invitation(
+            &self,
+            _to: &str,
+            _data: &crate::traits::email::InviteData,
+            _locale: Option<&str>,
+        ) -> Result<(), crate::traits::EmailError> {
+            Err(crate::traits::EmailError::Delivery(
+                "smtp unavailable".into(),
+            ))
+        }
+    }
+
+    #[tokio::test]
+    async fn an_undeliverable_invitation_still_stands() {
+        // Delivery is best-effort by design: the invitation is already persisted, and rolling
+        // it back on a transient SMTP failure would destroy a token the inviter can still
+        // resend. So the failure cannot surface to the caller — which makes the log the only
+        // signal that invitations are being created and never arriving.
+        let Some(s) = setup(invite_config()) else { return };
+        let users = Arc::new(InMemoryUserRepository::new());
+        let stores = Arc::new(InMemoryStores::new());
+        let built = AuthEngine::builder()
+            .config(invite_config())
+            .environment(Environment::Test)
+            .user_repository(users.clone())
+            .redis_stores(stores.clone())
+            .email_provider(Arc::new(FailingInviteEmail))
+            .build();
+        let Ok(engine) = built else { return };
+        let admin = seed_admin(&users, "sender@example.com", "ADMIN").await;
+        drop(s);
+
+        assert!(
+            engine
+                .invite(&admin, "unreachable@example.com", "MEMBER", "t1", None)
+                .await
+                .is_ok()
+        );
+
+        // Exercise every method of the double so its object-safe surface is fully covered: the
+        // invitation send errors (the path under test), the rest succeed.
+        let provider = FailingInviteEmail;
+        let invite = crate::traits::email::InviteData {
+            inviter_name: "Inviter".to_owned(),
+            tenant_name: "Tenant".to_owned(),
+            invite_token: "t".to_owned(),
+            expires_at: time::OffsetDateTime::UNIX_EPOCH,
+        };
+        let session = crate::traits::email::SessionInfo {
+            device: "Chrome".to_owned(),
+            ip: "1.2.3.4".to_owned(),
+            session_hash: "abcd1234".to_owned(),
+        };
+        assert!(provider.send_invitation("e", &invite, None).await.is_err());
+        assert!(
+            provider
+                .send_password_reset_token("e", "t", None)
+                .await
+                .is_ok()
+        );
+        assert!(
+            provider
+                .send_password_reset_otp("e", "o", None)
+                .await
+                .is_ok()
+        );
+        assert!(
+            provider
+                .send_email_verification_otp("e", "o", None)
+                .await
+                .is_ok()
+        );
+        assert!(provider.send_mfa_enabled("e", None).await.is_ok());
+        assert!(provider.send_mfa_disabled("e", None).await.is_ok());
+        assert!(
+            provider
+                .send_new_session_alert("e", &session, None)
+                .await
+                .is_ok()
+        );
     }
 }

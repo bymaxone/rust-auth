@@ -45,6 +45,7 @@ impl MfaService {
             .put_setup_nx(&key, &json, super::MFA_SETUP_TTL_SECONDS)
             .await?
         {
+            tracing::info!(%user_id, context = ?ctx, "mfa setup: initiated");
             return Ok(self.build_setup_result(&view.email, &raw_secret, plain_codes));
         }
 
@@ -109,11 +110,13 @@ impl MfaService {
             .verify_totp_with_anti_replay(user_id, &raw_secret, code)
             .await?
         {
+            tracing::warn!(%user_id, "mfa setup: invalid TOTP code");
             return Err(AuthError::MfaInvalidCode);
         }
 
         // Atomic completion gate: only the request that wins the `GETDEL` proceeds to enable.
         if self.mfa_store.take_setup(&key).await?.is_none() {
+            tracing::warn!(%user_id, "mfa setup: pending record consumed by a concurrent request");
             return Err(AuthError::MfaSetupRequired);
         }
 
@@ -137,6 +140,7 @@ impl MfaService {
             .await?;
 
         self.notify_enabled(&view, user_id, ip, user_agent);
+        tracing::info!(%user_id, context = ?ctx, "mfa setup: enabled");
         Ok(())
     }
 
