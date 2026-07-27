@@ -15,7 +15,8 @@
   <a href="https://www.npmjs.com/package/@bymax-one/rust-auth"><img src="https://img.shields.io/npm/v/@bymax-one/rust-auth?style=flat-square&colorA=000000&colorB=000000&label=npm" alt="npm version" /></a>
   <a href="https://docs.rs/bymax-auth"><img src="https://img.shields.io/docsrs/bymax-auth?style=flat-square&colorA=000000&label=docs.rs" alt="docs.rs" /></a>
   <a href="https://github.com/bymaxone/rust-auth/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/bymaxone/rust-auth/ci.yml?branch=main&style=flat-square&colorA=000000&label=CI" alt="CI status" /></a>
-  <a href="https://github.com/bymaxone/rust-auth/actions/workflows/ci.yml"><img src="https://img.shields.io/badge/coverage-pre--release-lightgrey?style=flat-square&colorA=000000" alt="coverage" /></a>
+  <a href="https://github.com/bymaxone/rust-auth/actions/workflows/ci.yml"><img src="https://img.shields.io/badge/coverage-100%25%20lines-brightgreen?style=flat-square&colorA=000000" alt="coverage" /></a>
+  <a href="https://github.com/bymaxone/rust-auth/blob/main/.cargo/mutants.toml"><img src="https://img.shields.io/badge/mutation-gated-brightgreen?style=flat-square&colorA=000000" alt="mutation gate" /></a>
   <a href="https://scorecard.dev/viewer/?uri=github.com/bymaxone/rust-auth"><img src="https://api.scorecard.dev/projects/github.com/bymaxone/rust-auth/badge?style=flat-square" alt="OpenSSF Scorecard" /></a>
   <a href="https://rustsec.org/"><img src="https://img.shields.io/badge/audit-RustSec-000000?style=flat-square" alt="RustSec audit" /></a>
   <a href="https://github.com/bymaxone/rust-auth/attestations"><img src="https://img.shields.io/badge/provenance-attested-000000?style=flat-square" alt="build provenance" /></a>
@@ -418,13 +419,14 @@ Everything is configured through `AuthConfig`. Two ready-made profiles bundle se
 
 | Group              | Key options                                                                  | nest-compat default        |
 | ------------------ | ---------------------------------------------------------------------------- | -------------------------- |
-| **jwt**            | `secret` (required, ≥ 32 chars), `access_ttl`, `refresh_expires_in_days`     | `15m`, `7d`, HS256 (pinned) |
+| **jwt**            | `secret` (required, ≥ 32 chars), `access_ttl`, `refresh_expires_in_days`, `absolute_session_lifetime_days` | `15m`, `7d`, off, HS256 (pinned) |
 | **password**       | `active_algorithm`, scrypt `cost_factor` / Argon2id `memory_kib`             | scrypt N=2¹⁵, r=8, p=1     |
 | **token_delivery** | `Cookie` \| `Bearer` \| `Both`                                               | `Cookie`                   |
-| **cookies**        | names, `refresh_cookie_path`, `same_site`, `resolve_domains`                 | HttpOnly, Secure, Strict   |
+| **cookies**        | names, `refresh_cookie_path`, `same_site`, `trusted_origins`, `resolve_domains` | HttpOnly, Secure, Strict, `[]` |
 | **mfa**            | `encryption_key` (32 bytes), `issuer`, `totp_window`, `recovery_code_count`  | —                          |
 | **sessions**       | `enabled`, `default_max_sessions`, `max_sessions_resolver`                   | `false`, `5`               |
 | **brute_force**    | `max_attempts`, `window_seconds`                                             | `5`, `900`                 |
+| **rate limiting**  | `AxumAuthConfig::rate_limits` — per-route governor limits, pinned to the shared contract | on, per-route |
 | **password_reset** | `method` (`Token` \| `Otp`), `otp_length`, `token_ttl`                       | `Token`, 600 s             |
 | **platform**       | `enabled` (requires `roles.platform_hierarchy`)                              | `false`                    |
 | **invitations**    | `enabled`, `token_ttl`                                                       | `false`, 48 h              |
@@ -433,7 +435,36 @@ Everything is configured through `AuthConfig`. Two ready-made profiles bundle se
 | **controllers**    | per-group route toggles                                                      | feature-driven             |
 
 > [!NOTE]
-> `build()` validates every cross-field invariant (secret length/entropy, role referential integrity, parameter floors, `SameSite=None ⇒ Secure`, OAuth redirect allow-listing, required stores) and rejects an invalid config with a precise `ConfigError`.
+> `build()` validates every cross-field invariant (secret length/entropy, role referential integrity, parameter floors, `SameSite=None ⇒ Secure`, `SameSite=None ⇔ trusted_origins`, OAuth redirect allow-listing, required stores) and rejects an invalid config with a precise `ConfigError`.
+
+Two options are deliberately off by default, because switching either on changes behaviour for
+sessions and origins that already exist:
+
+- `jwt.absolute_session_lifetime_days` caps how long one login can be extended by rotation.
+  Without it, a client refreshing every fifteen minutes keeps a session alive forever.
+- `cookies.trusted_origins` is required as soon as `same_site` is `None`, and refused under any
+  other posture — that is the only setting where the browser sends the session cookie
+  cross-site, and therefore the only one where an origin needs authorizing.
+
+The breached-password check is opt-in for a different reason: it is the only part of the
+credential path that reaches the network, and a library should not start talking to a third
+party because it was upgraded. It rides the crate's own `HttpClient` seam, so a deployment
+supplies the transport it already has:
+
+```rust
+// Cargo.toml: bymax-auth = { version = "…", features = ["breach"] }
+use bymax_auth::HibpBreachChecker;
+
+let engine = AuthEngine::builder()
+    .config(config)
+    .user_repository(users)
+    .redis_stores(stores)
+    .breach_checker(Arc::new(HibpBreachChecker::new(http_client)))
+    .build()?;
+```
+
+The checker fails **open** by contract: an unreachable corpus must never stop someone changing
+their password — least of all during an incident, when changing it is the urgent thing.
 
 ---
 
@@ -527,6 +558,11 @@ When integrating `bymax-auth` in production, verify each of the following:
 | Cookies           | HttpOnly, Secure-by-default, `SameSite=Strict`, path-scoped refresh   |
 | Brute-Force       | Redis atomic fixed-window counters per `HMAC(tenant:email)`           |
 | CSRF (OAuth)      | 64-hex single-use `state` (`GETDEL`) + PKCE `code_verifier` (S256)    |
+| Refresh Rotation  | Single-use tokens with a grace window; a replay past it revokes that login's whole family lineage |
+| Cross-Site Writes | `Origin` / `Sec-Fetch-Site` check on cookie-authenticated writes — the gap `SameSite=None` leaves open |
+| Breached Passwords| Optional Have I Been Pwned range check by k-anonymity; only a 5-char SHA-1 prefix leaves the process |
+| Rate Limiting     | Per-route `tower_governor` layer, in-process; the limits themselves are pinned to the shared contract |
+| Session Lifetime  | Optional absolute cap on how long one login can be extended by rotation |
 | Edge Verify       | Same HS256 primitive compiled to WebAssembly — no network call        |
 
 > [!IMPORTANT]
@@ -593,8 +629,8 @@ Tracked with [Criterion](https://github.com/bheisler/criterion.rs) so a regressi
 
 Authentication is critical infrastructure, so the suite is held to a bar beyond "it compiles" — every behavior is pinned so a regression **fails a test**.
 
-- ✅ **100% line + region coverage** — enforced as a release gate via [`cargo-llvm-cov`](https://github.com/taiki-e/cargo-llvm-cov) across the full `cargo-hack` feature matrix
-- ✅ **Near-100% mutation score** — verified with [`cargo-mutants`](https://mutants.rs/): faults are seeded into the source and the suite must catch them
+- ✅ **100% line and function coverage** — enforced as a release gate via [`cargo-llvm-cov --fail-under-lines 100`](https://github.com/taiki-e/cargo-llvm-cov) across the full `cargo-hack` feature matrix
+- ✅ **Mutation-gated** — [`cargo-mutants`](https://mutants.rs/) seeds faults into the source and the suite must catch them; every surviving mutant is either killed by a new test or recorded in [`.cargo/mutants.toml`](.cargo/mutants.toml) with the reason it cannot be. The sweep runs post-merge on `main`, never on a PR (it takes hours: the Redis stores are exercised against a real container)
 - ✅ **Property tests + fuzzing** — `proptest` round-trips and `cargo-fuzz` smoke runs over the trust-boundary parsers (JWT, PHC, base32)
 - ✅ **Real-Redis E2E** — atomic Lua, rotation/grace, and revocation proven against `redis:8` via [`testcontainers`](https://github.com/testcontainers/testcontainers-rs)
 - ✅ **Edge parity** — `wasm-bindgen-test` confirms the WASM verifier accepts a token signed by the backend
@@ -683,6 +719,28 @@ Route groups mount only when their feature **and** runtime toggle are enabled, s
 | `createClientRefreshHandler()` | POST handler | Client-triggered token refresh                   |
 | `createLogoutHandler()`        | POST handler | Clear tokens and session                         |
 | `verifyJwtToken()`             | Edge helper  | WASM-backed HS256 verification (server/edge only)|
+
+---
+
+## 🗺️ Roadmap
+
+The items below are on deck for future releases. None ship today — the list exists so
+contributors can see where the workspace is headed and where help is most useful. Open an issue
+to discuss priorities or propose a design.
+
+| Area                        | Item                                                                                                                     | Status    |
+| --------------------------- | ------------------------------------------------------------------------------------------------------------------------ | --------- |
+| Registry publishing         | OIDC trusted publishing, the `release` workflow, SBOM/attestation publishing, and the tag ↔ version gate (P12's second half) | Deferred  |
+| OAuth providers             | A provider trait implementation set beyond Google — GitHub, Microsoft, Apple — behind the existing `OAuthProvider` seam   | Planned   |
+| Error-message i18n          | Locale presets for `AuthError`'s user-facing messages (defaults are English)                                             | Planned   |
+| Passwordless / magic link   | Single-use link flow reusing `generate_secure_token` and the `EmailProvider` seam                                        | Exploring |
+| Passkeys / WebAuthn         | WebAuthn as an MFA method, and eventually a first factor, behind its own feature                                         | Exploring |
+| Per-tenant configuration    | Per-tenant overrides for session limits, MFA enforcement, and password policy, resolved per request                      | Exploring |
+| Pluggable password policy   | A `PasswordPolicy` seam for complexity classes and per-tenant rules (the breach check already ships as `PasswordBreachChecker`) | Planned   |
+| Additional adapters         | An `actix-web` adapter alongside `bymax-auth-axum`, sharing the same engine and wire contract                            | Exploring |
+
+> Track progress and discuss proposals on the [issues board](https://github.com/bymaxone/rust-auth/issues).
+> Phase-level status for the work already delivered lives in [docs/development_plan.md](./docs/development_plan.md).
 
 ---
 

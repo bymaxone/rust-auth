@@ -29,6 +29,7 @@ oauth = []                # OAuth orchestration + traits; no HTTP client
 oauth-reqwest = ["oauth"] # adds the bundled ReqwestHttpClient (pulls reqwest)
 platform = []
 invitations = []
+breach = []               # breached-password refusal (HIBP k-anonymity over the HttpClient seam)
 
 # Infrastructure / adapters.
 redis = []
@@ -45,6 +46,7 @@ full = [
     "oauth-reqwest",
     "platform",
     "invitations",
+    "breach",
     "redis",
     "axum",
     "client",
