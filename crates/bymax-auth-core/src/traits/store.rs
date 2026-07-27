@@ -171,6 +171,16 @@ pub struct WsTicketSnapshot {
     pub mfa_verified: bool,
 }
 
+/// How long a [`SessionStore`] must keep a bumped token epoch readable, in seconds (30 days).
+///
+/// The epoch record is what makes an already-issued access token verifiable as stale. If it can
+/// lapse while a pre-bump token is still inside its own `exp` window, [`SessionStore::current_epoch`]
+/// falls back to `0`, the `token.epoch < stored` test stops firing, and a token revoked by a
+/// password reset becomes valid again — a fail-open. Startup validation therefore rejects an
+/// `jwt.access_expires_in` longer than this bound, which lets a store safely expire the record
+/// rather than retaining it forever.
+pub const TOKEN_EPOCH_RETENTION_SECS: u64 = 30 * 24 * 60 * 60;
+
 /// Refresh-session lifecycle plus access-JWT revocation. Backs the `rt`/`prt`, `rp`/`prp`,
 /// `sess`/`psess`, `sd`/`psd`, and `rv` keyspaces.
 ///
@@ -263,6 +273,10 @@ pub trait SessionStore: Send + Sync {
     /// outstanding access token for that user at once (a password reset or a sign-out-everywhere).
     /// Idempotent in effect: each call advances the generation, and only tokens stamped at or
     /// above the new value remain valid.
+    ///
+    /// An implementation that expires the stored epoch must retain it for at least
+    /// [`TOKEN_EPOCH_RETENTION_SECS`]; startup validation rejects an access-token lifetime longer
+    /// than that, so a bump can never lapse while a pre-bump token is still presentable.
     async fn bump_epoch(&self, kind: SessionKind, user_id: &str) -> Result<u64, AuthError>;
 }
 

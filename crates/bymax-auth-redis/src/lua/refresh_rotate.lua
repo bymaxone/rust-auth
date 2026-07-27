@@ -14,6 +14,8 @@
 -- ARGV[4] = family id of the presented session ('' means "legacy, no family": skip family work)
 -- ARGV[5] = sha256(old)  the SET member to move out of the family
 -- ARGV[6] = sha256(new)  the SET member to move into the family
+-- ARGV[7] = namespace    e.g. "auth" — used to rebuild a family index key discovered at runtime
+-- ARGV[8] = family prefix "fam" (dashboard) or "pfam" (platform)
 --
 -- Returns the consumed old-session JSON on a live rotation; "GRACE:" .. json when the old token
 -- was already rotated but is still inside the grace window; "REUSED:" .. family when the old
@@ -48,6 +50,19 @@ if old then
 end
 local grace = redis.call('GET', KEYS[3])
 if grace then
+    -- A surviving grace pointer is not on its own enough to recover. Reuse detection revokes a
+    -- compromised lineage by deleting its family index, but it cannot reach the `rp:` pointers of
+    -- hashes that already rotated out of that index — so a leftover pointer would let the caller
+    -- mint a fresh session in a family that was just locked out. Resolve the lineage from the
+    -- consumed marker (which carries the family id and outlives the pointer) and recover only
+    -- while its family index is still live. The presented token's own family is not knowable from
+    -- ARGV here: a replay carries a placeholder record with no family, so the key is rebuilt from
+    -- the namespace. A legacy session planted no consumed marker and keeps the old behavior.
+    local consumed_family = redis.call('GET', KEYS[4])
+    if consumed_family
+        and redis.call('EXISTS', ARGV[7] .. ':' .. ARGV[8] .. ':' .. consumed_family) == 0 then
+        return false
+    end
     return 'GRACE:' .. grace
 end
 -- Post-grace reuse: the consumed-family marker outlives the grace pointer, so its presence here

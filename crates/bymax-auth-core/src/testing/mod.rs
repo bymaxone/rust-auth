@@ -423,8 +423,26 @@ impl SessionStore for InMemoryStores {
             }
             return Ok(RotateOutcome::Rotated(old_record));
         }
-        if let Some(recovered) = lock(&self.grace).get(&(kind, rotation.old_hash.clone())) {
-            return Ok(RotateOutcome::Grace(recovered.clone()));
+        // Each lookup takes and releases its own guard: no two of these maps are ever held at
+        // once, so this path cannot invert the lock order used by `revoke_family`.
+        let recovered = lock(&self.grace)
+            .get(&(kind, rotation.old_hash.clone()))
+            .cloned();
+        if let Some(recovered) = recovered {
+            // Mirror `refresh_rotate.lua`: a grace pointer only recovers while its lineage is
+            // still live. `revoke_family` drops the family index but cannot reach the pointers of
+            // hashes that already rotated out of it, so honoring a leftover pointer would
+            // resurrect a revoked family. The consumed marker carries the family id and outlives
+            // the pointer; a legacy session has no marker and keeps the old behavior.
+            let consumed_family = lock(&self.consumed)
+                .get(&(kind, rotation.old_hash.clone()))
+                .cloned();
+            let lineage_revoked = consumed_family
+                .is_some_and(|family| !lock(&self.families).contains_key(&(kind, family)));
+            if lineage_revoked {
+                return Ok(RotateOutcome::Invalid);
+            }
+            return Ok(RotateOutcome::Grace(recovered));
         }
         // Neither live nor in grace: a surviving consumed-token marker means this token was
         // validly issued and already rotated — a reuse of a consumed token (its grace window
@@ -1196,6 +1214,42 @@ mod tests {
         assert!(matches!(store.list_sessions(kind, "u1").await, Ok(v) if v.is_empty()));
         assert!(store.revoke_family(kind, "famA").await.is_ok());
         assert!(store.revoke_family(kind, "").await.is_ok());
+
+        // A revoked family cannot be resurrected through a leftover grace pointer. `revoke_family`
+        // deletes the family index but cannot reach the `rp:` pointer of a hash that already
+        // rotated out of it, so a still-live pointer in a locked-out lineage must yield Invalid
+        // rather than Grace — otherwise the replay would mint a fresh session in the very family
+        // reuse detection just killed.
+        let store = InMemoryStores::new();
+        assert!(
+            store
+                .create_session(kind, "r1", &record_in_family("u3", "famB"), 60)
+                .await
+                .is_ok()
+        );
+        let first = SessionRotation {
+            old_hash: "r1".to_owned(),
+            new_hash: "r2".to_owned(),
+            new_raw: "rawr2".to_owned(),
+            new_record: record_in_family("u3", "famB"),
+            refresh_ttl: 60,
+            grace_ttl: 30,
+        };
+        assert!(matches!(
+            store.rotate(kind, &first).await,
+            Ok(RotateOutcome::Rotated(_))
+        ));
+        // The grace pointer for r1 is live, so a replay recovers while the lineage is intact.
+        assert!(matches!(
+            store.rotate(kind, &first).await,
+            Ok(RotateOutcome::Grace(_))
+        ));
+        // Reuse detection revokes famB; the r1 grace pointer survives it untouched.
+        assert!(store.revoke_family(kind, "famB").await.is_ok());
+        assert!(matches!(
+            store.rotate(kind, &first).await,
+            Ok(RotateOutcome::Invalid)
+        ));
 
         // A legacy session with no family plants no consumed marker, so a post-grace replay is a
         // plain Invalid, never a reuse.

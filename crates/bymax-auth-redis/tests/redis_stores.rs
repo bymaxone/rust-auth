@@ -252,6 +252,56 @@ async fn reuse_past_grace_is_detected_and_revoke_family_kills_the_lineage() {
 }
 
 #[tokio::test]
+async fn a_revoked_family_cannot_be_resurrected_through_a_surviving_grace_pointer() {
+    let Some(redis) = common::try_start().await else {
+        return;
+    };
+    let Some(stores) = redis.stores() else { return };
+    let kind = SessionKind::Dashboard;
+
+    // A login under `g1`, then a rotation g1 -> g2 in family "fam-gu" with a long grace window,
+    // so the `rp:g1` pointer comfortably outlives the revoke below.
+    assert!(
+        stores
+            .create_session(kind, "g1", &record("gu"), 3600)
+            .await
+            .is_ok()
+    );
+    assert!(matches!(
+        stores
+            .rotate(kind, &rotation_with_grace("g1", "g2", "gu", 600))
+            .await,
+        Ok(RotateOutcome::Rotated(old)) if old.user_id == "gu"
+    ));
+    // While the lineage is live, replaying the consumed token recovers through the grace window.
+    assert!(matches!(
+        stores
+            .rotate(kind, &rotation_with_grace("g1", "g3", "gu", 600))
+            .await,
+        Ok(RotateOutcome::Grace(r)) if r.user_id == "gu"
+    ));
+
+    // Reuse detection revokes the lineage. `revoke_family` drops the family index but cannot
+    // reach `rp:g1` — that pointer belongs to a hash which already rotated out of the index.
+    assert!(stores.revoke_family(kind, "fam-gu").await.is_ok());
+    assert_eq!(redis.ttl("auth:fam:fam-gu").await, -2);
+    // The grace pointer is demonstrably still alive, so this is a genuine test of the family
+    // check and not of an incidentally-expired pointer.
+    assert!(redis.ttl("auth:rp:g1").await > 0);
+
+    // Replaying the consumed token must now be rejected outright: honoring the leftover pointer
+    // would mint a fresh live session inside the family reuse detection just locked out.
+    assert!(matches!(
+        stores
+            .rotate(kind, &rotation_with_grace("g1", "g4", "gu", 600))
+            .await,
+        Ok(RotateOutcome::Invalid)
+    ));
+    // Nothing was persisted for the rejected replay.
+    assert!(matches!(stores.find_session(kind, "g4").await, Ok(None)));
+}
+
+#[tokio::test]
 async fn token_epoch_defaults_to_zero_bumps_monotonically_and_is_keyspace_disjoint() {
     let Some(redis) = common::try_start().await else {
         return;

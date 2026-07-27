@@ -12,6 +12,7 @@ use zeroize::Zeroizing;
 
 use super::{AuthConfig, Environment, PasswordConfig, SameSite, TokenDelivery};
 use crate::ConfigError;
+use crate::traits::TOKEN_EPOCH_RETENTION_SECS;
 
 /// Domain-separation label for the derived identifier-hashing key. Changing it invalidates
 /// every existing keyed identifier and is therefore a breaking change.
@@ -165,6 +166,17 @@ impl AuthConfig {
         let lifetime = u64::from(self.jwt.refresh_expires_in_days) * 86_400;
         if grace >= lifetime {
             return Err(ConfigError::RefreshGraceTooLarge { grace, lifetime });
+        }
+
+        // Rule 4b: the access-token lifetime must fit inside the token-epoch retention window.
+        // A longer-lived access token could outlive the stored epoch that revokes it, so
+        // `current_epoch` would fall back to `0` and a reset-revoked token would verify again.
+        let access = self.jwt.access_expires_in.as_secs();
+        if access > TOKEN_EPOCH_RETENTION_SECS {
+            return Err(ConfigError::AccessLifetimeExceedsEpochRetention {
+                access,
+                retention: TOKEN_EPOCH_RETENTION_SECS,
+            });
         }
 
         // Rule 5-7: role hierarchies.
@@ -582,6 +594,28 @@ mod tests {
                 lifetime: 86_400
             })
         ));
+    }
+
+    #[test]
+    fn rejects_an_access_lifetime_that_outlives_the_token_epoch_retention_window() {
+        // An access token allowed to outlive the stored epoch would let the epoch key expire
+        // while a pre-bump token is still inside its own `exp`, so `current_epoch` would read
+        // `0`, the staleness test would stop firing, and a reset-revoked token would verify
+        // again. The boundary itself is legal — only strictly longer is rejected.
+        let mut over = valid_config();
+        over.jwt.access_expires_in = std::time::Duration::from_secs(TOKEN_EPOCH_RETENTION_SECS + 1);
+        assert!(matches!(
+            over.validate(Environment::Production),
+            Err(ConfigError::AccessLifetimeExceedsEpochRetention {
+                access,
+                retention
+            }) if access == TOKEN_EPOCH_RETENTION_SECS + 1
+                && retention == TOKEN_EPOCH_RETENTION_SECS
+        ));
+
+        let mut exact = valid_config();
+        exact.jwt.access_expires_in = std::time::Duration::from_secs(TOKEN_EPOCH_RETENTION_SECS);
+        assert!(exact.validate(Environment::Production).is_ok());
     }
 
     #[test]

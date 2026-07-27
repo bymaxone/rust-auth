@@ -5,6 +5,7 @@
 use async_trait::async_trait;
 use bymax_auth_core::traits::{
     RotateOutcome, SessionDetail, SessionKind, SessionRecord, SessionRotation, SessionStore,
+    TOKEN_EPOCH_RETENTION_SECS,
 };
 use bymax_auth_types::AuthError;
 use deadpool_redis::Connection;
@@ -214,6 +215,8 @@ impl RedisStores {
             .arg(family)
             .arg(&rotation.old_hash)
             .arg(&rotation.new_hash)
+            .arg(keys.namespace())
+            .arg(prefixes.fam.as_str())
             .invoke_async(&mut conn)
             .await?;
 
@@ -472,10 +475,11 @@ impl RedisStores {
     }
 }
 
-/// TTL applied to a token-epoch key, in seconds (30 days). It must comfortably exceed the
-/// longest an access token can live so an epoch bump stays in force for every pre-bump token's
-/// remaining lifetime; a small fixed integer key per reset-affected user is negligible.
-const EPOCH_TTL_SECS: u64 = 30 * 24 * 60 * 60;
+/// TTL applied to a token-epoch key, in seconds. Pinned to the [`TOKEN_EPOCH_RETENTION_SECS`]
+/// store contract rather than a local literal: startup validation rejects a `jwt.access_expires_in`
+/// longer than that bound, so a bump can never lapse while a pre-bump token is still presentable.
+/// A small fixed integer key per reset-affected user is negligible.
+const EPOCH_TTL_SECS: u64 = TOKEN_EPOCH_RETENTION_SECS;
 
 /// The token-epoch key prefix for a session kind (`ep:` dashboard, `pep:` platform).
 fn epoch_prefix(kind: SessionKind) -> Prefix {
