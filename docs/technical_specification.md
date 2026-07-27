@@ -293,7 +293,7 @@ used in §5.4).
 - MFA: if MFA is enabled, `encryption_key` decodes to exactly 32 bytes and `issuer` is non-empty.
 - Platform: if platform is enabled, a `PlatformUserRepository` was supplied.
 - OAuth: if an OAuth feature is on, at least one `OAuthProvider` is registered and redirect URLs satisfy the production HTTPS/relative-path rule.
-- Cookie/route coherence (e.g. the MFA temp-cookie path matches the real MFA route; `SameSite=None` requires secure cookies).
+- Cookie/route coherence (e.g. the MFA temp-cookie path matches the real MFA route; `SameSite=None` requires secure cookies **and** a trusted-origin allowlist, which is in turn refused under any other posture — either half alone fails quietly, one rejecting every cross-site call and the other never being consulted).
 - Feature/collaborator coherence: every enabled flow has the stores and repositories it needs.
 
 The contrast with NestJS is deliberate: there are **no decorators, no reflection, and no token registry**. Wiring is ordinary constructor code, missing dependencies are caught by the type system or by `build()`, and the validated `AuthEngine` is the single thing handed to the adapter. This is more verbose than `registerAsync({...})` but fully explicit and statically checked.
@@ -1043,6 +1043,7 @@ The **Default** column lists `AuthConfig::default()` (≡ `nest_compat_defaults(
 | `jwt.refresh_expires_in_days` | `u32` | No | `7` | Refresh lifetime (days) |
 | `jwt.algorithm` | `JwtAlgorithm` | No | `Hs256` | Pinned — HS256 only |
 | `jwt.refresh_grace_window` | `Duration` | No | `30s` | Must be < refresh lifetime |
+| `jwt.absolute_session_lifetime_days` | `u32` | No | `0` (off) | Caps how long one login can be extended by rotation; `0` disables the cap |
 | `roles.hierarchy` | `HashMap<String, Vec<String>>` | Yes | — | Non-empty; referential integrity enforced |
 | `roles.platform_hierarchy` | `Option<HashMap<…>>` | Cond. | `None` | Required when `platform.enabled` |
 | `password.active_algorithm` | `PasswordAlgorithm` | No | `Scrypt` | New-hash algorithm; `Argon2id` requires the `argon2` feature (§5.1.9) |
@@ -1060,7 +1061,8 @@ The **Default** column lists `AuthConfig::default()` (≡ `nest_compat_defaults(
 | `cookies.session_signal_name` | `String` | No | `has_session` | Non-HttpOnly login signal |
 | `cookies.refresh_cookie_path` | `String` | No | `/auth` | Must align with `route_prefix` |
 | `cookies.mfa_temp_cookie_path` | `String` | No | `/auth/mfa` | Scopes OAuth-MFA temp cookie |
-| `cookies.same_site` | `SameSite` | No | `Lax` | `None` requires `secure_cookies` |
+| `cookies.same_site` | `SameSite` | No | `Lax` | `None` requires `secure_cookies` **and** a non-empty `trusted_origins` |
+| `cookies.trusted_origins` | `Vec<String>` | Cond. | `[]` | Origins allowed to make cookie-authenticated cross-site writes; required under `SameSite::None`, refused otherwise. Each entry is compared verbatim against the `Origin` header, so it must be a bare `scheme://host[:port]` |
 | `cookies.resolve_domains` | `Option<Arc<dyn …>>` | No | `None` | Multi-domain resolver |
 | `mfa` | `Option<MfaConfig>` | Cond. | `None` | Presence enables MFA config |
 | `mfa.encryption_key` | `SecretString` | Cond. | — | Decodes to exactly 32 bytes |
@@ -6906,7 +6908,7 @@ non-goals explicitly keeps the surface unambiguous for the dev plans that follow
 | **Tenant creation, billing, plans, subscriptions** | Business logic specific to the platform (billing belongs to a Stripe/billing module).          | Host app's tenants/billing modules.                                 |
 | **Tenant *resolution* strategy**               | *How* a request's tenant is determined (subdomain/header/path) is application-specific; the library accepts a `tenant_id_resolver` callback but ships no policy. | Host app supplies the resolver closure.                             |
 | **Audit logging / SIEM**                       | The library emits `tracing` spans and exposes `before/after` auth **hooks**; it does not persist an audit trail. | Host app records via the hooks + its audit/observability stack.     |
-| **Custom password-policy rules**               | The library enforces only baseline constraints (e.g. minimum length); richer policies (dictionary, breach-check, complexity) are not built in. | Host app via the `beforeRegister` hook or DTO validation.           |
+| **Custom password-policy rules**               | The library enforces baseline constraints (e.g. minimum length) and ships the breached-password check behind the `PasswordBreachChecker` seam (opt-in, feature `breach`); richer policies — dictionary, complexity classes, per-tenant rules — are not built in. | Host app via the `before_register` hook or DTO validation; a custom `PasswordBreachChecker` for a private corpus. |
 | **Additional profile fields**                  | Anything beyond the `AuthUser` contract.                                                            | Host app's profile table.                                           |
 | **Observability backends (metrics/traces export)** | The library is instrumented with `tracing`; wiring exporters (OTLP/Prometheus) is the host's job. | Host app's `tracing-subscriber` setup.                              |
 | **Performance SLAs / load & capacity testing** | Auth is I/O-bound; the library ships `criterion` benchmarks for regression-visibility on hot paths (§20.11) but makes **no throughput guarantee** and is not a load-testing harness. | Host app's perf/capacity testing against its own deployment. |
