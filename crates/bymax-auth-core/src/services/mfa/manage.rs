@@ -32,6 +32,8 @@ impl MfaService {
         self.reauth_gate(user_id, code, &view).await?;
         // The TOTP code verified; clear MFA, revoke sessions, and notify.
         self.persist_mfa(user_id, ctx, false, None, None).await?;
+        // Revoke the user's OTHER refresh sessions; the current session continues, so the token
+        // epoch is not bumped here (see the enable path for the rationale).
         self.session_store
             .revoke_all(session_kind(ctx), user_id)
             .await?;

@@ -34,5 +34,5 @@ pub use store::OAuthStateStore;
 pub use store::{
     BruteForceStore, InvitationStore, OtpPurpose, OtpStore, PasswordResetStore, ResetContext,
     RotateOutcome, SessionDetail, SessionKind, SessionRecord, SessionRotation, SessionStore,
-    StoredInvitation, WsTicketSnapshot, WsTicketStore,
+    StoredInvitation, TOKEN_EPOCH_RETENTION_SECS, WsTicketSnapshot, WsTicketStore,
 };

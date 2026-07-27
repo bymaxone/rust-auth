@@ -28,6 +28,7 @@ fn sign_dashboard(iat: i64, exp: i64) -> String {
         mfa_verified: false,
         iat,
         exp,
+        epoch: 0,
     };
     sign(&claims, &HsKey::from_bytes(SECRET.as_bytes())).unwrap_or_default()
 }

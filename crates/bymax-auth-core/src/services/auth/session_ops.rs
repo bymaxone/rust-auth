@@ -287,6 +287,7 @@ mod tests {
             mfa_verified: false,
             iat: now - 1_000,
             exp: now - 500,
+            epoch: 0,
         };
         let Ok(token) = h.engine.tokens().issue_access(&expired) else { return };
         assert!(

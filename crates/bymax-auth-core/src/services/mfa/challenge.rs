@@ -299,6 +299,8 @@ impl MfaService {
             device,
             ip: stored_ip,
             created_at: now_offset(),
+            // Server-internal family id is not part of the hook/eviction projection.
+            family_id: String::new(),
         };
         let hook_ctx: HookContext = self.hook_context(&safe.id, email, ip, user_agent);
         self.sessions

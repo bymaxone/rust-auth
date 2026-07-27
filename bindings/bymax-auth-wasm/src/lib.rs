@@ -150,6 +150,7 @@ mod tests {
             mfa_verified: false,
             iat,
             exp,
+            epoch: 0,
         };
         sign(&claims, &HsKey::from_bytes(secret.as_bytes())).unwrap_or_default()
     }

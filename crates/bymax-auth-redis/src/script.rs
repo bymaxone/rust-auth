@@ -45,6 +45,11 @@ pub static SESSION_REVOKE: LazyLock<LuaScript> =
 pub static INVALIDATE_USER_SESSIONS: LazyLock<LuaScript> =
     LazyLock::new(|| LuaScript::new(include_str!("lua/invalidate_user_sessions.lua")));
 
+/// `revoke_family` — revoke every live session in a refresh-token family on reuse detection
+/// (section 12.5.2).
+pub static REVOKE_FAMILY: LazyLock<LuaScript> =
+    LazyLock::new(|| LuaScript::new(include_str!("lua/revoke_family.lua")));
+
 /// `brute_force_incr` — fixed-window failure counter (section 12.5.3).
 pub static BRUTE_FORCE_INCR: LazyLock<LuaScript> =
     LazyLock::new(|| LuaScript::new(include_str!("lua/brute_force_incr.lua")));

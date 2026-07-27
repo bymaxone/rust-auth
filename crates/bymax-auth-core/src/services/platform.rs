@@ -724,11 +724,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn logout_cleans_the_grace_pointer_so_a_rotated_token_cannot_recover() {
+    async fn logout_cleans_the_grace_pointer_and_reuse_of_the_old_token_revokes_the_family() {
         // Login, then refresh (which plants a grace pointer for the OLD token). Logging out the
-        // OLD token must clean BOTH its primary key (already consumed by the rotation) AND its
-        // grace pointer, so a follow-up grace-window rotation of the old token now fails — proving
-        // the grace key was cleaned, not just the primary.
+        // OLD token cleans BOTH its primary key (already consumed by the rotation) AND its grace
+        // pointer, so a follow-up rotation of the old token can no longer recover through the
+        // grace window. The consumed-family marker outlives the grace pointer, so that follow-up
+        // is now caught as a REUSE of a consumed token — the signature of a stolen token — and
+        // revokes the whole family, taking the live rotated token down with it.
         let Some(h) = harness(platform_config()) else { return };
         let id = seed_admin(&h.admins, "grace@admin.io", "pw");
         let Some(svc) = h.engine.platform_auth() else { return };
@@ -737,23 +739,25 @@ mod tests {
         // Rotate: the old refresh token is consumed and a grace pointer is planted for it.
         let rotation = svc.refresh(&auth.refresh_token, "1.2.3.4", "agent").await;
         let Ok(rotated) = rotation else { return };
-        // A second rotation of the OLD token would normally hit the grace window and succeed.
-        // After logging out the OLD token, the grace pointer is gone, so it can no longer recover.
+        // Logging out the OLD token cleans its grace pointer.
         assert!(
             svc.logout(&auth.access_token, &auth.refresh_token, &id)
                 .await
                 .is_ok()
         );
+        // Replaying the OLD token can no longer recover through the (now-cleaned) grace window; it
+        // is rejected as a reuse of a consumed token, which revokes the family.
         assert!(matches!(
             svc.refresh(&auth.refresh_token, "1.2.3.4", "agent").await,
             Err(AuthError::RefreshTokenInvalid)
         ));
-        // The freshly rotated (live) token is unaffected and still rotates.
-        assert!(
+        // The reuse revoked the whole lineage, so even the freshly rotated (previously live)
+        // token no longer rotates — a stolen token can never keep a parallel chain alive.
+        assert!(matches!(
             svc.refresh(&rotated.refresh_token, "1.2.3.4", "agent")
-                .await
-                .is_ok()
-        );
+                .await,
+            Err(AuthError::RefreshTokenInvalid)
+        ));
     }
 
     #[tokio::test]

@@ -127,6 +127,11 @@ impl MfaService {
             Some(data.hashed_codes),
         )
         .await?;
+        // Revoke the user's OTHER refresh sessions on the MFA-state change; the current session
+        // (which just performed the change) is expected to continue, so the token epoch is NOT
+        // bumped here. That stronger, sign-out-everywhere invalidation currently has exactly one
+        // trigger — the password-reset flow; `revoke_all` deliberately does not bump either, so
+        // it too leaves already-issued access tokens valid until they expire.
         self.session_store
             .revoke_all(session_kind(ctx), user_id)
             .await?;

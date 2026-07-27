@@ -41,6 +41,18 @@ pub enum ConfigError {
         /// The rejected value.
         got: u32,
     },
+    /// `jwt.access_expires_in` outlives the window a store keeps a bumped token epoch readable,
+    /// which would let an epoch bump lapse while a pre-bump access token is still presentable —
+    /// silently restoring a token that a password reset had revoked.
+    #[error(
+        "jwt.access_expires_in ({access}s) must not exceed the token-epoch retention window ({retention}s)"
+    )]
+    AccessLifetimeExceedsEpochRetention {
+        /// The configured access-token lifetime, in seconds.
+        access: u64,
+        /// The guaranteed token-epoch retention window, in seconds.
+        retention: u64,
+    },
     /// `roles.hierarchy` is empty (at least one role must be declared).
     #[error("roles.hierarchy must not be empty")]
     EmptyRoleHierarchy,

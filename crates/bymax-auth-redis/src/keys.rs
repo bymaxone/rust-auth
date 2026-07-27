@@ -28,8 +28,16 @@ pub enum Prefix {
     Rt,
     /// Access-JWT revocation blacklist (`rv`).
     Rv,
+    /// Dashboard per-user token epoch / generation counter (`ep`).
+    Ep,
+    /// Platform per-user token epoch / generation counter (`pep`).
+    Pep,
     /// Dashboard rotation grace pointer (`rp`).
     Rp,
+    /// Dashboard consumed-token family marker for reuse detection (`cf`).
+    Cf,
+    /// Dashboard refresh-token family index SET (`fam`).
+    Fam,
     /// Dashboard active-session index SET (`sess`).
     Sess,
     /// Dashboard per-session detail (`sd`).
@@ -52,6 +60,10 @@ pub enum Prefix {
     Prt,
     /// Platform rotation grace pointer (`prp`).
     Prp,
+    /// Platform consumed-token family marker for reuse detection (`pcf`).
+    Pcf,
+    /// Platform refresh-token family index SET (`pfam`).
+    Pfam,
     /// Platform active-session index SET (`psess`).
     Psess,
     /// Platform per-session detail (`psd`).
@@ -73,7 +85,11 @@ impl Prefix {
         match self {
             Self::Rt => "rt",
             Self::Rv => "rv",
+            Self::Ep => "ep",
+            Self::Pep => "pep",
             Self::Rp => "rp",
+            Self::Cf => "cf",
+            Self::Fam => "fam",
             Self::Sess => "sess",
             Self::Sd => "sd",
             Self::Lf => "lf",
@@ -85,6 +101,8 @@ impl Prefix {
             Self::Inv => "inv",
             Self::Prt => "prt",
             Self::Prp => "prp",
+            Self::Pcf => "pcf",
+            Self::Pfam => "pfam",
             Self::Psess => "psess",
             Self::Psd => "psd",
             Self::MfaSetup => "mfa_setup",
@@ -150,7 +168,11 @@ mod tests {
         let cases = [
             (Prefix::Rt, "auth:rt:abc"),
             (Prefix::Rv, "auth:rv:abc"),
+            (Prefix::Ep, "auth:ep:abc"),
+            (Prefix::Pep, "auth:pep:abc"),
             (Prefix::Rp, "auth:rp:abc"),
+            (Prefix::Cf, "auth:cf:abc"),
+            (Prefix::Fam, "auth:fam:abc"),
             (Prefix::Sess, "auth:sess:abc"),
             (Prefix::Sd, "auth:sd:abc"),
             (Prefix::Lf, "auth:lf:abc"),
@@ -162,6 +184,8 @@ mod tests {
             (Prefix::Inv, "auth:inv:abc"),
             (Prefix::Prt, "auth:prt:abc"),
             (Prefix::Prp, "auth:prp:abc"),
+            (Prefix::Pcf, "auth:pcf:abc"),
+            (Prefix::Pfam, "auth:pfam:abc"),
             (Prefix::Psess, "auth:psess:abc"),
             (Prefix::Psd, "auth:psd:abc"),
             (Prefix::MfaSetup, "auth:mfa_setup:abc"),

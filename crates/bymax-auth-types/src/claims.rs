@@ -89,6 +89,21 @@ pub struct DashboardClaims {
     /// Expiry (seconds since the Unix epoch).
     #[cfg_attr(feature = "ts-export", ts(type = "number"))]
     pub exp: i64,
+    /// The user's token **epoch** at issuance — a per-user generation counter the server bumps
+    /// to invalidate every outstanding access token at once (a password reset or a full
+    /// sign-out-everywhere). **Server-side** verification rejects the token when its epoch is
+    /// below the user's current stored epoch; the edge/WASM verifier carries this claim but does
+    /// not consult it (it checks signature, `iat`, and `exp` only), exactly like the jti
+    /// blacklist. Defaults to `0` on a legacy token that predates the field, which is never
+    /// rejected while the stored epoch is also `0` (the mechanism is inert until a bump).
+    ///
+    /// Exported as an optional TS property: the decode-only edge path passes the raw JWT payload
+    /// through untyped, so a legacy token really does arrive without the key (serde's default
+    /// only applies when deserializing into this struct). Rendered via `Option::<f64>` because
+    /// ts-rs maps 64-bit integers to `bigint`, while `JSON.parse` yields a `number`.
+    #[serde(default)]
+    #[cfg_attr(feature = "ts-export", ts(as = "Option::<f64>", optional))]
+    pub epoch: u64,
 }
 
 /// Access token for platform admins — no `tenantId`. The TypeScript counterpart is
@@ -120,6 +135,15 @@ pub struct PlatformClaims {
     /// Expiry (seconds since the Unix epoch).
     #[cfg_attr(feature = "ts-export", ts(type = "number"))]
     pub exp: i64,
+    /// The admin's token **epoch** at issuance — the platform-domain analogue of
+    /// [`DashboardClaims::epoch`]: a per-admin generation counter the server bumps to invalidate
+    /// every outstanding platform access token at once. Enforced by **server-side** verification
+    /// only; the edge/WASM verifier carries it without consulting it. Defaults to `0` on a legacy
+    /// token, and is exported as an optional TS property for the same reason as
+    /// [`DashboardClaims::epoch`].
+    #[serde(default)]
+    #[cfg_attr(feature = "ts-export", ts(as = "Option::<f64>", optional))]
+    pub epoch: u64,
 }
 
 /// Short-lived token bridging the password step and the MFA challenge. The TypeScript
@@ -165,23 +189,39 @@ mod tests {
             mfa_verified: false,
             iat: 1_700_000_000,
             exp: 1_700_000_900,
+            epoch: 3,
         }
     }
 
     #[test]
     fn dashboard_claims_emit_the_exact_wire_field_names() {
         // The discriminator is `type`, the tenant/MFA fields are camelCase, and BOTH
-        // mfaEnabled and mfaVerified are present — the byte-level nest-auth contract.
+        // mfaEnabled and mfaVerified are present — the byte-level nest-auth contract. The
+        // per-user token epoch rides along as a plain `epoch` number.
         let json = serde_json::to_value(dashboard_claims()).unwrap_or_default();
         assert_eq!(json["type"], "dashboard");
         assert_eq!(json["tenantId"], "t_1");
         assert_eq!(json["mfaEnabled"], true);
         assert_eq!(json["mfaVerified"], false);
         assert_eq!(json["status"], "ACTIVE");
+        assert_eq!(json["epoch"], 3);
         assert!(
             json.get("token_type").is_none(),
             "raw field name must not leak"
         );
+    }
+
+    #[test]
+    fn a_missing_epoch_deserializes_to_zero() {
+        // A legacy token that predates the epoch field must still deserialize, defaulting the
+        // epoch to 0 so the mechanism stays inert for it rather than failing the parse.
+        let legacy = serde_json::json!({
+            "sub": "u_1", "jti": "jti-1", "tenantId": "t_1", "role": "member",
+            "type": "dashboard", "status": "ACTIVE", "mfaEnabled": false,
+            "mfaVerified": false, "iat": 1, "exp": 2
+        });
+        let parsed: Result<DashboardClaims, _> = serde_json::from_value(legacy);
+        assert!(matches!(parsed, Ok(claims) if claims.epoch == 0));
     }
 
     #[test]
@@ -196,6 +236,7 @@ mod tests {
             mfa_verified: false,
             iat: 1,
             exp: 2,
+            epoch: 0,
         };
         let json = serde_json::to_value(claims).unwrap_or_default();
         assert_eq!(json["type"], "platform");
