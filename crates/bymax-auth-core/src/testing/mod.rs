@@ -447,8 +447,23 @@ impl SessionStore for InMemoryStores {
             }
             return Ok(RotateOutcome::Rotated(old_record));
         }
-        if let Some(recovered) = lock(&self.grace).get(&(kind, rotation.old_hash.clone())) {
-            return Ok(RotateOutcome::Grace(recovered.clone()));
+        // The grace window is single-shot, and only recovers into a lineage that is still alive.
+        // Removing the pointer keeps one captured token from minting a fresh session on every
+        // request for the whole window; the family check closes the resurrection path, where a
+        // pointer planted by an earlier rotation of a lineage outlives the reuse detection that
+        // revoked it and would hand the thief back the family the lockout just killed. Both
+        // mirror the Redis store, whose script consumes the pointer and whose host side runs the
+        // same `family_is_alive` test — the in-memory store is what the conformance tier and
+        // nest-auth's end-to-end tier run against, so a weaker rule here would let a divergence
+        // ship unnoticed. A record written before families existed carries none and recovers as
+        // before.
+        if let Some(recovered) = lock(&self.grace).remove(&(kind, rotation.old_hash.clone())) {
+            if recovered.family_id.is_empty()
+                || lock(&self.families).contains_key(&(kind, recovered.family_id.clone()))
+            {
+                return Ok(RotateOutcome::Grace(recovered));
+            }
+            return Ok(RotateOutcome::Invalid);
         }
         // Neither live nor in grace: a surviving consumed-token marker means this token was
         // validly issued and already rotated — a reuse of a consumed token (its grace window
@@ -1270,6 +1285,89 @@ mod tests {
         assert!(store.delete_grace_pointer(kind, "g1").await.is_ok());
         assert!(matches!(
             store.rotate(kind, &legacy).await,
+            Ok(RotateOutcome::Invalid)
+        ));
+    }
+
+    #[tokio::test]
+    async fn session_store_grace_is_single_shot_and_refuses_a_revoked_lineage() {
+        let kind = SessionKind::Dashboard;
+
+        // A grace pointer recovers exactly once. Were it repeatable, one captured token would
+        // mint a fresh session on every request for the whole window instead of covering the
+        // single retry where the old token was consumed but the new one never arrived.
+        let store = InMemoryStores::new();
+        assert!(
+            store
+                .create_session(kind, "s1", &record_in_family("u3", "famB"), 60)
+                .await
+                .is_ok()
+        );
+        let rotation = SessionRotation {
+            old_hash: "s1".to_owned(),
+            new_hash: "s2".to_owned(),
+            new_raw: "raws2".to_owned(),
+            new_record: record_in_family("u3", "famB"),
+            refresh_ttl: 60,
+            grace_ttl: 30,
+        };
+        assert!(matches!(
+            store.rotate(kind, &rotation).await,
+            Ok(RotateOutcome::Rotated(_))
+        ));
+        assert!(matches!(
+            store.rotate(kind, &rotation).await,
+            Ok(RotateOutcome::Grace(_))
+        ));
+        // The second replay finds the pointer consumed and falls through to reuse detection.
+        assert!(matches!(
+            store.rotate(kind, &rotation).await,
+            Ok(RotateOutcome::Reused(family)) if family == "famB"
+        ));
+
+        // A revoked family cannot be resurrected through a leftover grace pointer. Reuse
+        // detection deletes the family index, but it cannot reach the `rp:` pointer of a hash
+        // that already rotated out of it — so a still-live pointer in a locked-out lineage must
+        // yield Invalid rather than Grace, or the replay would mint a fresh session in the very
+        // family the lockout just killed.
+        let store = InMemoryStores::new();
+        assert!(
+            store
+                .create_session(kind, "t1", &record_in_family("u4", "famC"), 60)
+                .await
+                .is_ok()
+        );
+        assert!(matches!(
+            store
+                .rotate(
+                    kind,
+                    &SessionRotation {
+                        old_hash: "t1".to_owned(),
+                        new_hash: "t2".to_owned(),
+                        new_raw: "rawt2".to_owned(),
+                        new_record: record_in_family("u4", "famC"),
+                        refresh_ttl: 60,
+                        grace_ttl: 30,
+                    },
+                )
+                .await,
+            Ok(RotateOutcome::Rotated(_))
+        ));
+        assert!(store.revoke_family(kind, "famC").await.is_ok());
+        assert!(matches!(
+            store
+                .rotate(
+                    kind,
+                    &SessionRotation {
+                        old_hash: "t1".to_owned(),
+                        new_hash: "t3".to_owned(),
+                        new_raw: "rawt3".to_owned(),
+                        new_record: record_in_family("u4", "famC"),
+                        refresh_ttl: 60,
+                        grace_ttl: 30,
+                    },
+                )
+                .await,
             Ok(RotateOutcome::Invalid)
         ));
     }

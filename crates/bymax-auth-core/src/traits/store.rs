@@ -195,6 +195,16 @@ pub mod unix_millis {
     }
 }
 
+/// How long a [`SessionStore`] must keep a bumped token epoch readable, in seconds (30 days).
+///
+/// The epoch record is what makes an already-issued access token verifiable as stale. If it can
+/// lapse while a pre-bump token is still inside its own `exp` window, [`SessionStore::current_epoch`]
+/// falls back to `0`, the `token.epoch < stored` test stops firing, and a token revoked by a
+/// password reset becomes valid again — a fail-open. Startup validation therefore rejects an
+/// `jwt.access_expires_in` longer than this bound, which lets a store safely expire the record
+/// rather than retaining it forever.
+pub const TOKEN_EPOCH_RETENTION_SECS: u64 = 30 * 24 * 60 * 60;
+
 /// One session's display detail, returned by [`SessionStore::list_sessions`]. The
 /// `session_hash` is the bare SHA-256 hex of the refresh token (the `sess:`-set member is that
 /// hash under its `rt:`/`prt:` prefix), never the raw token.

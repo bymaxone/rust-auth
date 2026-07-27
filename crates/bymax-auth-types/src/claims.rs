@@ -91,11 +91,18 @@ pub struct DashboardClaims {
     pub exp: i64,
     /// The user's token **epoch** at issuance — a per-user generation counter the server bumps
     /// to invalidate every outstanding access token at once (a password reset or a full
-    /// sign-out-everywhere). Verification rejects the token when its epoch is below the user's
-    /// current stored epoch. Defaults to `0` on a legacy token that predates the field, which is
-    /// never rejected while the stored epoch is also `0` (the mechanism is inert until a bump).
+    /// sign-out-everywhere). **Server-side** verification rejects the token when its epoch is
+    /// below the user's current stored epoch; the edge/WASM verifier carries this claim but does
+    /// not consult it (it checks signature, `iat`, and `exp` only), exactly like the jti
+    /// blacklist. Defaults to `0` on a legacy token that predates the field, which is never
+    /// rejected while the stored epoch is also `0` (the mechanism is inert until a bump).
+    ///
+    /// Exported as an optional TS property: the decode-only edge path passes the raw JWT payload
+    /// through untyped, so a legacy token really does arrive without the key (serde's default
+    /// only applies when deserializing into this struct). Rendered via `Option::<f64>` because
+    /// ts-rs maps 64-bit integers to `bigint`, while `JSON.parse` yields a `number`.
     #[serde(default)]
-    #[cfg_attr(feature = "ts-export", ts(type = "number"))]
+    #[cfg_attr(feature = "ts-export", ts(as = "Option::<f64>", optional))]
     pub epoch: u64,
 }
 
@@ -130,9 +137,12 @@ pub struct PlatformClaims {
     pub exp: i64,
     /// The admin's token **epoch** at issuance — the platform-domain analogue of
     /// [`DashboardClaims::epoch`]: a per-admin generation counter the server bumps to invalidate
-    /// every outstanding platform access token at once. Defaults to `0` on a legacy token.
+    /// every outstanding platform access token at once. Enforced by **server-side** verification
+    /// only; the edge/WASM verifier carries it without consulting it. Defaults to `0` on a legacy
+    /// token, and is exported as an optional TS property for the same reason as
+    /// [`DashboardClaims::epoch`].
     #[serde(default)]
-    #[cfg_attr(feature = "ts-export", ts(type = "number"))]
+    #[cfg_attr(feature = "ts-export", ts(as = "Option::<f64>", optional))]
     pub epoch: u64,
 }
 
