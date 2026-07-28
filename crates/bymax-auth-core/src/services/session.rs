@@ -1311,4 +1311,91 @@ mod tests {
         // exists to make visible.
         assert!(matches!(svc.list_sessions(&uid, Some(&new)).await, Ok(v) if v.len() == 2));
     }
+
+    #[tokio::test]
+    async fn a_refused_eviction_reports_only_a_real_store_failure() {
+        // The warning is the whole body of its branch, so the condition guarding it — "report
+        // everything EXCEPT SessionNotFound" — has no other observable effect. Asserting the
+        // outcome of the eviction cannot distinguish an inverted condition from a correct one:
+        // the session stays either way. So the log itself is the assertion surface, both for
+        // what it must say and for what it must stay quiet about.
+        let users = Arc::new(InMemoryUserRepository::new());
+        let uid = seed_user(&users, "reported").await;
+        let base = OffsetDateTime::UNIX_EPOCH;
+        let old = hash("1111");
+        let new = hash("2222");
+
+        // A backend failure IS reported.
+        let store = Arc::new(InMemoryStores::new());
+        assert!(
+            store
+                .create_session(SessionKind::Dashboard, &old, &record(&uid, base), 3600)
+                .await
+                .is_ok()
+        );
+        let new_record = record(&uid, base + time::Duration::seconds(1));
+        assert!(
+            store
+                .create_session(SessionKind::Dashboard, &new, &new_record, 3600)
+                .await
+                .is_ok()
+        );
+        store.fail_next_cleanup_writes(1);
+        let svc = service(
+            store.clone(),
+            users.clone(),
+            Arc::new(CountingHooks::default()),
+            config(1, None),
+        );
+        let (events, guard) = crate::log_capture::capture_events();
+        assert!(
+            svc.after_session_created(&new_record, &new, &ctx())
+                .await
+                .is_ok()
+        );
+        drop(guard);
+        assert!(events.contains_at(
+            tracing::Level::WARN,
+            "sessions: eviction of an over-cap session failed"
+        ));
+        assert!(events.contains(&format!("user_id={uid}")));
+
+        // A `SessionNotFound` is NOT: it is what a concurrent logout leaves behind, and an
+        // operator watching for a cap that stopped being enforced must not have to sift it out
+        // of one line per ordinary race.
+        let store = Arc::new(InMemoryStores::new());
+        assert!(
+            store
+                .create_session(SessionKind::Dashboard, &old, &record(&uid, base), 3600)
+                .await
+                .is_ok()
+        );
+        assert!(
+            store
+                .create_session(SessionKind::Dashboard, &new, &new_record, 3600)
+                .await
+                .is_ok()
+        );
+        // Revoke the victim out from under the cap, so the eviction finds it already gone.
+        assert!(
+            store
+                .revoke_session(SessionKind::Dashboard, &uid, &old)
+                .await
+                .is_ok()
+        );
+        let svc = service(
+            store.clone(),
+            users,
+            Arc::new(CountingHooks::default()),
+            config(1, None),
+        );
+        let (events, guard) = crate::log_capture::capture_events();
+        assert!(
+            svc.after_session_created(&new_record, &new, &ctx())
+                .await
+                .is_ok()
+        );
+        drop(guard);
+        assert!(!events.contains("sessions: eviction of an over-cap session failed"));
+    }
 }

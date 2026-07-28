@@ -65,8 +65,12 @@ additional_cargo_args = ["--all-features"]
 #    drop the compiled twin's mutant, which the suite does kill. If `builder.rs` shifts, the
 #    anchor stops matching and the mutant reappears as a survivor — a loud failure, not a
 #    silent one. Re-anchor it then.
-# 6. `token_manager.rs:618` `issue_mfa_temp_token` — the `cfg(not(feature = "mfa"))` twin of
-#    the method below it, anchored for the same reason as 5.
+# 6. `token_manager.rs:632` `issue_mfa_temp_token` — the `cfg(not(feature = "mfa"))` twin of
+#    the method below it, anchored for the same reason as 5. Re-anchored from 618 on 2026-07-28
+#    when security logging pushed the method down: the sweep reported both of its mutants as
+#    survivors, which is the loud failure this anchoring was chosen for. Confirm with
+#    `cargo mutants --list --all-features | grep issue_mfa_temp_token` — exactly one line must
+#    remain, and it is the `cfg(feature = "mfa")` twin the suite kills.
 # 7. The seven `NoOpEmailProvider` sends — the provider's whole job is to do nothing, and each
 #    body is one `tracing::debug!` line followed by `Ok(())`. Replacing a body with `Ok(())`
 #    removes only that debug line, which no assertion reaches without installing a `tracing`
@@ -103,7 +107,7 @@ exclude_re = [
     'delete match arm "inactive" in assert_not_blocked',
     'replace == with != in validate_password',
     'builder\.rs:212:9: replace AuthEngineBuilder::redis_stores',
-    'token_manager\.rs:618:9: replace TokenManagerService::issue_mfa_temp_token',
+    'token_manager\.rs:632:9: replace TokenManagerService::issue_mfa_temp_token',
     'replace <impl EmailProvider for NoOpEmailProvider>::\w+ -> Result<\(\), EmailError> with Ok\(\(\)\)',
     'replace AuthHooks::\w+ -> Result<\(\), HookError> with Ok\(\(\)\)',
     'replace < with <= in MfaService::challenge_platform',

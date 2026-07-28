@@ -1320,6 +1320,38 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn armed_cleanup_failures_are_finite() {
+        // The point of arming a COUNT is that it runs out. A counter that never reached zero
+        // would leave the store failing for the rest of the test, and every assertion that
+        // follows would be measuring an outage instead of the behaviour it names — silently,
+        // because these are exactly the writes the library swallows. So the third call here is
+        // the assertion that matters: it must behave normally again.
+        let store = InMemoryStores::new();
+        let kind = SessionKind::Dashboard;
+        assert!(
+            store
+                .create_session(kind, "a1", &record("u9"), 60)
+                .await
+                .is_ok()
+        );
+
+        store.fail_next_cleanup_writes(2);
+        // Armed: a backend error, not the `SessionNotFound` an absent session would give.
+        assert!(matches!(
+            store.revoke_session(kind, "u9", "a1").await,
+            Err(AuthError::Internal(_))
+        ));
+        assert!(matches!(
+            store.delete_grace_pointer(kind, "a1").await,
+            Err(AuthError::Internal(_))
+        ));
+        // Disarmed: the session is still there (both armed calls failed before touching it),
+        // so this one succeeds — which it could not if the counter had grown or stalled.
+        assert!(store.revoke_session(kind, "u9", "a1").await.is_ok());
+        assert!(store.delete_grace_pointer(kind, "a1").await.is_ok());
+    }
+
+    #[tokio::test]
     async fn session_store_grace_is_single_shot_and_refuses_a_revoked_lineage() {
         let kind = SessionKind::Dashboard;
 

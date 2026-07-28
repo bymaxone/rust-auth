@@ -31,6 +31,10 @@ pub mod config;
 pub mod context;
 pub mod engine;
 mod error;
+/// Test-only capture of the crate's own `tracing` events, so a security event that is a branch's
+/// only observable effect can be asserted rather than assumed. Never compiled into a release.
+#[cfg(test)]
+mod log_capture;
 mod normalize;
 #[cfg(feature = "oauth")]
 pub mod providers;

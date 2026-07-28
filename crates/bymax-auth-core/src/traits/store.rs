@@ -709,6 +709,18 @@ mod tests {
     }
 
     #[test]
+    fn the_epoch_retention_window_is_thirty_days_to_the_second() {
+        // Pinned to the literal, never recomputed from the same expression the constant uses.
+        // Every other test of this bound reads it back through the constant — the startup rule
+        // is checked with `TOKEN_EPOCH_RETENTION_SECS + 1` and `== TOKEN_EPOCH_RETENTION_SECS` —
+        // so a typo in the arithmetic would round-trip perfectly and the validation would go on
+        // "passing" while enforcing a ceiling nobody chose. This is the only assertion that can
+        // see that, and the number is a contract: nest-auth's `TOKEN_EPOCH_RETENTION_SECONDS`
+        // and the 30 days both READMEs promise have to be the same value.
+        assert_eq!(TOKEN_EPOCH_RETENTION_SECS, 2_592_000);
+    }
+
+    #[test]
     fn the_optional_birth_time_adapter_round_trips_both_arms() {
         // On a `SessionRecord` the field is skipped when absent, so the `None` arm of the
         // serializer is unreachable there. It is still the adapter's contract, and a caller
