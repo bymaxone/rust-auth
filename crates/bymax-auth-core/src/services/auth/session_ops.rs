@@ -435,12 +435,20 @@ mod tests {
         let Some((id, auth)) = logged_in(&h, "down@x.io", "pw").await else { return };
 
         h.stores.fail_next_cleanup_writes(2);
+        let (events, capture) = crate::log_capture::capture_events();
         assert!(
             h.engine
                 .logout(&auth.access_token, &auth.refresh_token, &id)
                 .await
                 .is_ok()
         );
+        drop(capture);
+
+        // Both refusals are reported. The warning is the whole body of its branch — the logout
+        // returns `Ok` either way and the session survives either way — so the log is the only
+        // place the condition guarding it is observable at all.
+        assert!(events.contains_at(tracing::Level::WARN, "logout: session cleanup failed"));
+        assert!(events.contains_at(tracing::Level::WARN, "logout: grace pointer cleanup failed"));
 
         // The failures were consumed by the two cleanup calls, and the session survives them —
         // which is what makes the swallowed error worth reporting rather than ignoring.
@@ -471,11 +479,23 @@ mod tests {
                 .await
                 .is_ok()
         );
+
+        // The second logout finds the session already gone. That is `SessionNotFound`, the
+        // ordinary outcome of a double logout or a session rotated away — and it must NOT be
+        // reported, or the one line that means "sessions are outliving their logouts" drowns in
+        // one line per ordinary race. Inverting the guard is invisible to every other assertion:
+        // the call still returns `Ok` and the store is still empty.
+        let (events, capture) = crate::log_capture::capture_events();
         assert!(
             h.engine
                 .logout(&auth.access_token, &auth.refresh_token, &id)
                 .await
                 .is_ok()
         );
+        drop(capture);
+        assert!(!events.contains("logout: session cleanup failed"));
+        // …while the logout itself is still recorded, so "quiet" means quiet about the failure,
+        // not quiet altogether.
+        assert!(events.contains_at(tracing::Level::INFO, "logout: session closed"));
     }
 }
