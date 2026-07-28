@@ -55,6 +55,30 @@ version bump.
 - **Per-route rate limits pinned to the shared contract** — the adapter already
   enforced them; what was missing was the agreement, with 21 numbers duplicated
   across two repositories and nothing checking they matched.
+- **Header sanitization matched to `nest-auth`, entry for entry** — the map handed
+  to host-supplied hooks withheld three names against the sibling's fifteen, so a
+  host wiring one audit sink behind both backends received `x-api-key`,
+  `proxy-authorization` and every forwarded-identity header from this side and not
+  the other. `nest-auth`'s
+  `^x-.*-(token|secret|key|password|credential|auth|bearer|signature|hmac)$` is
+  reproduced as a suffix test rather than a regex dependency, matching it exactly:
+  the leading `x-` is stripped and the remainder must carry a dash of its own, so
+  `x-request-token` is withheld and `x-token`, which the pattern also declines, is
+  not.
+- **Security logging across the core flows** — three events against the sibling's
+  seventy. Login lockouts, invalid credentials, MFA lockouts and rejected codes,
+  refresh-token reuse, a completed password reset, and every best-effort cleanup
+  that failed now emit, with `mask_email` reproducing `nest-auth`'s masking so one
+  log pipeline shows one spelling for one account. `SessionNotFound` on the logout
+  path stays silent: it is the ordinary outcome for a session already rotated, and
+  logging it would bury the outage it exists to surface.
+- **`recordEncodings` and `accessTokenClaims` added to the conformance tier** — the
+  two sections of the shared contract that decide whether a record written by one
+  backend is readable by the other, including the deliberate split where the
+  session detail's timestamps are numeric while the refresh session's are ISO-8601.
+- **`InMemoryStores::fail_next_cleanup_writes`** — arms a finite number of store
+  failures so the paths the library deliberately swallows can be asserted rather
+  than assumed.
 
 ### Changed
 
@@ -75,6 +99,12 @@ version bump.
 
 ### Fixed
 
+- **The in-memory store's grace window was weaker than the Redis one it stands in
+  for.** It neither consumed the pointer nor checked the lineage was still alive,
+  so a replay could recover repeatedly and a pointer left behind by an earlier
+  rotation could remount a family reuse detection had just revoked. The conformance
+  tier and `nest-auth`'s end-to-end tier both run against this store, so the gap hid
+  exactly the divergence those tiers exist to catch.
 - **A grace pointer could resurrect a revoked lineage.** Reuse detection only
   proves the *replayed* token's own pointer expired; a pointer planted by an
   earlier rotation of the same lineage can still be live, and recovering from it

@@ -437,6 +437,15 @@ Everything is configured through `AuthConfig`. Two ready-made profiles bundle se
 > [!NOTE]
 > `build()` validates every cross-field invariant (secret length/entropy, role referential integrity, parameter floors, `SameSite=None ⇒ Secure`, `SameSite=None ⇔ trusted_origins`, OAuth redirect allow-listing, required stores) and rejects an invalid config with a precise `ConfigError`.
 
+> [!IMPORTANT]
+> `jwt.access_expires_in` must not exceed **30 days**, the window a store keeps a bumped token
+> epoch readable. The epoch is what makes a stateless access token revocable: a password reset
+> advances it and every token stamped below it stops verifying — but only while the bumped value
+> is still there. A longer-lived access token would outlive it, `current_epoch` would fall back
+> to `0`, and a token the reset revoked would verify again. `build()` refuses the configuration
+> (`ConfigError::AccessLifetimeExceedsEpochRetention`) rather than letting it fail open, and
+> `nest-auth` enforces the identical bound.
+
 Two options are deliberately off by default, because switching either on changes behaviour for
 sessions and origins that already exist:
 
