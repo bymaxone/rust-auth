@@ -183,7 +183,7 @@ async fn platform_login_me_refresh_logout_and_revoke_all_against_redis() {
     let Ok(PlatformLoginResult::Success(auth)) = login else {
         return;
     };
-    assert_eq!(auth.user.email, "ops@admin.io");
+    assert_eq!(auth.admin.email, "ops@admin.io");
 
     // The persisted keys are the platform ones (`prt:`/`psess:`/`psd:`), never the dashboard
     // ones (`rt:`/`sess:`/`sd:`), and the namespace prefix applies.
@@ -348,7 +348,7 @@ async fn platform_mfa_challenge_exchange_issues_a_full_session_against_redis() {
     let Ok(bymax_auth_core::LoginResultMfa::Platform(result)) = exchanged else {
         return;
     };
-    assert_eq!(result.user.email, "mfa-admin.io");
+    assert_eq!(result.admin.email, "mfa-admin.io");
     // The issued access token carries `mfaVerified: true` and the platform discriminator, with
     // no tenantId — decoded directly from the JWT payload.
     let body = result.access_token.split('.').nth(1).unwrap_or_default();

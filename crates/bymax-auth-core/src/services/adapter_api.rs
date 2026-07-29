@@ -934,7 +934,7 @@ mod tests {
         }
         fn platform() -> PlatformAuthResult {
             PlatformAuthResult {
-                user: safe_admin(),
+                admin: safe_admin(),
                 access_token: "a".to_owned(),
                 refresh_token: "r".to_owned(),
             }

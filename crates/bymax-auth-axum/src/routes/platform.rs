@@ -200,7 +200,7 @@ async fn rotated_into_platform_result(
         .await?;
     let admin = state.engine().platform_me(&claims.sub).await?;
     Ok(PlatformAuthResult {
-        user: admin,
+        admin,
         access_token: tokens.access_token,
         refresh_token: tokens.refresh_token,
     })

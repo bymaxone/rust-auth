@@ -36,7 +36,13 @@ pub struct AuthResult {
 #[serde(rename_all = "camelCase")]
 pub struct PlatformAuthResult {
     /// The authenticated admin, with all credential fields removed.
-    pub user: SafeAuthPlatformUser,
+    ///
+    /// Named `admin`, not `user`: that is the key the platform login body carries on the wire,
+    /// and it is what nest-auth emits. The field used to be `user` and the adapter renamed it
+    /// while building the response, which left the TypeScript generated from this struct
+    /// describing a key the server never sends — a consumer reading `result.user` got
+    /// `undefined` at runtime. One name, in the struct, in the generated type, and on the wire.
+    pub admin: SafeAuthPlatformUser,
     /// The signed HS256 platform access JWT.
     pub access_token: String,
     /// The opaque refresh token (never a JWT).
@@ -202,12 +208,17 @@ mod tests {
     fn platform_login_result_round_trips_both_arms() {
         // The platform union mirrors the dashboard one over the platform result type.
         let success = PlatformLoginResult::Success(Box::new(PlatformAuthResult {
-            user: safe_platform_user(),
+            admin: safe_platform_user(),
             access_token: "jwt".to_owned(),
             refresh_token: "opaque".to_owned(),
         }));
         let json = serde_json::to_value(&success).unwrap_or_default();
         assert_eq!(json["accessToken"], "jwt");
+        // The account rides under `admin`, the key the platform body carries on the wire and
+        // the one nest-auth emits. A `user` here would be a type that describes a response
+        // nobody sends.
+        assert!(json["admin"].is_object());
+        assert!(json["user"].is_null());
 
         let challenge = PlatformLoginResult::MfaChallenge(MfaChallengeResult {
             mfa_required: true,

@@ -239,7 +239,7 @@ fn bearer_body(result: &AuthResult) -> impl Serialize + '_ {
 #[cfg(feature = "platform")]
 fn platform_bearer_body(result: &bymax_auth_types::PlatformAuthResult) -> impl Serialize + '_ {
     json!({
-        "admin": &result.user,
+        "admin": &result.admin,
         "accessToken": &result.access_token,
         "refreshToken": &result.refresh_token,
     })
@@ -293,7 +293,7 @@ mod tests {
     #[cfg(feature = "platform")]
     fn platform_result() -> PlatformAuthResult {
         PlatformAuthResult {
-            user: SafeAuthPlatformUser::from(AuthPlatformUser {
+            admin: SafeAuthPlatformUser::from(AuthPlatformUser {
                 id: "a1".to_owned(),
                 email: "a@e.com".to_owned(),
                 name: "A".to_owned(),
@@ -395,6 +395,103 @@ mod tests {
             assert!(!has_cookie(&jar, "refresh_token"));
             assert!(!has_cookie(&jar, "has_session"));
         }
+    }
+
+    /// Read a `responseBodies` entry from the shared cross-implementation wire contract.
+    ///
+    /// These are the payloads a consumer's TypeScript describes, so a difference here is not a
+    /// record that fails to load — it is a client that compiles against one backend and reads
+    /// `undefined` from the other.
+    fn response_body_keys(path: &[&str]) -> Vec<String> {
+        let file = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../conformance/wire-contract.json"
+        );
+        let raw = std::fs::read_to_string(file).unwrap_or_default();
+        let root: serde_json::Value = serde_json::from_str(&raw).unwrap_or(serde_json::Value::Null);
+        let mut node = root
+            .get("responseBodies")
+            .cloned()
+            .unwrap_or(serde_json::Value::Null);
+        for step in path {
+            node = node.get(step).cloned().unwrap_or(serde_json::Value::Null);
+        }
+        let keys: Vec<String> = node
+            .as_array()
+            .map(|values| {
+                values
+                    .iter()
+                    .filter_map(serde_json::Value::as_str)
+                    .map(str::to_owned)
+                    .collect()
+            })
+            .unwrap_or_default();
+        // The label is built before the assert, not inside its message: an argument evaluated
+        // only on failure is a line the coverage gate never sees executed.
+        let label = path.join(".");
+        assert!(
+            !keys.is_empty(),
+            "the wire contract declared no responseBodies.{label} — it did not load"
+        );
+        keys
+    }
+
+    /// The keys of a serialized body, sorted.
+    fn sorted_keys(body: &serde_json::Value) -> Vec<String> {
+        let mut keys: Vec<String> = body
+            .as_object()
+            .map(|map| map.keys().cloned().collect())
+            .unwrap_or_default();
+        keys.sort();
+        keys
+    }
+
+    #[test]
+    fn the_login_bodies_match_the_shared_wire_contract() {
+        // Cookie mode: the body carries the user and NOTHING else. The tokens are in
+        // `Set-Cookie` precisely so script cannot read them, and repeating a refresh token in
+        // the JSON payload would hand it to any XSS on the page — making the HttpOnly flag
+        // decorative. This is the assertion that would catch that regression.
+        let result = auth_result();
+        let cookie_body = serde_json::json!({ "user": &result.user });
+        let mut expected = response_body_keys(&["login", "cookie"]);
+        expected.sort();
+        assert_eq!(sorted_keys(&cookie_body), expected);
+        assert!(!cookie_body.to_string().contains("acc"));
+        assert!(!cookie_body.to_string().contains("ref"));
+
+        // Bearer mode: exactly the declared keys.
+        let bearer = serde_json::to_value(bearer_body(&result)).unwrap_or_default();
+        let mut expected = response_body_keys(&["login", "bearer"]);
+        expected.sort();
+        assert_eq!(sorted_keys(&bearer), expected);
+    }
+
+    #[cfg(feature = "platform")]
+    #[test]
+    fn the_platform_login_body_matches_the_shared_wire_contract() {
+        // The account rides under `admin`. This library's own generated TypeScript said `user`
+        // until the struct field was renamed to match what the adapter emits — a consumer
+        // reading `result.user` got `undefined` at runtime, and nothing was checking.
+        let body =
+            serde_json::to_value(platform_bearer_body(&platform_result())).unwrap_or_default();
+        let mut expected = response_body_keys(&["platformLogin", "bearer"]);
+        expected.sort();
+        assert_eq!(sorted_keys(&body), expected);
+        assert!(expected.contains(&"admin".to_owned()));
+        assert!(!expected.contains(&"user".to_owned()));
+    }
+
+    #[test]
+    fn the_challenge_body_matches_the_shared_wire_contract() {
+        let challenge = bymax_auth_types::MfaChallengeResult {
+            mfa_required: true,
+            mfa_temp_token: "t".to_owned(),
+        };
+        let body = serde_json::to_value(challenge).unwrap_or_default();
+        let mut expected = response_body_keys(&["mfaChallenge"]);
+        expected.sort();
+        assert_eq!(sorted_keys(&body), expected);
     }
 
     #[cfg(feature = "platform")]

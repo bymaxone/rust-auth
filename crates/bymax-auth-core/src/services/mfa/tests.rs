@@ -1135,7 +1135,7 @@ async fn platform_challenge_exchanges_a_temp_token_for_a_full_platform_session()
     let Ok(LoginResultMfa::Platform(result)) = exchanged else {
         return;
     };
-    assert_eq!(result.user.email, "admin@example.com");
+    assert_eq!(result.admin.email, "admin@example.com");
     // The issued access token verifies as a PLATFORM token carrying mfa_verified, and the
     // serialized claims carry no tenantId.
     let claims = h

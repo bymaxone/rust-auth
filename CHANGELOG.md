@@ -82,6 +82,12 @@ version bump.
   what was missing was the agreement, because nest-auth had no equivalent to
   agree with. It does now, so the prefix, the record shape and the tenant-scope
   omission are pinned rather than coincidental.
+- **`responseBodies` added to the contract**, which is what caught the mismatch above. It
+  declares the client-facing payloads — the login body per delivery mode, the platform body,
+  the challenge, the ws-ticket — and both sides assert against what they actually serialize.
+  The cookie-mode claim is the load-bearing one: the tokens are in `Set-Cookie` so script
+  cannot read them, and a refresh token repeated in the JSON payload would make the HttpOnly
+  flag decorative.
 - **`credentialFormats` and `errorEnvelope` added too**, which closes the section
   list: every part of the shared contract is now asserted on both sides.
   `credentialFormats` is asserted against what the code actually mints rather
@@ -112,6 +118,12 @@ version bump.
 
 ### Fixed
 
+- **`PlatformAuthResult`'s account field was named `user` while the wire says `admin`.** The
+  adapter renamed it while building the response, so the TypeScript generated from the struct
+  described a key the server never sends: a consumer reading `result.user` got `undefined` at
+  runtime. The struct field is now `admin`, so the type, the struct and the body agree, and the
+  adapter no longer remaps. **Breaking** for Rust callers reading `PlatformAuthResult::user` —
+  none published, since the crate is unreleased. The wire is unchanged.
 - **The error envelope omitted `details` instead of sending `null`.** The shared
   contract declares the key present with an `object|null` value, which is what
   nest-auth emits and what the one client library decoding both backends expects

@@ -393,7 +393,7 @@ impl TokenManagerService {
             .await?;
 
         Ok(PlatformAuthResult {
-            user: admin.clone(),
+            admin: admin.clone(),
             access_token,
             refresh_token: refresh.expose_secret().to_owned(),
         })

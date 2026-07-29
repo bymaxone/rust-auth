@@ -217,6 +217,26 @@
     }
   },
 
+  "responseBodies": {
+    "$comment": [
+      "The client-facing payloads. These are what a consumer's TypeScript describes, so a",
+      "difference here is not a store that fails to read — it is a client that compiles against",
+      "one backend and reads `undefined` from the other. The platform login body is the trap:",
+      "the account rides under `admin`, not `user`, on both sides."
+    ],
+    "login": {
+      "cookie": ["user"],
+      "bearer": ["user", "accessToken", "refreshToken"],
+      "$comment": "In cookie mode the tokens are in Set-Cookie and MUST NOT also be in the body: a refresh token in a JSON payload is one an XSS can read, which is the whole reason the cookie is HttpOnly."
+    },
+    "platformLogin": {
+      "bearer": ["admin", "accessToken", "refreshToken"],
+      "$comment": "Always bearer — a platform admin console is not a browser session — and the account key is `admin`."
+    },
+    "mfaChallenge": ["mfaRequired", "mfaTempToken"],
+    "wsTicket": ["ticket", "expiresIn"]
+  },
+
   "errorEnvelope": {
     "$comment": "The body shape every auth error serializes to. `details` is present and null when the thrower supplied none.",
     "shape": { "error": { "code": "string", "message": "string", "details": "object|null" } }

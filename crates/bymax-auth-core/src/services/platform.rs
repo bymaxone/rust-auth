@@ -562,7 +562,7 @@ mod tests {
             .await;
         assert!(matches!(&result, Ok(PlatformLoginResult::Success(_))));
         let Ok(PlatformLoginResult::Success(auth)) = result else { return };
-        assert_eq!(auth.user.email, "ok@admin.io");
+        assert_eq!(auth.admin.email, "ok@admin.io");
         assert!(!auth.access_token.is_empty());
 
         // The platform access token verifies as a platform token and carries no tenant.
