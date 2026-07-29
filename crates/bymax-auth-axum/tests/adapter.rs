@@ -22,8 +22,9 @@
 mod common;
 
 use common::{
-    Captured, EngineSpec, Req, TENANT, build, build_oauth_with_redirects, current_totp,
-    enable_mfa_flag, router, seed_admin, seed_user, set_status,
+    Captured, EngineSpec, Req, TENANT, build, build_oauth_with_failing_state_store,
+    build_oauth_with_redirects, current_totp, enable_mfa_flag, router, seed_admin, seed_user,
+    set_status,
 };
 use http::{HeaderName, Method, StatusCode, header};
 
@@ -1786,6 +1787,61 @@ async fn oauth_query_validation_rejects_a_missing_tenant_id() {
 // ----------------------------------------------------------------------------------------
 // oauth: configured success/mfa/error redirect branches (302)
 // ----------------------------------------------------------------------------------------
+
+#[tokio::test]
+async fn a_provider_error_callback_is_an_oauth_failure_not_a_validation_error() {
+    // RFC 6749 §4.1.2.1: a provider that refuses answers with `error` and no `code` — which is
+    // what Google sends when the user clicks "Cancel". The query used to require `code`, so a
+    // user who simply changed their mind got a validation envelope instead of the library's
+    // own refusal. A callback carrying neither takes the same path.
+    let Some(h) = build(EngineSpec {
+        oauth: true,
+        allow_oauth: true,
+        ..EngineSpec::default()
+    }) else {
+        return;
+    };
+    let app = router(&h);
+
+    for query in [
+        "error=access_denied&state=deadbeef",
+        "error=temporarily_unavailable&error_description=try%20later&state=deadbeef",
+        "state=deadbeef",
+    ] {
+        let res = Req::get(&format!("/auth/oauth/google/callback?{query}"))
+            .send(&app)
+            .await;
+        assert_eq!(res.status, StatusCode::UNAUTHORIZED, "for query {query}");
+        assert_eq!(res.json()["error"]["code"], "auth.oauth_failed");
+        // The provider's own string never reaches the caller: it is provider-chosen text, and
+        // `oauth_failed` already says everything the library is willing to vouch for.
+        let body = String::from_utf8_lossy(&res.body).to_string();
+        assert!(!body.contains("access_denied"));
+        assert!(!body.contains("temporarily_unavailable"));
+    }
+}
+
+#[tokio::test]
+async fn an_infrastructure_failure_on_the_callback_does_not_become_an_error_redirect() {
+    // The error redirect exists to explain a refusal to a user. A store that is down is not a
+    // refusal: dressing it up as `?error=oauth_failed` would tell the user to try again while
+    // hiding an outage from whatever watches 5xx. Only an `OauthFailed` gets the redirect.
+    let Some(h) = build_oauth_with_failing_state_store() else { return };
+    let app = router(&h);
+
+    // A well-formed 64-hex state: a malformed one is refused on shape before the store is
+    // ever consulted, and the test would pass on the wrong path.
+    let state = "a".repeat(64);
+    let res = Req::get(&format!(
+        "/auth/oauth/google/callback?code=abc&state={state}"
+    ))
+    .cookie("oauth_state", &state)
+    .send(&app)
+    .await;
+
+    assert_eq!(res.status, StatusCode::INTERNAL_SERVER_ERROR);
+    assert!(!res.headers.contains_key(header::LOCATION));
+}
 
 #[tokio::test]
 async fn oauth_callback_redirect_branches() {

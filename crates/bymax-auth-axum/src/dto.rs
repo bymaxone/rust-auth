@@ -273,8 +273,28 @@ pub struct OAuthInitiateQuery {
 #[serde(rename_all = "camelCase")]
 pub struct OAuthCallbackQuery {
     /// The authorization code returned by the provider.
-    #[garde(length(min = 1, max = 2048))]
-    pub code: String,
+    ///
+    /// Absent on the error callback RFC 6749 §4.1.2.1 defines — the response a provider sends
+    /// when the user declines consent, which used to be rejected as a malformed query for the
+    /// missing field: a user who simply changed their mind saw a validation envelope instead
+    /// of the configured error redirect. The handler refuses a callback carrying neither this
+    /// nor `error`.
+    #[garde(inner(length(min = 1, max = 2048)))]
+    pub code: Option<String>,
+    /// The provider's error code (RFC 6749 §4.1.2.1) — `access_denied` when the user clicks
+    /// "Cancel" at the consent screen, plus `server_error`, `temporarily_unavailable` and the
+    /// rest. Logged and never echoed to the caller: the response stays `auth.oauth_failed`, so
+    /// the provider cannot choose what appears in a redirect URL the browser follows.
+    #[garde(inner(length(max = 128)))]
+    pub error: Option<String>,
+    /// Human-readable detail accompanying `error`. Accepted so the query validates; logged
+    /// with `error`, never echoed.
+    #[garde(inner(length(max = 512)))]
+    pub error_description: Option<String>,
+    /// URI of a provider page describing `error`. Accepted so the query validates; never
+    /// followed and never echoed.
+    #[garde(inner(length(max = 512)))]
+    pub error_uri: Option<String>,
     /// The CSRF `state` nonce (matched against the stored single-use record).
     #[garde(length(min = 1, max = 128))]
     pub state: String,

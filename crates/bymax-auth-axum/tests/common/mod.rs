@@ -256,6 +256,43 @@ pub fn build_oauth_with_redirects() -> Option<Harness> {
     })
 }
 
+/// Build an OAuth-enabled engine whose state store fails on `take_state`, with the error
+/// redirect configured. Drives the one path where the callback must NOT redirect: an
+/// infrastructure failure has to surface to monitoring rather than be dressed up as a user
+/// declining consent.
+pub fn build_oauth_with_failing_state_store() -> Option<Harness> {
+    let users = Arc::new(InMemoryUserRepository::new());
+    let admins = Arc::new(InMemoryPlatformUserRepository::new());
+    let failing = Arc::new(FailingStores::with_failing_oauth_state());
+    let inert = Arc::new(InMemoryStores::new());
+
+    let mut config = AuthConfig::default();
+    config.jwt.secret = SecretString::from(JWT_SECRET.to_owned());
+    config.roles.hierarchy = HashMap::from([("USER".to_owned(), Vec::new())]);
+    config.controllers.oauth = true;
+    config.oauth.error_redirect_url = Some("http://localhost/error".to_owned());
+    config.oauth.redirect_allowlist = vec!["localhost".to_owned()];
+
+    let engine = AuthEngine::builder()
+        .config(config)
+        .environment(Environment::Development)
+        .user_repository(users.clone())
+        .platform_user_repository(admins.clone())
+        .redis_stores(failing.clone())
+        .oauth_provider(Arc::new(MockOAuthProvider::new("google")))
+        .oauth_state_store(failing)
+        .hooks(Arc::new(AllowOAuthHooks))
+        .build()
+        .ok()?;
+    Some(Harness {
+        engine: Arc::new(engine),
+        users,
+        admins,
+        stores: inert,
+        domain_resolver: None,
+    })
+}
+
 /// Assemble the adapter router for the harness engine with default adapter config.
 pub fn router(harness: &Harness) -> Router {
     bymax_auth_axum::AuthRouter::from_engine(harness.engine.clone(), AxumAuthConfig::default())
@@ -335,6 +372,10 @@ pub struct FailingStores {
     /// revocation check), so a test can drive the auth-extractor's internal-error path rather
     /// than the handler error arms. Default `false` keeps the auth extractors passing.
     blacklist_fails: bool,
+    /// When set, `take_state` fails, so the OAuth callback surfaces a store error rather than
+    /// `OauthFailed` — the one input that proves an infrastructure failure is NOT swallowed
+    /// into the friendly `?error=oauth_failed` redirect.
+    oauth_state_fails: bool,
 }
 
 impl FailingStores {
@@ -342,6 +383,7 @@ impl FailingStores {
         Self {
             inner: Arc::new(InMemoryStores::new()),
             blacklist_fails: false,
+            oauth_state_fails: false,
         }
     }
 
@@ -349,6 +391,15 @@ impl FailingStores {
         Self {
             inner: Arc::new(InMemoryStores::new()),
             blacklist_fails: true,
+            oauth_state_fails: false,
+        }
+    }
+
+    fn with_failing_oauth_state() -> Self {
+        Self {
+            inner: Arc::new(InMemoryStores::new()),
+            blacklist_fails: false,
+            oauth_state_fails: true,
         }
     }
 }
@@ -655,6 +706,9 @@ impl bymax_auth_core::traits::OAuthStateStore for FailingStores {
         &self,
         state_hash: &str,
     ) -> Result<Option<String>, bymax_auth_types::AuthError> {
+        if self.oauth_state_fails {
+            return Err(fail());
+        }
         self.inner.take_state(state_hash).await
     }
 }

@@ -184,6 +184,14 @@ version bump.
   (RFC 6265 §5.3.6), so a second one on the same response is either a duplicate scope or a
   value that gets dropped. Unset — the default — still means no `Domain` attribute at all,
   which is what a session cookie should be; `nest-auth` now defaults the same way.
+- **The provider's error callback reaches the OAuth error handling instead of the validator.**
+  RFC 6749 §4.1.2.1 defines a callback carrying `error` and no `code` — the response a provider
+  sends when the user declines consent. `OAuthCallbackQuery` required `code`, so a user who
+  simply clicked "Cancel" got a validation envelope rather than the configured error redirect.
+  `code` is now optional and the handler refuses a callback carrying neither it nor `error`.
+  The provider's value is logged and never echoed: it is provider-chosen text that would
+  otherwise land in a URL the browser follows, and `oauth_failed` already says everything the
+  library is willing to vouch for. `nest-auth` takes the same change.
 - **The platform recovery-code challenge gates on winning the temp-token consume**, which the
   dashboard path already did. Found while chasing a coverage gap the enrolment change exposed:
   the two planes carry the same logic separately, and only one had been fixed.
