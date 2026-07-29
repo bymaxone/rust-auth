@@ -386,6 +386,16 @@ impl InMemoryStores {
         *lock(&self.last_rotate_ttl_secs)
     }
 
+    /// Drop the resend-cooldown marker for `(purpose, identifier)`, letting a test drive a
+    /// second issuance without waiting out the window. Returns whether a marker was held.
+    ///
+    /// Production has no such door: the cooldown is what keeps a caller from re-minting an OTP
+    /// (and with it a fresh `attempts: 0`) as often as they like. A test that needs two
+    /// issuances is testing something else and says so by calling this.
+    pub fn expire_resend_cooldown(&self, purpose: OtpPurpose, identifier: &str) -> bool {
+        lock(&self.resend).remove(&(purpose, identifier.to_owned()))
+    }
+
     /// Read the stored OTP code for a purpose + identifier without consuming it. A test-only
     /// inspection helper (the real store never exposes a stored code), used to drive the
     /// verification flow end to end against the in-memory double.

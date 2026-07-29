@@ -324,9 +324,12 @@ describe("AuthClient — endpoint, payload, and error mapping", () => {
     expect(first(calls).url).toBe("https://api.test/auth/refresh");
   });
 
-  it("getMe GETs /auth/me and unwraps the { user } envelope", async () => {
+  // The route answers with the BARE user object, not a `{ user }` envelope — mocking the
+  // envelope here is what let the client's `wrapper.user` unwrap survive the server changing
+  // shape: the test passed while returning `undefined` to every real caller.
+  it("getMe GETs /auth/me and returns the bare user body", async () => {
     const user = makeUser();
-    const calls = installFetch(async () => jsonResponse({ user }));
+    const calls = installFetch(async () => jsonResponse(user));
     const client = createAuthClient({ baseUrl, timeout: 0 });
 
     const value = await client.getMe();

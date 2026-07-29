@@ -37,7 +37,10 @@ pub(crate) fn routes(config: &AxumAuthConfig, ip_source: ClientIpSource) -> Rout
             "/login",
             crate::router::throttled(post(login), limits.login, ip_source),
         )
-        .route("/logout", post(logout))
+        .route(
+            "/logout",
+            crate::router::throttled(post(logout), limits.logout, ip_source),
+        )
         .route(
             "/refresh",
             crate::router::throttled(post(refresh), limits.refresh, ip_source),
@@ -56,11 +59,14 @@ pub(crate) fn routes(config: &AxumAuthConfig, ip_source: ClientIpSource) -> Rout
             ),
         );
 
-    // The WS-ticket mint endpoint compiles only under the `websocket` feature; it is NOT
-    // assigned an edge limit (§16.3) — it is an authenticated, status- and MFA-gated route,
-    // not a credential-entry path. A consumer needing to cap mint volume adds an outer limit.
+    // The WS-ticket mint endpoint compiles only under the `websocket` feature. It IS limited,
+    // despite being authenticated and status/MFA-gated: every call writes a fresh single-use
+    // ticket key, so without a ceiling one authenticated caller can mint them without bound.
     #[cfg(feature = "websocket")]
-    let router = router.route("/ws-ticket", post(crate::ws::ws_ticket));
+    let router = router.route(
+        "/ws-ticket",
+        crate::router::throttled(post(crate::ws::ws_ticket), limits.ws_ticket, ip_source),
+    );
 
     router
 }

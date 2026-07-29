@@ -237,6 +237,52 @@ describe("createAuthProxy — fail-closed verification (S1) and token-type asser
   });
 });
 
+describe("createAuthProxy — client-supplied x-user-* headers never survive", () => {
+  /** A protected request that forges every advisory identity header. */
+  function forged(token: string): NextRequest {
+    return new NextRequest("https://app.test/dashboard", {
+      headers: {
+        cookie: `access_token=${token}`,
+        "x-user-id": "victim",
+        "x-user-role": "ADMIN",
+        "x-user-tenant-id": "victim-tenant",
+        "x-user-status": "ACTIVE",
+      },
+    });
+  }
+
+  it("overwrites every forged header from the verified token", async () => {
+    const { proxy } = createAuthProxy({ accessTokenSecret: SECRET });
+    const response = await proxy(forged(dashboardToken()));
+
+    expect(response.headers.get("x-middleware-request-x-user-id")).toBe("u_1");
+    expect(response.headers.get("x-middleware-request-x-user-role")).not.toBe("ADMIN");
+  });
+
+  it("strips them on a public path, where there is no token at all", async () => {
+    const { proxy } = createAuthProxy({ accessTokenSecret: SECRET, publicPaths: ["/public"] });
+    const response = await proxy(
+      new NextRequest("https://app.test/public", {
+        headers: { "x-user-id": "victim", "x-user-role": "ADMIN" },
+      }),
+    );
+
+    const injected = response.headers.get("x-middleware-override-headers");
+    expect(injected).not.toBeNull();
+    expect(injected).not.toContain("x-user-id");
+    expect(response.headers.get("x-middleware-request-x-user-id")).not.toBe("victim");
+  });
+
+  it("does not exempt a protected path that merely starts with a public prefix", async () => {
+    // `/login` must not make `/loginhistory` public. The direction of that mistake is
+    // fail-open: a route the operator meant to protect becomes reachable unauthenticated.
+    const { proxy } = createAuthProxy({ accessTokenSecret: SECRET, publicPaths: ["/login"] });
+    const response = await proxy(new NextRequest("https://app.test/loginhistory"));
+
+    expect(redirectedToLogin(response)).toBe(true);
+  });
+});
+
 describe("createAuthProxy — forged background headers are not an auth bypass (RC10)", () => {
   /**
    * Whether a response is the bare, uncacheable 401 the proxy owes an unauthenticated

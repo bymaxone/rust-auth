@@ -199,6 +199,32 @@ version bump.
   tracing records response headers, a reasonable thing to switch on while debugging, was
   writing live session tokens into its logs, where they outlive the session and are read by
   people it was never issued to.
+- **`initiate_reset` shares the resend cooldown.** `resend_reset_otp` was throttled and
+  `initiate_reset` was not, which made the throttle decorative — a caller just used the other
+  door. It also made the OTP's 5-attempt ceiling per-issuance rather than per-account, because
+  every issuance rewrites the record with `attempts: 0`: an attacker who knew an address could
+  loop "initiate, guess five times" at a six-digit code indefinitely, mailing the victim once
+  per lap. Both entry points now claim one budget under one key. `nest-auth` takes the same
+  change.
+- **The absolute session-lifetime cap is enforced on the grace-recovery path.** The check ran
+  against the seed, and on that path the seed is the placeholder used when the live key is
+  already gone — its `family_created_at` is `None`, so the check returned early and applied
+  nothing. A lineage that had just passed its cap could still mint a fresh access token and a
+  full-length refresh session by presenting a token inside its grace window: the cap ended
+  normal rotation and left the one remaining door open. Both planes take the check.
+- **`GET /auth/me` is pinned in the wire contract, and the TypeScript client reads the shape
+  the server actually sends.** The route returns the bare user object; the client still
+  unwrapped a `{ user }` envelope, so `getMe()` resolved to `undefined` while every other
+  signal said authenticated — `AuthProvider` reported a session with no user, and a consumer
+  reading `user.role` threw on a perfectly good login. The test that should have caught it
+  mocked the old envelope. The contract had no `me` entry, which is why nothing else did.
+- **`POST /auth/logout` and `POST /auth/ws-ticket` are rate-limited** (20/60s each, pinned in
+  the contract). Logout is public by necessity and was unlimited; ws-ticket is authenticated
+  but writes a fresh single-use key per call.
+- **The Next.js proxy strips the caller's `x-user-*` headers on a public path** — that arm
+  forwarded them verbatim, so the advisory identity headers were forgeable with no token at
+  all — and `isPublicPath` now matches at a segment boundary, so `/login` no longer exempts
+  `/loginhistory`.
 - **The platform recovery-code challenge gates on winning the temp-token consume**, which the
   dashboard path already did. Found while chasing a coverage gap the enrolment change exposed:
   the two planes carry the same logic separately, and only one had been fixed.

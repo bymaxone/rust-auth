@@ -143,7 +143,12 @@ export function createAuthProxy(config: AuthProxyConfig): AuthProxyInstance {
   const proxy = async (request: NextRequest): Promise<NextResponse> => {
     const { pathname } = request.nextUrl;
     if (isPublicPath(pathname, resolved.publicPaths)) {
-      return NextResponse.next();
+      // A public path still has to have the caller's `x-user-*` stripped: they are forgeable
+      // by anyone and the page behind a public route renders with whatever it is handed. This
+      // arm used to forward them verbatim, so the headers were spoofable with no token at all.
+      const headers = new Headers(request.headers);
+      stripUserHeaders(headers);
+      return NextResponse.next({ request: { headers } });
     }
 
     const token = request.cookies.get(AUTH_ACCESS_COOKIE_NAME)?.value;
@@ -254,12 +259,30 @@ function redirectToLogin(
   return NextResponse.redirect(url);
 }
 
-/** Forward the request with UI-only `x-user-*` headers (advisory; never authoritative). */
+/**
+ * Forward the request with UI-only `x-user-*` headers (advisory; never authoritative).
+ *
+ * Every one of them is DELETED from the caller's copy first, then set only from the verified
+ * token. The `tenantId` and `status` sets are conditional, and a request that reaches here
+ * always carries both claims — the proxy refuses a token missing either — so this is
+ * defence-in-depth rather than a hole being closed: it removes the asymmetry where two of the
+ * four headers were authoritative and two depended on a claim being present, which is not a
+ * distinction a consumer reading them could see. The public-path arm below is the case that
+ * WAS reachable: it forwarded the caller's headers verbatim, with no token involved at all.
+ */
+function stripUserHeaders(headers: Headers): void {
+  headers.delete("x-user-id");
+  headers.delete("x-user-role");
+  headers.delete("x-user-tenant-id");
+  headers.delete("x-user-status");
+}
+
 function forwardWithUserHeaders(
   request: NextRequest,
   user: { id: string; role: string; tenantId: string | undefined; status: string | undefined },
 ): NextResponse {
   const headers = new Headers(request.headers);
+  stripUserHeaders(headers);
   headers.set("x-user-id", user.id);
   headers.set("x-user-role", user.role);
   if (user.tenantId !== undefined) headers.set("x-user-tenant-id", user.tenantId);
@@ -269,7 +292,12 @@ function forwardWithUserHeaders(
 
 /** Whether a pathname is matched by any configured public prefix. */
 function isPublicPath(pathname: string, publicPaths: readonly string[]): boolean {
-  return publicPaths.some((prefix) => pathname === prefix || pathname.startsWith(prefix));
+  // The prefix must end at a segment boundary. A bare `startsWith` made `/login` exempt
+  // `/loginhistory` too, and the direction of that mistake is fail-open: a route the operator
+  // meant to protect becomes public because its name happens to start with a public one.
+  return publicPaths.some(
+    (prefix) => pathname === prefix || pathname.startsWith(prefix.endsWith("/") ? prefix : `${prefix}/`),
+  );
 }
 
 /**

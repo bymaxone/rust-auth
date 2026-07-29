@@ -155,6 +155,21 @@ pub struct RateLimitConfig {
     pub oauth_initiate: Option<RateLimit>,
     /// `GET /auth/oauth/{provider}/callback` — 10 / 60s.
     pub oauth_callback: Option<RateLimit>,
+    /// `POST /auth/logout` — 20 / 60s.
+    ///
+    /// The route is public: it has to be, or a user whose access token expired could not sign
+    /// out and the refresh session would live out its full lifetime on a device they had just
+    /// abandoned. Public and unlimited is a different thing, though — each call costs a hash
+    /// and several store round trips, and nothing about the caller is known. The ceiling is
+    /// deliberately loose: a browser with several tabs can legitimately fire a handful at once,
+    /// and being rate-limited out of signing out would be its own security problem.
+    pub logout: Option<RateLimit>,
+    /// `POST /auth/ws-ticket` — 20 / 60s.
+    ///
+    /// Authenticated, but every call writes a fresh single-use ticket key, so an authenticated
+    /// caller could otherwise mint them without bound. A reconnecting client needs one per
+    /// socket; 20 covers a flapping connection without covering a loop.
+    pub ws_ticket: Option<RateLimit>,
 }
 
 impl Default for RateLimitConfig {
@@ -181,6 +196,8 @@ impl Default for RateLimitConfig {
             revoke_all_sessions: Some(RateLimit::new(5, 60)),
             oauth_initiate: Some(RateLimit::new(10, 60)),
             oauth_callback: Some(RateLimit::new(10, 60)),
+            logout: Some(RateLimit::new(20, 60)),
+            ws_ticket: Some(RateLimit::new(20, 60)),
         }
     }
 }
@@ -267,7 +284,7 @@ mod tests {
     fn every_default_limit_matches_the_shared_wire_contract() {
         let contract = contract_limits();
         let defaults = RateLimitConfig::default();
-        let pairs: [(&str, Option<RateLimit>); 21] = [
+        let pairs: [(&str, Option<RateLimit>); 23] = [
             ("login", defaults.login),
             ("register", defaults.register),
             ("refresh", defaults.refresh),
@@ -289,6 +306,8 @@ mod tests {
             ("revokeAllSessions", defaults.revoke_all_sessions),
             ("oauthInitiate", defaults.oauth_initiate),
             ("oauthCallback", defaults.oauth_callback),
+            ("logout", defaults.logout),
+            ("wsTicket", defaults.ws_ticket),
         ];
 
         for (name, limit) in pairs {

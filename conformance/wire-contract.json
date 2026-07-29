@@ -179,6 +179,8 @@
     "login": "5/60",
     "register": "10/3600",
     "refresh": "10/60",
+  "logout": "20/60",
+  "wsTicket": "20/60",
     "forgotPassword": "3/300",
     "resetPassword": "3/300",
     "verifyOtp": "3/300",
@@ -231,6 +233,10 @@
     "platformLogin": {
       "bearer": ["admin", "accessToken", "refreshToken"],
       "$comment": "Always bearer — a platform admin console is not a browser session — and the account key is `admin`."
+    },
+    "me": {
+      "envelope": "none",
+      "$comment": "GET /auth/me answers with the BARE user object — no `{ user }` wrapper. Pinned because its absence from this table is what let one side change shape while the other kept unwrapping a key that was no longer there: the client returned `undefined` while every other signal said authenticated, and the test that should have caught it mocked the old envelope."
     },
     "mfaChallenge": ["mfaRequired", "mfaTempToken"],
     "wsTicket": ["ticket", "expiresIn"]

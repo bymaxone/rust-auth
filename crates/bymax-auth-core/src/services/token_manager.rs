@@ -327,6 +327,15 @@ impl TokenManagerService {
                 })
             }
             RotateOutcome::Grace(recovered) => {
+                // The cap is measured again here, against the RECOVERED record. The check
+                // before the script ran against the seed — and on this path the seed is the
+                // placeholder used when the live key is already gone, whose `family_created_at`
+                // is `None`, so that check returned early and applied nothing. Without this
+                // second check a lineage that had just passed its absolute cap could still mint
+                // a fresh access token and a full-length refresh session by presenting a token
+                // inside its grace window: the cap ends normal rotation and the one remaining
+                // door stays open.
+                self.assert_within_absolute_lifetime(&recovered)?;
                 // Lost the rotation race: mint a fresh session for the recovered identity
                 // rather than re-planting a grace pointer.
                 let fresh = RawRefreshToken::generate();
@@ -509,6 +518,15 @@ impl TokenManagerService {
                 })
             }
             RotateOutcome::Grace(recovered) => {
+                // The cap is measured again here, against the RECOVERED record. The check
+                // before the script ran against the seed — and on this path the seed is the
+                // placeholder used when the live key is already gone, whose `family_created_at`
+                // is `None`, so that check returned early and applied nothing. Without this
+                // second check a lineage that had just passed its absolute cap could still mint
+                // a fresh access token and a full-length refresh session by presenting a token
+                // inside its grace window: the cap ends normal rotation and the one remaining
+                // door stays open.
+                self.assert_within_absolute_lifetime(&recovered)?;
                 // Lost the rotation race: mint a fresh platform session for the recovered
                 // identity rather than re-planting a grace pointer.
                 let fresh = RawRefreshToken::generate();
@@ -1761,6 +1779,56 @@ mod absolute_lifetime_tests {
             family_id: "fam-1".to_owned(),
             family_created_at: Some(now_offset() - TimeDuration::days(days_ago)),
         }
+    }
+
+    #[tokio::test]
+    async fn a_grace_recovery_is_refused_once_the_family_outlives_the_cap() {
+        // The cap must hold on the GRACE path too. The check before the script runs against the
+        // seed, and on this path the seed is the placeholder used when the live key is already
+        // gone — its `family_created_at` is `None`, so that check returns early and applies
+        // nothing. Without a second check against the RECOVERED record, a lineage that had just
+        // passed its cap could still mint a fresh access token and a full-length refresh
+        // session by presenting a token inside its grace window: the cap ends normal rotation
+        // and the one remaining door stays open.
+        let store = Arc::new(InMemoryStores::new());
+        // An UNCAPPED manager plants the grace pointer, because a capped one would refuse the
+        // first rotation outright and there would be no pointer to recover from.
+        let uncapped = TokenManagerService::new(
+            HsKey::from_bytes(b"0123456789abcdef0123456789abcdef"),
+            Vec::new(),
+            store.clone(),
+            Duration::from_secs(900),
+            7,
+            Duration::from_secs(30),
+            0,
+        );
+        let old = RawRefreshToken::generate();
+        assert!(
+            store
+                .create_session(
+                    SessionKind::Dashboard,
+                    &old.redis_hash(),
+                    &record_born(31),
+                    3600
+                )
+                .await
+                .is_ok()
+        );
+        assert!(
+            uncapped
+                .reissue_tokens(old.expose_secret(), "203.0.113.4", "Chrome")
+                .await
+                .is_ok(),
+            "the first rotation plants the grace pointer"
+        );
+
+        // Now replay the consumed token against a CAPPED manager: the live key is gone, so this
+        // takes the grace path, and the recovered record is 31 days old against a 30-day cap.
+        let refused = capped(store.clone())
+            .reissue_tokens(old.expose_secret(), "203.0.113.4", "Chrome")
+            .await;
+
+        assert!(matches!(refused, Err(AuthError::RefreshTokenInvalid)));
     }
 
     #[tokio::test]

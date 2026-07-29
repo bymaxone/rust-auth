@@ -28,7 +28,13 @@ use crate::traits::{HookContext, OtpPurpose, ResetContext};
 /// OTP verification to the reset form (§7.8 `VERIFIED_TOKEN_TTL_SECONDS`).
 const VERIFIED_TOKEN_TTL_SECONDS: u64 = 300;
 
-/// The atomic resend cooldown for the OTP method, in seconds (§7.8.4).
+/// Seconds one account must wait between reset sends (§7.8.4), shared by `initiate_reset` and
+/// `resend_reset_otp`.
+///
+/// It is not only about mail volume. Every issuance rewrites the OTP record with `attempts: 0`,
+/// so an entry point that can be called freely converts the 5-attempt ceiling into 5 attempts
+/// *per call*, and a six-digit code stops being a secret. Both doors therefore draw on one
+/// budget under one key.
 const RESEND_COOLDOWN_SECS: u64 = 60;
 
 /// The bytes of entropy in a reset link / verified token before hex-encoding (256-bit).
@@ -147,6 +153,24 @@ impl AuthEngine {
     /// the anti-enumeration timing floor to every exit path (success and infra error alike).
     async fn initiate_reset_inner(&self, input: &ForgotPasswordInput) -> Result<(), AuthError> {
         let config = self.config().config();
+
+        // The SAME cooldown `resend_reset_otp` claims, under the same key, so the two entry
+        // points share one budget rather than one throttling itself while the other hands out
+        // fresh sends for free. Two things depended on that: every issuance rewrites the OTP
+        // record with `attempts: 0`, so an untimed initiate turns the 5-attempt ceiling into
+        // 5 attempts *per call* — an unbounded supply of guesses at a six-digit code — and each
+        // call also mails the victim, which is a mail bomb aimed at an address the caller merely
+        // has to know. A cooldown hit is a silent success, and the caller's anti-enumeration
+        // floor still applies, so the throttle does not itself answer whether the account exists.
+        let identifier = self.hashed_identifier(&input.tenant_id, &input.email);
+        if !self
+            .otp()
+            .try_begin_resend(OtpPurpose::PasswordReset, &identifier, RESEND_COOLDOWN_SECS)
+            .await?
+        {
+            return Ok(());
+        }
+
         // Look up the account; an unknown email or a blocked account takes no visible branch.
         if let Some(user) = self
             .user_repository()
@@ -800,6 +824,13 @@ mod tests {
         assert!(h.engine.reset_password(reset, &ctx()).await.is_ok());
 
         // Verified-token bridge: re-send an OTP, verify it for a token, reset with the token.
+        // The earlier initiate claimed the resend cooldown — that gate is what stops a caller
+        // re-minting an OTP (and a fresh `attempts: 0`) at will — so release it explicitly
+        // rather than silently getting no second code and skipping the rest of this test.
+        assert!(
+            h.stores
+                .expire_resend_cooldown(OtpPurpose::PasswordReset, &identifier)
+        );
         assert!(
             h.engine
                 .initiate_reset(forgot("otp@example.com"), &ctx())
@@ -846,6 +877,63 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn initiate_shares_the_resend_cooldown_so_the_otp_attempt_ceiling_cannot_be_reset() {
+        // `resend_reset_otp` was throttled and `initiate_reset` was not, which made the
+        // throttle decorative: the caller just used the other door. It also made the OTP's
+        // 5-attempt ceiling per-issuance rather than per-account, because every issuance
+        // rewrites the record with `attempts: 0` — so an attacker who knows an address could
+        // loop "initiate, guess five times" at a six-digit code forever, and mail the victim
+        // once per lap while doing it.
+        let Some(h) = otp_harness() else { return };
+        let _ = h
+            .seed(SeedUser::active("throttled@example.com", "old"))
+            .await;
+        let identifier = h.engine.hashed_identifier("t1", "throttled@example.com");
+
+        assert!(
+            h.engine
+                .initiate_reset(forgot("throttled@example.com"), &ctx())
+                .await
+                .is_ok()
+        );
+        let first = h
+            .stores
+            .peek_otp(OtpPurpose::PasswordReset, &identifier)
+            .unwrap_or_default();
+        assert!(!first.is_empty(), "the first initiate mints an OTP");
+
+        // Burn four of the five attempts, then try to buy five more with a second initiate.
+        for _ in 0..4 {
+            let _ = h
+                .engine
+                .verify_reset_otp(
+                    VerifyResetOtpInput {
+                        email: "throttled@example.com".to_owned(),
+                        tenant_id: "t1".to_owned(),
+                        otp: "000000".to_owned(),
+                    },
+                    &ctx(),
+                )
+                .await;
+        }
+
+        assert!(
+            h.engine
+                .initiate_reset(forgot("throttled@example.com"), &ctx())
+                .await
+                .is_ok(),
+            "a throttled initiate is still a silent success — it must not answer whether the account exists"
+        );
+        // The stored code is untouched, which means its attempt counter is too: the second
+        // call bought nothing.
+        assert_eq!(
+            h.stores.peek_otp(OtpPurpose::PasswordReset, &identifier),
+            Some(first),
+            "the cooldown must stop a second issuance from resetting the attempt counter"
+        );
+    }
+
+    #[tokio::test]
     async fn a_reset_started_in_one_casing_completes_in_another() {
         // Both entry points canonicalize the address before anything derives a key from it.
         // Without that, the OTP identifier written by `initiate_reset` and the one read by
@@ -886,7 +974,13 @@ mod tests {
         assert!(after.is_some() && after != before);
 
         // The verified-token bridge canonicalizes too, so the OTP minted under one spelling
-        // verifies under another and the token it returns completes the reset.
+        // verifies under another and the token it returns completes the reset. The first
+        // initiate above claimed the resend cooldown — which is the point of that gate — so
+        // release it explicitly rather than silently getting no second OTP.
+        assert!(
+            h.stores
+                .expire_resend_cooldown(OtpPurpose::PasswordReset, &identifier)
+        );
         assert!(
             h.engine
                 .initiate_reset(forgot("case@example.com"), &ctx())
@@ -1484,7 +1578,13 @@ mod tests {
         // …and again with the rollback itself refused. The caller still sees the same
         // anti-enumerating success — it must not learn that the address exists, let alone that
         // the store is down — so the log is the only place a token now stranded in Redis for
-        // its whole TTL can surface at all.
+        // its whole TTL can surface at all. The first initiate claimed the resend cooldown, so
+        // release it: otherwise this second call returns before reaching the send at all, and
+        // the rollback branch under test never runs.
+        assert!(stores.expire_resend_cooldown(
+            OtpPurpose::PasswordReset,
+            &engine.hashed_identifier("t1", "fail@example.com")
+        ));
         stores.fail_next_cleanup_writes(1);
         assert!(
             engine
