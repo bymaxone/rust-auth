@@ -380,10 +380,15 @@ pub(crate) mod test_support {
     ///
     /// Returns `false` if the deadline passes with the hash unchanged, so the caller asserts
     /// rather than hangs.
-    pub(crate) async fn await_rehash(harness: &Harness, user_id: &str, previous: &str) -> bool {
-        // Generous: 40 polls at 100 ms is four seconds, far longer than a derivation takes even
-        // on a slow shared runner, and the loop exits the moment the value changes.
-        for _ in 0..40 {
+    /// Polls to a deadline of `attempts` × 100 ms. Callers pass a generous count; the
+    /// give-up path is reachable — and therefore testable — by passing a small one.
+    pub(crate) async fn await_rehash_within(
+        harness: &Harness,
+        user_id: &str,
+        previous: &str,
+        attempts: u32,
+    ) -> bool {
+        for _ in 0..attempts {
             if let Ok(Some(user)) = harness.users.find_by_id(user_id, None).await
                 && user.password_hash.as_deref().unwrap_or_default() != previous
             {
@@ -392,6 +397,13 @@ pub(crate) mod test_support {
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         }
         false
+    }
+
+    /// Wait for a detached rehash with a generous deadline — four seconds, far longer than a
+    /// derivation takes even on a slow shared runner, and the loop exits the moment the value
+    /// changes.
+    pub(crate) async fn await_rehash(harness: &Harness, user_id: &str, previous: &str) -> bool {
+        await_rehash_within(harness, user_id, previous, 40).await
     }
 
     pub(crate) fn harness(cfg: AuthConfig, hooks: Option<Arc<dyn AuthHooks>>) -> Option<Harness> {

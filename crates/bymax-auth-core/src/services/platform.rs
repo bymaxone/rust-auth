@@ -1022,7 +1022,10 @@ mod tests {
                 }
                 tokio::time::sleep(Duration::from_millis(100)).await;
             }
-            let Some(stored) = stored else { panic!("the stored hash was never upgraded") };
+            // Asserted before the destructure so a rehash that never landed fails loudly here;
+            // the `let-else` below then cannot swallow it into a silent pass.
+            assert!(stored.is_some(), "the stored hash was never upgraded");
+            let Some(stored) = stored else { return };
             assert_ne!(stored.password_hash, weak_hash);
             // The other fire-and-forget task on this path: the successful login is stamped.
             assert!(stored.last_login_at.is_some());

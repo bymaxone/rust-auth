@@ -554,6 +554,23 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn the_rehash_wait_gives_up_rather_than_hanging() {
+        // The helper the two rehash tests rely on has to report a deadline it never met, or a
+        // rehash that silently stopped happening would hang the suite instead of failing it.
+        // Exercised with a one-poll deadline against a hash nothing is going to change.
+        let Some(h) = active_harness(false).await else { return };
+        let id = h.seed(SeedUser::active("nochange@example.com", "pw")).await;
+        let stored = h.users.find_by_id(&id, Some("t1")).await;
+        let Ok(Some(stored)) = stored else { return };
+        let current = stored.password_hash.unwrap_or_default();
+
+        assert!(
+            !super::super::test_support::await_rehash_within(&h, &id, &current, 1).await,
+            "the wait reported a change nobody made"
+        );
+    }
+
+    #[tokio::test]
     async fn a_current_password_hash_is_not_rehashed_on_login() {
         // The upgrade needs the toggle *and* a genuinely stale hash. Either alone must not
         // rewrite a current one: a rehash on every login is a write on the hot path for no
