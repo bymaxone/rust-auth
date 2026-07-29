@@ -35,6 +35,25 @@ pub enum ConfigError {
         /// The refresh-token lifetime, in seconds.
         lifetime: u64,
     },
+    /// `jwt.refresh_grace_window` exceeds the absolute ceiling: it is the replay window for an
+    /// already-consumed refresh token, so it covers a network retry, not a session policy.
+    #[error("jwt.refresh_grace_window ({got}s) must be <= {max}s")]
+    RefreshGraceCeiling {
+        /// The configured grace window, in seconds.
+        got: u64,
+        /// The ceiling, in seconds.
+        max: u64,
+    },
+    /// `brute_force.window` is zero, which makes the store delete each counter as it is
+    /// created (`EXPIRE key 0`) and silently disables the account lockout.
+    #[error("brute_force.window must be at least 1s (a zero window deletes the counter)")]
+    BruteForceWindowInvalid,
+    /// `brute_force.max_attempts` is outside the accepted `1..=100` range.
+    #[error("brute_force.max_attempts must be within 1..=100 (got {got})")]
+    BruteForceAttemptsRange {
+        /// The rejected threshold.
+        got: u32,
+    },
     /// `jwt.refresh_expires_in_days` is zero (it must be a positive number of days).
     #[error("jwt.refresh_expires_in_days must be a positive value (got {got})")]
     RefreshLifetimeInvalid {

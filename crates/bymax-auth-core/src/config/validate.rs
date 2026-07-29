@@ -201,6 +201,11 @@ fn derive_hmac_key(secret: &str) -> SecretBox<[u8; 64]> {
     SecretBox::new(Box::new(key))
 }
 
+/// Hard ceiling on `jwt.refresh_grace_window`, in seconds (five minutes). Deliberately far
+/// above the 30-second default and far below anything that could be mistaken for a session
+/// policy. `nest-auth` enforces the identical bound.
+const MAX_REFRESH_GRACE_WINDOW_SECS: u64 = 300;
+
 impl AuthConfig {
     /// Resolve `secure_cookies`: the explicit value if set, otherwise `true` only in a
     /// production environment.
@@ -268,6 +273,32 @@ impl AuthConfig {
         let lifetime = u64::from(self.jwt.refresh_expires_in_days) * 86_400;
         if grace >= lifetime {
             return Err(ConfigError::RefreshGraceTooLarge { grace, lifetime });
+        }
+        // The relative bound above is not enough on its own: a 6-day window under a 7-day
+        // refresh passes it. This window is the span in which an already-consumed refresh
+        // token still buys a session, so it is the replay window for a stolen one — it exists
+        // to cover a single network retry, measured in seconds, not a policy knob measured in
+        // days. `nest-auth` enforces the identical ceiling.
+        if grace > MAX_REFRESH_GRACE_WINDOW_SECS {
+            return Err(ConfigError::RefreshGraceCeiling {
+                got: grace,
+                max: MAX_REFRESH_GRACE_WINDOW_SECS,
+            });
+        }
+
+        // Rule 3c: the two values that decide whether the account lockout exists at all.
+        // `window` is handed to the store as the counter's EXPIRE, and Redis DELETES a key on
+        // `EXPIRE key 0` — a zero window destroys every failure counter as it is created, the
+        // count never exceeds one, and the lockout silently never engages while the config
+        // still reads as enabled. `max_attempts` of 0 is the opposite failure: a fresh counter
+        // already satisfies `count >= 0`, so every account is locked out permanently.
+        if self.brute_force.window.as_secs() == 0 {
+            return Err(ConfigError::BruteForceWindowInvalid);
+        }
+        if !(1..=100).contains(&self.brute_force.max_attempts) {
+            return Err(ConfigError::BruteForceAttemptsRange {
+                got: self.brute_force.max_attempts,
+            });
         }
 
         // Rule 4b: the access-token lifetime must fit inside the token-epoch retention window.
@@ -1019,6 +1050,60 @@ mod tests {
             many.validate(Environment::Test),
             Err(ConfigError::RecoveryCodeCountRange { got: 51 })
         ));
+    }
+
+    #[test]
+    fn the_grace_window_and_lockout_knobs_are_bounded() {
+        // The grace window is the span in which an ALREADY-CONSUMED refresh token still buys a
+        // session, so it is precisely the replay window for a stolen one. The relative bound
+        // ("< refresh lifetime") lets a 6-day window under a 7-day refresh through, which is a
+        // days-long replay window wearing the name of a network retry.
+        let mut wide = valid_config();
+        wide.jwt.refresh_grace_window = std::time::Duration::from_secs(6 * 86_400);
+        wide.jwt.refresh_expires_in_days = 7;
+        assert!(matches!(
+            wide.validate(Environment::Test),
+            Err(ConfigError::RefreshGraceCeiling { max: 300, .. })
+        ));
+
+        // The edges hold: the default, the ceiling, and 0 (grace disabled outright).
+        for secs in [0u64, 30, 300] {
+            let mut ok = valid_config();
+            ok.jwt.refresh_grace_window = std::time::Duration::from_secs(secs);
+            assert!(
+                ok.validate(Environment::Test).is_ok(),
+                "grace of {secs}s must be accepted"
+            );
+        }
+
+        // A zero brute-force window reaches the store as `EXPIRE key 0`, which DELETES the key:
+        // every failure counter is destroyed as it is created, the count never exceeds one, and
+        // the lockout silently never engages while the config still reads as enabled.
+        let mut no_window = valid_config();
+        no_window.brute_force.window = std::time::Duration::from_secs(0);
+        assert!(matches!(
+            no_window.validate(Environment::Test),
+            Err(ConfigError::BruteForceWindowInvalid)
+        ));
+
+        // Zero attempts is the opposite failure: a fresh counter already satisfies
+        // `count >= 0`, so every account is locked out permanently. A huge threshold disables
+        // the lockout as thoroughly as switching it off.
+        for got in [0u32, 101, 1_000_000] {
+            let mut bad = valid_config();
+            bad.brute_force.max_attempts = got;
+            let refused = matches!(
+                bad.validate(Environment::Test),
+                Err(ConfigError::BruteForceAttemptsRange { got: reported }) if reported == got
+            );
+            assert!(refused, "max_attempts of {got} must be refused");
+        }
+
+        for got in [1u32, 5, 100] {
+            let mut ok = valid_config();
+            ok.brute_force.max_attempts = got;
+            assert!(ok.validate(Environment::Test).is_ok());
+        }
     }
 
     #[cfg(feature = "scrypt")]
