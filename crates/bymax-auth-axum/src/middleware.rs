@@ -13,7 +13,9 @@ use http::HeaderValue;
 use http::header::{CACHE_CONTROL, PRAGMA};
 use tower_cookies::CookieManagerLayer;
 use tower_http::limit::RequestBodyLimitLayer;
-use tower_http::sensitive_headers::SetSensitiveRequestHeadersLayer;
+use tower_http::sensitive_headers::{
+    SetSensitiveRequestHeadersLayer, SetSensitiveResponseHeadersLayer,
+};
 use tower_http::set_header::SetResponseHeaderLayer;
 use tower_http::trace::TraceLayer;
 
@@ -38,6 +40,15 @@ pub(crate) fn apply_middleware(
     // `cookie`, and `x-csrf-token` are all masked before the tracing layer records them.
     let sensitive = SetSensitiveRequestHeadersLayer::new(sensitive_header_names());
 
+    // The same treatment for the response side, where the credential travels outward: every
+    // successful login, refresh, and OAuth callback answers with `Set-Cookie: access_token=<a
+    // signed JWT>`. Request redaction alone leaves that value printable, so a deployment whose
+    // tracing records response headers — a reasonable thing to switch on while debugging —
+    // writes live session tokens into its logs, where they outlive the session and are read by
+    // people the session was never issued to. Marking the header sensitive costs nothing and
+    // makes that mistake unavailable.
+    let sensitive_out = SetSensitiveResponseHeadersLayer::new([http::header::SET_COOKIE]);
+
     // Layered innermost-last: the cookie manager runs closest to the handler so the jar is
     // ready, then body-limit, redaction, optional CORS, and tracing wrap outward.
     // The cross-site check sits innermost, next to the handlers: it must see the request
@@ -51,6 +62,7 @@ pub(crate) fn apply_middleware(
         .layer(CookieManagerLayer::new())
         .layer(RequestBodyLimitLayer::new(max_body_bytes))
         .layer(sensitive)
+        .layer(sensitive_out)
         // Every response of every route this router serves is stamped `Cache-Control:
         // no-store` (plus `Pragma: no-cache` for HTTP/1.0 intermediaries). RFC 6749 §5.1
         // requires it on any response carrying a token, and every route here either carries

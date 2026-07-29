@@ -192,6 +192,13 @@ version bump.
   The provider's value is logged and never echoed: it is provider-chosen text that would
   otherwise land in a URL the browser follows, and `oauth_failed` already says everything the
   library is willing to vouch for. `nest-auth` takes the same change.
+- **`Set-Cookie` is marked sensitive on every response**
+  (`SetSensitiveResponseHeadersLayer`). The request side was already redacted from traces; the
+  response side is where the credential travels outward — every successful login, refresh and
+  OAuth callback answers with `Set-Cookie: access_token=<a signed JWT>`. A deployment whose
+  tracing records response headers, a reasonable thing to switch on while debugging, was
+  writing live session tokens into its logs, where they outlive the session and are read by
+  people it was never issued to.
 - **The platform recovery-code challenge gates on winning the temp-token consume**, which the
   dashboard path already did. Found while chasing a coverage gap the enrolment change exposed:
   the two planes carry the same logic separately, and only one had been fixed.

@@ -97,6 +97,30 @@ async fn always_on_groups_are_mounted_and_optional_groups_are_absent_by_default(
 }
 
 #[tokio::test]
+async fn the_set_cookie_header_is_marked_sensitive_so_tracing_cannot_print_the_token() {
+    // Every successful login answers with `Set-Cookie: access_token=<a signed JWT>`. Marking
+    // the header sensitive is what stops a deployment whose tracing records response headers —
+    // a reasonable thing to switch on while debugging — from writing live session tokens into
+    // its logs, where they outlive the session and are read by people it was never issued to.
+    let Some(h) = build(EngineSpec::default()) else { return };
+    let app = router(&h);
+
+    let reg = Req::post("/auth/register")
+        .json(serde_json::json!({
+            "email": "sensitive@e.com", "password": "password123", "name": "Sensi", "tenantId": TENANT
+        }))
+        .send(&app)
+        .await;
+
+    assert_eq!(reg.status, StatusCode::CREATED);
+    let cookies: Vec<_> = reg.headers.get_all(header::SET_COOKIE).iter().collect();
+    assert!(!cookies.is_empty(), "the login must set cookies at all");
+    for value in cookies {
+        assert!(value.is_sensitive(), "Set-Cookie must be marked sensitive");
+    }
+}
+
+#[tokio::test]
 async fn session_cookies_are_host_only_unless_a_domain_resolver_is_configured() {
     // Default: no `Domain` attribute at all. A cookie carrying `Domain=app.example.com` is
     // sent to every subdomain of that name (RFC 6265 §5.2.3), so deriving it from the request
