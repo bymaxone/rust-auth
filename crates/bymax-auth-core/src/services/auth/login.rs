@@ -568,7 +568,18 @@ mod tests {
                 .await,
             Ok(LoginResult::Success(_))
         ));
-        // Long enough for a spawned rehash to have landed if one had been spawned.
+        // The deterministic half: the hash is not stale to begin with, so nothing should have
+        // been spawned. This is what the test really means, and unlike the wait below it cannot
+        // pass by being too slow to observe a write.
+        let stored = before.password_hash.clone().unwrap_or_default();
+        assert!(!bymax_auth_crypto::password::needs_rehash(
+            &stored,
+            &crate::services::auth::test_support::crypto_params()
+        ));
+
+        // …and the observational half, which only ever weakens: a wait too short to catch a
+        // write makes this pass, never fail. It is kept because it is the one check that would
+        // notice a rehash spawned for some reason other than staleness.
         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
         let after = h.users.find_by_id(&id, Some("t1")).await;
         let Ok(Some(after)) = after else { return };
@@ -642,11 +653,14 @@ mod tests {
                 .login(login_input("weak@example.com", "pw"), &ctx())
                 .await;
             assert!(matches!(result, Ok(LoginResult::Success(_))));
-            // Allow the detached rehash to complete, then confirm the stored hash changed.
-            tokio::time::sleep(Duration::from_millis(500)).await;
-            let stored = h.users.find_by_id(&user.id, None).await;
-            let Ok(Some(stored)) = stored else { return };
-            assert_ne!(stored.password_hash.unwrap_or_default(), weak_hash);
+            // Poll for the detached rehash rather than sleeping a fixed span. The rehash is one
+            // scrypt derivation at the configured cost, and how long that takes depends on the
+            // machine — a fixed wait tuned on a developer's laptop is a test that fails on a
+            // slower CI runner and tells you nothing about the code.
+            assert!(
+                super::super::test_support::await_rehash(&h, &user.id, &weak_hash).await,
+                "the stored hash was never upgraded"
+            );
         }
     }
 

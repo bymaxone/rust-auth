@@ -1009,9 +1009,20 @@ mod tests {
             let Some(svc) = h.engine.platform_auth() else { return };
             let result = svc.login("weak@admin.io", "pw", "1.2.3.4", "agent").await;
             assert!(matches!(result, Ok(PlatformLoginResult::Success(_))));
-            tokio::time::sleep(Duration::from_millis(500)).await;
-            let stored = h.admins.find_by_id(&id).await;
-            let Ok(Some(stored)) = stored else { return };
+            // Poll rather than sleep a fixed span: the rehash is one derivation at the
+            // configured cost, and a wait tuned on a laptop fails on a slower runner while
+            // saying nothing about the code.
+            let mut stored = None;
+            for _ in 0..40 {
+                if let Ok(Some(admin)) = h.admins.find_by_id(&id).await
+                    && admin.password_hash != weak_hash
+                {
+                    stored = Some(admin);
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+            let Some(stored) = stored else { panic!("the stored hash was never upgraded") };
             assert_ne!(stored.password_hash, weak_hash);
             // The other fire-and-forget task on this path: the successful login is stamped.
             assert!(stored.last_login_at.is_some());

@@ -277,7 +277,7 @@ pub(crate) mod test_support {
     }
 
     /// The crypto parameters for the compiled hasher, used to seed stored password hashes.
-    fn crypto_params() -> PasswordParams {
+    pub(crate) fn crypto_params() -> PasswordParams {
         #[cfg(not(feature = "scrypt"))]
         {
             PasswordParams {
@@ -370,6 +370,30 @@ pub(crate) mod test_support {
 
     /// Build a harness from `cfg` and optional hooks. Returns `None` if the (always valid)
     /// fixture config somehow fails to assemble, so callers stay panic-free with `let-else`.
+    /// Wait for a detached rehash to land, polling until the stored hash differs from
+    /// `previous` or the deadline passes.
+    ///
+    /// Polling rather than sleeping a fixed span: the rehash is one password derivation at the
+    /// configured cost, and how long that takes depends on the machine. A fixed wait tuned on a
+    /// developer's laptop becomes a test that fails on a slower CI runner and reports nothing
+    /// about the code — which is exactly what raising the default cost factor turned this into.
+    ///
+    /// Returns `false` if the deadline passes with the hash unchanged, so the caller asserts
+    /// rather than hangs.
+    pub(crate) async fn await_rehash(harness: &Harness, user_id: &str, previous: &str) -> bool {
+        // Generous: 40 polls at 100 ms is four seconds, far longer than a derivation takes even
+        // on a slow shared runner, and the loop exits the moment the value changes.
+        for _ in 0..40 {
+            if let Ok(Some(user)) = harness.users.find_by_id(user_id, None).await
+                && user.password_hash.as_deref().unwrap_or_default() != previous
+            {
+                return true;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+        false
+    }
+
     pub(crate) fn harness(cfg: AuthConfig, hooks: Option<Arc<dyn AuthHooks>>) -> Option<Harness> {
         let users = Arc::new(InMemoryUserRepository::new());
         let stores = Arc::new(InMemoryStores::new());
