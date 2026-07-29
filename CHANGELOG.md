@@ -133,14 +133,25 @@ version bump.
   recorded in `.cargo/mutants.toml` with the reason it cannot be. Re-running the
   sweep over the survivors is what caught four fixes that asserted the wrong
   thing, so each of those is red-checked by hand. The first full sweep under the
-  corrected configuration confirms it: **1,630 mutants, 1,242 caught, 95 detected
+  corrected configuration confirmed it: **1,630 mutants, 1,242 caught, 95 detected
   by timeout, 293 unviable, zero survivors** (8 h wall clock).
-- Recorded for whoever tunes the gate next: 95 of the 95 timeouts sit in the
-  container-backed stores (`bymax-auth-redis`, 90 of them, and three in
+- A second full sweep, after the parity work above: **1,652 mutants — 1,269
+  caught, 89 detected by timeout, 293 unviable, 1 survivor** (9 h). The survivor
+  was `!matches!(error, SessionNotFound)` on the logout path, which decides
+  *which* cleanup failures an operator is told about and has no other observable
+  effect — the logout returns `Ok` either way. It is closed, and the sweep before
+  it had found nine more of the same character: a constant only ever read back
+  through itself, an armed-failure counter never shown to run out, a log branch
+  with no assertion surface, and a documented equivalent whose line anchor the new
+  logging had pushed out from under it. Not one was a bug in the library.
+- Recorded for whoever tunes the gate next: the timeouts sit almost entirely in
+  the container-backed stores (`bymax-auth-redis`, plus a few in
   `bymax-auth-client`). A mutation there is detected by the suite *hanging* rather
-  than asserting, and each one spends the full 119 s window — roughly half the
+  than asserting, and each one spends the full timeout window — roughly half the
   run's wall clock. Shortening the window would buy hours at the cost of gate
   integrity, since a legitimately slow test cut short is reported as detected and
   would hide a survivor; the sound fix is making those tests fail fast instead.
+  For the same reason the two are reported apart rather than summed: 1,269 caught
+  by assertion is the number that carries the stronger guarantee.
 
 [Unreleased]: https://github.com/bymaxone/rust-auth/commits/main
