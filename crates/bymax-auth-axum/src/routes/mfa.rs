@@ -23,7 +23,7 @@ use crate::dto::{
 };
 use crate::extractors::AuthUser;
 use crate::response::error_response;
-use crate::routes::RequestMeta;
+use crate::routes::{CookieDomains, RequestMeta};
 use crate::state::{AuthState, AxumAuthConfig, ClientIpSource};
 use crate::validation::ValidatedJson;
 
@@ -126,10 +126,11 @@ async fn verify_enable(
 async fn challenge(
     State(state): State<AuthState>,
     cookies: tower_cookies::Cookies,
+    CookieDomains(domains): CookieDomains,
     RequestMeta(ctx): RequestMeta,
     ValidatedJson(dto): ValidatedJson<MfaChallengeDto>,
 ) -> Response {
-    let delivery = TokenDelivery::new(state.config());
+    let delivery = TokenDelivery::with_domains(state.config(), &domains);
     let cookie_token = mfa_temp_cookie(&cookies);
     // Neither channel carried a token: that is an invalid temp token (nest-auth throws
     // `MFA_TEMP_TOKEN_INVALID` here), never a generic field-validation 400.

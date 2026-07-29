@@ -175,6 +175,15 @@ version bump.
   **Breaking:** `AuthEngine::oauth_initiate` returns `OAuthRedirect` instead of `String`, and
   `AuthEngine::oauth_callback` takes the cookie as its fourth argument. `nest-auth` takes the
   same change.
+- **`cookies.resolve_domains` is honoured.** The field was configurable and never read: a
+  deployment that set it got host-only cookies anyway, with nothing to say so. The adapter now
+  asks the resolver per request — handing it the request host with the port stripped — and
+  stamps the answer on all three session cookies and on the logout clear, which must mirror it
+  or the browser keeps the cookie it was asked to delete. Only the first domain is used: a
+  browser rejects a `Set-Cookie` whose `Domain` is not a suffix of the responding host
+  (RFC 6265 §5.3.6), so a second one on the same response is either a duplicate scope or a
+  value that gets dropped. Unset — the default — still means no `Domain` attribute at all,
+  which is what a session cookie should be; `nest-auth` now defaults the same way.
 - **The platform recovery-code challenge gates on winning the temp-token consume**, which the
   dashboard path already did. Found while chasing a coverage gap the enrolment change exposed:
   the two planes carry the same logic separately, and only one had been fixed.

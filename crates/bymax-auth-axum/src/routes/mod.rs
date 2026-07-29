@@ -216,6 +216,49 @@ where
     }
 }
 
+/// A handler extractor that resolves the cookie `Domain`(s) for this request by asking the
+/// configured `cookies.resolve_domains` resolver, or an empty vector when none is configured.
+///
+/// Empty means **host-only** — no `Domain` attribute at all, which is the right default for a
+/// session cookie: `Domain=app.example.com` is sent to every subdomain of that name
+/// (RFC 6265 §5.2.3), so a session scoped that way is readable by a marketing site, a
+/// user-content host, or a stale DNS record someone else now answers for. Sharing across
+/// subdomains is a deliberate deployment decision; the resolver is where it is made.
+///
+/// The host comes from the `Host` header (or HTTP/2 `:authority`, which axum normalizes into
+/// it), port stripped — the resolver names a domain, not an origin. Infallible: an absent or
+/// unreadable host reaches the resolver as an empty string, exactly as it does in `nest-auth`.
+pub(crate) struct CookieDomains(pub Vec<String>);
+
+impl<S> FromRequestParts<S> for CookieDomains
+where
+    AuthState: FromRef<S>,
+    S: Send + Sync,
+{
+    type Rejection = Infallible;
+
+    async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
+        let auth_state = AuthState::from_ref(state);
+        let Some(resolver) = auth_state
+            .engine()
+            .config()
+            .config()
+            .cookies
+            .resolve_domains
+            .clone()
+        else {
+            return Ok(Self(Vec::new()));
+        };
+        let host = parts
+            .headers
+            .get(header::HOST)
+            .and_then(|value| value.to_str().ok())
+            .map(|value| value.split(':').next().unwrap_or(value))
+            .unwrap_or("");
+        Ok(Self(resolver.resolve(host)))
+    }
+}
+
 /// A handler extractor that resolves the raw access token from the configured channel
 /// (cookie or `Authorization` header), or an empty string when absent — used by `logout` to
 /// blacklist the presented token. Infallible (logout never blocks on a missing token).

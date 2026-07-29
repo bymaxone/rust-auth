@@ -14,7 +14,7 @@ use tower_cookies::Cookies;
 use crate::delivery::TokenDelivery;
 use crate::dto::{OAuthCallbackQuery, OAuthInitiateQuery};
 use crate::response::error_response;
-use crate::routes::RequestMeta;
+use crate::routes::{CookieDomains, RequestMeta};
 use crate::state::{AuthState, AxumAuthConfig, ClientIpSource};
 use crate::validation::ValidatedQuery;
 
@@ -79,6 +79,7 @@ async fn initiate(
 async fn callback(
     State(state): State<AuthState>,
     cookies: Cookies,
+    CookieDomains(domains): CookieDomains,
     Path(provider): Path<String>,
     RequestMeta(ctx): RequestMeta,
     ValidatedQuery(query): ValidatedQuery<OAuthCallbackQuery>,
@@ -103,7 +104,7 @@ async fn callback(
         .await;
     match outcome {
         Ok(OAuthOutcome::Authenticated(result)) => {
-            let delivery = TokenDelivery::new(state.config());
+            let delivery = TokenDelivery::with_domains(state.config(), &domains);
             match state.engine().oauth_success_redirect_url() {
                 // Browser flow: plant the auth cookies into the jar (the cookie-manager layer
                 // emits them on the redirect response), then 302 to the configured URL.

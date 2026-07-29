@@ -96,6 +96,106 @@ async fn always_on_groups_are_mounted_and_optional_groups_are_absent_by_default(
 }
 
 #[tokio::test]
+async fn session_cookies_are_host_only_unless_a_domain_resolver_is_configured() {
+    // Default: no `Domain` attribute at all. A cookie carrying `Domain=app.example.com` is
+    // sent to every subdomain of that name (RFC 6265 §5.2.3), so deriving it from the request
+    // host would hand the session to a marketing site, a user-content host, or a stale DNS
+    // record someone else now answers for. Host-only is the safe default; sharing is opted in.
+    let Some(h) = build(EngineSpec::default()) else { return };
+    let app = router(&h);
+    let reg = Req::post("/auth/register")
+        .json(serde_json::json!({
+            "email": "hostonly@e.com", "password": "password123", "name": "Hana", "tenantId": TENANT
+        }))
+        .send(&app)
+        .await;
+    assert_eq!(reg.status, StatusCode::CREATED);
+    assert!(!reg.set_cookies.is_empty());
+    for cookie in &reg.set_cookies {
+        assert!(
+            !cookie.to_ascii_lowercase().contains("domain="),
+            "unexpected Domain attribute: {cookie}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_configured_domain_resolver_stamps_every_session_cookie_and_the_logout_clear() {
+    // `cookies.resolve_domains` was a config field the adapter never read — an option that
+    // silently did nothing. The resolved domain is stamped on all three session cookies, and
+    // the logout clear mirrors it: a browser matches a deletion on name + domain + path, so a
+    // host-only clear would leave the real cookie in place and the user who signed out would
+    // stay signed in. Only the first domain is used — a browser rejects a `Set-Cookie` whose
+    // `Domain` is not a suffix of the responding host (RFC 6265 §5.3.6), so a second one on
+    // the same response is either a duplicate scope or a value the browser drops.
+    let Some(h) = build(EngineSpec {
+        cookie_domains: &[".example.com", ".api.example.com"],
+        ..EngineSpec::default()
+    }) else {
+        return;
+    };
+    let app = router(&h);
+
+    let reg = Req::post("/auth/register")
+        .header(header::HOST, "app.example.com:8443")
+        .json(serde_json::json!({
+            "email": "shared@e.com", "password": "password123", "name": "Sara", "tenantId": TENANT
+        }))
+        .send(&app)
+        .await;
+
+    // The resolver is handed the request host with the port stripped — it names a domain, not
+    // an origin, and `app.example.com:8443` is not a legal `Domain` value. A resolver that
+    // received an empty string could not scope anything, which is how this stayed dead config.
+    assert_eq!(
+        h.domain_resolver.as_ref().and_then(|r| r
+            .seen_host
+            .lock()
+            .ok()
+            .and_then(|seen| seen.clone())),
+        Some("app.example.com".to_owned())
+    );
+    assert_eq!(reg.status, StatusCode::CREATED);
+    assert_eq!(reg.set_cookies.len(), 3);
+    assert_eq!(
+        reg.set_cookies
+            .iter()
+            .filter(|c| c.contains("Domain=example.com"))
+            .count(),
+        3,
+        // The leading dot the resolver returned is dropped on the way out: RFC 6265 §4.1.2.3
+        // ignores it, and `Domain=example.com` already matches every subdomain.
+        "expected all three session cookies scoped to the resolved domain"
+    );
+
+    // The clear has to replay the cookies: `tower-cookies` only emits a removal for a cookie
+    // the request actually carried, so a jar-less logout would emit nothing and prove nothing.
+    let logout = Req::post("/auth/logout")
+        .cookie(
+            "access_token",
+            &reg.cookie_value("access_token").unwrap_or_default(),
+        )
+        .cookie(
+            "refresh_token",
+            &reg.cookie_value("refresh_token").unwrap_or_default(),
+        )
+        .cookie("has_session", "1")
+        .send(&app)
+        .await;
+    assert_eq!(logout.status, StatusCode::NO_CONTENT);
+    assert_eq!(logout.set_cookies.len(), 3);
+    assert_eq!(
+        logout
+            .set_cookies
+            .iter()
+            .filter(|c| c.contains("Domain=example.com"))
+            .count(),
+        3,
+        "expected all three clears scoped to the resolved domain"
+    );
+}
+
+#[tokio::test]
 async fn an_unknown_route_is_404() {
     // A path outside the mounted table is a clean 404.
     let Some(h) = build(EngineSpec::default()) else { return };

@@ -8,7 +8,7 @@
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use axum::Router;
@@ -70,6 +70,9 @@ pub struct EngineSpec {
     /// Origins the deployment trusts for cross-site, cookie-authenticated writes. Setting any
     /// switches `SameSite` to `None`, since the two are only valid together.
     pub trusted_origins: &'static [&'static str],
+    /// Cookie `Domain`(s) a configured `resolve_domains` should return. Empty leaves the
+    /// resolver unconfigured, which is the host-only default.
+    pub cookie_domains: &'static [&'static str],
 }
 
 impl Default for EngineSpec {
@@ -84,7 +87,26 @@ impl Default for EngineSpec {
             verification_required: false,
             allow_oauth: false,
             trusted_origins: &[],
+            cookie_domains: &[],
         }
+    }
+}
+
+/// A `CookieDomainResolver` that answers with a fixed list, and records the request host it
+/// was handed so a test can assert the adapter passes the real one (port stripped) rather than
+/// an empty string — a resolver that cannot see the host cannot scope anything.
+pub struct RecordingDomains {
+    domains: Vec<String>,
+    /// The last host the adapter handed the resolver.
+    pub seen_host: Mutex<Option<String>>,
+}
+
+impl bymax_auth_core::config::CookieDomainResolver for RecordingDomains {
+    fn resolve(&self, request_host: &str) -> Vec<String> {
+        if let Ok(mut seen) = self.seen_host.lock() {
+            *seen = Some(request_host.to_owned());
+        }
+        self.domains.clone()
     }
 }
 
@@ -106,6 +128,8 @@ pub struct Harness {
     pub users: Arc<InMemoryUserRepository>,
     pub admins: Arc<InMemoryPlatformUserRepository>,
     pub stores: Arc<InMemoryStores>,
+    /// The cookie-domain resolver, present only when `EngineSpec::cookie_domains` asked for one.
+    pub domain_resolver: Option<Arc<RecordingDomains>>,
 }
 
 /// Build an engine + router over in-memory stores per `spec`.
@@ -128,6 +152,20 @@ pub fn build(spec: EngineSpec) -> Option<Harness> {
     config.controllers.invitations = spec.invitations;
     config.invitations.enabled = spec.invitations;
     config.controllers.oauth = spec.oauth;
+    let domain_resolver = if spec.cookie_domains.is_empty() {
+        None
+    } else {
+        let resolver = Arc::new(RecordingDomains {
+            domains: spec
+                .cookie_domains
+                .iter()
+                .map(|domain| (*domain).to_owned())
+                .collect(),
+            seen_host: Mutex::new(None),
+        });
+        config.cookies.resolve_domains = Some(resolver.clone());
+        Some(resolver)
+    };
     if !spec.trusted_origins.is_empty() {
         config.cookies.same_site = bymax_auth_core::config::SameSite::None;
         config.cookies.trusted_origins = spec
@@ -178,6 +216,7 @@ pub fn build(spec: EngineSpec) -> Option<Harness> {
         users,
         admins,
         stores,
+        domain_resolver,
     })
 }
 
@@ -213,6 +252,7 @@ pub fn build_oauth_with_redirects() -> Option<Harness> {
         users,
         admins,
         stores,
+        domain_resolver: None,
     })
 }
 
@@ -651,6 +691,7 @@ pub fn build_failing() -> Option<Harness> {
         users,
         admins,
         stores: inert,
+        domain_resolver: None,
     })
 }
 
@@ -685,6 +726,7 @@ pub fn build_failing_blacklist() -> Option<Harness> {
         users,
         admins,
         stores: inert,
+        domain_resolver: None,
     })
 }
 

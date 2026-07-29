@@ -19,7 +19,8 @@ use crate::dto::{LoginDto, RegisterDto, ResendVerificationDto, VerifyEmailDto};
 use crate::extractors::AuthUser;
 use crate::response::error_response;
 use crate::routes::{
-    PresentedAccessToken, RequestMeta, parse_optional_refresh_body, source_refresh_token,
+    CookieDomains, PresentedAccessToken, RequestMeta, parse_optional_refresh_body,
+    source_refresh_token,
 };
 use crate::state::{AuthState, AxumAuthConfig, ClientIpSource};
 use crate::validation::ValidatedJson;
@@ -69,6 +70,7 @@ pub(crate) fn routes(config: &AxumAuthConfig, ip_source: ClientIpSource) -> Rout
 async fn register(
     State(state): State<AuthState>,
     cookies: Cookies,
+    CookieDomains(domains): CookieDomains,
     RequestMeta(ctx): RequestMeta,
     ValidatedJson(dto): ValidatedJson<RegisterDto>,
 ) -> Response {
@@ -79,7 +81,7 @@ async fn register(
         tenant_id: dto.tenant_id,
     };
     match state.engine().register(input, &ctx).await {
-        Ok(result) => deliver_login(&state, &cookies, result, StatusCode::CREATED),
+        Ok(result) => deliver_login(&state, &cookies, &domains, result, StatusCode::CREATED),
         Err(error) => error_response(&error),
     }
 }
@@ -88,6 +90,7 @@ async fn register(
 async fn login(
     State(state): State<AuthState>,
     cookies: Cookies,
+    CookieDomains(domains): CookieDomains,
     RequestMeta(ctx): RequestMeta,
     ValidatedJson(dto): ValidatedJson<LoginDto>,
 ) -> Response {
@@ -97,7 +100,7 @@ async fn login(
         tenant_id: dto.tenant_id,
     };
     match state.engine().login(input, &ctx).await {
-        Ok(result) => deliver_login(&state, &cookies, result, StatusCode::OK),
+        Ok(result) => deliver_login(&state, &cookies, &domains, result, StatusCode::OK),
         Err(error) => error_response(&error),
     }
 }
@@ -119,6 +122,7 @@ async fn login(
 async fn logout(
     State(state): State<AuthState>,
     cookies: Cookies,
+    CookieDomains(domains): CookieDomains,
     PresentedAccessToken(access_token): PresentedAccessToken,
     body: axum::body::Bytes,
 ) -> Response {
@@ -132,7 +136,7 @@ async fn logout(
         dto.refresh_token.as_deref(),
     );
     let _ = state.engine().logout(&access_token, &refresh).await;
-    TokenDelivery::new(state.config()).clear_session(&cookies);
+    TokenDelivery::with_domains(state.config(), &domains).clear_session(&cookies);
     StatusCode::NO_CONTENT.into_response()
 }
 
@@ -144,6 +148,7 @@ async fn logout(
 async fn refresh(
     State(state): State<AuthState>,
     cookies: Cookies,
+    CookieDomains(domains): CookieDomains,
     RequestMeta(ctx): RequestMeta,
     body: axum::body::Bytes,
 ) -> Response {
@@ -165,7 +170,9 @@ async fn refresh(
         Err(error) => return error_response(&error),
     };
     match rotated_into_auth_result(&state, tokens).await {
-        Ok(result) => TokenDelivery::new(state.config()).deliver_refresh(&cookies, &result),
+        Ok(result) => {
+            TokenDelivery::with_domains(state.config(), &domains).deliver_refresh(&cookies, &result)
+        }
         Err(error) => error_response(&error),
     }
 }
@@ -216,10 +223,11 @@ async fn resend_verification(
 fn deliver_login(
     state: &AuthState,
     cookies: &Cookies,
+    domains: &[String],
     result: LoginResult,
     success_status: StatusCode,
 ) -> Response {
-    let delivery = TokenDelivery::new(state.config());
+    let delivery = TokenDelivery::with_domains(state.config(), domains);
     match result {
         LoginResult::Success(auth) => delivery.deliver_auth(cookies, &auth, success_status),
         LoginResult::MfaChallenge(challenge) => delivery.deliver_mfa_challenge(&challenge),

@@ -14,7 +14,7 @@ use crate::delivery::TokenDelivery;
 use crate::dto::{AcceptInvitationDto, CreateInvitationDto};
 use crate::extractors::AuthUser;
 use crate::response::error_response;
-use crate::routes::RequestMeta;
+use crate::routes::{CookieDomains, RequestMeta};
 use crate::state::{AuthState, AxumAuthConfig, ClientIpSource};
 use crate::validation::ValidatedJson;
 use bymax_auth_types::AuthResult;
@@ -61,6 +61,7 @@ async fn create(
 async fn accept(
     State(state): State<AuthState>,
     cookies: Cookies,
+    CookieDomains(domains): CookieDomains,
     RequestMeta(ctx): RequestMeta,
     ValidatedJson(dto): ValidatedJson<AcceptInvitationDto>,
 ) -> Response {
@@ -79,12 +80,21 @@ async fn accept(
         )
         .await
     {
-        Ok(result) => deliver_accept(&state, &cookies, &result),
+        Ok(result) => deliver_accept(&state, &cookies, &domains, &result),
         Err(error) => error_response(&error),
     }
 }
 
 /// Deliver a successful invitation acceptance (201) per the configured mode.
-fn deliver_accept(state: &AuthState, cookies: &Cookies, result: &AuthResult) -> Response {
-    TokenDelivery::new(state.config()).deliver_auth(cookies, result, StatusCode::CREATED)
+fn deliver_accept(
+    state: &AuthState,
+    cookies: &Cookies,
+    domains: &[String],
+    result: &AuthResult,
+) -> Response {
+    TokenDelivery::with_domains(state.config(), domains).deliver_auth(
+        cookies,
+        result,
+        StatusCode::CREATED,
+    )
 }

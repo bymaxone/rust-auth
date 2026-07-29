@@ -27,6 +27,19 @@ use tower_cookies::cookie::{Cookie, SameSite};
 
 use crate::state::{ResolvedConfig, ResolvedCookies};
 
+/// Stamp a `Domain` attribute onto a built cookie, or leave it host-only when `domain` is
+/// `None`. Kept as a free function so both the plant and the clear go through one place.
+fn with_domain(cookie: Cookie<'static>, domain: Option<&str>) -> Cookie<'static> {
+    match domain {
+        Some(value) => {
+            let mut cookie = cookie;
+            cookie.set_domain(value.to_owned());
+            cookie
+        }
+        None => cookie,
+    }
+}
+
 /// Map the engine's `SameSite` to the cookie crate's `SameSite`.
 fn map_same_site(value: ConfigSameSite) -> SameSite {
     match value {
@@ -41,12 +54,42 @@ fn map_same_site(value: ConfigSameSite) -> SameSite {
 /// attributes computed once at router build.
 pub(crate) struct TokenDelivery<'a> {
     config: &'a ResolvedConfig,
+    /// The `Domain` attribute(s) to stamp on the session cookies, resolved per request from
+    /// `cookies.resolve_domains`. Empty — the default — means **no `Domain` attribute**, i.e.
+    /// a host-only cookie, which is what a session cookie should be: a cookie carrying
+    /// `Domain=app.example.com` is sent to every subdomain of that name (RFC 6265 §5.2.3), so
+    /// deriving it from the request host would hand the session to a marketing site, a
+    /// user-content host, or a stale DNS record someone else now answers for. Sharing across
+    /// subdomains is a deliberate deployment decision, and the resolver is where it is made.
+    domains: &'a [String],
 }
 
 impl<'a> TokenDelivery<'a> {
-    /// Construct a delivery helper over the resolved adapter config.
+    /// Construct a delivery helper over the resolved adapter config, planting host-only
+    /// cookies. Use [`TokenDelivery::with_domains`] on the routes that deliver a session.
     pub(crate) fn new(config: &'a ResolvedConfig) -> Self {
-        Self { config }
+        Self {
+            config,
+            domains: &[],
+        }
+    }
+
+    /// Construct a delivery helper that stamps `domains` onto the session cookies — the
+    /// per-request answer from `cookies.resolve_domains`, empty when unconfigured.
+    pub(crate) fn with_domains(config: &'a ResolvedConfig, domains: &'a [String]) -> Self {
+        Self { config, domains }
+    }
+
+    /// The `Domain` to stamp on each session cookie: `None` (host-only) when no resolver is
+    /// configured, otherwise the **first** domain the resolver returned for this request.
+    ///
+    /// Only one can take effect, so only one is emitted. A browser rejects a `Set-Cookie`
+    /// whose `Domain` is not a suffix of the host that sent the response (RFC 6265 §5.3.6),
+    /// which means a second domain on the same response is either the same scope written
+    /// twice or a value the browser drops on the floor. The resolver is handed the request
+    /// host precisely so it can answer with the scope that applies to it.
+    fn domain(&self) -> Option<&str> {
+        self.domains.first().map(String::as_str)
     }
 
     /// The cookie attributes resolved at router build.
@@ -100,9 +143,16 @@ impl<'a> TokenDelivery<'a> {
     /// Plant the full auth-cookie set (access + path-scoped refresh + the session signal)
     /// into the jar. Used by login/register/refresh/MFA-success/invitation-accept.
     fn set_auth_cookies(&self, cookies: &Cookies, access: &str, refresh: &str) {
-        cookies.add(self.build_access_cookie(access.to_owned()));
-        cookies.add(self.build_refresh_cookie(refresh.to_owned()));
-        cookies.add(self.build_signal_cookie());
+        let domain = self.domain();
+        cookies.add(with_domain(
+            self.build_access_cookie(access.to_owned()),
+            domain,
+        ));
+        cookies.add(with_domain(
+            self.build_refresh_cookie(refresh.to_owned()),
+            domain,
+        ));
+        cookies.add(with_domain(self.build_signal_cookie(), domain));
     }
 
     /// Plant the auth cookies for a browser-redirect flow (the OAuth success/MFA redirect),
@@ -118,13 +168,24 @@ impl<'a> TokenDelivery<'a> {
     /// sending). `Cookies::remove` emits the expiry `Set-Cookie`.
     pub(crate) fn clear_session(&self, cookies: &Cookies) {
         let c = self.cookies();
-        cookies.remove(Cookie::build((c.access_name.clone(), "")).path("/").build());
-        cookies.remove(
+        // The clear has to mirror the plant on every attribute the browser matches a deletion
+        // by — name, domain and path. Clearing a `Domain=`-scoped cookie host-only leaves the
+        // real one in place, and the user who signed out stays signed in.
+        let domain = self.domain();
+        cookies.remove(with_domain(
+            Cookie::build((c.access_name.clone(), "")).path("/").build(),
+            domain,
+        ));
+        cookies.remove(with_domain(
             Cookie::build((c.refresh_name.clone(), ""))
                 .path(c.refresh_path.clone())
                 .build(),
-        );
-        cookies.remove(Cookie::build((c.signal_name.clone(), "")).path("/").build());
+            domain,
+        ));
+        cookies.remove(with_domain(
+            Cookie::build((c.signal_name.clone(), "")).path("/").build(),
+            domain,
+        ));
     }
 
     /// Plant the ephemeral OAuth `state` cookie, binding the flow to the browser that started
