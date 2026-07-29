@@ -40,42 +40,25 @@ pub struct MfaTempVerified {
     pub jti: String,
 }
 
-/// The collaborators the MFA temp-token methods need beyond JWT signing: the single-use
-/// `mfa:` marker store and the brute-force store/key for the per-user challenge counter
-/// reset. Held as `Option` on the token manager so a build without a wired MFA store still
-/// issues a (sign-only) challenge token; the store-backed single-use path engages only when
-/// the support is present.
+/// The collaborator the MFA temp-token methods need beyond JWT signing: the single-use
+/// `mfa:` marker store. Held as `Option` on the token manager so a build without a wired MFA
+/// store still issues a (sign-only) challenge token; the store-backed single-use path engages
+/// only when the support is present.
+///
+/// It once also carried the brute-force store and identifier key, to clear the per-user
+/// challenge counter on every issuance. That reset is gone — it made the per-account MFA
+/// lockout unreachable for an attacker who holds the password — so the counter is owned
+/// entirely by `MfaService`, which clears it on a successful challenge and nowhere else.
 #[cfg(feature = "mfa")]
 pub(crate) struct MfaTokenSupport {
     store: std::sync::Arc<dyn crate::traits::MfaStore>,
-    brute_force: std::sync::Arc<dyn crate::traits::BruteForceStore>,
-    challenge_hmac_key: zeroize::Zeroizing<[u8; 64]>,
 }
 
 #[cfg(feature = "mfa")]
 impl MfaTokenSupport {
-    /// Assemble the support bundle from the MFA store, the brute-force store, and the engine's
-    /// derived identifier-hashing key (copied into a zeroizing buffer).
-    pub(crate) fn new(
-        store: std::sync::Arc<dyn crate::traits::MfaStore>,
-        brute_force: std::sync::Arc<dyn crate::traits::BruteForceStore>,
-        hmac_key: &[u8; 64],
-    ) -> Self {
-        Self {
-            store,
-            brute_force,
-            challenge_hmac_key: zeroize::Zeroizing::new(*hmac_key),
-        }
-    }
-
-    /// The hashed brute-force identifier for the per-user MFA-challenge counter
-    /// (`hmac_sha256("challenge:{user_id}")`, hex). Namespaced as `challenge:` so it is
-    /// isolated from the `disable:` counter the management ops use (§7.5.3).
-    fn challenge_bf_id(&self, user_id: &str) -> String {
-        crate::services::to_hex(&bymax_auth_crypto::mac::hmac_sha256(
-            self.challenge_hmac_key.as_ref(),
-            format!("challenge:{user_id}").as_bytes(),
-        ))
+    /// Assemble the support bundle from the MFA store.
+    pub(crate) fn new(store: std::sync::Arc<dyn crate::traits::MfaStore>) -> Self {
+        Self { store }
     }
 }
 
@@ -667,15 +650,22 @@ impl TokenManagerService {
     }
 
     /// Issue a short-lived MFA temp token bridging the password step and the second factor.
-    /// When the single-use support is wired this signs the challenge JWT, plants the
-    /// single-use `mfa:{sha256(jti)}` marker (300 s), and resets the per-user MFA-challenge
-    /// brute-force counter (a fresh login restarts the challenge budget; §7.3.5). Without the
-    /// support it falls back to signing only.
+    /// When the single-use support is wired this signs the challenge JWT and plants the
+    /// single-use `mfa:{sha256(jti)}` marker (300 s). Without the support it falls back to
+    /// signing only.
+    ///
+    /// The per-user MFA-challenge brute-force counter is deliberately **not** reset here. It
+    /// used to be, on the reasoning that a fresh login proves renewed password possession —
+    /// but password possession is exactly the attacker's assumed capability in the threat
+    /// model the second factor exists to cover. Resetting on every issuance let that attacker
+    /// loop `login → five wrong codes → login` forever, so the per-account lockout never
+    /// engaged and the only remaining control was the per-IP rate limit, which a distributed
+    /// caller sidesteps. Exactly one event clears it: a SUCCESSFUL challenge.
     ///
     /// # Errors
     ///
     /// Returns [`AuthError::Internal`] if signing fails (unreachable), or a store
-    /// [`AuthError`] if planting the marker or resetting the counter fails.
+    /// [`AuthError`] if planting the marker fails.
     #[cfg(feature = "mfa")]
     pub async fn issue_mfa_temp_token(
         &self,
@@ -691,14 +681,6 @@ impl TokenManagerService {
                     user_id,
                     MFA_TEMP_TOKEN_TTL_SECONDS.unsigned_abs(),
                 )
-                .await?;
-            // A fresh login proves renewed password possession, so the challenge counter
-            // restarts from zero. The `disable:` counter is a separate namespace and is left
-            // untouched, so a pre-auth attacker can neither lock out nor clear the
-            // authenticated user's management-op budget.
-            support
-                .brute_force
-                .reset(&support.challenge_bf_id(user_id))
                 .await?;
         }
         Ok(token)
@@ -1461,11 +1443,10 @@ mod tests {
 
     #[cfg(feature = "mfa")]
     fn service_with_mfa(store: Arc<InMemoryStores>) -> TokenManagerService {
-        // A token manager whose MFA support is backed by the in-memory stores (which satisfy
-        // both the MFA-marker and brute-force seams), under a fixed identifier-hashing key.
-        let brute_force: Arc<dyn crate::traits::BruteForceStore> = store.clone();
+        // A token manager whose MFA support is backed by the in-memory store satisfying the
+        // MFA-marker seam. The brute-force counter is no longer this type's business.
         let mfa_store: Arc<dyn crate::traits::MfaStore> = store.clone();
-        let support = MfaTokenSupport::new(mfa_store, brute_force, &[7u8; 64]);
+        let support = MfaTokenSupport::new(mfa_store);
         TokenManagerService::new(
             key(),
             Vec::new(),
@@ -1550,10 +1531,14 @@ mod tests {
 
     #[cfg(feature = "mfa")]
     #[tokio::test]
-    async fn issue_resets_only_the_challenge_brute_force_namespace() {
-        // Issuing a fresh temp token clears the `challenge:` counter (a fresh login restarts
-        // the MFA budget) while leaving the `disable:` counter untouched, so the two
-        // namespaces are isolated.
+    async fn issuing_a_temp_token_clears_no_brute_force_counter() {
+        // Issuing a fresh temp token used to clear the `challenge:` counter, on the reasoning
+        // that a fresh login restarts the MFA budget. But password possession is exactly the
+        // attacker's assumed capability in the threat model the second factor covers, so that
+        // let them loop `login -> five wrong codes -> login` forever: the per-account lockout
+        // never engaged and only the per-IP limit remained, which a distributed caller
+        // sidesteps. Neither namespace is cleared here now; a SUCCESSFUL challenge is the one
+        // event that clears the challenge counter.
         let store = Arc::new(InMemoryStores::new());
         let svc = service_with_mfa(store.clone());
         let bf: Arc<dyn crate::traits::BruteForceStore> = store.clone();
@@ -1573,13 +1558,13 @@ mod tests {
         }
         assert!(matches!(bf.is_locked(&challenge_id, 5).await, Ok(true)));
         assert!(matches!(bf.is_locked(&disable_id, 5).await, Ok(true)));
-        // Issuing a token resets the challenge counter only.
+        // Issuing a token leaves BOTH counters standing.
         assert!(
             svc.issue_mfa_temp_token("u1", MfaContext::Dashboard)
                 .await
                 .is_ok()
         );
-        assert!(matches!(bf.is_locked(&challenge_id, 5).await, Ok(false)));
+        assert!(matches!(bf.is_locked(&challenge_id, 5).await, Ok(true)));
         assert!(matches!(bf.is_locked(&disable_id, 5).await, Ok(true)));
     }
 

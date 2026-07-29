@@ -8,6 +8,7 @@
 //! `@Throttle(...)` per handler. The limiter keys on the client IP, derived per the
 //! configured trusted-proxy strategy ([`crate::state::ClientIpSource`]).
 
+use std::net::IpAddr;
 use std::sync::Arc;
 
 use axum::body::Body;
@@ -17,10 +18,65 @@ use governor::middleware::NoOpMiddleware;
 use http::Response;
 use tower_governor::GovernorError;
 use tower_governor::governor::{GovernorConfig, GovernorConfigBuilder};
-use tower_governor::key_extractor::{PeerIpKeyExtractor, SmartIpKeyExtractor};
+use tower_governor::key_extractor::{KeyExtractor, PeerIpKeyExtractor};
 
 use crate::response::error_response;
 use crate::state::ClientIpSource;
+
+/// A [`KeyExtractor`] that reads the **rightmost** `X-Forwarded-For` entry, falling back to
+/// the peer socket address.
+///
+/// This replaces `tower_governor`'s `SmartIpKeyExtractor`, which takes the **leftmost**
+/// parseable entry and additionally honours `X-Real-IP` and `Forwarded`. A conforming proxy
+/// *appends* the address it observed, so the leftmost entry is whatever the client itself
+/// sent: an attacker rotating `X-Forwarded-For: <random>` gets a fresh limiter key per
+/// request and every per-route limit evaporates, while spoofing a victim's address exhausts
+/// that victim's bucket. `X-Real-IP` and `Forwarded` are ignored entirely — a proxy that
+/// appends to `X-Forwarded-For` gives no such guarantee for headers it does not manage.
+///
+/// The rightmost entry is the one the *nearest* trusted hop wrote, which is the strongest
+/// claim available without a configured trusted-proxy CIDR set. With exactly one proxy in
+/// front — the deployment [`ClientIpSource::TrustedForwardedFor`] documents — it is the real
+/// client. With N proxies it is the Nth-from-the-client hop: still unforgeable, still a
+/// stable key, just coarser.
+///
+/// A malformed or absent header falls back to the peer address rather than failing the
+/// request, so a missing header degrades to the [`ClientIpSource::PeerAddr`] behaviour
+/// instead of 429-ing every caller.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct RightmostForwardedIpKeyExtractor;
+
+impl KeyExtractor for RightmostForwardedIpKeyExtractor {
+    type Key = IpAddr;
+
+    fn extract<T>(&self, req: &http::Request<T>) -> Result<Self::Key, GovernorError> {
+        let forwarded = req
+            .headers()
+            .get("x-forwarded-for")
+            .and_then(|value| value.to_str().ok())
+            .and_then(rightmost_forwarded_ip);
+
+        forwarded
+            .or_else(|| {
+                req.extensions()
+                    .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
+                    .map(|info| info.0.ip())
+            })
+            .ok_or(GovernorError::UnableToExtractKey)
+    }
+}
+
+/// The last parseable IP in a comma-separated `X-Forwarded-For` value.
+///
+/// Scans from the right so the first parseable address found is the one the nearest hop
+/// appended. Returns `None` when no entry parses, which sends the caller to the peer-address
+/// fallback.
+fn rightmost_forwarded_ip(header: &str) -> Option<IpAddr> {
+    header
+        .split(',')
+        .rev()
+        .find_map(|entry| entry.trim().parse::<IpAddr>().ok())
+}
 
 /// One named edge limit: `burst` requests, replenished over `per_seconds`. Modeled as
 /// governor's quota — a burst bucket of `burst` cells that refills the whole bucket over
@@ -136,8 +192,8 @@ impl Default for RateLimitConfig {
 pub(crate) enum GovernorConfigKind {
     /// Peer-socket-IP keyed (never reads `X-Forwarded-For`) — the secure default.
     Peer(Arc<GovernorConfig<PeerIpKeyExtractor, NoOpMiddleware>>),
-    /// `X-Forwarded-For`/`X-Real-IP`/`Forwarded` keyed, for a trusted-proxy deployment.
-    Smart(Arc<GovernorConfig<SmartIpKeyExtractor, NoOpMiddleware>>),
+    /// Keyed on the rightmost `X-Forwarded-For` entry, for a trusted-proxy deployment.
+    Smart(Arc<GovernorConfig<RightmostForwardedIpKeyExtractor, NoOpMiddleware>>),
 }
 
 /// Build a per-route governor config for `limit` under the configured `ip_source`.
@@ -162,7 +218,7 @@ pub(crate) fn build_governor_config(
         ClientIpSource::TrustedForwardedFor => GovernorConfigBuilder::default()
             .per_second(per_second)
             .burst_size(burst)
-            .key_extractor(SmartIpKeyExtractor)
+            .key_extractor(RightmostForwardedIpKeyExtractor)
             .finish()
             .map(|config| GovernorConfigKind::Smart(Arc::new(config))),
     }
@@ -310,5 +366,97 @@ mod tests {
         assert_eq!(cfg.register, Some(RateLimit::new(10, 3600)));
         assert_eq!(cfg.list_sessions, Some(RateLimit::new(30, 60)));
         assert_eq!(cfg.oauth_callback, Some(RateLimit::new(10, 60)));
+    }
+
+    /// Build a request carrying the given `X-Forwarded-For` value and peer address.
+    fn req_with(xff: Option<&str>, peer: &str) -> http::Request<()> {
+        let mut builder = http::Request::builder().uri("/");
+        if let Some(value) = xff {
+            builder = builder.header("x-forwarded-for", value);
+        }
+        let mut req = builder.body(()).unwrap_or_default();
+        if let Ok(addr) = peer.parse::<std::net::SocketAddr>() {
+            req.extensions_mut()
+                .insert(axum::extract::ConnectInfo(addr));
+        }
+        req
+    }
+
+    #[test]
+    fn the_forwarded_extractor_keys_on_the_rightmost_entry() {
+        // A conforming proxy APPENDS the address it observed, so the leftmost entry is
+        // whatever the client itself sent. Keying on it — which `SmartIpKeyExtractor` does —
+        // lets an attacker rotate `X-Forwarded-For` for a fresh limiter key per request,
+        // evaporating every per-route limit; and lets them spoof a victim's address to
+        // exhaust that victim's bucket. The rightmost entry is the one the nearest trusted
+        // hop wrote.
+        let extractor = RightmostForwardedIpKeyExtractor;
+
+        // Attacker-supplied junk on the left, the proxy's observation on the right.
+        let req = req_with(Some("1.1.1.1, 2.2.2.2, 203.0.113.9"), "10.0.0.1:443");
+        assert_eq!(
+            extractor.extract(&req).ok(),
+            Some(
+                "203.0.113.9"
+                    .parse::<IpAddr>()
+                    .unwrap_or(IpAddr::from([0, 0, 0, 0]))
+            )
+        );
+
+        // Two requests whose ONLY difference is the spoofable left-hand side must share a key,
+        // or the limit is per-attacker-choice rather than per-client.
+        let spoof_a = req_with(Some("9.9.9.9, 203.0.113.9"), "10.0.0.1:443");
+        let spoof_b = req_with(Some("8.8.8.8, 203.0.113.9"), "10.0.0.1:443");
+        assert_eq!(
+            extractor.extract(&spoof_a).ok(),
+            extractor.extract(&spoof_b).ok()
+        );
+    }
+
+    #[test]
+    fn the_forwarded_extractor_falls_back_to_the_peer_address() {
+        // No header, an unparseable header, and an empty header all degrade to the peer
+        // address — the `PeerAddr` behaviour — rather than failing the request, which would
+        // 429 every caller behind a proxy that does not set the header.
+        let extractor = RightmostForwardedIpKeyExtractor;
+        let peer = "198.51.100.7"
+            .parse::<IpAddr>()
+            .unwrap_or(IpAddr::from([0, 0, 0, 0]));
+
+        for header in [None, Some("not-an-ip"), Some(""), Some(" , ")] {
+            let req = req_with(header, "198.51.100.7:443");
+            assert_eq!(
+                extractor.extract(&req).ok(),
+                Some(peer),
+                "header {header:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_forwarded_extractor_ignores_x_real_ip_and_forwarded() {
+        // `SmartIpKeyExtractor` also honours `X-Real-IP` and `Forwarded`. A proxy that appends
+        // to `X-Forwarded-For` gives no guarantee about headers it does not manage, so reading
+        // them reopens the same spoofing hole through a different name.
+        let extractor = RightmostForwardedIpKeyExtractor;
+        let mut req = http::Request::builder()
+            .uri("/")
+            .header("x-real-ip", "1.2.3.4")
+            .header("forwarded", "for=5.6.7.8")
+            .body(())
+            .unwrap_or_default();
+        if let Ok(addr) = "198.51.100.7:443".parse::<std::net::SocketAddr>() {
+            req.extensions_mut()
+                .insert(axum::extract::ConnectInfo(addr));
+        }
+
+        assert_eq!(
+            extractor.extract(&req).ok(),
+            Some(
+                "198.51.100.7"
+                    .parse::<IpAddr>()
+                    .unwrap_or(IpAddr::from([0, 0, 0, 0]))
+            )
+        );
     }
 }

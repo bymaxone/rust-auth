@@ -421,13 +421,9 @@ impl AuthEngineBuilder {
         // challenge token planted at login is store-backed and brute-force-capped.
         #[cfg(feature = "mfa")]
         let tokens = match &mfa_store {
-            Some(store) => {
-                tokens.with_mfa_support(crate::services::token_manager::MfaTokenSupport::new(
-                    store.clone(),
-                    brute_force_store.clone(),
-                    config.hmac_key(),
-                ))
-            }
+            Some(store) => tokens.with_mfa_support(
+                crate::services::token_manager::MfaTokenSupport::new(store.clone()),
+            ),
             None => tokens,
         };
         let tokens = Arc::new(tokens);

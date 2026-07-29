@@ -320,6 +320,22 @@ impl AuthEngine {
         ctx: &RequestContext,
         hook_ctx: HookContext,
     ) -> Result<OAuthOutcome, AuthError> {
+        // Status gate. Every credential flow in this engine runs it — password login, the MFA
+        // challenge, both password-reset steps, the platform login — and OAuth was the one
+        // that did not, so a BANNED or SUSPENDED account holding a linked provider identity
+        // walked straight back in. Ban is the primary account kill switch; a flow that
+        // ignores it makes it advisory. Run before the MFA branch so a blocked account cannot
+        // even obtain a temp token. `nest-auth` gates the same point.
+        self.assert_user_not_blocked(&user.status)?;
+
+        // Email-verification gate, on the same footing as password login: when a deployment
+        // requires a verified address, an OAuth identity does not substitute for one. The
+        // create path records what the provider actually asserted, so an unverified provider
+        // profile stays unverified here rather than being promoted by the act of signing in.
+        if self.config().config().email_verification.required && !user.email_verified {
+            return Err(AuthError::EmailNotVerified);
+        }
+
         if user.mfa_enabled {
             let mfa_temp_token = self
                 .tokens()
@@ -1243,6 +1259,9 @@ mod tests {
         let stores = Arc::new(InMemoryStores::new());
         let mut cfg = base_config();
         cfg.controllers.oauth = true;
+        // Verification is not REQUIRED here, so the sign-in completes and the stored record is
+        // observable. The sibling test below covers the required case.
+        cfg.email_verification.required = false;
         let engine = AuthEngine::builder()
             .config(cfg)
             .environment(Environment::Test)
@@ -1268,6 +1287,110 @@ mod tests {
         assert!(
             matches!(stored, Ok(Some(ref user)) if !user.email_verified),
             "an unverified provider email must not create a verified account"
+        );
+    }
+
+    #[tokio::test]
+    async fn oauth_refuses_an_unverified_address_when_verification_is_required() {
+        // An OAuth identity is not a substitute for a proven mailbox. When a deployment
+        // requires verification, signing in through a provider that reports the address as
+        // unverified must fail exactly as password login fails — otherwise the act of signing
+        // in promotes the address and the deployment's "this email is proven" invariant is
+        // false for every OAuth account.
+        let users = Arc::new(InMemoryUserRepository::new());
+        let stores = Arc::new(InMemoryStores::new());
+        let mut cfg = base_config();
+        cfg.controllers.oauth = true;
+        cfg.email_verification.required = true;
+        let engine = AuthEngine::builder()
+            .config(cfg)
+            .environment(Environment::Test)
+            .user_repository(users.clone())
+            .redis_stores(stores.clone())
+            .hooks(Arc::new(DecisionHook(OAuthLoginResult::Create)))
+            .oauth_provider(Arc::new(crate::testing::MockOAuthProvider::unverified(
+                "google",
+            )))
+            .oauth_state_store(stores.clone())
+            .build();
+        let Ok(engine) = engine else { return };
+
+        let url = engine.oauth_initiate("google", "t1").await;
+        let Ok(url) = url else { return };
+        let state = extract_query_param(&url, "state").unwrap_or_default();
+        let outcome = engine
+            .oauth_callback("google", "auth-code", &state, &ctx())
+            .await;
+
+        assert!(
+            matches!(outcome, Err(AuthError::EmailNotVerified)),
+            "expected EmailNotVerified, got {outcome:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn oauth_honours_the_status_and_email_verification_gates() {
+        // Every credential flow gates on account status — password login, the MFA challenge,
+        // both reset steps, the platform login — and OAuth was the one that did not, so a
+        // BANNED account holding a linked provider identity walked straight back in. Ban is
+        // the primary account kill switch; a flow that ignores it makes it advisory.
+        let users = Arc::new(InMemoryUserRepository::new());
+        let stores = Arc::new(InMemoryStores::new());
+        let mut cfg = base_config();
+        cfg.controllers.oauth = true;
+        let engine = AuthEngine::builder()
+            .config(cfg)
+            .environment(Environment::Test)
+            .user_repository(users.clone())
+            .redis_stores(stores.clone())
+            .hooks(Arc::new(DecisionHook(OAuthLoginResult::Create)))
+            .oauth_provider(Arc::new(crate::testing::MockOAuthProvider::new("google")))
+            .oauth_state_store(stores.clone())
+            .build();
+        let Ok(engine) = engine else { return };
+
+        // First sign-in creates the account and succeeds.
+        let url = engine.oauth_initiate("google", "t1").await;
+        let Ok(url) = url else { return };
+        let state = extract_query_param(&url, "state").unwrap_or_default();
+        assert!(matches!(
+            engine
+                .oauth_callback("google", "auth-code", &state, &ctx())
+                .await,
+            Ok(OAuthOutcome::Authenticated(_))
+        ));
+
+        // Ban the account, then sign in again through the same provider identity.
+        let found = users.find_by_email("mock@example.com", "t1").await;
+        let Ok(Some(user)) = found else { return };
+        assert!(
+            crate::traits::UserRepository::update_status(users.as_ref(), &user.id, "BANNED")
+                .await
+                .is_ok()
+        );
+
+        let mut linking_cfg = base_config();
+        linking_cfg.controllers.oauth = true;
+        let linking = AuthEngine::builder()
+            .config(linking_cfg)
+            .environment(Environment::Test)
+            .user_repository(users.clone())
+            .redis_stores(stores.clone())
+            .hooks(Arc::new(DecisionHook(OAuthLoginResult::Link)))
+            .oauth_provider(Arc::new(crate::testing::MockOAuthProvider::new("google")))
+            .oauth_state_store(stores.clone())
+            .build();
+        let Ok(linking) = linking else { return };
+
+        let url = linking.oauth_initiate("google", "t1").await;
+        let Ok(url) = url else { return };
+        let state = extract_query_param(&url, "state").unwrap_or_default();
+        let banned = linking
+            .oauth_callback("google", "auth-code", &state, &ctx())
+            .await;
+        assert!(
+            matches!(banned, Err(AuthError::AccountBanned)),
+            "a banned account must not complete an OAuth sign-in, got {banned:?}"
         );
     }
 
