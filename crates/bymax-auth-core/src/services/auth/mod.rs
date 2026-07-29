@@ -534,6 +534,66 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn every_tenant_scoped_flow_honours_the_resolver() {
+        // The option documents itself as ignoring the body's tenant when a resolver is
+        // configured, "to prevent tenant spoofing". Only `login` and `register` honoured it:
+        // password reset (all four steps) and email verification (both) read the body value
+        // verbatim, so a caller on one tenant could drive reset/verification mail at accounts
+        // in another — and a reset started under the RESOLVED tenant could never be completed,
+        // because the stored context and the confirm step disagreed about which tenant it
+        // belonged to.
+        //
+        // The check is indirect but exact: the resolver refuses when no `host` header is
+        // present, so a flow that consults it fails with `Forbidden` on an empty context and a
+        // flow that ignores it does not. Every one of these used to be silently fine.
+        let mut cfg = test_support::base_config();
+        cfg.tenant_id_resolver = Some(Arc::new(HostTenantResolver));
+        let Some(h) = test_support::harness(cfg, None) else { return };
+        let empty = RequestContext::new("1.2.3.4", "ua", BTreeMap::new());
+
+        let forgot = crate::services::auth::ForgotPasswordInput {
+            email: "x@example.com".to_owned(),
+            tenant_id: "body-tenant".to_owned(),
+        };
+        assert!(matches!(
+            h.engine.initiate_reset(forgot, &empty).await,
+            Err(AuthError::Forbidden)
+        ));
+
+        let verify_otp = crate::services::auth::VerifyResetOtpInput {
+            email: "x@example.com".to_owned(),
+            tenant_id: "body-tenant".to_owned(),
+            otp: "123456".to_owned(),
+        };
+        assert!(matches!(
+            h.engine.verify_reset_otp(verify_otp, &empty).await,
+            Err(AuthError::Forbidden)
+        ));
+
+        let resend = crate::services::auth::ResendResetOtpInput {
+            email: "x@example.com".to_owned(),
+            tenant_id: "body-tenant".to_owned(),
+        };
+        assert!(matches!(
+            h.engine.resend_reset_otp(resend, &empty).await,
+            Err(AuthError::Forbidden)
+        ));
+
+        assert!(matches!(
+            h.engine
+                .verify_email("body-tenant", "x@example.com", "123456", &empty)
+                .await,
+            Err(AuthError::Forbidden)
+        ));
+        assert!(matches!(
+            h.engine
+                .resend_verification_email("body-tenant", "x@example.com", &empty)
+                .await,
+            Err(AuthError::Forbidden)
+        ));
+    }
+
+    #[tokio::test]
     async fn harness_wires_hooks_and_seed_reports_a_conflict() {
         // The harness wires an explicit hooks collaborator, and seeding a duplicate email
         // returns an empty id (the repository conflict path).

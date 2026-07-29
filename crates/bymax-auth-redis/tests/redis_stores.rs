@@ -1156,10 +1156,13 @@ async fn engine_runs_password_reset_via_token_against_redis() {
     // test, so plant a known token via the store to drive the reset deterministically.
     assert!(
         engine
-            .initiate_reset(ForgotPasswordInput {
-                email: "reset@example.com".to_owned(),
-                tenant_id: "t1".to_owned(),
-            })
+            .initiate_reset(
+                ForgotPasswordInput {
+                    email: "reset@example.com".to_owned(),
+                    tenant_id: "t1".to_owned(),
+                },
+                &ctx
+            )
             .await
             .is_ok()
     );
@@ -1180,14 +1183,17 @@ async fn engine_runs_password_reset_via_token_against_redis() {
     );
     assert!(
         engine
-            .reset_password(ResetPasswordInput {
-                email: "reset@example.com".to_owned(),
-                tenant_id: "t1".to_owned(),
-                new_password: "a-brand-new-password".to_owned(),
-                token: Some("known-reset-token".to_owned()),
-                otp: None,
-                verified_token: None,
-            })
+            .reset_password(
+                ResetPasswordInput {
+                    email: "reset@example.com".to_owned(),
+                    tenant_id: "t1".to_owned(),
+                    new_password: "a-brand-new-password".to_owned(),
+                    token: Some("known-reset-token".to_owned()),
+                    otp: None,
+                    verified_token: None,
+                },
+                &ctx
+            )
             .await
             .is_ok()
     );
@@ -1202,14 +1208,17 @@ async fn engine_runs_password_reset_via_token_against_redis() {
     // The reset token is single-use: a replay is invalid.
     assert!(matches!(
         engine
-            .reset_password(ResetPasswordInput {
-                email: "reset@example.com".to_owned(),
-                tenant_id: "t1".to_owned(),
-                new_password: "again".to_owned(),
-                token: Some("known-reset-token".to_owned()),
-                otp: None,
-                verified_token: None,
-            })
+            .reset_password(
+                ResetPasswordInput {
+                    email: "reset@example.com".to_owned(),
+                    tenant_id: "t1".to_owned(),
+                    new_password: "again".to_owned(),
+                    token: Some("known-reset-token".to_owned()),
+                    otp: None,
+                    verified_token: None,
+                },
+                &ctx
+            )
             .await,
         Err(AuthError::PasswordResetTokenInvalid)
     ));
@@ -1227,6 +1236,7 @@ async fn engine_runs_password_reset_via_otp_against_redis() {
     // OTP method: register, drive the engine to generate+store a real OTP, read the code back
     // from its `otp:` record, then run the verify→verified-token→reset bridge against real Redis
     // and confirm the password changed and every session was revoked.
+    let ctx = RequestContext::new("203.0.113.4", "agent/1.0", BTreeMap::new());
     let otp_users = Arc::new(InMemoryUserRepository::new());
     let mut otp_config = AuthConfig::default();
     otp_config.jwt.secret = SecretString::from("fedcba9876543210fedcba9876543210".to_owned());
@@ -1271,10 +1281,13 @@ async fn engine_runs_password_reset_via_otp_against_redis() {
     // read the code back from the record's value rather than recomputing the key.
     assert!(
         otp_engine
-            .initiate_reset(ForgotPasswordInput {
-                email: "otp-reset@example.com".to_owned(),
-                tenant_id: "t1".to_owned(),
-            })
+            .initiate_reset(
+                ForgotPasswordInput {
+                    email: "otp-reset@example.com".to_owned(),
+                    tenant_id: "t1".to_owned(),
+                },
+                &ctx
+            )
             .await
             .is_ok()
     );
@@ -1300,24 +1313,30 @@ async fn engine_runs_password_reset_via_otp_against_redis() {
 
     // Verify the OTP for a short-lived verified token, then reset through the verified path.
     let verified = otp_engine
-        .verify_reset_otp(VerifyResetOtpInput {
-            email: "otp-reset@example.com".to_owned(),
-            tenant_id: "t1".to_owned(),
-            otp: code,
-        })
+        .verify_reset_otp(
+            VerifyResetOtpInput {
+                email: "otp-reset@example.com".to_owned(),
+                tenant_id: "t1".to_owned(),
+                otp: code,
+            },
+            &ctx,
+        )
         .await;
     assert!(verified.is_ok());
     let Ok(verified_token) = verified else { return };
     assert!(
         otp_engine
-            .reset_password(ResetPasswordInput {
-                email: "otp-reset@example.com".to_owned(),
-                tenant_id: "t1".to_owned(),
-                new_password: "a-fresh-new-password".to_owned(),
-                token: None,
-                otp: None,
-                verified_token: Some(verified_token.clone()),
-            })
+            .reset_password(
+                ResetPasswordInput {
+                    email: "otp-reset@example.com".to_owned(),
+                    tenant_id: "t1".to_owned(),
+                    new_password: "a-fresh-new-password".to_owned(),
+                    token: None,
+                    otp: None,
+                    verified_token: Some(verified_token.clone()),
+                },
+                &ctx
+            )
             .await
             .is_ok()
     );
@@ -1343,14 +1362,17 @@ async fn engine_runs_password_reset_via_otp_against_redis() {
     // The verified token is single-use: a replay through the verified path is rejected.
     assert!(matches!(
         otp_engine
-            .reset_password(ResetPasswordInput {
-                email: "otp-reset@example.com".to_owned(),
-                tenant_id: "t1".to_owned(),
-                new_password: "another".to_owned(),
-                token: None,
-                otp: None,
-                verified_token: Some(verified_token),
-            })
+            .reset_password(
+                ResetPasswordInput {
+                    email: "otp-reset@example.com".to_owned(),
+                    tenant_id: "t1".to_owned(),
+                    new_password: "another".to_owned(),
+                    token: None,
+                    otp: None,
+                    verified_token: Some(verified_token),
+                },
+                &ctx
+            )
             .await,
         Err(AuthError::PasswordResetTokenInvalid)
     ));

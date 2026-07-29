@@ -13,6 +13,7 @@ use bymax_auth_core::services::auth::{
 use http::StatusCode;
 use serde_json::json;
 
+use super::RequestMeta;
 use crate::dto::{ForgotPasswordDto, ResendOtpDto, ResetPasswordDto, VerifyOtpDto};
 use crate::response::error_response;
 use crate::state::{AuthState, AxumAuthConfig, ClientIpSource};
@@ -47,6 +48,7 @@ pub(crate) fn routes(config: &AxumAuthConfig, ip_source: ClientIpSource) -> Rout
 /// `POST /auth/password/forgot-password` (200). Public + anti-enumeration.
 async fn forgot_password(
     State(state): State<AuthState>,
+    RequestMeta(ctx): RequestMeta,
     ValidatedJson(dto): ValidatedJson<ForgotPasswordDto>,
 ) -> Response {
     let input = ForgotPasswordInput {
@@ -56,13 +58,14 @@ async fn forgot_password(
     // Anti-enumeration: the response is uniform regardless of the outcome (existence, blocked
     // status, or an infra hiccup), so even an `Err` collapses to the same 200 body — surfacing
     // it would leak a distinguishable signal the engine's timing-normalized contract forbids.
-    let _ = state.engine().initiate_reset(input).await;
+    let _ = state.engine().initiate_reset(input, &ctx).await;
     (StatusCode::OK, Json(json!({}))).into_response()
 }
 
 /// `POST /auth/password/reset-password` (204). Public.
 async fn reset_password(
     State(state): State<AuthState>,
+    RequestMeta(ctx): RequestMeta,
     ValidatedJson(dto): ValidatedJson<ResetPasswordDto>,
 ) -> Response {
     let input = ResetPasswordInput {
@@ -73,7 +76,7 @@ async fn reset_password(
         otp: dto.otp,
         verified_token: dto.verified_token,
     };
-    match state.engine().reset_password(input).await {
+    match state.engine().reset_password(input, &ctx).await {
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
         Err(error) => error_response(&error),
     }
@@ -82,6 +85,7 @@ async fn reset_password(
 /// `POST /auth/password/verify-otp` (200). Public. Returns the short-lived verified token.
 async fn verify_otp(
     State(state): State<AuthState>,
+    RequestMeta(ctx): RequestMeta,
     ValidatedJson(dto): ValidatedJson<VerifyOtpDto>,
 ) -> Response {
     let input = VerifyResetOtpInput {
@@ -89,7 +93,7 @@ async fn verify_otp(
         tenant_id: dto.tenant_id,
         otp: dto.otp,
     };
-    match state.engine().verify_reset_otp(input).await {
+    match state.engine().verify_reset_otp(input, &ctx).await {
         Ok(verified_token) => (
             StatusCode::OK,
             Json(json!({ "verifiedToken": verified_token })),
@@ -102,6 +106,7 @@ async fn verify_otp(
 /// `POST /auth/password/resend-otp` (200). Public + anti-enumeration.
 async fn resend_otp(
     State(state): State<AuthState>,
+    RequestMeta(ctx): RequestMeta,
     ValidatedJson(dto): ValidatedJson<ResendOtpDto>,
 ) -> Response {
     let input = ResendResetOtpInput {
@@ -109,6 +114,6 @@ async fn resend_otp(
         tenant_id: dto.tenant_id,
     };
     // Anti-enumeration: uniform response regardless of the outcome (see `forgot_password`).
-    let _ = state.engine().resend_reset_otp(input).await;
+    let _ = state.engine().resend_reset_otp(input, &ctx).await;
     (StatusCode::OK, Json(json!({}))).into_response()
 }

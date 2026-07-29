@@ -128,6 +128,18 @@ version bump.
   exists to guarantee — invisibly, because the parameter that *is* bounded stays intact.
   `nest-auth` enforces the identical ranges.
 
+- **`tenant_id_resolver` is now honoured by every tenant-scoped flow.** The resolver is
+  documented as authoritative over the body's `tenant_id` when configured, which is the whole
+  anti-spoofing promise — but only `login` and `register` called it. `initiate_reset`,
+  `reset_password`, `verify_reset_otp`, `resend_reset_otp`, `verify_email` and
+  `resend_verification_email` read the caller's value verbatim, so on a deployment that
+  derives the tenant from the request a caller on one tenant could drive reset and
+  verification mail at accounts in another, and a reset started under the resolved tenant
+  could never be completed because the two steps derived different identifiers.
+  **Breaking:** those six methods now take `&RequestContext` as their final argument; the
+  axum routes supply it through the existing `RequestMeta` extractor. `nest-auth` takes the
+  same change as the Express request.
+
 ### Changed
 
 - **Family-lineage reuse detection replaces the previous sentinel.** A login opens

@@ -179,11 +179,12 @@ async fn me(State(state): State<AuthState>, user: AuthUser) -> Response {
 /// `POST /auth/verify-email` (204). Public. Consumes the OTP and marks the account verified.
 async fn verify_email(
     State(state): State<AuthState>,
+    RequestMeta(ctx): RequestMeta,
     ValidatedJson(dto): ValidatedJson<VerifyEmailDto>,
 ) -> Response {
     match state
         .engine()
-        .verify_email(&dto.tenant_id, &dto.email, &dto.otp)
+        .verify_email(&dto.tenant_id, &dto.email, &dto.otp, &ctx)
         .await
     {
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
@@ -195,13 +196,14 @@ async fn verify_email(
 /// regardless of account existence.
 async fn resend_verification(
     State(state): State<AuthState>,
+    RequestMeta(ctx): RequestMeta,
     ValidatedJson(dto): ValidatedJson<ResendVerificationDto>,
 ) -> Response {
     // Anti-enumeration: the response is uniform regardless of the outcome, so even an `Err`
     // collapses to the same 204 — surfacing it would leak a distinguishable signal.
     let _ = state
         .engine()
-        .resend_verification_email(&dto.tenant_id, &dto.email)
+        .resend_verification_email(&dto.tenant_id, &dto.email, &ctx)
         .await;
     StatusCode::NO_CONTENT.into_response()
 }

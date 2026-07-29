@@ -17,6 +17,7 @@ use bymax_auth_crypto::token::generate_secure_token;
 use bymax_auth_types::{AuthError, AuthUser, SafeAuthUser};
 
 use crate::config::ResetMethod;
+use crate::context::RequestContext;
 use crate::engine::AuthEngine;
 use crate::normalize::normalize_email;
 use crate::services::auth::detached::run_after_password_reset;
@@ -113,13 +114,25 @@ impl AuthEngine {
     /// persisting the proof); account state never changes the otherwise-`Ok(())` outcome. The
     /// timing floor is applied before the error is returned, so an infra error stays
     /// latency-indistinguishable from a normal response.
-    pub async fn initiate_reset(&self, input: ForgotPasswordInput) -> Result<(), AuthError> {
+    pub async fn initiate_reset(
+        &self,
+        input: ForgotPasswordInput,
+        ctx: &RequestContext,
+    ) -> Result<(), AuthError> {
         // Canonicalize first: every key below (the OTP/cooldown identifier, the lookup,
         // and the reset context written for the confirm step) must derive from one
         // spelling, or a reset started under one casing cannot be completed under another.
+        //
+        // The tenant goes through the resolver for the same reason `login` and `register` do:
+        // when one is configured it is authoritative and the body value is ignored, which is
+        // the whole anti-spoofing promise. Without it a caller on one tenant could drive
+        // reset mail at accounts in another — and a reset started under the resolved tenant
+        // could never be completed, because the stored context and the confirm step would
+        // disagree about which tenant it belonged to.
+        let tenant_id = self.resolve_tenant(&input.tenant_id, ctx).await?;
         let input = ForgotPasswordInput {
             email: normalize_email(&input.email),
-            ..input
+            tenant_id,
         };
         let started = Instant::now();
         // Run the fallible body, then normalize the elapsed time on EVERY exit — including an
@@ -168,12 +181,22 @@ impl AuthEngine {
     /// wrong proof for the method, or an invalid/consumed proof is presented; an OTP error
     /// ([`AuthError::OtpInvalid`]/[`AuthError::OtpExpired`]/[`AuthError::OtpMaxAttempts`]) for a
     /// failed OTP; or a hashing/store [`AuthError`].
-    pub async fn reset_password(&self, input: ResetPasswordInput) -> Result<(), AuthError> {
+    pub async fn reset_password(
+        &self,
+        input: ResetPasswordInput,
+        ctx: &RequestContext,
+    ) -> Result<(), AuthError> {
         // Canonicalize first: every key below (the OTP/cooldown identifier, the lookup,
         // and the reset context written for the confirm step) must derive from one
         // spelling, or a reset started under one casing cannot be completed under another.
+        // The tenant goes through the resolver, exactly as `login` and `register` do: when one
+        // is configured it is authoritative and the body value is ignored. That is the
+        // anti-spoofing promise, and it also keeps this step reading the same tenant the
+        // initiate step wrote under.
+        let tenant_id = self.resolve_tenant(&input.tenant_id, ctx).await?;
         let input = ResetPasswordInput {
             email: normalize_email(&input.email),
+            tenant_id,
             ..input
         };
         // Classify the proofs: exactly one of token / otp / verified_token must be present.
@@ -267,12 +290,22 @@ impl AuthEngine {
     ///
     /// Returns the OTP error on a failed verify, [`AuthError::PasswordResetTokenInvalid`] for a
     /// vanished account, or a store [`AuthError`].
-    pub async fn verify_reset_otp(&self, input: VerifyResetOtpInput) -> Result<String, AuthError> {
+    pub async fn verify_reset_otp(
+        &self,
+        input: VerifyResetOtpInput,
+        ctx: &RequestContext,
+    ) -> Result<String, AuthError> {
         // Canonicalize first: every key below (the OTP/cooldown identifier, the lookup,
         // and the reset context written for the confirm step) must derive from one
         // spelling, or a reset started under one casing cannot be completed under another.
+        // The tenant goes through the resolver, exactly as `login` and `register` do: when one
+        // is configured it is authoritative and the body value is ignored. That is the
+        // anti-spoofing promise, and it also keeps this step reading the same tenant the
+        // initiate step wrote under.
+        let tenant_id = self.resolve_tenant(&input.tenant_id, ctx).await?;
         let input = VerifyResetOtpInput {
             email: normalize_email(&input.email),
+            tenant_id,
             ..input
         };
         let identifier = self.hashed_identifier(&input.tenant_id, &input.email);
@@ -314,13 +347,22 @@ impl AuthEngine {
     /// account lookup); account state never changes the otherwise-`Ok(())` outcome. The timing
     /// floor is applied before the error is returned, so an infra error stays
     /// latency-indistinguishable from a normal response.
-    pub async fn resend_reset_otp(&self, input: ResendResetOtpInput) -> Result<(), AuthError> {
+    pub async fn resend_reset_otp(
+        &self,
+        input: ResendResetOtpInput,
+        ctx: &RequestContext,
+    ) -> Result<(), AuthError> {
         // Canonicalize first: every key below (the OTP/cooldown identifier, the lookup,
         // and the reset context written for the confirm step) must derive from one
         // spelling, or a reset started under one casing cannot be completed under another.
+        // The tenant goes through the resolver, exactly as `login` and `register` do: when one
+        // is configured it is authoritative and the body value is ignored. That is the
+        // anti-spoofing promise, and it also keeps this step reading the same tenant the
+        // initiate step wrote under.
+        let tenant_id = self.resolve_tenant(&input.tenant_id, ctx).await?;
         let input = ResendResetOtpInput {
             email: normalize_email(&input.email),
-            ..input
+            tenant_id,
         };
         let started = Instant::now();
         // Run the fallible body, then normalize the elapsed time on EVERY exit — the cooldown
@@ -531,7 +573,7 @@ fn reset_context_hooks(context: &ResetContext) -> HookContext {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::services::auth::test_support::{Harness, SeedUser, base_config, harness};
+    use crate::services::auth::test_support::{Harness, SeedUser, base_config, ctx, harness};
     use crate::traits::{
         EmailProvider, OtpStore, PasswordResetStore, SessionKind, SessionStore, UserRepository,
     };
@@ -600,7 +642,7 @@ mod tests {
         // drive send_reset_token directly to learn the raw token is single-use end to end.
         assert!(
             h.engine
-                .initiate_reset(forgot("reset@example.com"))
+                .initiate_reset(forgot("reset@example.com"), &ctx())
                 .await
                 .is_ok()
         );
@@ -629,7 +671,7 @@ mod tests {
             otp: None,
             verified_token: None,
         };
-        assert!(h.engine.reset_password(reset).await.is_ok());
+        assert!(h.engine.reset_password(reset, &ctx()).await.is_ok());
 
         // The password changed and the session was revoked.
         let after = stored_hash(&h, &id).await;
@@ -648,7 +690,7 @@ mod tests {
             verified_token: None,
         };
         assert!(matches!(
-            h.engine.reset_password(replay).await,
+            h.engine.reset_password(replay, &ctx()).await,
             Err(AuthError::PasswordResetTokenInvalid)
         ));
     }
@@ -688,7 +730,7 @@ mod tests {
             otp: None,
             verified_token: None,
         };
-        assert!(h.engine.reset_password(reset).await.is_ok());
+        assert!(h.engine.reset_password(reset, &ctx()).await.is_ok());
         // The reset advanced the epoch: any token stamped at 0 is now below the current value.
         assert!(matches!(
             h.stores.current_epoch(SessionKind::Dashboard, &id).await,
@@ -726,7 +768,7 @@ mod tests {
             verified_token: None,
         };
         assert!(matches!(
-            h.engine.reset_password(reset).await,
+            h.engine.reset_password(reset, &ctx()).await,
             Err(AuthError::PasswordResetTokenInvalid)
         ));
     }
@@ -742,7 +784,7 @@ mod tests {
         // Direct OTP path: send, read the code from the in-memory store, reset.
         assert!(
             h.engine
-                .initiate_reset(forgot("otp@example.com"))
+                .initiate_reset(forgot("otp@example.com"), &ctx())
                 .await
                 .is_ok()
         );
@@ -755,23 +797,26 @@ mod tests {
             otp: Some(code.clone()),
             verified_token: None,
         };
-        assert!(h.engine.reset_password(reset).await.is_ok());
+        assert!(h.engine.reset_password(reset, &ctx()).await.is_ok());
 
         // Verified-token bridge: re-send an OTP, verify it for a token, reset with the token.
         assert!(
             h.engine
-                .initiate_reset(forgot("otp@example.com"))
+                .initiate_reset(forgot("otp@example.com"), &ctx())
                 .await
                 .is_ok()
         );
         let Some(code2) = h.stores.peek_otp(OtpPurpose::PasswordReset, &identifier) else { return };
         let verified = h
             .engine
-            .verify_reset_otp(VerifyResetOtpInput {
-                email: "otp@example.com".to_owned(),
-                tenant_id: "t1".to_owned(),
-                otp: code2,
-            })
+            .verify_reset_otp(
+                VerifyResetOtpInput {
+                    email: "otp@example.com".to_owned(),
+                    tenant_id: "t1".to_owned(),
+                    otp: code2,
+                },
+                &ctx(),
+            )
             .await;
         assert!(verified.is_ok());
         let Ok(verified_token) = verified else { return };
@@ -783,7 +828,7 @@ mod tests {
             otp: None,
             verified_token: Some(verified_token.clone()),
         };
-        assert!(h.engine.reset_password(reset2).await.is_ok());
+        assert!(h.engine.reset_password(reset2, &ctx()).await.is_ok());
         let _ = id;
         // The verified token is single-use.
         let replay = ResetPasswordInput {
@@ -795,7 +840,7 @@ mod tests {
             verified_token: Some(verified_token),
         };
         assert!(matches!(
-            h.engine.reset_password(replay).await,
+            h.engine.reset_password(replay, &ctx()).await,
             Err(AuthError::PasswordResetTokenInvalid)
         ));
     }
@@ -812,7 +857,7 @@ mod tests {
         // Started with the address shouted.
         assert!(
             h.engine
-                .initiate_reset(forgot("CASE@Example.COM"))
+                .initiate_reset(forgot("CASE@Example.COM"), &ctx())
                 .await
                 .is_ok()
         );
@@ -835,7 +880,7 @@ mod tests {
             otp: Some(code),
             verified_token: None,
         };
-        assert!(h.engine.reset_password(reset).await.is_ok());
+        assert!(h.engine.reset_password(reset, &ctx()).await.is_ok());
         // The password really changed: the stored hash is not the seeded one.
         let after = stored_hash(&h, &id).await;
         assert!(after.is_some() && after != before);
@@ -844,7 +889,7 @@ mod tests {
         // verifies under another and the token it returns completes the reset.
         assert!(
             h.engine
-                .initiate_reset(forgot("case@example.com"))
+                .initiate_reset(forgot("case@example.com"), &ctx())
                 .await
                 .is_ok()
         );
@@ -855,11 +900,14 @@ mod tests {
         assert!(!second.is_empty());
         let verified = h
             .engine
-            .verify_reset_otp(VerifyResetOtpInput {
-                email: "cAsE@eXaMpLe.CoM".to_owned(),
-                tenant_id: "t1".to_owned(),
-                otp: second,
-            })
+            .verify_reset_otp(
+                VerifyResetOtpInput {
+                    email: "cAsE@eXaMpLe.CoM".to_owned(),
+                    tenant_id: "t1".to_owned(),
+                    otp: second,
+                },
+                &ctx(),
+            )
             .await;
         assert!(verified.is_ok(), "the OTP must verify under any spelling");
         let Ok(verified_token) = verified else { return };
@@ -871,7 +919,7 @@ mod tests {
             otp: None,
             verified_token: Some(verified_token),
         };
-        assert!(h.engine.reset_password(bridged).await.is_ok());
+        assert!(h.engine.reset_password(bridged, &ctx()).await.is_ok());
         assert!(stored_hash(&h, &id).await != after);
     }
 
@@ -888,7 +936,7 @@ mod tests {
             verified_token: None,
         };
         assert!(matches!(
-            h.engine.reset_password(none).await,
+            h.engine.reset_password(none, &ctx()).await,
             Err(AuthError::PasswordResetTokenInvalid)
         ));
         let two = ResetPasswordInput {
@@ -900,7 +948,7 @@ mod tests {
             verified_token: Some("v".to_owned()),
         };
         assert!(matches!(
-            h.engine.reset_password(two).await,
+            h.engine.reset_password(two, &ctx()).await,
             Err(AuthError::PasswordResetTokenInvalid)
         ));
         // A token to the OTP method is an explicit mismatch.
@@ -913,7 +961,7 @@ mod tests {
             verified_token: None,
         };
         assert!(matches!(
-            h.engine.reset_password(mismatch).await,
+            h.engine.reset_password(mismatch, &ctx()).await,
             Err(AuthError::PasswordResetTokenInvalid)
         ));
 
@@ -928,7 +976,7 @@ mod tests {
             verified_token: None,
         };
         assert!(matches!(
-            ht.engine.reset_password(otp_to_token).await,
+            ht.engine.reset_password(otp_to_token, &ctx()).await,
             Err(AuthError::PasswordResetTokenInvalid)
         ));
     }
@@ -956,17 +1004,20 @@ mod tests {
             "absent@example.com",
         ] {
             let started = Instant::now();
-            assert!(h.engine.initiate_reset(forgot(email)).await.is_ok());
+            assert!(h.engine.initiate_reset(forgot(email), &ctx()).await.is_ok());
             assert!(started.elapsed() >= Duration::from_millis(300));
         }
 
         let started = Instant::now();
         assert!(
             h.engine
-                .resend_reset_otp(ResendResetOtpInput {
-                    email: "present@example.com".to_owned(),
-                    tenant_id: "t1".to_owned(),
-                })
+                .resend_reset_otp(
+                    ResendResetOtpInput {
+                        email: "present@example.com".to_owned(),
+                        tenant_id: "t1".to_owned(),
+                    },
+                    &ctx()
+                )
                 .await
                 .is_ok()
         );
@@ -974,20 +1025,26 @@ mod tests {
         // A second resend within the cooldown is the silent-success branch.
         assert!(
             h.engine
-                .resend_reset_otp(ResendResetOtpInput {
-                    email: "present@example.com".to_owned(),
-                    tenant_id: "t1".to_owned(),
-                })
+                .resend_reset_otp(
+                    ResendResetOtpInput {
+                        email: "present@example.com".to_owned(),
+                        tenant_id: "t1".to_owned(),
+                    },
+                    &ctx()
+                )
                 .await
                 .is_ok()
         );
         // An absent account is indistinguishable on resend.
         assert!(
             h.engine
-                .resend_reset_otp(ResendResetOtpInput {
-                    email: "ghost@example.com".to_owned(),
-                    tenant_id: "t1".to_owned(),
-                })
+                .resend_reset_otp(
+                    ResendResetOtpInput {
+                        email: "ghost@example.com".to_owned(),
+                        tenant_id: "t1".to_owned(),
+                    },
+                    &ctx()
+                )
                 .await
                 .is_ok()
         );
@@ -1006,10 +1063,13 @@ mod tests {
         );
         assert!(
             h.engine
-                .resend_reset_otp(ResendResetOtpInput {
-                    email: "SHOUT@Example.com".to_owned(),
-                    tenant_id: "t1".to_owned(),
-                })
+                .resend_reset_otp(
+                    ResendResetOtpInput {
+                        email: "SHOUT@Example.com".to_owned(),
+                        tenant_id: "t1".to_owned(),
+                    },
+                    &ctx()
+                )
                 .await
                 .is_ok()
         );
@@ -1029,17 +1089,20 @@ mod tests {
         let _ = h.seed(SeedUser::active("vrf@example.com", "pw")).await;
         assert!(
             h.engine
-                .initiate_reset(forgot("vrf@example.com"))
+                .initiate_reset(forgot("vrf@example.com"), &ctx())
                 .await
                 .is_ok()
         );
         assert!(matches!(
             h.engine
-                .verify_reset_otp(VerifyResetOtpInput {
-                    email: "vrf@example.com".to_owned(),
-                    tenant_id: "t1".to_owned(),
-                    otp: "000000".to_owned(),
-                })
+                .verify_reset_otp(
+                    VerifyResetOtpInput {
+                        email: "vrf@example.com".to_owned(),
+                        tenant_id: "t1".to_owned(),
+                        otp: "000000".to_owned(),
+                    },
+                    &ctx()
+                )
                 .await,
             Err(AuthError::OtpInvalid)
         ));
@@ -1054,11 +1117,14 @@ mod tests {
         );
         assert!(matches!(
             h.engine
-                .verify_reset_otp(VerifyResetOtpInput {
-                    email: "ghost@example.com".to_owned(),
-                    tenant_id: "t1".to_owned(),
-                    otp: "111111".to_owned(),
-                })
+                .verify_reset_otp(
+                    VerifyResetOtpInput {
+                        email: "ghost@example.com".to_owned(),
+                        tenant_id: "t1".to_owned(),
+                        otp: "111111".to_owned(),
+                    },
+                    &ctx()
+                )
                 .await,
             Err(AuthError::PasswordResetTokenInvalid)
         ));
@@ -1257,7 +1323,7 @@ mod tests {
         let identifier = h.engine.hashed_identifier("t1", "hooked@example.com");
         assert!(
             h.engine
-                .initiate_reset(forgot("hooked@example.com"))
+                .initiate_reset(forgot("hooked@example.com"), &ctx())
                 .await
                 .is_ok()
         );
@@ -1274,7 +1340,7 @@ mod tests {
             otp: Some(code),
             verified_token: None,
         };
-        assert!(h.engine.reset_password(reset).await.is_ok());
+        assert!(h.engine.reset_password(reset, &ctx()).await.is_ok());
         // Long enough for the detached notification to have run.
         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
         let seen = spy.subjects.lock().map(|s| s.clone()).unwrap_or_default();
@@ -1315,7 +1381,7 @@ mod tests {
 
         assert!(
             engine
-                .initiate_reset(forgot("mailed@example.com"))
+                .initiate_reset(forgot("mailed@example.com"), &ctx())
                 .await
                 .is_ok()
         );
@@ -1331,7 +1397,7 @@ mod tests {
             otp: None,
             verified_token: None,
         };
-        assert!(engine.reset_password(reset).await.is_ok());
+        assert!(engine.reset_password(reset, &ctx()).await.is_ok());
         let after = users
             .find_by_id(&user.id, None)
             .await
@@ -1410,7 +1476,7 @@ mod tests {
         // initiate_reset drives send_reset_token, whose send fails and triggers the cleanup.
         assert!(
             engine
-                .initiate_reset(forgot("fail@example.com"))
+                .initiate_reset(forgot("fail@example.com"), &ctx())
                 .await
                 .is_ok()
         );
@@ -1422,7 +1488,7 @@ mod tests {
         stores.fail_next_cleanup_writes(1);
         assert!(
             engine
-                .initiate_reset(forgot("fail@example.com"))
+                .initiate_reset(forgot("fail@example.com"), &ctx())
                 .await
                 .is_ok()
         );
@@ -1472,14 +1538,17 @@ mod tests {
         // invalid, proving the flow did not leave a usable proof behind.
         assert!(matches!(
             engine
-                .reset_password(ResetPasswordInput {
-                    email: "fail@example.com".to_owned(),
-                    tenant_id: "t1".to_owned(),
-                    new_password: "x".to_owned(),
-                    token: Some("a".repeat(64)),
-                    otp: None,
-                    verified_token: None,
-                })
+                .reset_password(
+                    ResetPasswordInput {
+                        email: "fail@example.com".to_owned(),
+                        tenant_id: "t1".to_owned(),
+                        new_password: "x".to_owned(),
+                        token: Some("a".repeat(64)),
+                        otp: None,
+                        verified_token: None,
+                    },
+                    &ctx()
+                )
                 .await,
             Err(AuthError::PasswordResetTokenInvalid)
         ));
@@ -1519,7 +1588,7 @@ mod tests {
         );
         assert!(
             engine
-                .initiate_reset(forgot("nostore@example.com"))
+                .initiate_reset(forgot("nostore@example.com"), &ctx())
                 .await
                 .is_ok()
         );
@@ -1623,7 +1692,9 @@ mod tests {
         let Ok(engine) = built else { return };
 
         let started = Instant::now();
-        let initiate = engine.initiate_reset(forgot("err@example.com")).await;
+        let initiate = engine
+            .initiate_reset(forgot("err@example.com"), &ctx())
+            .await;
         assert!(matches!(initiate, Err(AuthError::Internal(_))));
         assert!(started.elapsed() >= Duration::from_millis(300));
 
@@ -1631,10 +1702,13 @@ mod tests {
         // backend error surfaces only after the timing floor.
         let started = Instant::now();
         let resend = engine
-            .resend_reset_otp(ResendResetOtpInput {
-                email: "err2@example.com".to_owned(),
-                tenant_id: "t1".to_owned(),
-            })
+            .resend_reset_otp(
+                ResendResetOtpInput {
+                    email: "err2@example.com".to_owned(),
+                    tenant_id: "t1".to_owned(),
+                },
+                &ctx(),
+            )
             .await;
         assert!(matches!(resend, Err(AuthError::Internal(_))));
         assert!(started.elapsed() >= Duration::from_millis(300));
@@ -1723,14 +1797,17 @@ mod tests {
         );
         assert!(
             h.engine
-                .reset_password(ResetPasswordInput {
-                    email: "vanish@example.com".to_owned(),
-                    tenant_id: "t1".to_owned(),
-                    new_password: "new".to_owned(),
-                    token: Some(token),
-                    otp: None,
-                    verified_token: None,
-                })
+                .reset_password(
+                    ResetPasswordInput {
+                        email: "vanish@example.com".to_owned(),
+                        tenant_id: "t1".to_owned(),
+                        new_password: "new".to_owned(),
+                        token: Some(token),
+                        otp: None,
+                        verified_token: None,
+                    },
+                    &ctx()
+                )
                 .await
                 .is_ok()
         );
