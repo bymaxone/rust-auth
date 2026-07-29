@@ -115,6 +115,10 @@ fn build_engine() -> Result<AuthEngine, Box<dyn std::error::Error>> {
         encryption_key: SecretString::from(
             std::env::var("MFA_KEY").unwrap_or_else(|_| EXAMPLE_MFA_KEY_B64.to_owned()),
         ),
+        // No rotation in progress. A key retired by a rotation of `encryption_key` goes here,
+        // accepted for decryption only, so stored TOTP secrets keep opening while the
+        // rotation drains.
+        previous_encryption_keys: Vec::new(),
         issuer: "Bymax Live".to_owned(),
         recovery_code_count: 8,
         totp_window: 1,

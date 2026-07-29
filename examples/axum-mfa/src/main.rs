@@ -73,6 +73,10 @@ fn build_engine() -> Result<AuthEngine, Box<dyn std::error::Error>> {
     config.controllers.mfa = true;
     config.mfa = Some(MfaConfig {
         encryption_key: SecretString::from(EXAMPLE_MFA_KEY_B64.to_owned()),
+        // No rotation in progress. A key retired by a rotation of `encryption_key` goes here,
+        // accepted for decryption only, so stored TOTP secrets keep opening while the
+        // rotation drains.
+        previous_encryption_keys: Vec::new(),
         issuer: "bymax-auth example".to_owned(),
         recovery_code_count: 8,
         totp_window: 1,

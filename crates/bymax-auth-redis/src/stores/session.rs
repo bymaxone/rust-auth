@@ -225,9 +225,12 @@ impl RedisStores {
         let rp_old = keys.key(prefixes.rp, &rotation.old_hash);
         let cf_old = keys.key(prefixes.cf, &rotation.old_hash);
         // The family index of the presented session's lineage. When the new record carries no
-        // family (a legacy rotation) the script's `ARGV[4] == ''` guard skips every family write,
-        // so this key is built but never touched.
+        // family the script's `ARGV[4] == ''` guard skips every family write, so this key is
+        // built but never touched.
         let family = &rotation.new_record.family_id;
+        // The namespaced live-session prefix, so the script's grace branch can probe whether
+        // the session a rotation produced is still alive before honouring the pointer.
+        let rt_prefix = format!("{}:{}", keys.namespace(), prefixes.rt.as_str());
         let fam_key = keys.key(prefixes.fam, family);
         let new_json = serde_json::to_string(&rotation.new_record)?;
 
@@ -245,6 +248,7 @@ impl RedisStores {
             .arg(family)
             .arg(&rotation.old_hash)
             .arg(&rotation.new_hash)
+            .arg(&rt_prefix)
             .invoke_async(&mut conn)
             .await?;
 

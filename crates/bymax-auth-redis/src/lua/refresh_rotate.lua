@@ -11,9 +11,18 @@
 -- ARGV[1] = new session record JSON (the SessionRecord, never a raw token)
 -- ARGV[2] = refresh TTL in seconds (always > 0)
 -- ARGV[3] = grace TTL in seconds (0 means "no grace pointer": skip it entirely)
--- ARGV[4] = family id of the presented session ('' means "legacy, no family": skip family work)
+-- ARGV[4] = family id of the presented session ('' means "no family": skip family work)
 -- ARGV[5] = sha256(old)  the SET member to move out of the family
 -- ARGV[6] = sha256(new)  the SET member to move into the family
+-- ARGV[7] = the live-session key prefix, namespace included, for the successor probe
+--
+-- The grace pointer stores `{successorHash}:{session JSON}` — the hash of the session the
+-- rotation produced, then a colon, then the record (split on the FIRST colon). Recovery is gated on that successor still
+-- being live, because the pointer exists for exactly one purpose: to cover the retry where the
+-- old token was consumed but the client never received the new one. Once the successor is gone
+-- (revoked from the session list, or swept by "log out everywhere") there is nothing left to
+-- recover *to*, and honouring the pointer would rebuild a full-lifetime session out of the very
+-- record the user just revoked.
 --
 -- The script never decodes a stored record: every JSON value it touches is handed back to the
 -- caller and parsed there, by a real parser rather than Lua's `cjson`. That keeps it byte-for-byte
@@ -36,12 +45,12 @@ if old then
     -- A zero grace window means no grace recovery: skip the pointer rather than issue an
     -- `EX 0` SET, which Redis rejects.
     if tonumber(ARGV[3]) > 0 then
-        redis.call('SET', KEYS[3], ARGV[1], 'EX', ARGV[3])
+        redis.call('SET', KEYS[3], ARGV[6] .. ':' .. ARGV[1], 'EX', ARGV[3])
     end
     -- Plant the consumed-family marker (surviving the whole refresh lifetime, past the shorter
     -- grace window) and move the family membership from the old hash to the new one, so a
-    -- post-grace replay is detected as a reuse and the whole lineage stays revocable. A legacy
-    -- session with no family ('') skips this bookkeeping.
+    -- post-grace replay is detected as a reuse and the whole lineage stays revocable. A session
+    -- with no family ('') skips this bookkeeping.
     if ARGV[4] ~= '' then
         redis.call('SET', KEYS[4], ARGV[4], 'EX', ARGV[2])
         redis.call('SREM', KEYS[5], ARGV[5])
@@ -57,7 +66,20 @@ if grace then
     -- session on every request for the whole window. It exists to cover the one retry where the
     -- old token was consumed but the client never received the new one.
     redis.call('DEL', KEYS[3])
-    return 'GRACE:' .. grace
+    -- `{successorHash}:{json}`. Recovery only makes sense while the session the rotation
+    -- produced is still live: once it has been revoked, the retry this window exists for has
+    -- nothing to land on. Falling through reaches the reuse check below, which is the correct
+    -- reading of a consumed token presented after its successor died.
+    -- Split on the FIRST colon rather than a fixed width: the hash is hex and the record is
+    -- JSON, so neither can contain one before the separator, and a fixed width would silently
+    -- mis-split any hash that is not exactly sha256-hex.
+    local sep = string.find(grace, ':', 1, true)
+    if sep then
+        local successor = string.sub(grace, 1, sep - 1)
+        if redis.call('EXISTS', ARGV[7] .. ':' .. successor) == 1 then
+            return 'GRACE:' .. string.sub(grace, sep + 1)
+        end
+    end
 end
 -- Post-grace reuse: the consumed-family marker outlives the grace pointer, so its presence here
 -- means this token was validly issued and already rotated — a replay of a consumed token.

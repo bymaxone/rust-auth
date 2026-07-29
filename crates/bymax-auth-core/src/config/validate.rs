@@ -142,6 +142,8 @@ impl ResolvedConfig {
     ///
     /// Decrypt-only: a stored TOTP secret records no key identifier, so without these a change
     /// of `mfa.encryption_key` makes every stored secret undecryptable at once.
+    #[cfg(feature = "mfa")]
+    #[must_use]
     pub(crate) fn previous_mfa_encryption_keys(&self) -> Vec<Zeroizing<[u8; 32]>> {
         self.config
             .mfa

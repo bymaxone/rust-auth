@@ -296,18 +296,121 @@ async fn a_grace_pointer_cannot_resurrect_a_revoked_family() {
     ));
     assert!(stores.revoke_family(kind, "fam-ku").await.is_ok());
 
-    // The still-live sibling pointer must NOT recover a session: its family is gone, so the
-    // rotation reports the token invalid instead of handing back the revoked lineage.
+    // The still-live sibling pointer must NOT recover a session. Two independent guards now
+    // refuse it: the successor probe inside the script (k3 was deleted with the family, so the
+    // pointer has nothing to recover *to*) and the family-liveness check above it. Because the
+    // script now falls through the dead-successor pointer to the reuse check, and `cf:k2` is
+    // still planted, the outcome is the truthful classification — k2 is a consumed token being
+    // replayed — rather than the flat `Invalid` the family check alone used to produce. What
+    // the guard cares about is that no session comes back, which both spellings satisfy.
     assert!(
         redis.ttl("auth:rp:k2").await > 0,
         "the pointer itself survives"
     );
-    assert!(matches!(
-        stores.rotate(kind, &rotation("k2", "kY", "ku")).await,
-        Ok(RotateOutcome::Invalid)
-    ));
+    let replayed = stores.rotate(kind, &rotation("k2", "kY", "ku")).await;
+    assert!(
+        matches!(
+            replayed,
+            Ok(RotateOutcome::Invalid) | Ok(RotateOutcome::Reused(_))
+        ),
+        "a pointer whose successor is gone must never recover, got {replayed:?}"
+    );
     assert!(matches!(stores.find_session(kind, "kY").await, Ok(None)));
     assert!(matches!(stores.list_sessions(kind, "ku").await, Ok(v) if v.is_empty()));
+}
+
+#[tokio::test]
+async fn a_revoked_session_cannot_be_rebuilt_from_its_predecessors_grace_pointer() {
+    let Some(redis) = common::try_start().await else {
+        return;
+    };
+    let Some(stores) = redis.stores() else { return };
+    let kind = SessionKind::Dashboard;
+
+    // SECURITY REGRESSION GUARD. A grace pointer is keyed by the OLD hash, so revoking a
+    // session — which acts on the NEW hash — cannot find and delete it. Before the successor
+    // probe, replaying the predecessor inside the (default 30 s) window rebuilt a fresh
+    // FULL-lifetime session out of the very record the user had just revoked: "log out this
+    // device" undone by the device's own consumed token.
+    assert!(
+        stores
+            .create_session(kind, "g1", &record("gu"), 3600)
+            .await
+            .is_ok()
+    );
+    assert!(matches!(
+        stores.rotate(kind, &rotation("g1", "g2", "gu")).await,
+        Ok(RotateOutcome::Rotated(_))
+    ));
+    assert!(
+        redis.ttl("auth:rp:g1").await > 0,
+        "the predecessor pointer is live"
+    );
+
+    // While the successor is alive the pointer still works — the retry it exists for is the
+    // one where the client never received the new token. This is the control case: without it
+    // the test below would pass even if grace recovery were simply broken.
+    assert!(matches!(
+        stores.rotate(kind, &rotation("g1", "gA", "gu")).await,
+        Ok(RotateOutcome::Grace(r)) if r.user_id == "gu"
+    ));
+
+    // Re-plant a pointer, then revoke the live session the way the session list does.
+    assert!(matches!(
+        stores.rotate(kind, &rotation("g2", "g3", "gu")).await,
+        Ok(RotateOutcome::Rotated(_))
+    ));
+    assert!(redis.ttl("auth:rp:g2").await > 0);
+    assert!(stores.revoke_session(kind, "gu", "g3").await.is_ok());
+
+    // The pointer survives (nothing knew to delete it) but must no longer recover: its
+    // successor g3 is gone.
+    assert!(
+        redis.ttl("auth:rp:g2").await > 0,
+        "the pointer itself survives the revoke"
+    );
+    let replayed = stores.rotate(kind, &rotation("g2", "gZ", "gu")).await;
+    assert!(
+        !matches!(replayed, Ok(RotateOutcome::Grace(_))),
+        "a revoked session must not come back through its predecessor's pointer, got {replayed:?}"
+    );
+    assert!(matches!(stores.find_session(kind, "gZ").await, Ok(None)));
+}
+
+#[tokio::test]
+async fn a_grace_recovery_is_refused_when_the_family_index_is_gone() {
+    let Some(redis) = common::try_start().await else {
+        return;
+    };
+    let Some(stores) = redis.stores() else { return };
+    let kind = SessionKind::Dashboard;
+
+    // The script's successor probe and this store-side family check are two independent
+    // guards, and the second is not redundant: `revoke_family` enumerates the index and then
+    // deletes it, so a session created between those two steps stays live while its family
+    // index is already gone. This reconstructs exactly that state — successor alive, family
+    // index deleted — which the probe alone would wave through.
+    assert!(
+        stores
+            .create_session(kind, "f1", &record("fu"), 3600)
+            .await
+            .is_ok()
+    );
+    assert!(matches!(
+        stores.rotate(kind, &rotation("f1", "f2", "fu")).await,
+        Ok(RotateOutcome::Rotated(_))
+    ));
+    assert!(matches!(stores.find_session(kind, "f2").await, Ok(Some(_))));
+
+    // Drop the family index only. The successor f2 is untouched and still live.
+    assert!(redis.del("auth:fam:fam-fu").await);
+
+    let replayed = stores.rotate(kind, &rotation("f1", "fX", "fu")).await;
+    assert!(
+        matches!(replayed, Ok(RotateOutcome::Invalid)),
+        "a lineage whose family index is gone must not recover, got {replayed:?}"
+    );
+    assert!(matches!(stores.find_session(kind, "fX").await, Ok(None)));
 }
 
 #[tokio::test]
