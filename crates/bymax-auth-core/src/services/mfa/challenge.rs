@@ -192,7 +192,8 @@ impl MfaService {
             }
             None
         } else {
-            match super::verify_recovery_code(&recovery_codes, &self.hash_recovery_code(code)) {
+            match super::verify_recovery_code(&recovery_codes, &self.recovery_code_candidates(code))
+            {
                 Some(index) => {
                     // The recovery-code path carries no `tu:` marker, so the temp token is
                     // consumed standalone now that the code is confirmed valid.
@@ -269,9 +270,9 @@ impl MfaService {
     /// Scan the stored recovery-code digests for a constant-time match of `code`, returning
     /// the matched index or `None`.
     fn accept_recovery_code(&self, user: &AuthUser, code: &str) -> Option<usize> {
-        let digest = self.hash_recovery_code(code);
+        let candidates = self.recovery_code_candidates(code);
         let stored = user.mfa_recovery_codes.clone().unwrap_or_default();
-        super::verify_recovery_code(&stored, &digest)
+        super::verify_recovery_code(&stored, &candidates)
     }
 
     /// Remove the just-used recovery code from the stored set and persist the smaller set

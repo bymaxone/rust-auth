@@ -91,6 +91,9 @@ fn jti_hash(jti: &str) -> String {
 /// is wired with the platform domain.
 pub struct TokenManagerService {
     key: HsKey,
+    /// Keys retired by a rotation, tried only after [`Self::key`] and only to verify. Empty
+    /// unless a rotation is in progress; nothing is ever signed under one.
+    previous_keys: Vec<HsKey>,
     session_store: Arc<dyn SessionStore>,
     access_ttl: Duration,
     refresh_ttl_secs: u64,
@@ -102,10 +105,38 @@ pub struct TokenManagerService {
 }
 
 impl TokenManagerService {
+    /// Verify a token against the current signing key, then against any retired by a rotation.
+    ///
+    /// The current key is always tried first, so the common path costs exactly what it did
+    /// before. Retired keys verify only — nothing is ever signed under one, which is what makes
+    /// a rotation one-way — and every other check the verifier makes (algorithm pinning,
+    /// expiry, claim decoding) still applies to them, so a retired key buys a token nothing but
+    /// signature acceptance.
+    ///
+    /// Every failure is the current key's failure: reporting *which* key rejected the token
+    /// would tell an attacker whether a forgery was made under a key the deployment used to
+    /// hold.
+    fn verify_rotating<C: serde::de::DeserializeOwned + bymax_auth_jwt::JwtClaims>(
+        &self,
+        token: &str,
+    ) -> Result<C, bymax_auth_jwt::JwtError> {
+        let current = verify::<C>(token, &self.key, &VerifyOptions::default());
+        if current.is_ok() || self.previous_keys.is_empty() {
+            return current;
+        }
+        for key in &self.previous_keys {
+            if let Ok(claims) = verify::<C>(token, key, &VerifyOptions::default()) {
+                return Ok(claims);
+            }
+        }
+        current
+    }
+
     /// Assemble the token manager from the signing key, the session store, and the
     /// resolved token lifetimes.
     pub(crate) fn new(
         key: HsKey,
+        previous_keys: Vec<HsKey>,
         session_store: Arc<dyn SessionStore>,
         access_ttl: Duration,
         refresh_expires_in_days: u32,
@@ -114,6 +145,7 @@ impl TokenManagerService {
     ) -> Self {
         Self {
             key,
+            previous_keys,
             session_store,
             access_ttl,
             refresh_ttl_secs: u64::from(refresh_expires_in_days) * 86_400,
@@ -513,7 +545,8 @@ impl TokenManagerService {
     /// public [`AuthError::TokenInvalid`]; all collapse to `token_invalid` at the boundary.
     #[cfg(feature = "platform")]
     pub async fn verify_platform_access(&self, token: &str) -> Result<PlatformClaims, AuthError> {
-        let claims = verify::<PlatformClaims>(token, &self.key, &VerifyOptions::default())
+        let claims = self
+            .verify_rotating::<PlatformClaims>(token)
             .map_err(map_jwt_error)?;
         if self.session_store.is_blacklisted(&claims.jti).await? {
             return Err(AuthError::TokenRevoked);
@@ -560,7 +593,8 @@ impl TokenManagerService {
     /// the public [`AuthError::TokenInvalid`]; all collapse to `token_invalid` at the HTTP
     /// boundary so no oracle is exposed.
     pub async fn verify_access(&self, token: &str) -> Result<DashboardClaims, AuthError> {
-        let claims = verify::<DashboardClaims>(token, &self.key, &VerifyOptions::default())
+        let claims = self
+            .verify_rotating::<DashboardClaims>(token)
             .map_err(map_jwt_error)?;
         if self.session_store.is_blacklisted(&claims.jti).await? {
             return Err(AuthError::TokenRevoked);
@@ -684,7 +718,8 @@ impl TokenManagerService {
     /// [`AuthError`] on a backend failure.
     #[cfg(feature = "mfa")]
     pub async fn verify_mfa_temp_token(&self, token: &str) -> Result<MfaTempVerified, AuthError> {
-        let claims = verify::<MfaTempClaims>(token, &self.key, &VerifyOptions::default())
+        let claims = self
+            .verify_rotating::<MfaTempClaims>(token)
             .map_err(|_| AuthError::MfaTempTokenInvalid)?;
         let Some(support) = &self.mfa else {
             return Err(AuthError::MfaTempTokenInvalid);
@@ -877,11 +912,25 @@ mod tests {
     fn service(store: Arc<InMemoryStores>) -> TokenManagerService {
         TokenManagerService::new(
             key(),
+            Vec::new(),
             store,
             Duration::from_secs(900),
             7,
             Duration::from_secs(30),
             // No absolute cap in the default fixture; the cap has its own tests.
+            0,
+        )
+    }
+
+    /// A manager whose current key is `key()` and which also accepts `retired` for verification.
+    fn service_rotating(store: Arc<InMemoryStores>, retired: Vec<HsKey>) -> TokenManagerService {
+        TokenManagerService::new(
+            key(),
+            retired,
+            store,
+            Duration::from_secs(900),
+            7,
+            Duration::from_secs(30),
             0,
         )
     }
@@ -1419,6 +1468,7 @@ mod tests {
         let support = MfaTokenSupport::new(mfa_store, brute_force, &[7u8; 64]);
         TokenManagerService::new(
             key(),
+            Vec::new(),
             store,
             Duration::from_secs(900),
             7,
@@ -1532,6 +1582,91 @@ mod tests {
         assert!(matches!(bf.is_locked(&challenge_id, 5).await, Ok(false)));
         assert!(matches!(bf.is_locked(&disable_id, 5).await, Ok(true)));
     }
+
+    fn retired_key() -> HsKey {
+        HsKey::from_bytes(b"the-previous-hs256-secret-abcdefgh")
+    }
+
+    #[tokio::test]
+    async fn a_token_signed_under_a_retired_secret_still_verifies() {
+        // Without this, rotating the signing secret signs every user out at the moment the new
+        // configuration rolls out. Listing the old secret makes the rotation a rollout instead.
+        let store = Arc::new(InMemoryStores::new());
+        let old_manager = service_rotating(store.clone(), Vec::new());
+        // Mint under the retired key by making it the CURRENT key of a throwaway manager.
+        let minted_under_old = TokenManagerService::new(
+            retired_key(),
+            Vec::new(),
+            store.clone(),
+            Duration::from_secs(900),
+            7,
+            Duration::from_secs(30),
+            0,
+        );
+        let issued = minted_under_old
+            .issue_tokens(&user(), "1.2.3.4", "agent", false)
+            .await;
+        let Ok(issued) = issued else { return };
+        drop(old_manager);
+
+        // The current key alone rejects it…
+        let strict = service_rotating(store.clone(), Vec::new());
+        assert!(matches!(
+            strict.verify_access(&issued.access_token).await,
+            Err(AuthError::TokenInvalid)
+        ));
+
+        // …and with the retired key listed, it verifies.
+        let rotating = service_rotating(store, vec![retired_key()]);
+        assert!(matches!(
+            rotating.verify_access(&issued.access_token).await,
+            Ok(claims) if claims.sub == "u1"
+        ));
+    }
+
+    #[tokio::test]
+    async fn a_retired_secret_excuses_nothing_but_the_signature() {
+        // A token nobody signed is still refused, and the failure is the CURRENT key's — which
+        // is what keeps the error from reporting whether a forgery matched a key the deployment
+        // used to hold.
+        let store = Arc::new(InMemoryStores::new());
+        let rotating = service_rotating(store.clone(), vec![retired_key()]);
+        let forged = TokenManagerService::new(
+            HsKey::from_bytes(b"a-key-nobody-in-this-deployment-holds"),
+            Vec::new(),
+            store,
+            Duration::from_secs(900),
+            7,
+            Duration::from_secs(30),
+            0,
+        );
+        let issued = forged
+            .issue_tokens(&user(), "1.2.3.4", "agent", false)
+            .await;
+        let Ok(issued) = issued else { return };
+
+        assert!(matches!(
+            rotating.verify_access(&issued.access_token).await,
+            Err(AuthError::TokenInvalid)
+        ));
+    }
+
+    #[tokio::test]
+    async fn the_current_key_is_always_tried_first() {
+        // The common path must not pay for a feature nobody switched on: a token under the
+        // current key verifies whether or not retired keys are listed.
+        let store = Arc::new(InMemoryStores::new());
+        let rotating = service_rotating(store.clone(), vec![retired_key()]);
+        let issued = rotating
+            .issue_tokens(&user(), "1.2.3.4", "agent", false)
+            .await;
+        let Ok(issued) = issued else { return };
+
+        assert!(matches!(
+            rotating.verify_access(&issued.access_token).await,
+            Ok(claims) if claims.sub == "u1"
+        ));
+    }
 }
 
 #[cfg(test)]
@@ -1544,6 +1679,7 @@ mod absolute_lifetime_tests {
     fn capped(store: Arc<InMemoryStores>) -> TokenManagerService {
         TokenManagerService::new(
             HsKey::from_bytes(b"0123456789abcdef0123456789abcdef"),
+            Vec::new(),
             store,
             Duration::from_secs(900),
             7,
@@ -1678,6 +1814,7 @@ mod absolute_lifetime_tests {
 
         let uncapped = TokenManagerService::new(
             HsKey::from_bytes(b"0123456789abcdef0123456789abcdef"),
+            Vec::new(),
             store.clone(),
             Duration::from_secs(900),
             7,

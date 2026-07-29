@@ -420,7 +420,7 @@ Everything is configured through `AuthConfig`. Two ready-made profiles bundle se
 | Group              | Key options                                                                  | nest-compat default        |
 | ------------------ | ---------------------------------------------------------------------------- | -------------------------- |
 | **jwt**            | `secret` (required, ≥ 32 chars), `access_ttl`, `refresh_expires_in_days`, `absolute_session_lifetime_days` | `15m`, `7d`, off, HS256 (pinned) |
-| **password**       | `active_algorithm`, scrypt `cost_factor` / Argon2id `memory_kib`             | scrypt N=2¹⁵, r=8, p=1     |
+| **password**       | `active_algorithm`, scrypt `cost_factor` / Argon2id `memory_kib`             | scrypt N=2¹⁷, r=8, p=1     |
 | **token_delivery** | `Cookie` \| `Bearer` \| `Both`                                               | `Cookie`                   |
 | **cookies**        | names, `refresh_cookie_path`, `same_site`, `trusted_origins`, `resolve_domains` | HttpOnly, Secure, Strict, `[]` |
 | **mfa**            | `encryption_key` (32 bytes), `issuer`, `totp_window`, `recovery_code_count`  | —                          |
@@ -436,6 +436,16 @@ Everything is configured through `AuthConfig`. Two ready-made profiles bundle se
 
 > [!NOTE]
 > `build()` validates every cross-field invariant (secret length/entropy, role referential integrity, parameter floors, `SameSite=None ⇒ Secure`, `SameSite=None ⇔ trusted_origins`, OAuth redirect allow-listing, required stores) and rejects an invalid config with a precise `ConfigError`.
+
+> [!TIP]
+> **Rotating the signing secret.** `jwt.previous_secrets` lists secrets retired by a rotation,
+> accepted for verification only. Without it, changing `jwt.secret` signs every user out the
+> moment the new configuration rolls out *and* invalidates every stored recovery-code digest —
+> those are keyed by an HMAC derived from the secret, so users lose the codes they printed and
+> filed. With it, both keep working while tokens issued under the old secret drain, and a
+> rotation becomes a rollout. Remove the entry once the longest-lived token signed under it has
+> expired: every entry is a key that still opens the door. `mfa.encryption_key` is separate and
+> is **not** covered — rotating it requires re-encrypting the stored TOTP secrets.
 
 > [!IMPORTANT]
 > `jwt.access_expires_in` must not exceed **30 days**, the window a store keeps a bumped token
@@ -557,7 +567,7 @@ When integrating `bymax-auth` in production, verify each of the following:
 
 | Layer             | Implementation                                                       |
 | ----------------- | -------------------------------------------------------------------- |
-| Password Hashing  | RustCrypto `scrypt` (N=2¹⁵, r=8, p=1) **or** `argon2` Argon2id (PHC) |
+| Password Hashing  | RustCrypto `scrypt` (N=2¹⁷, r=8, p=1 — OWASP's recommended minimum) **or** `argon2` Argon2id (PHC) |
 | MFA Encryption    | `aes-gcm` AES-256-GCM with a fresh 12-byte CSPRNG IV per call         |
 | TOTP              | `hmac` + `sha1` per RFC 4226/6238, ±1 step window, anti-replay marked |
 | Recovery Codes    | Keyed **HMAC-SHA-256** digests (never plaintext, never reversible)    |
@@ -624,7 +634,7 @@ Tracked with [Criterion](https://github.com/bheisler/criterion.rs) so a regressi
 | Secure token (32 B → hex) | ~870 ns | dominated by the OS CSPRNG syscall, not allocation |
 | AES-256-GCM encrypt / decrypt | ~2.1 µs / ~1.3 µs | TOTP secret encrypted at rest |
 | TOTP generate / verify (±1 window) | ~200 ns / ~710 ns | RFC 6238, constant-time |
-| scrypt hash / verify (N=2¹⁵) | ~37 ms | memory-hard — tunable security cost |
+| scrypt hash / verify (N=2¹⁷) | ~150 ms | memory-hard — tunable security cost, at OWASP's recommended minimum |
 | Argon2id hash / verify (19 MiB) | ~10 ms | memory-hard — tunable security cost |
 
 <sub>Indicative medians on an Apple M4 Max, `release` profile, Rust 1.96. Reproduce with `cargo bench -p bymax-auth-crypto --bench crypto --all-features`. Absolute figures are hardware-dependent — the point is the order of magnitude and that the numbers are tracked, not hand-waved.</sub>

@@ -401,8 +401,16 @@ impl AuthEngineBuilder {
         let sessions_enabled = session_config.enabled;
         let config = Arc::new(ResolvedConfig::new(config, environment, secure_cookies));
 
+        let previous_keys = config
+            .config()
+            .jwt
+            .previous_secrets
+            .iter()
+            .map(|secret| HsKey::from_bytes(secret.expose_secret().as_bytes()))
+            .collect();
         let tokens = TokenManagerService::new(
             signing_key,
+            previous_keys,
             session_store.clone(),
             access_ttl,
             refresh_days,
@@ -560,6 +568,12 @@ fn build_mfa_service(wiring: MfaWiring<'_>) -> Option<crate::services::mfa::MfaS
         hooks: wiring.hooks.clone(),
         encryption_key,
         identifier_key: zeroize::Zeroizing::new(*wiring.config.hmac_key()),
+        previous_identifier_keys: wiring
+            .config
+            .previous_hmac_keys()
+            .into_iter()
+            .map(zeroize::Zeroizing::new)
+            .collect(),
         issuer: mfa_config.issuer.clone(),
         totp_window: mfa_config.totp_window,
         recovery_code_count: mfa_config.recovery_code_count,
@@ -593,6 +607,65 @@ mod tests {
 
     fn stores() -> Arc<InMemoryStores> {
         Arc::new(InMemoryStores::new())
+    }
+
+    #[tokio::test]
+    async fn a_configured_rotation_reaches_the_token_manager() {
+        // The retired secrets have to become verification keys on the token manager, or the
+        // configuration would be accepted and do nothing — the worst outcome for a rotation
+        // setting, since the operator would believe old tokens keep working and find out
+        // otherwise from their users.
+        let mut cfg = valid_config();
+        let retired = "Zx4mQ7wLpR2nT9yB6vKdH3sJfCgA5eU8iO1rXwNqYtM0";
+        cfg.jwt.secret =
+            SecretString::from("kR7pQw9zTr4XmVn2PsB6yLdG3hJ8fCxZ5aNeU1oIqW0M".to_owned());
+        cfg.jwt.previous_secrets = vec![SecretString::from(retired.to_owned())];
+
+        let built = AuthEngine::builder()
+            .config(cfg)
+            .environment(Environment::Test)
+            .user_repository(user_repo())
+            .redis_stores(stores())
+            .build();
+        let Ok(engine) = built else { return };
+
+        // A token minted under the retired secret verifies through the assembled engine.
+        let minted = TokenManagerService::new(
+            HsKey::from_bytes(retired.as_bytes()),
+            Vec::new(),
+            stores(),
+            std::time::Duration::from_secs(900),
+            7,
+            std::time::Duration::from_secs(30),
+            0,
+        );
+        let issued = minted
+            .issue_tokens(
+                &bymax_auth_types::SafeAuthUser {
+                    id: "u1".to_owned(),
+                    email: "u@example.com".to_owned(),
+                    name: "U".to_owned(),
+                    role: "ADMIN".to_owned(),
+                    tenant_id: "t1".to_owned(),
+                    status: "ACTIVE".to_owned(),
+                    email_verified: true,
+                    mfa_enabled: false,
+                    created_at: time::OffsetDateTime::UNIX_EPOCH,
+                    last_login_at: None,
+                    oauth_provider: None,
+                    oauth_provider_id: None,
+                },
+                "1.2.3.4",
+                "agent",
+                false,
+            )
+            .await;
+        let Ok(issued) = issued else { return };
+
+        assert!(matches!(
+            engine.tokens().verify_access(&issued.access_token).await,
+            Ok(claims) if claims.sub == "u1"
+        ));
     }
 
     #[tokio::test]

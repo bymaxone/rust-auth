@@ -63,7 +63,13 @@ impl PasswordAlgorithm {
 /// scrypt cost parameters.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ScryptParams {
-    /// CPU/memory cost N — a power of two, default 32768 (2^15), minimum 16384 (2^14).
+    /// CPU/memory cost N — a power of two, default 131072 (2^17), minimum 16384 (2^14).
+    ///
+    /// The default is OWASP's recommended minimum for scrypt alongside `r=8, p=1`: roughly
+    /// 128 MiB and ~100 ms per hash on a modern core. That cost is the point — it is what makes
+    /// an offline attack on a leaked hash expensive. A deployment that cannot afford the memory
+    /// should lower this deliberately, knowing what it gives up, rather than inherit a weaker
+    /// default that never announced itself.
     pub cost_factor: u32,
     /// Block size r, default 8.
     pub block_size: u32,
@@ -74,7 +80,7 @@ pub struct ScryptParams {
 impl Default for ScryptParams {
     fn default() -> Self {
         Self {
-            cost_factor: 1 << 15,
+            cost_factor: 1 << 17,
             block_size: 8,
             parallelization: 1,
         }
@@ -134,6 +140,22 @@ impl Default for PasswordConfig {
 pub struct JwtConfig {
     /// Signing secret. Required. Redacted in `Debug`, zeroized on drop.
     pub secret: SecretString,
+    /// Secrets retired by a rotation, accepted for **verification only**. Default: empty.
+    ///
+    /// Rotating [`JwtConfig::secret`] with nothing else in place invalidates every token in
+    /// flight at once — every signed-in user is signed out the moment the new configuration
+    /// rolls out — and invalidates every stored recovery-code digest, which is keyed by an HMAC
+    /// derived from the secret. Users would be locked out of the codes they printed and filed,
+    /// and would discover it at the moment they most need them. Listing the previous secret
+    /// here keeps both readable while tokens issued under it drain, so a rotation is a rollout
+    /// rather than a mass logout.
+    ///
+    /// Signing always uses [`JwtConfig::secret`]. Entries here are only ever tried after it,
+    /// and only to verify, so a rotation is one-way: nothing new is ever produced under a
+    /// retired secret. Remove an entry once the longest-lived thing signed under it has
+    /// expired — every entry is a key that still opens the door — and each is validated exactly
+    /// like the current secret, because a weak one is just as forgeable.
+    pub previous_secrets: Vec<SecretString>,
     /// Access-token lifetime, default 15m.
     pub access_expires_in: Duration,
     /// Access-token cookie `Max-Age`, default 15m.
@@ -166,6 +188,7 @@ impl Default for JwtConfig {
     fn default() -> Self {
         Self {
             secret: SecretString::from(String::new()),
+            previous_secrets: Vec::new(),
             access_expires_in: Duration::from_secs(15 * 60),
             access_cookie_max_age: Duration::from_secs(15 * 60),
             refresh_expires_in_days: 7,

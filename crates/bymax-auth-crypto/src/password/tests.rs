@@ -9,11 +9,13 @@ use super::*;
 
 #[test]
 fn default_params_are_scrypt_at_the_baseline() {
-    // The default writer is scrypt at the nest-auth baseline (N=2^15, r=8, p=1) — the
-    // drop-in parity posture the library promises out of the box.
+    // The default writer is scrypt at OWASP's recommended minimum (N=2^17, r=8, p=1), which
+    // nest-auth also defaults to — the drop-in parity posture the library promises out of the
+    // box. Pinned to the literal: read back through `ScryptParams::default()` this would agree
+    // with itself no matter what the number became.
     let params = PasswordParams::default();
     assert_eq!(params.active, PasswordAlgorithm::Scrypt);
-    assert_eq!(params.scrypt.cost_factor, 1 << 15);
+    assert_eq!(params.scrypt.cost_factor, 1 << 17);
     assert_eq!(params.scrypt.block_size, 8);
     assert_eq!(params.scrypt.parallelization, 1);
 }
@@ -171,7 +173,7 @@ mod scrypt_tests {
         let phc = hash(b"pw", &PasswordParams::default()).unwrap_or_default();
         let stronger = PasswordParams {
             scrypt: ScryptParams {
-                cost_factor: 1 << 16,
+                cost_factor: 1 << 18,
                 ..ScryptParams::default()
             },
             ..PasswordParams::default()

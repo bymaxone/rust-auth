@@ -228,6 +228,18 @@ impl SessionService {
     /// action). A `SessionNotFound` for a victim (a concurrent logout already removed it) is
     /// swallowed; any other store error is propagated.
     ///
+    /// The user's token epoch is advanced as part of this, which is what makes the revocation
+    /// take effect *now* rather than whenever each device's access token happens to expire.
+    /// Deleting a refresh session stops that device rotating, but its already-issued access
+    /// token is stateless and keeps verifying for the rest of its lifetime — up to
+    /// `jwt.access_expires_in` of continued access on a device the user just told the system to
+    /// sign out. Someone who does this because they think a device is compromised means now.
+    ///
+    /// The caller's own access token is invalidated too — the epoch is per user, not per
+    /// session — but the caller is the one party who can recover instantly: their refresh
+    /// session is deliberately preserved, so the next request refreshes and continues. The
+    /// revoked devices cannot, having lost the refresh token that would let them.
+    ///
     /// # Errors
     ///
     /// Returns [`AuthError::SessionNotFound`] when `current_hash` is malformed, or a store
@@ -258,6 +270,12 @@ impl SessionService {
                 Err(other) => return Err(other),
             }
         }
+        // Last, and only once every victim is gone: a failure above leaves the epoch untouched
+        // rather than signing the caller out of a device the loop never got to revoke.
+        self.store
+            .bump_epoch(SessionKind::Dashboard, user_id)
+            .await?;
+        tracing::info!(%user_id, "sessions: revoked all other devices, token epoch advanced");
         Ok(())
     }
 
@@ -1397,5 +1415,92 @@ mod tests {
         );
         drop(guard);
         assert!(!events.contains("sessions: eviction of an over-cap session failed"));
+    }
+
+    #[tokio::test]
+    async fn revoking_other_devices_advances_the_token_epoch() {
+        // Deleting a refresh session stops that device ROTATING; its already-issued access token
+        // is stateless and keeps verifying for the rest of its lifetime. A user signing out a
+        // device they believe is compromised means now, so the epoch advances and every
+        // outstanding access token for the account stops verifying at once.
+        let store = Arc::new(InMemoryStores::new());
+        let users = Arc::new(InMemoryUserRepository::new());
+        let uid = seed_user(&users, "everywhere").await;
+        let base = OffsetDateTime::UNIX_EPOCH;
+        let current = hash("cccc");
+        let other = hash("dddd");
+        for (h, at) in [
+            (&current, base),
+            (&other, base + time::Duration::seconds(1)),
+        ] {
+            assert!(
+                store
+                    .create_session(SessionKind::Dashboard, h, &record(&uid, at), 3600)
+                    .await
+                    .is_ok()
+            );
+        }
+
+        let svc = service(
+            store.clone(),
+            users,
+            Arc::new(CountingHooks::default()),
+            config(5, None),
+        );
+        assert!(matches!(
+            store.current_epoch(SessionKind::Dashboard, &uid).await,
+            Ok(0)
+        ));
+
+        assert!(svc.revoke_all_except_current(&uid, &current).await.is_ok());
+
+        // The other device is gone, the caller's session survives — and every access token for
+        // the account, the caller's included, is now stale. The caller is the only party that
+        // can recover: their refresh session is the one still standing.
+        assert!(matches!(
+            store.current_epoch(SessionKind::Dashboard, &uid).await,
+            Ok(epoch) if epoch > 0
+        ));
+        assert!(matches!(svc.list_sessions(&uid, Some(&current)).await, Ok(v) if v.len() == 1));
+    }
+
+    #[tokio::test]
+    async fn a_failed_revocation_leaves_the_epoch_untouched() {
+        // Bumping after a partial failure would be the worst of both outcomes: the caller signed
+        // out of a device the loop never managed to revoke, and no trace that it failed.
+        let store = Arc::new(InMemoryStores::new());
+        let users = Arc::new(InMemoryUserRepository::new());
+        let uid = seed_user(&users, "partial").await;
+        let base = OffsetDateTime::UNIX_EPOCH;
+        let current = hash("eeee");
+        let other = hash("ffff");
+        for (h, at) in [
+            (&current, base),
+            (&other, base + time::Duration::seconds(1)),
+        ] {
+            assert!(
+                store
+                    .create_session(SessionKind::Dashboard, h, &record(&uid, at), 3600)
+                    .await
+                    .is_ok()
+            );
+        }
+
+        store.fail_next_cleanup_writes(1);
+        let svc = service(
+            store.clone(),
+            users,
+            Arc::new(CountingHooks::default()),
+            config(5, None),
+        );
+
+        assert!(matches!(
+            svc.revoke_all_except_current(&uid, &current).await,
+            Err(AuthError::Internal(_))
+        ));
+        assert!(matches!(
+            store.current_epoch(SessionKind::Dashboard, &uid).await,
+            Ok(0)
+        ));
     }
 }

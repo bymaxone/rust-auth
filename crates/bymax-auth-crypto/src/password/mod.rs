@@ -76,9 +76,14 @@ impl ScryptParams {
 }
 
 impl Default for ScryptParams {
+    /// OWASP's recommended minimum for scrypt: `N = 2^17`, `r = 8`, `p = 1`.
+    ///
+    /// This has to stay equal to `AuthConfig`'s scrypt default. They are two declarations of one
+    /// number, and when they disagreed every hash written by a caller using these params was
+    /// immediately "stale" to an engine running the other — a rehash on every single login.
     fn default() -> Self {
         Self {
-            cost_factor: 1 << 15,
+            cost_factor: 1 << 17,
             block_size: 8,
             parallelization: 1,
         }

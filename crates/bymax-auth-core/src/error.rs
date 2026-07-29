@@ -53,6 +53,10 @@ pub enum ConfigError {
         /// The guaranteed token-epoch retention window, in seconds.
         retention: u64,
     },
+    /// A `jwt.previous_secrets` entry repeats `jwt.secret` or an earlier entry, which means the
+    /// rotation it claims to describe did not happen.
+    #[error("jwt.previous_secrets repeats jwt.secret or an earlier entry")]
+    PreviousSecretRepeated,
     /// `roles.hierarchy` is empty (at least one role must be declared).
     #[error("roles.hierarchy must not be empty")]
     EmptyRoleHierarchy,

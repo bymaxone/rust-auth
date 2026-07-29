@@ -649,8 +649,68 @@ async fn sessions_list_revoke_one_and_revoke_all() {
         .await;
     assert_eq!(revoke_all.status, StatusCode::NO_CONTENT);
 
-    // Revoke a specific session by its hash.
-    let revoke_one = Req::delete(&format!("/auth/sessions/{hash}"))
+    // Revoking the other devices advances the token epoch, so every access token for the
+    // account is stale — the caller's included. Without it, a device the user just signed out
+    // keeps working until its access token expires, which is not what "sign out my other
+    // devices" means to the person clicking it.
+    let stale = Req::get("/auth/sessions")
+        .cookie("access_token", &access)
+        .cookie("refresh_token", &refresh)
+        .send(&app)
+        .await;
+    assert_eq!(stale.status, StatusCode::UNAUTHORIZED);
+
+    // The caller — and only the caller — recovers immediately: the one refresh session the
+    // revocation preserved is theirs. The revoked devices lost theirs and cannot.
+    let rotated = Req::post("/auth/refresh")
+        .cookie("refresh_token", &refresh)
+        .send(&app)
+        .await;
+    assert_eq!(rotated.status, StatusCode::OK);
+    let access = rotated
+        .cookie_value("access_token")
+        .unwrap_or_default()
+        .to_owned();
+    let refresh = rotated
+        .cookie_value("refresh_token")
+        .unwrap_or_default()
+        .to_owned();
+
+    // The pre-rotation hash names a session the rotation has since replaced, so the `{id}`
+    // route reports it as gone rather than pretending to revoke it.
+    let already_gone = Req::delete(&format!("/auth/sessions/{hash}"))
+        .cookie("access_token", &access)
+        .cookie("refresh_token", &refresh)
+        .send(&app)
+        .await;
+    assert_eq!(already_gone.status, StatusCode::NOT_FOUND);
+
+    // A second device, so there is a real session to revoke by id.
+    let second = Req::post("/auth/login")
+        .json(serde_json::json!({
+            "email": "s@e.com", "password": "password123", "tenantId": TENANT
+        }))
+        .send(&app)
+        .await;
+    assert_eq!(second.status, StatusCode::OK);
+
+    let list = Req::get("/auth/sessions")
+        .cookie("access_token", &access)
+        .cookie("refresh_token", &refresh)
+        .send(&app)
+        .await;
+    assert_eq!(list.status, StatusCode::OK);
+    let sessions = list.json().as_array().cloned().unwrap_or_default();
+    let victim = sessions
+        .iter()
+        .find(|session| session["isCurrent"] != true)
+        .and_then(|session| session["sessionHash"].as_str())
+        .unwrap_or_default()
+        .to_owned();
+    assert!(!victim.is_empty());
+
+    // Revoke that one by its hash.
+    let revoke_one = Req::delete(&format!("/auth/sessions/{victim}"))
         .cookie("access_token", &access)
         .cookie("refresh_token", &refresh)
         .send(&app)

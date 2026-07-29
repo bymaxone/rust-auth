@@ -33,6 +33,9 @@ pub struct ResolvedConfig {
     environment: Environment,
     secure_cookies: bool,
     hmac_key: SecretBox<[u8; 64]>,
+    /// The same derivation over each retired secret, for verification-only reads during a
+    /// rotation. Empty unless one is in progress.
+    previous_hmac_keys: Vec<SecretBox<[u8; 64]>>,
 }
 
 impl ResolvedConfig {
@@ -41,11 +44,18 @@ impl ResolvedConfig {
     /// resolved `secure_cookies` value.
     pub(crate) fn new(config: AuthConfig, environment: Environment, secure_cookies: bool) -> Self {
         let hmac_key = derive_hmac_key(config.jwt.secret.expose_secret());
+        let previous_hmac_keys = config
+            .jwt
+            .previous_secrets
+            .iter()
+            .map(|secret| derive_hmac_key(secret.expose_secret()))
+            .collect();
         Self {
             config,
             environment,
             secure_cookies,
             hmac_key,
+            previous_hmac_keys,
         }
     }
 
@@ -76,6 +86,21 @@ impl ResolvedConfig {
     #[must_use]
     pub fn hmac_key(&self) -> &[u8; 64] {
         self.hmac_key.expose_secret()
+    }
+
+    /// The identifier-hashing keys derived from `jwt.previous_secrets`, in the order given.
+    /// Empty unless a rotation is in progress.
+    ///
+    /// Read-only, like the secrets they come from: a recovery-code digest written under a
+    /// retired key still verifies, so rotating the signing secret does not lock users out of
+    /// the codes they printed and filed. Nothing is ever newly written under one — a code that
+    /// matches here is consumed and the set is regenerated under the current key.
+    #[must_use]
+    pub fn previous_hmac_keys(&self) -> Vec<[u8; 64]> {
+        self.previous_hmac_keys
+            .iter()
+            .map(|key| *key.expose_secret())
+            .collect()
     }
 
     /// Whether `held_role` satisfies a required dashboard/tenant role under the dashboard
@@ -185,6 +210,29 @@ impl AuthConfig {
         let entropy = shannon_entropy(secret);
         if entropy < MIN_SECRET_ENTROPY {
             return Err(ConfigError::JwtSecretLowEntropy { entropy });
+        }
+
+        // Rule 2b: every retired secret is held to the same bar. They still verify tokens and
+        // still read recovery-code digests, so a weak entry is exactly as forgeable as a weak
+        // current secret would be — the rotation list is not a place where the bar drops. A
+        // retired secret equal to the current one is rejected too: it means the rotation never
+        // happened, and a configuration that reads as rotated while nothing changed is worse
+        // than one that never claimed to.
+        let mut seen: Vec<&str> = vec![secret];
+        for previous in &self.jwt.previous_secrets {
+            let previous = previous.expose_secret();
+            let len = previous.chars().count();
+            if len < MIN_SECRET_LEN {
+                return Err(ConfigError::JwtSecretTooShort { len });
+            }
+            let entropy = shannon_entropy(previous);
+            if entropy < MIN_SECRET_ENTROPY {
+                return Err(ConfigError::JwtSecretLowEntropy { entropy });
+            }
+            if seen.contains(&previous) {
+                return Err(ConfigError::PreviousSecretRepeated);
+            }
+            seen.push(previous);
         }
 
         // Rule 3-4: refresh lifetime positive + grace window strictly smaller.
@@ -1377,5 +1425,66 @@ mod tests {
         // The entropy of an empty string is zero (the secret-length rule fires first in
         // `validate`, so this guards the standalone helper).
         assert_eq!(shannon_entropy(""), 0.0);
+    }
+
+    #[test]
+    fn retired_secrets_are_held_to_the_same_bar_as_the_current_one() {
+        // They still verify tokens and still read recovery-code digests, so a weak entry is
+        // exactly as forgeable as a weak current secret. The rotation list is not a place where
+        // the bar drops.
+        let strong = "kR7pQw9zTr4XmVn2PsB6yLdG3hJ8fCxZ5aNeU1oIqW0M";
+        let mut cfg = valid_config();
+        cfg.jwt.secret = SecretString::from(strong.to_owned());
+
+        // A well-formed rotation is accepted, and derives one identifier key per retired secret
+        // — the keys that keep pre-rotation recovery-code digests readable.
+        let mut rotating = cfg.clone();
+        rotating.jwt.previous_secrets = vec![SecretString::from(
+            "Zx4mQ7wLpR2nT9yB6vKdH3sJfCgA5eU8iO1rXwNqYtM0".to_owned(),
+        )];
+        assert!(rotating.validate(Environment::Test).is_ok());
+        let resolved = ResolvedConfig::new(rotating.clone(), Environment::Test, true);
+        assert_eq!(resolved.previous_hmac_keys().len(), 1);
+        assert_ne!(resolved.previous_hmac_keys()[0], *resolved.hmac_key());
+
+        // With no rotation in progress there are no retired keys at all.
+        let none = ResolvedConfig::new(cfg.clone(), Environment::Test, true);
+        assert!(none.previous_hmac_keys().is_empty());
+
+        // Too short, and too repetitive: rejected by the same two rules the current secret faces.
+        let mut short = cfg.clone();
+        short.jwt.previous_secrets = vec![SecretString::from("too-short".to_owned())];
+        assert!(matches!(
+            short.validate(Environment::Test),
+            Err(ConfigError::JwtSecretTooShort { .. })
+        ));
+
+        let mut flat = cfg.clone();
+        flat.jwt.previous_secrets = vec![SecretString::from("a".repeat(40))];
+        assert!(matches!(
+            flat.validate(Environment::Test),
+            Err(ConfigError::JwtSecretLowEntropy { .. })
+        ));
+
+        // The current secret repeated, and a duplicate entry: both mean the rotation being
+        // described did not happen, and a config that reads as rotated while nothing changed is
+        // worse than one that never claimed to.
+        let mut echoed = cfg.clone();
+        echoed.jwt.previous_secrets = vec![SecretString::from(strong.to_owned())];
+        assert!(matches!(
+            echoed.validate(Environment::Test),
+            Err(ConfigError::PreviousSecretRepeated)
+        ));
+
+        let other = "Zx4mQ7wLpR2nT9yB6vKdH3sJfCgA5eU8iO1rXwNqYtM0";
+        let mut duplicated = cfg;
+        duplicated.jwt.previous_secrets = vec![
+            SecretString::from(other.to_owned()),
+            SecretString::from(other.to_owned()),
+        ];
+        assert!(matches!(
+            duplicated.validate(Environment::Test),
+            Err(ConfigError::PreviousSecretRepeated)
+        ));
     }
 }

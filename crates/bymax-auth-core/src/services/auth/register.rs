@@ -53,7 +53,17 @@ impl AuthEngine {
             Ok(BeforeRegisterResult::Reject { .. }) | Err(_) => return Err(AuthError::Forbidden),
         };
 
-        // Uniqueness-before-hash: never spend a memory-hard derivation on a duplicate email.
+        // Uniqueness before hashing — but the conflict path still spends the derivation.
+        //
+        // Skipping it is the cheaper thing to do and it leaks: a taken address answers in
+        // single-digit milliseconds while a free one spends ~100 ms deriving, which enumerates
+        // accounts by clock even for a caller who ignores the status code. The response itself
+        // cannot be made uniform here — registration issues tokens, and there are none to issue
+        // for an account the caller does not own — so the timing is the part that can be fixed.
+        // What bounds the disclosure that remains is the route's own rate limit.
+        //
+        // The sentinel verify is the same one the login path spends on an unknown address, so
+        // this adds no amplification a login could not already be used for.
         if self
             .user_repository()
             .find_by_email(&input.email, &tenant_id)
@@ -61,6 +71,7 @@ impl AuthEngine {
             .map_err(map_repository_error)?
             .is_some()
         {
+            self.passwords().verify_sentinel(&input.password).await?;
             return Err(AuthError::EmailAlreadyExists);
         }
 

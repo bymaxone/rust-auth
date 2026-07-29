@@ -1378,12 +1378,23 @@ impl MfaStore for ScriptedMfaStore {
 /// Build an `MfaService` directly over a custom MFA store and a seeded user, with the other
 /// collaborators backed by fresh in-memory doubles. The AES key is the fixed `[7u8; 32]` the
 /// scripted records are encrypted under.
-fn service_over(store: Arc<dyn MfaStore>, users: Arc<InMemoryUserRepository>) -> MfaService {
+fn service_with_previous_keys(
+    store: Arc<dyn MfaStore>,
+    users: Arc<InMemoryUserRepository>,
+    previous_identifier_keys: Vec<zeroize::Zeroizing<[u8; 64]>>,
+) -> MfaService {
+    let mut deps = service_deps(store, users);
+    deps.previous_identifier_keys = previous_identifier_keys;
+    MfaService::new(deps)
+}
+
+fn service_deps(store: Arc<dyn MfaStore>, users: Arc<InMemoryUserRepository>) -> MfaServiceDeps {
     let inmem = Arc::new(InMemoryStores::new());
     let session_store: Arc<dyn SessionStore> = inmem.clone();
     let brute_force_store: Arc<dyn BruteForceStore> = inmem;
     let tokens = Arc::new(TokenManagerService::new(
         HsKey::from_bytes(b"0123456789abcdef0123456789abcdef"),
+        Vec::new(),
         session_store.clone(),
         Duration::from_secs(900),
         7,
@@ -1398,7 +1409,7 @@ fn service_over(store: Arc<dyn MfaStore>, users: Arc<InMemoryUserRepository>) ->
         3600,
     ));
     let brute_force = Arc::new(BruteForceService::new(brute_force_store, 5, 900));
-    MfaService::new(MfaServiceDeps {
+    MfaServiceDeps {
         mfa_store: store,
         user_repo: users,
         platform_repo: None,
@@ -1410,12 +1421,17 @@ fn service_over(store: Arc<dyn MfaStore>, users: Arc<InMemoryUserRepository>) ->
         hooks: Arc::new(NoOpAuthHooks),
         encryption_key: zeroize::Zeroizing::new([7u8; 32]),
         identifier_key: zeroize::Zeroizing::new([9u8; 64]),
+        previous_identifier_keys: Vec::new(),
         issuer: "Bymax One".to_owned(),
         totp_window: 2,
         recovery_code_count: 8,
         sessions_enabled: false,
         blocked_statuses: vec!["BANNED".to_owned(), "SUSPENDED".to_owned()],
-    })
+    }
+}
+
+fn service_over(store: Arc<dyn MfaStore>, users: Arc<InMemoryUserRepository>) -> MfaService {
+    MfaService::new(service_deps(store, users))
 }
 
 /// Seed a fresh user (not MFA-enabled) and return its id.
@@ -1989,5 +2005,42 @@ async fn the_stored_totp_secret_and_recovery_digests_match_the_shared_credential
             .iter()
             .any(|digest| digest.starts_with("scrypt:")),
         "a recovery digest was written in the legacy form"
+    );
+}
+
+#[tokio::test]
+async fn a_recovery_code_digested_under_a_retired_key_still_verifies() {
+    // The digest is keyed by an HMAC derived from the signing secret, so a rotation without the
+    // retired key silently invalidates every code a user printed and filed — and they find out
+    // at the moment they most need it, locked out of an account they cannot reach another way.
+    let users = Arc::new(InMemoryUserRepository::new());
+    let retired = zeroize::Zeroizing::new([3u8; 64]);
+
+    // A digest written under the retired key: nothing in the stored set matches the current one.
+    let plain = "ABCD-EF12-3456";
+    let stale_digest = crate::services::to_hex(&bymax_auth_crypto::mac::hmac_sha256(
+        retired.as_ref(),
+        plain.as_bytes(),
+    ));
+
+    // Without the retired key listed, the code does not verify…
+    let strict = service_over(Arc::new(InMemoryStores::new()), users.clone());
+    assert!(
+        super::verify_recovery_code(
+            std::slice::from_ref(&stale_digest),
+            &strict.recovery_code_candidates(plain)
+        )
+        .is_none()
+    );
+
+    // …and with it, it does — at index 0, so the right code is the one consumed.
+    let rotating =
+        service_with_previous_keys(Arc::new(InMemoryStores::new()), users, vec![retired]);
+    assert_eq!(
+        super::verify_recovery_code(
+            &["a".repeat(64), stale_digest],
+            &rotating.recovery_code_candidates(plain)
+        ),
+        Some(1)
     );
 }

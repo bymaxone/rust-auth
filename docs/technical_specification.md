@@ -816,7 +816,7 @@ pub enum PasswordAlgorithm {
 
 #[derive(Clone, Copy)]
 pub struct ScryptParams {
-    /// CPU/memory cost N. Power of two. Default 32768 (2^15). Min 16384 (2^14).
+    /// CPU/memory cost N. Power of two. Default 131072 (2^17). Min 16384 (2^14).
     pub cost_factor: u32,
     /// Block size r. Default 8.
     pub block_size: u32,
@@ -1048,7 +1048,7 @@ The **Default** column lists `AuthConfig::default()` (≡ `nest_compat_defaults(
 | `roles.platform_hierarchy` | `Option<HashMap<…>>` | Cond. | `None` | Required when `platform.enabled` |
 | `password.active_algorithm` | `PasswordAlgorithm` | No | `Scrypt` | New-hash algorithm; `Argon2id` requires the `argon2` feature (§5.1.9) |
 | `password.rehash_on_verify` | `bool` | No | `true` | Transparent upgrade on verify |
-| `password.scrypt.cost_factor` | `u32` | No | `32768` | Power of 2, min `16384` |
+| `password.scrypt.cost_factor` | `u32` | No | `131072` | Power of 2, min `16384` |
 | `password.scrypt.block_size` | `u32` | No | `8` | scrypt r |
 | `password.scrypt.parallelization` | `u32` | No | `1` | scrypt p |
 | `password.argon2.memory_kib` | `u32` | No | `19456` | min `19456` (OWASP) |
@@ -5095,14 +5095,14 @@ Password hashing is **configurable** between two RustCrypto algorithms, both emi
 
 | Algorithm | Crate | PHC prefix | Default params |
 | --- | --- | --- | --- |
-| **scrypt** | `scrypt` | `$scrypt$` | `N = 2^15 (32768)`, `r = 8`, `p = 1`, 32-byte output, 16-byte random salt |
+| **scrypt** | `scrypt` | `$scrypt$` | `N = 2^17 (131072)`, `r = 8`, `p = 1`, 32-byte output, 16-byte random salt |
 | **Argon2id** | `argon2` | `$argon2id$` | `m >= 19456` KiB, `t >= 2`, `p = 1` (OWASP production floor, enforced at `build()` — §5.5); defaults `m = 19456`, `t = 2`; 16-byte salt, 32-byte output |
 
 Both algorithms use the `password-hash` crate's `PasswordHasher`/`PasswordVerifier` traits, so the stored string is self-describing (algorithm + params + salt + digest) and verification auto-selects the algorithm from the PHC prefix — a hash written by either algorithm verifies regardless of the currently-configured default.
 
 **Recommended vs default.** **Argon2id is the *recommended* writer for new deployments** — it is OWASP's first-choice memory-hard KDF and the more conservative choice against GPU/ASIC attackers — while **scrypt is the *default*** purely for drop-in parity with nest-auth's stored `scrypt:{salt}:{hash}` corpus. A greenfield deployment SHOULD enable the `argon2` feature (§19.2) and configure Argon2id as the writer (§19.3); scrypt verification is retained so any legacy hashes still validate and lazily migrate via rehash-on-verify. At the type level this is enforced by making `Argon2id` a `#[cfg(feature = "argon2")]` enum variant (§5.1.9): the default active algorithm is `Scrypt`, and Argon2id becomes *selectable* only once the feature is compiled in, so a default build can never name an uncompiled hasher.
 
-**Parameter floors are validated at startup.** The selected algorithm's cost parameters are checked against configured minimum floors at `build()` (§5.5) and below-floor params are **rejected, never silently accepted**, so a misconfiguration fails fast at boot rather than silently weakening every stored hash. Argon2id's floor is the OWASP production minimum (`m ≥ 19456` KiB, `t ≥ 2`, `p ≥ 1`); scrypt's **enforced floor** is `N ≥ 2^14 (16384)` and a power of two (validated at `build()`, §5.5 rule 9), while its **default** parameter set is the nest-auth parity baseline `N = 2^15 (32768)`, `r = 8`, `p = 1` — a deployment may raise the cost but not drop `N` below the `2^14` floor.
+**Parameter floors are validated at startup.** The selected algorithm's cost parameters are checked against configured minimum floors at `build()` (§5.5) and below-floor params are **rejected, never silently accepted**, so a misconfiguration fails fast at boot rather than silently weakening every stored hash. Argon2id's floor is the OWASP production minimum (`m ≥ 19456` KiB, `t ≥ 2`, `p ≥ 1`); scrypt's **enforced floor** is `N ≥ 2^14 (16384)` and a power of two (validated at `build()`, §5.5 rule 9), while its **default** parameter set is OWASP's recommended minimum `N = 2^17 (131072)`, `r = 8`, `p = 1`, which nest-auth also defaults to — a deployment may raise the cost but not drop `N` below the `2^14` floor.
 
 ```rust
 pub enum PasswordAlgo {

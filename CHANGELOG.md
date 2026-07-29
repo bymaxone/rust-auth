@@ -99,6 +99,13 @@ version bump.
   failures so the paths the library deliberately swallows can be asserted rather
   than assumed.
 
+- **`jwt.previous_secrets`** — secrets retired by a rotation, accepted for verification only.
+  Rotating the signing secret used to sign every user out at once *and* invalidate every stored
+  recovery-code digest, which is keyed by an HMAC derived from that secret: users would lose the
+  codes they printed and filed, and find out at the moment they most need them. Both are now
+  readable while the old tokens drain. Signing always uses the current secret, so a rotation is
+  one-way. `mfa.encryption_key` is a separate key and is not covered.
+
 ### Changed
 
 - **Family-lineage reuse detection replaces the previous sentinel.** A login opens
@@ -112,6 +119,21 @@ version bump.
   script that decodes JSON is one the shared contract cannot be exercised against
   on that side. The grace record's family and the family owner's id are parsed by
   the caller instead, with a real parser.
+- **Signing out other devices now advances the token epoch.** Deleting a refresh session stops
+  that device rotating, but its already-issued access token is stateless and kept verifying for
+  the rest of its lifetime — up to `jwt.access_expires_in` of continued access on a device the
+  user had just revoked. Someone doing that because they believe a device is compromised means
+  now. The caller's own access token is invalidated too, and the caller is the one party who
+  recovers instantly: their refresh session is the one deliberately preserved. **Behavioural**
+  for a client without silent refresh, which sees one 401 after the call.
+- **The default scrypt cost is `N = 2^17`**, OWASP's recommended minimum, up from `2^15`. Both
+  the config default and `ScryptParams::default()` moved — they are two declarations of one
+  number and had to agree, since a mismatch makes every hash written by one immediately "stale"
+  to the other and rehashes on every login. **Behavioural**: roughly 128 MiB and ~100 ms per
+  hash. Lower it deliberately if the memory is not there.
+- **A duplicate registration now spends the same derivation as a new one.** Skipping it was
+  cheaper and leaked: a taken address answered in single-digit milliseconds against ~100 ms for
+  a free one, which enumerates accounts by clock regardless of the status code.
 - **The grace window is single-shot.** The pointer was served on every request
   inside the window, so one captured consumed token could mint a session
   repeatedly. It is consumed on use now, matching `nest-auth`.

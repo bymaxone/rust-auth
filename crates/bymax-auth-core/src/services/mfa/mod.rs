@@ -135,6 +135,9 @@ pub struct MfaService {
     /// The engine's identifier-hashing key, keying every `mfa_setup:`/`tu:` suffix, the
     /// `challenge:`/`disable:` brute-force ids, and the recovery-code digests.
     identifier_key: Zeroizing<[u8; 64]>,
+    /// Identifier keys retired by a secret rotation, used only to READ recovery-code digests
+    /// written before it. Empty unless a rotation is in progress.
+    previous_identifier_keys: Vec<Zeroizing<[u8; 64]>>,
     issuer: String,
     totp_window: u8,
     recovery_code_count: u8,
@@ -159,6 +162,8 @@ pub(crate) struct MfaServiceDeps {
     pub(crate) hooks: Arc<dyn AuthHooks>,
     pub(crate) encryption_key: Zeroizing<[u8; 32]>,
     pub(crate) identifier_key: Zeroizing<[u8; 64]>,
+    /// Identifier keys retired by a secret rotation (see the field of the same name).
+    pub(crate) previous_identifier_keys: Vec<Zeroizing<[u8; 64]>>,
     pub(crate) issuer: String,
     pub(crate) totp_window: u8,
     pub(crate) recovery_code_count: u8,
@@ -181,6 +186,7 @@ impl MfaService {
             hooks: deps.hooks,
             encryption_key: deps.encryption_key,
             identifier_key: deps.identifier_key,
+            previous_identifier_keys: deps.previous_identifier_keys,
             issuer: deps.issuer,
             totp_window: deps.totp_window,
             recovery_code_count: deps.recovery_code_count,
@@ -243,6 +249,20 @@ impl MfaService {
     /// The keyed HMAC-SHA-256 digest (hex) of a recovery code — the only form ever persisted.
     fn hash_recovery_code(&self, code: &str) -> String {
         to_hex(&hmac_sha256(self.identifier_key.as_ref(), code.as_bytes()))
+    }
+
+    /// Every digest a presented recovery code could legitimately match: the one under the
+    /// current identifier key, then one per key retired by a secret rotation.
+    ///
+    /// Only the first is ever written. The rest exist so a rotation does not invalidate codes
+    /// a user already holds — see [`verify_recovery_code`].
+    fn recovery_code_candidates(&self, code: &str) -> Vec<String> {
+        let mut candidates = Vec::with_capacity(1 + self.previous_identifier_keys.len());
+        candidates.push(self.hash_recovery_code(code));
+        for key in &self.previous_identifier_keys {
+            candidates.push(to_hex(&hmac_sha256(key.as_ref(), code.as_bytes())));
+        }
+        candidates
     }
 
     /// AES-256-GCM-encrypt `plaintext` under the configured MFA key.
@@ -563,14 +583,23 @@ fn generate_recovery_code() -> String {
 /// Find the index of the recovery code matching `code` among the stored keyed-HMAC digests,
 /// in constant time across the whole set (no early return on a match), so neither which code
 /// matched nor whether any matched leaks through timing. Returns the matched index, or `None`.
-fn verify_recovery_code(stored_digests: &[String], candidate_digest: &str) -> Option<usize> {
+fn verify_recovery_code(stored_digests: &[String], candidates: &[String]) -> Option<usize> {
     let mut found: Option<usize> = None;
     for (index, digest) in stored_digests.iter().enumerate() {
-        // Accumulate without short-circuiting: every element is compared. `or` keeps the FIRST
-        // match (a later duplicate digest cannot overwrite it) while still visiting every
-        // element, so the scan stays constant-time and the spliced index is unambiguous.
-        if constant_time_eq(digest.as_bytes(), candidate_digest.as_bytes()) {
-            found = found.or(Some(index));
+        // Accumulate without short-circuiting: every element is compared against every
+        // candidate. `or` keeps the FIRST match (a later duplicate digest cannot overwrite it)
+        // while still visiting every element, so the scan stays constant-time and the spliced
+        // index is unambiguous.
+        //
+        // More than one candidate means a secret rotation is in progress: the digest is keyed
+        // by an HMAC derived from the signing secret, so without the retired keys a rotation
+        // would silently invalidate every code a user printed and filed — discovered at the
+        // moment they most need it. Retired keys read only; a code that matches one is consumed
+        // and the set is regenerated under the current key.
+        for candidate in candidates {
+            if constant_time_eq(digest.as_bytes(), candidate.as_bytes()) {
+                found = found.or(Some(index));
+            }
         }
     }
     found
