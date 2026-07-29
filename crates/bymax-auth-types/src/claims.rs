@@ -56,6 +56,21 @@ pub enum MfaContext {
     Platform,
 }
 
+impl MfaContext {
+    /// The plane's wire name, matching how this enum serializes.
+    ///
+    /// Used to namespace the MFA store keys and brute-force counters by identity plane. The
+    /// two planes' ids come from different consumer repositories and may collide, so a key
+    /// derived from the id alone is shared between an unrelated user and admin.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Dashboard => "dashboard",
+            Self::Platform => "platform",
+        }
+    }
+}
+
 /// Access token for tenant/dashboard users. The TypeScript counterpart is
 /// `DashboardJwtPayload`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

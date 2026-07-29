@@ -25,7 +25,7 @@ impl MfaService {
         if view.mfa_enabled {
             return Err(AuthError::MfaAlreadyEnabled);
         }
-        let key = self.setup_key(user_id);
+        let key = self.setup_key(ctx, user_id);
 
         // Fast-path idempotency: an existing pending record is re-returned verbatim, so a user
         // who refreshes the setup page sees the same secret/QR/codes they may already be
@@ -88,7 +88,7 @@ impl MfaService {
         if view.mfa_enabled {
             return Err(AuthError::MfaAlreadyEnabled);
         }
-        let key = self.setup_key(user_id);
+        let key = self.setup_key(ctx, user_id);
 
         // Load and decrypt the pending record. A missing record, a record that will not parse,
         // and a secret that will not decrypt all collapse to the same opaque `MfaSetupRequired`
@@ -107,7 +107,7 @@ impl MfaService {
         // Verify the code with anti-replay before the completion gate, so an invalid code never
         // consumes the pending record.
         if !self
-            .verify_totp_with_anti_replay(user_id, &raw_secret, code)
+            .verify_totp_with_anti_replay(ctx, user_id, &raw_secret, code)
             .await?
         {
             tracing::warn!(%user_id, "mfa setup: invalid TOTP code");

@@ -64,7 +64,7 @@ impl MfaService {
         user_agent: &str,
     ) -> Result<LoginResultMfa, AuthError> {
         let MfaTempVerified { user_id, jti, .. } = verified;
-        let bf_id = self.challenge_bf_id(&user_id);
+        let bf_id = self.challenge_bf_id(MfaContext::Dashboard, &user_id);
         self.assert_not_locked("challenge", &user_id, &bf_id)
             .await?;
 
@@ -98,7 +98,10 @@ impl MfaService {
         // else is treated as a recovery code. On any invalid code the temp token is left alive
         // (retryable within its TTL) and only the failure counter advances.
         let recovery_index = if is_totp_code(code) {
-            if !self.accept_totp(&user_id, &raw_secret, code, &jti).await? {
+            if !self
+                .accept_totp(MfaContext::Dashboard, &user_id, &raw_secret, code, &jti)
+                .await?
+            {
                 return self.reject_code("challenge", &user_id, &bf_id).await;
             }
             None
@@ -175,7 +178,7 @@ impl MfaService {
         user_agent: &str,
     ) -> Result<LoginResultMfa, AuthError> {
         let MfaTempVerified { user_id, jti, .. } = verified;
-        let bf_id = self.challenge_bf_id(&user_id);
+        let bf_id = self.challenge_bf_id(MfaContext::Platform, &user_id);
         self.assert_not_locked("platform challenge", &user_id, &bf_id)
             .await?;
 
@@ -211,7 +214,10 @@ impl MfaService {
         // (retryable within its TTL) and only the failure counter advances.
         let recovery_codes = admin.mfa_recovery_codes.clone().unwrap_or_default();
         let recovery_index = if is_totp_code(code) {
-            if !self.accept_totp(&user_id, &raw_secret, code, &jti).await? {
+            if !self
+                .accept_totp(MfaContext::Platform, &user_id, &raw_secret, code, &jti)
+                .await?
+            {
                 return self
                     .reject_code("platform challenge", &user_id, &bf_id)
                     .await;
@@ -268,6 +274,7 @@ impl MfaService {
     /// consumed, `false` for an invalid code or a losing concurrent same-code submission.
     async fn accept_totp(
         &self,
+        ctx: MfaContext,
         user_id: &str,
         raw_secret: &[u8],
         code: &str,
@@ -286,7 +293,7 @@ impl MfaService {
         // (same marker already present) or a different still-valid code (its marker is fresh but
         // the temp token is already gone) — is rejected, so exactly one session is issued. The
         // anti-replay TTL is derived from the configured window so the marker outlives the code.
-        let replay = self.replay_id(user_id, code);
+        let replay = self.replay_id(ctx, user_id, code);
         let jti_marker = to_hex(&bymax_auth_crypto::mac::sha256(jti.as_bytes()));
         self.mfa_store
             .challenge_consume(&replay, &jti_marker, self.anti_replay_ttl_seconds())

@@ -29,7 +29,7 @@ impl MfaService {
         ctx: MfaContext,
     ) -> Result<(), AuthError> {
         let view = self.fetch_user_mfa(user_id, ctx).await?;
-        self.reauth_gate(user_id, code, &view).await?;
+        self.reauth_gate(ctx, user_id, code, &view).await?;
         // The TOTP code verified; clear MFA, revoke sessions, and notify.
         self.persist_mfa(user_id, ctx, false, None, None).await?;
         // Revoke every refresh session AND advance the token epoch: an auth-state change
@@ -65,7 +65,7 @@ impl MfaService {
         ctx: MfaContext,
     ) -> Result<Vec<String>, AuthError> {
         let view = self.fetch_user_mfa(user_id, ctx).await?;
-        self.reauth_gate(user_id, totp_code, &view).await?;
+        self.reauth_gate(ctx, user_id, totp_code, &view).await?;
         // Generate a fresh set with the same entropy/format as setup; persist only the digests.
         let plain_codes: Vec<String> = (0..self.recovery_code_count)
             .map(|_| generate_recovery_code())
@@ -95,6 +95,7 @@ impl MfaService {
     /// [`AuthError::TokenInvalid`], [`AuthError::MfaInvalidCode`], or a store [`AuthError`].
     async fn reauth_gate(
         &self,
+        ctx: MfaContext,
         user_id: &str,
         code: &str,
         view: &MfaUserView,
@@ -102,7 +103,7 @@ impl MfaService {
         if !view.mfa_enabled {
             return Err(AuthError::MfaNotEnabled);
         }
-        let bf_id = self.disable_bf_id(user_id);
+        let bf_id = self.disable_bf_id(ctx, user_id);
         self.assert_not_locked("disable", user_id, &bf_id).await?;
         // An enabled account with no stored secret is an inconsistency, not a user error.
         let encrypted = view.mfa_secret.clone().ok_or(AuthError::TokenInvalid)?;
@@ -110,7 +111,7 @@ impl MfaService {
             .decrypt_secret(&encrypted)
             .ok_or(AuthError::TokenInvalid)?;
         if !self
-            .verify_totp_with_anti_replay(user_id, &raw_secret, code)
+            .verify_totp_with_anti_replay(ctx, user_id, &raw_secret, code)
             .await?
         {
             tracing::warn!(%user_id, "mfa disable: invalid code");

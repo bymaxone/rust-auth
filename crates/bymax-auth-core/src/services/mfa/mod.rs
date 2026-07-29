@@ -201,22 +201,28 @@ impl MfaService {
         }
     }
 
-    /// The `mfa_setup:` key suffix for a user (`hmac_sha256(user_id)`, hex). The low-entropy
-    /// id is keyed, never used raw, so no PII reaches a store key.
-    fn setup_key(&self, user_id: &str) -> String {
+    /// The `mfa_setup:` key suffix for a user (`hmac_sha256("{plane}:{user_id}")`, hex). The
+    /// low-entropy id is keyed, never used raw, so no PII reaches a store key.
+    ///
+    /// The plane is part of the input because the two identity domains draw their ids from
+    /// different consumer repositories, which may hand out the same string. Keyed on the id
+    /// alone, an admin's pending enrolment and a user's shared one record: the second party to
+    /// call `verify_and_enable` would adopt the first party's secret and recovery digests.
+    fn setup_key(&self, ctx: MfaContext, user_id: &str) -> String {
         to_hex(&hmac_sha256(
             self.identifier_key.as_ref(),
-            user_id.as_bytes(),
+            format!("{}:{user_id}", ctx.as_str()).as_bytes(),
         ))
     }
 
-    /// The `tu:` anti-replay key suffix for a `(user_id, code)` pair
-    /// (`hmac_sha256("{user_id}:{code}")`, hex) — ties the marker to both the user and the
-    /// code value, with no plaintext code in the store and no cross-user replay.
-    fn replay_id(&self, user_id: &str, code: &str) -> String {
+    /// The `tu:` anti-replay key suffix for a `(plane, user_id, code)` triple
+    /// (`hmac_sha256("{plane}:{user_id}:{code}")`, hex) — ties the marker to the plane, the
+    /// user and the code value, with no plaintext code in the store and no cross-user or
+    /// cross-plane replay.
+    fn replay_id(&self, ctx: MfaContext, user_id: &str, code: &str) -> String {
         to_hex(&hmac_sha256(
             self.identifier_key.as_ref(),
-            format!("{user_id}:{code}").as_bytes(),
+            format!("{}:{user_id}:{code}", ctx.as_str()).as_bytes(),
         ))
     }
 
@@ -243,21 +249,23 @@ impl MfaService {
     }
 
     /// The hashed brute-force identifier for the pre-auth challenge counter
-    /// (`hmac_sha256("challenge:{user_id}")`, hex), isolated from the `disable:` namespace.
-    fn challenge_bf_id(&self, user_id: &str) -> String {
+    /// (`hmac_sha256("challenge:{plane}:{user_id}")`, hex), isolated from the `disable:`
+    /// namespace and from the other identity plane — otherwise a colliding id lets either
+    /// party exhaust the other's lockout budget.
+    fn challenge_bf_id(&self, ctx: MfaContext, user_id: &str) -> String {
         to_hex(&hmac_sha256(
             self.identifier_key.as_ref(),
-            format!("challenge:{user_id}").as_bytes(),
+            format!("challenge:{}:{user_id}", ctx.as_str()).as_bytes(),
         ))
     }
 
     /// The hashed brute-force identifier for the authenticated management counter
     /// (`hmac_sha256("disable:{user_id}")`, hex), shared by `disable` and `regenerate` and
     /// isolated from the `challenge:` namespace.
-    fn disable_bf_id(&self, user_id: &str) -> String {
+    fn disable_bf_id(&self, ctx: MfaContext, user_id: &str) -> String {
         to_hex(&hmac_sha256(
             self.identifier_key.as_ref(),
-            format!("disable:{user_id}").as_bytes(),
+            format!("disable:{}:{user_id}", ctx.as_str()).as_bytes(),
         ))
     }
 
@@ -364,6 +372,7 @@ impl MfaService {
     /// Returns a store [`AuthError`] only if the anti-replay marker cannot be written.
     async fn verify_totp_with_anti_replay(
         &self,
+        ctx: MfaContext,
         user_id: &str,
         secret: &[u8],
         code: &str,
@@ -375,7 +384,7 @@ impl MfaService {
         // newly created — `false` means the code was already seen, i.e. a replay.
         self.mfa_store
             .mark_totp_used(
-                &self.replay_id(user_id, code),
+                &self.replay_id(ctx, user_id, code),
                 self.anti_replay_ttl_seconds(),
             )
             .await

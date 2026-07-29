@@ -2448,3 +2448,52 @@ async fn a_recovery_challenge_that_loses_the_temp_token_consume_issues_no_sessio
         "a lost consume must issue no session, got {outcome:?}"
     );
 }
+
+#[test]
+fn every_mfa_key_is_namespaced_by_identity_plane() {
+    // The two planes draw their ids from DIFFERENT consumer repositories, which may hand out
+    // the same string — sequential integers make it certain. Keyed on the id alone, a dashboard
+    // user and a platform admin sharing an id shared: the pending-enrolment record (so whoever
+    // called `verify_and_enable` second adopted the FIRST party's secret and recovery digests),
+    // the TOTP anti-replay marker, and both brute-force counters (so either could exhaust the
+    // other's lockout budget, or clear it).
+    //
+    // Everything else about the two planes is already separate — Redis prefixes, claim types,
+    // session indexes. This was the one place the isolation leaked.
+    let users = Arc::new(InMemoryUserRepository::new());
+    let service = service_over(Arc::new(InMemoryStores::new()), users);
+    let id = "1";
+
+    assert_ne!(
+        service.setup_key(MfaContext::Dashboard, id),
+        service.setup_key(MfaContext::Platform, id),
+        "a shared pending-enrolment record lets one plane adopt the other's secret"
+    );
+    assert_ne!(
+        service.replay_id(MfaContext::Dashboard, id, "123456"),
+        service.replay_id(MfaContext::Platform, id, "123456"),
+        "a shared anti-replay marker lets one plane burn the other's code"
+    );
+    assert_ne!(
+        service.challenge_bf_id(MfaContext::Dashboard, id),
+        service.challenge_bf_id(MfaContext::Platform, id),
+        "a shared challenge counter lets one plane lock the other out"
+    );
+    assert_ne!(
+        service.disable_bf_id(MfaContext::Dashboard, id),
+        service.disable_bf_id(MfaContext::Platform, id),
+        "a shared disable counter lets one plane lock the other out"
+    );
+
+    // The `challenge:` / `disable:` split still holds WITHIN a plane — the pre-auth counter an
+    // attacker can drive must not be able to exhaust the authenticated user's management
+    // budget.
+    assert_ne!(
+        service.challenge_bf_id(MfaContext::Dashboard, id),
+        service.disable_bf_id(MfaContext::Dashboard, id)
+    );
+
+    // And the plane component is the wire name, so nest-auth derives the same key.
+    assert_eq!(MfaContext::Dashboard.as_str(), "dashboard");
+    assert_eq!(MfaContext::Platform.as_str(), "platform");
+}
