@@ -103,16 +103,51 @@ impl TokenManagerService {
         &self,
         token: &str,
     ) -> Result<C, bymax_auth_jwt::JwtError> {
-        let current = verify::<C>(token, &self.key, &VerifyOptions::default());
+        self.verify_rotating_with(token, &VerifyOptions::default())
+    }
+
+    /// [`Self::verify_rotating`] under caller-chosen options, so one caller can waive the
+    /// expiry check without every other verification inheriting that.
+    fn verify_rotating_with<C: serde::de::DeserializeOwned + bymax_auth_jwt::JwtClaims>(
+        &self,
+        token: &str,
+        opts: &VerifyOptions,
+    ) -> Result<C, bymax_auth_jwt::JwtError> {
+        let current = verify::<C>(token, &self.key, opts);
         if current.is_ok() || self.previous_keys.is_empty() {
             return current;
         }
         for key in &self.previous_keys {
-            if let Ok(claims) = verify::<C>(token, key, &VerifyOptions::default()) {
+            if let Ok(claims) = verify::<C>(token, key, opts) {
                 return Ok(claims);
             }
         }
         current
+    }
+
+    /// Verify an access token's signature under the pinned algorithm while **ignoring its
+    /// expiry**.
+    ///
+    /// Exactly one caller wants this: logout. An access token that expired while the user was
+    /// away is the normal case there, and refusing the request leaves the refresh session —
+    /// the long-lived credential logout exists to kill — alive for its whole lifetime. The
+    /// signature still has to hold: the payload's `jti` decides which token gets blacklisted,
+    /// so reading it unverified would let a caller revoke an access token they do not own by
+    /// naming its id. The blacklist and epoch checks are skipped too: an already-revoked token
+    /// is exactly the one whose owner is trying to finish signing out.
+    ///
+    /// # Errors
+    ///
+    /// [`AuthError`] when no configured signing key accepts the token.
+    pub fn verify_access_ignoring_expiry(&self, token: &str) -> Result<DashboardClaims, AuthError> {
+        self.verify_rotating_with::<DashboardClaims>(
+            token,
+            &VerifyOptions {
+                validate_exp: false,
+                ..VerifyOptions::default()
+            },
+        )
+        .map_err(map_jwt_error)
     }
 
     /// Assemble the token manager from the signing key, the session store, and the

@@ -14,23 +14,45 @@ use crate::traits::{HookContext, SessionKind};
 
 impl AuthEngine {
     /// Revoke the current session: blacklist the access token's `jti` for its remaining
-    /// lifetime — only when the token actually verifies — and delete the refresh session
+    /// lifetime — only when the token's signature verifies — and delete the refresh session
     /// (idempotent on an already-gone session).
+    ///
+    /// The caller is **not** required to hold a live access token. The common case is a user
+    /// returning after their access token expired and signing out: refusing that leaves the
+    /// refresh session — the long-lived credential logout exists to kill — alive for its whole
+    /// lifetime, on a device the user just told the system to sign out. The refresh token is
+    /// what authorizes this operation, and the session's owner is read from the stored record
+    /// rather than taken from the caller, so an absent or forged access token cannot aim the
+    /// revocation at somebody else's session.
+    ///
+    /// Expiry is waived when verifying the access token, but the signature is not: the `jti`
+    /// decides which token gets blacklisted, so an unverified one would let a caller revoke a
+    /// token they do not own by naming its id.
     ///
     /// # Errors
     ///
     /// Best-effort cleanup — store failures are swallowed so a logout is never blocked. The
     /// `Result` is reserved for forward compatibility and currently always returns `Ok`.
-    pub async fn logout(
-        &self,
-        access_token: &str,
-        raw_refresh: &str,
-        user_id: &str,
-    ) -> Result<(), AuthError> {
-        // Blacklist only a token that actually verifies (signature + algorithm + temporal).
-        // A forged or expired token needs no revocation, and trusting an unverified `jti`
-        // would let a caller pollute the revocation set with long-lived junk entries.
-        if let Ok(claims) = self.tokens().verify_access(access_token).await {
+    pub async fn logout(&self, access_token: &str, raw_refresh: &str) -> Result<(), AuthError> {
+        // The stored session names its owner. Presenting the refresh token proves possession;
+        // the record proves whose it is. An access token's claims cannot serve that purpose
+        // when the token is allowed to be absent.
+        let session_hash = is_refresh_token_shape(raw_refresh)
+            .then(|| RawRefreshToken::from_raw(raw_refresh.to_owned()).redis_hash());
+        let user_id = match &session_hash {
+            Some(hash) => self
+                .session_store()
+                .find_session(SessionKind::Dashboard, hash)
+                .await
+                .ok()
+                .flatten()
+                .map(|record| record.user_id)
+                .unwrap_or_default(),
+            None => String::new(),
+        };
+        let user_id = user_id.as_str();
+
+        if let Ok(claims) = self.tokens().verify_access_ignoring_expiry(access_token) {
             // Blacklist for the token's residual lifetime only. `try_from` clamps to `0` if
             // the token lapsed in the window between `verify_access` and this clock read, so a
             // stale token can never be handed a positive (extended) TTL. Best-effort — a store
@@ -47,11 +69,10 @@ impl AuthEngine {
         // session. Both are best-effort: `SessionNotFound` (already rotated/evicted) and any
         // other store error are swallowed, so logout is idempotent and never blocks. A
         // malformed/oversized token is skipped before hashing — it owns no session anyway.
-        if is_refresh_token_shape(raw_refresh) {
-            let session_hash = RawRefreshToken::from_raw(raw_refresh.to_owned()).redis_hash();
+        if let Some(session_hash) = &session_hash {
             if let Err(error) = self
                 .session_store()
-                .revoke_session(SessionKind::Dashboard, user_id, &session_hash)
+                .revoke_session(SessionKind::Dashboard, user_id, session_hash)
                 .await
             {
                 // Swallowed by design, but not silently: an operator seeing repeated cleanup
@@ -65,7 +86,7 @@ impl AuthEngine {
             }
             if let Err(error) = self
                 .session_store()
-                .delete_grace_pointer(SessionKind::Dashboard, &session_hash)
+                .delete_grace_pointer(SessionKind::Dashboard, session_hash)
                 .await
             {
                 tracing::warn!(%error, "logout: grace pointer cleanup failed");
@@ -73,12 +94,16 @@ impl AuthEngine {
         }
 
         tracing::info!(%user_id, "logout: session closed");
-        let hook_ctx = identity_only_context(user_id, None, None);
-        spawn_guarded(run_after_logout(
-            self.hooks().clone(),
-            user_id.to_owned(),
-            hook_ctx,
-        ));
+        // The hook names the user who was signed out, so it only fires when the session told
+        // us who that was. A logout for an already-gone session has nobody to name.
+        if !user_id.is_empty() {
+            let hook_ctx = identity_only_context(user_id, None, None);
+            spawn_guarded(run_after_logout(
+                self.hooks().clone(),
+                user_id.to_owned(),
+                hook_ctx,
+            ));
+        }
         Ok(())
     }
 
@@ -229,10 +254,10 @@ mod tests {
         let mut cfg = base_config();
         cfg.email_verification.required = false;
         let Some(h) = harness(cfg, None) else { return };
-        let Some((id, auth)) = logged_in(&h, "out@example.com", "pw").await else { return };
+        let Some((_id, auth)) = logged_in(&h, "out@example.com", "pw").await else { return };
         assert!(
             h.engine
-                .logout(&auth.access_token, &auth.refresh_token, &id)
+                .logout(&auth.access_token, &auth.refresh_token)
                 .await
                 .is_ok()
         );
@@ -249,16 +274,54 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn logout_revokes_the_session_without_a_live_access_token() {
+        // The common case: the user comes back after their access token expired and signs
+        // out. The route used to sit behind the `AuthUser` extractor, so that request answered
+        // 401 and the engine never ran — the refresh session, the long-lived credential logout
+        // exists to kill, stayed valid for its full lifetime on a device the user had just
+        // told the system to sign out.
+        //
+        // Driven with NO access token at all, which is the strongest form of the case: the
+        // owner has to come from the stored session, because there are no claims to read.
+        let mut cfg = base_config();
+        cfg.email_verification.required = false;
+        let Some(h) = harness(cfg, None) else { return };
+        let Some((_, auth)) = logged_in(&h, "exp@example.com", "pw").await else { return };
+
+        assert!(h.engine.logout("", &auth.refresh_token).await.is_ok());
+
+        // The session is gone: the refresh token no longer rotates.
+        assert!(matches!(
+            h.engine
+                .refresh(&auth.refresh_token, "1.2.3.4", "agent")
+                .await,
+            Err(AuthError::RefreshTokenInvalid)
+        ));
+    }
+
+    #[tokio::test]
+    async fn logout_takes_the_owner_from_the_stored_session() {
+        // A refresh token that matches no live session names nobody, so there is nothing to
+        // revoke and nothing to attribute — and the call still succeeds, because logout is
+        // idempotent and must never tell a caller whether a session existed.
+        let mut cfg = base_config();
+        cfg.email_verification.required = false;
+        let Some(h) = harness(cfg, None) else { return };
+        let unknown = "0".repeat(64);
+        assert!(h.engine.logout("", &unknown).await.is_ok());
+    }
+
+    #[tokio::test]
     async fn logout_skips_blacklist_for_an_unverified_token_but_revokes_the_session() {
         // A forged/garbage access token never verifies, so logout skips the blacklist
         // (the live access token is left untouched) yet still revokes the refresh session.
         let mut cfg = base_config();
         cfg.email_verification.required = false;
         let Some(h) = harness(cfg, None) else { return };
-        let Some((id, auth)) = logged_in(&h, "skip@example.com", "pw").await else { return };
+        let Some((_id, auth)) = logged_in(&h, "skip@example.com", "pw").await else { return };
         assert!(
             h.engine
-                .logout("not-a-jwt", &auth.refresh_token, &id)
+                .logout("not-a-jwt", &auth.refresh_token)
                 .await
                 .is_ok()
         );
@@ -282,7 +345,7 @@ mod tests {
         // unknown user, still succeeding.
         assert!(
             h.engine
-                .logout("not-a-jwt", "unknown-refresh", "user-x")
+                .logout("not-a-jwt", "unknown-refresh")
                 .await
                 .is_ok()
         );
@@ -304,12 +367,7 @@ mod tests {
             epoch: 0,
         };
         let Ok(token) = h.engine.tokens().issue_access(&expired) else { return };
-        assert!(
-            h.engine
-                .logout(&token, "unknown-refresh", "user-x")
-                .await
-                .is_ok()
-        );
+        assert!(h.engine.logout(&token, "unknown-refresh").await.is_ok());
     }
 
     #[tokio::test]
@@ -432,13 +490,13 @@ mod tests {
         let mut cfg = base_config();
         cfg.email_verification.required = false;
         let Some(h) = harness(cfg, None) else { return };
-        let Some((id, auth)) = logged_in(&h, "down@x.io", "pw").await else { return };
+        let Some((_id, auth)) = logged_in(&h, "down@x.io", "pw").await else { return };
 
         h.stores.fail_next_cleanup_writes(2);
         let (events, capture) = crate::log_capture::capture_events();
         assert!(
             h.engine
-                .logout(&auth.access_token, &auth.refresh_token, &id)
+                .logout(&auth.access_token, &auth.refresh_token)
                 .await
                 .is_ok()
         );
@@ -472,10 +530,10 @@ mod tests {
         let mut cfg = base_config();
         cfg.email_verification.required = false;
         let Some(h) = harness(cfg, None) else { return };
-        let Some((id, auth)) = logged_in(&h, "twice@x.io", "pw").await else { return };
+        let Some((_id, auth)) = logged_in(&h, "twice@x.io", "pw").await else { return };
         assert!(
             h.engine
-                .logout(&auth.access_token, &auth.refresh_token, &id)
+                .logout(&auth.access_token, &auth.refresh_token)
                 .await
                 .is_ok()
         );
@@ -488,7 +546,7 @@ mod tests {
         let (events, capture) = crate::log_capture::capture_events();
         assert!(
             h.engine
-                .logout(&auth.access_token, &auth.refresh_token, &id)
+                .logout(&auth.access_token, &auth.refresh_token)
                 .await
                 .is_ok()
         );

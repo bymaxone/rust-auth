@@ -102,8 +102,15 @@ async fn login(
     }
 }
 
-/// `POST /auth/logout` (204). Requires [`AuthUser`]. Revokes the access JTI and the refresh
-/// session, then clears the auth cookies.
+/// `POST /auth/logout` (204). Public. Revokes the access JTI and the refresh session, then
+/// clears the auth cookies.
+///
+/// Deliberately **not** behind [`AuthUser`]. The common case is a user returning after their
+/// access token expired and signing out — under that extractor the request answered 401, so
+/// the engine never ran and the refresh session stayed live for its full lifetime on a device
+/// the user had just told the system to sign out. The refresh token is what authorizes this,
+/// and the engine reads the session's owner from the stored record rather than from the
+/// caller, so an absent or forged access token cannot aim the revocation elsewhere.
 ///
 /// The refresh token is sourced from the cookie **or** the request body, exactly as nest-auth
 /// does (`AuthController.logout` → `extractRefreshToken`). Reading only the cookie left a real
@@ -112,7 +119,6 @@ async fn login(
 async fn logout(
     State(state): State<AuthState>,
     cookies: Cookies,
-    user: AuthUser,
     PresentedAccessToken(access_token): PresentedAccessToken,
     body: axum::body::Bytes,
 ) -> Response {
@@ -125,10 +131,7 @@ async fn logout(
         &state.config().cookies.refresh_name,
         dto.refresh_token.as_deref(),
     );
-    let _ = state
-        .engine()
-        .logout(&access_token, &refresh, &user.0.sub)
-        .await;
+    let _ = state.engine().logout(&access_token, &refresh).await;
     TokenDelivery::new(state.config()).clear_session(&cookies);
     StatusCode::NO_CONTENT.into_response()
 }

@@ -1744,7 +1744,7 @@ async fn engine_runs_register_login_refresh_logout_against_redis() {
     // always Ok.
     assert!(
         engine
-            .logout(&rotated.access_token, &rotated.refresh_token, &auth.user.id)
+            .logout(&rotated.access_token, &rotated.refresh_token)
             .await
             .is_ok()
     );

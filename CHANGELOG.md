@@ -140,6 +140,16 @@ version bump.
   axum routes supply it through the existing `RequestMeta` extractor. `nest-auth` takes the
   same change as the Express request.
 
+- **`POST /auth/logout` no longer requires a live access token.** The route sat behind the
+  `AuthUser` extractor, so a user returning after their access token expired got a 401 and the
+  engine never ran — the refresh session stayed live for its full lifetime on a device the
+  user had just told the system to sign out. The refresh token authorizes the operation now,
+  and `AuthEngine::logout` reads the session's owner from the stored record rather than taking
+  it from the caller. The access token is still verified (signature + pinned algorithm) before
+  its `jti` is blacklisted, waiving only the expiry check — an unverified one would let a
+  caller revoke a token they do not own by naming its id. **Breaking:** `logout` drops its
+  `user_id` parameter. `nest-auth` takes the same change.
+
 ### Changed
 
 - **Family-lineage reuse detection replaces the previous sentinel.** A login opens
