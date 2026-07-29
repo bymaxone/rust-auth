@@ -76,6 +76,12 @@ version bump.
   two sections of the shared contract that decide whether a record written by one
   backend is readable by the other, including the deliberate split where the
   session detail's timestamps are numeric while the refresh session's are ISO-8601.
+- **The WebSocket upgrade ticket entered the shared contract.** `wst`, the
+  snapshot's field list, and the ticket's own credential format are now declared
+  and asserted on both sides. The mechanism was already here and is unchanged;
+  what was missing was the agreement, because nest-auth had no equivalent to
+  agree with. It does now, so the prefix, the record shape and the tenant-scope
+  omission are pinned rather than coincidental.
 - **`credentialFormats` and `errorEnvelope` added too**, which closes the section
   list: every part of the shared contract is now asserted on both sides.
   `credentialFormats` is asserted against what the code actually mints rather

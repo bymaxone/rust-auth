@@ -206,6 +206,7 @@ mod tests {
             ("passwordResetVerifiedToken", Prefix::PwVtok),
             ("totpReplayMarker", Prefix::Tu),
             ("oauthState", Prefix::Os),
+            ("wsTicket", Prefix::Wst),
             ("invitation", Prefix::Inv),
         ] {
             assert_eq!(

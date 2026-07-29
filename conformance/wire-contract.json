@@ -62,6 +62,7 @@
     "passwordResetVerifiedToken": "pw_vtok",
     "totpReplayMarker": "tu",
     "oauthState": "os",
+    "wsTicket": "wst",
     "invitation": "inv"
   },
 
@@ -139,6 +140,12 @@
       "createdAt": "iso8601-string",
       "$comment": "Consumption is a single-use GETDEL, so a record the reader rejects is destroyed rather than retried — a missing field loses the invitation outright."
     },
+    "wsTicket": {
+      "key": "wst:{sha256(ticket)}",
+      "fields": ["sub", "tenantId", "role", "status", "mfaEnabled", "mfaVerified"],
+      "tenantId": "omitted from the record entirely when the ticket is not tenant-scoped",
+      "$comment": "A verified-identity SNAPSHOT, never a token: no jti, no signature, no expiry of its own. The socket it authorizes cannot be turned back into a session. Redemption is a single-use GETDEL, so a captured upgrade URL is worthless once the socket opens."
+    },
     "passwordResetContext": {
       "key": "pw_reset:{sha256(token)}",
       "fields": ["userId", "email", "tenantId"]
@@ -154,7 +161,8 @@
     "refreshTokenLegacy": "uuid-v4, accepted for one refresh lifetime after convergence",
     "totpSecretAtRest": "aes-256-gcm over the BASE32 TEXT of the secret",
     "recoveryCodeDigest": "hex hmac-sha256 of the code under the derived identifier key",
-    "recoveryCodeDigestLegacy": "scrypt:{salt}:{hash}, still verified, never newly written"
+    "recoveryCodeDigestLegacy": "scrypt:{salt}:{hash}, still verified, never newly written",
+    "wsTicket": "64 lowercase hex characters (32 CSPRNG bytes), single-use, 30 s lifetime"
   },
 
   "rateLimits": {

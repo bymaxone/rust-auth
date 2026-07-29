@@ -1146,6 +1146,46 @@ mod tests {
     }
 
     #[test]
+    fn the_ws_ticket_snapshot_matches_the_shared_wire_contract() -> serde_json::Result<()> {
+        // A ticket minted by one backend is redeemed by whichever one receives the upgrade, so
+        // the snapshot's field names are a contract, not an internal detail. It is a snapshot
+        // and not a token by design: no `jti` to revoke, no signature to re-verify, nothing the
+        // holder could present back to the REST surface.
+        let snapshot = WsTicketSnapshot {
+            sub: "u1".into(),
+            tenant_id: Some("t1".into()),
+            role: "MEMBER".into(),
+            status: "ACTIVE".into(),
+            mfa_enabled: true,
+            mfa_verified: true,
+        };
+        let json: serde_json::Value = serde_json::to_value(&snapshot)?;
+        for field in contract_fields("wsTicket") {
+            assert!(
+                json.get(&field).is_some(),
+                "wsTicket field `{field}` is named in the wire contract but absent from the record"
+            );
+        }
+        assert_eq!(
+            contract_section("wsTicket")
+                .get("key")
+                .and_then(serde_json::Value::as_str),
+            Some("wst:{sha256(ticket)}")
+        );
+
+        // A ticket with no tenant scope omits the field entirely rather than writing null —
+        // nest-auth omits it the same way, and a record differing by that one key is not
+        // byte-identical.
+        let platform = WsTicketSnapshot {
+            tenant_id: None,
+            ..snapshot
+        };
+        let json: serde_json::Value = serde_json::to_value(platform)?;
+        assert!(json.get("tenantId").is_none());
+        Ok(())
+    }
+
+    #[test]
     fn the_invitation_and_reset_context_records_match_the_shared_wire_contract()
     -> serde_json::Result<()> {
         // An invitation is consumed with a single-use GETDEL, so a record the reader rejects is
