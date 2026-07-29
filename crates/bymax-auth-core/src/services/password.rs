@@ -245,9 +245,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn verify_reports_needs_rehash_for_a_legacy_or_weaker_hash() {
-        // A fresh hash under the active params does not need rehashing; a legacy
-        // non-PHC value (scrypt builds) always reports stale so it migrates on next login.
+    async fn verify_reports_needs_rehash_for_an_unreadable_or_weaker_hash() {
+        // A fresh hash under the active params does not need rehashing; a value that is not a
+        // PHC string always reports stale so it migrates on the next login.
         let Some(svc) = service() else { return };
         let Ok(phc) = svc.hash("pw").await else { return };
         let outcome = svc.verify("pw", &phc).await;
@@ -261,10 +261,10 @@ mod tests {
 
         #[cfg(feature = "scrypt")]
         {
-            // The legacy `scrypt:salt:hash` corpus is always stale; the password need not
+            // A stored value this library never writes is always stale; the password need not
             // match for `needs_rehash` to fire (it parses the stored form, not the input).
-            let legacy = "scrypt:0011:2233";
-            let stale = svc.verify("anything", legacy).await;
+            let unreadable = "scrypt:0011:2233";
+            let stale = svc.verify("anything", unreadable).await;
             assert!(matches!(
                 stale,
                 Ok(VerifyOutcome {

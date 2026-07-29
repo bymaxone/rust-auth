@@ -419,11 +419,11 @@ Everything is configured through `AuthConfig`. Two ready-made profiles bundle se
 
 | Group              | Key options                                                                  | nest-compat default        |
 | ------------------ | ---------------------------------------------------------------------------- | -------------------------- |
-| **jwt**            | `secret` (required, ≥ 32 chars), `access_ttl`, `refresh_expires_in_days`, `absolute_session_lifetime_days` | `15m`, `7d`, off, HS256 (pinned) |
+| **jwt**            | `secret` (required, ≥ 32 chars), `previous_secrets`, `access_ttl`, `refresh_expires_in_days`, `absolute_session_lifetime_days` | `15m`, `7d`, off, HS256 (pinned) |
 | **password**       | `active_algorithm`, scrypt `cost_factor` / Argon2id `memory_kib`             | scrypt N=2¹⁷, r=8, p=1     |
 | **token_delivery** | `Cookie` \| `Bearer` \| `Both`                                               | `Cookie`                   |
 | **cookies**        | names, `refresh_cookie_path`, `same_site`, `trusted_origins`, `resolve_domains` | HttpOnly, Secure, Strict, `[]` |
-| **mfa**            | `encryption_key` (32 bytes), `issuer`, `totp_window`, `recovery_code_count`  | —                          |
+| **mfa**            | `encryption_key` (32 bytes), `previous_encryption_keys`, `issuer`, `totp_window`, `recovery_code_count` | —              |
 | **sessions**       | `enabled`, `default_max_sessions`, `max_sessions_resolver`                   | `false`, `5`               |
 | **brute_force**    | `max_attempts`, `window_seconds`                                             | `5`, `900`                 |
 | **rate limiting**  | `AxumAuthConfig::rate_limits` — per-route governor limits, pinned to the shared contract | on, per-route |
@@ -444,8 +444,21 @@ Everything is configured through `AuthConfig`. Two ready-made profiles bundle se
 > those are keyed by an HMAC derived from the secret, so users lose the codes they printed and
 > filed. With it, both keep working while tokens issued under the old secret drain, and a
 > rotation becomes a rollout. Remove the entry once the longest-lived token signed under it has
-> expired: every entry is a key that still opens the door. `mfa.encryption_key` is separate and
-> is **not** covered — rotating it requires re-encrypting the stored TOTP secrets.
+> expired: every entry is a key that still opens the door. `mfa.encryption_key` rotates the same
+> way, through its own list — see below.
+
+> [!TIP]
+> **Rotating the MFA encryption key.** `mfa.previous_encryption_keys` lists AES-256 keys retired
+> by a rotation of `mfa.encryption_key`. The stored ciphertext carries no key identifier, so
+> without the list a change of key makes every enrolled user's TOTP secret undecryptable at once,
+> with no way back — their authenticator simply stops matching. With it, a stored secret that
+> opened under a retired key is *re-encrypted under the current one* on the next successful
+> challenge, so the rotation drains on its own instead of requiring the retired key to stay
+> configured forever. `build()` holds each entry to the same bar as the current key (base64,
+> exactly 32 bytes, and never equal to the current key or to another entry), because a malformed
+> one would otherwise surface at a user's first challenge rather than at boot. Drop the entry
+> once your enrolled users have had time to authenticate at least once. `nest-auth` exposes the
+> identical option as `mfa.previousEncryptionKeys`.
 
 > [!IMPORTANT]
 > `jwt.access_expires_in` must not exceed **30 days**, the window a store keeps a bumped token

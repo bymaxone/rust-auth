@@ -140,6 +140,7 @@ pub fn build(spec: EngineSpec) -> Option<Harness> {
 
     if spec.mfa {
         config.mfa = Some(MfaConfig {
+            previous_encryption_keys: Vec::new(),
             encryption_key: SecretString::from(mfa_key_b64()),
             issuer: "Bymax".to_owned(),
             recovery_code_count: 8,

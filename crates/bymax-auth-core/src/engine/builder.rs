@@ -567,6 +567,7 @@ fn build_mfa_service(wiring: MfaWiring<'_>) -> Option<crate::services::mfa::MfaS
         email: wiring.email_provider.clone(),
         hooks: wiring.hooks.clone(),
         encryption_key,
+        previous_encryption_keys: wiring.config.previous_mfa_encryption_keys(),
         identifier_key: zeroize::Zeroizing::new(*wiring.config.hmac_key()),
         previous_identifier_keys: wiring
             .config
@@ -792,6 +793,7 @@ mod tests {
         use base64::Engine as _;
         let mut cfg = valid_config();
         cfg.mfa = Some(MfaConfig {
+            previous_encryption_keys: Vec::new(),
             encryption_key: SecretString::from(
                 base64::engine::general_purpose::STANDARD.encode([3u8; 32]),
             ),

@@ -767,8 +767,8 @@ impl TokenManagerService {
     /// established once never has to be established again. The cap measures from the
     /// **family's** birth, which is carried unchanged through the lineage.
     ///
-    /// A session with no birth time predates the field and is not capped — it ages out under
-    /// the refresh lifetime like any other. A cap of `0` disables the check.
+    /// A session with no birth time has no cap to measure from and is not capped — it ages out
+    /// under the refresh lifetime like any other. A cap of `0` disables the check.
     ///
     /// # Errors
     ///
@@ -1791,17 +1791,17 @@ mod absolute_lifetime_tests {
 
     #[tokio::test]
     async fn a_record_with_no_birth_time_and_a_zero_cap_both_rotate() {
-        // A record written before the field predates the mechanism and must not be ended by
-        // it; a zero cap disables the check outright. Both are the "not capped" answer.
+        // A record with no birth time has nothing to measure from and must not be ended by the
+        // cap; a zero cap disables the check outright. Both are the "not capped" answer.
         let store = Arc::new(InMemoryStores::new());
-        let legacy = SessionRecord {
+        let uncapped = SessionRecord {
             family_created_at: None,
             ..record_born(365)
         };
         let old = RawRefreshToken::generate();
         assert!(
             store
-                .create_session(SessionKind::Dashboard, &old.redis_hash(), &legacy, 3600)
+                .create_session(SessionKind::Dashboard, &old.redis_hash(), &uncapped, 3600)
                 .await
                 .is_ok()
         );

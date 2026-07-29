@@ -172,8 +172,8 @@ pub struct JwtConfig {
     /// passed the rotation is refused and the user signs in again.
     ///
     /// Off by default because switching it on ends sessions already older than the cap, which
-    /// is a decision a deployment makes rather than one an upgrade makes for it. A record
-    /// written before the family birth time existed carries none and is not capped.
+    /// is a decision a deployment makes rather than one an upgrade makes for it. A record with
+    /// no family birth time — the replay placeholder — carries no cap to measure from.
     pub absolute_session_lifetime_days: u32,
     /// Pinned to HS256.
     pub algorithm: JwtAlgorithm,
@@ -304,6 +304,19 @@ pub struct MfaConfig {
     /// AES-256-GCM key for TOTP-secret encryption. Must decode (base64 standard or
     /// url-safe) to exactly 32 bytes. Redacted in `Debug`, zeroized on drop.
     pub encryption_key: SecretString,
+    /// Keys retired by a rotation, accepted for **decryption only**. Default: empty.
+    ///
+    /// A TOTP secret is stored encrypted under [`MfaConfig::encryption_key`] and the ciphertext
+    /// records no key identifier, so changing that key without this makes every stored secret
+    /// undecryptable — every enrolled user's authenticator stops matching, at once, with no way
+    /// back. Listing the previous key keeps those secrets readable, and each is re-encrypted
+    /// under the current key the next time its owner passes a challenge, so the rotation drains
+    /// on its own.
+    ///
+    /// Encryption always uses the current key; entries here are only ever tried after it, and
+    /// only to decrypt. AES-GCM authenticates, so a wrong key fails unambiguously rather than
+    /// returning garbage. Each is validated exactly like the current key.
+    pub previous_encryption_keys: Vec<SecretString>,
     /// Issuer shown in authenticator apps. Required, non-empty.
     pub issuer: String,
     /// Recovery codes generated on enable, default 8.

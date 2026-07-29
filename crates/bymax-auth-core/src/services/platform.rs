@@ -447,6 +447,7 @@ mod tests {
         {
             use base64::Engine as _;
             cfg.mfa = Some(crate::config::MfaConfig {
+                previous_encryption_keys: Vec::new(),
                 encryption_key: SecretString::from(
                     base64::engine::general_purpose::STANDARD.encode([5u8; 32]),
                 ),

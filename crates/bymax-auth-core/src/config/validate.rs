@@ -134,11 +134,34 @@ impl ResolvedConfig {
     #[must_use]
     pub(crate) fn mfa_encryption_key(&self) -> Option<Zeroizing<[u8; 32]>> {
         let mfa = self.config.mfa.as_ref()?;
-        let decoded = Zeroizing::new(decode_base64_any(mfa.encryption_key.expose_secret())?);
-        <[u8; 32]>::try_from(decoded.as_slice())
-            .ok()
-            .map(Zeroizing::new)
+        decode_aes256_key(mfa.encryption_key.expose_secret())
     }
+
+    /// The MFA keys retired by a rotation, decoded, in the order configured. Empty unless a
+    /// rotation is in progress.
+    ///
+    /// Decrypt-only: a stored TOTP secret records no key identifier, so without these a change
+    /// of `mfa.encryption_key` makes every stored secret undecryptable at once.
+    pub(crate) fn previous_mfa_encryption_keys(&self) -> Vec<Zeroizing<[u8; 32]>> {
+        self.config
+            .mfa
+            .as_ref()
+            .map(|mfa| {
+                mfa.previous_encryption_keys
+                    .iter()
+                    .filter_map(|key| decode_aes256_key(key.expose_secret()))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+}
+
+/// Decode a base64 AES-256 key, returning `None` unless it is exactly 32 bytes.
+fn decode_aes256_key(encoded: &str) -> Option<Zeroizing<[u8; 32]>> {
+    let decoded = Zeroizing::new(decode_base64_any(encoded)?);
+    <[u8; 32]>::try_from(decoded.as_slice())
+        .ok()
+        .map(Zeroizing::new)
 }
 
 /// Lowercase hexadecimal alphabet, indexed by nibble value.
@@ -254,6 +277,24 @@ impl AuthConfig {
                 access,
                 retention: TOKEN_EPOCH_RETENTION_SECS,
             });
+        }
+
+        // Rule 4c: every retired MFA key is held to the same bar as the current one. They still
+        // decrypt stored secrets, so a malformed entry would throw at the first challenge
+        // instead of at startup — and a key equal to the current one means the rotation being
+        // described did not happen.
+        if let Some(mfa) = self.mfa.as_ref() {
+            let mut seen: Vec<&str> = vec![mfa.encryption_key.expose_secret()];
+            for previous in &mfa.previous_encryption_keys {
+                let previous = previous.expose_secret();
+                if decode_aes256_key(previous).is_none() {
+                    return Err(ConfigError::MfaKeyInvalidBase64);
+                }
+                if seen.contains(&previous) {
+                    return Err(ConfigError::PreviousSecretRepeated);
+                }
+                seen.push(previous);
+            }
         }
 
         // Rule 5-7: role hierarchies.
@@ -873,6 +914,7 @@ mod tests {
 
     fn mfa_with_key(key: &str) -> MfaConfig {
         MfaConfig {
+            previous_encryption_keys: Vec::new(),
             encryption_key: SecretString::from(key.to_owned()),
             issuer: "Acme".to_owned(),
             recovery_code_count: 8,
@@ -1482,6 +1524,79 @@ mod tests {
             SecretString::from(other.to_owned()),
             SecretString::from(other.to_owned()),
         ];
+        assert!(matches!(
+            duplicated.validate(Environment::Test),
+            Err(ConfigError::PreviousSecretRepeated)
+        ));
+    }
+
+    #[test]
+    fn retired_mfa_keys_are_held_to_the_same_bar_as_the_current_one() {
+        // They still decrypt stored TOTP secrets, so a malformed entry would throw at the first
+        // challenge instead of at startup — and a key equal to the current one means the
+        // rotation being described did not happen.
+        let key = base64::engine::general_purpose::STANDARD.encode([1u8; 32]);
+        let retired = base64::engine::general_purpose::STANDARD.encode([2u8; 32]);
+        let mut cfg = valid_config();
+        cfg.mfa = Some(mfa_with_key(&key));
+
+        // A well-formed rotation is accepted and decodes one key per entry.
+        let mut rotating = cfg.clone();
+        if let Some(mfa) = rotating.mfa.as_mut() {
+            mfa.previous_encryption_keys = vec![SecretString::from(retired.clone())];
+        }
+        assert!(rotating.validate(Environment::Test).is_ok());
+        let resolved = ResolvedConfig::new(rotating, Environment::Test, true);
+        assert_eq!(resolved.previous_mfa_encryption_keys().len(), 1);
+        assert!(matches!(
+            resolved.mfa_encryption_key(),
+            Some(current) if *current != *resolved.previous_mfa_encryption_keys()[0]
+        ));
+
+        // With no rotation in progress there are no retired keys at all.
+        let none = ResolvedConfig::new(cfg.clone(), Environment::Test, true);
+        assert!(none.previous_mfa_encryption_keys().is_empty());
+
+        // A key that is not 32 bytes is refused at startup, not at the first challenge.
+        let mut short = cfg.clone();
+        if let Some(mfa) = short.mfa.as_mut() {
+            mfa.previous_encryption_keys = vec![SecretString::from("dG9vLXNob3J0".to_owned())];
+        }
+        assert!(matches!(
+            short.validate(Environment::Test),
+            Err(ConfigError::MfaKeyInvalidBase64)
+        ));
+
+        // Neither is a value that is not base64 at all — the two rejections are separate
+        // branches, and only one of them being wired would let the other reach a challenge.
+        let mut garbage = cfg.clone();
+        if let Some(mfa) = garbage.mfa.as_mut() {
+            mfa.previous_encryption_keys =
+                vec![SecretString::from("!!!!not base64!!!!".to_owned())];
+        }
+        assert!(matches!(
+            garbage.validate(Environment::Test),
+            Err(ConfigError::MfaKeyInvalidBase64)
+        ));
+
+        // The current key repeated, and a duplicate entry: both describe a rotation that did
+        // not happen.
+        let mut echoed = cfg.clone();
+        if let Some(mfa) = echoed.mfa.as_mut() {
+            mfa.previous_encryption_keys = vec![SecretString::from(key)];
+        }
+        assert!(matches!(
+            echoed.validate(Environment::Test),
+            Err(ConfigError::PreviousSecretRepeated)
+        ));
+
+        let mut duplicated = cfg;
+        if let Some(mfa) = duplicated.mfa.as_mut() {
+            mfa.previous_encryption_keys = vec![
+                SecretString::from(retired.clone()),
+                SecretString::from(retired),
+            ];
+        }
         assert!(matches!(
             duplicated.validate(Environment::Test),
             Err(ConfigError::PreviousSecretRepeated)

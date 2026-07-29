@@ -59,6 +59,7 @@ fn build_engine(stores: Arc<RedisStores>) -> Option<(AuthEngine, Arc<InMemoryUse
     config.roles.hierarchy = HashMap::from([("USER".to_owned(), Vec::new())]);
     config.email_verification.required = false;
     config.mfa = Some(MfaConfig {
+        previous_encryption_keys: Vec::new(),
         encryption_key: SecretString::from(
             base64::engine::general_purpose::STANDARD.encode([9u8; 32]),
         ),

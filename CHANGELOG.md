@@ -104,7 +104,17 @@ version bump.
   recovery-code digest, which is keyed by an HMAC derived from that secret: users would lose the
   codes they printed and filed, and find out at the moment they most need them. Both are now
   readable while the old tokens drain. Signing always uses the current secret, so a rotation is
-  one-way. `mfa.encryption_key` is a separate key and is not covered.
+  one-way.
+- **`mfa.previous_encryption_keys`** — AES-256 keys retired by a rotation of
+  `mfa.encryption_key`. The stored ciphertext carries no key identifier, so changing that key
+  made every enrolled user's TOTP secret undecryptable at once, with no way back: the
+  authenticator they set up simply stops matching, and nothing in the library could tell them
+  why. A secret that opens under a retired key is now re-encrypted under the current one on the
+  next successful challenge — TOTP and recovery code alike — so the rotation drains instead of
+  requiring the retired key to stay configured forever; a key that still opens every stored
+  secret is not retired. `build()` holds each entry to the same bar as the current key (base64,
+  exactly 32 bytes, never equal to the current key or to another entry), because a malformed one
+  would otherwise surface at a user's first challenge. Same option on both sides.
 
 ### Changed
 

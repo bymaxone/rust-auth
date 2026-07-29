@@ -63,6 +63,29 @@ fn build_with(
     email: Option<Arc<dyn EmailProvider>>,
     hooks: Option<Arc<dyn AuthHooks>>,
 ) -> Option<Harness> {
+    build_full(sessions, wire_platform, email, hooks, Vec::new())
+}
+
+/// The same harness with a retired MFA encryption key configured, so a secret written under
+/// that key still opens through the engine's own flows.
+fn build_rotating(retired_b64: String) -> Option<Harness> {
+    build_full(
+        true,
+        false,
+        None,
+        None,
+        vec![SecretString::from(retired_b64)],
+    )
+}
+
+/// The harness builder every variant above delegates to.
+fn build_full(
+    sessions: bool,
+    wire_platform: bool,
+    email: Option<Arc<dyn EmailProvider>>,
+    hooks: Option<Arc<dyn AuthHooks>>,
+    previous_encryption_keys: Vec<SecretString>,
+) -> Option<Harness> {
     let users = Arc::new(InMemoryUserRepository::new());
     let stores = Arc::new(InMemoryStores::new());
     let platform = Arc::new(InMemoryPlatformUserRepository::new());
@@ -72,6 +95,7 @@ fn build_with(
     config.email_verification.required = false;
     config.sessions.enabled = sessions;
     config.mfa = Some(MfaConfig {
+        previous_encryption_keys,
         encryption_key: SecretString::from(key_b64()),
         issuer: "Bymax One".to_owned(),
         recovery_code_count: 8,
@@ -1420,6 +1444,7 @@ fn service_deps(store: Arc<dyn MfaStore>, users: Arc<InMemoryUserRepository>) ->
         email: Arc::new(NoOpEmailProvider),
         hooks: Arc::new(NoOpAuthHooks),
         encryption_key: zeroize::Zeroizing::new([7u8; 32]),
+        previous_encryption_keys: Vec::new(),
         identifier_key: zeroize::Zeroizing::new([9u8; 64]),
         previous_identifier_keys: Vec::new(),
         issuer: "Bymax One".to_owned(),
@@ -2029,7 +2054,7 @@ async fn the_stored_totp_secret_and_recovery_digests_match_the_shared_credential
             .hashed_codes
             .iter()
             .any(|digest| digest.starts_with("scrypt:")),
-        "a recovery digest was written in the legacy form"
+        "a recovery digest was written as a KDF hash instead of a keyed MAC"
     );
 }
 
@@ -2067,5 +2092,120 @@ async fn a_recovery_code_digested_under_a_retired_key_still_verifies() {
             &rotating.recovery_code_candidates(plain)
         ),
         Some(1)
+    );
+}
+
+#[tokio::test]
+async fn a_secret_stored_under_a_retired_key_still_opens_and_is_rewritten() {
+    // The ciphertext records no key identifier, so without the retired key a change of
+    // `mfa.encryption_key` makes every stored secret undecryptable — every enrolled user's
+    // authenticator stops matching at once, with no way back.
+    let users = Arc::new(InMemoryUserRepository::new());
+    let retired = zeroize::Zeroizing::new([3u8; 32]);
+
+    // A service that encrypts under the RETIRED key, to produce the stored form.
+    let mut old_deps = service_deps(Arc::new(InMemoryStores::new()), users.clone());
+    old_deps.encryption_key = retired.clone();
+    let old_service = MfaService::new(old_deps);
+    let (raw_secret, _codes, data) = old_service
+        .generate_setup_material()
+        .unwrap_or_else(|_| unreachable!("setup material generation cannot fail"));
+
+    // The current service cannot open it…
+    let strict = service_over(Arc::new(InMemoryStores::new()), users.clone());
+    assert!(strict.decrypt_secret(&data.encrypted_secret).is_none());
+
+    // …and with the retired key listed it opens, and is reported as needing a rewrite.
+    let mut deps = service_deps(Arc::new(InMemoryStores::new()), users.clone());
+    deps.previous_encryption_keys = vec![retired];
+    let rotating = MfaService::new(deps);
+    let opened = rotating.decrypt_secret_with_rotation(&data.encrypted_secret);
+    assert!(matches!(opened, Some((ref secret, true)) if *secret == raw_secret));
+
+    // A record under a key nobody holds is still refused: the retired list widens what opens,
+    // it does not make decryption lenient. Without this the loop's exhausted path is untested
+    // and a rotation could silently accept a tampered record.
+    let mut third_deps = service_deps(Arc::new(InMemoryStores::new()), users);
+    third_deps.encryption_key = zeroize::Zeroizing::new([9u8; 32]);
+    let stranger = MfaService::new(third_deps);
+    let Ok((_, _, foreign)) = stranger.generate_setup_material() else {
+        return;
+    };
+    assert!(
+        rotating
+            .decrypt_secret_with_rotation(&foreign.encrypted_secret)
+            .is_none()
+    );
+
+    // The rewrite produces a record the CURRENT key opens, carrying the same secret.
+    let rewritten = rotating
+        .reencrypt_secret(&raw_secret)
+        .unwrap_or_else(|_| unreachable!("re-encryption cannot fail for a 20-byte secret"));
+    assert!(matches!(
+        rotating.decrypt_secret_with_rotation(&rewritten),
+        Some((ref secret, false)) if *secret == raw_secret
+    ));
+    assert!(strict.decrypt_secret(&rewritten).is_some());
+}
+
+#[tokio::test]
+async fn a_totp_challenge_rewrites_a_secret_stored_under_a_retired_key() {
+    // The rewrite has to happen on the TOTP path too, which persists nothing on its own —
+    // otherwise the rotation never drains for a user who only ever uses their authenticator,
+    // and the retired key has to stay configured forever: a key that still opens every secret.
+    let retired_bytes = [3u8; 32];
+    let retired_b64 = base64::engine::general_purpose::STANDARD.encode(retired_bytes);
+    let Some(h) = build_rotating(retired_b64) else {
+        return;
+    };
+    let Some(uid) = register(&h.engine, "rot@example.com").await else {
+        return;
+    };
+
+    // Enrol out of band, with the secret encrypted under the RETIRED key — the state a
+    // deployment is in the moment it rotates `mfa.encryption_key`.
+    let mut old_deps = service_deps(Arc::new(InMemoryStores::new()), h.users.clone());
+    old_deps.encryption_key = zeroize::Zeroizing::new(retired_bytes);
+    let old_service = MfaService::new(old_deps);
+    let Ok((raw_secret, _codes, data)) = old_service.generate_setup_material() else {
+        return;
+    };
+    let stored_under_retired = data.encrypted_secret.clone();
+    assert!(
+        h.users
+            .update_mfa(
+                &uid,
+                bymax_auth_types::UpdateMfaData {
+                    mfa_enabled: true,
+                    mfa_secret: Some(stored_under_retired.clone()),
+                    mfa_recovery_codes: Some(data.hashed_codes),
+                },
+            )
+            .await
+            .is_ok()
+    );
+
+    // A plain TOTP challenge succeeds — the retired key opened the secret.
+    let Some(mfa) = h.engine.mfa() else { return };
+    let Some(temp) = login_temp_token(&h.engine, "rot@example.com").await else {
+        return;
+    };
+    assert!(matches!(
+        mfa.challenge(&temp, &raw_code(&raw_secret, now_secs()), "1.2.3.4", "ua")
+            .await,
+        Ok(LoginResultMfa::Dashboard(_))
+    ));
+
+    // …and it was rewritten in place: the stored record changed, and a service holding ONLY
+    // the current key now opens it. Without the rewrite the retired key could never be dropped.
+    let Ok(Some(after)) = h.users.find_by_id(&uid, None).await else {
+        return;
+    };
+    let rewritten = after.mfa_secret.unwrap_or_default();
+    assert_ne!(rewritten, stored_under_retired);
+    let strict = service_over(Arc::new(InMemoryStores::new()), h.users.clone());
+    assert_eq!(
+        strict.decrypt_secret(&rewritten).as_deref(),
+        Some(raw_secret.as_slice())
     );
 }

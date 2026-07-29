@@ -132,6 +132,9 @@ pub struct MfaService {
     hooks: Arc<dyn AuthHooks>,
     /// AES-256-GCM key for the TOTP secret and the plaintext-codes record.
     encryption_key: Zeroizing<[u8; 32]>,
+    /// Keys retired by a rotation, tried only after [`Self::encryption_key`] and only to
+    /// decrypt. Empty unless a rotation is in progress; nothing is ever encrypted under one.
+    previous_encryption_keys: Vec<Zeroizing<[u8; 32]>>,
     /// The engine's identifier-hashing key, keying every `mfa_setup:`/`tu:` suffix, the
     /// `challenge:`/`disable:` brute-force ids, and the recovery-code digests.
     identifier_key: Zeroizing<[u8; 64]>,
@@ -161,6 +164,8 @@ pub(crate) struct MfaServiceDeps {
     pub(crate) email: Arc<dyn EmailProvider>,
     pub(crate) hooks: Arc<dyn AuthHooks>,
     pub(crate) encryption_key: Zeroizing<[u8; 32]>,
+    /// MFA keys retired by a rotation (see the field of the same name).
+    pub(crate) previous_encryption_keys: Vec<Zeroizing<[u8; 32]>>,
     pub(crate) identifier_key: Zeroizing<[u8; 64]>,
     /// Identifier keys retired by a secret rotation (see the field of the same name).
     pub(crate) previous_identifier_keys: Vec<Zeroizing<[u8; 64]>>,
@@ -185,6 +190,7 @@ impl MfaService {
             email: deps.email,
             hooks: deps.hooks,
             encryption_key: deps.encryption_key,
+            previous_encryption_keys: deps.previous_encryption_keys,
             identifier_key: deps.identifier_key,
             previous_identifier_keys: deps.previous_identifier_keys,
             issuer: deps.issuer,
@@ -283,7 +289,30 @@ impl MfaService {
     /// failure (wrong key, tampered ciphertext, malformed wire) so the failure mode is opaque
     /// — the caller maps `None` to the appropriate flow error with no padding/format oracle.
     fn decrypt(&self, wire: &str) -> Option<Vec<u8>> {
-        aead::decrypt(wire, &self.encryption_key).ok()
+        self.decrypt_with_rotation(wire)
+            .map(|(plaintext, _)| plaintext)
+    }
+
+    /// Decrypt under the current key, then under each retired one.
+    ///
+    /// The ciphertext records no key identifier, so without the retired keys a change of
+    /// `mfa.encryption_key` makes every stored secret undecryptable — every enrolled user's
+    /// authenticator stops matching at once, with no way back. AES-GCM authenticates, so a
+    /// wrong key fails unambiguously rather than returning garbage; trying them in order is
+    /// safe.
+    ///
+    /// Returns the plaintext and whether a RETIRED key produced it — the signal that the
+    /// record should be rewritten under the current key.
+    fn decrypt_with_rotation(&self, wire: &str) -> Option<(Vec<u8>, bool)> {
+        if let Ok(plaintext) = aead::decrypt(wire, &self.encryption_key) {
+            return Some((plaintext, false));
+        }
+        for key in &self.previous_encryption_keys {
+            if let Ok(plaintext) = aead::decrypt(wire, key) {
+                return Some((plaintext, true));
+            }
+        }
+        None
     }
 
     /// Decrypt a stored TOTP secret back to the raw bytes the HMAC uses as its key.
@@ -293,9 +322,26 @@ impl MfaService {
     /// failure — wrong key, tampered ciphertext, non-UTF-8, or invalid Base32 — so the caller
     /// surfaces one opaque error and no decrypt/format oracle distinguishes them.
     fn decrypt_secret(&self, wire: &str) -> Option<Vec<u8>> {
-        let encoded = self.decrypt(wire)?;
+        self.decrypt_secret_with_rotation(wire)
+            .map(|(secret, _)| secret)
+    }
+
+    /// As [`Self::decrypt_secret`], also reporting whether a key RETIRED by a rotation produced
+    /// the plaintext — the signal that the stored record should be rewritten under the current
+    /// key so the rotation drains.
+    fn decrypt_secret_with_rotation(&self, wire: &str) -> Option<(Vec<u8>, bool)> {
+        let (encoded, stale) = self.decrypt_with_rotation(wire)?;
         let text = String::from_utf8(encoded).ok()?;
-        totp::decode_secret_base32(&text).ok()
+        totp::decode_secret_base32(&text).ok().map(|s| (s, stale))
+    }
+
+    /// Re-encrypt a decrypted TOTP secret under the CURRENT key, for a record that opened under
+    /// a retired one.
+    ///
+    /// The secret goes back under the cipher in the same at-rest form it was stored in — the
+    /// Base32 text, not the raw bytes — because that is the shared contract with nest-auth.
+    fn reencrypt_secret(&self, raw_secret: &[u8]) -> Result<String, AuthError> {
+        self.encrypt(totp::encode_secret_base32(raw_secret).as_bytes())
     }
 
     /// Verify a 6-digit TOTP `code` against `secret` and, on success, atomically mark it used

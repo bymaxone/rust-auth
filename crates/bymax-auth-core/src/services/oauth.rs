@@ -155,7 +155,7 @@ impl AuthEngine {
             return Err(AuthError::OauthFailed);
         };
         let Ok(payload) = serde_json::from_str::<OAuthStatePayload>(&raw_payload) else {
-            // A malformed/legacy payload is treated as a failed state, not an internal error.
+            // A malformed payload is treated as a failed state, not an internal error.
             return Err(AuthError::OauthFailed);
         };
         let tenant_id = payload.tenant_id;

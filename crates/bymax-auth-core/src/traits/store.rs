@@ -84,9 +84,10 @@ pub struct SessionRecord {
     /// The refresh-token **family** (login lineage) this session belongs to. Minted at login
     /// and inherited unchanged across every rotation, so all descendants of one login share it.
     /// It is the unit of reuse-detection revocation: presenting an already-consumed refresh
-    /// token (post-grace) revokes the whole family (section 12.5.2). Empty on a legacy record
-    /// written before families existed — such a record simply carries no family and is never a
-    /// reuse-revocation target; it is omitted from the wire when empty for byte-parity.
+    /// token (post-grace) revokes the whole family (section 12.5.2). Empty only on the
+    /// placeholder a replayed token produces, which is never stored — such a record carries no
+    /// family and is never a reuse-revocation target; it is omitted from the wire when empty
+    /// for byte-parity.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub family_id: String,
     /// When the **family** was born — the moment of the login this session descends from.
@@ -96,8 +97,8 @@ pub struct SessionRecord {
     /// cap has something to measure: without it, a client rotating every fifteen minutes renews
     /// its lifetime forever and a session established once never has to be established again.
     ///
-    /// Serialized as an ISO-8601 string alongside `family_id`, and omitted with it on a legacy
-    /// record — such a session is simply not capped.
+    /// Serialized as an ISO-8601 string alongside `family_id`, and omitted with it on a
+    /// family-less record — such a session is simply not capped.
     #[serde(
         default,
         with = "optional_rfc3339",
@@ -106,8 +107,8 @@ pub struct SessionRecord {
     pub family_created_at: Option<OffsetDateTime>,
 }
 
-/// Serde adapter for an optional RFC 3339 instant, so a legacy record with no family birth
-/// time round-trips as `None` rather than failing the whole record.
+/// Serde adapter for an optional RFC 3339 instant, so a record with no family birth time
+/// round-trips as `None` rather than failing the whole record.
 pub mod optional_rfc3339 {
     use serde::{Deserialize, Deserializer, Serialize, Serializer};
     use time::OffsetDateTime;
@@ -808,17 +809,17 @@ mod tests {
         // implementations produce the same key set for the same session.
         assert!(json.contains("\"mfaEnabled\":false"));
 
-        // An empty family id (a legacy record) is omitted from the wire for byte-parity, and a
+        // An empty family id is omitted from the wire for byte-parity, and a
         // record with no `familyId` key deserializes back to an empty family.
-        let legacy = SessionRecord {
+        let familyless = SessionRecord {
             family_id: String::new(),
             family_created_at: Some(OffsetDateTime::UNIX_EPOCH),
             ..session_record()
         };
-        let legacy_json = serde_json::to_string(&legacy)?;
-        assert!(!legacy_json.contains("familyId"));
-        let legacy_back: SessionRecord = serde_json::from_str(&legacy_json)?;
-        assert_eq!(legacy_back.family_id, "");
+        let familyless_json = serde_json::to_string(&familyless)?;
+        assert!(!familyless_json.contains("familyId"));
+        let familyless_back: SessionRecord = serde_json::from_str(&familyless_json)?;
+        assert_eq!(familyless_back.family_id, "");
 
         // Round-trip parity for the full record.
         let back: SessionRecord = serde_json::from_str(&json)?;
@@ -908,7 +909,7 @@ mod tests {
     fn unix_millis_preserves_pre_epoch_instants_and_rejects_non_numbers() {
         // The clamp in `unix_millis::serialize` must keep a pre-epoch instant NEGATIVE rather
         // than saturating it to `i64::MAX`, and the reader must refuse a stringly-typed
-        // timestamp instead of silently defaulting — a legacy RFC 3339 `sd:` record has to fail
+        // timestamp instead of silently defaulting — an RFC 3339 `sd:` record has to fail
         // loudly (and be swept as stale) rather than decode to a bogus time.
         let detail = SessionDetail {
             session_hash: "abc123".into(),
@@ -922,10 +923,10 @@ mod tests {
         assert!(json.contains("\"createdAt\":-1000000"));
         assert!(json.contains("\"lastActivityAt\":0"));
 
-        let legacy: Result<SessionDetail, _> = serde_json::from_str(
+        let rfc3339: Result<SessionDetail, _> = serde_json::from_str(
             r#"{"sessionHash":"abc123","device":"Firefox","ip":"198.51.100.7","createdAt":"1970-01-01T00:00:00Z","lastActivityAt":0}"#,
         );
-        assert!(legacy.is_err());
+        assert!(rfc3339.is_err());
     }
 
     #[test]
@@ -1136,14 +1137,14 @@ mod tests {
 
         // An empty family is omitted from the wire entirely, never written as `""` — nest-auth
         // omits it the same way, and a record differing by that one key is not byte-identical.
-        let legacy = SessionRecord {
+        let familyless = SessionRecord {
             family_id: String::new(),
             family_created_at: None,
             ..session_record()
         };
-        let legacy_json: serde_json::Value = serde_json::to_value(legacy)?;
-        assert!(legacy_json.get("familyId").is_none());
-        assert!(legacy_json.get("familyCreatedAt").is_none());
+        let familyless_json: serde_json::Value = serde_json::to_value(familyless)?;
+        assert!(familyless_json.get("familyId").is_none());
+        assert!(familyless_json.get("familyCreatedAt").is_none());
         Ok(())
     }
 

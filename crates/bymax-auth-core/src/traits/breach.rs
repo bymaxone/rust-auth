@@ -35,8 +35,8 @@ pub trait PasswordBreachChecker: Send + Sync {
 
 /// The default checker: approves every password, and touches no network.
 ///
-/// Registered when the builder is given none, so the credential path behaves exactly as it did
-/// before the check existed.
+/// Registered when the builder is given none, so a deployment that configures no checker pays
+/// nothing for the feature and the credential path is unchanged.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct AllowAllBreachChecker;
 

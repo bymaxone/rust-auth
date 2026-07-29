@@ -51,12 +51,13 @@ exp: number,
  * sign-out-everywhere). **Server-side** verification rejects the token when its epoch is
  * below the user's current stored epoch; the edge/WASM verifier carries this claim but does
  * not consult it (it checks signature, `iat`, and `exp` only), exactly like the jti
- * blacklist. Defaults to `0` on a legacy token that predates the field, which is never
- * rejected while the stored epoch is also `0` (the mechanism is inert until a bump).
+ * blacklist. Defaults to `0` when the claim is absent, which is never rejected while the
+ * stored epoch is also `0` (the mechanism is inert until a bump) and always rejected once
+ * it is bumped — the fail-closed direction.
  *
  * Exported as an optional TS property: the decode-only edge path passes the raw JWT payload
- * through untyped, so a legacy token really does arrive without the key (serde's default
- * only applies when deserializing into this struct). Rendered via `Option::<f64>` because
+ * through untyped, so a token really can arrive without the key (serde's default only
+ * applies when deserializing into this struct). Rendered via `Option::<f64>` because
  * ts-rs maps 64-bit integers to `bigint`, while `JSON.parse` yields a `number`.
  */
 epoch?: number, };
@@ -148,8 +149,8 @@ exp: number,
  * The admin's token **epoch** at issuance — the platform-domain analogue of
  * [`DashboardClaims::epoch`]: a per-admin generation counter the server bumps to invalidate
  * every outstanding platform access token at once. Enforced by **server-side** verification
- * only; the edge/WASM verifier carries it without consulting it. Defaults to `0` on a legacy
- * token, and is exported as an optional TS property for the same reason as
+ * only; the edge/WASM verifier carries it without consulting it. Defaults to `0` when the
+ * claim is absent, and is exported as an optional TS property for the same reason as
  * [`DashboardClaims::epoch`].
  */
 epoch?: number, };

@@ -125,6 +125,7 @@ fn build_engine(
     config.controllers.mfa = true;
     config.platform.enabled = true;
     config.mfa = Some(MfaConfig {
+        previous_encryption_keys: Vec::new(),
         encryption_key: SecretString::from(mfa_key()),
         issuer: "Bymax".to_owned(),
         recovery_code_count: 8,

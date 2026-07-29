@@ -419,7 +419,7 @@ impl SessionStore for InMemoryStores {
                 last_activity_at: detail.created_at,
             });
         // Register the new session in its family index (a fresh login, or the grace-path fork),
-        // so the whole lineage is revocable on reuse detection. A legacy record with no family
+        // so the whole lineage is revocable on reuse detection. A record with no family
         // simply carries no index entry.
         if !detail.family_id.is_empty() {
             lock(&self.families)
@@ -482,7 +482,7 @@ impl SessionStore for InMemoryStores {
         // mirror the Redis store, whose script consumes the pointer and whose host side runs the
         // same `family_is_alive` test — the in-memory store is what the conformance tier and
         // nest-auth's end-to-end tier run against, so a weaker rule here would let a divergence
-        // ship unnoticed. A record written before families existed carries none and recovers as
+        // ship unnoticed. A record that names no family recovers as
         // before.
         if let Some(recovered) = lock(&self.grace).remove(&(kind, rotation.old_hash.clone())) {
             if recovered.family_id.is_empty()
@@ -1292,7 +1292,7 @@ mod tests {
         assert!(store.revoke_family(kind, "famA").await.is_ok());
         assert!(store.revoke_family(kind, "").await.is_ok());
 
-        // A legacy session with no family plants no consumed marker, so a post-grace replay is a
+        // A session with no family plants no consumed marker, so a post-grace replay is a
         // plain Invalid, never a reuse.
         assert!(
             store
@@ -1300,7 +1300,7 @@ mod tests {
                 .await
                 .is_ok()
         );
-        let legacy = SessionRotation {
+        let familyless = SessionRotation {
             old_hash: "g1".to_owned(),
             new_hash: "g2".to_owned(),
             new_raw: "rawg".to_owned(),
@@ -1309,12 +1309,12 @@ mod tests {
             grace_ttl: 30,
         };
         assert!(matches!(
-            store.rotate(kind, &legacy).await,
+            store.rotate(kind, &familyless).await,
             Ok(RotateOutcome::Rotated(_))
         ));
         assert!(store.delete_grace_pointer(kind, "g1").await.is_ok());
         assert!(matches!(
-            store.rotate(kind, &legacy).await,
+            store.rotate(kind, &familyless).await,
             Ok(RotateOutcome::Invalid)
         ));
     }

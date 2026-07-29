@@ -95,6 +95,7 @@ fn build_engine(
     ]));
     config.platform.enabled = true;
     config.mfa = Some(MfaConfig {
+        previous_encryption_keys: Vec::new(),
         encryption_key: SecretString::from(key_b64()),
         issuer: "Bymax Platform".to_owned(),
         recovery_code_count: 8,

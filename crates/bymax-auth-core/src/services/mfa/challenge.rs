@@ -87,7 +87,9 @@ impl MfaService {
         let Some(encrypted_secret) = user.mfa_secret.clone().filter(|_| user.mfa_enabled) else {
             return Err(AuthError::MfaNotEnabled);
         };
-        let Some(raw_secret) = self.decrypt_secret(&encrypted_secret) else {
+        let Some((raw_secret, under_retired_key)) =
+            self.decrypt_secret_with_rotation(&encrypted_secret)
+        else {
             // A secret that will not decrypt is an opaque failure (no decrypt oracle).
             return Err(AuthError::TokenInvalid);
         };
@@ -115,9 +117,27 @@ impl MfaService {
         // Success: clear the failure counter and, for a recovery code, splice it out so it is
         // single-use.
         self.brute_force.reset(&bf_id).await?;
+        // A secret that opened under a retired key is rewritten under the current one, so the
+        // rotation drains on its own rather than requiring the retired key to stay configured
+        // forever — a key that still opens every stored secret.
+        let stored_secret = if under_retired_key {
+            self.reencrypt_secret(&raw_secret)?
+        } else {
+            encrypted_secret.clone()
+        };
         if let Some(index) = recovery_index {
-            self.splice_recovery_code(&user, &encrypted_secret, index)
+            self.splice_recovery_code(&user, &stored_secret, index)
                 .await?;
+        } else if under_retired_key {
+            // A TOTP challenge persists nothing on its own, so the rewrite needs its own write.
+            self.persist_mfa(
+                &user_id,
+                MfaContext::Dashboard,
+                true,
+                Some(stored_secret),
+                user.mfa_recovery_codes.clone(),
+            )
+            .await?;
         }
 
         // Mint a full session with `mfa_verified = true`.
