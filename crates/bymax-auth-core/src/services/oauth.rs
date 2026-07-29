@@ -22,6 +22,8 @@ use bymax_auth_types::{
 };
 use serde::{Deserialize, Serialize};
 
+use bymax_auth_crypto::compare::constant_time_eq;
+
 use crate::RepositoryError;
 use crate::context::{RequestContext, to_safe_user};
 use crate::engine::AuthEngine;
@@ -59,6 +61,24 @@ struct OAuthStatePayload {
     code_verifier: String,
 }
 
+/// What [`AuthEngine::oauth_initiate`] hands back: the provider authorization URL to redirect
+/// to, and the raw `state` the adapter must plant as a cookie on that same response.
+///
+/// The two travel together because they are one decision. A `state` validated against the
+/// store alone proves only that *somebody* started a flow: an attacker can run their own
+/// authorization, hold the resulting `?code=…&state=…` URL without visiting it, and lure the
+/// victim there — the victim's browser then completes the attacker's login. RFC 6749 §10.12
+/// requires the state to be bound to the user agent, and the cookie is the only carrier the
+/// core can offer a transport it knows nothing about. It deliberately derives no `Debug`: the
+/// raw state is a bearer value for the length of the flow and must not reach a log line.
+pub struct OAuthRedirect {
+    /// The provider authorization URL, already carrying the `state` and PKCE challenge.
+    pub authorize_url: String,
+    /// The raw `state`, to be planted as the `oauth_state` cookie. Never stored server-side —
+    /// only its hash is a key.
+    pub state: String,
+}
+
 /// The outcome of [`AuthEngine::oauth_callback`]: either a full authentication or an MFA
 /// challenge. Discriminated like the password-login [`bymax_auth_types::LoginResult`], so the
 /// adapter shapes the response the same way.
@@ -92,7 +112,7 @@ impl AuthEngine {
         &self,
         provider: &str,
         tenant_id: &str,
-    ) -> Result<String, AuthError> {
+    ) -> Result<OAuthRedirect, AuthError> {
         // Resolve the provider first: an unknown provider fails without minting state.
         let provider_impl = self.resolve_oauth_provider(provider)?;
 
@@ -108,7 +128,10 @@ impl AuthEngine {
             .put_state(&state_key(&state), &payload, OAUTH_STATE_TTL_SECS)
             .await?;
 
-        Ok(provider_impl.authorize_url(&state, Some(&code_challenge)))
+        Ok(OAuthRedirect {
+            authorize_url: provider_impl.authorize_url(&state, Some(&code_challenge)),
+            state,
+        })
     }
 
     /// Complete an OAuth callback (§11.3.2): resolve the provider, atomically consume the
@@ -130,6 +153,7 @@ impl AuthEngine {
         provider: &str,
         code: &str,
         state: &str,
+        state_cookie: Option<&str>,
         ctx: &RequestContext,
     ) -> Result<OAuthOutcome, AuthError> {
         // Resolve the provider BEFORE consuming the state, so a misconfigured provider does
@@ -143,6 +167,20 @@ impl AuthEngine {
         // stored key anyway, so it takes the same path as a missing/forged/replayed state —
         // the opaque `OauthFailed` — and never reaches `state_key`/the store.
         if !is_oauth_state_shape(state) {
+            return Err(AuthError::OauthFailed);
+        }
+
+        // Bind the callback to the browser that started the flow (RFC 6749 §10.12). A `state`
+        // that merely exists in the store proves only that *somebody* started a flow: an
+        // attacker can run their own authorization to the point of holding a valid
+        // `?code=…&state=…` URL, never visit it, and lure the victim there instead — the
+        // victim's browser would then be logged into the attacker's account, and anything they
+        // added afterwards would be the attacker's to read. Only the cookie tells the two
+        // apart, so a missing one is as fatal as a wrong one. Checked before `take_state` so a
+        // lured callback cannot burn a state the legitimate browser is still entitled to spend.
+        let bound = state_cookie
+            .is_some_and(|cookie| constant_time_eq(state.as_bytes(), cookie.as_bytes()));
+        if !bound {
             return Err(AuthError::OauthFailed);
         }
 
@@ -729,10 +767,10 @@ mod tests {
     /// (the recording transport ignores it); the `state` is recovered from the authorize URL.
     async fn run_flow(h: &OAuthHarness) -> Result<OAuthOutcome, AuthError> {
         let url = h.engine.oauth_initiate("google", "t1").await;
-        let Ok(url) = url else { return Err(AuthError::OauthFailed) };
+        let Ok(url) = url.map(|r| r.authorize_url) else { return Err(AuthError::OauthFailed) };
         let state = extract_query_param(&url, "state").unwrap_or_default();
         h.engine
-            .oauth_callback("google", "auth-code", &state, &ctx())
+            .oauth_callback("google", "auth-code", &state, Some(&state), &ctx())
             .await
     }
 
@@ -753,8 +791,10 @@ mod tests {
         let hooks: Arc<dyn AuthHooks> = Arc::new(DecisionHook(OAuthLoginResult::Create));
         let Some(h) = harness(hooks, Arc::new(RoutingHttpClient::new()), false) else { return };
         let url = h.engine.oauth_initiate("google", "t1").await;
-        assert!(matches!(&url, Ok(u) if u.starts_with("https://accounts.google.com/")));
-        let Ok(url) = url else { return };
+        assert!(
+            matches!(&url, Ok(r) if r.authorize_url.starts_with("https://accounts.google.com/"))
+        );
+        let Ok(url) = url.map(|r| r.authorize_url) else { return };
         assert!(url.contains("code_challenge_method=S256"));
         let state = extract_query_param(&url, "state").unwrap_or_default();
         assert_eq!(state.len(), 64, "state is 64 hex chars");
@@ -814,12 +854,12 @@ mod tests {
         let hooks: Arc<dyn AuthHooks> = Arc::new(DecisionHook(OAuthLoginResult::Create));
         let Some(h) = harness(hooks, Arc::new(RoutingHttpClient::new()), false) else { return };
         let url = h.engine.oauth_initiate("google", "t1").await;
-        let Ok(url) = url else { return };
+        let Ok(url) = url.map(|r| r.authorize_url) else { return };
         let state = extract_query_param(&url, "state").unwrap_or_default();
         let challenge = extract_query_param(&url, "code_challenge").unwrap_or_default();
         let done = h
             .engine
-            .oauth_callback("google", "auth-code", &state, &ctx())
+            .oauth_callback("google", "auth-code", &state, Some(&state), &ctx())
             .await;
         assert!(done.is_ok());
         let Some(exchange) = h.http.exchange_body() else { return };
@@ -921,26 +961,89 @@ mod tests {
         // Forged / missing state.
         assert!(matches!(
             h.engine
-                .oauth_callback("google", "code", &"f".repeat(64), &ctx())
+                .oauth_callback(
+                    "google",
+                    "code",
+                    &"f".repeat(64),
+                    Some(&"f".repeat(64)),
+                    &ctx()
+                )
                 .await,
             Err(AuthError::OauthFailed)
         ));
         // Issue a real state, consume it once, then replay it.
         let url = h.engine.oauth_initiate("google", "t1").await;
-        let Ok(url) = url else { return };
+        let Ok(url) = url.map(|r| r.authorize_url) else { return };
         let state = extract_query_param(&url, "state").unwrap_or_default();
         assert!(
             h.engine
-                .oauth_callback("google", "code", &state, &ctx())
+                .oauth_callback("google", "code", &state, Some(&state), &ctx())
                 .await
                 .is_ok()
         );
         assert!(matches!(
             h.engine
-                .oauth_callback("google", "code", &state, &ctx())
+                .oauth_callback("google", "code", &state, Some(&state), &ctx())
                 .await,
             Err(AuthError::OauthFailed)
         ));
+    }
+
+    #[tokio::test]
+    async fn callback_requires_the_state_cookie_and_does_not_burn_the_state_without_it() {
+        // The browser binding RFC 6749 §10.12 requires. A `state` that merely exists in the
+        // store proves only that *somebody* started a flow: an attacker can run their own
+        // authorization to the point of holding a valid `?code=…&state=…` URL, never visit it,
+        // and lure the victim there — the victim's browser would then be logged into the
+        // attacker's account. The cookie is what tells the two apart, so a missing one and a
+        // mismatched one are both fatal.
+        let hooks: Arc<dyn AuthHooks> = Arc::new(DecisionHook(OAuthLoginResult::Create));
+        let Some(h) = harness(hooks, Arc::new(RoutingHttpClient::new()), false) else { return };
+        let url = h.engine.oauth_initiate("google", "t1").await;
+        let Ok(url) = url.map(|r| r.authorize_url) else { return };
+        let state = extract_query_param(&url, "state").unwrap_or_default();
+
+        // No cookie at all — the lured-victim request.
+        assert!(matches!(
+            h.engine
+                .oauth_callback("google", "code", &state, None, &ctx())
+                .await,
+            Err(AuthError::OauthFailed)
+        ));
+        // A cookie from some other flow, and an empty one — neither is "close enough".
+        for cookie in ["b".repeat(64), String::new()] {
+            assert!(matches!(
+                h.engine
+                    .oauth_callback("google", "code", &state, Some(&cookie), &ctx())
+                    .await,
+                Err(AuthError::OauthFailed)
+            ));
+        }
+
+        // The state survived all three refusals: it is still spendable by the browser that
+        // owns it. A check placed after `take_state` would have burned it, turning the lure
+        // into a denial of service against a login the victim never asked to start.
+        assert!(
+            h.engine
+                .oauth_callback("google", "code", &state, Some(&state), &ctx())
+                .await
+                .is_ok()
+        );
+    }
+
+    #[tokio::test]
+    async fn initiate_returns_the_state_it_put_in_the_authorize_url() {
+        // The adapter plants `redirect.state` as the cookie and the callback compares it to
+        // the `state` query parameter the provider echoes back — which only works if the two
+        // are the same value. A struct that returned a *fresh* state would leave every
+        // callback unsatisfiable, and no other test would notice.
+        let hooks: Arc<dyn AuthHooks> = Arc::new(DecisionHook(OAuthLoginResult::Create));
+        let Some(h) = harness(hooks, Arc::new(RoutingHttpClient::new()), false) else { return };
+        let Ok(redirect) = h.engine.oauth_initiate("google", "t1").await else { return };
+        assert_eq!(
+            extract_query_param(&redirect.authorize_url, "state").as_deref(),
+            Some(redirect.state.as_str())
+        );
     }
 
     #[tokio::test]
@@ -973,7 +1076,9 @@ mod tests {
             "g".repeat(64),
         ] {
             assert!(matches!(
-                engine.oauth_callback("google", "code", &bad, &ctx()).await,
+                engine
+                    .oauth_callback("google", "code", &bad, Some(&bad), &ctx())
+                    .await,
                 Err(AuthError::OauthFailed)
             ));
         }
@@ -1001,7 +1106,7 @@ mod tests {
         );
         assert!(matches!(
             h.engine
-                .oauth_callback("google", "code", &state, &ctx())
+                .oauth_callback("google", "code", &state, Some(&state), &ctx())
                 .await,
             Err(AuthError::OauthFailed)
         ));
@@ -1014,7 +1119,13 @@ mod tests {
         let Some(h) = harness(hooks, Arc::new(RoutingHttpClient::new()), false) else { return };
         assert!(matches!(
             h.engine
-                .oauth_callback("github", "code", &"a".repeat(64), &ctx())
+                .oauth_callback(
+                    "github",
+                    "code",
+                    &"a".repeat(64),
+                    Some(&"a".repeat(64)),
+                    &ctx()
+                )
                 .await,
             Err(AuthError::OauthFailed)
         ));
@@ -1276,10 +1387,10 @@ mod tests {
         let Ok(engine) = engine else { return };
 
         let url = engine.oauth_initiate("google", "t1").await;
-        let Ok(url) = url else { return };
+        let Ok(url) = url.map(|r| r.authorize_url) else { return };
         let state = extract_query_param(&url, "state").unwrap_or_default();
         let outcome = engine
-            .oauth_callback("google", "auth-code", &state, &ctx())
+            .oauth_callback("google", "auth-code", &state, Some(&state), &ctx())
             .await;
 
         assert!(matches!(&outcome, Ok(OAuthOutcome::Authenticated(_))));
@@ -1316,10 +1427,10 @@ mod tests {
         let Ok(engine) = engine else { return };
 
         let url = engine.oauth_initiate("google", "t1").await;
-        let Ok(url) = url else { return };
+        let Ok(url) = url.map(|r| r.authorize_url) else { return };
         let state = extract_query_param(&url, "state").unwrap_or_default();
         let outcome = engine
-            .oauth_callback("google", "auth-code", &state, &ctx())
+            .oauth_callback("google", "auth-code", &state, Some(&state), &ctx())
             .await;
 
         assert!(
@@ -1351,11 +1462,11 @@ mod tests {
 
         // First sign-in creates the account and succeeds.
         let url = engine.oauth_initiate("google", "t1").await;
-        let Ok(url) = url else { return };
+        let Ok(url) = url.map(|r| r.authorize_url) else { return };
         let state = extract_query_param(&url, "state").unwrap_or_default();
         assert!(matches!(
             engine
-                .oauth_callback("google", "auth-code", &state, &ctx())
+                .oauth_callback("google", "auth-code", &state, Some(&state), &ctx())
                 .await,
             Ok(OAuthOutcome::Authenticated(_))
         ));
@@ -1383,10 +1494,10 @@ mod tests {
         let Ok(linking) = linking else { return };
 
         let url = linking.oauth_initiate("google", "t1").await;
-        let Ok(url) = url else { return };
+        let Ok(url) = url.map(|r| r.authorize_url) else { return };
         let state = extract_query_param(&url, "state").unwrap_or_default();
         let banned = linking
-            .oauth_callback("google", "auth-code", &state, &ctx())
+            .oauth_callback("google", "auth-code", &state, Some(&state), &ctx())
             .await;
         assert!(
             matches!(banned, Err(AuthError::AccountBanned)),

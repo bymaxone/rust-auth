@@ -55,6 +55,7 @@ pub(crate) fn routes(config: &AxumAuthConfig, ip_source: ClientIpSource) -> Rout
 /// `GET /auth/oauth/{provider}` (302). Public. Redirects to the provider authorize URL.
 async fn initiate(
     State(state): State<AuthState>,
+    cookies: Cookies,
     Path(provider): Path<String>,
     ValidatedQuery(query): ValidatedQuery<OAuthInitiateQuery>,
 ) -> Response {
@@ -63,7 +64,12 @@ async fn initiate(
         .oauth_initiate(&provider, &query.tenant_id)
         .await
     {
-        Ok(authorize_url) => found(&authorize_url),
+        Ok(redirect) => {
+            // Bind the flow to this browser: the callback refuses any request that does not
+            // send this cookie back (RFC 6749 §10.12). See `set_oauth_state_cookie`.
+            TokenDelivery::new(state.config()).set_oauth_state_cookie(&cookies, &redirect.state);
+            found(&redirect.authorize_url)
+        }
         Err(error) => error_response(&error),
     }
 }
@@ -77,9 +83,23 @@ async fn callback(
     RequestMeta(ctx): RequestMeta,
     ValidatedQuery(query): ValidatedQuery<OAuthCallbackQuery>,
 ) -> Response {
+    // The state cookie is single-use: it is spent the moment the callback is handled, whatever
+    // the outcome. Read before clearing, and cleared before the outcome is known, so a failed
+    // attempt cannot leave a stale cookie for the next flow to trip over.
+    let state_cookie = cookies
+        .get(bymax_auth_types::constants::OAUTH_STATE_COOKIE_NAME)
+        .map(|cookie| cookie.value().to_owned());
+    TokenDelivery::new(state.config()).clear_oauth_state_cookie(&cookies);
+
     let outcome = state
         .engine()
-        .oauth_callback(&provider, &query.code, &query.state, &ctx)
+        .oauth_callback(
+            &provider,
+            &query.code,
+            &query.state,
+            state_cookie.as_deref(),
+            &ctx,
+        )
         .await;
     match outcome {
         Ok(OAuthOutcome::Authenticated(result)) => {

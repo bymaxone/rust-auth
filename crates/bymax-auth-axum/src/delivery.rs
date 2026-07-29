@@ -127,6 +127,48 @@ impl<'a> TokenDelivery<'a> {
         cookies.remove(Cookie::build((c.signal_name.clone(), "")).path("/").build());
     }
 
+    /// Plant the ephemeral OAuth `state` cookie, binding the flow to the browser that started
+    /// it (RFC 6749 §10.12). Scoped to `/` because the callback path is operator-configured and
+    /// the core cannot know it; HttpOnly because nothing client-side reads it; Max-Age pinned
+    /// to the 600 s TTL of the server-side `os:` record so neither half outlives the other.
+    ///
+    /// `SameSite` is always `Lax`, never the configured value: the provider redirects the
+    /// browser back with a top-level GET, which is a **cross-site** navigation, and `Strict`
+    /// withholds the cookie on exactly that hop — a deployment that hardened the setting
+    /// everywhere else would find every OAuth login broken with no way to complete it. `Lax`
+    /// is the tightest value that survives the callback, and it is enough: the cookie is read
+    /// on that one navigation and is useless to a cross-site *request*.
+    #[cfg(feature = "oauth")]
+    pub(crate) fn set_oauth_state_cookie(&self, cookies: &Cookies, state: &str) {
+        use bymax_auth_types::constants::{
+            OAUTH_STATE_COOKIE_MAX_AGE_SECONDS, OAUTH_STATE_COOKIE_NAME,
+        };
+        let max_age = i64::try_from(OAUTH_STATE_COOKIE_MAX_AGE_SECONDS).unwrap_or(i64::MAX);
+        cookies.add(
+            Cookie::build((OAUTH_STATE_COOKIE_NAME.to_owned(), state.to_owned()))
+                .path("/")
+                .http_only(true)
+                .secure(self.cookies().secure)
+                .same_site(SameSite::Lax)
+                .max_age(Duration::seconds(max_age))
+                .build(),
+        );
+    }
+
+    /// Clear the OAuth `state` cookie once its callback has been handled, reusing the exact
+    /// `Path` it was planted with. The cookie is single-use: a stale one left behind would
+    /// never match the next flow's freshly minted state, turning one failed login into a
+    /// permanently broken one.
+    #[cfg(feature = "oauth")]
+    pub(crate) fn clear_oauth_state_cookie(&self, cookies: &Cookies) {
+        use bymax_auth_types::constants::OAUTH_STATE_COOKIE_NAME;
+        cookies.remove(
+            Cookie::build((OAUTH_STATE_COOKIE_NAME.to_owned(), ""))
+                .path("/")
+                .build(),
+        );
+    }
+
     /// Plant the ephemeral MFA-temp cookie (§14.1): path-scoped to the MFA challenge path,
     /// HttpOnly, Secure-by-default, `SameSite` aligned with the refresh cookie, Max-Age
     /// pinned to the temp-token's 300 s lifetime so the cookie can never outlive the JWT.

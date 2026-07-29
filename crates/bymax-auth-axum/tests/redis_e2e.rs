@@ -420,7 +420,9 @@ async fn full_router_against_real_redis() {
         Method::GET,
         &format!("/auth/oauth/google/callback?code=abc&state={state}"),
         None,
-        &[],
+        // The browser replays the `oauth_state` cookie planted on initiate; the callback
+        // refuses without it (RFC 6749 §10.12).
+        &[("oauth_state", state.as_str())],
     )
     .await;
     assert_eq!(callback.status, StatusCode::OK);

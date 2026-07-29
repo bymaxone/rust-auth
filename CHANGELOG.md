@@ -159,6 +159,22 @@ version bump.
   provisioned purely through OAuth has no local password and is exempt. **Breaking:**
   `MfaService::setup` and `AuthEngine::mfa_setup` take `Option<&str>` for the password, and
   the two setup routes accept a `password` body field. `nest-auth` takes the same change.
+- **The OAuth `state` is bound to the browser that started the flow.** The `state` nonce was
+  validated against the store alone, which proves only that *somebody* started a flow. An
+  attacker could run their own authorization, complete consent at the provider, capture the
+  resulting `?code=…&state=…` callback URL without visiting it, and lure the victim there: the
+  victim's browser then received the attacker's session, and everything they did next — a
+  payment method, an uploaded document, a linked account — landed in the attacker's hands.
+  PKCE does not cover this, because the verifier is held server-side and replayed for whoever
+  presents the state. `oauth_initiate` now returns an `OAuthRedirect { authorize_url, state }`
+  and the Axum adapter plants the raw state as an HttpOnly `oauth_state` cookie; the callback
+  refuses any request that does not carry it back, as RFC 6749 §10.12 requires. The cookie is
+  `SameSite=Lax` — the provider's callback is a cross-site top-level GET, and `Strict` would
+  withhold the cookie on exactly that hop — and the check runs *before* `take_state`, so a
+  lured victim cannot burn a state the legitimate browser is still entitled to spend.
+  **Breaking:** `AuthEngine::oauth_initiate` returns `OAuthRedirect` instead of `String`, and
+  `AuthEngine::oauth_callback` takes the cookie as its fourth argument. `nest-auth` takes the
+  same change.
 - **The platform recovery-code challenge gates on winning the temp-token consume**, which the
   dashboard path already did. Found while chasing a coverage gap the enrolment change exposed:
   the two planes carry the same logic separately, and only one had been fixed.

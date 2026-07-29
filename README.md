@@ -732,6 +732,12 @@ Route groups mount only when their feature **and** runtime toggle are enabled, s
 | GET    | `/auth/oauth/:provider/callback` | Public                       | Handle the callback, exchange the code, issue tokens |
 | POST   | `/auth/ws-ticket`             | `AuthUser`, `UserStatus`, `MfaSatisfied` | Mint a single-use WebSocket upgrade ticket  |
 
+> `GET /auth/oauth/:provider` plants an HttpOnly `oauth_state` cookie carrying the flow's
+> `state`, and the callback refuses any request that does not send it back — the binding
+> RFC 6749 §10.12 requires, without which an attacker can hand a victim a callback URL and
+> have the victim's browser complete the attacker's login. The router's cookie layer handles
+> this; a custom mount must keep `CookieManagerLayer` in place.
+
 ### Extractors (Axum `FromRequestParts`)
 
 | Extractor               | Purpose                                                          |

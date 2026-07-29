@@ -33,6 +33,21 @@ pub const MFA_TEMP_COOKIE_NAME: &str = "mfa_temp_token";
 /// cookie can never outlive the token.
 pub const MFA_TEMP_COOKIE_MAX_AGE_SECONDS: u64 = 300;
 
+/// Cookie binding an in-flight OAuth `state` to the browser that started the flow.
+///
+/// The `state` parameter alone proves only that *somebody* started a flow, not that **this**
+/// browser did. Without the binding an attacker can begin their own authorization, complete
+/// consent at the provider, capture the resulting `?code=…&state=…` callback URL without
+/// visiting it, and lure the victim there: the victim's browser then receives the *attacker's*
+/// session, and everything the victim does next lands in the attacker's account. PKCE does not
+/// help, because the verifier lives server-side and is replayed for whoever presents the state.
+/// RFC 6749 §10.12 requires the state to be bound to the user agent; this cookie is that binding.
+pub const OAUTH_STATE_COOKIE_NAME: &str = "oauth_state";
+
+/// Max-Age of the OAuth state cookie, pinned to the 600 s TTL of the server-side `os:` record
+/// it is paired with so neither half outlives the other.
+pub const OAUTH_STATE_COOKIE_MAX_AGE_SECONDS: u64 = 600;
+
 /// Default route prefix. Every path in [`routes`] is built under it.
 pub const AUTH_ROUTE_PREFIX: &str = "auth";
 
@@ -139,6 +154,8 @@ mod tests {
         assert_eq!(AUTH_REFRESH_COOKIE_PATH, "/auth");
         assert_eq!(MFA_TEMP_COOKIE_NAME, "mfa_temp_token");
         assert_eq!(MFA_TEMP_COOKIE_MAX_AGE_SECONDS, 300);
+        assert_eq!(OAUTH_STATE_COOKIE_NAME, "oauth_state");
+        assert_eq!(OAUTH_STATE_COOKIE_MAX_AGE_SECONDS, 600);
     }
 
     #[test]

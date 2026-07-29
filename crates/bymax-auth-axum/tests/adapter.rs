@@ -1039,10 +1039,35 @@ async fn oauth_initiate_redirects_and_callback_completes() {
         .unwrap_or("")
         .to_owned();
 
+    // The initiate response planted the binding cookie: HttpOnly, SameSite=Lax (the provider's
+    // callback is a cross-site top-level GET, and Strict would withhold the cookie on exactly
+    // that hop), scoped to `/`, carrying the same state the authorize URL carries.
+    let planted = initiate.cookie("oauth_state").unwrap_or_default();
+    assert!(planted.contains(&format!("oauth_state={state}")));
+    assert!(planted.contains("HttpOnly"));
+    assert!(planted.contains("SameSite=Lax"));
+    assert!(planted.contains("Path=/"));
+
+    // Without the cookie, a callback carrying a live state is refused — the lured-victim
+    // request, where the attacker holds the URL and the victim's browser holds no cookie for
+    // the attacker's flow (RFC 6749 §10.12). Sent BEFORE the legitimate callback below, so
+    // the 401 cannot be explained by an already-spent state; the success that follows proves
+    // the refusal did not burn it either.
+    let lured = Req::get(&format!(
+        "/auth/oauth/google/callback?code=abc&state={state}"
+    ))
+    .send(&app)
+    .await;
+    assert_eq!(lured.status, StatusCode::UNAUTHORIZED);
+    assert_eq!(lured.json()["error"]["code"], "auth.oauth_failed");
+
     // The callback consumes the state and (via the allowing hook) creates a session.
     let callback = Req::get(&format!(
         "/auth/oauth/google/callback?code=abc&state={state}"
     ))
+    // The browser replays the `oauth_state` cookie the initiate response planted; without it
+    // the callback is refused, which is the whole point of the binding (RFC 6749 §10.12).
+    .cookie("oauth_state", &state)
     .send(&app)
     .await;
     assert_eq!(callback.status, StatusCode::OK);
@@ -1482,6 +1507,9 @@ async fn mfa_challenge_falls_back_to_the_oauth_temp_cookie_and_clears_it() {
     let callback = Req::get(&format!(
         "/auth/oauth/google/callback?code=abc&state={state}"
     ))
+    // The browser replays the `oauth_state` cookie the initiate response planted; without it
+    // the callback is refused, which is the whole point of the binding (RFC 6749 §10.12).
+    .cookie("oauth_state", &state)
     .send(&app)
     .await;
     let temp_cookie = callback.cookie_value("mfa_temp_token").unwrap_or_default();
@@ -1687,6 +1715,9 @@ async fn oauth_callback_redirect_branches() {
     let callback = Req::get(&format!(
         "/auth/oauth/google/callback?code=abc&state={state}"
     ))
+    // The browser replays the `oauth_state` cookie the initiate response planted; without it
+    // the callback is refused, which is the whole point of the binding (RFC 6749 §10.12).
+    .cookie("oauth_state", &state)
     .send(&app)
     .await;
     assert_eq!(callback.status, StatusCode::FOUND);
@@ -1967,6 +1998,9 @@ async fn oauth_callback_with_mfa_user_takes_the_mfa_redirect_branch() {
     let callback = Req::get(&format!(
         "/auth/oauth/google/callback?code=abc&state={state}"
     ))
+    // The browser replays the `oauth_state` cookie the initiate response planted; without it
+    // the callback is refused, which is the whole point of the binding (RFC 6749 §10.12).
+    .cookie("oauth_state", &state)
     .send(&app)
     .await;
     // The MFA branch: a 302 to the mfa redirect, with the ephemeral mfa_temp cookie planted.
@@ -2182,6 +2216,9 @@ async fn oauth_callback_mfa_branch_without_redirect_returns_json() {
     let callback = Req::get(&format!(
         "/auth/oauth/google/callback?code=abc&state={state}"
     ))
+    // The browser replays the `oauth_state` cookie the initiate response planted; without it
+    // the callback is refused, which is the whole point of the binding (RFC 6749 §10.12).
+    .cookie("oauth_state", &state)
     .send(&app)
     .await;
     // No redirect configured → 200 JSON challenge body, with the mfa_temp cookie planted.

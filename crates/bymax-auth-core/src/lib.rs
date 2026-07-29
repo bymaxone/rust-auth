@@ -64,7 +64,7 @@ pub use providers::ReqwestHttpClient;
 pub use services::mfa::{LoginResultMfa, MfaService, MfaSetupResult};
 #[cfg(feature = "oauth")]
 #[doc(inline)]
-pub use services::oauth::OAuthOutcome;
+pub use services::oauth::{OAuthOutcome, OAuthRedirect};
 #[cfg(feature = "platform")]
 #[doc(inline)]
 pub use services::platform::PlatformAuthService;
