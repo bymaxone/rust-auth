@@ -52,14 +52,6 @@ mod scrypt_tests {
     use super::*;
     use proptest::prelude::*;
 
-    /// A correct password and an independently computed legacy `scrypt:hex:hex` vector
-    /// (Python `hashlib.scrypt`, N=2^15, r=8, p=1, 32-byte key) — an external KAT
-    /// proving the legacy verifier reproduces nest-auth's stored format rather than
-    /// just agreeing with itself.
-    const LEGACY_PASSWORD: &[u8] = b"correct horse battery staple";
-    const LEGACY_HASH: &str = "scrypt:6e6573742d617574682d6c6567616379:\
-                               f07791588511498573e76f19c5ec479c2fdbd3340e2e1a9e1c817bb0aacbdadf";
-
     #[test]
     fn scrypt_hash_round_trips() {
         // A scrypt hash is a `$scrypt$` PHC string that verifies for the right password
@@ -82,80 +74,6 @@ mod scrypt_tests {
         assert_ne!(a, b);
         assert!(matches!(verify(b"same", &a), Ok(true)));
         assert!(matches!(verify(b"same", &b), Ok(true)));
-    }
-
-    #[test]
-    fn legacy_scrypt_hash_verifies_against_external_vector() {
-        // The legacy `scrypt:hex:hex` corpus verifies (external KAT) for the right
-        // password and rejects a wrong one — the migration-compatibility guarantee.
-        assert!(matches!(verify(LEGACY_PASSWORD, LEGACY_HASH), Ok(true)));
-        assert!(matches!(verify(b"wrong password", LEGACY_HASH), Ok(false)));
-    }
-
-    #[test]
-    fn legacy_hash_is_always_stale() {
-        // A legacy hash always reports needs_rehash → true so the next successful login
-        // transparently upgrades it to a PHC string.
-        assert!(needs_rehash(LEGACY_HASH, &PasswordParams::default()));
-    }
-
-    #[test]
-    fn legacy_parser_rejects_malformed_hex_and_shapes() {
-        // Malformed legacy strings (odd-length hex, non-hex chars, a too-short or
-        // over-long derived key, extra/empty segments) must not verify — exercises the
-        // hex decoder, the length cap, and the short-key KDF guard.
-        assert!(matches!(verify(b"pw", "scrypt:abc:00"), Ok(false))); // odd-length salt hex
-        assert!(matches!(verify(b"pw", "scrypt:zz:00"), Ok(false))); // first nibble non-hex
-        assert!(matches!(verify(b"pw", "scrypt:az:00"), Ok(false))); // second nibble non-hex
-        assert!(matches!(verify(b"pw", "scrypt:aa:00"), Ok(false))); // 1-byte key < KDF min
-        assert!(matches!(verify(b"pw", "scrypt:aa:bb:cc"), Ok(false))); // extra segment
-        assert!(matches!(verify(b"pw", "scrypt::00"), Ok(false))); // empty salt
-        assert!(matches!(verify(b"pw", "scrypt:aa:"), Ok(false))); // empty hash
-        assert!(matches!(verify(b"pw", "scrypt:aa:zz"), Ok(false))); // valid salt, non-hex hash
-        assert!(matches!(verify(b"pw", "scrypt:no-second-colon"), Ok(false))); // single segment
-        let over_long = format!("scrypt:aa:{}", "ab".repeat(65)); // 65-byte key > cap
-        assert!(matches!(verify(b"pw", &over_long), Ok(false)));
-        // Upper-case hex must decode (exercises the A–F branch of the nibble decoder);
-        // the recomputed KDF then rejects the wrong password.
-        let upper = format!("scrypt:AABBCCDD:{}", "AB".repeat(32));
-        assert!(matches!(verify(b"pw", &upper), Ok(false)));
-    }
-
-    #[test]
-    fn legacy_parser_bounds_each_field_on_its_own() {
-        // Through `verify` every rejection above collapses to `Ok(false)` — which a wrong
-        // password produces too — so the guard itself is asserted at the parser, where the
-        // three conditions can be told apart and the cap has a boundary.
-        use crate::password::phc::parse_legacy;
-        assert!(parse_legacy("scrypt::00").is_none(), "empty salt alone");
-        assert!(parse_legacy("scrypt:aa:").is_none(), "empty hash alone");
-        // The cap is inclusive: exactly 64 bytes is the largest accepted key, and 65 is out.
-        let at_cap = format!("scrypt:aa:{}", "ab".repeat(64));
-        assert!(
-            parse_legacy(&at_cap).is_some(),
-            "64 bytes is within the cap"
-        );
-        let over_cap = format!("scrypt:aa:{}", "ab".repeat(65));
-        assert!(
-            parse_legacy(&over_cap).is_none(),
-            "65 bytes is over the cap"
-        );
-        // A well-formed pair decodes to its bytes.
-        assert_eq!(
-            parse_legacy("scrypt:0a0b:0c0d"),
-            Some((vec![0x0a, 0x0b], vec![0x0c, 0x0d]))
-        );
-        // Upper-case hex decodes to the same bytes — nest-auth's corpus contains both, and a
-        // decoder that dropped the A–F arm would reject those rows as malformed. Asserted on
-        // the decoded value, because through `verify` it looks like a wrong password.
-        assert_eq!(
-            parse_legacy("scrypt:AABB:CCDD"),
-            Some((vec![0xaa, 0xbb], vec![0xcc, 0xdd]))
-        );
-        assert_eq!(
-            parse_legacy("scrypt:AABB:CCDD"),
-            parse_legacy("scrypt:aabb:ccdd")
-        );
     }
 
     #[test]

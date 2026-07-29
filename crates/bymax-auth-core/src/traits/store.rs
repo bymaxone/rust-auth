@@ -74,9 +74,12 @@ pub struct SessionRecord {
     /// `mfa_verified` is deliberately NOT stored: it must stay `false` in a rotated token
     /// so clearing the second factor always goes back through the MFA challenge.
     ///
-    /// `default` so a session written before this field existed deserializes as `false`
-    /// rather than failing the whole record — the same defensive read nest-auth performs.
-    #[serde(default)]
+    /// Required on the wire, deliberately. Defaulting a missing value to `false` would turn a
+    /// truncated or corrupt record into a silent second-factor bypass — the gate only refuses a
+    /// token whose claims say `mfa_enabled && !mfa_verified`, so an absent field reads as "this
+    /// account has no second factor" and the rotated token clears every MFA-gated route. A
+    /// record that cannot be read is treated as no session at all, which costs the holder a
+    /// login and costs an attacker the bypass.
     pub mfa_enabled: bool,
     /// The refresh-token **family** (login lineage) this session belongs to. Minted at login
     /// and inherited unchanged across every rotation, so all descendants of one login share it.
@@ -762,18 +765,17 @@ mod tests {
         assert_eq!(OtpPurpose::PasswordReset.as_str(), "password_reset");
         assert_eq!(OtpPurpose::EmailVerification.as_str(), "email_verification");
     }
-
     #[test]
-    fn session_record_reads_a_legacy_payload_without_the_mfa_flag() {
-        // Sessions written before `mfaEnabled` existed are still live in Redis (refresh TTL is
-        // days). Deserialization must default them to `false` rather than fail: a hard error
-        // would reject every in-flight session at once and log the whole user base out.
-        let legacy = r#"{"userId":"u1","tenantId":"t1","role":"MEMBER",
-            "device":"Chrome","ip":"203.0.113.4","createdAt":"1970-01-01T00:00:00Z"}"#;
-
-        let parsed: Result<SessionRecord, _> = serde_json::from_str(legacy);
-
-        assert!(matches!(parsed, Ok(ref r) if !r.mfa_enabled && r.user_id == "u1"));
+    fn a_record_without_the_mfa_flag_is_refused_rather_than_defaulted() {
+        // Defaulting a missing `mfaEnabled` to `false` would turn a truncated or corrupt record
+        // into a silent second-factor bypass: the gate refuses only a token whose claims say
+        // `mfaEnabled && !mfaVerified`, so an absent field reads as "no second factor here" and
+        // the rotated token clears every MFA-gated route. Refusing the record costs the holder
+        // a login; defaulting it costs the account.
+        let without_flag = r#"{"userId":"u1","tenantId":"t1","role":"MEMBER","device":"Chrome",
+            "ip":"1.2.3.4","createdAt":"1970-01-01T00:00:00Z"}"#;
+        let parsed: Result<SessionRecord, _> = serde_json::from_str(without_flag);
+        assert!(parsed.is_err());
     }
 
     #[test]

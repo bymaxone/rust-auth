@@ -99,34 +99,13 @@ pub(crate) fn now_offset() -> OffsetDateTime {
 /// malformed value cheaply — no allocation and no SHA-256 over unbounded input — and such a
 /// value could never match a stored hash anyway.
 ///
-/// The legacy UUID-v4 shape is accepted too. nest-auth minted refresh tokens as UUID v4
-/// before both sides converged on 256-bit tokens, and those live in the shared Redis for a
-/// full refresh lifetime (seven days by default). Rejecting them here would refuse to rotate
-/// a session that is still perfectly valid and whose `rt:{sha256}` record is right there.
-/// Accepting the shape grants nothing on its own — the token still has to hash to a stored
-/// session — so this is a parsing allowance, not a weakened check.
-///
-/// Remove the legacy arm once every token predating the convergence has expired.
 pub(crate) fn is_refresh_token_shape(raw: &str) -> bool {
-    is_hex_token_shape(raw) || is_legacy_uuid_shape(raw)
+    is_hex_token_shape(raw)
 }
 
 /// The current shape: 64 lower-case hex characters.
 fn is_hex_token_shape(raw: &str) -> bool {
     raw.len() == 64 && raw.bytes().all(is_lower_hex)
-}
-
-/// The legacy shape: a lower-case UUID v4, `8-4-4-4-12` hex with dashes at fixed offsets.
-fn is_legacy_uuid_shape(raw: &str) -> bool {
-    const DASH_POSITIONS: [usize; 4] = [8, 13, 18, 23];
-    raw.len() == 36
-        && raw.bytes().enumerate().all(|(index, byte)| {
-            if DASH_POSITIONS.contains(&index) {
-                byte == b'-'
-            } else {
-                is_lower_hex(byte)
-            }
-        })
 }
 
 /// Whether `byte` is a lower-case hexadecimal digit.
@@ -151,20 +130,10 @@ mod tests {
     }
 
     #[test]
-    fn is_refresh_token_shape_accepts_a_legacy_uuid_v4() {
-        // nest-auth minted UUID-v4 refresh tokens before the two sides converged on 256-bit
-        // ones, and those survive in the shared Redis for a whole refresh lifetime. Refusing
-        // the shape would refuse to rotate a session that is still valid and stored.
-        assert!(is_refresh_token_shape(
-            "11111111-2222-4333-8444-555555555555"
-        ));
-    }
-
-    #[test]
-    fn is_refresh_token_shape_rejects_uuid_lookalikes() {
-        // The allowance is for one exact legacy shape, not "anything with dashes": a dash in
-        // the wrong place, an upper-case digit, a non-hex character, and a wrong length are
-        // all still refused before any hashing happens.
+    fn is_refresh_token_shape_rejects_anything_but_64_hex() {
+        // A UUID is not a refresh token: the shape is 64 lower-case hex characters and
+        // nothing else, so a dash in any position, an upper-case digit, a non-hex character
+        // and a wrong length are all refused before any hashing happens.
         assert!(!is_refresh_token_shape(
             "111111112-222-4333-8444-555555555555"
         ));

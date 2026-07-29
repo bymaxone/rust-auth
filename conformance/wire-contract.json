@@ -158,10 +158,9 @@
       "or a session started on one backend cannot continue on the other."
     ],
     "refreshToken": "64 lowercase hex characters (32 CSPRNG bytes)",
-    "refreshTokenLegacy": "uuid-v4, accepted for one refresh lifetime after convergence",
+    "passwordHash": "self-describing: the parameters the hash was written under travel with it, so a verify never assumes the currently configured cost",
     "totpSecretAtRest": "aes-256-gcm over the BASE32 TEXT of the secret",
     "recoveryCodeDigest": "hex hmac-sha256 of the code under the derived identifier key",
-    "recoveryCodeDigestLegacy": "scrypt:{salt}:{hash}, still verified, never newly written",
     "wsTicket": "64 lowercase hex characters (32 CSPRNG bytes), single-use, 30 s lifetime"
   },
 

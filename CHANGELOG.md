@@ -138,7 +138,25 @@ version bump.
   inside the window, so one captured consumed token could mint a session
   repeatedly. It is consumed on use now, matching `nest-auth`.
 
+### Removed
+
+- **Every legacy-compatibility path in the credential surface.** Both libraries are new and
+  unreleased into production, so a parsing allowance for a corpus that does not exist is a
+  widened input for nothing — and each of these sat in the credential-verification core:
+  - the `scrypt:{salt_hex}:{hash_hex}` nest-compat password reader, with its fixed
+    `N = 2^15` assumption and its bounded-hex parser,
+  - the UUID-v4 refresh-token shape,
+  - and the corresponding `refreshTokenLegacy` / `recoveryCodeDigestLegacy` contract entries.
+
 ### Fixed
+
+- **`mfa_enabled` is required on a stored session record.** `#[serde(default)]` made a missing
+  value read as `false`, which turns a truncated or corrupt record into a silent second-factor
+  bypass: the gate refuses only a token whose claims say `mfa_enabled && !mfa_verified`, so an
+  absent field reads as "no second factor here" and the rotated token clears every MFA-gated
+  route. A record that cannot be read is now no session at all — a login for the holder, and no
+  bypass for anyone else. nest-auth made the same change.
+
 
 - **`PlatformAuthResult`'s account field was named `user` while the wire says `admin`.** The
   adapter renamed it while building the response, so the TypeScript generated from the struct

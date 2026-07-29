@@ -1903,6 +1903,25 @@ fn repository_error_maps_both_variants_to_internal() {
 /// The file at `conformance/wire-contract.json` is held byte-identical by nest-auth. This section
 /// is the shape of the credentials themselves, so a drift here is not a parse error on the other
 /// side — it is a session that cannot continue, or a TOTP code that never verifies.
+fn contract_credential_formats() -> serde_json::Map<String, serde_json::Value> {
+    let path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../conformance/wire-contract.json"
+    );
+    let raw = std::fs::read_to_string(path).unwrap_or_default();
+    let root: serde_json::Value = serde_json::from_str(&raw).unwrap_or(serde_json::Value::Null);
+    let section = root
+        .get("credentialFormats")
+        .and_then(serde_json::Value::as_object)
+        .cloned()
+        .unwrap_or_default();
+    assert!(
+        !section.is_empty(),
+        "the wire contract declared no `credentialFormats` — it did not load"
+    );
+    section
+}
+
 fn credential_format(key: &str) -> String {
     let path = concat!(
         env!("CARGO_MANIFEST_DIR"),
@@ -1943,9 +1962,13 @@ fn the_refresh_token_matches_the_shared_credential_format() {
         );
     }
 
-    // The legacy UUID shape is documented as *accepted*, never minted — the allowance only makes
-    // sense while tokens issued before the convergence are still inside their lifetime.
-    assert!(credential_format("refreshTokenLegacy").contains("uuid-v4"));
+    // No legacy shape is declared, and none is accepted: the libraries are new, so a parsing
+    // allowance for a corpus that does not exist is a widened input for nothing.
+    assert!(
+        contract_credential_formats()
+            .get("refreshTokenLegacy")
+            .is_none()
+    );
 }
 
 #[tokio::test]
@@ -1996,9 +2019,11 @@ async fn the_stored_totp_secret_and_recovery_digests_match_the_shared_credential
         assert_ne!(digest, code, "the recovery code was stored in the clear");
     }
 
-    // The legacy `scrypt:` form is still verified but never newly written, so no digest above
-    // may carry its prefix.
-    assert!(credential_format("recoveryCodeDigestLegacy").contains("scrypt:"));
+    assert!(
+        contract_credential_formats()
+            .get("recoveryCodeDigestLegacy")
+            .is_none()
+    );
     assert!(
         !data
             .hashed_codes
