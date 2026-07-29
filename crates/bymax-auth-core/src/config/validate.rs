@@ -332,6 +332,26 @@ impl AuthConfig {
             return Err(ConfigError::MfaToggleWithoutConfig);
         }
 
+        // Rule 13b: the two MFA parameters that decide how much a second factor is worth.
+        // `totp_window` is counted in 30-second steps on either side of now, so `2n + 1` codes
+        // are valid at once: three at the default of 1, but 121 at 60 — a six-digit code a
+        // hundred times easier to guess than its length suggests. `recovery_code_count` of
+        // zero enrols an account with no way back if the authenticator is lost. Every sibling
+        // security parameter carries a bound; these two decide whether MFA is worth anything.
+        if let Some(mfa) = self.mfa.as_ref() {
+            if mfa.totp_window > 10 {
+                return Err(ConfigError::TotpWindowRange {
+                    got: mfa.totp_window,
+                    valid: u16::from(mfa.totp_window) * 2 + 1,
+                });
+            }
+            if !(1..=50).contains(&mfa.recovery_code_count) {
+                return Err(ConfigError::RecoveryCodeCountRange {
+                    got: mfa.recovery_code_count,
+                });
+            }
+        }
+
         // Rule 14: OTP length range.
         let otp_length = self.password_reset.otp_length;
         if !(4..=8).contains(&otp_length) {
@@ -520,6 +540,27 @@ fn validate_password(password: &PasswordConfig) -> Result<(), ConfigError> {
     if !password.scrypt.cost_factor.is_power_of_two() || password.scrypt.cost_factor < 16_384 {
         return Err(ConfigError::ScryptCostFactor {
             got: password.scrypt.cost_factor,
+        });
+    }
+
+    // scrypt's memory cost is `128 * N * r`, so the block size is a multiplier on the hardness
+    // the cost-factor floor exists to guarantee: at `r = 1` the same N buys an eighth of the
+    // memory and the floor quietly stops meaning what it says. The weakening is invisible
+    // precisely because the parameter that IS bounded is still intact.
+    #[cfg(feature = "scrypt")]
+    if password.scrypt.block_size < 8 {
+        return Err(ConfigError::ScryptBlockSize {
+            got: password.scrypt.block_size,
+        });
+    }
+
+    // Below 1 is not a weaker setting but an invalid one — the hasher rejects it at the first
+    // password, which is a credential path failing at runtime over something startup could
+    // have caught.
+    #[cfg(feature = "scrypt")]
+    if password.scrypt.parallelization < 1 {
+        return Err(ConfigError::ScryptParallelization {
+            got: password.scrypt.parallelization,
         });
     }
 
@@ -920,6 +961,91 @@ mod tests {
             recovery_code_count: 8,
             totp_window: 1,
         }
+    }
+
+    #[cfg(feature = "mfa")]
+    #[test]
+    fn the_mfa_parameters_that_decide_a_second_factor_are_bounded() {
+        // `totp_window` is counted in 30-second steps on either side of now, so `2n + 1` codes
+        // are valid at once. At 60 that is 121, and a six-digit code is a hundred times easier
+        // to guess than its length suggests — the second factor is worth almost nothing while
+        // the config still reads as "MFA enabled". Every sibling parameter carries a bound.
+        let key = base64::engine::general_purpose::STANDARD.encode([7u8; 32]);
+        let mut wide = valid_config();
+        wide.mfa = Some(MfaConfig {
+            totp_window: 60,
+            ..mfa_with_key(&key)
+        });
+        assert!(matches!(
+            wide.validate(Environment::Test),
+            Err(ConfigError::TotpWindowRange {
+                got: 60,
+                valid: 121
+            })
+        ));
+
+        // The edges are accepted: 0 is a deliberate hardening (no tolerance at all), 10 is the
+        // generous ceiling. A bound that refused a legitimate tolerance would be an outage.
+        for window in [0u8, 1, 10] {
+            let mut ok = valid_config();
+            ok.mfa = Some(MfaConfig {
+                totp_window: window,
+                ..mfa_with_key(&key)
+            });
+            assert!(ok.validate(Environment::Test).is_ok());
+        }
+
+        // Zero recovery codes enrols an account with no way back if the authenticator is lost,
+        // and nothing in the flow reports anything wrong — the user finds out at the worst
+        // possible moment.
+        let mut none = valid_config();
+        none.mfa = Some(MfaConfig {
+            recovery_code_count: 0,
+            ..mfa_with_key(&key)
+        });
+        assert!(matches!(
+            none.validate(Environment::Test),
+            Err(ConfigError::RecoveryCodeCountRange { got: 0 })
+        ));
+
+        let mut many = valid_config();
+        many.mfa = Some(MfaConfig {
+            recovery_code_count: 51,
+            ..mfa_with_key(&key)
+        });
+        assert!(matches!(
+            many.validate(Environment::Test),
+            Err(ConfigError::RecoveryCodeCountRange { got: 51 })
+        ));
+    }
+
+    #[cfg(feature = "scrypt")]
+    #[test]
+    fn the_scrypt_parameters_that_carry_the_memory_hardness_are_bounded() {
+        // The memory cost is `128 * N * r`. Bounding N alone is not enough: at `r = 1` the same
+        // cost factor buys an eighth of the memory, and the floor quietly stops meaning what it
+        // says — invisibly, because the parameter that IS bounded is still intact.
+        let mut thin = valid_config();
+        thin.password.scrypt.block_size = 1;
+        assert!(matches!(
+            thin.validate(Environment::Test),
+            Err(ConfigError::ScryptBlockSize { got: 1 })
+        ));
+
+        // Below 1 is not weaker but invalid: the hasher rejects it at the first password, which
+        // is a credential path failing at runtime over something startup could have caught.
+        let mut zero = valid_config();
+        zero.password.scrypt.parallelization = 0;
+        assert!(matches!(
+            zero.validate(Environment::Test),
+            Err(ConfigError::ScryptParallelization { got: 0 })
+        ));
+
+        // The defaults sit at the floor and are accepted.
+        let mut ok = valid_config();
+        ok.password.scrypt.block_size = 8;
+        ok.password.scrypt.parallelization = 1;
+        assert!(ok.validate(Environment::Test).is_ok());
     }
 
     #[cfg(feature = "mfa")]

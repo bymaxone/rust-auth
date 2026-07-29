@@ -461,6 +461,18 @@ Everything is configured through `AuthConfig`. Two ready-made profiles bundle se
 > identical option as `mfa.previousEncryptionKeys`.
 
 > [!IMPORTANT]
+> **The parameters that carry a control's strength are bounded by `build()`.** `mfa.totp_window`
+> must be `0..=10` (`TotpWindowRange`): the window counts 30-second steps on *either* side of
+> now, so `2n + 1` codes are valid at once — three at 1, but 121 at 60, which makes a six-digit
+> code a hundred times easier to guess while the configuration still reads as "MFA enabled".
+> `mfa.recovery_code_count` must be `1..=50` (`RecoveryCodeCountRange`), because zero enrols an
+> account with no way back if the authenticator is lost. `password.scrypt.block_size` must be
+> at least 8 (`ScryptBlockSize`) and `password.scrypt.parallelization` at least 1
+> (`ScryptParallelization`): the memory cost is `128 * N * r`, so a smaller block size divides
+> the hardness that the cost-factor floor exists to guarantee — invisibly, since the bounded
+> parameter is still intact. `nest-auth` enforces the identical ranges.
+
+> [!IMPORTANT]
 > `jwt.access_expires_in` must not exceed **30 days**, the window a store keeps a bumped token
 > epoch readable. The epoch is what makes a stateless access token revocable: a password reset
 > advances it and every token stamped below it stops verifying — but only while the bumped value

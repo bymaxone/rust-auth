@@ -116,6 +116,18 @@ version bump.
   exactly 32 bytes, never equal to the current key or to another entry), because a malformed one
   would otherwise surface at a user's first challenge. Same option on both sides.
 
+- **Startup bounds on the parameters that carry a control's strength.** `mfa.totp_window`
+  (`0..=10`, `TotpWindowRange`), `mfa.recovery_code_count` (`1..=50`,
+  `RecoveryCodeCountRange`), `password.scrypt.block_size` (`>= 8`, `ScryptBlockSize`) and
+  `password.scrypt.parallelization` (`>= 1`, `ScryptParallelization`) had no validation while
+  every sibling parameter did. The window counts 30-second steps on *either* side of now, so
+  `2n + 1` codes are valid at once: at 60 that is 121, and a six-digit code becomes a hundred
+  times easier to guess while the configuration still reads as "MFA enabled". Zero recovery
+  codes enrols an account with no way back if the authenticator is lost. And scrypt's memory
+  cost is `128 * N * r`, so a block size below 8 divides the hardness the cost-factor floor
+  exists to guarantee — invisibly, because the parameter that *is* bounded stays intact.
+  `nest-auth` enforces the identical ranges.
+
 ### Changed
 
 - **Family-lineage reuse detection replaces the previous sentinel.** A login opens

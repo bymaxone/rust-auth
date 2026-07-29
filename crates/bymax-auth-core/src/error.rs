@@ -81,6 +81,35 @@ pub enum ConfigError {
         /// The rejected cost factor.
         got: u32,
     },
+    /// `password.scrypt.block_size` is below the floor that makes the cost factor mean what
+    /// it says.
+    #[error("password.scrypt.block_size must be >= 8 (got {got})")]
+    ScryptBlockSize {
+        /// The rejected block size.
+        got: u32,
+    },
+    /// `password.scrypt.parallelization` is below 1.
+    #[error("password.scrypt.parallelization must be >= 1 (got {got})")]
+    ScryptParallelization {
+        /// The rejected parallelization.
+        got: u32,
+    },
+    /// `mfa.totp_window` is outside the accepted `0..=10` range.
+    #[error(
+        "mfa.totp_window must be within 0..=10 (got {got}; {valid} codes would be valid at once)"
+    )]
+    TotpWindowRange {
+        /// The rejected window.
+        got: u8,
+        /// How many codes that window would accept simultaneously.
+        valid: u16,
+    },
+    /// `mfa.recovery_code_count` is outside the accepted `1..=50` range.
+    #[error("mfa.recovery_code_count must be within 1..=50 (got {got})")]
+    RecoveryCodeCountRange {
+        /// The rejected count.
+        got: u8,
+    },
     /// `password.argon2.memory_kib` is below the OWASP production floor of 19456 KiB.
     #[error("password.argon2.memory_kib must be >= 19456 (OWASP floor; got {got})")]
     Argon2Memory {
