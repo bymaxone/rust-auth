@@ -731,14 +731,39 @@ pub fn current_totp(secret_b32: &str) -> String {
 /// several TOTP-gated operations in one test uses distinct window offsets (0, 30, 60, …) so the
 /// per-window anti-replay never rejects a reused code. The configured `totp_window` (2) accepts
 /// codes a couple of steps away from the verifier's clock, so a near-future offset still validates.
-pub fn totp_at(secret_b32: &str, offset_secs: u64) -> String {
+pub fn now_unix() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
+/// A TOTP code at an absolute instant. Lifecycle tests that need several distinct,
+/// non-replayed codes capture ONE base with [`now_unix`] and derive every code from it —
+/// per-call clock reads can straddle a 30-second step boundary mid-test, silently colliding
+/// two "distinct" steps and tripping the anti-replay marker.
+pub fn totp_at_abs(secret_b32: &str, at_unix: i64) -> String {
+    let raw = bymax_auth_crypto::totp::decode_secret_base32(secret_b32).unwrap_or_default();
+    format!(
+        "{:06}",
+        bymax_auth_crypto::totp::totp(&raw, u64::try_from(at_unix).unwrap_or(0), 30, 6)
+    )
+}
+
+pub fn totp_at(secret_b32: &str, offset_secs: i64) -> String {
+    // Signed offset: a lifecycle test that has already consumed the present and near-future
+    // steps against the anti-replay marker still needs a valid in-window code, and the only
+    // ones left are in the near past.
     let raw = bymax_auth_crypto::totp::decode_secret_base32(secret_b32).unwrap_or_default();
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
+        .map(|d| d.as_secs() as i64)
         .unwrap_or(0)
         + offset_secs;
-    format!("{:06}", bymax_auth_crypto::totp::totp(&raw, now, 30, 6))
+    format!(
+        "{:06}",
+        bymax_auth_crypto::totp::totp(&raw, u64::try_from(now).unwrap_or(0), 30, 6)
+    )
 }
 
 /// Mark a seeded user as MFA-enabled with a stored (encrypted-placeholder) secret.

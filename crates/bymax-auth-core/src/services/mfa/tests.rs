@@ -2209,3 +2209,99 @@ async fn a_totp_challenge_rewrites_a_secret_stored_under_a_retired_key() {
         Some(raw_secret.as_slice())
     );
 }
+
+#[tokio::test]
+async fn an_mfa_state_change_kills_the_outstanding_access_tokens() {
+    // Enabling a second factor advances the token epoch: every access token issued before
+    // that moment is stamped `mfa_enabled: false`, and the MFA gate refuses only
+    // `mfa_enabled && !mfa_verified` — so without the bump a stolen access token keeps
+    // clearing every MFA-gated route for its remaining lifetime, at the exact moment the
+    // user enabled MFA because they suspected that theft. Disable applies the same rule in
+    // the other direction: an auth-state change revokes everything issued under the
+    // previous state, exactly as the password-reset flow does.
+    let Some(h) = build(true, false) else { return };
+    let input = crate::services::auth::RegisterInput {
+        email: "epoch@example.com".to_owned(),
+        name: "U".to_owned(),
+        password: PASSWORD.to_owned(),
+        tenant_id: TENANT.to_owned(),
+    };
+    let registered = h.engine.register(input, &ctx()).await;
+    let Ok(LoginResult::Success(auth)) = registered else {
+        return;
+    };
+    let uid = auth.user.id.clone();
+    let pre_enable_token = auth.access_token.clone();
+    assert!(
+        h.engine
+            .tokens()
+            .verify_access(&pre_enable_token)
+            .await
+            .is_ok()
+    );
+
+    // Enable MFA. Distinct TOTP steps per verification, as in the lifecycle test.
+    let Some(mfa) = h.engine.mfa() else { return };
+    let Ok(setup) = mfa.setup(&uid, MfaContext::Dashboard).await else {
+        return;
+    };
+    let base = now_secs();
+    assert!(
+        mfa.verify_and_enable(
+            &uid,
+            &code_at(&setup.secret, base),
+            "1.2.3.4",
+            "ua",
+            MfaContext::Dashboard
+        )
+        .await
+        .is_ok()
+    );
+
+    // The pre-enable token is dead the moment the state changed — not fifteen minutes later.
+    assert!(
+        h.engine
+            .tokens()
+            .verify_access(&pre_enable_token)
+            .await
+            .is_err()
+    );
+
+    // A fresh login through the challenge mints a token stamped with the NEW epoch…
+    let Some(temp) = login_temp_token(&h.engine, "epoch@example.com").await else {
+        return;
+    };
+    let challenged = mfa
+        .challenge(&temp, &code_at(&setup.secret, base + 30), "1.2.3.4", "ua")
+        .await;
+    let Ok(LoginResultMfa::Dashboard(post_enable)) = challenged else {
+        return;
+    };
+    assert!(
+        h.engine
+            .tokens()
+            .verify_access(&post_enable.access_token)
+            .await
+            .is_ok()
+    );
+
+    // …and disabling bumps again, so that token dies with the state that minted it.
+    assert!(
+        mfa.disable(
+            &uid,
+            &code_at(&setup.secret, base + 60),
+            "1.2.3.4",
+            "ua",
+            MfaContext::Dashboard
+        )
+        .await
+        .is_ok()
+    );
+    assert!(
+        h.engine
+            .tokens()
+            .verify_access(&post_enable.access_token)
+            .await
+            .is_err()
+    );
+}

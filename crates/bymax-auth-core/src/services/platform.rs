@@ -275,7 +275,11 @@ impl PlatformAuthService {
 
     /// Atomically invalidate EVERY platform session for the admin (the "log out everywhere"
     /// action), clearing the `psess:` set and every member's `prt:`/`psd:` keys in one
-    /// transaction over the platform keyspace.
+    /// transaction over the platform keyspace — then advance the admin's token epoch, so
+    /// outstanding platform **access** tokens die with the refresh sessions rather than
+    /// working on to expiry. Bumped after the sweep so a failed sweep leaves the operation
+    /// visibly incomplete instead of reading as done while the sessions live on. The
+    /// dashboard revoke-all bumps its plane's epoch the same way.
     ///
     /// # Errors
     ///
@@ -283,7 +287,11 @@ impl PlatformAuthService {
     pub async fn revoke_all_platform_sessions(&self, admin_id: &str) -> Result<(), AuthError> {
         self.session_store
             .revoke_all(SessionKind::Platform, admin_id)
-            .await
+            .await?;
+        self.session_store
+            .bump_epoch(SessionKind::Platform, admin_id)
+            .await?;
+        Ok(())
     }
 
     /// The hashed brute-force identifier for a platform login: `hmac_sha256("platform:{email}")`
@@ -849,6 +857,14 @@ mod tests {
         let Ok(PlatformLoginResult::Success(first)) = first_login else { return };
         let second_login = svc.login("all@admin.io", "pw", "5.6.7.8", "agent").await;
         let Ok(PlatformLoginResult::Success(second)) = second_login else { return };
+        // Before the revoke, the first login's ACCESS token verifies.
+        assert!(
+            h.engine
+                .tokens()
+                .verify_platform_access(&first.access_token)
+                .await
+                .is_ok()
+        );
         assert!(svc.revoke_all_platform_sessions(&id).await.is_ok());
         assert!(matches!(
             svc.refresh(&first.refresh_token, "1.2.3.4", "agent").await,
@@ -858,6 +874,23 @@ mod tests {
             svc.refresh(&second.refresh_token, "5.6.7.8", "agent").await,
             Err(AuthError::RefreshTokenInvalid)
         ));
+        // The outstanding ACCESS tokens die with the refresh sessions: revoke-all bumps the
+        // platform token epoch, and every token stamped below it stops verifying. Without
+        // the bump, "log out everywhere" left every access token working to expiry.
+        assert!(
+            h.engine
+                .tokens()
+                .verify_platform_access(&first.access_token)
+                .await
+                .is_err()
+        );
+        assert!(
+            h.engine
+                .tokens()
+                .verify_platform_access(&second.access_token)
+                .await
+                .is_err()
+        );
     }
 
     #[tokio::test]

@@ -172,6 +172,23 @@ version bump.
 
 ### Fixed
 
+- **An auth-state change now revokes the outstanding access tokens too.** Enabling or
+  disabling MFA, and the platform "log out everywhere" (`revoke_all_platform_sessions`),
+  revoked the refresh sessions but left every access token working to expiry — the enable
+  path even carried a comment claiming the current session would continue, which `revoke_all`
+  had never made true. For MFA enable that is the worst possible window: every pre-enable
+  token is stamped `mfa_enabled: false`, and the MFA gate refuses only
+  `mfa_enabled && !mfa_verified` — so a stolen token kept clearing every MFA-gated route at
+  the exact moment the user enabled a second factor because they suspected that theft. All
+  three flows now bump the plane-scoped token epoch alongside the session sweep, the same
+  rule the password-reset flow already applied. Verification has always enforced the epoch on
+  both planes; what was missing was anything advancing it. Same change on both sides.
+- **Every response of the axum router is stamped `Cache-Control: no-store`**
+  (plus `Pragma: no-cache`), via `SetResponseHeaderLayer` in the middleware stack. RFC 6749
+  §5.1 requires it on any response carrying a token, and a CDN or corporate proxy that caches
+  a login response serves one user's tokens to the next caller. A router-wide layer rather
+  than per handler, so a future route cannot forget it. `nest-auth` stamps the identical
+  headers via a controller interceptor.
 - **`mfa_enabled` is required on a stored session record.** `#[serde(default)]` made a missing
   value read as `false`, which turns a truncated or corrupt record into a silent second-factor
   bypass: the gate refuses only a token whose claims say `mfa_enabled && !mfa_verified`, so an

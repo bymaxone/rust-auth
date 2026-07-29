@@ -1,16 +1,20 @@
 //! The ordered tower middleware stack applied around the whole router (§8.8).
 //!
-//! Layers, outermost first: structured tracing spans, a request-body size cap,
-//! sensitive-header redaction (so the credential-bearing headers never reach trace output),
-//! an optional consumer-supplied CORS layer, and the cookie manager that makes the typed
+//! Layers, outermost first: structured tracing spans, an optional consumer-supplied CORS
+//! layer, the `Cache-Control: no-store` response stamp (RFC 6749 §5.1 — no auth response is
+//! ever cacheable), sensitive-header redaction (so the credential-bearing headers never
+//! reach trace output), a request-body size cap, and the cookie manager that makes the typed
 //! `CookieJar` available to extractors and the delivery layer. Rate-limit layers are
 //! **not** here — they attach per route group (§16). The adapter emits `tracing` spans but
 //! installs **no** subscriber: the consuming application owns subscriber setup.
 
 use axum::Router;
+use http::HeaderValue;
+use http::header::{CACHE_CONTROL, PRAGMA};
 use tower_cookies::CookieManagerLayer;
 use tower_http::limit::RequestBodyLimitLayer;
 use tower_http::sensitive_headers::SetSensitiveRequestHeadersLayer;
+use tower_http::set_header::SetResponseHeaderLayer;
 use tower_http::trace::TraceLayer;
 
 use crate::routes::sensitive_header_names;
@@ -46,7 +50,23 @@ pub(crate) fn apply_middleware(
         ))
         .layer(CookieManagerLayer::new())
         .layer(RequestBodyLimitLayer::new(max_body_bytes))
-        .layer(sensitive);
+        .layer(sensitive)
+        // Every response of every route this router serves is stamped `Cache-Control:
+        // no-store` (plus `Pragma: no-cache` for HTTP/1.0 intermediaries). RFC 6749 §5.1
+        // requires it on any response carrying a token, and every route here either carries
+        // one, sets an auth cookie, or answers a question about an authenticated identity —
+        // all of which a shared cache must never replay to the next caller. Stamped as a
+        // layer, not per handler, so a future route cannot forget it; placed outside the
+        // body-limit so even a 413 goes out uncacheable. `nest-auth` stamps the identical
+        // headers via a controller interceptor.
+        .layer(SetResponseHeaderLayer::overriding(
+            CACHE_CONTROL,
+            HeaderValue::from_static("no-store"),
+        ))
+        .layer(SetResponseHeaderLayer::overriding(
+            PRAGMA,
+            HeaderValue::from_static("no-cache"),
+        ));
 
     let router = match cors {
         Some(cors) => router.layer(cors),

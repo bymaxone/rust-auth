@@ -23,7 +23,7 @@ mod common;
 
 use common::{
     Captured, EngineSpec, Req, TENANT, build, build_oauth_with_redirects, current_totp,
-    enable_mfa_flag, router, seed_admin, seed_user, set_status, totp_at,
+    enable_mfa_flag, router, seed_admin, seed_user, set_status,
 };
 use http::{HeaderName, Method, StatusCode, header};
 
@@ -102,6 +102,36 @@ async fn an_unknown_route_is_404() {
     let app = router(&h);
     let resp = Req::get("/auth/does-not-exist").send(&app).await;
     assert_eq!(resp.status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn every_response_is_stamped_uncacheable() {
+    // RFC 6749 §5.1: a response carrying a token must never be cacheable — a CDN or
+    // corporate proxy that caches a login response serves one user's tokens to the next
+    // caller. The stamp is a router-wide layer rather than per handler, so a future route
+    // cannot forget it; this test pins success, auth-failure, and 404 responses alike,
+    // because a cached 401 wedges a client just as a cached login leaks one. `nest-auth`
+    // stamps the identical headers via a controller interceptor.
+    let Some(h) = build(EngineSpec::default()) else { return };
+    let app = router(&h);
+
+    for path in ["/auth/me", "/auth/does-not-exist"] {
+        let resp = Req::get(path).send(&app).await;
+        assert_eq!(
+            resp.headers
+                .get(http::header::CACHE_CONTROL)
+                .and_then(|v| v.to_str().ok()),
+            Some("no-store"),
+            "missing no-store on {path}"
+        );
+        assert_eq!(
+            resp.headers
+                .get(http::header::PRAGMA)
+                .and_then(|v| v.to_str().ok()),
+            Some("no-cache"),
+            "missing pragma on {path}"
+        );
+    }
 }
 
 // ----------------------------------------------------------------------------------------
@@ -1266,28 +1296,52 @@ async fn platform_mfa_full_lifecycle() {
     assert_eq!(setup.status, StatusCode::CREATED);
     let secret = setup.json()["secret"].as_str().unwrap_or("").to_owned();
 
-    // Each TOTP-gated step uses a distinct window offset so the per-window anti-replay never
-    // rejects a reused code (the verifier's window tolerance accepts the near-future codes).
+    // ONE captured base for every code: distinct steps per verification, immune to a step
+    // boundary passing mid-test (see totp_at_abs).
+    let base = common::now_unix();
     let enable = Req::post("/auth/platform/mfa/verify-enable")
         .bearer(&access)
-        .json(serde_json::json!({ "code": totp_at(&secret, 0) }))
+        .json(serde_json::json!({ "code": common::totp_at_abs(&secret, base) }))
         .send(&app)
         .await;
     assert_eq!(enable.status, StatusCode::NO_CONTENT);
 
-    // recovery-codes with a fresh-window TOTP returns a fresh set.
+    // Enabling bumped the platform token epoch, so the pre-enable token is dead — exactly
+    // what a compromised-account recovery needs. The admin re-authenticates through the
+    // platform challenge, as a real client would.
+    let stale = Req::post("/auth/platform/mfa/recovery-codes")
+        .bearer(&access)
+        .json(serde_json::json!({ "code": common::totp_at_abs(&secret, base + 30) }))
+        .send(&app)
+        .await;
+    assert_eq!(stale.status, StatusCode::UNAUTHORIZED);
+
+    let relogin = platform_login(&app, "padmin2@e.com").await;
+    let temp = relogin.json()["mfaTempToken"]
+        .as_str()
+        .unwrap_or("")
+        .to_owned();
+    let challenged = Req::post("/auth/platform/mfa/challenge")
+        .json(serde_json::json!({ "mfaTempToken": temp, "code": common::totp_at_abs(&secret, base + 30) }))
+        .send(&app)
+        .await;
+    assert_eq!(challenged.status, StatusCode::OK);
+    let access = platform_access(&challenged);
+
+    // recovery-codes with a fresh-step TOTP returns a fresh set.
     let recov = Req::post("/auth/platform/mfa/recovery-codes")
         .bearer(&access)
-        .json(serde_json::json!({ "code": totp_at(&secret, 30) }))
+        .json(serde_json::json!({ "code": common::totp_at_abs(&secret, base + 60) }))
         .send(&app)
         .await;
     assert_eq!(recov.status, StatusCode::OK);
     assert!(recov.json()["recoveryCodes"].is_array());
 
-    // disable with another fresh-window TOTP turns it off.
+    // disable with step base-30: inside the verifier's window, never consumed by anti-replay
+    // (the steps at base, base+30 and base+60 all were).
     let disable = Req::post("/auth/platform/mfa/disable")
         .bearer(&access)
-        .json(serde_json::json!({ "code": totp_at(&secret, 60) }))
+        .json(serde_json::json!({ "code": common::totp_at_abs(&secret, base - 30) }))
         .send(&app)
         .await;
     assert_eq!(disable.status, StatusCode::NO_CONTENT);
@@ -1982,18 +2036,22 @@ async fn platform_me_and_revoke_error_arms_with_a_ghost_admin() {
     assert_eq!(me.status, StatusCode::UNAUTHORIZED);
     assert_eq!(me.json()["error"]["code"], "auth.token_invalid");
 
-    // revoke-all for a ghost admin: the engine revokes nothing and returns Ok (204), but the
-    // path is exercised; a logout for the ghost also runs.
+    // revoke-all for a ghost admin: the engine revokes nothing but still bumps the ghost's
+    // epoch — 204, and the path is exercised.
     let revoke = Req::delete("/auth/platform/sessions")
         .bearer(&ghost)
         .send(&app)
         .await;
     assert_eq!(revoke.status, StatusCode::NO_CONTENT);
+    // The token that performed the revoke is now dead like every other token the ghost held:
+    // revoke-all reaches the access tokens too, not only the refresh sessions. (The plain
+    // ghost-logout 204 arm is covered by the real-admin logout test; one token cannot both
+    // revoke-all and then log out, which is the point.)
     let logout = Req::post("/auth/platform/logout")
         .bearer(&ghost)
         .send(&app)
         .await;
-    assert_eq!(logout.status, StatusCode::NO_CONTENT);
+    assert_eq!(logout.status, StatusCode::UNAUTHORIZED);
 }
 
 #[tokio::test]
@@ -2171,22 +2229,54 @@ async fn dashboard_mfa_disable_and_recovery_success() {
         .send(&app)
         .await;
     let secret = setup.json()["secret"].as_str().unwrap_or("").to_owned();
+    // ONE captured base for every code in this test: per-call clock reads can straddle a
+    // 30-second step boundary mid-test and collide two "distinct" steps on the anti-replay
+    // marker (see totp_at_abs).
+    let base = common::now_unix();
     let _ = Req::post("/auth/mfa/verify-enable")
         .cookie("access_token", &access)
-        .json(serde_json::json!({ "code": totp_at(&secret, 0) }))
+        .json(serde_json::json!({ "code": common::totp_at_abs(&secret, base) }))
         .send(&app)
         .await;
 
+    // Enabling bumped the token epoch, so the pre-enable token is dead — the account must
+    // re-authenticate through the challenge, which is exactly what a real client does.
+    let stale = Req::post("/auth/mfa/recovery-codes")
+        .cookie("access_token", &access)
+        .json(serde_json::json!({ "code": common::totp_at_abs(&secret, base + 30) }))
+        .send(&app)
+        .await;
+    assert_eq!(stale.status, StatusCode::UNAUTHORIZED);
+
+    let relogin = Req::post("/auth/login")
+        .json(serde_json::json!({
+            "email": "dr@e.com", "password": "password123", "tenantId": TENANT
+        }))
+        .send(&app)
+        .await;
+    let temp = relogin.json()["mfaTempToken"]
+        .as_str()
+        .unwrap_or("")
+        .to_owned();
+    let challenged = Req::post("/auth/mfa/challenge")
+        .json(serde_json::json!({ "mfaTempToken": temp, "code": common::totp_at_abs(&secret, base + 30) }))
+        .send(&app)
+        .await;
+    assert_eq!(challenged.status, StatusCode::OK);
+    let access = challenged.cookie_value("access_token").unwrap_or_default();
+
     let recov = Req::post("/auth/mfa/recovery-codes")
         .cookie("access_token", &access)
-        .json(serde_json::json!({ "code": totp_at(&secret, 30) }))
+        .json(serde_json::json!({ "code": common::totp_at_abs(&secret, base + 60) }))
         .send(&app)
         .await;
     assert_eq!(recov.status, StatusCode::OK);
 
+    // Step base-30: inside the verifier's window and never consumed by the anti-replay
+    // marker (the steps at base, base+30 and base+60 all were).
     let disable = Req::post("/auth/mfa/disable")
         .cookie("access_token", &access)
-        .json(serde_json::json!({ "code": totp_at(&secret, 60) }))
+        .json(serde_json::json!({ "code": common::totp_at_abs(&secret, base - 30) }))
         .send(&app)
         .await;
     assert_eq!(disable.status, StatusCode::NO_CONTENT);

@@ -130,13 +130,19 @@ impl MfaService {
             Some(data.hashed_codes),
         )
         .await?;
-        // Revoke the user's OTHER refresh sessions on the MFA-state change; the current session
-        // (which just performed the change) is expected to continue, so the token epoch is NOT
-        // bumped here. That stronger, sign-out-everywhere invalidation currently has exactly one
-        // trigger — the password-reset flow; `revoke_all` deliberately does not bump either, so
-        // it too leaves already-issued access tokens valid until they expire.
+        // Revoke every refresh session AND advance the token epoch. Every access token issued
+        // before this moment is stamped `mfa_enabled: false`, and the MFA gate refuses only
+        // `mfa_enabled && !mfa_verified` — so without the bump, a stolen access token keeps
+        // clearing every MFA-gated route for its remaining lifetime, at the exact moment the
+        // user enabled a second factor because they suspected that theft. (`revoke_all` kills
+        // the current session too, so the "current session continues" this comment once
+        // promised was never true — only its access token survived, the one artifact the
+        // epoch is able to reach.)
         self.session_store
             .revoke_all(session_kind(ctx), user_id)
+            .await?;
+        self.session_store
+            .bump_epoch(session_kind(ctx), user_id)
             .await?;
 
         self.notify_enabled(&view, user_id, ip, user_agent);
