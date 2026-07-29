@@ -204,12 +204,21 @@ fn validation_details_serialize_the_field_errors() {
 fn envelope_has_the_canonical_shape_and_uses_the_wire_code() {
     // The wire body must be exactly `{ error: { code, message, details } }`, and an
     // internal-only error must surface the remapped public code, never the sentinel.
+    //
+    // `details` is `null` here, not absent: the shared contract declares the key present with
+    // an `object|null` value, and one client library decodes both backends. This assertion used
+    // to omit it while the comment above already said "exactly" — the two disagreed, and the
+    // comment was right.
     let env = AuthError::TokenExpired.to_envelope();
     let json = serde_json::to_value(&env).unwrap_or_default();
     assert_eq!(
         json,
         serde_json::json!({
-            "error": { "code": "auth.token_invalid", "message": "Invalid token" }
+            "error": {
+                "code": "auth.token_invalid",
+                "message": "Invalid token",
+                "details": null
+            }
         })
     );
     // A details-bearing error includes the structured payload under `error.details`.

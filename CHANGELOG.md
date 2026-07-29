@@ -76,6 +76,13 @@ version bump.
   two sections of the shared contract that decide whether a record written by one
   backend is readable by the other, including the deliberate split where the
   session detail's timestamps are numeric while the refresh session's are ISO-8601.
+- **`credentialFormats` and `errorEnvelope` added too**, which closes the section
+  list: every part of the shared contract is now asserted on both sides.
+  `credentialFormats` is asserted against what the code actually mints rather
+  than against the contract's own prose — the TOTP secret at rest is proven to be
+  AES-GCM over the BASE32 *text* by decrypting it and decoding back to the HMAC
+  key, which is precisely the regression a merge introduced here and which no
+  conformance test could see at the time.
 - **`InMemoryStores::fail_next_cleanup_writes`** — arms a finite number of store
   failures so the paths the library deliberately swallows can be asserted rather
   than assumed.
@@ -99,6 +106,16 @@ version bump.
 
 ### Fixed
 
+- **The error envelope omitted `details` instead of sending `null`.** The shared
+  contract declares the key present with an `object|null` value, which is what
+  nest-auth emits and what the one client library decoding both backends expects
+  — `undefined` is not `null` to it, and a key that is sometimes absent makes
+  every reader handle two shapes for one meaning. The field carried a
+  `skip_serializing_if` and a doc comment asserting the omission was deliberate,
+  while the test next to it said the body "must be exactly
+  `{ error: { code, message, details } }`" and then asserted a body without it.
+  Nothing caught the disagreement because `errorEnvelope` was the one contract
+  section neither implementation asserted.
 - **The in-memory store's grace window was weaker than the Redis one it stands in
   for.** It neither consumed the pointer nor checked the lineage was still alive,
   so a replay could recover repeatedly and a pointer left behind by an earlier

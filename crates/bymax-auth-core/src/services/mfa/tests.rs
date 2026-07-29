@@ -1881,3 +1881,113 @@ fn repository_error_maps_both_variants_to_internal() {
         AuthError::Internal(_)
     ));
 }
+
+/// Read `credentialFormats.{key}` from the shared cross-implementation wire contract.
+///
+/// The file at `conformance/wire-contract.json` is held byte-identical by nest-auth. This section
+/// is the shape of the credentials themselves, so a drift here is not a parse error on the other
+/// side — it is a session that cannot continue, or a TOTP code that never verifies.
+fn credential_format(key: &str) -> String {
+    let path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../conformance/wire-contract.json"
+    );
+    let raw = std::fs::read_to_string(path).unwrap_or_default();
+    let root: serde_json::Value = serde_json::from_str(&raw).unwrap_or(serde_json::Value::Null);
+    let value = root
+        .get("credentialFormats")
+        .and_then(|c| c.get(key))
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default()
+        .to_owned();
+    assert!(
+        !value.is_empty(),
+        "the wire contract declared no `credentialFormats.{key}` — it did not load"
+    );
+    value
+}
+
+#[test]
+fn the_refresh_token_matches_the_shared_credential_format() {
+    // 64 lowercase hex characters, from 32 CSPRNG bytes. The contract is asserted against a
+    // token this library actually mints, not against the constant that produces it: a shape
+    // read back through its own generator would round-trip any change to either.
+    let declared = credential_format("refreshToken");
+    assert!(declared.contains("64 lowercase hex"));
+    assert!(declared.contains("32 CSPRNG bytes"));
+
+    for _ in 0..32 {
+        let token = bymax_auth_jwt::RawRefreshToken::generate();
+        let raw = token.expose_secret();
+        assert_eq!(raw.len(), 64, "refresh token is not 64 characters: {raw}");
+        assert!(
+            raw.chars()
+                .all(|c| c.is_ascii_digit() || ('a'..='f').contains(&c)),
+            "refresh token is not lowercase hex: {raw}"
+        );
+    }
+
+    // The legacy UUID shape is documented as *accepted*, never minted — the allowance only makes
+    // sense while tokens issued before the convergence are still inside their lifetime.
+    assert!(credential_format("refreshTokenLegacy").contains("uuid-v4"));
+}
+
+#[tokio::test]
+async fn the_stored_totp_secret_and_recovery_digests_match_the_shared_credential_format() {
+    // The at-rest TOTP secret is AES-GCM over the BASE32 **text**, not over the raw bytes.
+    // Decrypting one form as the other hands the wrong key to HMAC-SHA-1 and every code the
+    // user's authenticator produces is rejected — which is exactly the regression a merge
+    // introduced here once, by calling the raw-bytes decrypt on a base32-text record.
+    let declared = credential_format("totpSecretAtRest");
+    assert!(declared.contains("aes-256-gcm"));
+    assert!(declared.contains("BASE32"));
+
+    let users = Arc::new(InMemoryUserRepository::new());
+    let service = service_over(Arc::new(InMemoryStores::new()), users);
+    let (raw_secret, plain_codes, data) = service
+        .generate_setup_material()
+        .unwrap_or_else(|_| unreachable!("setup material generation cannot fail"));
+
+    // Decrypting the stored form yields the Base32 TEXT, and decoding that text yields the very
+    // bytes the HMAC uses as its key.
+    let decrypted = service
+        .decrypt(&data.encrypted_secret)
+        .unwrap_or_else(|| unreachable!("the record was just encrypted under this key"));
+    let text = String::from_utf8(decrypted).unwrap_or_default();
+    assert!(
+        text.chars()
+            .all(|c| c.is_ascii_uppercase() || ('2'..='7').contains(&c)),
+        "the stored secret is not Base32 text: {text}"
+    );
+    assert_eq!(
+        service.decrypt_secret(&data.encrypted_secret).as_deref(),
+        Some(raw_secret.as_slice()),
+        "the at-rest form does not decode back to the HMAC key"
+    );
+
+    // Recovery codes are stored as a hex HMAC-SHA-256 under the derived identifier key — 64
+    // lowercase hex characters, and never the code itself.
+    let declared = credential_format("recoveryCodeDigest");
+    assert!(declared.contains("hex hmac-sha256"));
+    for (digest, code) in data.hashed_codes.iter().zip(plain_codes.iter()) {
+        assert_eq!(digest.len(), 64, "recovery digest is not 64 hex characters");
+        assert!(
+            digest
+                .chars()
+                .all(|c| c.is_ascii_digit() || ('a'..='f').contains(&c)),
+            "recovery digest is not lowercase hex: {digest}"
+        );
+        assert_ne!(digest, code, "the recovery code was stored in the clear");
+    }
+
+    // The legacy `scrypt:` form is still verified but never newly written, so no digest above
+    // may carry its prefix.
+    assert!(credential_format("recoveryCodeDigestLegacy").contains("scrypt:"));
+    assert!(
+        !data
+            .hashed_codes
+            .iter()
+            .any(|digest| digest.starts_with("scrypt:")),
+        "a recovery digest was written in the legacy form"
+    );
+}
