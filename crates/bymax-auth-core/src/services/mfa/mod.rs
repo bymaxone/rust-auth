@@ -229,7 +229,16 @@ impl MfaService {
     /// while the code it protects is still accepted (which would re-open the replay window). A
     /// fixed literal would be wrong whenever `totp_window` is configured larger.
     fn anti_replay_ttl_seconds(&self) -> u64 {
-        let window = u64::from(self.totp_window);
+        // The CONFIGURED window is not necessarily the one in force: `totp::verify` clamps it
+        // to `MAX_VERIFY_WINDOW` so an oversized value cannot become a CPU-amplification
+        // vector. Sizing the marker from the unclamped value would over-reserve (harmless, but
+        // it makes the marker's TTL and the acceptance span disagree, which is exactly the
+        // kind of drift that later reads as a bug). Startup validation refuses anything above
+        // the clamp, so this only matters for a caller reaching the service directly.
+        let window = u64::from(
+            self.totp_window
+                .min(bymax_auth_crypto::totp::MAX_VERIFY_WINDOW),
+        );
         (2 * window + 1) * TOTP_STEP_SECONDS
     }
 

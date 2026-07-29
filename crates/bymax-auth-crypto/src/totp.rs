@@ -20,7 +20,7 @@ const TOTP_DIGITS: u32 = 6;
 /// larger value is clamped to this, bounding the per-verification work to
 /// `2 * MAX_VERIFY_WINDOW + 1` HOTP computations so a misconfigured (or hostile) window
 /// cannot turn `verify` into a CPU-amplification vector.
-const MAX_VERIFY_WINDOW: u8 = 2;
+pub const MAX_VERIFY_WINDOW: u8 = 2;
 /// HMAC-SHA1 output length in bytes.
 const HMAC_SHA1_LEN: usize = 20;
 /// Upper-case hex alphabet for percent-encoding.

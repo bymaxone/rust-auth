@@ -372,7 +372,15 @@ impl AuthConfig {
         // zero enrols an account with no way back if the authenticator is lost. Every sibling
         // security parameter carries a bound; these two decide whether MFA is worth anything.
         if let Some(mfa) = self.mfa.as_ref() {
-            if mfa.totp_window > 10 {
+            // The ceiling is the drift window the verifier actually applies, so a configured
+            // value always means what it says instead of being silently clamped. Without the
+            // `mfa` feature the verifier is not compiled in, so the constant is restated —
+            // the two are pinned together by a test in `bymax-auth-crypto`.
+            #[cfg(feature = "mfa")]
+            let max_window = u32::from(bymax_auth_crypto::totp::MAX_VERIFY_WINDOW);
+            #[cfg(not(feature = "mfa"))]
+            let max_window = 2u32;
+            if u32::from(mfa.totp_window) > max_window {
                 return Err(ConfigError::TotpWindowRange {
                     got: mfa.totp_window,
                     valid: u16::from(mfa.totp_window) * 2 + 1,
@@ -1017,9 +1025,22 @@ mod tests {
             })
         ));
 
+        // The bound is the drift window the VERIFIER applies, so a configured value always
+        // means what it says. It used to be looser (10) than the verifier's clamp (2), which
+        // made `totp_window: 10` read as ±5 minutes in the config and behave as ±1 minute.
+        let mut over_clamp = valid_config();
+        over_clamp.mfa = Some(MfaConfig {
+            totp_window: 3,
+            ..mfa_with_key(&key)
+        });
+        assert!(matches!(
+            over_clamp.validate(Environment::Test),
+            Err(ConfigError::TotpWindowRange { got: 3, valid: 7 })
+        ));
+
         // The edges are accepted: 0 is a deliberate hardening (no tolerance at all), 10 is the
         // generous ceiling. A bound that refused a legitimate tolerance would be an outage.
-        for window in [0u8, 1, 10] {
+        for window in [0u8, 1, 2] {
             let mut ok = valid_config();
             ok.mfa = Some(MfaConfig {
                 totp_window: window,
@@ -1050,6 +1071,17 @@ mod tests {
             many.validate(Environment::Test),
             Err(ConfigError::RecoveryCodeCountRange { got: 51 })
         ));
+    }
+
+    #[cfg(feature = "mfa")]
+    #[test]
+    fn the_restated_window_ceiling_tracks_the_verifier() {
+        // `validate` restates the ceiling as a literal when the `mfa` feature is off, because
+        // the verifier that owns the constant is not compiled in then. The two must not drift:
+        // a looser config bound than the verifier's clamp means a configured window is
+        // silently reduced, and a tighter one refuses a value the verifier would honour. This
+        // is the pin — the only build that can see both is the one with the feature on.
+        assert_eq!(u32::from(bymax_auth_crypto::totp::MAX_VERIFY_WINDOW), 2);
     }
 
     #[test]

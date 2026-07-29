@@ -1792,13 +1792,22 @@ fn anti_replay_ttl_is_derived_from_the_window_and_scales() {
     assert_eq!(service.anti_replay_ttl_seconds(), max_window_secs_w2);
     assert!(service.anti_replay_ttl_seconds() >= max_window_secs_w2);
 
-    // It scales with the window: a wider window yields a strictly longer TTL, and a zero
-    // window collapses to a single step (the code is accepted at exactly one step).
-    service.totp_window = 4;
-    assert_eq!(service.anti_replay_ttl_seconds(), (2 * 4 + 1) * 30);
-    assert!(service.anti_replay_ttl_seconds() > max_window_secs_w2);
+    // It scales with the window, and a zero window collapses to a single step (the code is
+    // accepted at exactly one step).
+    service.totp_window = 1;
+    assert_eq!(service.anti_replay_ttl_seconds(), 3 * 30);
+    assert!(service.anti_replay_ttl_seconds() < max_window_secs_w2);
     service.totp_window = 0;
     assert_eq!(service.anti_replay_ttl_seconds(), 30);
+
+    // A window past the verifier's clamp sizes the marker to the window ACTUALLY in force,
+    // not the configured one. `verify` clamps to MAX_VERIFY_WINDOW so an oversized value
+    // cannot become a CPU-amplification vector; deriving the TTL from the unclamped value
+    // would leave the marker's lifetime and the acceptance span disagreeing. Startup
+    // validation refuses anything above the clamp, so this only bites a caller reaching the
+    // service directly.
+    service.totp_window = 40;
+    assert_eq!(service.anti_replay_ttl_seconds(), max_window_secs_w2);
 }
 
 #[tokio::test]
