@@ -581,7 +581,7 @@ impl bymax_auth_core::traits::MfaStore for FailingStores {
     ) -> Result<Option<String>, bymax_auth_types::AuthError> {
         self.inner.get_temp(jti_hash).await
     }
-    async fn del_temp(&self, jti_hash: &str) -> Result<(), bymax_auth_types::AuthError> {
+    async fn del_temp(&self, jti_hash: &str) -> Result<bool, bymax_auth_types::AuthError> {
         self.inner.del_temp(jti_hash).await
     }
     async fn mark_totp_used(

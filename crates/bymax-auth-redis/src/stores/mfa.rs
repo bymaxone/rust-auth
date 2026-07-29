@@ -90,12 +90,14 @@ impl RedisStores {
         Ok(conn.get(&key).await?)
     }
 
-    /// `DEL mfa:{jti_hash}` — consume the temp-token marker (idempotent).
-    async fn del_temp_inner(&self, jti_hash: &str) -> Result<(), RedisStoreError> {
+    /// `DEL mfa:{jti_hash}` — consume the temp-token marker, returning whether this call was
+    /// the one that removed it. `DEL` answers with the number of keys it deleted, which is
+    /// exactly the exactly-once signal the recovery-code path gates on.
+    async fn del_temp_inner(&self, jti_hash: &str) -> Result<bool, RedisStoreError> {
         let key = self.keys().key(Prefix::Mfa, jti_hash);
         let mut conn = self.connection().await?;
-        conn.del::<_, ()>(&key).await?;
-        Ok(())
+        let removed: i64 = conn.del(&key).await?;
+        Ok(removed > 0)
     }
 
     /// `SET tu:{replay_id} "1" NX EX ttl` — set the standalone anti-replay marker, returning
@@ -178,7 +180,7 @@ impl MfaStore for RedisStores {
         self.get_temp_inner(jti_hash).await.map_err(AuthError::from)
     }
 
-    async fn del_temp(&self, jti_hash: &str) -> Result<(), AuthError> {
+    async fn del_temp(&self, jti_hash: &str) -> Result<bool, AuthError> {
         self.del_temp_inner(jti_hash).await.map_err(AuthError::from)
     }
 

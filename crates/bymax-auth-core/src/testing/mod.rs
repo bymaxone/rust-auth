@@ -815,9 +815,10 @@ impl crate::traits::MfaStore for InMemoryStores {
         Ok(lock(&self.mfa_temp).get(jti_hash).cloned())
     }
 
-    async fn del_temp(&self, jti_hash: &str) -> Result<(), AuthError> {
-        lock(&self.mfa_temp).remove(jti_hash);
-        Ok(())
+    async fn del_temp(&self, jti_hash: &str) -> Result<bool, AuthError> {
+        // `HashMap::remove` answers with the previous value — present exactly for the caller
+        // that removed it, which is the same exactly-once signal Redis's `DEL` count gives.
+        Ok(lock(&self.mfa_temp).remove(jti_hash).is_some())
     }
 
     async fn mark_totp_used(&self, replay_id: &str, _ttl: u64) -> Result<bool, AuthError> {

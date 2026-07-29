@@ -638,8 +638,18 @@ pub trait MfaStore: Send + Sync {
     /// mistyped code leaves the token alive for a retry (§7.3.5). `None` when absent/expired.
     async fn get_temp(&self, jti_hash: &str) -> Result<Option<String>, AuthError>;
 
-    /// Delete the MFA temp-token marker at `mfa:{jti_hash}`. Idempotent.
-    async fn del_temp(&self, jti_hash: &str) -> Result<(), AuthError>;
+    /// Delete the MFA temp-token marker at `mfa:{jti_hash}`, reporting whether **this** call
+    /// was the one that removed it.
+    ///
+    /// The boolean is what makes the recovery-code path single-use. That path has no `tu:`
+    /// marker to fuse against (unlike TOTP, see [`MfaStore::challenge_consume`]), so it
+    /// consumes the temp token standalone — and when the delete reported nothing, two
+    /// concurrent challenges carrying the same temp token and the same recovery code both saw
+    /// the marker, both "consumed" it, and both issued a full session. Gating success on the
+    /// deletion gives that path the same exactly-once property the fused TOTP step has.
+    ///
+    /// Idempotent: a second call for the same `jti_hash` returns `false` rather than erroring.
+    async fn del_temp(&self, jti_hash: &str) -> Result<bool, AuthError>;
 
     /// Set the standalone anti-replay marker `tu:{replay_id} = "1"` with `NX EX ttl`.
     /// Returns `true` when the marker was newly created (the code had not been seen) and

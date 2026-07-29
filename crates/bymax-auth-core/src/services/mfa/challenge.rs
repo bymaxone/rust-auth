@@ -106,8 +106,14 @@ impl MfaService {
             match self.accept_recovery_code(&user, code) {
                 Some(index) => {
                     // The recovery-code path carries no `tu:` marker, so the temp token is
-                    // consumed standalone now that the code is confirmed valid.
-                    self.tokens.consume_mfa_temp_token(&jti).await?;
+                    // consumed standalone now that the code is confirmed valid — and the
+                    // consume must WIN. Two concurrent challenges on one temp token both
+                    // observe the marker and both delete it; without gating on which delete
+                    // actually removed it, both issued a full session. The fused TOTP step
+                    // gets this by construction; this is the recovery path's equivalent.
+                    if !self.tokens.consume_mfa_temp_token(&jti).await? {
+                        return Err(AuthError::MfaTempTokenInvalid);
+                    }
                     Some(index)
                 }
                 None => return self.reject_code("challenge", &user_id, &bf_id).await,

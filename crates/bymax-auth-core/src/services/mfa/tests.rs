@@ -1360,9 +1360,52 @@ async fn platform_challenge_with_an_undecryptable_secret_is_an_opaque_failure() 
 /// returns a fixed value, so the lost-`SET NX`-race and record-corruption branches of `setup`
 /// — unreachable with a coherent real store — are driven deterministically. The remaining
 /// methods return benign defaults (they are not exercised by these tests).
+/// An MFA store that delegates everything to a real in-memory one **except** `del_temp`,
+/// which always reports that someone else won the consume.
+///
+/// This is the interleaving the in-memory repository cannot produce on its own: its
+/// recovery-code splice serialises two concurrent challenges, so the loser fails on the code
+/// rather than on the token. Forcing the lost consume is what exercises the gate that keeps a
+/// single recovery code and a single temp token from minting two sessions.
+struct LosingConsumeMfaStore {
+    inner: Arc<InMemoryStores>,
+}
+
+#[async_trait]
+impl MfaStore for LosingConsumeMfaStore {
+    async fn put_setup_nx(&self, k: &str, v: &str, ttl: u64) -> Result<bool, AuthError> {
+        self.inner.put_setup_nx(k, v, ttl).await
+    }
+    async fn get_setup(&self, k: &str) -> Result<Option<String>, AuthError> {
+        self.inner.get_setup(k).await
+    }
+    async fn take_setup(&self, k: &str) -> Result<Option<String>, AuthError> {
+        self.inner.take_setup(k).await
+    }
+    async fn put_temp(&self, j: &str, u: &str, ttl: u64) -> Result<(), AuthError> {
+        self.inner.put_temp(j, u, ttl).await
+    }
+    async fn get_temp(&self, j: &str) -> Result<Option<String>, AuthError> {
+        self.inner.get_temp(j).await
+    }
+    async fn del_temp(&self, _j: &str) -> Result<bool, AuthError> {
+        Ok(false)
+    }
+    async fn mark_totp_used(&self, r: &str, ttl: u64) -> Result<bool, AuthError> {
+        self.inner.mark_totp_used(r, ttl).await
+    }
+    async fn challenge_consume(&self, r: &str, j: &str, ttl: u64) -> Result<bool, AuthError> {
+        self.inner.challenge_consume(r, j, ttl).await
+    }
+}
+
 struct ScriptedMfaStore {
     get_setup: Mutex<VecDeque<Option<String>>>,
     put_nx: bool,
+    /// What `del_temp` reports. `false` stands in for losing the consume to a concurrent
+    /// challenge — the interleaving the in-memory repository cannot produce, because its
+    /// recovery-code splice serialises the two callers.
+    del_temp_wins: bool,
 }
 
 #[async_trait]
@@ -1388,8 +1431,8 @@ impl MfaStore for ScriptedMfaStore {
     async fn get_temp(&self, _j: &str) -> Result<Option<String>, AuthError> {
         Ok(None)
     }
-    async fn del_temp(&self, _j: &str) -> Result<(), AuthError> {
-        Ok(())
+    async fn del_temp(&self, _j: &str) -> Result<bool, AuthError> {
+        Ok(self.del_temp_wins)
     }
     async fn mark_totp_used(&self, _r: &str, _ttl: u64) -> Result<bool, AuthError> {
         Ok(true)
@@ -1517,6 +1560,7 @@ async fn setup_returns_the_winner_record_after_a_lost_nx_race() {
             Some(winner_record("WINNER-0000-CODE")),
         ])),
         put_nx: false,
+        del_temp_wins: true,
     });
     let svc = service_over(store, users);
     let result = svc.setup(&uid, MfaContext::Dashboard).await;
@@ -1533,6 +1577,7 @@ async fn setup_errors_when_the_record_vanishes_after_a_lost_race() {
     let store = Arc::new(ScriptedMfaStore {
         get_setup: Mutex::new(VecDeque::from([None, None])),
         put_nx: false,
+        del_temp_wins: true,
     });
     let svc = service_over(store, users);
     assert!(matches!(
@@ -1553,6 +1598,7 @@ async fn setup_fast_path_rejects_a_corrupt_or_undecryptable_record() {
     let garbage = Arc::new(ScriptedMfaStore {
         get_setup: Mutex::new(VecDeque::from([Some("not json".to_owned())])),
         put_nx: false,
+        del_temp_wins: true,
     });
     assert!(matches!(
         service_over(garbage, users.clone())
@@ -1570,6 +1616,7 @@ async fn setup_fast_path_rejects_a_corrupt_or_undecryptable_record() {
     let undecryptable = Arc::new(ScriptedMfaStore {
         get_setup: Mutex::new(VecDeque::from([Some(bad_cipher)])),
         put_nx: false,
+        del_temp_wins: true,
     });
     assert!(matches!(
         service_over(undecryptable, users.clone())
@@ -1584,6 +1631,7 @@ async fn setup_fast_path_rejects_a_corrupt_or_undecryptable_record() {
             "bad".to_owned(),
         ))])),
         put_nx: false,
+        del_temp_wins: true,
     });
     assert!(matches!(
         service_over(codes_undecryptable, users.clone())
@@ -1600,6 +1648,7 @@ async fn setup_fast_path_rejects_a_corrupt_or_undecryptable_record() {
             bad_codes_json,
         ))])),
         put_nx: false,
+        del_temp_wins: true,
     });
     assert!(matches!(
         service_over(codes_undecodable, users)
@@ -1616,6 +1665,7 @@ async fn scripted_store_default_methods_are_inert() {
     let store = ScriptedMfaStore {
         get_setup: Mutex::new(VecDeque::new()),
         put_nx: true,
+        del_temp_wins: true,
     };
     let store: &dyn MfaStore = &store;
     assert!(store.put_temp("j", "u", 1).await.is_ok());
@@ -1636,6 +1686,7 @@ async fn enable_fails_when_the_completion_gate_is_lost() {
     let store = Arc::new(ScriptedMfaStore {
         get_setup: Mutex::new(VecDeque::from([Some(winner_record("X"))])),
         put_nx: false,
+        del_temp_wins: true,
     });
     let svc = service_over(store, users);
     // `winner_record` encrypts the raw secret `[1u8; 20]`, so a code for those bytes verifies.
@@ -1783,6 +1834,7 @@ fn anti_replay_ttl_is_derived_from_the_window_and_scales() {
     let store: Arc<dyn MfaStore> = Arc::new(ScriptedMfaStore {
         get_setup: Mutex::new(VecDeque::new()),
         put_nx: true,
+        del_temp_wins: true,
     });
     let mut service = service_over(store.clone(), users.clone());
 
@@ -2312,5 +2364,87 @@ async fn an_mfa_state_change_kills_the_outstanding_access_tokens() {
             .verify_access(&post_enable.access_token)
             .await
             .is_err()
+    );
+}
+
+#[tokio::test]
+async fn a_recovery_challenge_that_loses_the_temp_token_consume_issues_no_session() {
+    // The gate that keeps ONE recovery code and ONE temp token from minting TWO sessions. The
+    // recovery path has no `tu:` marker to fuse against (unlike TOTP), so it consumes the temp
+    // token standalone — and when that consume reported nothing, both concurrent challenges
+    // "succeeded". The losing store forces the interleaving directly: the in-memory repository
+    // serialises the recovery-code splice, so a spawned race resolves on the code instead and
+    // would pass with or without this gate.
+    let users = Arc::new(InMemoryUserRepository::new());
+    let inner = Arc::new(InMemoryStores::new());
+    let losing: Arc<dyn MfaStore> = Arc::new(LosingConsumeMfaStore {
+        inner: inner.clone(),
+    });
+
+    let created = users
+        .create(bymax_auth_types::CreateUserData {
+            email: "lose@example.com".to_owned(),
+            name: "L".to_owned(),
+            password_hash: Some("$scrypt$x".to_owned()),
+            role: Some("USER".to_owned()),
+            status: Some("ACTIVE".to_owned()),
+            tenant_id: TENANT.to_owned(),
+            email_verified: Some(true),
+        })
+        .await;
+    let Ok(user) = created else { return };
+
+    // Enrol with a known recovery code, digested exactly as the service digests one.
+    let mut deps = service_deps(losing.clone(), users.clone());
+    // The token manager needs MFA support over the SAME losing store, so the temp token it
+    // issues is readable and its consume is the one that loses.
+    deps.tokens = Arc::new(
+        TokenManagerService::new(
+            HsKey::from_bytes(b"0123456789abcdef0123456789abcdef"),
+            Vec::new(),
+            inner.clone(),
+            Duration::from_secs(900),
+            7,
+            Duration::from_secs(30),
+            0,
+        )
+        .with_mfa_support(crate::services::token_manager::MfaTokenSupport::new(
+            losing.clone(),
+        )),
+    );
+    let service = MfaService::new(deps);
+
+    let plain = "AAAA-BBBB-CCCC-DDDD-EEEE-FFFF";
+    let digest = crate::services::to_hex(&bymax_auth_crypto::mac::hmac_sha256(
+        &[9u8; 64],
+        plain.as_bytes(),
+    ));
+    let material = service.generate_setup_material();
+    let Ok((_, _, data)) = material else { return };
+    assert!(
+        users
+            .update_mfa(
+                &user.id,
+                bymax_auth_types::UpdateMfaData {
+                    mfa_enabled: true,
+                    mfa_secret: Some(data.encrypted_secret),
+                    mfa_recovery_codes: Some(vec![digest]),
+                },
+            )
+            .await
+            .is_ok()
+    );
+
+    let issued = service
+        .tokens
+        .issue_mfa_temp_token(&user.id, MfaContext::Dashboard)
+        .await;
+    let Ok(temp) = issued else { return };
+
+    // The code is valid and the token is present — only the consume loses. No session.
+    let outcome = service.challenge(&temp, plain, "1.2.3.4", "ua").await;
+    assert!(
+        matches!(outcome, Err(AuthError::MfaTempTokenInvalid)),
+        "a lost consume must issue no session, got {outcome:?}"
     );
 }

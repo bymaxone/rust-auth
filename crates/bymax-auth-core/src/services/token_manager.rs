@@ -724,18 +724,23 @@ impl TokenManagerService {
         })
     }
 
-    /// Consume an MFA temp token by deleting its `mfa:{sha256(jti)}` marker. Idempotent, and
-    /// called only after the submitted code is confirmed valid (§7.5.3). For the TOTP path the
-    /// consume is fused with the anti-replay mark in a single atomic step
-    /// ([`crate::traits::MfaStore::challenge_consume`]); this standalone form serves the
-    /// recovery-code path, whose code carries no `tu:` marker.
+    /// Consume an MFA temp token by deleting its `mfa:{sha256(jti)}` marker, reporting whether
+    /// **this** call was the one that removed it. Called only after the submitted code is
+    /// confirmed valid (§7.5.3). For the TOTP path the consume is fused with the anti-replay
+    /// mark in a single atomic step ([`crate::traits::MfaStore::challenge_consume`]); this
+    /// standalone form serves the recovery-code path, whose code carries no `tu:` marker.
+    ///
+    /// The caller **must** gate success on the returned flag. Without it, two concurrent
+    /// challenges carrying the same temp token and the same recovery code both observed the
+    /// marker, both deleted it, and both issued a full session — the exactly-once property the
+    /// fused TOTP step has by construction.
     ///
     /// # Errors
     ///
     /// Returns [`AuthError::MfaTempTokenInvalid`] when no single-use support is wired, or a
     /// store [`AuthError`] on a backend failure.
     #[cfg(feature = "mfa")]
-    pub async fn consume_mfa_temp_token(&self, jti: &str) -> Result<(), AuthError> {
+    pub async fn consume_mfa_temp_token(&self, jti: &str) -> Result<bool, AuthError> {
         let Some(support) = &self.mfa else {
             return Err(AuthError::MfaTempTokenInvalid);
         };
@@ -1526,6 +1531,41 @@ mod tests {
         assert!(matches!(
             svc.consume_mfa_temp_token("some-jti").await,
             Err(AuthError::MfaTempTokenInvalid)
+        ));
+    }
+
+    #[cfg(feature = "mfa")]
+    #[tokio::test]
+    async fn consuming_a_temp_token_reports_the_winner_exactly_once() {
+        // The recovery-code challenge path has no `tu:` marker to fuse against, so it consumes
+        // the temp token standalone and gates success on this flag. The flag is the whole
+        // guarantee: when the consume reported nothing, two challenges carrying the same temp
+        // token both observed the marker, both deleted it, and both issued a full session —
+        // which is a recovery code, whose entire security model is single use, minting two.
+        //
+        // The property is exactly-once, so it is pinned here rather than through a concurrency
+        // test: the in-memory repository serialises the recovery-code splice, so a spawned race
+        // passes with or without the gate and would prove nothing.
+        let store = Arc::new(InMemoryStores::new());
+        let svc = service_with_mfa(store);
+
+        let issued = svc.issue_mfa_temp_token("u1", MfaContext::Dashboard).await;
+        let Ok(token) = issued else { return };
+        let verified = svc.verify_mfa_temp_token(&token).await;
+        let Ok(claims) = verified else { return };
+
+        // The first consume wins; every later one loses, including for a jti that never existed.
+        assert!(matches!(
+            svc.consume_mfa_temp_token(&claims.jti).await,
+            Ok(true)
+        ));
+        assert!(matches!(
+            svc.consume_mfa_temp_token(&claims.jti).await,
+            Ok(false)
+        ));
+        assert!(matches!(
+            svc.consume_mfa_temp_token("never-issued").await,
+            Ok(false)
         ));
     }
 
