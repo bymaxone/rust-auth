@@ -86,6 +86,17 @@ impl AuthEngine {
             .await
             .map_err(map_repository_error)?
             .ok_or(AuthError::TokenInvalid)?;
+        // The inviter must belong to the tenant they are inviting into. Without this the only
+        // authorization is the role-hierarchy check below, which says nothing about *where*
+        // the role is held: an ADMIN of tenant A could mint an invitation that provisions an
+        // ADMIN account inside tenant B. The shipped axum adapter sources `tenant_id` from the
+        // caller's own claims, which hides it — but this is a library whose core API hosts
+        // call directly, and the authorization contract belongs here rather than in one
+        // caller. It is also what makes `invite` consistent with `accept_invitation`, which
+        // already re-validates the role as anti-tamper.
+        if inviter.tenant_id != tenant_id {
+            return Err(AuthError::InsufficientRole);
+        }
         if !has_role(&inviter.role, role, hierarchy) {
             return Err(AuthError::InsufficientRole);
         }
@@ -391,6 +402,32 @@ mod tests {
                 .await,
             Err(AuthError::InvalidInvitationToken)
         ));
+    }
+
+    #[tokio::test]
+    async fn invite_refuses_a_tenant_the_inviter_does_not_belong_to() {
+        // The role-hierarchy check says WHAT role the inviter holds and nothing about WHERE
+        // they hold it, so on its own an ADMIN of tenant t1 could mint an invitation that
+        // provisions an ADMIN account inside t2 — a tenant they have no relationship with.
+        // The shipped axum adapter sources `tenant_id` from the caller's own claims, which
+        // hides it, but this is a library whose core API hosts call directly.
+        let Some(s) = setup(invite_config()) else { return };
+        let admin = seed_admin(&s.users, "t1admin@example.com", "ADMIN").await;
+
+        // Same inviter, same role, only the tenant differs: t1 succeeds, t2 is refused.
+        assert!(matches!(
+            s.engine
+                .invite(&admin, "victim@example.com", "ADMIN", "t2", None)
+                .await,
+            Err(AuthError::InsufficientRole)
+        ));
+        assert!(
+            s.engine
+                .invite(&admin, "ok@example.com", "ADMIN", "t1", None)
+                .await
+                .is_ok(),
+            "the inviter's own tenant must still work"
+        );
     }
 
     #[tokio::test]
