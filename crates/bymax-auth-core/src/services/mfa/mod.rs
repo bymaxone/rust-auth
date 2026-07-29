@@ -115,6 +115,10 @@ struct MfaUserView {
     mfa_enabled: bool,
     mfa_secret: Option<String>,
     dashboard_user: Option<SafeAuthUser>,
+    /// The account's stored password hash, or `None` for an account provisioned purely
+    /// through OAuth. Enrolment re-authenticates against it; an account without one has
+    /// nothing to re-prove here.
+    password_hash: Option<String>,
 }
 
 /// The MFA lifecycle service. Constructed by the engine builder only when `config.mfa` is
@@ -128,6 +132,7 @@ pub struct MfaService {
     sessions: Arc<SessionService>,
     session_store: Arc<dyn SessionStore>,
     brute_force: Arc<BruteForceService>,
+    passwords: Arc<crate::services::password::PasswordService>,
     email: Arc<dyn EmailProvider>,
     hooks: Arc<dyn AuthHooks>,
     /// AES-256-GCM key for the TOTP secret and the plaintext-codes record.
@@ -161,6 +166,7 @@ pub(crate) struct MfaServiceDeps {
     pub(crate) sessions: Arc<SessionService>,
     pub(crate) session_store: Arc<dyn SessionStore>,
     pub(crate) brute_force: Arc<BruteForceService>,
+    pub(crate) passwords: Arc<crate::services::password::PasswordService>,
     pub(crate) email: Arc<dyn EmailProvider>,
     pub(crate) hooks: Arc<dyn AuthHooks>,
     pub(crate) encryption_key: Zeroizing<[u8; 32]>,
@@ -187,6 +193,7 @@ impl MfaService {
             sessions: deps.sessions,
             session_store: deps.session_store,
             brute_force: deps.brute_force,
+            passwords: deps.passwords,
             email: deps.email,
             hooks: deps.hooks,
             encryption_key: deps.encryption_key,
@@ -198,6 +205,35 @@ impl MfaService {
             recovery_code_count: deps.recovery_code_count,
             sessions_enabled: deps.sessions_enabled,
             blocked_statuses: deps.blocked_statuses,
+        }
+    }
+
+    /// Require the caller to re-prove the account password before a factor is changed.
+    ///
+    /// An account provisioned purely through OAuth has no local password, so there is nothing
+    /// to re-authenticate against and refusing it would make MFA unreachable for those users
+    /// — their credential belongs to the provider, which this engine cannot re-verify inline.
+    ///
+    /// # Errors
+    ///
+    /// [`AuthError::InvalidCredentials`] when the account has a password and the submitted one
+    /// is absent or wrong. Deliberately the same error a failed login returns: an attacker
+    /// holding a stolen token learns nothing from it beyond what they already knew.
+    async fn assert_reauthenticated(
+        &self,
+        password_hash: Option<&str>,
+        password: Option<&str>,
+    ) -> Result<(), AuthError> {
+        let Some(hash) = password_hash else {
+            return Ok(());
+        };
+        // A missing password still pays the KDF, so "no password sent" and "wrong password"
+        // take the same time — otherwise the response separates them for free.
+        let outcome = self.passwords.verify(password.unwrap_or(""), hash).await?;
+        if outcome.matched {
+            Ok(())
+        } else {
+            Err(AuthError::InvalidCredentials)
         }
     }
 
@@ -415,6 +451,7 @@ impl MfaService {
                     email: user.email.clone(),
                     mfa_enabled: user.mfa_enabled,
                     mfa_secret: user.mfa_secret.clone(),
+                    password_hash: user.password_hash.clone(),
                     dashboard_user: Some(SafeAuthUser::from(user)),
                 })
             }
@@ -432,6 +469,7 @@ impl MfaService {
                     email: admin.email,
                     mfa_enabled: admin.mfa_enabled,
                     mfa_secret: admin.mfa_secret,
+                    password_hash: Some(admin.password_hash),
                     dashboard_user: None,
                 })
             }

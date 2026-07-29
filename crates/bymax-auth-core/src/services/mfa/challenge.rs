@@ -228,8 +228,14 @@ impl MfaService {
             {
                 Some(index) => {
                     // The recovery-code path carries no `tu:` marker, so the temp token is
-                    // consumed standalone now that the code is confirmed valid.
-                    self.tokens.consume_mfa_temp_token(&jti).await?;
+                    // consumed standalone now that the code is confirmed valid — and the
+                    // consume must WIN, exactly as on the dashboard plane. Two concurrent
+                    // challenges on one temp token both observe the marker and both delete
+                    // it; without gating on which delete actually removed it, both issue a
+                    // full session from one single-use recovery code.
+                    if !self.tokens.consume_mfa_temp_token(&jti).await? {
+                        return Err(AuthError::MfaTempTokenInvalid);
+                    }
                     Some(index)
                 }
                 None => {

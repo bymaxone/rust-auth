@@ -302,7 +302,9 @@ async fn platform_mfa_challenge_exchange_issues_a_full_session_against_redis() {
     // exchange it for a full platform session with a valid TOTP code — the login → challenge →
     // full-token exchange, end to end against Redis.
     let base = now_secs();
-    let setup_result = mfa.setup(&id, MfaContext::Platform).await;
+    // Enrolment re-authenticates: this admin has a password, so it must be re-proved
+    // before a factor is minted.
+    let setup_result = mfa.setup(&id, MfaContext::Platform, Some(PASSWORD)).await;
     assert!(
         setup_result.is_ok(),
         "platform MFA setup must succeed: {setup_result:?}"

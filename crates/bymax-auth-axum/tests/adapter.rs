@@ -787,6 +787,7 @@ async fn mfa_setup_verify_enable_and_challenge_error_arms() {
     // Nest's `POST` default.
     let setup = Req::post("/auth/mfa/setup")
         .cookie("access_token", &access)
+        .json(serde_json::json!({ "password": "password123" }))
         .send(&app)
         .await;
     assert_eq!(setup.status, StatusCode::CREATED);
@@ -951,6 +952,7 @@ async fn platform_mfa_setup_requires_platform_auth() {
     let access = platform_access(&login);
     let setup_ok = Req::post("/auth/platform/mfa/setup")
         .bearer(&access)
+        .json(serde_json::json!({ "password": "adminpass123" }))
         .send(&app)
         .await;
     assert_eq!(setup_ok.status, StatusCode::CREATED);
@@ -1291,6 +1293,7 @@ async fn platform_mfa_full_lifecycle() {
     // Enrolment answers 201 (Nest's `POST` default, since `MfaController.setup` sets no code).
     let setup = Req::post("/auth/platform/mfa/setup")
         .bearer(&access)
+        .json(serde_json::json!({ "password": "adminpass123" }))
         .send(&app)
         .await;
     assert_eq!(setup.status, StatusCode::CREATED);
@@ -1383,6 +1386,7 @@ async fn mfa_dashboard_challenge_success_issues_a_session() {
     let access = reg.cookie_value("access_token").unwrap_or_default();
     let setup = Req::post("/auth/mfa/setup")
         .cookie("access_token", &access)
+        .json(serde_json::json!({ "password": "password123" }))
         .send(&app)
         .await;
     let secret = setup.json()["secret"].as_str().unwrap_or("").to_owned();
@@ -1445,6 +1449,7 @@ async fn mfa_challenge_falls_back_to_the_oauth_temp_cookie_and_clears_it() {
     let access = login0.cookie_value("access_token").unwrap_or_default();
     let setup = Req::post("/auth/mfa/setup")
         .cookie("access_token", &access)
+        .json(serde_json::json!({ "password": "password123" }))
         .send(&app)
         .await;
     let secret = setup.json()["secret"].as_str().unwrap_or("").to_owned();
@@ -1541,6 +1546,7 @@ async fn mfa_challenge_temp_token_sourcing_precedence_and_clearing_policy() {
     let access = reg.cookie_value("access_token").unwrap_or_default();
     let setup = Req::post("/auth/mfa/setup")
         .cookie("access_token", &access)
+        .json(serde_json::json!({ "password": "password123" }))
         .send(&app)
         .await;
     let secret = setup.json()["secret"].as_str().unwrap_or("").to_owned();
@@ -1591,6 +1597,7 @@ async fn mfa_challenge_body_token_wins_over_a_stale_cookie() {
     let access = reg.cookie_value("access_token").unwrap_or_default();
     let setup = Req::post("/auth/mfa/setup")
         .cookie("access_token", &access)
+        .json(serde_json::json!({ "password": "password123" }))
         .send(&app)
         .await;
     let secret = setup.json()["secret"].as_str().unwrap_or("").to_owned();
@@ -1890,6 +1897,7 @@ async fn platform_login_mfa_challenge_success() {
     let access = platform_access(&login0);
     let setup = Req::post("/auth/platform/mfa/setup")
         .bearer(&access)
+        .json(serde_json::json!({ "password": "adminpass123" }))
         .send(&app)
         .await;
     let secret = setup.json()["secret"].as_str().unwrap_or("").to_owned();
@@ -2073,6 +2081,7 @@ async fn mfa_setup_error_arm_when_already_enabled() {
     let access = reg.cookie_value("access_token").unwrap_or_default();
     let setup = Req::post("/auth/mfa/setup")
         .cookie("access_token", &access)
+        .json(serde_json::json!({ "password": "password123" }))
         .send(&app)
         .await;
     let secret = setup.json()["secret"].as_str().unwrap_or("").to_owned();
@@ -2085,6 +2094,7 @@ async fn mfa_setup_error_arm_when_already_enabled() {
     // re-enrolment policy, so assert only that it is no longer the 201 success.
     let again = Req::post("/auth/mfa/setup")
         .cookie("access_token", &access)
+        .json(serde_json::json!({ "password": "password123" }))
         .send(&app)
         .await;
     assert_ne!(again.status, StatusCode::CREATED);
@@ -2109,6 +2119,7 @@ async fn mfa_verify_enable_error_arm_with_a_wrong_code() {
     let access = reg.cookie_value("access_token").unwrap_or_default();
     let _ = Req::post("/auth/mfa/setup")
         .cookie("access_token", &access)
+        .json(serde_json::json!({ "password": "password123" }))
         .send(&app)
         .await;
     let resp = Req::post("/auth/mfa/verify-enable")
@@ -2226,6 +2237,7 @@ async fn dashboard_mfa_disable_and_recovery_success() {
     let access = reg.cookie_value("access_token").unwrap_or_default();
     let setup = Req::post("/auth/mfa/setup")
         .cookie("access_token", &access)
+        .json(serde_json::json!({ "password": "password123" }))
         .send(&app)
         .await;
     let secret = setup.json()["secret"].as_str().unwrap_or("").to_owned();
@@ -2380,6 +2392,7 @@ async fn mfa_and_platform_challenge_context_mismatch_arms() {
     let access = platform_access(&login0);
     let setup = Req::post("/auth/platform/mfa/setup")
         .bearer(&access)
+        .json(serde_json::json!({ "password": "adminpass123" }))
         .send(&app)
         .await;
     let secret = setup.json()["secret"].as_str().unwrap_or("").to_owned();

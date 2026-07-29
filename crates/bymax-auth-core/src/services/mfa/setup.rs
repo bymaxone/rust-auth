@@ -20,11 +20,28 @@ impl MfaService {
     /// Returns [`AuthError::MfaNotEnabled`] for a platform context with no platform repository
     /// or a missing account, [`AuthError::MfaAlreadyEnabled`] when MFA is already on, or an
     /// internal/store [`AuthError`].
-    pub async fn setup(&self, user_id: &str, ctx: MfaContext) -> Result<MfaSetupResult, AuthError> {
+    pub async fn setup(
+        &self,
+        user_id: &str,
+        ctx: MfaContext,
+        password: Option<&str>,
+    ) -> Result<MfaSetupResult, AuthError> {
         let view = self.fetch_user_mfa(user_id, ctx).await?;
         if view.mfa_enabled {
             return Err(AuthError::MfaAlreadyEnabled);
         }
+
+        // Re-authenticate before minting a factor. Enabling MFA changes how the account
+        // authenticates, and an access token alone is not proof of who is asking: a token
+        // lifted by XSS or from a shared machine could otherwise enrol an authenticator the
+        // attacker holds — and the enable then revokes every session and bumps the epoch,
+        // locking the real owner out of an account they still know the password to, with the
+        // recovery codes displayed only to the attacker. ASVS requires re-authentication
+        // before an authentication factor changes; `disable` already demands a TOTP code.
+        // Gating `setup` rather than `verify_and_enable` means the attacker cannot even obtain
+        // a secret they control, and it costs the user one prompt at the natural moment.
+        self.assert_reauthenticated(view.password_hash.as_deref(), password)
+            .await?;
         let key = self.setup_key(ctx, user_id);
 
         // Fast-path idempotency: an existing pending record is re-returned verbatim, so a user

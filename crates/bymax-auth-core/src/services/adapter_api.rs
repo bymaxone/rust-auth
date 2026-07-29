@@ -228,16 +228,18 @@ impl AuthEngine {
     /// # Errors
     ///
     /// Returns [`AuthError::MfaNotEnabled`] when MFA is not configured, [`AuthError::MfaAlreadyEnabled`]
-    /// when already enrolled, or a store/crypto [`AuthError`].
+    /// when already enrolled, [`AuthError::InvalidCredentials`] when the account has a password
+    /// and `password` is absent or wrong, or a store/crypto [`AuthError`].
     #[cfg(feature = "mfa")]
     pub async fn mfa_setup(
         &self,
         user_id: &str,
         ctx: MfaContext,
+        password: Option<&str>,
     ) -> Result<MfaSetupResult, AuthError> {
         self.mfa()
             .ok_or(AuthError::MfaNotEnabled)?
-            .setup(user_id, ctx)
+            .setup(user_id, ctx, password)
             .await
     }
 
@@ -822,7 +824,7 @@ mod tests {
         use bymax_auth_types::MfaContext;
         let Some(h) = harness(base_config(), None) else { return };
         assert!(matches!(
-            h.engine.mfa_setup("u", MfaContext::Dashboard).await,
+            h.engine.mfa_setup("u", MfaContext::Dashboard, None).await,
             Err(AuthError::MfaNotEnabled)
         ));
         assert!(matches!(

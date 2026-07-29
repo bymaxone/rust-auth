@@ -18,7 +18,9 @@ use http::StatusCode;
 use serde_json::json;
 
 use crate::delivery::TokenDelivery;
-use crate::dto::{MfaChallengeDto, MfaDisableDto, MfaRegenerateRecoveryCodesDto, MfaVerifyDto};
+use crate::dto::{
+    MfaChallengeDto, MfaDisableDto, MfaRegenerateRecoveryCodesDto, MfaSetupDto, MfaVerifyDto,
+};
 use crate::extractors::AuthUser;
 use crate::response::error_response;
 use crate::routes::RequestMeta;
@@ -58,10 +60,18 @@ pub(crate) fn routes(config: &AxumAuthConfig, ip_source: ClientIpSource) -> Rout
 ///
 /// 201 Created, not 200: nest-auth's `MfaController.setup` carries no `@HttpCode`, so it uses
 /// Nest's `POST` default of 201, and enrolment does create the pending setup record.
-async fn setup(State(state): State<AuthState>, user: AuthUser) -> Response {
+async fn setup(
+    State(state): State<AuthState>,
+    user: AuthUser,
+    body: axum::body::Bytes,
+) -> Response {
+    // The body carries the account password. It is optional on the wire — an OAuth-only
+    // account has none — so an absent or unparseable body degrades to "no password supplied"
+    // and the engine decides, rather than 400-ing before it can.
+    let dto: MfaSetupDto = serde_json::from_slice(&body).unwrap_or_default();
     match state
         .engine()
-        .mfa_setup(&user.0.sub, MfaContext::Dashboard)
+        .mfa_setup(&user.0.sub, MfaContext::Dashboard, dto.password.as_deref())
         .await
     {
         Ok(result) => (

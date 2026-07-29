@@ -521,7 +521,9 @@ async fn full_router_against_real_redis() {
         &app,
         Method::POST,
         "/auth/mfa/setup",
-        None,
+        // Enrolment re-authenticates: the account has a password, so it must be re-proved
+        // before a factor is minted.
+        Some(serde_json::json!({ "password": "password123" })),
         &[("access_token", &mfa_access)],
     )
     .await;

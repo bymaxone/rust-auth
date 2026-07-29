@@ -150,6 +150,19 @@ version bump.
   caller revoke a token they do not own by naming its id. **Breaking:** `logout` drops its
   `user_id` parameter. `nest-auth` takes the same change.
 
+- **MFA enrolment re-authenticates against the account password.** `mfa_setup` was guarded by
+  the access token alone, so a token lifted by XSS or from a shared machine could enrol an
+  authenticator the attacker holds — and the enable then revokes every session and bumps the
+  epoch, locking the real owner out of an account they still know the password to, with the
+  recovery codes displayed only to the attacker. ASVS requires re-authentication before an
+  authentication factor changes; `disable` already demanded a TOTP code. An account
+  provisioned purely through OAuth has no local password and is exempt. **Breaking:**
+  `MfaService::setup` and `AuthEngine::mfa_setup` take `Option<&str>` for the password, and
+  the two setup routes accept a `password` body field. `nest-auth` takes the same change.
+- **The platform recovery-code challenge gates on winning the temp-token consume**, which the
+  dashboard path already did. Found while chasing a coverage gap the enrolment change exposed:
+  the two planes carry the same logic separately, and only one had been fixed.
+
 ### Changed
 
 - **Family-lineage reuse detection replaces the previous sentinel.** A login opens

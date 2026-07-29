@@ -133,6 +133,24 @@ pub struct ResendVerificationDto {
     pub tenant_id: String,
 }
 
+/// `POST /auth/mfa/setup` body: the account password, re-proving who is asking.
+///
+/// Enabling MFA changes how the account authenticates, so an access token alone is not proof
+/// of identity: a token lifted by XSS or from a shared machine could otherwise enrol an
+/// authenticator the attacker holds, and the enable would revoke every session and lock the
+/// real owner out of an account they still know the password to.
+///
+/// **Optional in the body, required by the engine whenever the account has a password.** An
+/// account provisioned purely through OAuth has none, and refusing those would make MFA
+/// unreachable for them. Mirrors nest-auth's `MfaSetupDto`.
+#[derive(Debug, Default, Deserialize, Validate)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct MfaSetupDto {
+    /// The account password. `None` for an OAuth-only account.
+    #[garde(length(min = 1, max = 128))]
+    pub password: Option<String>,
+}
+
 /// `POST /auth/mfa/verify-enable` body: the 6-digit TOTP from the authenticator.
 #[derive(Debug, Deserialize, Validate)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
