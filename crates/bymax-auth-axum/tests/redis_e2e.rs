@@ -574,6 +574,53 @@ async fn full_router_against_real_redis() {
     .await;
     assert_eq!(again.status, StatusCode::NO_CONTENT);
 
+    // Withdrawal is authority-checked against the role recorded on the INVITATION, not the one
+    // named in the request — the caller only supplies an address. A USER naming an address that
+    // holds an ADMIN invitation is refused, which is the single path where `revoke` answers with
+    // an error instead of its idempotent 204. Without this case the endpoint's whole `Err` arm
+    // is unexercised, and a regression that downgraded the refusal into a successful withdrawal
+    // would let any account cancel an administrator's invitation.
+    let peer = call(
+        &app,
+        Method::POST,
+        "/auth/invitations",
+        Some(serde_json::json!({ "email": "peer@e.com", "role": "ADMIN" })),
+        &[("access_token", &inviter_access)],
+    )
+    .await;
+    assert_eq!(peer.status, StatusCode::NO_CONTENT);
+    seed_user(&users, "plain@e.com", "USER").await;
+    let plogin = call(
+        &app,
+        Method::POST,
+        "/auth/login",
+        Some(serde_json::json!({
+            "email": "plain@e.com", "password": "glidingwalnut42", "tenantId": TENANT
+        })),
+        &[],
+    )
+    .await;
+    let plain_access = plogin.cookie_value("access_token");
+    let denied = call(
+        &app,
+        Method::POST,
+        "/auth/invitations/revoke",
+        Some(serde_json::json!({ "email": "peer@e.com" })),
+        &[("access_token", &plain_access)],
+    )
+    .await;
+    assert_eq!(denied.status, StatusCode::FORBIDDEN);
+    // The invitation survived the refused withdrawal: the ADMIN who issued it still can.
+    let cleanup = call(
+        &app,
+        Method::POST,
+        "/auth/invitations/revoke",
+        Some(serde_json::json!({ "email": "peer@e.com" })),
+        &[("access_token", &inviter_access)],
+    )
+    .await;
+    assert_eq!(cleanup.status, StatusCode::NO_CONTENT);
+
     // ---- MFA enrolment over real Redis (setup → verify-enable with a live TOTP) ---------
     seed_user(&users, "mfa@e.com", "USER").await;
     let mlogin = call(
