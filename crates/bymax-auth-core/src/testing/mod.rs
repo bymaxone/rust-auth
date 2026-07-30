@@ -592,26 +592,34 @@ impl SessionStore for InMemoryStores {
         Ok(())
     }
 
-    async fn revoke_family(&self, kind: SessionKind, family_id: &str) -> Result<(), AuthError> {
+    async fn revoke_family(
+        &self,
+        kind: SessionKind,
+        family_id: &str,
+    ) -> Result<Option<String>, AuthError> {
         // Idempotent: an empty, unknown, or already-cleared family drops nothing.
         if family_id.is_empty() {
-            return Ok(());
+            return Ok(None);
         }
         let Some(hashes) = lock(&self.families).remove(&(kind, family_id.to_owned())) else {
-            return Ok(());
+            return Ok(None);
         };
         let mut sessions = lock(&self.sessions);
         let mut index = lock(&self.session_index);
+        let mut owner = None;
         for hash in hashes {
             // Every live descendant of the compromised login is deleted, and pruned from its
             // owner's session index (all family members share one user).
-            if let Some(record) = sessions.remove(&(kind, hash.clone()))
-                && let Some(details) = index.get_mut(&(kind, record.user_id.clone()))
-            {
-                details.retain(|detail| detail.session_hash != hash);
+            if let Some(record) = sessions.remove(&(kind, hash.clone())) {
+                if owner.is_none() && !record.user_id.is_empty() {
+                    owner = Some(record.user_id.clone());
+                }
+                if let Some(details) = index.get_mut(&(kind, record.user_id.clone())) {
+                    details.retain(|detail| detail.session_hash != hash);
+                }
             }
         }
-        Ok(())
+        Ok(owner)
     }
 
     async fn blacklist_access(

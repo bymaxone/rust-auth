@@ -12,6 +12,22 @@ version bump.
 
 ### Added
 
+- **Failure-side hooks: `on_login_failed`, `on_lockout`, `on_refresh_token_reuse_detected`**
+  (`crates/bymax-auth-core/src/traits/hooks.rs`). Every existing hook fired on a success
+  path, which left the failure side of authentication with no structured seam at all: a
+  burst of wrong passwords, an account tripping its lockout, and a stolen refresh token
+  being replayed existed only as English log lines whose wording is not a contract and whose
+  change is not semver-visible. ASVS v5 §16.3.1 expects authentication operations to be
+  logged with their outcome and §6.1.1 an *adaptive* response, which needs a signal to adapt
+  to. `on_login_failed` carries a `LoginFailureReason` and — only when the address resolved —
+  the user id, so a consumer can tell "someone is guessing at this account" from "someone is
+  spraying addresses", a distinction the uniform `InvalidCredentials` response deliberately
+  hides from the caller but not from the deployment. `on_lockout` fires on the attempt that
+  **crosses** the threshold, not the next one: an attacker who trips the lock and walks away
+  would otherwise never produce the event. All three are fire-and-forget — a hook that fails
+  is logged and dropped, and the refusal the caller receives is unchanged.
+
+
 - Initial workspace scaffolding: the Cargo workspace, the facade and internal
   crate skeletons, the WASM edge binding, the npm package stub, the pinned
   toolchain and lint posture, the supply-chain policy (`cargo-deny` / `cargo-vet`),
@@ -310,6 +326,16 @@ version bump.
   the two planes carry the same logic separately, and only one had been fixed.
 
 ### Changed
+
+- **`SessionStore::revoke_family` now returns the account the family belonged to**
+  (`Result<Option<String>, AuthError>`). Reuse detection had no way to name its victim: the
+  replayed token's own `rt:` key is deleted when it is rotated, so by the time the replay is
+  caught the family index is the only surviving link between that token and an account — and
+  the revocation already reads a member record to find the session index it prunes. Returning
+  what it found there turns the strongest compromise signal the library produces from an
+  anonymous log line into an attributable event. Implementors of the trait must widen the
+  return type; returning `Ok(None)` preserves the previous behaviour.
+
 
 - **Family-lineage reuse detection replaces the previous sentinel.** A login opens
   a family; every rotation inherits it; a replay past the grace window revokes that

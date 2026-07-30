@@ -1013,6 +1013,27 @@ async fn sessions_list_revoke_one_and_revoke_all() {
         .await;
     assert_eq!(revoke_one.status, StatusCode::NO_CONTENT);
 
+    // Revoking ONE session advances the epoch for the same reason revoking all of them does:
+    // deleting the refresh session stops rotation but says nothing about the access token that
+    // device is already carrying, and someone revoking a device they believe is compromised is
+    // deciding about right now. The caller's own token goes stale too and is re-minted on the
+    // next rotation — which the shipped client does silently, and which this test does by hand.
+    let stale_again = Req::get("/auth/sessions")
+        .cookie("access_token", &access)
+        .cookie("refresh_token", &refresh)
+        .send(&app)
+        .await;
+    assert_eq!(stale_again.status, StatusCode::UNAUTHORIZED);
+    let rotated = Req::post("/auth/refresh")
+        .cookie("refresh_token", &refresh)
+        .send(&app)
+        .await;
+    assert_eq!(rotated.status, StatusCode::OK);
+    let access = rotated
+        .cookie_value("access_token")
+        .unwrap_or_default()
+        .to_owned();
+
     // A blocked status fails the `UserStatus` gate on the sessions list.
     let banned_id = reg.json()["user"]["id"]
         .as_str()

@@ -469,7 +469,7 @@ impl bymax_auth_core::traits::SessionStore for FailingStores {
         &self,
         kind: bymax_auth_core::traits::SessionKind,
         family_id: &str,
-    ) -> Result<(), bymax_auth_types::AuthError> {
+    ) -> Result<Option<String>, bymax_auth_types::AuthError> {
         self.inner.revoke_family(kind, family_id).await
     }
     async fn blacklist_access(

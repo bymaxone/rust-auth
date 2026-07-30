@@ -18,7 +18,7 @@ use crate::services::auth::detached::{
 };
 use crate::services::auth::{LoginInput, map_repository_error, normalize_anti_enum, spawn_guarded};
 use crate::status_gate::assert_not_blocked;
-use crate::traits::HookContext;
+use crate::traits::{HookContext, LoginFailure, LoginFailureReason};
 
 impl AuthEngine {
     /// Authenticate email + password, returning either a full session or an MFA challenge.
@@ -46,21 +46,29 @@ impl AuthEngine {
         let tenant_id = self.resolve_tenant(&input.tenant_id, ctx).await?;
         let identifier = self.hashed_identifier(&tenant_id, &input.email);
 
-        // Brute-force gate first (so an already-locked account never increments again).
-        if let Err(error) = self.assert_not_locked(&identifier).await {
-            // Kept on one line on purpose: a `tracing` field expression on its own line is
-            // never evaluated without an installed subscriber, so it would read as an
-            // uncovered line under the 100% gate while being perfectly exercised.
-            tracing::warn!(email = %mask_email(&input.email), %tenant_id, "login: account locked");
-            return Err(error);
-        }
-
         let hook_ctx = HookContext::from_request(
             ctx,
             None,
             Some(input.email.clone()),
             Some(tenant_id.clone()),
         );
+
+        // Brute-force gate first (so an already-locked account never increments again).
+        if let Err(error) = self.assert_not_locked(&identifier).await {
+            // Kept on one line on purpose: a `tracing` field expression on its own line is
+            // never evaluated without an installed subscriber, so it would read as an
+            // uncovered line under the 100% gate while being perfectly exercised.
+            tracing::warn!(email = %mask_email(&input.email), %tenant_id, "login: account locked");
+            self.fire_login_failed(
+                &input.email,
+                &tenant_id,
+                None,
+                LoginFailureReason::LockedOut,
+                &hook_ctx,
+            )
+            .await;
+            return Err(error);
+        }
         self.hooks()
             .before_login(&input.email, &tenant_id, &hook_ctx)
             .await
@@ -79,14 +87,41 @@ impl AuthEngine {
         // the KDF cost is paid either way, then record the failure and return generically.
         let Some(user) = user.filter(has_local_hash) else {
             self.passwords().verify_sentinel(&input.password).await?;
-            return self.record_failure_and_reject(&identifier, started).await;
+            return self
+                .record_failure_and_reject(
+                    &identifier,
+                    started,
+                    &input.email,
+                    &tenant_id,
+                    None,
+                    &hook_ctx,
+                )
+                .await;
         };
 
         // Status gate runs before the KDF so a blocked account never consumes hashing CPU.
-        self.assert_user_not_blocked(&user.status)?;
+        if let Err(error) = self.assert_user_not_blocked(&user.status) {
+            self.fire_login_failed(
+                &input.email,
+                &tenant_id,
+                Some(&user.id),
+                LoginFailureReason::AccountBlocked,
+                &hook_ctx,
+            )
+            .await;
+            return Err(error);
+        }
 
         // Email-verification gate.
         if config.email_verification.required && !user.email_verified {
+            self.fire_login_failed(
+                &input.email,
+                &tenant_id,
+                Some(&user.id),
+                LoginFailureReason::EmailNotVerified,
+                &hook_ctx,
+            )
+            .await;
             return Err(AuthError::EmailNotVerified);
         }
 
@@ -94,7 +129,16 @@ impl AuthEngine {
         let phc = user.password_hash.clone().unwrap_or_default();
         let outcome = self.passwords().verify(&input.password, &phc).await?;
         if !outcome.matched {
-            return self.record_failure_and_reject(&identifier, started).await;
+            return self
+                .record_failure_and_reject(
+                    &identifier,
+                    started,
+                    &input.email,
+                    &tenant_id,
+                    Some(&user.id),
+                    &hook_ctx,
+                )
+                .await;
         }
 
         // Password proven: clear the failure counter.
@@ -142,11 +186,90 @@ impl AuthEngine {
         &self,
         identifier: &str,
         started: Instant,
+        email: &str,
+        tenant_id: &str,
+        user_id: Option<&str>,
+        hook_ctx: &HookContext,
     ) -> Result<T, AuthError> {
         tracing::warn!("login: invalid credentials");
         self.brute_force().record_failure(identifier).await?;
+        self.fire_login_failed(
+            email,
+            tenant_id,
+            user_id,
+            LoginFailureReason::InvalidCredentials,
+            hook_ctx,
+        )
+        .await;
+        // Read the lock AFTER recording, so the event fires on the attempt that crosses the
+        // threshold rather than on the next one — an attacker who trips the lock and walks
+        // away would otherwise never produce it.
+        self.fire_lockout_if_crossed(identifier, email, tenant_id, hook_ctx)
+            .await;
         normalize_anti_enum(started).await;
         Err(AuthError::InvalidCredentials)
+    }
+
+    /// Fire the fire-and-forget [`AuthHooks::on_login_failed`] hook.
+    ///
+    /// Swallowed like every other notification hook: a consumer's SIEM being unreachable is
+    /// not an authentication decision, and the refusal the caller receives is unchanged.
+    ///
+    /// [`AuthHooks::on_login_failed`]: crate::traits::AuthHooks::on_login_failed
+    async fn fire_login_failed(
+        &self,
+        email: &str,
+        tenant_id: &str,
+        user_id: Option<&str>,
+        reason: LoginFailureReason,
+        hook_ctx: &HookContext,
+    ) {
+        let failure = LoginFailure {
+            email,
+            tenant_id,
+            user_id,
+            reason,
+        };
+        if let Err(error) = self.hooks().on_login_failed(&failure, hook_ctx).await {
+            tracing::error!(%error, "login: on_login_failed hook returned an error (ignored)");
+        }
+    }
+
+    /// Fire [`AuthHooks::on_lockout`] when the failure just recorded closed the window.
+    ///
+    /// A store error here is swallowed too: it means the *hook* could not be decided, not
+    /// that the login should answer differently.
+    ///
+    /// [`AuthHooks::on_lockout`]: crate::traits::AuthHooks::on_lockout
+    async fn fire_lockout_if_crossed(
+        &self,
+        identifier: &str,
+        email: &str,
+        tenant_id: &str,
+        hook_ctx: &HookContext,
+    ) {
+        let crossed = match self.brute_force().is_locked(identifier).await {
+            Ok(locked) => locked,
+            Err(error) => {
+                tracing::error!(%error, "login: could not read the lockout state for the hook");
+                return;
+            }
+        };
+        if !crossed {
+            return;
+        }
+        let retry = self
+            .brute_force()
+            .remaining_lockout_secs(identifier)
+            .await
+            .unwrap_or(0);
+        if let Err(error) = self
+            .hooks()
+            .on_lockout(email, tenant_id, retry, hook_ctx)
+            .await
+        {
+            tracing::error!(%error, "login: on_lockout hook returned an error (ignored)");
+        }
     }
 
     /// Reject the login when the identifier is already locked out, surfacing the retry hint.
@@ -224,6 +347,7 @@ mod tests {
     use super::*;
     use crate::services::auth::test_support::{Harness, SeedUser, base_config, ctx, harness};
     use crate::traits::UserRepository;
+    use std::sync::Arc;
     use std::time::Duration;
 
     fn login_input(email: &str, password: &str) -> LoginInput {
@@ -679,6 +803,197 @@ mod tests {
                 "the stored hash was never upgraded"
             );
         }
+    }
+
+    /// The failure-side hook surface, recorded in order.
+    #[derive(Default)]
+    struct FailureSpy {
+        calls: std::sync::Mutex<Vec<String>>,
+    }
+
+    impl FailureSpy {
+        fn seen(&self) -> Vec<String> {
+            self.calls.lock().map(|c| c.clone()).unwrap_or_default()
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl crate::traits::AuthHooks for FailureSpy {
+        async fn on_login_failed(
+            &self,
+            failure: &LoginFailure<'_>,
+            _ctx: &HookContext,
+        ) -> Result<(), crate::traits::HookError> {
+            if let Ok(mut calls) = self.calls.lock() {
+                calls.push(format!(
+                    "failed:{}:{}:{}",
+                    failure.reason,
+                    failure.email,
+                    failure.user_id.unwrap_or("-")
+                ));
+            }
+            Ok(())
+        }
+        async fn on_lockout(
+            &self,
+            email: &str,
+            _tenant_id: &str,
+            retry_after_seconds: u64,
+            _ctx: &HookContext,
+        ) -> Result<(), crate::traits::HookError> {
+            if let Ok(mut calls) = self.calls.lock() {
+                calls.push(format!("lockout:{email}:{retry_after_seconds}"));
+            }
+            Ok(())
+        }
+    }
+
+    /// Hooks that fail on every failure-side callback, to prove the refusal is unchanged.
+    struct BrokenFailureHooks;
+
+    #[async_trait::async_trait]
+    impl crate::traits::AuthHooks for BrokenFailureHooks {
+        async fn on_login_failed(
+            &self,
+            _failure: &LoginFailure<'_>,
+            _ctx: &HookContext,
+        ) -> Result<(), crate::traits::HookError> {
+            Err(crate::traits::HookError::Rejected(
+                "siem unreachable".to_owned(),
+            ))
+        }
+        async fn on_lockout(
+            &self,
+            _email: &str,
+            _tenant_id: &str,
+            _retry: u64,
+            _ctx: &HookContext,
+        ) -> Result<(), crate::traits::HookError> {
+            Err(crate::traits::HookError::Rejected(
+                "siem unreachable".to_owned(),
+            ))
+        }
+    }
+
+    #[tokio::test]
+    async fn every_refusal_reaches_the_failure_hook_with_its_own_reason() {
+        // The whole point of the hook is that the four refusals are DISTINGUISHABLE to the
+        // deployment while staying uniform to the caller. An unknown address carries no user
+        // id; a wrong password against a real account carries one — that is what separates
+        // "someone is guessing at this account" from "someone is spraying addresses".
+        let spy = Arc::new(FailureSpy::default());
+        let mut cfg = base_config();
+        cfg.email_verification.required = true;
+        let Some(h) = harness(cfg, Some(spy.clone())) else {
+            return;
+        };
+        let known = h.seed(SeedUser::active("known@example.com", "right")).await;
+        let blocked = h
+            .seed(SeedUser {
+                status: "SUSPENDED".to_owned(),
+                ..SeedUser::active("blocked@example.com", "right")
+            })
+            .await;
+        let pending = h
+            .seed(SeedUser {
+                email_verified: false,
+                ..SeedUser::active("pending@example.com", "right")
+            })
+            .await;
+
+        for (email, password) in [
+            ("nobody@example.com", "whatever"),
+            ("known@example.com", "wrong"),
+            ("blocked@example.com", "right"),
+            ("pending@example.com", "right"),
+        ] {
+            let _ = h.engine.login(login_input(email, password), &ctx()).await;
+        }
+
+        assert_eq!(
+            spy.seen(),
+            vec![
+                "failed:invalid_credentials:nobody@example.com:-".to_owned(),
+                format!("failed:invalid_credentials:known@example.com:{known}"),
+                format!("failed:account_blocked:blocked@example.com:{blocked}"),
+                format!("failed:email_not_verified:pending@example.com:{pending}"),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn the_lockout_hook_fires_on_the_attempt_that_crosses_the_threshold() {
+        // Not on the next one. An attacker who trips the lock and walks away never makes a
+        // sixth attempt, so a hook fired from the already-locked gate would never run and the
+        // account would sit locked with nothing having announced it. The fifth failure — the
+        // one that closes the window — is where the event belongs.
+        let spy = Arc::new(FailureSpy::default());
+        let mut cfg = base_config();
+        cfg.email_verification.required = false;
+        let Some(h) = harness(cfg, Some(spy.clone())) else {
+            return;
+        };
+        let _ = h.seed(SeedUser::active("lock@example.com", "right")).await;
+
+        for _ in 0..5 {
+            let _ = h
+                .engine
+                .login(login_input("lock@example.com", "wrong"), &ctx())
+                .await;
+        }
+
+        let lockouts: Vec<String> = spy
+            .seen()
+            .into_iter()
+            .filter(|call| call.starts_with("lockout:"))
+            .collect();
+        assert_eq!(lockouts.len(), 1, "exactly one lockout event: {lockouts:?}");
+        // The retry hint is the remaining window, not a placeholder.
+        let retry: u64 = lockouts[0]
+            .rsplit(':')
+            .next()
+            .unwrap_or("0")
+            .parse()
+            .unwrap_or(0);
+        assert!(retry > 0, "the lockout carried no retry hint: {lockouts:?}");
+
+        // …and the sixth attempt, refused at the gate before any credential check, reports
+        // itself as `locked_out` rather than as another credential failure.
+        let _ = h
+            .engine
+            .login(login_input("lock@example.com", "right"), &ctx())
+            .await;
+        assert_eq!(
+            spy.seen().last().map(String::as_str),
+            Some("failed:locked_out:lock@example.com:-")
+        );
+    }
+
+    #[tokio::test]
+    async fn a_failing_failure_hook_never_changes_the_refusal() {
+        // A consumer's SIEM being unreachable is not an authentication decision. The refusal
+        // is still a refusal, and the lockout still locks.
+        let mut cfg = base_config();
+        cfg.email_verification.required = false;
+        let Some(h) = harness(cfg, Some(Arc::new(BrokenFailureHooks))) else {
+            return;
+        };
+        let _ = h
+            .seed(SeedUser::active("broken@example.com", "right"))
+            .await;
+
+        for _ in 0..5 {
+            let attempt = h
+                .engine
+                .login(login_input("broken@example.com", "wrong"), &ctx())
+                .await;
+            assert!(matches!(attempt, Err(AuthError::InvalidCredentials)));
+        }
+        let locked = h
+            .engine
+            .login(login_input("broken@example.com", "right"), &ctx())
+            .await;
+        assert!(matches!(locked, Err(AuthError::AccountLocked { .. })));
     }
 
     #[test]

@@ -1192,8 +1192,8 @@ mod tests {
             &self,
             _kind: SessionKind,
             _family_id: &str,
-        ) -> Result<(), AuthError> {
-            Ok(())
+        ) -> Result<Option<String>, AuthError> {
+            Ok(None)
         }
         async fn blacklist_access(
             &self,

@@ -21,7 +21,10 @@ use bymax_auth_types::{PlatformAuthResult, PlatformClaims, PlatformType, SafeAut
 
 use crate::services::session::normalize_session_metadata;
 use crate::services::{internal_error, is_refresh_token_shape, new_uuid_v4, now_offset, now_unix};
-use crate::traits::{RotateOutcome, SessionKind, SessionRecord, SessionRotation, SessionStore};
+use crate::traits::{
+    AuthHooks, HookContext, RotateOutcome, SessionKind, SessionRecord, SessionRotation,
+    SessionStore,
+};
 
 /// MFA temp-token lifetime, in seconds (§7.3 constant `MFA_TEMP_TOKEN_TTL_SECONDS`).
 const MFA_TEMP_TOKEN_TTL_SECONDS: i64 = 300;
@@ -82,6 +85,12 @@ pub struct TokenManagerService {
     refresh_ttl_secs: u64,
     grace_ttl_secs: u64,
     absolute_lifetime_secs: u64,
+    /// The consumer's hooks, and the only reason this otherwise dependency-light service
+    /// knows about them: refresh-token reuse is detected here and nowhere else, and it is the
+    /// strongest evidence of compromise the library produces. Routing it out through the
+    /// error would lose the family id, and losing it leaves a consumer with nothing to
+    /// correlate against — every replay would look like any other invalid token.
+    hooks: Arc<dyn AuthHooks>,
     /// The MFA single-use temp-token support, wired only when an MFA store is supplied.
     #[cfg(feature = "mfa")]
     mfa: Option<MfaTokenSupport>,
@@ -194,9 +203,21 @@ impl TokenManagerService {
             refresh_ttl_secs: u64::from(refresh_expires_in_days) * 86_400,
             grace_ttl_secs: grace_window.as_secs(),
             absolute_lifetime_secs: u64::from(absolute_session_lifetime_days) * 86_400,
+            hooks: Arc::new(crate::traits::NoOpAuthHooks),
             #[cfg(feature = "mfa")]
             mfa: None,
         }
+    }
+
+    /// Install the consumer's hooks, so reuse detection can report itself.
+    ///
+    /// Separate from [`Self::new`] rather than a parameter, because the hooks are defaulted
+    /// late in the builder (after the OAuth wiring check) and every other caller — the tests
+    /// included — has no interest in them.
+    #[must_use]
+    pub(crate) fn with_hooks(mut self, hooks: Arc<dyn AuthHooks>) -> Self {
+        self.hooks = hooks;
+        self
     }
 
     /// Attach the MFA temp-token support (the single-use `mfa:` marker store and the
@@ -391,9 +412,14 @@ impl TokenManagerService {
                 tracing::warn!(
                     "refresh: reuse of a consumed refresh token detected — revoking the token family"
                 );
-                self.session_store
+                // The owner comes back from the revocation, and can come from nowhere
+                // else: the replayed token's own key was deleted when it was rotated, so
+                // the family index is the last surviving link to an account.
+                let owner = self
+                    .session_store
                     .revoke_family(SessionKind::Dashboard, &family)
                     .await?;
+                self.fire_reuse_detected(owner.as_deref(), &family).await;
                 Err(AuthError::RefreshTokenInvalid)
             }
             RotateOutcome::Invalid => {
@@ -581,9 +607,14 @@ impl TokenManagerService {
                 tracing::warn!(
                     "platform refresh: reuse of a consumed refresh token detected — revoking the token family"
                 );
-                self.session_store
+                // The owner comes back from the revocation, and can come from nowhere
+                // else: the replayed token's own key was deleted when it was rotated, so
+                // the family index is the last surviving link to an account.
+                let owner = self
+                    .session_store
                     .revoke_family(SessionKind::Platform, &family)
                     .await?;
+                self.fire_reuse_detected(owner.as_deref(), &family).await;
                 Err(AuthError::RefreshTokenInvalid)
             }
             RotateOutcome::Invalid => {
@@ -823,6 +854,28 @@ impl TokenManagerService {
             return Err(AuthError::MfaTempTokenInvalid);
         };
         support.store.del_temp(&jti_hash(jti)).await
+    }
+
+    /// Fire the fire-and-forget [`AuthHooks::on_refresh_token_reuse_detected`] hook.
+    ///
+    /// Skipped when the owner is unknown: a replay of a token whose live key is already gone
+    /// leaves nothing to read, and an event naming no account is worse than no event — a
+    /// consumer would have to treat it as unattributable noise.
+    ///
+    /// [`AuthHooks::on_refresh_token_reuse_detected`]:
+    ///     crate::traits::AuthHooks::on_refresh_token_reuse_detected
+    async fn fire_reuse_detected(&self, user_id: Option<&str>, family_id: &str) {
+        let Some(user_id) = user_id else { return };
+        // The rotation carries no request context of its own — the identity fields are what
+        // the hook itself already names.
+        let ctx = HookContext::detached(user_id);
+        if let Err(error) = self
+            .hooks
+            .on_refresh_token_reuse_detected(user_id, family_id, &ctx)
+            .await
+        {
+            tracing::error!(%error, "refresh: reuse hook returned an error (ignored)");
+        }
     }
 
     /// Refuse a rotation once the login it descends from has outlived the absolute cap.
@@ -1140,6 +1193,169 @@ mod tests {
                 .await,
             Err(AuthError::RefreshTokenInvalid)
         ));
+    }
+
+    /// Records the reuse events the rotation reports.
+    #[derive(Default)]
+    struct ReuseSpy {
+        calls: std::sync::Mutex<Vec<String>>,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::traits::AuthHooks for ReuseSpy {
+        async fn on_refresh_token_reuse_detected(
+            &self,
+            user_id: &str,
+            family_id: &str,
+            ctx: &crate::traits::HookContext,
+        ) -> Result<(), crate::traits::HookError> {
+            if let Ok(mut calls) = self.calls.lock() {
+                // The context names the account and nothing it never observed: an empty `ip`
+                // is honest about a rotation carrying no request, where a placeholder would
+                // read to a consumer as an address someone actually connected from.
+                calls.push(format!(
+                    "{user_id}:{family_id}:{}:{}",
+                    ctx.user_id.clone().unwrap_or_default(),
+                    ctx.ip
+                ));
+            }
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn a_detected_reuse_reports_the_owner_it_recovered_from_the_family() {
+        // The replayed token's own key was deleted when it was rotated, so nothing about the
+        // token still names an account — the family index is the only surviving link. Without
+        // it the event would fire anonymously, which is worse than not firing: a consumer
+        // cannot act on a takeover signal that names no victim.
+        let spy = Arc::new(ReuseSpy::default());
+        let store = Arc::new(InMemoryStores::new());
+        let svc = service(store.clone()).with_hooks(spy.clone());
+        let Ok(issued) = svc
+            .issue_tokens(&user(), "10.0.0.1", "agent/1.0", false)
+            .await
+        else {
+            return;
+        };
+        let old_hash = RawRefreshToken::from_raw(issued.refresh_token.clone()).redis_hash();
+        let Ok(_rotated) = svc
+            .reissue_tokens(&issued.refresh_token, "10.0.0.1", "agent/1.0")
+            .await
+        else {
+            return;
+        };
+        assert!(
+            store
+                .delete_grace_pointer(SessionKind::Dashboard, &old_hash)
+                .await
+                .is_ok()
+        );
+
+        assert!(matches!(
+            svc.reissue_tokens(&issued.refresh_token, "10.0.0.1", "agent/1.0")
+                .await,
+            Err(AuthError::RefreshTokenInvalid)
+        ));
+
+        let seen = spy.calls.lock().map(|c| c.clone()).unwrap_or_default();
+        assert_eq!(seen.len(), 1, "exactly one reuse event: {seen:?}");
+        let owner = user().id;
+        assert!(
+            seen[0].starts_with(&format!("{owner}:")),
+            "the event named no owner: {seen:?}"
+        );
+        // The family id is carried through, and the detached context repeats the owner while
+        // inventing no request fields.
+        assert!(seen[0].ends_with(&format!(":{owner}:")), "{seen:?}");
+    }
+
+    #[tokio::test]
+    async fn a_reuse_with_no_recoverable_owner_fires_no_event() {
+        // A family whose every member has expired names nobody. The refusal is unchanged and
+        // the hook stays silent rather than emitting an unattributable alert.
+        let spy = Arc::new(ReuseSpy::default());
+        let store = Arc::new(InMemoryStores::new());
+        let svc = service(store.clone()).with_hooks(spy.clone());
+        let Ok(issued) = svc
+            .issue_tokens(&user(), "10.0.0.1", "agent/1.0", false)
+            .await
+        else {
+            return;
+        };
+        let old_hash = RawRefreshToken::from_raw(issued.refresh_token.clone()).redis_hash();
+        let Ok(rotated) = svc
+            .reissue_tokens(&issued.refresh_token, "10.0.0.1", "agent/1.0")
+            .await
+        else {
+            return;
+        };
+        assert!(
+            store
+                .delete_grace_pointer(SessionKind::Dashboard, &old_hash)
+                .await
+                .is_ok()
+        );
+        // Drop the only live descendant, so the family index survives with nothing readable.
+        assert!(
+            store
+                .revoke_session(SessionKind::Dashboard, &user().id, &rotated_hash(&rotated))
+                .await
+                .is_ok()
+        );
+
+        assert!(matches!(
+            svc.reissue_tokens(&issued.refresh_token, "10.0.0.1", "agent/1.0")
+                .await,
+            Err(AuthError::RefreshTokenInvalid)
+        ));
+
+        assert!(
+            spy.calls.lock().map(|c| c.is_empty()).unwrap_or(false),
+            "an unattributable reuse event was emitted"
+        );
+    }
+
+    #[cfg(feature = "platform")]
+    #[tokio::test]
+    async fn a_replayed_platform_token_reports_reuse_too() {
+        // The plane that usually carries more authority. An operator watching for takeover
+        // must not be blind on it.
+        let spy = Arc::new(ReuseSpy::default());
+        let store = Arc::new(InMemoryStores::new());
+        let svc = service(store.clone()).with_hooks(spy.clone());
+        let Ok(issued) = svc
+            .issue_platform_tokens(&platform_admin(), "10.0.0.1", "agent/1.0", false)
+            .await
+        else {
+            return;
+        };
+        let old_hash = RawRefreshToken::from_raw(issued.refresh_token.clone()).redis_hash();
+        let Ok(_rotated) = svc
+            .reissue_platform_tokens(&issued.refresh_token, "10.0.0.1", "agent/1.0")
+            .await
+        else {
+            return;
+        };
+        assert!(
+            store
+                .delete_grace_pointer(SessionKind::Platform, &old_hash)
+                .await
+                .is_ok()
+        );
+
+        assert!(matches!(
+            svc.reissue_platform_tokens(&issued.refresh_token, "10.0.0.1", "agent/1.0")
+                .await,
+            Err(AuthError::RefreshTokenInvalid)
+        ));
+
+        let seen = spy.calls.lock().map(|c| c.clone()).unwrap_or_default();
+        assert_eq!(seen.len(), 1, "exactly one platform reuse event: {seen:?}");
+        assert!(
+            seen[0].starts_with(&format!("{}:", platform_admin().id)),
+            "{seen:?}"
+        );
     }
 
     /// The store hash of a rotated pair's refresh token.

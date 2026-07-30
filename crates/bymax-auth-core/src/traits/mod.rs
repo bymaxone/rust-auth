@@ -23,8 +23,8 @@ pub use common_password::{CommonPasswordChecker, reduce_to_base_word};
 pub use email::{EmailError, EmailProvider, InviteData, NoOpEmailProvider, SessionInfo};
 #[doc(inline)]
 pub use hooks::{
-    AuthHooks, BeforeRegisterResult, HookContext, HookError, NoOpAuthHooks, OAuthLoginResult,
-    RegisterAttempt, RegisterOverrides,
+    AuthHooks, BeforeRegisterResult, HookContext, HookError, LoginFailure, LoginFailureReason,
+    NoOpAuthHooks, OAuthLoginResult, RegisterAttempt, RegisterOverrides,
 };
 #[doc(inline)]
 pub use http::{HttpClient, HttpError, HttpMethod, HttpRequest, HttpResponse};

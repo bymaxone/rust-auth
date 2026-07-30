@@ -377,7 +377,17 @@ pub trait SessionStore: Send + Sync {
     /// each descendant's refresh/detail keys and clearing the family index. Called on
     /// reuse-detection ([`RotateOutcome::Reused`]) to lock out a stolen token's whole chain.
     /// Idempotent: an unknown or already-cleared family is a no-op.
-    async fn revoke_family(&self, kind: SessionKind, family_id: &str) -> Result<(), AuthError>;
+    ///
+    /// Returns the id of the account the family belonged to, or `None` when no member record
+    /// was readable. The owner is reported because the reuse-detection caller cannot obtain it
+    /// any other way: the replayed token's own `rt:` key was deleted when it was rotated, so
+    /// the family index is the only surviving link between that token and an account — and an
+    /// implementation already has to read a member to find the session index it prunes.
+    async fn revoke_family(
+        &self,
+        kind: SessionKind,
+        family_id: &str,
+    ) -> Result<Option<String>, AuthError>;
 
     /// Add a JTI (preferred) or full-JWT hash to the access-token blacklist for its
     /// remaining lifetime.

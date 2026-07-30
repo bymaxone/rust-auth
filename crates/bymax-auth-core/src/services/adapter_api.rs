@@ -137,7 +137,28 @@ impl AuthEngine {
         user_id: &str,
         session_hash: &str,
     ) -> Result<(), AuthError> {
-        self.sessions().revoke_session(user_id, session_hash).await
+        self.sessions()
+            .revoke_session(user_id, session_hash)
+            .await?;
+        // …and cut the access tokens with it. Deleting the refresh session stops rotation but
+        // says nothing about the stateless access token that session's holder is already
+        // carrying, and that token keeps working until it expires — up to whatever
+        // `access_expires_in` allows. Someone who opens their session list and revokes a device
+        // does so because they think it is compromised: a decision about *right now*.
+        //
+        // The epoch is the only lever available, since a session hash does not name the `jti`
+        // of any access token. The collateral is that the account's other devices lose their
+        // access tokens too and silently re-mint one on their next rotation — they still hold
+        // live refresh sessions. The revoked device cannot, which is the point.
+        //
+        // Bumped AFTER the revoke: a failure above then leaves the epoch untouched and the
+        // operation visibly incomplete, rather than signing every device out for a session that
+        // is in fact still alive. `logout` keeps the plain revoke — it blacklists its own `jti`
+        // by name, and ending one session must not reach every other device's access token.
+        self.session_store()
+            .bump_epoch(crate::traits::SessionKind::Dashboard, user_id)
+            .await?;
+        Ok(())
     }
 
     /// Revoke every session for the caller except the current one (`DELETE /auth/sessions/all`).

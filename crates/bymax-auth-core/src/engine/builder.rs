@@ -425,7 +425,8 @@ impl AuthEngineBuilder {
             refresh_days,
             grace_window,
             absolute_session_lifetime_days,
-        );
+        )
+        .with_hooks(hooks.clone());
         // Wire the MFA temp-token single-use support when an MFA store is supplied, so the
         // challenge token planted at login is store-backed and brute-force-capped.
         #[cfg(feature = "mfa")]

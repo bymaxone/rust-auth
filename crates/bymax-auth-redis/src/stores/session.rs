@@ -308,19 +308,22 @@ impl RedisStores {
         &self,
         kind: SessionKind,
         family_id: &str,
-    ) -> Result<(), RedisStoreError> {
+    ) -> Result<Option<String>, RedisStoreError> {
         // An empty family id has no index key; nothing to revoke.
         if family_id.is_empty() {
-            return Ok(());
+            return Ok(None);
         }
         let prefixes = kind_prefixes(kind);
         let keys = self.keys();
         let fam_key = keys.key(prefixes.fam, family_id);
         let mut conn = self.connection().await?;
         let members: Vec<String> = conn.smembers(&fam_key).await?;
-        let owner_index = self
-            .resolve_family_owner_index(&mut conn, &prefixes, &members)
+        let owner = self
+            .resolve_family_owner(&mut conn, &prefixes, &members)
             .await?;
+        let owner_index = owner
+            .as_ref()
+            .map_or_else(String::new, |id| keys.key(prefixes.sess, id));
         script::REVOKE_FAMILY
             .prepare()
             .key(&fam_key)
@@ -330,18 +333,18 @@ impl RedisStores {
             .arg(&owner_index)
             .invoke_async::<i64>(&mut conn)
             .await?;
-        Ok(())
+        Ok(owner)
     }
 
-    /// Resolve the namespaced session-index key of the user a family belongs to, or an empty
-    /// string when no member record is readable — every member may have already expired, in
-    /// which case there is no index left to prune.
-    async fn resolve_family_owner_index(
+    /// Resolve the id of the user a family belongs to, or `None` when no member record is
+    /// readable — every member may have already expired, in which case there is no index left
+    /// to prune and nobody left to name.
+    async fn resolve_family_owner(
         &self,
         conn: &mut Connection,
         prefixes: &KindPrefixes,
         members: &[String],
-    ) -> Result<String, RedisStoreError> {
+    ) -> Result<Option<String>, RedisStoreError> {
         let keys = self.keys();
         for hash in members {
             let raw: Option<String> = conn.get(keys.key(prefixes.rt, hash)).await?;
@@ -350,10 +353,10 @@ impl RedisStores {
                 continue;
             };
             if !record.user_id.is_empty() {
-                return Ok(keys.key(prefixes.sess, &record.user_id));
+                return Ok(Some(record.user_id));
             }
         }
-        Ok(String::new())
+        Ok(None)
     }
 
     /// Move the session-index membership and detail from the old hash to the new hash after a
@@ -689,7 +692,11 @@ impl SessionStore for RedisStores {
             .map_err(AuthError::from)
     }
 
-    async fn revoke_family(&self, kind: SessionKind, family_id: &str) -> Result<(), AuthError> {
+    async fn revoke_family(
+        &self,
+        kind: SessionKind,
+        family_id: &str,
+    ) -> Result<Option<String>, AuthError> {
         self.revoke_family_inner(kind, family_id)
             .await
             .map_err(AuthError::from)
