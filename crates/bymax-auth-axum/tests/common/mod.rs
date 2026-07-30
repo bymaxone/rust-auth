@@ -64,6 +64,7 @@ pub struct EngineSpec {
     pub platform: bool,
     pub oauth: bool,
     pub invitations: bool,
+    pub email_change: bool,
     pub sessions: bool,
     pub verification_required: bool,
     pub allow_oauth: bool,
@@ -83,6 +84,7 @@ impl Default for EngineSpec {
             platform: false,
             oauth: false,
             invitations: false,
+            email_change: false,
             sessions: false,
             verification_required: false,
             allow_oauth: false,
@@ -150,6 +152,7 @@ pub fn build(spec: EngineSpec) -> Option<Harness> {
     config.sessions.enabled = spec.sessions;
     config.controllers.sessions = spec.sessions;
     config.controllers.invitations = spec.invitations;
+    config.controllers.email_change = spec.email_change;
     config.invitations.enabled = spec.invitations;
     config.controllers.oauth = spec.oauth;
     let domain_resolver = if spec.cookie_domains.is_empty() {
@@ -584,6 +587,22 @@ impl bymax_auth_core::traits::WsTicketStore for FailingStores {
 
 #[async_trait]
 impl bymax_auth_core::traits::PasswordResetStore for FailingStores {
+    async fn put_email_change(
+        &self,
+        token: &str,
+        context: &bymax_auth_core::traits::EmailChangeContext,
+        ttl_secs: u64,
+    ) -> Result<(), bymax_auth_types::AuthError> {
+        self.inner.put_email_change(token, context, ttl_secs).await
+    }
+    async fn consume_email_change(
+        &self,
+        token: &str,
+    ) -> Result<Option<bymax_auth_core::traits::EmailChangeContext>, bymax_auth_types::AuthError>
+    {
+        self.inner.consume_email_change(token).await
+    }
+
     async fn put_token(
         &self,
         token: &str,

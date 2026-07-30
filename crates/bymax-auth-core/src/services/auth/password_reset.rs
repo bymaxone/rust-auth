@@ -749,7 +749,7 @@ fn reset_context_hooks(context: &ResetContext) -> HookContext {
 /// leaked snapshot of the reset keyspace reveals nothing about the credential. An account with
 /// no local password yields the empty string, which is a value like any other: a proof minted
 /// then is invalidated as soon as one is set.
-fn password_fingerprint(user: &AuthUser) -> String {
+pub(super) fn password_fingerprint(user: &AuthUser) -> String {
     match user.password_hash.as_deref() {
         Some(phc) => to_hex(&sha256(phc.as_bytes())),
         None => String::new(),
@@ -1434,6 +1434,15 @@ mod tests {
 
     #[async_trait::async_trait]
     impl crate::traits::EmailProvider for FailingResetEmail {
+        async fn send_email_change_verification(
+            &self,
+            _new_email: &str,
+            _token: &str,
+            _locale: Option<&str>,
+        ) -> Result<(), crate::traits::EmailError> {
+            Ok(())
+        }
+
         async fn send_password_reset_token(
             &self,
             _email: &str,
@@ -1499,6 +1508,15 @@ mod tests {
 
     #[async_trait::async_trait]
     impl crate::traits::EmailProvider for CapturingResetEmail {
+        async fn send_email_change_verification(
+            &self,
+            _new_email: &str,
+            _token: &str,
+            _locale: Option<&str>,
+        ) -> Result<(), crate::traits::EmailError> {
+            Ok(())
+        }
+
         async fn send_password_reset_token(
             &self,
             _email: &str,
@@ -1876,6 +1894,14 @@ mod tests {
 
     #[async_trait::async_trait]
     impl UserRepository for FailingLookupRepo {
+        async fn update_email(
+            &self,
+            _id: &str,
+            _email: &str,
+        ) -> Result<(), crate::RepositoryError> {
+            Ok(())
+        }
+
         async fn find_by_id(
             &self,
             _id: &str,

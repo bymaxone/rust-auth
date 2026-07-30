@@ -522,6 +522,30 @@ pub struct ResetContext {
     pub password_fingerprint: String,
 }
 
+/// The trusted metadata stored for a pending address change under `ec:{sha256(token)}`.
+///
+/// Held byte-compatible with nest-auth: the two backends share this keyspace, so a change
+/// requested through one is confirmable through the other.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EmailChangeContext {
+    /// The account the change belongs to.
+    pub user_id: String,
+    /// The address being moved to, stored already normalized (trimmed, lowercased) because
+    /// the uniqueness re-check at confirm time compares it the same way login does.
+    pub new_email: String,
+    /// The tenant the account belongs to, for that re-check.
+    pub tenant_id: String,
+    /// Digest of the password hash in force when the token was minted.
+    ///
+    /// Binds the token to that password exactly as [`ResetContext`] does: an attacker who
+    /// plants a change request and waits loses it the moment the victim changes their
+    /// password. An ABSENT field is read as "no binding" and accepted, so a rolling deploy
+    /// does not break the changes already in flight.
+    #[serde(default)]
+    pub password_fingerprint: String,
+}
+
 /// The trusted metadata stored for a pending invitation under `inv:` keyed by
 /// `sha256(token)` — the raw token is never a key. Read back on accept; because the payload
 /// is trusted, the accept flow re-validates `role` against the hierarchy as anti-tamper (a
@@ -590,6 +614,25 @@ pub trait PasswordResetStore: Send + Sync {
     /// Atomically consume (`getdel`) a verified-token context. `None` when the token is
     /// unknown, expired, or already consumed.
     async fn consume_verified(&self, token: &str) -> Result<Option<ResetContext>, AuthError>;
+
+    /// Store a pending address change under `ec:{sha256(token)}` with a TTL.
+    ///
+    /// Lives on this trait rather than its own because it is the same thing: a single-use
+    /// opaque token, mailed to a mailbox, keyed by its hash and consumed exactly once. A
+    /// separate trait would duplicate the seam without separating any concern.
+    async fn put_email_change(
+        &self,
+        token: &str,
+        context: &EmailChangeContext,
+        ttl_secs: u64,
+    ) -> Result<(), AuthError>;
+
+    /// Atomically consume (`getdel`) a pending address change. `None` when the token is
+    /// unknown, expired, or already consumed.
+    async fn consume_email_change(
+        &self,
+        token: &str,
+    ) -> Result<Option<EmailChangeContext>, AuthError>;
 }
 
 /// Single-use invitation storage. A [`StoredInvitation`] is held under `inv:{sha256(token)}`

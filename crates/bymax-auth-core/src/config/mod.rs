@@ -453,6 +453,28 @@ impl Default for InvitationConfig {
     }
 }
 
+/// Address-change policy.
+///
+/// The flow itself is switched on by `controllers.email_change`; this only tunes it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct EmailChangeConfig {
+    /// Verification-token TTL, default 3600s (1h).
+    ///
+    /// Shorter than an invitation because the recipient is a user who just asked for the
+    /// change and is waiting on the message — and because the token points at the account's
+    /// recovery credential, so a link sitting in a mailbox for two days is a longer window
+    /// than the flow needs.
+    pub token_ttl: Duration,
+}
+
+impl Default for EmailChangeConfig {
+    fn default() -> Self {
+        Self {
+            token_ttl: Duration::from_secs(3_600),
+        }
+    }
+}
+
 /// OAuth redirect/flow knobs and the built-in Google provider credentials.
 #[derive(Clone, Debug, Default)]
 pub struct OAuthConfig {
@@ -520,6 +542,8 @@ pub struct ControllerToggles {
     pub oauth: bool,
     /// The invitations group (auto-true when `invitations.enabled`), default false.
     pub invitations: bool,
+    /// Mount the address-change routes, default false. Opt-in.
+    pub email_change: bool,
 }
 
 impl Default for ControllerToggles {
@@ -528,6 +552,7 @@ impl Default for ControllerToggles {
             auth: true,
             password_reset: true,
             mfa: false,
+            email_change: false,
             sessions: false,
             platform: false,
             oauth: false,
@@ -570,6 +595,8 @@ pub struct AuthConfig {
     pub platform: PlatformConfig,
     /// Invitation configuration.
     pub invitations: InvitationConfig,
+    /// Address-change policy.
+    pub email_change: EmailChangeConfig,
     /// OAuth configuration.
     pub oauth: OAuthConfig,
     /// Route prefix, default `auth`.

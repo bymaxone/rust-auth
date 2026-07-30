@@ -40,7 +40,7 @@ pub use store::MfaStore;
 pub use store::OAuthStateStore;
 #[doc(inline)]
 pub use store::{
-    BruteForceStore, InvitationStore, OtpPurpose, OtpStore, PasswordResetStore, ResetContext,
-    RotateOutcome, SessionDetail, SessionKind, SessionRecord, SessionRotation, SessionStore,
-    StoredInvitation, TOKEN_EPOCH_RETENTION_SECS, WsTicketSnapshot, WsTicketStore,
+    BruteForceStore, EmailChangeContext, InvitationStore, OtpPurpose, OtpStore, PasswordResetStore,
+    ResetContext, RotateOutcome, SessionDetail, SessionKind, SessionRecord, SessionRotation,
+    SessionStore, StoredInvitation, TOKEN_EPOCH_RETENTION_SECS, WsTicketSnapshot, WsTicketStore,
 };

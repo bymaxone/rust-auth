@@ -310,6 +310,15 @@ mod tests {
 
     #[async_trait::async_trait]
     impl EmailProvider for RecordingEmails {
+        async fn send_email_change_verification(
+            &self,
+            _new_email: &str,
+            _token: &str,
+            _locale: Option<&str>,
+        ) -> Result<(), crate::traits::EmailError> {
+            Ok(())
+        }
+
         async fn send_password_reset_token(
             &self,
             email: &str,

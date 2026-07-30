@@ -3120,3 +3120,76 @@ async fn a_cross_site_fetch_with_no_origin_header_is_refused() {
 
     assert_eq!(refused.status, StatusCode::FORBIDDEN);
 }
+
+#[tokio::test]
+async fn the_address_change_routes_move_an_account_only_after_the_new_address_proves_itself() {
+    // End to end through the router: the request changes nothing, the confirmation changes
+    // everything, and each guard along the way answers through the HTTP surface a consumer
+    // actually sees.
+    let Some(h) = build(EngineSpec {
+        email_change: true,
+        ..EngineSpec::default()
+    }) else {
+        return;
+    };
+    let app = router(&h);
+    seed_user(&h, "old@e.com", "glidingwalnut42", "USER").await;
+    let login = Req::post("/auth/login")
+        .json(serde_json::json!({
+            "email": "old@e.com", "password": "glidingwalnut42", "tenantId": TENANT
+        }))
+        .send(&app)
+        .await;
+    let access = login.cookie_value("access_token").unwrap_or_default();
+
+    // Unauthenticated, the request is refused before anything is read.
+    let anonymous = Req::post("/auth/email/change")
+        .json(serde_json::json!({ "newEmail": "new@e.com", "currentPassword": "glidingwalnut42" }))
+        .send(&app)
+        .await;
+    assert_eq!(anonymous.status, StatusCode::UNAUTHORIZED);
+
+    // The wrong current password reads as invalid credentials — the same answer a failed login
+    // gives, so a thief holding the token learns nothing new.
+    let wrong = Req::post("/auth/email/change")
+        .cookie("access_token", &access)
+        .json(serde_json::json!({ "newEmail": "new@e.com", "currentPassword": "not-it" }))
+        .send(&app)
+        .await;
+    assert_eq!(wrong.status, StatusCode::UNAUTHORIZED);
+
+    // The right one starts the change…
+    let requested = Req::post("/auth/email/change")
+        .cookie("access_token", &access)
+        .json(serde_json::json!({ "newEmail": "new@e.com", "currentPassword": "glidingwalnut42" }))
+        .send(&app)
+        .await;
+    assert_eq!(requested.status, StatusCode::NO_CONTENT);
+
+    // …and the account still answers under the OLD address, because nothing has been proved.
+    let still_old = Req::post("/auth/login")
+        .json(serde_json::json!({
+            "email": "old@e.com", "password": "glidingwalnut42", "tenantId": TENANT
+        }))
+        .send(&app)
+        .await;
+    assert_eq!(still_old.status, StatusCode::OK);
+
+    // A bogus token reaches no record.
+    let bogus = Req::post("/auth/email/change/confirm")
+        .json(serde_json::json!({ "token": "0".repeat(64) }))
+        .send(&app)
+        .await;
+    assert_eq!(bogus.status, StatusCode::BAD_REQUEST);
+    assert_eq!(
+        bogus.json()["error"]["code"],
+        "auth.email_change_token_invalid"
+    );
+
+    // …and a token of the wrong shape is refused by validation before it is hashed at all.
+    let malformed = Req::post("/auth/email/change/confirm")
+        .json(serde_json::json!({ "token": "too-short" }))
+        .send(&app)
+        .await;
+    assert_eq!(malformed.status, StatusCode::BAD_REQUEST);
+}

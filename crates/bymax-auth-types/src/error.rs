@@ -76,6 +76,11 @@ pub enum AuthErrorCode {
     /// Login when email verification is required and the email is unverified.
     #[serde(rename = "auth.email_not_verified")]
     EmailNotVerified,
+    /// Address-change token unknown, expired, already used, or no longer bound to the
+    /// password it was minted against. One code for all four: the holder of a bad link learns
+    /// only that it does not work, which is all they can act on.
+    #[serde(rename = "auth.email_change_token_invalid")]
+    EmailChangeTokenInvalid,
 
     // MFA
     /// Endpoint demands verified MFA but the JWT lacks `mfaVerified: true`.
@@ -216,6 +221,7 @@ impl AuthErrorCode {
             | Self::PasswordResetTokenInvalid
             | Self::PasswordResetTokenExpired
             | Self::InvalidInvitationToken
+            | Self::EmailChangeTokenInvalid
             | Self::Validation => 400,
             Self::AccountLocked | Self::OtpMaxAttempts | Self::TooManyRequests => 429,
             Self::Internal => 500,
@@ -244,6 +250,7 @@ impl AuthErrorCode {
             Self::TokenMissing => "Token missing",
             Self::EmailAlreadyExists => "Email already registered",
             Self::EmailNotVerified => "Email not verified",
+            Self::EmailChangeTokenInvalid => "Invalid or expired email change link",
             Self::MfaRequired => "Two-factor authentication required",
             Self::MfaInvalidCode => "Invalid MFA code",
             Self::MfaAlreadyEnabled => "MFA is already enabled",
@@ -413,6 +420,9 @@ pub enum AuthError {
     /// Email not verified while verification is required.
     #[error("email not verified")]
     EmailNotVerified,
+    /// Address-change token invalid, expired, spent, or no longer bound.
+    #[error("invalid email change token")]
+    EmailChangeTokenInvalid,
 
     // MFA
     /// Verified MFA required but absent from the JWT.
@@ -532,6 +542,7 @@ impl AuthError {
             Self::TokenMissing => AuthErrorCode::TokenMissing,
             Self::EmailAlreadyExists => AuthErrorCode::EmailAlreadyExists,
             Self::EmailNotVerified => AuthErrorCode::EmailNotVerified,
+            Self::EmailChangeTokenInvalid => AuthErrorCode::EmailChangeTokenInvalid,
             Self::MfaRequired => AuthErrorCode::MfaRequired,
             Self::MfaInvalidCode => AuthErrorCode::MfaInvalidCode,
             Self::MfaAlreadyEnabled => AuthErrorCode::MfaAlreadyEnabled,

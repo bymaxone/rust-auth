@@ -62,6 +62,8 @@ pub enum Prefix {
     Inv,
     /// Single-use claim on an MFA recovery code (`rcu`).
     Rcu,
+    /// Pending address change (`ec`).
+    Ec,
     /// Invitee index for a pending invitation (`invidx`). Keyed by
     /// `{tenantId}:{sha256(email)}` and holding the invitation's token hash — the only handle
     /// the issuing side has on a record keyed by a token it never saw.
@@ -112,6 +114,7 @@ impl Prefix {
             Self::PwVtok => "pw_vtok",
             Self::Inv => "inv",
             Self::Rcu => "rcu",
+            Self::Ec => "ec",
             Self::Invidx => "invidx",
             Self::Prt => "prt",
             Self::Prp => "prp",
@@ -313,6 +316,7 @@ mod tests {
             (Prefix::PwVtok, "auth:pw_vtok:abc"),
             (Prefix::Inv, "auth:inv:abc"),
             (Prefix::Rcu, "auth:rcu:abc"),
+            (Prefix::Ec, "auth:ec:abc"),
             (Prefix::Invidx, "auth:invidx:abc"),
             (Prefix::Prt, "auth:prt:abc"),
             (Prefix::Prp, "auth:prp:abc"),

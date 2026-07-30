@@ -11,9 +11,9 @@
 use std::time::Duration;
 
 use super::{
-    AuthConfig, BruteForceConfig, ControllerToggles, CookieConfig, EmailVerificationConfig,
-    InvitationConfig, JwtConfig, OAuthConfig, PasswordAlgorithm, PasswordConfig,
-    PasswordResetConfig, PlatformConfig, RolesConfig, SessionConfig, TokenDelivery,
+    AuthConfig, BruteForceConfig, ControllerToggles, CookieConfig, EmailChangeConfig,
+    EmailVerificationConfig, InvitationConfig, JwtConfig, OAuthConfig, PasswordAlgorithm,
+    PasswordConfig, PasswordResetConfig, PlatformConfig, RolesConfig, SessionConfig, TokenDelivery,
 };
 
 impl AuthConfig {
@@ -37,6 +37,7 @@ impl AuthConfig {
             email_verification: EmailVerificationConfig::default(),
             platform: PlatformConfig::default(),
             invitations: InvitationConfig::default(),
+            email_change: EmailChangeConfig::default(),
             oauth: OAuthConfig::default(),
             route_prefix: "auth".to_owned(),
             redis_namespace: "auth".to_owned(),

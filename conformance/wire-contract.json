@@ -64,7 +64,8 @@
     "oauthState": "os",
     "wsTicket": "wst",
     "invitation": "inv",
-    "recoveryCodeClaim": "rcu"
+    "recoveryCodeClaim": "rcu",
+    "emailChangeToken": "ec"
   },
 
   "recoveryCodeClaim": {
@@ -184,6 +185,28 @@
       "tenantId": "omitted from the record entirely when the ticket is not tenant-scoped",
       "$comment": "A verified-identity SNAPSHOT, never a token: no jti, no signature, no expiry of its own. The socket it authorizes cannot be turned back into a session. Redemption is a single-use GETDEL, so a captured upgrade URL is worthless once the socket opens."
     },
+    "emailChangeContext": {
+      "key": "ec:{sha256(token)}",
+      "fields": ["userId", "newEmail", "tenantId", "passwordFingerprint"],
+      "$comment": [
+        "The pending address change, held under a token that is mailed to the NEW address and",
+        "nowhere else — proving the requester controls it before it becomes the account's",
+        "address. Consumed with GETDEL, so a link works exactly once.",
+        "",
+        "`newEmail` is stored ALREADY NORMALIZED (trimmed, lowercased), because the uniqueness",
+        "check at confirm time compares it against the repository the same way login does. The",
+        "old address is not stored: it is read from the account at confirm time, so a record",
+        "that outlives an intervening change still notifies wherever the account actually is.",
+        "",
+        "`passwordFingerprint` binds the token to the password in force when it was minted,",
+        "exactly as the reset context does. An attacker who plants a change request and waits",
+        "loses it the moment the victim changes their password — which is the first thing a",
+        "victim does. An ABSENT field is read as 'no binding' and accepted, so a rolling deploy",
+        "does not break the changes already in flight."
+      ],
+      "passwordFingerprint": "sha256 of the account's password hash when the token was minted, or the empty string when the account had none."
+    },
+
     "passwordResetContext": {
       "key": "pw_reset:{sha256(token)}",
       "fields": ["userId", "email", "tenantId", "passwordFingerprint"],
@@ -235,6 +258,8 @@
     "invitationCreate": "10/3600",
     "invitationAccept": "5/60",
     "invitationRevoke": "10/3600",
+    "emailChangeRequest": "3/300",
+    "emailChangeConfirm": "5/60",
     "listSessions": "30/60",
     "revokeSession": "10/60",
     "revokeAllSessions": "5/60",
@@ -250,6 +275,27 @@
       "inert until the user's first bump. Absent from the MFA challenge token, which grants no",
       "resource access on its own."
     ],
+
+    "issuerAndAudience": {
+      "claims": ["iss", "aud"],
+      "type": "string, or absent",
+      "configuredBy": "jwt.issuer / jwt.audience",
+      "$comment": [
+        "Optional on both sides and absent by default, so an existing deployment is unchanged.",
+        "When configured, the value is STAMPED on every token the backend mints and REQUIRED on",
+        "every token it verifies: a token carrying the wrong issuer or audience, or none at all,",
+        "is rejected. That is the whole point — a verifier that accepts an unstamped token gives",
+        "an attacker a way to opt out of the check.",
+        "",
+        "Both backends must be configured with the SAME pair or they stop accepting each other's",
+        "tokens, which is the one way this setting can split a shared deployment. It is also the",
+        "reason it is not on by default.",
+        "",
+        "Turning it on invalidates the access tokens already in flight, because they were minted",
+        "without the claims. The window is one access-token lifetime and clients recover by",
+        "refreshing — the refresh token is opaque and carries no claims, so rotation is unaffected."
+      ]
+    },
     "epoch": {
       "claim": "epoch",
       "type": "non-negative integer",

@@ -6,7 +6,7 @@
 
 use async_trait::async_trait;
 use bymax_auth_core::traits::{
-    InvitationStore, PasswordResetStore, ResetContext, StoredInvitation,
+    EmailChangeContext, InvitationStore, PasswordResetStore, ResetContext, StoredInvitation,
 };
 use bymax_auth_crypto::mac::sha256;
 use bymax_auth_types::AuthError;
@@ -117,6 +117,26 @@ impl PasswordResetStore for RedisStores {
         ttl_secs: u64,
     ) -> Result<(), AuthError> {
         self.put_value(Prefix::PwVtok, token, context, ttl_secs)
+            .await
+            .map_err(AuthError::from)
+    }
+
+    async fn put_email_change(
+        &self,
+        token: &str,
+        context: &EmailChangeContext,
+        ttl_secs: u64,
+    ) -> Result<(), AuthError> {
+        self.put_value(Prefix::Ec, token, context, ttl_secs)
+            .await
+            .map_err(AuthError::from)
+    }
+
+    async fn consume_email_change(
+        &self,
+        token: &str,
+    ) -> Result<Option<EmailChangeContext>, AuthError> {
+        self.consume_value(Prefix::Ec, token)
             .await
             .map_err(AuthError::from)
     }

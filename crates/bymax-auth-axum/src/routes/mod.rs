@@ -9,6 +9,8 @@
 pub(crate) mod auth;
 pub(crate) mod password_reset;
 
+pub(crate) mod email_change;
+
 #[cfg(feature = "invitations")]
 pub(crate) mod invitations;
 #[cfg(feature = "mfa")]

@@ -22,11 +22,11 @@ use time::OffsetDateTime;
 
 use crate::RepositoryError;
 use crate::traits::{
-    BruteForceStore, HttpClient, HttpError, HttpRequest, HttpResponse, InvitationStore,
-    OAuthProfile, OAuthProvider, OAuthProviderError, OAuthTokens, OtpPurpose, OtpStore,
-    PasswordResetStore, PlatformUserRepository, ResetContext, RotateOutcome, SessionDetail,
-    SessionKind, SessionRecord, SessionRotation, SessionStore, StoredInvitation, UserRepository,
-    WsTicketSnapshot, WsTicketStore,
+    BruteForceStore, EmailChangeContext, HttpClient, HttpError, HttpRequest, HttpResponse,
+    InvitationStore, OAuthProfile, OAuthProvider, OAuthProviderError, OAuthTokens, OtpPurpose,
+    OtpStore, PasswordResetStore, PlatformUserRepository, ResetContext, RotateOutcome,
+    SessionDetail, SessionKind, SessionRecord, SessionRotation, SessionStore, StoredInvitation,
+    UserRepository, WsTicketSnapshot, WsTicketStore,
 };
 
 pub use crate::traits::{NoOpAuthHooks, NoOpEmailProvider};
@@ -159,6 +159,17 @@ impl UserRepository for InMemoryUserRepository {
     async fn update_email_verified(&self, id: &str, verified: bool) -> Result<(), RepositoryError> {
         if let Some(user) = lock(&self.users).get_mut(id) {
             user.email_verified = verified;
+        }
+        Ok(())
+    }
+
+    async fn update_email(&self, id: &str, email: &str) -> Result<(), RepositoryError> {
+        // The address is proven before this runs, so the account stays verified across the
+        // change — a store that cleared the flag here would sign the user out of a state it
+        // had just proved.
+        let mut users = lock(&self.users);
+        if let Some(user) = users.get_mut(id) {
+            user.email = email.to_owned();
         }
         Ok(())
     }
@@ -339,6 +350,8 @@ pub struct InMemoryStores {
     invitations: Mutex<HashMap<String, StoredInvitation>>,
     /// The invitee index: `{tenantId}:{sha256(email)}` -> the invitation's token hash.
     invitation_index: Mutex<HashMap<String, String>>,
+    /// Pending address changes (`ec:`), keyed by the token hash.
+    email_changes: Mutex<HashMap<String, EmailChangeContext>>,
     /// `mfa_setup:` — the AES-protected pending-setup record keyed by `hmac_sha256(user_id)`.
     #[cfg(feature = "mfa")]
     mfa_setup: Mutex<HashMap<String, String>>,
@@ -772,6 +785,23 @@ fn token_key(token: &str) -> String {
 
 #[async_trait]
 impl PasswordResetStore for InMemoryStores {
+    async fn put_email_change(
+        &self,
+        token: &str,
+        context: &EmailChangeContext,
+        _ttl_secs: u64,
+    ) -> Result<(), AuthError> {
+        lock(&self.email_changes).insert(token_key(token), context.clone());
+        Ok(())
+    }
+
+    async fn consume_email_change(
+        &self,
+        token: &str,
+    ) -> Result<Option<EmailChangeContext>, AuthError> {
+        Ok(lock(&self.email_changes).remove(&token_key(token)))
+    }
+
     async fn put_token(
         &self,
         token: &str,

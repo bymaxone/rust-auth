@@ -67,6 +67,54 @@ pub trait EmailProvider: Send + Sync {
         Ok(())
     }
 
+    /// Deliver the address-change verification token to the **new** address.
+    ///
+    /// The token goes here and nowhere else: receiving it is what proves the requester
+    /// controls the address before it becomes the account's. The provider builds the
+    /// confirmation URL from it.
+    ///
+    /// **Required, unlike the notices below.** A defaulted no-op would swallow the token and
+    /// leave the flow minting `ec:` keys nobody ever receives — a failure that looks like
+    /// success from every side, and that a user experiences as a verification email that
+    /// simply never arrives. Every other trait method that carries a token is required for
+    /// the same reason; making this one optional would be the exception, not the rule.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`EmailError`] when delivery fails. The engine surfaces it: a change whose
+    /// verification could not be sent has not started.
+    async fn send_email_change_verification(
+        &self,
+        new_email: &str,
+        token: &str,
+        locale: Option<&str>,
+    ) -> Result<(), EmailError>;
+
+    /// Notify the **old** address that the account's address has changed.
+    ///
+    /// NIST SP 800-63B §4.6 asks for notification of a credential change, and the address is
+    /// the recovery credential: someone who moves it can then drive a password reset to a
+    /// mailbox the owner does not read. This message is what puts that in front of the owner
+    /// while they still control the address it arrives at.
+    ///
+    /// Defaulted to a no-op so an existing provider keeps compiling, exactly like
+    /// [`Self::send_password_changed`] — it is the same kind of notice, and it carries no
+    /// token whose loss would break the flow.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`EmailError`] when delivery fails. The engine logs and drops it: a change the
+    /// user asked for and proved is not rolled back because a mail server was down.
+    async fn send_email_changed_notification(
+        &self,
+        old_email: &str,
+        new_email: &str,
+        locale: Option<&str>,
+    ) -> Result<(), EmailError> {
+        let _ = (old_email, new_email, locale);
+        Ok(())
+    }
+
     /// Security alert: MFA was enabled on the account.
     async fn send_mfa_enabled(&self, email: &str, locale: Option<&str>) -> Result<(), EmailError>;
 
@@ -152,6 +200,17 @@ pub struct NoOpEmailProvider;
 
 #[async_trait]
 impl EmailProvider for NoOpEmailProvider {
+    async fn send_email_change_verification(
+        &self,
+        new_email: &str,
+        token: &str,
+        _locale: Option<&str>,
+    ) -> Result<(), EmailError> {
+        let _ = (new_email, token);
+        tracing::debug!("NoOpEmailProvider: send_email_change_verification");
+        Ok(())
+    }
+
     async fn send_password_reset_token(
         &self,
         email: &str,

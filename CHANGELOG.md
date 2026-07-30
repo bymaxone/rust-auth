@@ -12,6 +12,33 @@ version bump.
 
 ### Added
 
+- **Changing the address on an account** — `POST /auth/email/change` and
+  `POST /auth/email/change/confirm`, opt-in behind `controllers.email_change`. The address is
+  the account's recovery credential: whoever controls it can drive a password reset to a
+  mailbox the owner does not read. Until now the library could mint one and never move it, so
+  a user whose address died was locked out permanently.
+
+  Two steps, and the split is the security property. The request re-proves the current password
+  and mails a single-use token to the NEW address; nothing about the account changes. The
+  confirmation consumes that token and is public, because the person holding it is proving
+  control of a mailbox rather than of a session. The old address is then notified (NIST SP
+  800-63B §4.6) — the last message the owner can receive somewhere they still control, and what
+  turns a silent takeover into one they can see.
+
+  No session is revoked: anyone who can complete the flow could already sign in, so ending the
+  caller's devices would cost the user and buy nothing. The stored token is bound to the
+  password in force when it was minted, so a planted request dies the moment the victim changes
+  their password; uniqueness is re-checked at confirm time, because the two steps are separated
+  by the whole TTL.
+
+  BREAKING: `UserRepository` gains `update_email`, `PasswordResetStore` gains
+  `put_email_change` / `consume_email_change`, and `EmailProvider` gains a **required**
+  `send_email_change_verification`. That one is required rather than defaulted on purpose — a
+  no-op default would swallow the token and leave the flow minting `ec:` keys nobody receives,
+  a failure that looks like success from every side. The notice to the old address
+  (`send_email_changed_notification`) is defaulted, like the other notices.
+
+
 - **`AuthEngine::unlock_account(email, tenant_id)` — clearing a brute-force lockout.** A
   lockout is a denial of service the library imposes on its own users, and it could only be
   waited out: the counter is keyed by an HMAC of `{tenant_id}:{email}` under the library's own

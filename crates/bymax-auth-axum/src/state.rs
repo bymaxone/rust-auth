@@ -86,6 +86,8 @@ pub struct RouteGroups {
     pub oauth: bool,
     /// The invitations group.
     pub invitations: bool,
+    /// The address-change group.
+    pub email_change: bool,
 }
 
 impl RouteGroups {
@@ -102,6 +104,7 @@ impl RouteGroups {
             platform_mfa: toggles.platform && toggles.mfa,
             oauth: toggles.oauth,
             invitations: toggles.invitations,
+            email_change: toggles.email_change,
         }
     }
 }

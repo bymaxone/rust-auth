@@ -255,6 +255,36 @@ pub struct CreateInvitationDto {
     pub tenant_name: Option<String>,
 }
 
+/// `POST /auth/email/change` body (authenticated).
+///
+/// The account is never named here — it comes from the caller's own claims. A body that could
+/// name a user id would let anyone holding any session move any account's recovery address.
+#[derive(Debug, Deserialize, Validate)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ChangeEmailDto {
+    /// The address to move to.
+    #[garde(email)]
+    pub new_email: String,
+    /// The account's current password, re-proved because the address is the recovery
+    /// credential. Bounded at 128 to match the hasher's input limit — an unbounded field is a
+    /// cheap way to make someone else pay for a key derivation.
+    #[garde(length(min = 1, max = 128))]
+    pub current_password: String,
+}
+
+/// `POST /auth/email/change/confirm` body (public).
+///
+/// The token is the whole payload: it already names the account, the target address and the
+/// tenant, all fixed when it was minted. Accepting any of those from the body would let the
+/// holder of one link redirect it at a different account.
+#[derive(Debug, Deserialize, Validate)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ConfirmEmailChangeDto {
+    /// The single-use token mailed to the new address — exactly 64 hex characters.
+    #[garde(length(min = 64, max = 64))]
+    pub token: String,
+}
+
 /// `POST /auth/invitations/revoke` body (authenticated).
 ///
 /// The address is the entire payload because it is the only handle the issuing side has: the

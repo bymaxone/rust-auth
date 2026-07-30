@@ -7,6 +7,7 @@
 //! (tenant resolution, the status gate, hook context, and fire-and-forget dispatch).
 
 pub(crate) mod detached;
+mod email_change;
 mod email_verification;
 mod invitation;
 mod login;
