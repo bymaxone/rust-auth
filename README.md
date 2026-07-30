@@ -723,6 +723,7 @@ Route groups mount only when their feature **and** runtime toggle are enabled, s
 | DELETE | `/auth/sessions/:id`          | `AuthUser`, `UserStatus`        | Revoke a specific session (ownership-checked)        |
 | POST   | `/auth/invitations`           | `AuthUser`                      | Create a tenant invitation                           |
 | POST   | `/auth/invitations/accept`    | Public                          | Accept an invitation and create the user             |
+| POST   | `/auth/invitations/revoke`    | `AuthUser`                      | Withdraw a pending invitation                        |
 | POST   | `/auth/platform/login`        | Public                          | Platform-admin login (separate context)              |
 | POST   | `/auth/platform/mfa/challenge`| Public                          | Platform-admin MFA challenge                         |
 | GET    | `/auth/platform/me`           | `PlatformUser`                  | Current platform admin                               |

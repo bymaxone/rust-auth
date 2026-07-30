@@ -255,6 +255,20 @@ pub struct CreateInvitationDto {
     pub tenant_name: Option<String>,
 }
 
+/// `POST /auth/invitations/revoke` body (authenticated).
+///
+/// The address is the entire payload because it is the only handle the issuing side has: the
+/// invitation record is keyed by the hash of a token only the invitee's mailbox ever held.
+/// `tenant_id` is absent for the same reason it is absent from [`CreateInvitationDto`] — it
+/// comes from the caller's claims, never the body.
+#[derive(Debug, Deserialize, Validate)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RevokeInvitationDto {
+    /// The invited address whose pending invitation is being withdrawn.
+    #[garde(email)]
+    pub email: String,
+}
+
 /// `POST /auth/invitations/accept` body (public).
 #[derive(Debug, Deserialize, Validate)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]

@@ -613,6 +613,46 @@ pub trait InvitationStore: Send + Sync {
     /// Atomically consume (`getdel`) an invitation. `None` when the token is unknown,
     /// expired, or already consumed.
     async fn consume_invitation(&self, token: &str) -> Result<Option<StoredInvitation>, AuthError>;
+
+    /// Point the invitee index (`invidx:{tenantId}:{sha256(email)}`) at a pending
+    /// invitation's token hash, with the invitation's own TTL so the pair expires together.
+    ///
+    /// The index is what makes an invitation manageable at all: the record is keyed by the
+    /// hash of a token only the invitee's mailbox ever held, so without it nobody on the
+    /// issuing side can name a pending invitation, let alone withdraw one. The email is
+    /// hashed by the implementation — a dump of the keyspace must not enumerate who a tenant
+    /// has been inviting.
+    async fn put_invitation_index(
+        &self,
+        tenant_id: &str,
+        email: &str,
+        token_hash: &str,
+        ttl_secs: u64,
+    ) -> Result<(), AuthError>;
+
+    /// Read the token hash the invitee index points at, leaving the entry in place.
+    async fn read_invitation_index(
+        &self,
+        tenant_id: &str,
+        email: &str,
+    ) -> Result<Option<String>, AuthError>;
+
+    /// Atomically take (`getdel`) the invitee index entry.
+    async fn take_invitation_index(
+        &self,
+        tenant_id: &str,
+        email: &str,
+    ) -> Result<Option<String>, AuthError>;
+
+    /// Read an invitation by its stored token **hash**, without consuming it — the revocation
+    /// path, which reaches the record through the index rather than through a raw token.
+    async fn read_invitation_by_hash(
+        &self,
+        token_hash: &str,
+    ) -> Result<Option<StoredInvitation>, AuthError>;
+
+    /// Delete an invitation by its stored token **hash**. `true` when a record was removed.
+    async fn delete_invitation_by_hash(&self, token_hash: &str) -> Result<bool, AuthError>;
 }
 
 /// The MFA storage seam: the AES-protected pending-setup record, the short-lived MFA

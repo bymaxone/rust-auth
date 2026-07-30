@@ -1295,6 +1295,31 @@ async fn invitation_create_and_accept() {
         accept.json()["error"]["code"],
         "auth.invalid_invitation_token"
     );
+
+    // The invitation created above can be withdrawn — an invitation is a credential, and
+    // until this route existed it stayed redeemable for its whole TTL whatever happened.
+    let revoke = Req::post("/auth/invitations/revoke")
+        .cookie("access_token", &access)
+        .json(serde_json::json!({ "email": "invitee@e.com" }))
+        .send(&app)
+        .await;
+    assert_eq!(revoke.status, StatusCode::NO_CONTENT);
+
+    // …and so is an address that has none: the endpoint answers the same either way, or it
+    // becomes an oracle for which addresses have pending invitations.
+    let absent = Req::post("/auth/invitations/revoke")
+        .cookie("access_token", &access)
+        .json(serde_json::json!({ "email": "nobody@e.com" }))
+        .send(&app)
+        .await;
+    assert_eq!(absent.status, StatusCode::NO_CONTENT);
+
+    // Withdrawing without auth is rejected, exactly like minting one.
+    let no_auth_revoke = Req::post("/auth/invitations/revoke")
+        .json(serde_json::json!({ "email": "invitee@e.com" }))
+        .send(&app)
+        .await;
+    assert_eq!(no_auth_revoke.status, StatusCode::UNAUTHORIZED);
 }
 
 #[tokio::test]

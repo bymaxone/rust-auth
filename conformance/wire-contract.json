@@ -140,6 +140,19 @@
       "createdAt": "iso8601-string",
       "$comment": "Consumption is a single-use GETDEL, so a record the reader rejects is destroyed rather than retried — a missing field loses the invitation outright."
     },
+    "invitationIndex": {
+      "key": "invidx:{tenantId}:{sha256(email)}",
+      "value": "the invitation's token hash (lowercase hex), pointing at its `inv:` record",
+      "$comment": [
+        "The one handle the issuing side has on a pending invitation: the record itself is keyed by",
+        "the hash of a token only the invitee's mailbox ever held, so without this nobody can name a",
+        "pending invitation, let alone withdraw one. Carries the invitation's TTL, so the pair expires",
+        "together. The email is hashed rather than stored in the clear — a dump of the keyspace must",
+        "not enumerate who a tenant has been inviting. Re-inviting an address supersedes the previous",
+        "invitation through this key: two live tokens for one invitee is two chances for an",
+        "intercepted link, and a revoke would only ever reach the newest."
+      ]
+    },
     "wsTicket": {
       "key": "wst:{sha256(ticket)}",
       "fields": ["sub", "tenantId", "role", "status", "mfaEnabled", "mfaVerified"],
@@ -180,11 +193,11 @@
     "login": "5/60",
     "register": "10/3600",
     "refresh": "10/60",
-  "logout": "20/60",
-  "wsTicket": "20/60",
+    "logout": "20/60",
+    "wsTicket": "20/60",
     "forgotPassword": "3/300",
     "resetPassword": "3/300",
-  "changePassword": "5/60",
+    "changePassword": "5/60",
     "verifyOtp": "3/300",
     "resendPasswordOtp": "3/300",
     "verifyEmail": "5/60",
@@ -196,6 +209,7 @@
     "platformLogin": "5/60",
     "invitationCreate": "10/3600",
     "invitationAccept": "5/60",
+    "invitationRevoke": "10/3600",
     "listSessions": "30/60",
     "revokeSession": "10/60",
     "revokeAllSessions": "5/60",

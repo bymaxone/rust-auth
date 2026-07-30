@@ -22,6 +22,16 @@ impl RedisStores {
         self.keys().key(prefix, &to_hex(&sha256(token.as_bytes())))
     }
 
+    /// The invitee index key: `invidx:{tenantId}:{sha256(email)}`. The address is hashed so a
+    /// dump of the keyspace does not enumerate who a tenant has been inviting, which the
+    /// invitation record itself never exposes either.
+    fn invitee_key(&self, tenant_id: &str, email: &str) -> String {
+        self.keys().key(
+            Prefix::Invidx,
+            &format!("{tenant_id}:{}", to_hex(&sha256(email.as_bytes()))),
+        )
+    }
+
     /// Store a JSON-serializable value under `prefix:{sha256(token)}` with a TTL.
     async fn put_value<T: serde::Serialize>(
         &self,
@@ -135,5 +145,79 @@ impl InvitationStore for RedisStores {
         self.consume_value(Prefix::Inv, token)
             .await
             .map_err(AuthError::from)
+    }
+
+    async fn put_invitation_index(
+        &self,
+        tenant_id: &str,
+        email: &str,
+        token_hash: &str,
+        ttl_secs: u64,
+    ) -> Result<(), AuthError> {
+        let key = self.invitee_key(tenant_id, email);
+        let mut conn = self.connection().await.map_err(AuthError::from)?;
+        redis::cmd("SET")
+            .arg(&key)
+            .arg(token_hash)
+            .arg("EX")
+            .arg(ttl_secs)
+            .query_async::<()>(&mut conn)
+            .await
+            .map_err(|error| AuthError::from(RedisStoreError::from(error)))
+    }
+
+    async fn read_invitation_index(
+        &self,
+        tenant_id: &str,
+        email: &str,
+    ) -> Result<Option<String>, AuthError> {
+        let key = self.invitee_key(tenant_id, email);
+        let mut conn = self.connection().await.map_err(AuthError::from)?;
+        redis::cmd("GET")
+            .arg(&key)
+            .query_async::<Option<String>>(&mut conn)
+            .await
+            .map_err(|error| AuthError::from(RedisStoreError::from(error)))
+    }
+
+    async fn take_invitation_index(
+        &self,
+        tenant_id: &str,
+        email: &str,
+    ) -> Result<Option<String>, AuthError> {
+        let key = self.invitee_key(tenant_id, email);
+        let mut conn = self.connection().await.map_err(AuthError::from)?;
+        redis::cmd("GETDEL")
+            .arg(&key)
+            .query_async::<Option<String>>(&mut conn)
+            .await
+            .map_err(|error| AuthError::from(RedisStoreError::from(error)))
+    }
+
+    async fn read_invitation_by_hash(
+        &self,
+        token_hash: &str,
+    ) -> Result<Option<StoredInvitation>, AuthError> {
+        let key = self.keys().key(Prefix::Inv, token_hash);
+        let mut conn = self.connection().await.map_err(AuthError::from)?;
+        let raw: Option<String> = redis::cmd("GET")
+            .arg(&key)
+            .query_async(&mut conn)
+            .await
+            .map_err(|error| AuthError::from(RedisStoreError::from(error)))?;
+        // A record that no longer parses is answered as absent: the revocation path deletes it
+        // either way, and it could not have been accepted either.
+        Ok(raw.and_then(|json| serde_json::from_str(&json).ok()))
+    }
+
+    async fn delete_invitation_by_hash(&self, token_hash: &str) -> Result<bool, AuthError> {
+        let key = self.keys().key(Prefix::Inv, token_hash);
+        let mut conn = self.connection().await.map_err(AuthError::from)?;
+        let removed: i64 = redis::cmd("DEL")
+            .arg(&key)
+            .query_async(&mut conn)
+            .await
+            .map_err(|error| AuthError::from(RedisStoreError::from(error)))?;
+        Ok(removed > 0)
     }
 }

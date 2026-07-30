@@ -337,6 +337,8 @@ pub struct InMemoryStores {
     reset_tokens: Mutex<HashMap<String, ResetContext>>,
     reset_verified: Mutex<HashMap<String, ResetContext>>,
     invitations: Mutex<HashMap<String, StoredInvitation>>,
+    /// The invitee index: `{tenantId}:{sha256(email)}` -> the invitation's token hash.
+    invitation_index: Mutex<HashMap<String, String>>,
     /// `mfa_setup:` — the AES-protected pending-setup record keyed by `hmac_sha256(user_id)`.
     #[cfg(feature = "mfa")]
     mfa_setup: Mutex<HashMap<String, String>>,
@@ -751,6 +753,11 @@ impl WsTicketStore for InMemoryStores {
 /// Hash an opaque token to its store-key form, mirroring the real store's
 /// "the raw token is never a key" guarantee (so the test double exercises the same
 /// hash-then-key path the engine relies on).
+/// The invitee index key, mirroring the Redis store's `invidx:{tenantId}:{sha256(email)}`.
+fn invitee_key(tenant_id: &str, email: &str) -> String {
+    format!("{tenant_id}:{}", token_key(email))
+}
+
 fn token_key(token: &str) -> String {
     let mut out = String::with_capacity(64);
     for byte in bymax_auth_crypto::mac::sha256(token.as_bytes()) {
@@ -811,6 +818,46 @@ impl InvitationStore for InMemoryStores {
 
     async fn consume_invitation(&self, token: &str) -> Result<Option<StoredInvitation>, AuthError> {
         Ok(lock(&self.invitations).remove(&token_key(token)))
+    }
+
+    async fn put_invitation_index(
+        &self,
+        tenant_id: &str,
+        email: &str,
+        token_hash: &str,
+        _ttl_secs: u64,
+    ) -> Result<(), AuthError> {
+        lock(&self.invitation_index).insert(invitee_key(tenant_id, email), token_hash.to_owned());
+        Ok(())
+    }
+
+    async fn read_invitation_index(
+        &self,
+        tenant_id: &str,
+        email: &str,
+    ) -> Result<Option<String>, AuthError> {
+        Ok(lock(&self.invitation_index)
+            .get(&invitee_key(tenant_id, email))
+            .cloned())
+    }
+
+    async fn take_invitation_index(
+        &self,
+        tenant_id: &str,
+        email: &str,
+    ) -> Result<Option<String>, AuthError> {
+        Ok(lock(&self.invitation_index).remove(&invitee_key(tenant_id, email)))
+    }
+
+    async fn read_invitation_by_hash(
+        &self,
+        token_hash: &str,
+    ) -> Result<Option<StoredInvitation>, AuthError> {
+        Ok(lock(&self.invitations).get(token_hash).cloned())
+    }
+
+    async fn delete_invitation_by_hash(&self, token_hash: &str) -> Result<bool, AuthError> {
+        Ok(lock(&self.invitations).remove(token_hash).is_some())
     }
 }
 

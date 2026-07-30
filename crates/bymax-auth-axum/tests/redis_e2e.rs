@@ -541,6 +541,39 @@ async fn full_router_against_real_redis() {
     .await;
     assert_eq!(create.status, StatusCode::NO_CONTENT);
 
+    // Re-inviting the same address supersedes the first invitation through the invitee index,
+    // then the whole pair is withdrawn — the `invidx:` keyspace end to end over real Redis,
+    // which is the only place its SET/GET/GETDEL/DEL round-trip is exercised for real.
+    let reinvite = call(
+        &app,
+        Method::POST,
+        "/auth/invitations",
+        Some(serde_json::json!({ "email": "invitee@e.com", "role": "USER" })),
+        &[("access_token", &inviter_access)],
+    )
+    .await;
+    assert_eq!(reinvite.status, StatusCode::NO_CONTENT);
+    let revoke = call(
+        &app,
+        Method::POST,
+        "/auth/invitations/revoke",
+        Some(serde_json::json!({ "email": "invitee@e.com" })),
+        &[("access_token", &inviter_access)],
+    )
+    .await;
+    assert_eq!(revoke.status, StatusCode::NO_CONTENT);
+    // Idempotent: the second withdrawal finds nothing and answers the same, so the endpoint
+    // never reports whether an address has a pending invitation.
+    let again = call(
+        &app,
+        Method::POST,
+        "/auth/invitations/revoke",
+        Some(serde_json::json!({ "email": "invitee@e.com" })),
+        &[("access_token", &inviter_access)],
+    )
+    .await;
+    assert_eq!(again.status, StatusCode::NO_CONTENT);
+
     // ---- MFA enrolment over real Redis (setup → verify-enable with a live TOTP) ---------
     seed_user(&users, "mfa@e.com", "USER").await;
     let mlogin = call(

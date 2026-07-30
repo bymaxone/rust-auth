@@ -634,6 +634,44 @@ impl bymax_auth_core::traits::InvitationStore for FailingStores {
     {
         self.inner.consume_invitation(token).await
     }
+    async fn put_invitation_index(
+        &self,
+        tenant_id: &str,
+        email: &str,
+        token_hash: &str,
+        ttl_secs: u64,
+    ) -> Result<(), bymax_auth_types::AuthError> {
+        self.inner
+            .put_invitation_index(tenant_id, email, token_hash, ttl_secs)
+            .await
+    }
+    async fn read_invitation_index(
+        &self,
+        tenant_id: &str,
+        email: &str,
+    ) -> Result<Option<String>, bymax_auth_types::AuthError> {
+        self.inner.read_invitation_index(tenant_id, email).await
+    }
+    async fn take_invitation_index(
+        &self,
+        tenant_id: &str,
+        email: &str,
+    ) -> Result<Option<String>, bymax_auth_types::AuthError> {
+        self.inner.take_invitation_index(tenant_id, email).await
+    }
+    async fn read_invitation_by_hash(
+        &self,
+        token_hash: &str,
+    ) -> Result<Option<bymax_auth_core::traits::StoredInvitation>, bymax_auth_types::AuthError>
+    {
+        self.inner.read_invitation_by_hash(token_hash).await
+    }
+    async fn delete_invitation_by_hash(
+        &self,
+        token_hash: &str,
+    ) -> Result<bool, bymax_auth_types::AuthError> {
+        self.inner.delete_invitation_by_hash(token_hash).await
+    }
 }
 
 #[async_trait]

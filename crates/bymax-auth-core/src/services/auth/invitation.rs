@@ -25,6 +25,12 @@ use crate::traits::{HookContext, InviteData, StoredInvitation};
 /// The bytes of entropy in an invitation token before hex-encoding (256-bit, 64 hex chars).
 const INVITE_TOKEN_BYTES: usize = 32;
 
+/// The stored key suffix for a raw invitation token: `sha256(token)` in lowercase hex, the
+/// same form the store derives, so the index can point at a record the engine never keys.
+fn token_hash(token: &str) -> String {
+    crate::services::to_hex(&bymax_auth_crypto::mac::sha256(token.as_bytes()))
+}
+
 /// Input to accept an invitation: the single-use token plus the new account's credentials.
 /// The `Debug` impl redacts the token and the password.
 #[derive(Clone)]
@@ -116,7 +122,20 @@ impl AuthEngine {
             // rejection would destroy the invitation rather than merely fail it.
             created_at: OffsetDateTime::now_utc(),
         };
+        // Re-inviting an address supersedes the previous invitation rather than adding a
+        // second one. Two live tokens for one invitee is two chances for an intercepted link
+        // to be redeemed, and a revoke would only ever reach the newest — the older would sit
+        // valid and unreferenced for the rest of its TTL.
+        if let Some(previous) = store.take_invitation_index(tenant_id, &email).await? {
+            store.delete_invitation_by_hash(&previous).await?;
+        }
         store.put_invitation(&raw, &invitation, ttl).await?;
+        // The invitee index is what makes an invitation manageable at all: the record is keyed
+        // by the hash of a token only the recipient's mailbox holds, so without this nobody on
+        // the issuing side can name a pending invitation, let alone withdraw one.
+        store
+            .put_invitation_index(tenant_id, &email, &token_hash(&raw), ttl)
+            .await?;
 
         // The email provider builds the accept URL from the raw token (never logged).
         let expires_at = OffsetDateTime::now_utc()
@@ -184,6 +203,14 @@ impl AuthEngine {
             return Err(AuthError::InvalidInvitationToken);
         }
 
+        // The record is already gone; drop the index that pointed at it so a later revoke does
+        // not report success over an invitation that was accepted. Both carry the same TTL, so
+        // this is tidiness rather than correctness — but a stale pointer is exactly the kind of
+        // thing an operator reads as "still pending".
+        store
+            .take_invitation_index(&invitation.tenant_id, &invitation.email)
+            .await?;
+
         // …and re-validate the INVITER, whose authority is what the invitation rests on. It was
         // checked when the link was minted and never again, so for the token's whole lifetime
         // the invitation outlived the person behind it: an admin could send one, be banned and
@@ -247,6 +274,74 @@ impl AuthEngine {
             hook_ctx,
         ));
         Ok(result)
+    }
+    /// Withdraw a pending invitation before it is accepted.
+    ///
+    /// An invitation is a credential: it provisions an account, at a role, inside a tenant,
+    /// to whoever holds the link. Until now the library could mint one and had no way to take
+    /// it back — a link sent to the wrong address, or sent by someone who has since left,
+    /// stayed redeemable for its whole TTL with nothing an operator could do about it. ASVS v5
+    /// §6.1.1 expects an administrative path to invalidate a credential that should no longer
+    /// work.
+    ///
+    /// The revoker is held to the same bar as the issuer: they must belong to the tenant, be
+    /// in good standing, and out-rank the role the invitation grants. Anything looser would
+    /// let a member cancel an admin's invitations.
+    ///
+    /// Idempotent: revoking an invitation that never existed, already expired, or was already
+    /// accepted is not an error — the caller asked for an end state and gets it, and reporting
+    /// the difference would tell them whether an address has a pending invitation, which is
+    /// precisely what hashing the email in the index avoids disclosing.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AuthError::TokenInvalid`] when the revoker no longer exists,
+    /// [`AuthError::InsufficientRole`] when they may not withdraw this invitation, or a
+    /// store/repository [`AuthError`].
+    pub async fn revoke_invitation(
+        &self,
+        revoker_user_id: &str,
+        email: &str,
+        tenant_id: &str,
+    ) -> Result<bool, AuthError> {
+        let email = normalize_email(email);
+        let store = self
+            .invitation_store()
+            .ok_or_else(|| crate::services::internal_error("invitation store not configured"))?;
+
+        let revoker = self
+            .user_repository()
+            .find_by_id(revoker_user_id, None)
+            .await
+            .map_err(map_repository_error)?
+            .ok_or(AuthError::TokenInvalid)?;
+        if revoker.tenant_id != tenant_id {
+            return Err(AuthError::InsufficientRole);
+        }
+
+        let Some(hash) = store.read_invitation_index(tenant_id, &email).await? else {
+            return Ok(false);
+        };
+
+        // The role check reads the invitation itself rather than the request: the caller names
+        // an address, not a role, so the only way to know what authority is being withdrawn is
+        // to look. A record that no longer parses reads as absent and is withdrawn without a
+        // role check — it can no longer be accepted either, and leaving it would be worse.
+        if let Some(invitation) = store.read_invitation_by_hash(&hash).await?
+            && !(self.assert_user_not_blocked(&revoker.status).is_ok()
+                && has_role(
+                    &revoker.role,
+                    &invitation.role,
+                    &self.config().config().roles.hierarchy,
+                ))
+        {
+            return Err(AuthError::InsufficientRole);
+        }
+
+        store.take_invitation_index(tenant_id, &email).await?;
+        let removed = store.delete_invitation_by_hash(&hash).await?;
+        tracing::info!(%tenant_id, %revoker_user_id, "invitation: withdrawn");
+        Ok(removed)
     }
 
     /// Re-check, at redemption time, everything that was true of the inviter when the link was
@@ -932,5 +1027,199 @@ mod tests {
                 .await
                 .is_ok()
         );
+    }
+
+    /// Read the token the invitee index points at, so a test can assert over the record.
+    async fn indexed(s: &Setup, email: &str) -> Option<String> {
+        s.stores
+            .read_invitation_index("t1", &normalize_email(email))
+            .await
+            .ok()
+            .flatten()
+    }
+
+    #[tokio::test]
+    async fn revoking_withdraws_the_invitation_and_its_index() {
+        // The capability the library documented and never had: an invitation provisions an
+        // account at a role, and it was unwithdrawable for its whole TTL.
+        let Some(s) = setup(invite_config()) else { return };
+        let inviter = seed_admin(&s.users, "admin@example.com", "ADMIN").await;
+        assert!(
+            s.engine
+                .invite(&inviter, "invitee@example.com", "MEMBER", "t1", None)
+                .await
+                .is_ok()
+        );
+        let Some(hash) = indexed(&s, "invitee@example.com").await else {
+            return;
+        };
+
+        assert!(matches!(
+            s.engine
+                .revoke_invitation(&inviter, " Invitee@Example.com ", "t1")
+                .await,
+            Ok(true)
+        ));
+        // Both the record and the pointer are gone — a surviving index would read to an
+        // operator as "still pending".
+        assert!(indexed(&s, "invitee@example.com").await.is_none());
+        assert!(matches!(
+            s.stores.read_invitation_by_hash(&hash).await,
+            Ok(None)
+        ));
+    }
+
+    #[tokio::test]
+    async fn revoking_nothing_is_not_an_error() {
+        // Idempotent, and deliberately silent about which case it was: answering differently
+        // would turn the endpoint into an oracle for "does this address have an invitation".
+        let Some(s) = setup(invite_config()) else { return };
+        let inviter = seed_admin(&s.users, "admin@example.com", "ADMIN").await;
+
+        assert!(matches!(
+            s.engine
+                .revoke_invitation(&inviter, "nobody@example.com", "t1")
+                .await,
+            Ok(false)
+        ));
+    }
+
+    #[tokio::test]
+    async fn a_member_cannot_withdraw_an_admins_invitation() {
+        // The revoker is held to the same bar as the issuer, or a member could cancel the
+        // invitations of someone who out-ranks them.
+        let Some(s) = setup(invite_config()) else { return };
+        let admin = seed_admin(&s.users, "admin@example.com", "ADMIN").await;
+        let member = seed_admin(&s.users, "member@example.com", "MEMBER").await;
+        assert!(
+            s.engine
+                .invite(&admin, "invitee@example.com", "ADMIN", "t1", None)
+                .await
+                .is_ok()
+        );
+
+        assert!(matches!(
+            s.engine
+                .revoke_invitation(&member, "invitee@example.com", "t1")
+                .await,
+            Err(AuthError::InsufficientRole)
+        ));
+        // …and the invitation survived the refusal.
+        assert!(indexed(&s, "invitee@example.com").await.is_some());
+    }
+
+    #[tokio::test]
+    async fn a_revoker_from_another_tenant_is_refused_before_any_lookup() {
+        let Some(s) = setup(invite_config()) else { return };
+        let inviter = seed_admin(&s.users, "admin@example.com", "ADMIN").await;
+
+        assert!(matches!(
+            s.engine
+                .revoke_invitation(&inviter, "invitee@example.com", "t2")
+                .await,
+            Err(AuthError::InsufficientRole)
+        ));
+    }
+
+    #[tokio::test]
+    async fn a_revoker_who_no_longer_exists_is_refused() {
+        let Some(s) = setup(invite_config()) else { return };
+
+        assert!(matches!(
+            s.engine
+                .revoke_invitation("ghost", "invitee@example.com", "t1")
+                .await,
+            Err(AuthError::TokenInvalid)
+        ));
+    }
+
+    #[tokio::test]
+    async fn reinviting_the_same_address_supersedes_the_previous_invitation() {
+        // Two live tokens for one invitee is two chances for an intercepted link to be
+        // redeemed, and a revoke would only ever reach the newest — the older would sit valid
+        // and unreferenced for the rest of its TTL.
+        let Some(s) = setup(invite_config()) else { return };
+        let inviter = seed_admin(&s.users, "admin@example.com", "ADMIN").await;
+        assert!(
+            s.engine
+                .invite(&inviter, "invitee@example.com", "MEMBER", "t1", None)
+                .await
+                .is_ok()
+        );
+        let Some(first) = indexed(&s, "invitee@example.com").await else {
+            return;
+        };
+
+        assert!(
+            s.engine
+                .invite(&inviter, "invitee@example.com", "MEMBER", "t1", None)
+                .await
+                .is_ok()
+        );
+        let Some(second) = indexed(&s, "invitee@example.com").await else {
+            return;
+        };
+
+        assert_ne!(first, second, "the re-invite reused the first token");
+        assert!(
+            matches!(s.stores.read_invitation_by_hash(&first).await, Ok(None)),
+            "the superseded invitation is still redeemable"
+        );
+    }
+
+    #[tokio::test]
+    async fn accepting_clears_the_invitee_index() {
+        // A pointer left behind after an acceptance reads to an operator as still pending, and
+        // a later revoke would report success over an invitation that was already redeemed.
+        let Some(s) = setup(invite_config()) else { return };
+        let inviter = seed_admin(&s.users, "admin@example.com", "ADMIN").await;
+        assert!(
+            s.engine
+                .invite(&inviter, "invitee@example.com", "MEMBER", "t1", None)
+                .await
+                .is_ok()
+        );
+        // The raw token is opaque, so plant a known one and point the index at it — exactly
+        // the pair `invite` writes.
+        let token = "d".repeat(64);
+        let hash = token_hash(&token);
+        assert!(
+            s.stores
+                .put_invitation(
+                    &token,
+                    &StoredInvitation {
+                        email: "invitee@example.com".to_owned(),
+                        role: "MEMBER".to_owned(),
+                        tenant_id: "t1".to_owned(),
+                        inviter_user_id: inviter.clone(),
+                        created_at: OffsetDateTime::UNIX_EPOCH,
+                    },
+                    600
+                )
+                .await
+                .is_ok()
+        );
+        assert!(
+            s.stores
+                .put_invitation_index("t1", "invitee@example.com", &hash, 600)
+                .await
+                .is_ok()
+        );
+        let accepted = s
+            .engine
+            .accept_invitation(
+                AcceptInvitationInput {
+                    token,
+                    name: "Invitee".to_owned(),
+                    password: "correct-horse-battery-staple".to_owned(),
+                },
+                "1.2.3.4",
+                "agent/1.0",
+                BTreeMap::new(),
+            )
+            .await;
+        assert!(accepted.is_ok(), "the invitation was not accepted");
+
+        assert!(indexed(&s, "invitee@example.com").await.is_none());
     }
 }

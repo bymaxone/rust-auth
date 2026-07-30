@@ -145,6 +145,8 @@ pub struct RateLimitConfig {
     pub invitation_create: Option<RateLimit>,
     /// `POST /auth/invitations/accept` — 5 / 60s.
     pub invitation_accept: Option<RateLimit>,
+    /// `POST /auth/invitations/revoke` — 10 / 3600s, matching the mint.
+    pub invitation_revoke: Option<RateLimit>,
     /// `GET /auth/sessions` — 30 / 60s.
     pub list_sessions: Option<RateLimit>,
     /// `DELETE /auth/sessions/{id}` — 10 / 60s.
@@ -198,6 +200,7 @@ impl Default for RateLimitConfig {
             platform_login: Some(RateLimit::new(5, 60)),
             invitation_create: Some(RateLimit::new(10, 3600)),
             invitation_accept: Some(RateLimit::new(5, 60)),
+            invitation_revoke: Some(RateLimit::new(10, 3600)),
             list_sessions: Some(RateLimit::new(30, 60)),
             revoke_session: Some(RateLimit::new(10, 60)),
             revoke_all_sessions: Some(RateLimit::new(5, 60)),
@@ -292,7 +295,7 @@ mod tests {
     fn every_default_limit_matches_the_shared_wire_contract() {
         let contract = contract_limits();
         let defaults = RateLimitConfig::default();
-        let pairs: [(&str, Option<RateLimit>); 24] = [
+        let pairs: [(&str, Option<RateLimit>); 25] = [
             ("login", defaults.login),
             ("register", defaults.register),
             ("refresh", defaults.refresh),
@@ -309,6 +312,7 @@ mod tests {
             ("platformLogin", defaults.platform_login),
             ("invitationCreate", defaults.invitation_create),
             ("invitationAccept", defaults.invitation_accept),
+            ("invitationRevoke", defaults.invitation_revoke),
             ("listSessions", defaults.list_sessions),
             ("revokeSession", defaults.revoke_session),
             ("revokeAllSessions", defaults.revoke_all_sessions),

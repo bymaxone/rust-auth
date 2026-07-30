@@ -1,6 +1,6 @@
 //! The `invitations` route group (§8.2.8), gated behind the `invitations` feature: create
 //! (authenticated; `tenant_id` derived from the inviter's claims, **never** the body) and
-//! accept (public, 201).
+//! accept (public, 201), and revoke (authenticated; withdraws a pending invitation).
 
 use axum::Router;
 use axum::extract::State;
@@ -11,7 +11,7 @@ use http::StatusCode;
 use tower_cookies::Cookies;
 
 use crate::delivery::TokenDelivery;
-use crate::dto::{AcceptInvitationDto, CreateInvitationDto};
+use crate::dto::{AcceptInvitationDto, CreateInvitationDto, RevokeInvitationDto};
 use crate::extractors::AuthUser;
 use crate::response::error_response;
 use crate::routes::{CookieDomains, RequestMeta};
@@ -30,6 +30,10 @@ pub(crate) fn routes(config: &AxumAuthConfig, ip_source: ClientIpSource) -> Rout
         .route(
             "/invitations/accept",
             crate::router::throttled(post(accept), limits.invitation_accept, ip_source),
+        )
+        .route(
+            "/invitations/revoke",
+            crate::router::throttled(post(revoke), limits.invitation_revoke, ip_source),
         )
 }
 
@@ -52,6 +56,27 @@ async fn create(
         .await
     {
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(error) => error_response(&error),
+    }
+}
+
+/// `POST /auth/invitations/revoke` (204). Requires [`AuthUser`]. The `tenant_id` comes from
+/// the caller's claims — never the body — so a request cannot withdraw another tenant's
+/// invitations.
+///
+/// Answers 204 whether or not anything was pending: reporting the difference would turn the
+/// endpoint into an oracle for which addresses have invitations.
+async fn revoke(
+    State(state): State<AuthState>,
+    user: AuthUser,
+    ValidatedJson(dto): ValidatedJson<RevokeInvitationDto>,
+) -> Response {
+    match state
+        .engine()
+        .revoke_invitation(&user.0.sub, &dto.email, &user.0.tenant_id)
+        .await
+    {
+        Ok(_) => StatusCode::NO_CONTENT.into_response(),
         Err(error) => error_response(&error),
     }
 }

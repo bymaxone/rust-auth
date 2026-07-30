@@ -12,6 +12,33 @@ version bump.
 
 ### Added
 
+- **`AuthEngine::unlock_account(email, tenant_id)` — clearing a brute-force lockout.** A
+  lockout is a denial of service the library imposes on its own users, and it could only be
+  waited out: the counter is keyed by an HMAC of `{tenant_id}:{email}` under the library's own
+  HMAC key, so a host facing "I am locked out and I need in now" had nothing to offer — and
+  neither did an operator watching an attacker deliberately lock one account out of its own
+  service. Undoing that is part of the defence, not a convenience (ASVS v5 §6.1.1). It grants
+  no access: the password, the status gate, the verification gate and MFA all still apply. No
+  adapter route ships with it, because who may unlock whom is a decision only the application
+  can make.
+
+- **`POST /auth/invitations/revoke` — withdrawing a pending invitation.** An invitation
+  provisions an account, at a role, inside a tenant, to whoever holds the link — a credential
+  in every sense — and once sent it stayed redeemable for its whole TTL with nothing an
+  operator could do about it. ASVS v5 §6.1.1 expects an administrative path to invalidate a
+  credential that should no longer work. Nothing on the issuing side could even *name* a
+  pending invitation, since the record is keyed by the hash of a token only the invitee's
+  mailbox ever held, so the withdrawal needs an index: `invidx:{tenantId}:{sha256(email)}`
+  carries the invitation's TTL and points at its record, with the email hashed so a dump of
+  the keyspace does not enumerate who a tenant has been inviting. Re-inviting an address now
+  supersedes the previous invitation through that index rather than adding a second live
+  token. The revoker is held to the same bar as the issuer (in the tenant, in good standing,
+  out-ranking the granted role), and the route answers `204` whether or not anything was
+  pending. Adds five `InvitationStore` methods (`put_invitation_index`,
+  `read_invitation_index`, `take_invitation_index`, `read_invitation_by_hash`,
+  `delete_invitation_by_hash`) — implementors of the trait must supply them.
+
+
 - **Failure-side hooks: `on_login_failed`, `on_lockout`, `on_refresh_token_reuse_detected`**
   (`crates/bymax-auth-core/src/traits/hooks.rs`). Every existing hook fired on a success
   path, which left the failure side of authentication with no structured seam at all: a

@@ -1251,7 +1251,7 @@ The route groups and the toggle/feature that gates each:
 | Sessions | `/sessions` (GET, DELETE) `/sessions/:id` (DELETE) | `sessions` (auto when `sessions.enabled`) | `sessions` |
 | Platform | `/platform/login` `/platform/me` `/platform/logout` `/platform/refresh` `/platform/sessions` (and `/platform/mfa/challenge` when `mfa` is also on) | `platform` (auto when `platform.enabled`) | `platform` |
 | OAuth | `/oauth/:provider/authorize` `/oauth/:provider/callback` | `oauth` (opt-in) | `oauth` |
-| Invitations | `/invitations` `/invitations/accept` | `invitations` (auto when `invitations.enabled`) | `invitations` |
+| Invitations | `/invitations` `/invitations/accept` `/invitations/revoke` | `invitations` (auto when `invitations.enabled`) | `invitations` |
 
 For consumers using the framework-agnostic core directly (no Axum), the toggles still gate which engine methods are wired and which background tasks run; routing is simply the consumer's responsibility. The edge JWT verifier (`bymax-auth-wasm`) is independent of all toggles — it only ever verifies HS256 access tokens locally and mounts no routes.
 

@@ -60,6 +60,10 @@ pub enum Prefix {
     PwVtok,
     /// Pending invitation (`inv`).
     Inv,
+    /// Invitee index for a pending invitation (`invidx`). Keyed by
+    /// `{tenantId}:{sha256(email)}` and holding the invitation's token hash — the only handle
+    /// the issuing side has on a record keyed by a token it never saw.
+    Invidx,
     /// Platform-admin refresh session (`prt`).
     Prt,
     /// Platform rotation grace pointer (`prp`).
@@ -105,6 +109,7 @@ impl Prefix {
             Self::PwReset => "pw_reset",
             Self::PwVtok => "pw_vtok",
             Self::Inv => "inv",
+            Self::Invidx => "invidx",
             Self::Prt => "prt",
             Self::Prp => "prp",
             Self::Pcf => "pcf",
@@ -304,6 +309,7 @@ mod tests {
             (Prefix::PwReset, "auth:pw_reset:abc"),
             (Prefix::PwVtok, "auth:pw_vtok:abc"),
             (Prefix::Inv, "auth:inv:abc"),
+            (Prefix::Invidx, "auth:invidx:abc"),
             (Prefix::Prt, "auth:prt:abc"),
             (Prefix::Prp, "auth:prp:abc"),
             (Prefix::Pcf, "auth:pcf:abc"),

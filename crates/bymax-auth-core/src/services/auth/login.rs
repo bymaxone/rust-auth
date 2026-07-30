@@ -272,6 +272,35 @@ impl AuthEngine {
         }
     }
 
+    /// Clear an account's brute-force lockout so the next attempt is judged on its merits.
+    ///
+    /// A lockout is a denial of service the library imposes on its own users, and until now it
+    /// could only be waited out: the counter is keyed by an HMAC of `{tenant_id}:{email}`
+    /// under the library's own HMAC key, which no consumer can derive, so a host facing "I am
+    /// locked out and I need in now" had nothing to offer. ASVS v5 §6.1.1 asks for an
+    /// administrative path to clear it — and the lockout is also the lever an attacker pulls
+    /// to deny service to a specific account, which makes the ability to undo it part of the
+    /// defence rather than a convenience.
+    ///
+    /// **This grants no access.** It restores the ability to *try*: the password, the status
+    /// gate, the verification gate and MFA all still apply. Authorising the caller is the
+    /// host's job — the adapter deliberately ships no route for this, because who may unlock
+    /// whom is a decision only the application can make.
+    ///
+    /// Idempotent: unlocking an account that is not locked is a no-op.
+    ///
+    /// # Errors
+    ///
+    /// Returns a store [`AuthError`] if the counter cannot be cleared.
+    pub async fn unlock_account(&self, email: &str, tenant_id: &str) -> Result<(), AuthError> {
+        // Normalized exactly as login normalizes it, or the derived key misses the counter the
+        // lockout actually wrote and the unlock silently does nothing.
+        let identifier = self.hashed_identifier(tenant_id, &normalize_email(email));
+        self.brute_force().reset(&identifier).await?;
+        tracing::info!(email = %mask_email(email), %tenant_id, "lockout cleared");
+        Ok(())
+    }
+
     /// Reject the login when the identifier is already locked out, surfacing the retry hint.
     ///
     /// # Errors
@@ -994,6 +1023,53 @@ mod tests {
             .login(login_input("broken@example.com", "right"), &ctx())
             .await;
         assert!(matches!(locked, Err(AuthError::AccountLocked { .. })));
+    }
+
+    #[tokio::test]
+    async fn unlocking_lets_the_account_try_again() {
+        // The counter is keyed by an HMAC no consumer can derive, so before this the lockout
+        // could only be waited out — and it is also the lever an attacker pulls to deny
+        // service to one account, which makes undoing it part of the defence. It grants no
+        // access: the correct password is still required after the unlock.
+        let Some(h) = active_harness(false).await else { return };
+        let _ = h
+            .seed(SeedUser::active("locked@example.com", "right"))
+            .await;
+        for _ in 0..5 {
+            let _ = h
+                .engine
+                .login(login_input("locked@example.com", "wrong"), &ctx())
+                .await;
+        }
+        assert!(matches!(
+            h.engine
+                .login(login_input("locked@example.com", "right"), &ctx())
+                .await,
+            Err(AuthError::AccountLocked { .. })
+        ));
+
+        // The address is normalized on the way in, so a differently-cased spelling still
+        // clears the counter the lockout wrote.
+        assert!(
+            h.engine
+                .unlock_account(" Locked@Example.com ", "t1")
+                .await
+                .is_ok()
+        );
+
+        assert!(matches!(
+            h.engine
+                .login(login_input("locked@example.com", "right"), &ctx())
+                .await,
+            Ok(LoginResult::Success(_))
+        ));
+        // …and a wrong password is still wrong: the unlock restored the ability to try.
+        assert!(matches!(
+            h.engine
+                .login(login_input("locked@example.com", "wrong"), &ctx())
+                .await,
+            Err(AuthError::InvalidCredentials)
+        ));
     }
 
     #[test]
