@@ -1246,7 +1246,7 @@ The route groups and the toggle/feature that gates each:
 | Route group | Mounted paths (under `route_prefix`) | Gated by toggle | Cargo feature |
 | --- | --- | --- | --- |
 | Auth | `/register` `/login` `/logout` `/refresh` `/me` `/verify-email` `/resend-verification` | `auth` (default on) | — (always compiled) |
-| Password reset | `/password/forgot-password` `/password/reset-password` `/password/verify-otp` `/password/resend-otp` | `password_reset` (default on) | — (always compiled) |
+| Password reset | `/password/forgot-password` `/password/reset-password` `/password/verify-otp` `/password/resend-otp` `/password/change` | `password_reset` (default on) | — (always compiled) |
 | MFA | `/mfa/setup` `/mfa/verify-enable` `/mfa/challenge` `/mfa/disable` | `mfa` (opt-in) | `mfa` |
 | Sessions | `/sessions` (GET, DELETE) `/sessions/:id` (DELETE) | `sessions` (auto when `sessions.enabled`) | `sessions` |
 | Platform | `/platform/login` `/platform/me` `/platform/logout` `/platform/refresh` `/platform/sessions` (and `/platform/mfa/challenge` when `mfa` is also on) | `platform` (auto when `platform.enabled`) | `platform` |
@@ -2617,8 +2617,11 @@ their ordering reproduces the NestJS guard pipeline.
 | POST   | `/auth/password/reset-password` | `reset_password`   | `ValidatedJson<ResetPasswordDto>`       | 204     | `ResetPasswordDto`    | always  |
 | POST   | `/auth/password/verify-otp`     | `verify_otp`       | `ValidatedJson<VerifyOtpDto>`           | 200     | `VerifyOtpDto`        | always  |
 | POST   | `/auth/password/resend-otp`     | `resend_otp`       | `ValidatedJson<ResendOtpDto>`           | 200     | `ResendOtpDto`        | always  |
+| POST   | `/auth/password/change`         | `change_password`  | `AuthUser`, `ValidatedJson<ChangePasswordDto>` | 204 | `ChangePasswordDto`   | always  |
 
-> All four are public. `forgot-password`, `resend-otp` are anti-enumeration: the
+> The first four are public. `change` is not: it re-proves the current password, so a stolen
+> access token alone cannot rewrite the credential it was minted from.
+> `forgot-password`, `resend-otp` are anti-enumeration: the
 > handler always returns the same status/body regardless of email existence, and
 > the engine normalizes timing.
 
@@ -2680,9 +2683,14 @@ their ordering reproduces the NestJS guard pipeline.
 | ------ | --------------------------- | ------------------- | --------------------------------------------------------- | ------- | --------------------- | ----------- |
 | POST   | `/auth/invitations`         | `create_invitation` | `AuthUser` (+ `RequireRole<InviterRole>` when configured) | 204     | `CreateInvitationDto` | invitations |
 | POST   | `/auth/invitations/accept`  | `accept_invitation` | `ValidatedJson<AcceptInvitationDto>`                      | 201     | `AcceptInvitationDto` | invitations |
+| POST   | `/auth/invitations/revoke`  | `revoke_invitation` | `AuthUser`                                                | 204     | `RevokeInvitationDto` | invitations |
 
 > `create_invitation` derives `tenant_id` from the authenticated user's claims —
 > never from the body — to prevent cross-tenant injection. `accept` is public.
+> `revoke_invitation` takes `tenant_id` from the claims for the same reason, and answers 204
+> whether or not anything was pending: reporting the difference would make the route an oracle
+> for which addresses have invitations, which is exactly what hashing the address in the
+> `invidx:` index avoids disclosing.
 
 ---
 
@@ -5018,10 +5026,13 @@ brute-force headroom per IP.
 | `POST /auth/login`                      | `login`               | 5     | 60          | Brute-force resistance per IP (complements engine per-account lockout).   |
 | `POST /auth/register`                   | `register`            | 10    | 3600        | Throttle mass account creation.                                          |
 | `POST /auth/refresh`                    | `refresh`             | 10    | 60          | Bound refresh churn.                                                      |
+| `POST /auth/logout`                     | `logout`              | 20    | 60          | Public route: bound the cost of an unauthenticated call.                |
+| `POST /auth/ws-ticket`                  | `ws_ticket`           | 20    | 60          | Bound socket-upgrade ticket minting.                                    |
 | `POST /auth/password/forgot-password`   | `forgot_password`     | 3     | 300         | Prevent reset-email spam.                                                 |
 | `POST /auth/password/reset-password`    | `reset_password`      | 3     | 300         | Protect the reset endpoint.                                              |
 | `POST /auth/password/verify-otp`        | `verify_otp`          | 3     | 300         | Earlier IP block than the engine's 5-attempt-per-OTP cap.                |
 | `POST /auth/password/resend-otp`        | `resend_password_otp` | 3     | 300         | Prevent reset-OTP spam (pairs with the engine resend-cooldown).          |
+| `POST /auth/password/change`            | `change_password`     | 5     | 60          | Bound credential rewriting behind a stolen access token.                |
 | `POST /auth/verify-email`               | `verify_email`        | 5     | 60          | Bound email-verification attempts.                                       |
 | `POST /auth/resend-verification`        | `resend_verification` | 3     | 300         | Prevent verification-email spam.                                         |
 | `POST /auth/mfa/setup`                  | `mfa_setup`           | 5     | 60          | Bound setup attempts.                                                    |
@@ -5031,6 +5042,7 @@ brute-force headroom per IP.
 | `POST /auth/platform/login`             | `platform_login`      | 5     | 60          | Protect admin login.                                                     |
 | `POST /auth/invitations`                | `invitation_create`   | 10    | 3600        | Prevent invitation flooding / email abuse.                              |
 | `POST /auth/invitations/accept`         | `invitation_accept`   | 5     | 60          | Protect invitation acceptance (token-guess resistance).                  |
+| `POST /auth/invitations/revoke`         | `invitation_revoke`   | 10    | 3600        | Matches the mint, so withdrawing costs what issuing does.               |
 | `GET /auth/sessions`                    | `list_sessions`       | 30    | 60          | Generous read limit.                                                     |
 | `DELETE /auth/sessions/{id}`            | `revoke_session`      | 10    | 60          | Bound single-session revocation.                                        |
 | `DELETE /auth/sessions/all`             | `revoke_all_sessions` | 5     | 60          | Bound bulk revocation.                                                   |
