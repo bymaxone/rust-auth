@@ -46,6 +46,27 @@ pub trait EmailProvider: Send + Sync {
         locale: Option<&str>,
     ) -> Result<(), EmailError>;
 
+    /// Security alert: the account password changed — after an authenticated change, and
+    /// after a completed reset.
+    ///
+    /// NIST SP 800-63B §4.6 requires the subscriber to be notified through a channel
+    /// independent of the transaction that bound the new credential. The classic takeover
+    /// starts with a compromised mailbox: the attacker triggers a reset, completes it, and
+    /// deletes the mail. This notice is what turns "the victim finds out days later, at a
+    /// failed login" into "the victim finds out now" — and it was the one credential change
+    /// this trait stayed silent about while announcing every MFA change unprompted.
+    ///
+    /// Defaulted to a no-op so an existing provider keeps compiling; a deployment that wants
+    /// the notice implements it.
+    async fn send_password_changed(
+        &self,
+        email: &str,
+        locale: Option<&str>,
+    ) -> Result<(), EmailError> {
+        let _ = (email, locale);
+        Ok(())
+    }
+
     /// Security alert: MFA was enabled on the account.
     async fn send_mfa_enabled(&self, email: &str, locale: Option<&str>) -> Result<(), EmailError>;
 

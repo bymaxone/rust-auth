@@ -155,6 +155,13 @@ pub struct RateLimitConfig {
     pub oauth_initiate: Option<RateLimit>,
     /// `GET /auth/oauth/{provider}/callback` — 10 / 60s.
     pub oauth_callback: Option<RateLimit>,
+    /// `POST /auth/password/change` — 5 / 60s.
+    ///
+    /// Authenticated, so the caller is already known — but each call spends a KDF verification
+    /// of the current password plus a derivation of the new one, the most expensive pair of
+    /// operations in the library. The ceiling matches `login`'s for the same reason: it is a
+    /// password-guessing surface, just one that needs a live session first.
+    pub change_password: Option<RateLimit>,
     /// `POST /auth/logout` — 20 / 60s.
     ///
     /// The route is public: it has to be, or a user whose access token expired could not sign
@@ -196,6 +203,7 @@ impl Default for RateLimitConfig {
             revoke_all_sessions: Some(RateLimit::new(5, 60)),
             oauth_initiate: Some(RateLimit::new(10, 60)),
             oauth_callback: Some(RateLimit::new(10, 60)),
+            change_password: Some(RateLimit::new(5, 60)),
             logout: Some(RateLimit::new(20, 60)),
             ws_ticket: Some(RateLimit::new(20, 60)),
         }
@@ -284,7 +292,7 @@ mod tests {
     fn every_default_limit_matches_the_shared_wire_contract() {
         let contract = contract_limits();
         let defaults = RateLimitConfig::default();
-        let pairs: [(&str, Option<RateLimit>); 23] = [
+        let pairs: [(&str, Option<RateLimit>); 24] = [
             ("login", defaults.login),
             ("register", defaults.register),
             ("refresh", defaults.refresh),
@@ -306,6 +314,7 @@ mod tests {
             ("revokeAllSessions", defaults.revoke_all_sessions),
             ("oauthInitiate", defaults.oauth_initiate),
             ("oauthCallback", defaults.oauth_callback),
+            ("changePassword", defaults.change_password),
             ("logout", defaults.logout),
             ("wsTicket", defaults.ws_ticket),
         ];

@@ -19,7 +19,7 @@ use crate::services::token_manager::TokenManagerService;
 #[cfg(feature = "mfa")]
 use crate::traits::MfaStore;
 use crate::traits::{
-    AllowAllBreachChecker, AuthHooks, BruteForceStore, EmailProvider, HttpClient, InvitationStore,
+    AuthHooks, BruteForceStore, CommonPasswordChecker, EmailProvider, HttpClient, InvitationStore,
     NoOpAuthHooks, NoOpEmailProvider, OAuthProvider, OtpStore, PasswordBreachChecker,
     PasswordResetStore, PlatformUserRepository, SessionStore, UserRepository, WsTicketStore,
 };
@@ -120,12 +120,20 @@ impl AuthEngineBuilder {
         self
     }
 
-    /// Set the breach checker consulted wherever a password is set (defaults to
-    /// [`AllowAllBreachChecker`], which approves everything and touches no network).
+    /// Set the password screen consulted wherever a password is set (defaults to
+    /// [`CommonPasswordChecker`], which refuses the common passwords offline).
     ///
-    /// Wiring one is opt-in on purpose: a crate should not start talking to a third-party
-    /// corpus because it was upgraded. The bundled `HibpBreachChecker` (feature `breach`)
-    /// runs over the same [`HttpClient`](crate::traits::HttpClient) seam the OAuth flows use.
+    /// The *network* check stays opt-in: a crate should not start talking to a third-party
+    /// corpus because it was upgraded. The bundled `HibpBreachChecker` (feature `breach`) runs
+    /// over the same [`HttpClient`](crate::traits::HttpClient) seam the OAuth flows use.
+    ///
+    /// The offline screen is a different matter, and is on by default. NIST SP 800-63B
+    /// §3.1.1.2 says a verifier SHALL compare against a blocklist of common passwords and ASVS
+    /// v5 §6.2.4 asks for it at Level 1; the previous default,
+    /// [`AllowAllBreachChecker`](crate::traits::AllowAllBreachChecker), approved everything,
+    /// so a deployment on defaults accepted `password1`. That one is still available for a
+    /// deployment with a deliberate reason to screen nothing — a migration importing legacy
+    /// accounts — which now has to say so.
     #[must_use]
     pub fn breach_checker(mut self, checker: Arc<dyn PasswordBreachChecker>) -> Self {
         self.breach_checker = Some(checker);
@@ -375,8 +383,9 @@ impl AuthEngineBuilder {
 
         // Build the password service (and its startup sentinel hash) from the validated
         // password config before it is moved into the resolved bundle.
-        let breach_checker = breach_checker
-            .unwrap_or_else(|| Arc::new(AllowAllBreachChecker) as Arc<dyn PasswordBreachChecker>);
+        let breach_checker = breach_checker.unwrap_or_else(|| {
+            Arc::new(CommonPasswordChecker::new()) as Arc<dyn PasswordBreachChecker>
+        });
         let passwords = Arc::new(PasswordService::new(&config.password, breach_checker)?);
 
         // Capture the scalar token/brute-force settings and the signing key before the

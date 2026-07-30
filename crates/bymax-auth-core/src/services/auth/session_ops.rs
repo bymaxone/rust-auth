@@ -382,7 +382,7 @@ mod tests {
         let mut cfg = base_config();
         cfg.email_verification.required = false;
         let Some(h) = harness(cfg, None) else { return };
-        let Some((id, auth)) = logged_in(&h, "deleted@e.com", "password123").await else { return };
+        let Some((id, auth)) = logged_in(&h, "gone@e.com", "walnut42x").await else { return };
 
         h.users.remove(&id);
 
@@ -409,7 +409,7 @@ mod tests {
         let id = h
             .seed(SeedUser {
                 email: "unverified@e.com".to_owned(),
-                password: "password123".to_owned(),
+                password: "glidingwalnut42".to_owned(),
                 tenant_id: "t1".to_owned(),
                 status: "ACTIVE".to_owned(),
                 email_verified: false,

@@ -107,7 +107,7 @@ async fn the_set_cookie_header_is_marked_sensitive_so_tracing_cannot_print_the_t
 
     let reg = Req::post("/auth/register")
         .json(serde_json::json!({
-            "email": "sensitive@e.com", "password": "password123", "name": "Sensi", "tenantId": TENANT
+            "email": "sensitive@e.com", "password": "glidingwalnut42", "name": "Sensi", "tenantId": TENANT
         }))
         .send(&app)
         .await;
@@ -117,6 +117,98 @@ async fn the_set_cookie_header_is_marked_sensitive_so_tracing_cannot_print_the_t
     assert!(!cookies.is_empty(), "the login must set cookies at all");
     for value in cookies {
         assert!(value.is_sensitive(), "Set-Cookie must be marked sensitive");
+    }
+}
+
+#[tokio::test]
+async fn password_change_requires_a_session_and_the_current_password() {
+    // The four recovery routes beside it answer to anyone who can read the account's mailbox;
+    // this one answers only to someone who holds a live session AND knows the password. ASVS v5
+    // §6.2.2 and §6.2.3 require it at Level 1, and it was the one credential operation this
+    // library did not own.
+    let Some(h) = build(EngineSpec {
+        delivery: bymax_auth_core::config::TokenDelivery::Bearer,
+        ..EngineSpec::default()
+    }) else {
+        return;
+    };
+    let app = router(&h);
+
+    let reg = Req::post("/auth/register")
+        .json(serde_json::json!({
+            "email": "changer@e.com", "password": "oldsecret77", "name": "Cha", "tenantId": TENANT
+        }))
+        .send(&app)
+        .await;
+    assert_eq!(reg.status, StatusCode::CREATED);
+    let access = reg.json()["accessToken"]
+        .as_str()
+        .unwrap_or_default()
+        .to_owned();
+
+    // Unauthenticated: refused before anything is read.
+    let anonymous = Req::post("/auth/password/change")
+        .json(serde_json::json!({
+            "currentPassword": "oldsecret77", "newPassword": "glidingwalnut42"
+        }))
+        .send(&app)
+        .await;
+    assert_eq!(anonymous.status, StatusCode::UNAUTHORIZED);
+
+    // Authenticated but unable to produce the current password — the stolen-session case.
+    let wrong = Req::post("/auth/password/change")
+        .bearer(&access)
+        .json(serde_json::json!({
+            "currentPassword": "not-the-password", "newPassword": "glidingwalnut42"
+        }))
+        .send(&app)
+        .await;
+    assert_eq!(wrong.status, StatusCode::UNAUTHORIZED);
+    assert_eq!(wrong.json()["error"]["code"], "auth.invalid_credentials");
+
+    // With both, it rotates.
+    let changed = Req::post("/auth/password/change")
+        .bearer(&access)
+        .json(serde_json::json!({
+            "currentPassword": "oldsecret77", "newPassword": "glidingwalnut42"
+        }))
+        .send(&app)
+        .await;
+    assert_eq!(changed.status, StatusCode::NO_CONTENT);
+
+    // The new password is what logs in afterwards.
+    let login = Req::post("/auth/login")
+        .json(serde_json::json!({
+            "email": "changer@e.com", "password": "glidingwalnut42", "tenantId": TENANT
+        }))
+        .send(&app)
+        .await;
+    assert_eq!(login.status, StatusCode::OK);
+}
+
+#[tokio::test]
+async fn register_refuses_a_common_password_by_default() {
+    // NIST SP 800-63B §3.1.1.2 says a verifier SHALL screen against a blocklist of common
+    // passwords, and ASVS v5 §6.2.4 asks for it at Level 1. The previous default approved
+    // everything, so a deployment on defaults accepted this — and the brute-force machinery
+    // never fired, because spraying one password across ten thousand accounts never crosses any
+    // single account's threshold.
+    let Some(h) = build(EngineSpec::default()) else { return };
+    let app = router(&h);
+
+    for weak in ["Password1", "12345678", "qwerty123", "iloveyou"] {
+        let res = Req::post("/auth/register")
+            .json(serde_json::json!({
+                "email": format!("{weak}@e.com"), "password": weak, "name": "Weak",
+                "tenantId": TENANT
+            }))
+            .send(&app)
+            .await;
+        assert_eq!(
+            res.json()["error"]["code"],
+            "auth.password_compromised",
+            "for {weak}"
+        );
     }
 }
 
@@ -139,7 +231,7 @@ async fn revoke_all_sessions_works_in_bearer_mode_and_never_reports_a_silent_suc
 
     let reg = Req::post("/auth/register")
         .json(serde_json::json!({
-            "email": "revoker@e.com", "password": "password123", "name": "Reva", "tenantId": TENANT
+            "email": "revoker@e.com", "password": "glidingwalnut42", "name": "Reva", "tenantId": TENANT
         }))
         .send(&app)
         .await;
@@ -179,7 +271,7 @@ async fn session_cookies_are_host_only_unless_a_domain_resolver_is_configured() 
     let app = router(&h);
     let reg = Req::post("/auth/register")
         .json(serde_json::json!({
-            "email": "hostonly@e.com", "password": "password123", "name": "Hana", "tenantId": TENANT
+            "email": "hostonly@e.com", "password": "glidingwalnut42", "name": "Hana", "tenantId": TENANT
         }))
         .send(&app)
         .await;
@@ -213,7 +305,7 @@ async fn a_configured_domain_resolver_stamps_every_session_cookie_and_the_logout
     let reg = Req::post("/auth/register")
         .header(header::HOST, "app.example.com:8443")
         .json(serde_json::json!({
-            "email": "shared@e.com", "password": "password123", "name": "Sara", "tenantId": TENANT
+            "email": "shared@e.com", "password": "glidingwalnut42", "name": "Sara", "tenantId": TENANT
         }))
         .send(&app)
         .await;
@@ -320,7 +412,7 @@ async fn register_login_me_logout_cookie_mode() {
 
     let reg = Req::post("/auth/register")
         .json(serde_json::json!({
-            "email": "a@e.com", "password": "password123", "name": "Ada", "tenantId": TENANT
+            "email": "a@e.com", "password": "glidingwalnut42", "name": "Ada", "tenantId": TENANT
         }))
         .send(&app)
         .await;
@@ -404,9 +496,9 @@ async fn login_bearer_mode_returns_tokens_in_body_and_no_cookies() {
     };
     let Some(h) = build(spec) else { return };
     let app = router(&h);
-    seed_user(&h, "b@e.com", "password123", "USER").await;
+    seed_user(&h, "b@e.com", "glidingwalnut42", "USER").await;
 
-    let resp = login(&app, "b@e.com", "password123").await;
+    let resp = login(&app, "b@e.com", "glidingwalnut42").await;
     assert_eq!(resp.status, StatusCode::OK);
     assert!(resp.set_cookies.is_empty());
     let token = resp.json()["accessToken"].as_str().unwrap_or("").to_owned();
@@ -434,9 +526,9 @@ async fn login_both_mode_sets_cookies_and_body_tokens() {
     };
     let Some(h) = build(spec) else { return };
     let app = router(&h);
-    seed_user(&h, "c@e.com", "password123", "USER").await;
+    seed_user(&h, "c@e.com", "glidingwalnut42", "USER").await;
 
-    let resp = login(&app, "c@e.com", "password123").await;
+    let resp = login(&app, "c@e.com", "glidingwalnut42").await;
     assert_eq!(resp.status, StatusCode::OK);
     assert!(resp.has_cookie_value("access_token"));
     let token = resp.json()["accessToken"].as_str().unwrap_or("").to_owned();
@@ -461,7 +553,7 @@ async fn refresh_rotates_in_cookie_and_bearer_modes() {
     let app = router(&h);
     let reg = Req::post("/auth/register")
         .json(serde_json::json!({
-            "email": "r@e.com", "password": "password123", "name": "Ray", "tenantId": TENANT
+            "email": "r@e.com", "password": "glidingwalnut42", "name": "Ray", "tenantId": TENANT
         }))
         .send(&app)
         .await;
@@ -486,8 +578,8 @@ async fn refresh_rotates_in_cookie_and_bearer_modes() {
     };
     let Some(hb) = build(spec) else { return };
     let appb = router(&hb);
-    seed_user(&hb, "rb@e.com", "password123", "USER").await;
-    let login = login(&appb, "rb@e.com", "password123").await;
+    seed_user(&hb, "rb@e.com", "glidingwalnut42", "USER").await;
+    let login = login(&appb, "rb@e.com", "glidingwalnut42").await;
     let refresh_token = login.json()["refreshToken"]
         .as_str()
         .unwrap_or("")
@@ -528,8 +620,8 @@ async fn bearer_mode_logout_revokes_the_refresh_session_from_the_body() {
     };
     let Some(h) = build(spec) else { return };
     let app = router(&h);
-    seed_user(&h, "blo@e.com", "password123", "USER").await;
-    let session = login(&app, "blo@e.com", "password123").await;
+    seed_user(&h, "blo@e.com", "glidingwalnut42", "USER").await;
+    let session = login(&app, "blo@e.com", "glidingwalnut42").await;
     let access = session.json()["accessToken"]
         .as_str()
         .unwrap_or("")
@@ -566,9 +658,9 @@ async fn logout_without_any_refresh_token_still_succeeds() {
     };
     let Some(h) = build(spec) else { return };
     let app = router(&h);
-    seed_user(&h, "nolo@e.com", "password123", "USER").await;
+    seed_user(&h, "nolo@e.com", "glidingwalnut42", "USER").await;
 
-    let first = login(&app, "nolo@e.com", "password123").await;
+    let first = login(&app, "nolo@e.com", "glidingwalnut42").await;
     let access = first.json()["accessToken"]
         .as_str()
         .unwrap_or("")
@@ -579,7 +671,7 @@ async fn logout_without_any_refresh_token_still_succeeds() {
     let after = Req::get("/auth/me").bearer(&access).send(&app).await;
     assert_eq!(after.status, StatusCode::UNAUTHORIZED);
 
-    let second = login(&app, "nolo@e.com", "password123").await;
+    let second = login(&app, "nolo@e.com", "glidingwalnut42").await;
     let access2 = second.json()["accessToken"]
         .as_str()
         .unwrap_or("")
@@ -629,13 +721,13 @@ async fn invalid_credentials_and_unknown_email_are_indistinguishable() {
     // 401 invalid-credentials.
     let Some(h) = build(EngineSpec::default()) else { return };
     let app = router(&h);
-    seed_user(&h, "known@e.com", "password123", "USER").await;
+    seed_user(&h, "known@e.com", "glidingwalnut42", "USER").await;
 
     let wrong = login(&app, "known@e.com", "wrongpass").await;
     assert_eq!(wrong.status, StatusCode::UNAUTHORIZED);
     assert_eq!(wrong.json()["error"]["code"], "auth.invalid_credentials");
 
-    let unknown = login(&app, "nobody@e.com", "password123").await;
+    let unknown = login(&app, "nobody@e.com", "glidingwalnut42").await;
     assert_eq!(unknown.status, StatusCode::UNAUTHORIZED);
     assert_eq!(unknown.json()["error"]["code"], "auth.invalid_credentials");
 }
@@ -663,7 +755,7 @@ async fn validation_rejects_unknown_fields_and_bad_fields() {
     // A bad email fails the `garde(email)` rule.
     let bad_email = Req::post("/auth/register")
         .json(serde_json::json!({
-            "email": "not-an-email", "password": "password123", "name": "X", "tenantId": TENANT
+            "email": "not-an-email", "password": "glidingwalnut42", "name": "X", "tenantId": TENANT
         }))
         .send(&app)
         .await;
@@ -688,7 +780,7 @@ async fn validation_rejects_unknown_fields_and_bad_fields() {
 async fn auth_user_rejects_missing_invalid_and_revoked_tokens() {
     let Some(h) = build(EngineSpec::default()) else { return };
     let app = router(&h);
-    seed_user(&h, "tok@e.com", "password123", "USER").await;
+    seed_user(&h, "tok@e.com", "glidingwalnut42", "USER").await;
 
     // Missing → token_invalid.
     let missing = Req::get("/auth/me").send(&app).await;
@@ -704,8 +796,8 @@ async fn auth_user_rejects_missing_invalid_and_revoked_tokens() {
     assert_eq!(malformed.json()["error"]["code"], "auth.token_invalid");
 
     // Revoked (after logout) → still token_invalid (no expired/revoked oracle).
-    let access = login_access_cookie(&app, "tok@e.com", "password123").await;
-    let login_resp = login(&app, "tok@e.com", "password123").await;
+    let access = login_access_cookie(&app, "tok@e.com", "glidingwalnut42").await;
+    let login_resp = login(&app, "tok@e.com", "glidingwalnut42").await;
     let refresh_value = login_resp.cookie_value("refresh_token").unwrap_or_default();
     let access2 = login_resp.cookie_value("access_token").unwrap_or_default();
     let _ = Req::post("/auth/logout")
@@ -821,7 +913,7 @@ async fn sessions_list_revoke_one_and_revoke_all() {
     let app = router(&h);
     let reg = Req::post("/auth/register")
         .json(serde_json::json!({
-            "email": "s@e.com", "password": "password123", "name": "Sam", "tenantId": TENANT
+            "email": "s@e.com", "password": "glidingwalnut42", "name": "Sam", "tenantId": TENANT
         }))
         .send(&app)
         .await;
@@ -892,7 +984,7 @@ async fn sessions_list_revoke_one_and_revoke_all() {
     // A second device, so there is a real session to revoke by id.
     let second = Req::post("/auth/login")
         .json(serde_json::json!({
-            "email": "s@e.com", "password": "password123", "tenantId": TENANT
+            "email": "s@e.com", "password": "glidingwalnut42", "tenantId": TENANT
         }))
         .send(&app)
         .await;
@@ -950,7 +1042,7 @@ async fn mfa_setup_verify_enable_and_challenge_error_arms() {
     let app = router(&h);
     let reg = Req::post("/auth/register")
         .json(serde_json::json!({
-            "email": "m@e.com", "password": "password123", "name": "Mo", "tenantId": TENANT
+            "email": "m@e.com", "password": "glidingwalnut42", "name": "Mo", "tenantId": TENANT
         }))
         .send(&app)
         .await;
@@ -961,7 +1053,7 @@ async fn mfa_setup_verify_enable_and_challenge_error_arms() {
     // Nest's `POST` default.
     let setup = Req::post("/auth/mfa/setup")
         .cookie("access_token", &access)
-        .json(serde_json::json!({ "password": "password123" }))
+        .json(serde_json::json!({ "password": "glidingwalnut42" }))
         .send(&app)
         .await;
     assert_eq!(setup.status, StatusCode::CREATED);
@@ -1011,11 +1103,11 @@ async fn login_with_mfa_returns_a_challenge_body() {
         return;
     };
     let app = router(&h);
-    let id = seed_user(&h, "mfauser@e.com", "password123", "USER").await;
+    let id = seed_user(&h, "mfauser@e.com", "glidingwalnut42", "USER").await;
     enable_mfa_flag(&h, &id).await;
     let login = Req::post("/auth/login")
         .json(serde_json::json!({
-            "email": "mfauser@e.com", "password": "password123", "tenantId": TENANT
+            "email": "mfauser@e.com", "password": "glidingwalnut42", "tenantId": TENANT
         }))
         .send(&app)
         .await;
@@ -1065,11 +1157,11 @@ async fn platform_login_me_logout_and_dashboard_token_is_rejected() {
     assert!(me.json().get("user").is_none());
 
     // A dashboard token on a platform route is `platform_auth_required`.
-    let dash = seed_user(&h, "tenant@e.com", "password123", "USER").await;
+    let dash = seed_user(&h, "tenant@e.com", "glidingwalnut42", "USER").await;
     let _ = dash;
     let dash_login = Req::post("/auth/login")
         .json(serde_json::json!({
-            "email": "tenant@e.com", "password": "password123", "tenantId": TENANT
+            "email": "tenant@e.com", "password": "glidingwalnut42", "tenantId": TENANT
         }))
         .send(&app)
         .await;
@@ -1147,11 +1239,11 @@ async fn invitation_create_and_accept() {
     };
     let app = router(&h);
     // An authenticated ADMIN can create an invitation (204); tenant comes from the claims.
-    let admin_id = seed_user(&h, "inviter@e.com", "password123", "ADMIN").await;
+    let admin_id = seed_user(&h, "inviter@e.com", "glidingwalnut42", "ADMIN").await;
     let _ = admin_id;
     let login = Req::post("/auth/login")
         .json(serde_json::json!({
-            "email": "inviter@e.com", "password": "password123", "tenantId": TENANT
+            "email": "inviter@e.com", "password": "glidingwalnut42", "tenantId": TENANT
         }))
         .send(&app)
         .await;
@@ -1173,7 +1265,7 @@ async fn invitation_create_and_accept() {
     // Accepting a bogus token is an invalid-invitation-token 400.
     let accept = Req::post("/auth/invitations/accept")
         .json(
-            serde_json::json!({ "token": "bogus", "name": "New User", "password": "password123" }),
+            serde_json::json!({ "token": "bogus", "name": "New User", "password": "glidingwalnut42" }),
         )
         .send(&app)
         .await;
@@ -1269,7 +1361,7 @@ async fn ws_ticket_mint_and_single_use_redeem() {
     let app = router(&h);
     let reg = Req::post("/auth/register")
         .json(serde_json::json!({
-            "email": "ws@e.com", "password": "password123", "name": "Wes", "tenantId": TENANT
+            "email": "ws@e.com", "password": "glidingwalnut42", "name": "Wes", "tenantId": TENANT
         }))
         .send(&app)
         .await;
@@ -1306,7 +1398,7 @@ async fn exceeding_the_login_limit_returns_a_429_envelope_with_retry_after() {
     // The default login limit is 5/60s; the 6th rapid attempt from the same IP is throttled.
     let Some(h) = build(EngineSpec::default()) else { return };
     let app = router(&h);
-    seed_user(&h, "rl@e.com", "password123", "USER").await;
+    seed_user(&h, "rl@e.com", "glidingwalnut42", "USER").await;
 
     let mut throttled = None;
     for _ in 0..12 {
@@ -1332,7 +1424,7 @@ async fn exceeding_the_login_limit_returns_a_429_envelope_with_retry_after() {
     // A different route's limit is independent (register is not throttled by login attempts).
     let register = Req::new(Method::POST, "/auth/register")
         .json(serde_json::json!({
-            "email": "fresh@e.com", "password": "password123", "name": "Fresh", "tenantId": TENANT
+            "email": "fresh@e.com", "password": "glidingwalnut42", "name": "Fresh", "tenantId": TENANT
         }))
         .send(&app)
         .await;
@@ -1345,7 +1437,7 @@ async fn a_custom_rate_limit_override_changes_the_threshold() {
     // Override the login limit to 1/60s and a per-route disable for register, proving the
     // config knobs flow through.
     let Some(h) = build(EngineSpec::default()) else { return };
-    seed_user(&h, "ov@e.com", "password123", "USER").await;
+    seed_user(&h, "ov@e.com", "glidingwalnut42", "USER").await;
     let limits = RateLimitConfig {
         login: Some(RateLimit::new(1, 60)),
         register: None,
@@ -1578,14 +1670,14 @@ async fn mfa_dashboard_challenge_success_issues_a_session() {
     // Enrol MFA for a fresh user via setup + verify-enable.
     let reg = Req::post("/auth/register")
         .json(serde_json::json!({
-            "email": "ch@e.com", "password": "password123", "name": "Cho", "tenantId": TENANT
+            "email": "ch@e.com", "password": "glidingwalnut42", "name": "Cho", "tenantId": TENANT
         }))
         .send(&app)
         .await;
     let access = reg.cookie_value("access_token").unwrap_or_default();
     let setup = Req::post("/auth/mfa/setup")
         .cookie("access_token", &access)
-        .json(serde_json::json!({ "password": "password123" }))
+        .json(serde_json::json!({ "password": "glidingwalnut42" }))
         .send(&app)
         .await;
     let secret = setup.json()["secret"].as_str().unwrap_or("").to_owned();
@@ -1604,7 +1696,7 @@ async fn mfa_dashboard_challenge_success_issues_a_session() {
     // A fresh login now returns an MFA challenge with a temp token.
     let login = Req::post("/auth/login")
         .json(serde_json::json!({
-            "email": "ch@e.com", "password": "password123", "tenantId": TENANT
+            "email": "ch@e.com", "password": "glidingwalnut42", "tenantId": TENANT
         }))
         .send(&app)
         .await;
@@ -1640,15 +1732,15 @@ async fn mfa_challenge_falls_back_to_the_oauth_temp_cookie_and_clears_it() {
     };
     // The mock provider resolves to this account; enabling MFA makes the callback yield a
     // challenge rather than a session.
-    let id = seed_user(&h, "mock@example.com", "password123", "USER").await;
+    let id = seed_user(&h, "mock@example.com", "glidingwalnut42", "USER").await;
     let app = router(&h);
 
     // Enrol MFA properly so a recovery code exists for the challenge.
-    let login0 = login(&app, "mock@example.com", "password123").await;
+    let login0 = login(&app, "mock@example.com", "glidingwalnut42").await;
     let access = login0.cookie_value("access_token").unwrap_or_default();
     let setup = Req::post("/auth/mfa/setup")
         .cookie("access_token", &access)
-        .json(serde_json::json!({ "password": "password123" }))
+        .json(serde_json::json!({ "password": "glidingwalnut42" }))
         .send(&app)
         .await;
     let secret = setup.json()["secret"].as_str().unwrap_or("").to_owned();
@@ -1741,14 +1833,14 @@ async fn mfa_challenge_temp_token_sourcing_precedence_and_clearing_policy() {
     // recoverable, so the cookie must survive for the retry.
     let reg = Req::post("/auth/register")
         .json(serde_json::json!({
-            "email": "keep@e.com", "password": "password123", "name": "Kee", "tenantId": TENANT
+            "email": "keep@e.com", "password": "glidingwalnut42", "name": "Kee", "tenantId": TENANT
         }))
         .send(&app)
         .await;
     let access = reg.cookie_value("access_token").unwrap_or_default();
     let setup = Req::post("/auth/mfa/setup")
         .cookie("access_token", &access)
-        .json(serde_json::json!({ "password": "password123" }))
+        .json(serde_json::json!({ "password": "glidingwalnut42" }))
         .send(&app)
         .await;
     let secret = setup.json()["secret"].as_str().unwrap_or("").to_owned();
@@ -1757,7 +1849,7 @@ async fn mfa_challenge_temp_token_sourcing_precedence_and_clearing_policy() {
         .json(serde_json::json!({ "code": current_totp(&secret) }))
         .send(&app)
         .await;
-    let mfa_login = login(&app, "keep@e.com", "password123").await;
+    let mfa_login = login(&app, "keep@e.com", "glidingwalnut42").await;
     let temp = mfa_login.json()["mfaTempToken"]
         .as_str()
         .unwrap_or("")
@@ -1792,14 +1884,14 @@ async fn mfa_challenge_body_token_wins_over_a_stale_cookie() {
     let app = router(&h);
     let reg = Req::post("/auth/register")
         .json(serde_json::json!({
-            "email": "pref@e.com", "password": "password123", "name": "Pre", "tenantId": TENANT
+            "email": "pref@e.com", "password": "glidingwalnut42", "name": "Pre", "tenantId": TENANT
         }))
         .send(&app)
         .await;
     let access = reg.cookie_value("access_token").unwrap_or_default();
     let setup = Req::post("/auth/mfa/setup")
         .cookie("access_token", &access)
-        .json(serde_json::json!({ "password": "password123" }))
+        .json(serde_json::json!({ "password": "glidingwalnut42" }))
         .send(&app)
         .await;
     let secret = setup.json()["secret"].as_str().unwrap_or("").to_owned();
@@ -1813,7 +1905,7 @@ async fn mfa_challenge_body_token_wins_over_a_stale_cookie() {
         .send(&app)
         .await;
 
-    let mfa_login = login(&app, "pref@e.com", "password123").await;
+    let mfa_login = login(&app, "pref@e.com", "glidingwalnut42").await;
     let temp = mfa_login.json()["mfaTempToken"]
         .as_str()
         .unwrap_or("")
@@ -1975,10 +2067,10 @@ async fn register_duplicate_email_hits_the_error_arm() {
     // A duplicate registration triggers the engine error arm of `register` (409).
     let Some(h) = build(EngineSpec::default()) else { return };
     let app = router(&h);
-    seed_user(&h, "dup@e.com", "password123", "USER").await;
+    seed_user(&h, "dup@e.com", "glidingwalnut42", "USER").await;
     let resp = Req::post("/auth/register")
         .json(serde_json::json!({
-            "email": "dup@e.com", "password": "password123", "name": "Dup", "tenantId": TENANT
+            "email": "dup@e.com", "password": "glidingwalnut42", "name": "Dup", "tenantId": TENANT
         }))
         .send(&app)
         .await;
@@ -1998,7 +2090,7 @@ async fn session_revoke_with_a_malformed_hash_hits_the_error_arm() {
     let app = router(&h);
     let reg = Req::post("/auth/register")
         .json(serde_json::json!({
-            "email": "rv@e.com", "password": "password123", "name": "Rv", "tenantId": TENANT
+            "email": "rv@e.com", "password": "glidingwalnut42", "name": "Rv", "tenantId": TENANT
         }))
         .send(&app)
         .await;
@@ -2021,10 +2113,10 @@ async fn invitation_create_with_an_unknown_role_hits_the_error_arm() {
         return;
     };
     let app = router(&h);
-    seed_user(&h, "inv2@e.com", "password123", "ADMIN").await;
+    seed_user(&h, "inv2@e.com", "glidingwalnut42", "ADMIN").await;
     let login = Req::post("/auth/login")
         .json(serde_json::json!({
-            "email": "inv2@e.com", "password": "password123", "tenantId": TENANT
+            "email": "inv2@e.com", "password": "glidingwalnut42", "tenantId": TENANT
         }))
         .send(&app)
         .await;
@@ -2045,7 +2137,7 @@ async fn password_reset_otp_two_step_success_flow() {
     use bymax_auth_core::traits::OtpPurpose;
     let Some(h) = build(EngineSpec::default()) else { return };
     let app = router(&h);
-    seed_user(&h, "pw@e.com", "password123", "USER").await;
+    seed_user(&h, "pw@e.com", "glidingwalnut42", "USER").await;
 
     // Trigger the reset so an OTP record exists.
     let _ = Req::post("/auth/password/forgot-password")
@@ -2115,7 +2207,7 @@ async fn invitation_accept_success_creates_a_session() {
         return;
     };
     let app = router(&h);
-    let inviter = seed_user(&h, "host@e.com", "password123", "ADMIN").await;
+    let inviter = seed_user(&h, "host@e.com", "glidingwalnut42", "ADMIN").await;
     let invitation = StoredInvitation {
         email: "joiner@e.com".to_owned(),
         role: "USER".to_owned(),
@@ -2130,7 +2222,7 @@ async fn invitation_accept_success_creates_a_session() {
 
     let accept = Req::post("/auth/invitations/accept")
         .json(serde_json::json!({
-            "token": "invite-token-xyz", "name": "New Joiner", "password": "password123"
+            "token": "invite-token-xyz", "name": "New Joiner", "password": "glidingwalnut42"
         }))
         .send(&app)
         .await;
@@ -2198,7 +2290,7 @@ async fn oauth_callback_with_mfa_user_takes_the_mfa_redirect_branch() {
     // configured the callback 302-redirects and plants the mfa_temp cookie (the MFA branch).
     let Some(h) = build_oauth_with_redirects() else { return };
     // Pre-create the OAuth user with MFA enabled so the callback resolves to a challenge.
-    let id = seed_user(&h, "mock@example.com", "password123", "USER").await;
+    let id = seed_user(&h, "mock@example.com", "glidingwalnut42", "USER").await;
     enable_mfa_flag(&h, &id).await;
     // Link the OAuth identity so the callback finds this user (provider id from the mock).
     use bymax_auth_core::traits::UserRepository;
@@ -2338,14 +2430,14 @@ async fn mfa_setup_error_arm_when_already_enabled() {
     let app = router(&h);
     let reg = Req::post("/auth/register")
         .json(serde_json::json!({
-            "email": "me2@e.com", "password": "password123", "name": "M", "tenantId": TENANT
+            "email": "me2@e.com", "password": "glidingwalnut42", "name": "M", "tenantId": TENANT
         }))
         .send(&app)
         .await;
     let access = reg.cookie_value("access_token").unwrap_or_default();
     let setup = Req::post("/auth/mfa/setup")
         .cookie("access_token", &access)
-        .json(serde_json::json!({ "password": "password123" }))
+        .json(serde_json::json!({ "password": "glidingwalnut42" }))
         .send(&app)
         .await;
     let secret = setup.json()["secret"].as_str().unwrap_or("").to_owned();
@@ -2358,7 +2450,7 @@ async fn mfa_setup_error_arm_when_already_enabled() {
     // re-enrolment policy, so assert only that it is no longer the 201 success.
     let again = Req::post("/auth/mfa/setup")
         .cookie("access_token", &access)
-        .json(serde_json::json!({ "password": "password123" }))
+        .json(serde_json::json!({ "password": "glidingwalnut42" }))
         .send(&app)
         .await;
     assert_ne!(again.status, StatusCode::CREATED);
@@ -2376,14 +2468,14 @@ async fn mfa_verify_enable_error_arm_with_a_wrong_code() {
     let app = router(&h);
     let reg = Req::post("/auth/register")
         .json(serde_json::json!({
-            "email": "ve@e.com", "password": "password123", "name": "V", "tenantId": TENANT
+            "email": "ve@e.com", "password": "glidingwalnut42", "name": "V", "tenantId": TENANT
         }))
         .send(&app)
         .await;
     let access = reg.cookie_value("access_token").unwrap_or_default();
     let _ = Req::post("/auth/mfa/setup")
         .cookie("access_token", &access)
-        .json(serde_json::json!({ "password": "password123" }))
+        .json(serde_json::json!({ "password": "glidingwalnut42" }))
         .send(&app)
         .await;
     let resp = Req::post("/auth/mfa/verify-enable")
@@ -2424,7 +2516,7 @@ async fn oauth_callback_mfa_branch_without_redirect_returns_json() {
     }) else {
         return;
     };
-    let id = seed_user(&h, "mock@example.com", "password123", "USER").await;
+    let id = seed_user(&h, "mock@example.com", "glidingwalnut42", "USER").await;
     enable_mfa_flag(&h, &id).await;
     use bymax_auth_core::traits::UserRepository;
     let _ = h.users.link_oauth(&id, "google", "mock-123").await;
@@ -2471,7 +2563,7 @@ async fn verify_email_success_with_a_live_otp() {
     // Register so the user exists and a verification OTP is dispatched.
     let _ = Req::post("/auth/register")
         .json(serde_json::json!({
-            "email": "vfy@e.com", "password": "password123", "name": "Vfy", "tenantId": TENANT
+            "email": "vfy@e.com", "password": "glidingwalnut42", "name": "Vfy", "tenantId": TENANT
         }))
         .send(&app)
         .await;
@@ -2497,14 +2589,14 @@ async fn dashboard_mfa_disable_and_recovery_success() {
     let app = router(&h);
     let reg = Req::post("/auth/register")
         .json(serde_json::json!({
-            "email": "dr@e.com", "password": "password123", "name": "Dr", "tenantId": TENANT
+            "email": "dr@e.com", "password": "glidingwalnut42", "name": "Dr", "tenantId": TENANT
         }))
         .send(&app)
         .await;
     let access = reg.cookie_value("access_token").unwrap_or_default();
     let setup = Req::post("/auth/mfa/setup")
         .cookie("access_token", &access)
-        .json(serde_json::json!({ "password": "password123" }))
+        .json(serde_json::json!({ "password": "glidingwalnut42" }))
         .send(&app)
         .await;
     let secret = setup.json()["secret"].as_str().unwrap_or("").to_owned();
@@ -2529,7 +2621,7 @@ async fn dashboard_mfa_disable_and_recovery_success() {
 
     let relogin = Req::post("/auth/login")
         .json(serde_json::json!({
-            "email": "dr@e.com", "password": "password123", "tenantId": TENANT
+            "email": "dr@e.com", "password": "glidingwalnut42", "tenantId": TENANT
         }))
         .send(&app)
         .await;
@@ -2711,7 +2803,7 @@ async fn sessions_list_and_revoke_all_store_failure_arms() {
     // Register against the delegating store (writes succeed) to obtain a valid session.
     let reg = Req::post("/auth/register")
         .json(serde_json::json!({
-            "email": "sf@e.com", "password": "password123", "name": "Sf", "tenantId": TENANT
+            "email": "sf@e.com", "password": "glidingwalnut42", "name": "Sf", "tenantId": TENANT
         }))
         .send(&app)
         .await;
@@ -2743,7 +2835,7 @@ async fn ws_ticket_mint_store_failure_arm() {
     let app = router(&h);
     let reg = Req::post("/auth/register")
         .json(serde_json::json!({
-            "email": "wsf@e.com", "password": "password123", "name": "Wf", "tenantId": TENANT
+            "email": "wsf@e.com", "password": "glidingwalnut42", "name": "Wf", "tenantId": TENANT
         }))
         .send(&app)
         .await;
@@ -2786,7 +2878,7 @@ async fn refresh_surfaces_a_failure_to_re_read_the_account_after_rotation() {
     let app = router(&h);
     let reg = Req::post("/auth/register")
         .json(serde_json::json!({
-            "email": "rr@e.com", "password": "password123", "name": "Rr", "tenantId": TENANT
+            "email": "rr@e.com", "password": "glidingwalnut42", "name": "Rr", "tenantId": TENANT
         }))
         .send(&app)
         .await;
@@ -2871,8 +2963,8 @@ async fn a_cookie_authenticated_write_from_an_untrusted_origin_is_refused() {
         return;
     };
     let app = router(&h);
-    seed_user(&h, "csrf@e.com", "password123", "USER").await;
-    let access = login_access_cookie(&app, "csrf@e.com", "password123").await;
+    seed_user(&h, "csrf@e.com", "glidingwalnut42", "USER").await;
+    let access = login_access_cookie(&app, "csrf@e.com", "glidingwalnut42").await;
 
     let refused = Req::post("/auth/logout")
         .cookie("access_token", &access)
@@ -2906,10 +2998,10 @@ async fn the_cross_site_check_admits_what_it_should() {
         return;
     };
     let app = router(&h);
-    seed_user(&h, "origin@e.com", "password123", "USER").await;
+    seed_user(&h, "origin@e.com", "glidingwalnut42", "USER").await;
 
     // A listed origin is what the allow-list is for.
-    let access = login_access_cookie(&app, "origin@e.com", "password123").await;
+    let access = login_access_cookie(&app, "origin@e.com", "glidingwalnut42").await;
     let allowed = Req::post("/auth/logout")
         .cookie("access_token", &access)
         .header(header::ORIGIN, "https://app.example.com")
@@ -2919,7 +3011,7 @@ async fn the_cross_site_check_admits_what_it_should() {
 
     // The app calling itself never consults the list — which is what keeps a same-origin
     // deployment working with nothing configured.
-    let access = login_access_cookie(&app, "origin@e.com", "password123").await;
+    let access = login_access_cookie(&app, "origin@e.com", "glidingwalnut42").await;
     let same_origin = Req::post("/auth/logout")
         .cookie("access_token", &access)
         .header(header::ORIGIN, "https://evil.example.com")
@@ -2951,7 +3043,7 @@ async fn the_cross_site_check_admits_what_it_should() {
     let read = Req::get("/auth/me")
         .cookie(
             "access_token",
-            &login_access_cookie(&app, "origin@e.com", "password123").await,
+            &login_access_cookie(&app, "origin@e.com", "glidingwalnut42").await,
         )
         .header(header::ORIGIN, "https://evil.example.com")
         .send(&app)
@@ -2971,8 +3063,8 @@ async fn a_cross_site_fetch_with_no_origin_header_is_refused() {
         return;
     };
     let app = router(&h);
-    seed_user(&h, "nohdr@e.com", "password123", "USER").await;
-    let access = login_access_cookie(&app, "nohdr@e.com", "password123").await;
+    seed_user(&h, "nohdr@e.com", "glidingwalnut42", "USER").await;
+    let access = login_access_cookie(&app, "nohdr@e.com", "glidingwalnut42").await;
 
     let refused = Req::post("/auth/logout")
         .cookie("access_token", &access)

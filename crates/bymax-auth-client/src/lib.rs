@@ -650,7 +650,7 @@ mod tests {
     fn register_input() -> RegisterRequest {
         RegisterRequest {
             email: "u@e.com".to_owned(),
-            password: "password123".to_owned(),
+            password: "glidingwalnut42".to_owned(),
             name: "U".to_owned(),
             tenant_id: "t1".to_owned(),
         }
@@ -659,7 +659,7 @@ mod tests {
     fn login_input() -> LoginRequest {
         LoginRequest {
             email: "u@e.com".to_owned(),
-            password: "password123".to_owned(),
+            password: "glidingwalnut42".to_owned(),
             tenant_id: "t1".to_owned(),
         }
     }
@@ -945,7 +945,7 @@ mod tests {
             with_server(plan, |client| async move {
                 let input = ResetPasswordRequest {
                     email: "u@e.com".to_owned(),
-                    new_password: "newpassword123".to_owned(),
+                    new_password: "newglidingwalnut42".to_owned(),
                     proof,
                     tenant_id: "t1".to_owned(),
                 };

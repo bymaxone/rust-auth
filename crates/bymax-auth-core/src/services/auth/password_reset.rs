@@ -14,6 +14,7 @@ use std::time::Instant;
 
 use bymax_auth_crypto::mac::{sha256, verify_digest};
 use bymax_auth_crypto::token::generate_secure_token;
+use bymax_auth_jwt::RawRefreshToken;
 use bymax_auth_types::{AuthError, AuthUser, SafeAuthUser};
 
 use crate::config::ResetMethod;
@@ -22,7 +23,8 @@ use crate::engine::AuthEngine;
 use crate::normalize::normalize_email;
 use crate::services::auth::detached::run_after_password_reset;
 use crate::services::auth::{map_repository_error, normalize_anti_enum, spawn_guarded};
-use crate::traits::{HookContext, OtpPurpose, ResetContext};
+use crate::services::is_refresh_token_shape;
+use crate::traits::{HookContext, OtpPurpose, ResetContext, SessionKind};
 
 /// The lifetime, in seconds, of the short-lived verified token that bridges a successful
 /// OTP verification to the reset form (§7.8 `VERIFIED_TOKEN_TTL_SECONDS`).
@@ -492,6 +494,112 @@ impl AuthEngine {
 
     /// Apply the verified reset: hash the new password, persist it, then revoke every session.
     ///
+    /// Change the password of an already-authenticated account, proving identity with the
+    /// current password rather than an emailed token.
+    ///
+    /// This is the flow ASVS v5 §6.2.2 and §6.2.3 require at Level 1 — "users can change their
+    /// password", and "password change functionality requires the user's current and new
+    /// password" — and it was the one credential operation this library did not own. Without
+    /// it a host either sends users through the *unauthenticated* recovery flow to rotate a
+    /// password they already know, or hand-rolls hashing against `bymax-auth-crypto` with
+    /// duplicated parameters and no guarantee that the sessions are revoked afterwards.
+    ///
+    /// The current password is what makes it safe. A session alone is not proof of identity: a
+    /// token lifted by XSS or from a shared machine would otherwise be enough to rotate the
+    /// credential, lock the real owner out of an account they still know the password to, and
+    /// keep the attacker in.
+    ///
+    /// Every other session ends on success (ASVS v5 §7.4.3) and the token epoch is bumped, so
+    /// already-issued access tokens die with them. The caller's own refresh session survives
+    /// when `current_refresh` identifies it, so the device that made the change stays signed in
+    /// and silently re-mints its access token on the next rotation. When it cannot be
+    /// identified, every session goes, this one included: a change that leaves an unknown
+    /// session alive is the failure the control exists to prevent.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AuthError::InvalidCredentials`] when the current password does not match, the
+    /// account is gone, or it has no local password (an OAuth-only account has nothing to
+    /// change — its credential belongs to the provider); [`AuthError::PasswordCompromised`]
+    /// when the screen refuses the new password; or a repository/store [`AuthError`].
+    pub async fn change_password(
+        &self,
+        user_id: &str,
+        current_password: &str,
+        new_password: &str,
+        current_refresh: Option<&str>,
+    ) -> Result<(), AuthError> {
+        let user = self
+            .user_repository()
+            .find_by_id(user_id, None)
+            .await
+            .map_err(map_repository_error)?;
+        // A verified token whose subject is gone, and an account with no local password, answer
+        // identically: the caller cannot prove a credential this account does not have.
+        let Some(phc) = user.and_then(|user| user.password_hash) else {
+            return Err(AuthError::InvalidCredentials);
+        };
+
+        if !self
+            .passwords()
+            .verify(current_password, &phc)
+            .await?
+            .matched
+        {
+            tracing::warn!(user_id = %user_id, "password change: current password rejected");
+            return Err(AuthError::InvalidCredentials);
+        }
+
+        self.passwords()
+            .assert_not_compromised(new_password)
+            .await?;
+        let new_hash = self.passwords().hash(new_password).await?;
+        self.user_repository()
+            .update_password(user_id, &new_hash)
+            .await
+            .map_err(map_repository_error)?;
+
+        // Sessions go only after the password is durably written, for the same reason the reset
+        // flow orders it that way: a crash between the two leaves stale refresh tokens alive
+        // until their TTL, but the old password is already dead.
+        match current_refresh.filter(|raw| is_refresh_token_shape(raw)) {
+            Some(raw) => {
+                let hash = RawRefreshToken::from_raw(raw.to_owned()).redis_hash();
+                self.sessions()
+                    .revoke_all_except_current(user_id, &hash)
+                    .await?;
+            }
+            None => {
+                self.session_store()
+                    .revoke_all(SessionKind::Dashboard, user_id)
+                    .await?;
+                self.session_store()
+                    .bump_epoch(SessionKind::Dashboard, user_id)
+                    .await?;
+            }
+        }
+
+        tracing::info!(user_id = %user_id, "password change: completed, other sessions revoked");
+        self.notify_password_changed(user_id).await;
+        Ok(())
+    }
+
+    /// Send the "your password changed" notice, detached and best-effort.
+    ///
+    /// NIST SP 800-63B §4.6 asks for a notification through a channel independent of the
+    /// transaction that bound the new credential. Never awaited and never allowed to fail the
+    /// operation: a delivery problem must not undo a password that is already written, nor
+    /// answer differently to the caller.
+    async fn notify_password_changed(&self, user_id: &str) {
+        let Ok(Some(user)) = self.user_repository().find_by_id(user_id, None).await else {
+            return;
+        };
+        spawn_guarded(run_send_password_changed(
+            self.email_provider().clone(),
+            user.email,
+        ));
+    }
+
     /// **Operation order is security-critical:** the password is updated **before** sessions
     /// are invalidated. A crash between the two leaves stale refresh tokens alive only until
     /// their TTL — but the old password is already dead, so a stolen password cannot mint new
@@ -527,6 +635,10 @@ impl AuthEngine {
         // it revokes every session the account had and invalidates its outstanding access
         // tokens, so it belongs in the audit trail even when nothing failed.
         tracing::info!(user_id = %context.user_id, "password reset: completed, all sessions revoked");
+
+        // A reset needs the notice at least as much as a change does: the classic takeover
+        // completes one from a compromised mailbox and deletes the mail.
+        self.notify_password_changed(&context.user_id).await;
 
         let hook_ctx = reset_context_hooks(context);
         let safe = self.project_user_for_hook(context).await;
@@ -594,13 +706,23 @@ fn reset_context_hooks(context: &ResetContext) -> HookContext {
     }
 }
 
+/// Send the "password changed" email (a named future so the detached spawn owns its data).
+async fn run_send_password_changed(
+    email: std::sync::Arc<dyn crate::traits::EmailProvider>,
+    recipient: String,
+) -> Result<(), crate::traits::EmailError> {
+    email.send_password_changed(&recipient, None).await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::services::auth::LoginInput;
     use crate::services::auth::test_support::{Harness, SeedUser, base_config, ctx, harness};
     use crate::traits::{
         EmailProvider, OtpStore, PasswordResetStore, SessionKind, SessionStore, UserRepository,
     };
+    use bymax_auth_types::{AuthResult, CreateUserData, LoginResult};
     use std::time::Duration;
 
     fn token_harness() -> Option<Harness> {
@@ -1871,6 +1993,136 @@ mod tests {
         }
     }
 
+    /// Log in and return the session, or `None` — so a caller's `let-else` fits on one line.
+    /// (Coverage is per line: a `return` on its own line inside a multi-line `let-else` is
+    /// never executed, and reads as a gap rather than as the panic-free idiom it is.)
+    async fn login_ok(h: &Harness, email: &str, password: &str) -> Option<AuthResult> {
+        let input = LoginInput {
+            email: email.to_owned(),
+            password: password.to_owned(),
+            tenant_id: "t1".to_owned(),
+        };
+        let result = h.engine.login(input, &ctx()).await;
+        let Ok(LoginResult::Success(auth)) = result else { return None };
+        Some(*auth)
+    }
+
+    #[tokio::test]
+    async fn change_password_requires_the_current_one_and_rotates() {
+        // ASVS v5 §6.2.2 and §6.2.3 at Level 1: users can change their password, and the change
+        // takes both the current and the new one. The current password is what makes it safe —
+        // a session alone is not proof of identity, so a token lifted by XSS or from a shared
+        // machine must not be enough to rotate the credential and lock the owner out.
+        let Some(h) = token_harness() else { return };
+        let id = h
+            .seed(SeedUser::active("changer@example.com", "oldsecret77"))
+            .await;
+
+        // A wrong current password writes nothing.
+        let refused = h
+            .engine
+            .change_password(&id, "not-the-password", "glidingwalnut42", None)
+            .await;
+        assert!(matches!(refused, Err(AuthError::InvalidCredentials)));
+
+        // The right one rotates it, and the new password is what logs in afterwards.
+        assert!(
+            h.engine
+                .change_password(&id, "oldsecret77", "glidingwalnut42", None)
+                .await
+                .is_ok()
+        );
+        assert!(
+            login_ok(&h, "changer@example.com", "glidingwalnut42")
+                .await
+                .is_some()
+        );
+    }
+
+    #[tokio::test]
+    async fn change_password_spares_the_caller_session_when_it_is_identified() {
+        // ASVS v5 §7.4.3: the other sessions end. The caller's own survives, so the device that
+        // made the change is not signed out by making it — it silently re-mints its access
+        // token on the next rotation instead.
+        let Some(h) = token_harness() else { return };
+        let id = h
+            .seed(SeedUser::active("keeper@example.com", "oldsecret77"))
+            .await;
+        let Some(mine) = login_ok(&h, "keeper@example.com", "oldsecret77").await else { return };
+        let Some(other) = login_ok(&h, "keeper@example.com", "oldsecret77").await else { return };
+
+        assert!(
+            h.engine
+                .change_password(
+                    &id,
+                    "oldsecret77",
+                    "glidingwalnut42",
+                    Some(&mine.refresh_token)
+                )
+                .await
+                .is_ok()
+        );
+
+        // The other device is gone…
+        assert!(
+            h.engine
+                .refresh(&other.refresh_token, "1.2.3.4", "agent")
+                .await
+                .is_err()
+        );
+        // …and the caller's own still rotates.
+        assert!(
+            h.engine
+                .refresh(&mine.refresh_token, "1.2.3.4", "agent")
+                .await
+                .is_ok()
+        );
+    }
+
+    #[tokio::test]
+    async fn change_password_refuses_an_account_with_no_local_password() {
+        // An account provisioned purely through OAuth has nothing to prove and nothing to
+        // change — its credential belongs to the provider. Answering the same
+        // `InvalidCredentials` as a wrong password keeps the two indistinguishable.
+        let Some(h) = token_harness() else { return };
+        let created = h
+            .users
+            .create(CreateUserData {
+                email: "oauth-only@example.com".to_owned(),
+                name: "OAuth Only".to_owned(),
+                password_hash: None,
+                role: None,
+                status: Some("ACTIVE".to_owned()),
+                tenant_id: "t1".to_owned(),
+                email_verified: Some(true),
+            })
+            .await;
+        let Ok(user) = created else { return };
+
+        let refused = h
+            .engine
+            .change_password(&user.id, "anything", "glidingwalnut42", None)
+            .await;
+        assert!(matches!(refused, Err(AuthError::InvalidCredentials)));
+    }
+
+    #[tokio::test]
+    async fn change_password_refuses_a_new_password_the_screen_rejects() {
+        // The screen runs on the change path as it does on register and reset — otherwise the
+        // one flow a user reaches *because* they were told their password was weak is the one
+        // that lets them pick another weak one.
+        let Some(h) = token_harness() else { return };
+        let id = h
+            .seed(SeedUser::active("weak@example.com", "oldsecret77"))
+            .await;
+
+        let refused = h
+            .engine
+            .change_password(&id, "oldsecret77", "Password123", None)
+            .await;
+        assert!(matches!(refused, Err(AuthError::PasswordCompromised)));
+    }
+
     #[tokio::test]
     async fn apply_reset_skips_the_hook_for_a_vanished_subject() {
         // A reset whose bound context points at a user id that no longer resolves still
@@ -1901,7 +2153,7 @@ mod tests {
                     ResetPasswordInput {
                         email: "vanish@example.com".to_owned(),
                         tenant_id: "t1".to_owned(),
-                        new_password: "new".to_owned(),
+                        new_password: "glidingwalnut42".to_owned(),
                         token: Some(token),
                         otp: None,
                         verified_token: None,

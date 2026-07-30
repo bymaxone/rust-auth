@@ -106,7 +106,7 @@ async fn a_wired_breach_checker_refuses_a_compromised_password_at_registration()
         .environment(Environment::Test)
         .user_repository(users)
         .redis_stores(Arc::new(InMemoryStores::new()))
-        .breach_checker(Arc::new(RejectsOnePassword("password123")))
+        .breach_checker(Arc::new(RejectsOnePassword("glidingwalnut42")))
         .build();
     assert!(engine.is_ok(), "valid wiring must assemble");
     let Ok(engine) = engine else { return };
@@ -120,7 +120,7 @@ async fn a_wired_breach_checker_refuses_a_compromised_password_at_registration()
         .register(
             bymax_auth_core::services::auth::RegisterInput {
                 email: "breached@example.com".to_owned(),
-                password: "password123".to_owned(),
+                password: "glidingwalnut42".to_owned(),
                 name: "Ada".to_owned(),
                 tenant_id: "t1".to_owned(),
             },

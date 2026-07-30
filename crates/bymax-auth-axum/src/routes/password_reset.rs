@@ -14,7 +14,10 @@ use http::StatusCode;
 use serde_json::json;
 
 use super::RequestMeta;
-use crate::dto::{ForgotPasswordDto, ResendOtpDto, ResetPasswordDto, VerifyOtpDto};
+use crate::dto::{
+    ChangePasswordDto, ForgotPasswordDto, ResendOtpDto, ResetPasswordDto, VerifyOtpDto,
+};
+use crate::extractors::{AuthUser, UserStatus};
 use crate::response::error_response;
 use crate::state::{AuthState, AxumAuthConfig, ClientIpSource};
 use crate::validation::ValidatedJson;
@@ -41,6 +44,10 @@ pub(crate) fn routes(config: &AxumAuthConfig, ip_source: ClientIpSource) -> Rout
             .route(
                 "/resend-otp",
                 crate::router::throttled(post(resend_otp), limits.resend_password_otp, ip_source),
+            )
+            .route(
+                "/change",
+                crate::router::throttled(post(change_password), limits.change_password, ip_source),
             ),
     )
 }
@@ -60,6 +67,35 @@ async fn forgot_password(
     // it would leak a distinguishable signal the engine's timing-normalized contract forbids.
     let _ = state.engine().initiate_reset(input, &ctx).await;
     (StatusCode::OK, Json(json!({}))).into_response()
+}
+
+/// `POST /auth/password/change` (204). **Authenticated** — the only route in this group that
+/// is, which is the point: the four beside it answer to anyone who can read the account's
+/// mailbox, and this one answers only to someone who holds a live session *and* knows the
+/// password.
+///
+/// ASVS v5 §6.2.2 and §6.2.3 require it at Level 1. Without it a user who wants to rotate a
+/// password they already know has to go through the anonymous recovery flow, and an attacker
+/// holding a stolen session cannot be raced out of the account by the owner changing it.
+async fn change_password(
+    State(state): State<AuthState>,
+    _status: UserStatus,
+    user: AuthUser,
+    ValidatedJson(dto): ValidatedJson<ChangePasswordDto>,
+) -> Response {
+    match state
+        .engine()
+        .change_password(
+            &user.0.sub,
+            &dto.current_password,
+            &dto.new_password,
+            dto.refresh_token.as_deref(),
+        )
+        .await
+    {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(error) => error_response(&error),
+    }
 }
 
 /// `POST /auth/password/reset-password` (204). Public.

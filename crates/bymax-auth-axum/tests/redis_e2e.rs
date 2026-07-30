@@ -160,7 +160,7 @@ async fn seed_user(users: &InMemoryUserRepository, email: &str, role: &str) -> S
         .create(CreateUserData {
             email: email.to_owned(),
             name: "User".to_owned(),
-            password_hash: Some(hash_password("password123")),
+            password_hash: Some(hash_password("glidingwalnut42")),
             role: Some(role.to_owned()),
             status: Some("ACTIVE".to_owned()),
             tenant_id: TENANT.to_owned(),
@@ -336,7 +336,7 @@ async fn full_router_against_real_redis() {
         Method::POST,
         "/auth/register",
         Some(serde_json::json!({
-            "email": "r@e.com", "password": "password123", "name": "Ray", "tenantId": TENANT
+            "email": "r@e.com", "password": "glidingwalnut42", "name": "Ray", "tenantId": TENANT
         })),
         &[],
     )
@@ -525,7 +525,7 @@ async fn full_router_against_real_redis() {
         Method::POST,
         "/auth/login",
         Some(serde_json::json!({
-            "email": "inviter@e.com", "password": "password123", "tenantId": TENANT
+            "email": "inviter@e.com", "password": "glidingwalnut42", "tenantId": TENANT
         })),
         &[],
     )
@@ -548,7 +548,7 @@ async fn full_router_against_real_redis() {
         Method::POST,
         "/auth/login",
         Some(serde_json::json!({
-            "email": "mfa@e.com", "password": "password123", "tenantId": TENANT
+            "email": "mfa@e.com", "password": "glidingwalnut42", "tenantId": TENANT
         })),
         &[],
     )
@@ -560,7 +560,7 @@ async fn full_router_against_real_redis() {
         "/auth/mfa/setup",
         // Enrolment re-authenticates: the account has a password, so it must be re-proved
         // before a factor is minted.
-        Some(serde_json::json!({ "password": "password123" })),
+        Some(serde_json::json!({ "password": "glidingwalnut42" })),
         &[("access_token", &mfa_access)],
     )
     .await;

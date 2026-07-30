@@ -5,6 +5,7 @@
 //! [`HttpClient`] transport.
 
 pub mod breach;
+pub mod common_password;
 pub mod email;
 pub mod hooks;
 pub mod http;
@@ -17,6 +18,7 @@ pub mod store;
 pub use breach::HibpBreachChecker;
 #[doc(inline)]
 pub use breach::{AllowAllBreachChecker, PasswordBreachChecker};
+pub use common_password::{CommonPasswordChecker, reduce_to_base_word};
 #[doc(inline)]
 pub use email::{EmailError, EmailProvider, InviteData, NoOpEmailProvider, SessionInfo};
 #[doc(inline)]

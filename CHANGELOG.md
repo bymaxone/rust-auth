@@ -257,6 +257,37 @@ version bump.
   window would still recover a session after "sign out everywhere", a password reset, or an MFA
   change — the exact property those flows exist to guarantee, asserted against a fake that
   could not break it.
+- **`POST /auth/password/change` — authenticated password change.** ASVS v5 §6.2.2 and §6.2.3
+  require it at **Level 1** — "users can change their password", and the change "requires the
+  user's current and new password" — and it was the one credential operation this library did
+  not own. Without it a host either sends users through the *unauthenticated* recovery flow to
+  rotate a password they already know, or hand-rolls hashing against `bymax-auth-crypto` with
+  duplicated parameters and no guarantee the sessions are revoked afterwards. The current
+  password is what makes it safe: a session alone is not proof of identity, so a token lifted
+  by XSS or from a shared machine could otherwise rotate the credential, lock the real owner
+  out of an account they still know the password to, and keep the attacker in. Every other
+  session ends on success and the epoch is bumped (§7.4.3); the caller's own survives when the
+  request carries its refresh token. `nest-auth` takes the same change.
+- **`CommonPasswordChecker` is the default password screen.** NIST SP 800-63B §3.1.1.2 states a
+  verifier **SHALL** compare a prospective secret against a blocklist of commonly used values,
+  and ASVS v5 §6.2.4 asks for it at **Level 1**. The previous default, `AllowAllBreachChecker`,
+  approved everything: a deployment on defaults accepted `password1` and `12345678`, and the
+  brute-force machinery never fired, because a spraying campaign that tries one password across
+  ten thousand accounts never crosses any single account's threshold. The new default is
+  offline, which is what lets it be a default where the HIBP checker could not — it refuses
+  common base words, keyboard walks, repeats, sequential runs, fragments padded out with
+  decoration, and any *decorated* form of those: `Password1`, `P@ssw0rd` and `PASSWORD123!`
+  reduce to one base, which is why a few hundred entries stand in for a much longer list. It is
+  a floor, not a corpus: `CommonPasswordChecker::with_extra_words` adds the context-specific
+  words §6.2.11 asks for, and the HIBP checker remains the opt-in upgrade to a real breach
+  corpus. `AllowAllBreachChecker` stays available for a deployment with a deliberate reason to
+  screen nothing. **Breaking:** a deployment that relied on the approve-everything default must
+  accept the screen or opt back out explicitly.
+- **`EmailProvider::send_password_changed`** — fired after an authenticated change and after a
+  completed reset. NIST SP 800-63B §4.6 requires the subscriber to be notified through a channel
+  independent of the transaction that bound the new credential, and this was the one credential
+  change the trait stayed silent about while announcing every MFA change unprompted. Defaulted
+  to a no-op so an existing provider keeps compiling.
 - **The platform recovery-code challenge gates on winning the temp-token consume**, which the
   dashboard path already did. Found while chasing a coverage gap the enrolment change exposed:
   the two planes carry the same logic separately, and only one had been fixed.

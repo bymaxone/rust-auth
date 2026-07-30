@@ -40,10 +40,10 @@ mod ws;
 mod test_support;
 
 pub use dto::{
-    AcceptInvitationDto, CreateInvitationDto, ForgotPasswordDto, LoginDto, MfaChallengeDto,
-    MfaDisableDto, MfaRegenerateRecoveryCodesDto, MfaVerifyDto, OAuthCallbackQuery,
-    OAuthInitiateQuery, PlatformLoginDto, RefreshDto, RegisterDto, ResendOtpDto,
-    ResendVerificationDto, ResetPasswordDto, VerifyEmailDto, VerifyOtpDto,
+    AcceptInvitationDto, ChangePasswordDto, CreateInvitationDto, ForgotPasswordDto, LoginDto,
+    MfaChallengeDto, MfaDisableDto, MfaRegenerateRecoveryCodesDto, MfaVerifyDto,
+    OAuthCallbackQuery, OAuthInitiateQuery, PlatformLoginDto, RefreshDto, RegisterDto,
+    ResendOtpDto, ResendVerificationDto, ResetPasswordDto, VerifyEmailDto, VerifyOtpDto,
 };
 pub use extractors::{
     AdminRole, AuthUser, CurrentUser, MfaSatisfied, OptionalAuthUser, RequireRole, Role,

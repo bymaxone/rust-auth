@@ -183,6 +183,7 @@
   "wsTicket": "20/60",
     "forgotPassword": "3/300",
     "resetPassword": "3/300",
+  "changePassword": "5/60",
     "verifyOtp": "3/300",
     "resendPasswordOtp": "3/300",
     "verifyEmail": "5/60",

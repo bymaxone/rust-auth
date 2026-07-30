@@ -118,7 +118,7 @@ fn mfa_key() -> String {
 /// Seed an active dashboard user with the given role; returns its id.
 pub(crate) async fn seed(users: &InMemoryUserRepository, email: &str, role: &str) -> String {
     let params = bymax_auth_crypto::password::PasswordParams::default();
-    let hash = bymax_auth_crypto::password::hash(b"password123", &params).unwrap_or_default();
+    let hash = bymax_auth_crypto::password::hash(b"glidingwalnut42", &params).unwrap_or_default();
     let created = users
         .create(CreateUserData {
             email: email.to_owned(),

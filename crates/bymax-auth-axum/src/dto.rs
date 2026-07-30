@@ -54,6 +54,35 @@ pub struct ForgotPasswordDto {
     pub tenant_id: String,
 }
 
+/// `POST /auth/password/change` body — the **authenticated** rotation.
+///
+/// Distinct from [`ResetPasswordDto`], which serves the unauthenticated recovery flow and
+/// proves identity with an emailed token or OTP. Here the proof is the current password, which
+/// is the one thing a stolen session does not carry.
+#[derive(Debug, Default, Deserialize, Validate)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ChangePasswordDto {
+    /// The account's current password, re-proving who is asking (ASVS v5 §6.2.3).
+    ///
+    /// The floor is 1, not the policy length: rejecting the empty string keeps a caller from
+    /// spending a KDF derivation for free, while enforcing the deployment's real policy here
+    /// would leak it as a pre-KDF signal — and this is a *current* password, which may predate
+    /// whatever the policy says today.
+    #[garde(length(min = 1, max = 128))]
+    pub current_password: String,
+    /// The new password (8–128 chars).
+    #[garde(length(min = 8, max = 128))]
+    pub new_password: String,
+    /// The caller's refresh token, when it has one to send.
+    ///
+    /// Optional, and only used to spare the caller's own session from the sweep: with it, the
+    /// device that made the change stays signed in; without it, every session goes, this one
+    /// included. A change that leaves an unidentified session alive is the failure the control
+    /// exists to prevent, so the safe branch is the one that takes them all.
+    #[garde(skip)]
+    pub refresh_token: Option<String>,
+}
+
 /// `POST /auth/password/reset-password` body. Exactly one of `token` / `otp` /
 /// `verified_token` carries the reset proof (validated by the engine, not garde).
 #[derive(Debug, Deserialize, Validate)]
