@@ -102,6 +102,9 @@ impl Stampable for DashboardClaims {
     }
 }
 
+// Gated with the type it stamps: `PlatformClaims` only exists under the `platform` feature,
+// and the feature matrix builds every combination.
+#[cfg(feature = "platform")]
 impl Stampable for PlatformClaims {
     fn stamped(&self, issuer: Option<String>, audience: Option<String>) -> Self {
         Self {
