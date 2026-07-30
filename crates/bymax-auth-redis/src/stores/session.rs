@@ -232,6 +232,10 @@ impl RedisStores {
         // the session a rotation produced is still alive before honouring the pointer.
         let rt_prefix = format!("{}:{}", keys.namespace(), prefixes.rt.as_str());
         let fam_key = keys.key(prefixes.fam, family);
+        // The owner's session index. The script touches it only on the live-rotation path,
+        // which the caller can reach only when its own pre-read of the old key succeeded — so
+        // `new_record.user_id` is the real owner there, never a placeholder.
+        let sess_key = keys.key(prefixes.sess, &rotation.new_record.user_id);
         let new_json = serde_json::to_string(&rotation.new_record)?;
 
         let mut conn = self.connection().await?;
@@ -242,6 +246,7 @@ impl RedisStores {
             .key(&rp_old)
             .key(&cf_old)
             .key(&fam_key)
+            .key(&sess_key)
             .arg(&new_json)
             .arg(rotation.refresh_ttl)
             .arg(rotation.grace_ttl)
@@ -249,6 +254,8 @@ impl RedisStores {
             .arg(&rotation.old_hash)
             .arg(&rotation.new_hash)
             .arg(&rt_prefix)
+            .arg(prefixes.rt.as_str())
+            .arg(prefixes.rp.as_str())
             .invoke_async(&mut conn)
             .await?;
 
@@ -266,7 +273,7 @@ impl RedisStores {
             }
             RotateParsed::Reused(family) => Ok(RotateOutcome::Reused(family)),
             RotateParsed::Rotated(old_record) => {
-                self.move_session_member(&mut conn, &prefixes, rotation, &old_record.user_id)
+                self.move_session_detail(&mut conn, &prefixes, rotation)
                     .await?;
                 Ok(RotateOutcome::Rotated(old_record))
             }
@@ -368,49 +375,32 @@ impl RedisStores {
     /// could still recover a live session through the grace window for the whole grace TTL,
     /// even after the user revoked every session. A zero-width grace window writes no pointer,
     /// so no member is added for it.
-    async fn move_session_member(
+    async fn move_session_detail(
         &self,
         conn: &mut Connection,
         prefixes: &KindPrefixes,
         rotation: &SessionRotation,
-        user_id: &str,
     ) -> Result<(), RedisStoreError> {
         let keys = self.keys();
-        let sess_key = keys.key(prefixes.sess, user_id);
         let sd_old = keys.key(prefixes.sd, &rotation.old_hash);
         let sd_new = keys.key(prefixes.sd, &rotation.new_hash);
-        let old_member = index_member(prefixes.rt, &rotation.old_hash);
-        let new_member = index_member(prefixes.rt, &rotation.new_hash);
         let detail_json =
             serde_json::to_string(&SessionDetailValue::at_creation(&rotation.new_record))?;
-        let ttl_window = i64::try_from(rotation.refresh_ttl).unwrap_or(i64::MAX);
-        let mut pipe = redis::pipe();
-        pipe.cmd("SREM")
-            .arg(&sess_key)
-            .arg(&old_member)
-            .ignore()
+        // The index membership itself moved into the rotation script — a sweep racing this
+        // step used to be able to miss the session the rotation had just minted. What is left
+        // is the per-session DETAIL, which names nothing the revocation reaches through: a
+        // stale `sd:` is cosmetic, and losing one costs a device row in the session list
+        // rather than a session that should have died.
+        redis::pipe()
+            .atomic()
             .cmd("DEL")
             .arg(&sd_old)
             .ignore()
-            .cmd("SADD")
-            .arg(&sess_key)
-            .arg(&new_member)
-            .ignore();
-        if rotation.grace_ttl > 0 {
-            pipe.cmd("SADD")
-                .arg(&sess_key)
-                .arg(index_member(prefixes.rp, &rotation.old_hash))
-                .ignore();
-        }
-        pipe.cmd("SET")
+            .cmd("SET")
             .arg(&sd_new)
             .arg(&detail_json)
             .arg("EX")
             .arg(rotation.refresh_ttl)
-            .ignore()
-            .cmd("EXPIRE")
-            .arg(&sess_key)
-            .arg(ttl_window)
             .ignore()
             .query_async::<()>(conn)
             .await?;

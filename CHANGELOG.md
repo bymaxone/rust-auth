@@ -354,6 +354,20 @@ version bump.
 
 ### Changed
 
+- **The session index is maintained by the rotation script, not after it**
+  (`crates/bymax-auth-redis/src/lua/refresh_rotate.lua`). The script gained `KEYS[6]`
+  (`sess:{userId}`) and two member prefixes, and does the index bookkeeping itself. Doing it in
+  the store after the script left a window between the atomic consume and the `SADD` in which
+  `revoke_all` could sweep the index without seeing the session the rotation had just minted:
+  that session survived a revocation the user was told had happened, and went on rotating —
+  re-stamping a fresh access token under every later epoch, so the token epoch did not contain
+  it either. The window is attacker-aimable: a thief holding a stolen refresh token and
+  refreshing in a loop is most likely to be mid-rotation exactly when a password reset is
+  trying to evict them. Inside the script the two operations serialize. What stays outside is
+  the per-session detail, which the revocation never reaches through, now issued as an atomic
+  `MULTI`. Held byte-compatible with nest-auth, which rotates the same sessions.
+
+
 - **`SessionStore::revoke_family` now returns the account the family belonged to**
   (`Result<Option<String>, AuthError>`). Reuse detection had no way to name its victim: the
   replayed token's own `rt:` key is deleted when it is rotated, so by the time the replay is

@@ -71,7 +71,12 @@
       "Index members are FULL key suffixes, not bare hashes. The member has to name its own",
       "keyspace: an atomic revoke rebuilds keys from members, and a bare hash cannot say whether",
       "it is a live session or a rotation grace pointer. Grace pointers are members too, which is",
-      "what lets a revoke-all also kill a token that was rotated away but is still in its window."
+      "what lets a revoke-all also kill a token that was rotated away but is still in its window.",
+      "The membership is maintained BY THE ROTATION SCRIPT, not by the caller afterwards. Done",
+      "after the script it left a window between the consume and the SADD in which a revoke-all",
+      "sweep could miss the session the rotation had just minted — leaving it alive, and still",
+      "rotating, after a revocation the user was told had happened. Inside the script the two",
+      "serialize. Either backend rotating the other's sessions must keep it there."
     ],
     "dashboardLive": "rt:{sha256(refreshToken)}",
     "dashboardGrace": "rp:{sha256(supersededToken)}",
