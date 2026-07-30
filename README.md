@@ -419,7 +419,7 @@ Everything is configured through `AuthConfig`. Two ready-made profiles bundle se
 
 | Group              | Key options                                                                  | nest-compat default        |
 | ------------------ | ---------------------------------------------------------------------------- | -------------------------- |
-| **jwt**            | `secret` (required, ≥ 32 chars), `previous_secrets`, `access_ttl`, `refresh_expires_in_days`, `absolute_session_lifetime_days` | `15m`, `7d`, off, HS256 (pinned) |
+| **jwt**            | `secret` (required, ≥ 32 chars), `previous_secrets`, `access_ttl`, `refresh_expires_in_days`, `absolute_session_lifetime_days`, `issuer`, `audience` | `15m`, `7d`, off, HS256 (pinned), both off |
 | **password**       | `active_algorithm`, scrypt `cost_factor` / Argon2id `memory_kib`             | scrypt N=2¹⁷, r=8, p=1     |
 | **token_delivery** | `Cookie` \| `Bearer` \| `Both`                                               | `Cookie`                   |
 | **cookies**        | names, `refresh_cookie_path`, `same_site`, `trusted_origins`, `resolve_domains` | HttpOnly, Secure, Strict, `[]` |
@@ -438,6 +438,20 @@ Everything is configured through `AuthConfig`. Two ready-made profiles bundle se
 > `build()` validates every cross-field invariant (secret length/entropy, role referential integrity, parameter floors, `SameSite=None ⇒ Secure`, `SameSite=None ⇔ trusted_origins`, OAuth redirect allow-listing, required stores) and rejects an invalid config with a precise `ConfigError`.
 
 > [!TIP]
+> **Binding tokens to an issuer and an audience.** `jwt.issuer` and `jwt.audience` are `None`
+> by default. Set either and its value is stamped on every token this backend mints — dashboard,
+> platform and MFA challenge alike — and **required** on every token it verifies: one carrying a
+> different value, or none at all, is rejected. That matters with HS256, where the verifier can
+> also sign: every service holding the secret to check a token can mint one, so audience binding
+> is what stops a token minted for one service being replayed at another that trusts the same
+> secret. The check sits at the single verification chokepoint, so a retired signing key does not
+> waive it.
+>
+> Two things to know before switching it on. Both backends of a shared deployment must carry the
+> same pair, or they stop accepting each other's tokens. And enabling it invalidates the access
+> tokens already in flight — a window of one access-token lifetime, which clients close by
+> refreshing. An empty string reads as unconfigured rather than as "require the empty issuer".
+
 > **Rotating the signing secret.** `jwt.previous_secrets` lists secrets retired by a rotation,
 > accepted for verification only. Without it, changing `jwt.secret` signs every user out the
 > moment the new configuration rolls out *and* invalidates every stored recovery-code digest —
@@ -724,6 +738,8 @@ Route groups mount only when their feature **and** runtime toggle are enabled, s
 | POST   | `/auth/invitations`           | `AuthUser`                      | Create a tenant invitation                           |
 | POST   | `/auth/invitations/accept`    | Public                          | Accept an invitation and create the user             |
 | POST   | `/auth/invitations/revoke`    | `AuthUser`                      | Withdraw a pending invitation                        |
+| POST   | `/auth/email/change`          | `AuthUser`                      | Request an address change (re-proves the password)   |
+| POST   | `/auth/email/change/confirm`  | Public                          | Confirm it with the token sent to the new address    |
 | POST   | `/auth/platform/login`        | Public                          | Platform-admin login (separate context)              |
 | POST   | `/auth/platform/mfa/challenge`| Public                          | Platform-admin MFA challenge                         |
 | GET    | `/auth/platform/me`           | `PlatformUser`                  | Current platform admin                               |

@@ -1252,6 +1252,7 @@ The route groups and the toggle/feature that gates each:
 | Platform | `/platform/login` `/platform/me` `/platform/logout` `/platform/refresh` `/platform/sessions` (and `/platform/mfa/challenge` when `mfa` is also on) | `platform` (auto when `platform.enabled`) | `platform` |
 | OAuth | `/oauth/:provider/authorize` `/oauth/:provider/callback` | `oauth` (opt-in) | `oauth` |
 | Invitations | `/invitations` `/invitations/accept` `/invitations/revoke` | `invitations` (auto when `invitations.enabled`) | `invitations` |
+| Email change | `/email/change` `/email/change/confirm` | `email_change` (opt-in) | — (always compiled) |
 
 For consumers using the framework-agnostic core directly (no Axum), the toggles still gate which engine methods are wired and which background tasks run; routing is simply the consumer's responsibility. The edge JWT verifier (`bymax-auth-wasm`) is independent of all toggles — it only ever verifies HS256 access tokens locally and mounts no routes.
 
@@ -2684,6 +2685,17 @@ their ordering reproduces the NestJS guard pipeline.
 | POST   | `/auth/invitations`         | `create_invitation` | `AuthUser` (+ `RequireRole<InviterRole>` when configured) | 204     | `CreateInvitationDto` | invitations |
 | POST   | `/auth/invitations/accept`  | `accept_invitation` | `ValidatedJson<AcceptInvitationDto>`                      | 201     | `AcceptInvitationDto` | invitations |
 | POST   | `/auth/invitations/revoke`  | `revoke_invitation` | `AuthUser`                                                | 204     | `RevokeInvitationDto` | invitations |
+
+| Method | Path                            | Handler            | Extractors / guards                            | Success | Body DTO                 | Feature |
+| ------ | ------------------------------- | ------------------ | ---------------------------------------------- | ------- | ------------------------ | ------- |
+| POST   | `/auth/email/change`            | `request`          | `AuthUser`, `ValidatedJson<ChangeEmailDto>`    | 204     | `ChangeEmailDto`         | always  |
+| POST   | `/auth/email/change/confirm`    | `confirm`          | `ValidatedJson<ConfirmEmailChangeDto>`         | 204     | `ConfirmEmailChangeDto`  | always  |
+
+> The request re-proves the current password and mails a single-use token to the NEW address;
+> nothing about the account changes there. The confirmation is public because the person holding
+> that token is proving control of a mailbox, not of a session — requiring a login would break
+> the case the flow exists to serve. The old address is notified once the change lands
+> (NIST SP 800-63B §4.6).
 
 > `create_invitation` derives `tenant_id` from the authenticated user's claims —
 > never from the body — to prevent cross-tenant injection. `accept` is public.
@@ -5043,6 +5055,8 @@ brute-force headroom per IP.
 | `POST /auth/invitations`                | `invitation_create`   | 10    | 3600        | Prevent invitation flooding / email abuse.                              |
 | `POST /auth/invitations/accept`         | `invitation_accept`   | 5     | 60          | Protect invitation acceptance (token-guess resistance).                  |
 | `POST /auth/invitations/revoke`         | `invitation_revoke`   | 10    | 3600        | Matches the mint, so withdrawing costs what issuing does.               |
+| `POST /auth/email/change`               | `email_change_request` | 3    | 300         | Sends mail to a caller-supplied address; matches the reset limits.     |
+| `POST /auth/email/change/confirm`       | `email_change_confirm` | 5    | 60          | Bounds guessing at the address-change token.                          |
 | `GET /auth/sessions`                    | `list_sessions`       | 30    | 60          | Generous read limit.                                                     |
 | `DELETE /auth/sessions/{id}`            | `revoke_session`      | 10    | 60          | Bound single-session revocation.                                        |
 | `DELETE /auth/sessions/all`             | `revoke_all_sessions` | 5     | 60          | Bound bulk revocation.                                                   |
