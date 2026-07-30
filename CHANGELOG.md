@@ -225,6 +225,38 @@ version bump.
   forwarded them verbatim, so the advisory identity headers were forgeable with no token at
   all — and `isPublicPath` now matches at a segment boundary, so `/login` no longer exempts
   `/loginhistory`.
+- **Refresh re-reads the account and re-applies the status and email-verification gates.**
+  Rotation worked entirely from the store record, so nothing on that path ever looked at the
+  user again — and rotation is the door a signed-in caller actually uses. A banned account
+  renewed its access token for the refresh token's whole lifetime (ASVS v5 §7.4.2 requires
+  disabling an account to terminate its sessions), and an address that was never verified held
+  a session indefinitely, because `register` issues one deliberately and only `login` ever
+  checked. A blocked account that touches the system now has every session revoked and its
+  epoch bumped in the same breath; an unverified one is refused without compensation, since an
+  unproven address is an unfinished onboarding and revoking would kill the token rendering the
+  "check your inbox" screen. **Breaking:** `AuthEngine::refresh` returns `RefreshedSession`
+  (the rotated tokens plus the account), which also removes the adapter's second verify-and-look-up.
+- **`AuthEngine::revoke_all_sessions(user_id)`** — the dashboard twin of `platform_revoke_all`,
+  for the moment a host suspends, bans or deletes an account. `revoke_all_except_current` could
+  not serve: it wants the hash of a session to keep, and an administrator banning somebody else
+  has none.
+- **`POST /auth/platform/logout` no longer requires a live access token.** It required
+  `PlatformUser`, which refuses an expired one, so an operator who stepped away for longer than
+  the access lifetime could not sign out and the refresh session of the highest-privilege
+  identity in the system stayed live on a console they believed they had left. Same fix the
+  dashboard plane took earlier in this cycle. **Breaking:** `AuthEngine::platform_logout` drops
+  its `admin_id` parameter — the owner is read from the stored record — and returns it instead.
+- **`DELETE /auth/sessions/all` accepts the refresh token from the body and refuses when it
+  cannot identify the caller's session.** It read the cookie only, and a bearer-mode deployment
+  plants none — so it could never identify one, and the engine treated that as "revoke nothing,
+  successfully". A user with a compromised second device clicked "sign out my other devices",
+  got 204, and nothing happened. `nest-auth` has always refused this case with
+  `session_not_found`.
+- **The in-memory `SessionStore` double clears grace pointers on `revoke_all`**, as the real
+  Lua does. Keeping them made the double *weaker* than production: a token inside its grace
+  window would still recover a session after "sign out everywhere", a password reset, or an MFA
+  change — the exact property those flows exist to guarantee, asserted against a fake that
+  could not break it.
 - **The platform recovery-code challenge gates on winning the temp-token consume**, which the
   dashboard path already did. Found while chasing a coverage gap the enrolment change exposed:
   the two planes carry the same logic separately, and only one had been fixed.

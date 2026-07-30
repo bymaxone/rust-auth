@@ -150,6 +150,31 @@ impl TokenManagerService {
         .map_err(map_jwt_error)
     }
 
+    /// The platform twin of [`TokenManagerService::verify_access_ignoring_expiry`], for the
+    /// same single caller: logout.
+    ///
+    /// An operator who walks away for longer than the access-token lifetime and then signs out
+    /// is the ordinary case, and refusing them leaves the refresh session of the
+    /// highest-privilege identity in the system alive on a console they believed they had left.
+    ///
+    /// # Errors
+    ///
+    /// [`AuthError`] when no configured signing key accepts the token.
+    #[cfg(feature = "platform")]
+    pub fn verify_platform_access_ignoring_expiry(
+        &self,
+        token: &str,
+    ) -> Result<PlatformClaims, AuthError> {
+        self.verify_rotating_with::<PlatformClaims>(
+            token,
+            &VerifyOptions {
+                validate_exp: false,
+                ..VerifyOptions::default()
+            },
+        )
+        .map_err(map_jwt_error)
+    }
+
     /// Assemble the token manager from the signing key, the session store, and the
     /// resolved token lifetimes.
     pub(crate) fn new(

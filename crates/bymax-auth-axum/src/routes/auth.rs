@@ -10,7 +10,7 @@ use axum::extract::State;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use bymax_auth_core::services::auth::{LoginInput, RegisterInput};
-use bymax_auth_types::{AuthError, AuthResult, LoginResult, RotatedTokens};
+use bymax_auth_types::{AuthResult, LoginResult};
 use http::StatusCode;
 use tower_cookies::Cookies;
 
@@ -167,20 +167,22 @@ async fn refresh(
     let body_refresh = dto.refresh_token.as_deref();
     let refresh =
         source_refresh_token(&cookies, &state.config().cookies.refresh_name, body_refresh);
-    let tokens = match state
+    let refreshed = match state
         .engine()
         .refresh(&refresh, &ctx.ip, &ctx.user_agent)
         .await
     {
-        Ok(tokens) => tokens,
+        Ok(refreshed) => refreshed,
         Err(error) => return error_response(&error),
     };
-    match rotated_into_auth_result(&state, tokens).await {
-        Ok(result) => {
-            TokenDelivery::with_domains(state.config(), &domains).deliver_refresh(&cookies, &result)
-        }
-        Err(error) => error_response(&error),
-    }
+    // No second verify-and-look-up here: `refresh` already re-read the account to apply the
+    // status and email-verification gates, and hands it back with the tokens.
+    let result = AuthResult {
+        user: refreshed.user,
+        access_token: refreshed.tokens.access_token,
+        refresh_token: refreshed.tokens.refresh_token,
+    };
+    TokenDelivery::with_domains(state.config(), &domains).deliver_refresh(&cookies, &result)
 }
 
 /// `GET /auth/me` (200). Requires [`AuthUser`]. Returns the credential-free user as the
@@ -238,27 +240,4 @@ fn deliver_login(
         LoginResult::Success(auth) => delivery.deliver_auth(cookies, &auth, success_status),
         LoginResult::MfaChallenge(challenge) => delivery.deliver_mfa_challenge(&challenge),
     }
-}
-
-/// Pair a rotated token pair with the account it belongs to, producing the [`AuthResult`] the
-/// delivery layer shapes into the refresh body.
-///
-/// The engine's `refresh` returns only the pair, so the subject is recovered from the
-/// freshly-minted access token (it verifies by construction) and the account is re-read
-/// through `me` — the same "rotate, then `getMe`" sequence nest-auth's controller performs,
-/// which also guarantees the echoed record reflects any change made since the last issuance.
-async fn rotated_into_auth_result(
-    state: &AuthState,
-    tokens: RotatedTokens,
-) -> Result<AuthResult, AuthError> {
-    let claims = state
-        .engine()
-        .verify_access_token(&tokens.access_token)
-        .await?;
-    let user = state.engine().me(&claims.sub).await?;
-    Ok(AuthResult {
-        user,
-        access_token: tokens.access_token,
-        refresh_token: tokens.refresh_token,
-    })
 }

@@ -51,6 +51,16 @@ impl InMemoryUserRepository {
         Self::default()
     }
 
+    /// Delete a user outright, so a test can drive the "the account is gone but its session
+    /// record outlived it" branch. Returns whether a row was removed.
+    ///
+    /// The `UserRepository` trait deliberately has no delete — account deletion is the host's
+    /// domain — so this exists only on the double, and only to reach a branch the engine has
+    /// to handle when a host does delete one.
+    pub fn remove(&self, id: &str) -> bool {
+        lock(&self.users).remove(id).is_some()
+    }
+
     /// Allocate a fresh, monotonically-increasing user id.
     fn allocate_id(&self) -> String {
         format!("user-{}", self.next_id.fetch_add(1, Ordering::Relaxed))
@@ -571,6 +581,14 @@ impl SessionStore for InMemoryStores {
                 sessions.remove(&(kind, detail.session_hash));
             }
         }
+        // Every grace pointer the user holds goes too. The real store deletes them because they
+        // are members of the same `sess:` index the sweep walks (`invalidate_user_sessions.lua`),
+        // and they are keyed by the SUPERSEDED hash — which is not the hash the index carries
+        // after a rotation, so mirroring this by index membership alone would miss them. A
+        // double that keeps them is *weaker* than production: a token inside its grace window
+        // would still recover a session after "sign out everywhere", a password reset, or an
+        // MFA change, which is the exact property those flows exist to guarantee.
+        lock(&self.grace).retain(|(k, _), record| *k != kind || record.user_id != user_id);
         Ok(())
     }
 

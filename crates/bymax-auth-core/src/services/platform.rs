@@ -230,17 +230,37 @@ impl PlatformAuthService {
     /// # Errors
     ///
     /// The `Result` is reserved for forward compatibility and currently always returns `Ok`.
-    pub async fn logout(
-        &self,
-        access_token: &str,
-        raw_refresh: &str,
-        admin_id: &str,
-    ) -> Result<(), AuthError> {
-        // Blacklist only a token that actually verifies as a PLATFORM token: a forged/expired
-        // token needs no revocation, and a dashboard token can never verify here (the platform
+    pub async fn logout(&self, access_token: &str, raw_refresh: &str) -> Result<String, AuthError> {
+        // The stored session names its owner. Presenting the refresh token proves possession;
+        // the record proves whose it is. The admin id used to come from the route's
+        // `PlatformUser` extractor — which is why the route refused an EXPIRED access token,
+        // so an operator who stepped away for longer than the access lifetime could not sign
+        // out at all and the refresh session of the highest-privilege identity in the system
+        // stayed live on a console they believed they had left. The dashboard plane was fixed
+        // for exactly this; the platform plane kept the old shape.
+        let admin_id = if is_refresh_token_shape(raw_refresh) {
+            let hash = RawRefreshToken::from_raw(raw_refresh.to_owned()).redis_hash();
+            self.session_store
+                .find_session(SessionKind::Platform, &hash)
+                .await?
+                .map(|record| record.user_id)
+                .unwrap_or_default()
+        } else {
+            String::new()
+        };
+        let admin_id = admin_id.as_str();
+
+        // Blacklist only a token that actually verifies as a PLATFORM token: a forged token
+        // needs no revocation, and a dashboard token can never verify here (the platform
         // discriminator rejects it), so a dashboard `jti` can never pollute the platform-session
-        // logout path. Best-effort — a store failure must not block the logout.
-        if let Ok(claims) = self.tokens.verify_platform_access(access_token).await {
+        // logout path. The expiry is waived — an expired token is the normal case at logout —
+        // but the signature is not: the `jti` decides which token gets blacklisted, so reading
+        // it unverified would let a caller revoke one they do not own by naming its id.
+        // Best-effort — a store failure must not block the logout.
+        if let Ok(claims) = self
+            .tokens
+            .verify_platform_access_ignoring_expiry(access_token)
+        {
             let ttl = u64::try_from(claims.exp.saturating_sub(now_unix())).unwrap_or(0);
             let _ = self.tokens.revoke_access(&claims.jti, ttl).await;
         }
@@ -264,13 +284,18 @@ impl PlatformAuthService {
                 .await;
         }
 
-        let hook_ctx = identity_only_context(admin_id);
-        spawn_guarded(run_after_logout(
-            self.hooks.clone(),
-            admin_id.to_owned(),
-            hook_ctx,
-        ));
-        Ok(())
+        // No live session matched the presented token — already signed out, or expired. There
+        // is no identity to hand the hook, and logout stays a success either way: it is
+        // idempotent, and answering an error would tell a caller whether a token was live.
+        if !admin_id.is_empty() {
+            let hook_ctx = identity_only_context(admin_id);
+            spawn_guarded(run_after_logout(
+                self.hooks.clone(),
+                admin_id.to_owned(),
+                hook_ctx,
+            ));
+        }
+        Ok(admin_id.to_owned())
     }
 
     /// Atomically invalidate EVERY platform session for the admin (the "log out everywhere"
@@ -766,7 +791,7 @@ mod tests {
         let logged = svc.login("hooked@admin.io", "pw", "1.2.3.4", "agent").await;
         let Ok(PlatformLoginResult::Success(auth)) = logged else { return };
         assert!(
-            svc.logout(&auth.access_token, &auth.refresh_token, &id)
+            svc.logout(&auth.access_token, &auth.refresh_token)
                 .await
                 .is_ok()
         );
@@ -777,16 +802,42 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn logout_works_without_a_live_access_token() {
+        // The route used to require a live `PlatformUser`, so an operator who stepped away for
+        // longer than the fifteen-minute access lifetime could not sign out at all — and the
+        // refresh session of the highest-privilege identity in the system stayed live on a
+        // console they believed they had left. The refresh token is what authorizes this; the
+        // stored record names its owner.
+        let Some(h) = harness(platform_config()) else { return };
+        let id = seed_admin(&h.admins, "away@admin.io", "pw");
+        let Some(svc) = h.engine.platform_auth() else { return };
+        let logged = svc.login("away@admin.io", "pw", "1.2.3.4", "agent").await;
+        let Ok(PlatformLoginResult::Success(auth)) = logged else { return };
+
+        // No access token at all — the shape a client sends once its bearer token has expired
+        // and it has nothing live to present.
+        let owner = svc.logout("", &auth.refresh_token).await;
+        assert_eq!(owner.ok(), Some(id));
+
+        // The session is gone: the refresh token no longer rotates.
+        assert!(
+            svc.refresh(&auth.refresh_token, "1.2.3.4", "agent")
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
     async fn logout_blacklists_the_jti_and_revokes_the_session() {
         // After logout the platform access jti is blacklisted (verify rejects it) and the
         // refresh session is gone, so the refresh token no longer rotates.
         let Some(h) = harness(platform_config()) else { return };
-        let id = seed_admin(&h.admins, "out@admin.io", "pw");
+        let _id = seed_admin(&h.admins, "out@admin.io", "pw");
         let Some(svc) = h.engine.platform_auth() else { return };
         let logged = svc.login("out@admin.io", "pw", "1.2.3.4", "agent").await;
         let Ok(PlatformLoginResult::Success(auth)) = logged else { return };
         assert!(
-            svc.logout(&auth.access_token, &auth.refresh_token, &id)
+            svc.logout(&auth.access_token, &auth.refresh_token)
                 .await
                 .is_ok()
         );
@@ -803,11 +854,7 @@ mod tests {
         ));
         // Logout tolerates a non-shaped refresh token, a garbage access token, and an unknown
         // admin, still succeeding.
-        assert!(
-            svc.logout("not-a-jwt", "unknown-refresh", "nobody")
-                .await
-                .is_ok()
-        );
+        assert!(svc.logout("not-a-jwt", "unknown-refresh").await.is_ok());
     }
 
     #[tokio::test]
@@ -819,7 +866,7 @@ mod tests {
         // is now caught as a REUSE of a consumed token — the signature of a stolen token — and
         // revokes the whole family, taking the live rotated token down with it.
         let Some(h) = harness(platform_config()) else { return };
-        let id = seed_admin(&h.admins, "grace@admin.io", "pw");
+        let _id = seed_admin(&h.admins, "grace@admin.io", "pw");
         let Some(svc) = h.engine.platform_auth() else { return };
         let logged = svc.login("grace@admin.io", "pw", "1.2.3.4", "agent").await;
         let Ok(PlatformLoginResult::Success(auth)) = logged else { return };
@@ -828,7 +875,7 @@ mod tests {
         let Ok(rotated) = rotation else { return };
         // Logging out the OLD token cleans its grace pointer.
         assert!(
-            svc.logout(&auth.access_token, &auth.refresh_token, &id)
+            svc.logout(&auth.access_token, &auth.refresh_token)
                 .await
                 .is_ok()
         );

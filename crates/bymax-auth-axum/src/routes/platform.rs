@@ -118,14 +118,20 @@ async fn me(State(state): State<AuthState>, user: PlatformUser) -> Response {
     }
 }
 
-/// `POST /auth/platform/logout` (204). Requires [`PlatformUser`].
+/// `POST /auth/platform/logout` (204). Public — deliberately.
+///
+/// It used to require [`PlatformUser`], which refuses an EXPIRED access token, so an operator
+/// who stepped away for longer than the access lifetime could not sign out at all and the
+/// refresh session of the highest-privilege identity in the system stayed live on a console
+/// they believed they had left. The refresh token is what authorizes the operation, the stored
+/// record names its owner, and the access token is still verified — signature and pinned
+/// algorithm, expiry aside — before its `jti` is blacklisted. Same shape as the dashboard route.
 ///
 /// The refresh token is read from the request body only: platform delivery never planted a
 /// cookie, so there is none to read, and honouring the dashboard refresh cookie here would let
 /// it shadow the body value and leave the platform session alive after logout.
 async fn logout(
     State(state): State<AuthState>,
-    user: PlatformUser,
     PresentedPlatformAccessToken(access_token): PresentedPlatformAccessToken,
     body: axum::body::Bytes,
 ) -> Response {
@@ -135,7 +141,7 @@ async fn logout(
     let refresh = dto.refresh_token.unwrap_or_default();
     let _ = state
         .engine()
-        .platform_logout(&access_token, &refresh, &user.0.sub)
+        .platform_logout(&access_token, &refresh)
         .await;
     StatusCode::NO_CONTENT.into_response()
 }

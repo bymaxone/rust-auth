@@ -1735,7 +1735,7 @@ async fn engine_runs_register_login_refresh_logout_against_redis() {
         .refresh(&auth.refresh_token, "203.0.113.4", "agent/1.0")
         .await;
     assert!(
-        matches!(&refreshed, Ok(tokens) if tokens.refresh_token != auth.refresh_token),
+        matches!(&refreshed, Ok(session) if session.tokens.refresh_token != auth.refresh_token),
         "refresh should rotate to a new token"
     );
     let Ok(rotated) = refreshed else { return };
@@ -1744,14 +1744,14 @@ async fn engine_runs_register_login_refresh_logout_against_redis() {
     // always Ok.
     assert!(
         engine
-            .logout(&rotated.access_token, &rotated.refresh_token)
+            .logout(&rotated.tokens.access_token, &rotated.tokens.refresh_token)
             .await
             .is_ok()
     );
     // The revoked refresh token no longer rotates after logout.
     assert!(matches!(
         engine
-            .refresh(&rotated.refresh_token, "203.0.113.4", "agent/1.0")
+            .refresh(&rotated.tokens.refresh_token, "203.0.113.4", "agent/1.0")
             .await,
         Err(AuthError::RefreshTokenInvalid)
     ));

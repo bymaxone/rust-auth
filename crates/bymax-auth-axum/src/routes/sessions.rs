@@ -67,8 +67,20 @@ async fn revoke_all(
     _status: UserStatus,
     user: AuthUser,
     cookies: Cookies,
+    body: axum::body::Bytes,
 ) -> Response {
-    let refresh = source_refresh_token(&cookies, &state.config().cookies.refresh_name, None);
+    // The body channel matters as much as the cookie: a bearer-mode deployment plants no
+    // cookies at all, so reading only the jar meant this route could never identify the
+    // caller's current session — and it answered 204 having revoked nothing. `logout` and
+    // `refresh` both accept the token either way for exactly this reason. An unparseable body
+    // degrades to "no body-supplied token" rather than 400-ing, which the engine then refuses
+    // explicitly instead of silently succeeding.
+    let dto = crate::routes::parse_optional_refresh_body(&body).unwrap_or_default();
+    let refresh = source_refresh_token(
+        &cookies,
+        &state.config().cookies.refresh_name,
+        dto.refresh_token.as_deref(),
+    );
     let raw = (!refresh.is_empty()).then_some(refresh.as_str());
     match state
         .engine()

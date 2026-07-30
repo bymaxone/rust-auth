@@ -6,11 +6,28 @@ use std::collections::BTreeMap;
 use bymax_auth_jwt::RawRefreshToken;
 use bymax_auth_types::{AuthError, AuthResult, RotatedTokens, SafeAuthUser};
 
+use crate::context::to_safe_user;
 use crate::engine::AuthEngine;
 use crate::services::auth::detached::{run_after_login, run_after_logout, run_update_last_login};
 use crate::services::auth::{map_repository_error, spawn_guarded};
 use crate::services::{is_refresh_token_shape, now_unix};
 use crate::traits::{HookContext, SessionKind};
+
+/// What a **dashboard** refresh returns: the rotated tokens plus the account behind them.
+///
+/// Rotation itself works entirely from the store record, so the repository read this carries is
+/// what lets the status and email-verification gates apply on refresh at all. Without them a
+/// suspended account renews its access token for the refresh token's whole lifetime — the login
+/// door a ban closes is one a signed-in user never needs to open again (ASVS v5 §7.4.2) — and
+/// an address that was never proven holds a session indefinitely. The user is returned rather
+/// than discarded so the adapter does not verify the token and read the repository a second
+/// time to build the response body. `nest-auth` returns the same shape.
+pub struct RefreshedSession {
+    /// The freshly minted access + refresh pair.
+    pub tokens: RotatedTokens,
+    /// The account behind the rotated session, re-read and re-checked during the rotation.
+    pub user: SafeAuthUser,
+}
 
 impl AuthEngine {
     /// Revoke the current session: blacklist the access token's `jti` for its remaining
@@ -137,10 +154,87 @@ impl AuthEngine {
         old_refresh: &str,
         ip: &str,
         user_agent: &str,
-    ) -> Result<RotatedTokens, AuthError> {
-        self.tokens()
+    ) -> Result<RefreshedSession, AuthError> {
+        let rotated = self
+            .tokens()
             .reissue_tokens(old_refresh, ip, user_agent)
+            .await?;
+
+        // The owner: read from the token we just minted, which is the only place it is
+        // available on both the live and the grace path. The adapter verified this same token
+        // to build its response body, so the work is moved rather than added.
+        let claims = self.tokens().verify_access(&rotated.access_token).await?;
+        let user_id = claims.sub;
+
+        // Re-read the account and re-apply the two gates `login` applies. Rotation works
+        // entirely from the store record, so nothing else on this path ever looks at the user
+        // again — and rotation is the door a signed-in caller actually uses. Without this, two
+        // things hold in the default configuration: a banned account renews its access token
+        // for the refresh token's whole lifetime, because the ban closes only the login door
+        // (ASVS v5 §7.4.2 requires disabling an account to terminate its sessions); and an
+        // address that was never verified holds a session indefinitely, because `register`
+        // issues one deliberately and only `login` ever checked.
+        //
+        // The check runs AFTER rotation because that is the only point where the owner is known
+        // on both the live and the grace path. The compensation is deliberately total: every
+        // session the account holds is revoked, including the one just minted, and the epoch
+        // bump kills the access token issued a moment ago.
+        let user = match self
+            .user_repository()
+            .find_by_id(&user_id, None)
             .await
+            .map_err(map_repository_error)?
+        {
+            Some(user) => user,
+            None => {
+                // The account is gone and the session record outlived it. End it rather than
+                // hand back a token for a user nobody can look up.
+                self.revoke_all_sessions(&user_id).await?;
+                return Err(AuthError::TokenInvalid);
+            }
+        };
+        if let Err(error) = self.assert_user_not_blocked(&user.status) {
+            self.revoke_all_sessions(&user_id).await?;
+            return Err(error);
+        }
+        // Refused, but NOT compensated. An unproven address is an unfinished onboarding, not a
+        // denied account: the refusal alone bounds the window to one access-token lifetime,
+        // which is exactly what the specification promises. Revoking everything here would
+        // also kill the token the consumer is using to render its "check your inbox" screen,
+        // breaking the flow that issued it.
+        if self.config().config().email_verification.required && !user.email_verified {
+            return Err(AuthError::EmailNotVerified);
+        }
+
+        Ok(RefreshedSession {
+            tokens: rotated,
+            user: to_safe_user(&user),
+        })
+    }
+
+    /// End every dashboard session for one account, and kill the access tokens already issued.
+    ///
+    /// The dashboard twin of [`AuthEngine::platform_revoke_all`]. It exists because a
+    /// library cannot see the moment a host suspends, bans, or deletes an account — the user
+    /// record is the host's — and until the host says so, that account's live sessions keep
+    /// working. ASVS v5 §7.4.2 requires that moment to terminate them, so the host needs a
+    /// supported way to say it; `revoke_all_except_current` cannot serve, because it wants the
+    /// hash of a session to keep and an administrator banning somebody else has none.
+    ///
+    /// The epoch is bumped after the sweep, not before: a failure in the sweep then leaves the
+    /// operation visibly incomplete rather than reading as done while the sessions live on.
+    ///
+    /// # Errors
+    ///
+    /// Returns a store [`AuthError`] when the sweep or the epoch bump fails.
+    pub async fn revoke_all_sessions(&self, user_id: &str) -> Result<(), AuthError> {
+        self.session_store()
+            .revoke_all(SessionKind::Dashboard, user_id)
+            .await?;
+        self.session_store()
+            .bump_epoch(SessionKind::Dashboard, user_id)
+            .await?;
+        Ok(())
     }
 
     /// Issue a full dashboard session for an existing user **without** a password
@@ -230,7 +324,9 @@ mod tests {
     use super::*;
     use crate::services::auth::LoginInput;
     use crate::services::auth::test_support::{Harness, SeedUser, base_config, ctx, harness};
+    use crate::traits::{SessionRecord, SessionStore as _, UserRepository as _};
     use bymax_auth_types::{DashboardClaims, LoginResult};
+    use time::OffsetDateTime;
 
     fn login_input(email: &str, password: &str) -> LoginInput {
         LoginInput {
@@ -245,6 +341,113 @@ mod tests {
         let result = h.engine.login(login_input(email, password), &ctx()).await;
         let Ok(LoginResult::Success(auth)) = result else { return None };
         Some((id, *auth))
+    }
+
+    #[tokio::test]
+    async fn refresh_refuses_and_revokes_everything_for_an_account_blocked_after_login() {
+        // A ban has to end an existing session, not merely refuse the next login — a door a
+        // signed-in user never needs to open again. Rotation works entirely from the store
+        // record, so without a re-read a suspended account renews its access token for the
+        // refresh token's whole lifetime (ASVS v5 §7.4.2).
+        let mut cfg = base_config();
+        cfg.email_verification.required = false;
+        let Some(h) = harness(cfg, None) else { return };
+        let Some((id, auth)) = logged_in(&h, "banned@e.com", "pw123456").await else { return };
+
+        // The operator bans the account through their own admin surface.
+        assert!(h.users.update_status(&id, "BANNED").await.is_ok());
+
+        let refused = h
+            .engine
+            .refresh(&auth.refresh_token, "1.2.3.4", "agent")
+            .await;
+        assert!(matches!(refused, Err(AuthError::AccountBanned)));
+
+        // Total compensation: the session just minted goes with every other one the account
+        // holds, so a second attempt has nothing left to rotate.
+        let again = h
+            .engine
+            .refresh(&auth.refresh_token, "1.2.3.4", "agent")
+            .await;
+        assert!(
+            matches!(again, Err(AuthError::RefreshTokenInvalid)),
+            "unexpected ok"
+        );
+    }
+
+    #[tokio::test]
+    async fn refresh_refuses_when_the_account_no_longer_exists() {
+        // The session record outlived the account. Hand back nothing, and clear the orphan
+        // rather than leaving it to be rotated again.
+        let mut cfg = base_config();
+        cfg.email_verification.required = false;
+        let Some(h) = harness(cfg, None) else { return };
+        let Some((id, auth)) = logged_in(&h, "deleted@e.com", "password123").await else { return };
+
+        h.users.remove(&id);
+
+        let refused = h
+            .engine
+            .refresh(&auth.refresh_token, "1.2.3.4", "agent")
+            .await;
+        assert!(matches!(refused, Err(AuthError::TokenInvalid)));
+    }
+
+    #[tokio::test]
+    async fn refresh_refuses_an_unverified_address_without_revoking_the_session() {
+        // `register` issues a full session deliberately — a consumer needs one to render the
+        // "check your inbox" screen — and the specification bounds that window at one
+        // access-token lifetime. Rotation is what un-bounded it: the gate lived only on
+        // `login`, a door the caller never has to open again once register handed them a
+        // refresh token. The refusal alone restores the bound; revoking everything would also
+        // kill the token rendering that very screen, so this path is refused, not compensated.
+        //
+        // The session is seeded straight into the store because every issuance path applies
+        // the very gate under test — going through one would prove only that the gate it
+        // already had works.
+        let Some(h) = harness(base_config(), None) else { return };
+        let id = h
+            .seed(SeedUser {
+                email: "unverified@e.com".to_owned(),
+                password: "password123".to_owned(),
+                tenant_id: "t1".to_owned(),
+                status: "ACTIVE".to_owned(),
+                email_verified: false,
+                mfa_enabled: false,
+            })
+            .await;
+        let raw = RawRefreshToken::generate();
+        let record = SessionRecord {
+            user_id: id,
+            tenant_id: Some("t1".to_owned()),
+            role: "USER".to_owned(),
+            device: "Chrome".to_owned(),
+            ip: "1.2.3.4".to_owned(),
+            created_at: OffsetDateTime::now_utc(),
+            mfa_enabled: false,
+            family_id: "fam-unverified".to_owned(),
+            family_created_at: Some(OffsetDateTime::now_utc()),
+        };
+        let seeded = h
+            .stores
+            .create_session(SessionKind::Dashboard, &raw.redis_hash(), &record, 3600)
+            .await;
+        assert!(seeded.is_ok());
+
+        let refused = h
+            .engine
+            .refresh(raw.expose_secret(), "1.2.3.4", "agent")
+            .await;
+        assert!(matches!(refused, Err(AuthError::EmailNotVerified)));
+
+        // NOT compensated: the account still holds its sessions, so the token that rendered
+        // the "check your inbox" screen keeps working for its remaining lifetime.
+        assert!(
+            h.stores
+                .find_session(SessionKind::Dashboard, &raw.redis_hash())
+                .await
+                .is_ok()
+        );
     }
 
     #[tokio::test]
@@ -396,7 +599,7 @@ mod tests {
             .engine
             .refresh(&auth.refresh_token, "1.2.3.4", "agent")
             .await;
-        assert!(matches!(&rotated, Ok(r) if r.refresh_token != auth.refresh_token));
+        assert!(matches!(&rotated, Ok(r) if r.tokens.refresh_token != auth.refresh_token));
     }
 
     #[tokio::test]

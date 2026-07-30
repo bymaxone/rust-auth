@@ -159,8 +159,14 @@ impl AuthEngine {
                     .revoke_all_except_current(user_id, &current)
                     .await
             }
-            // No identifiable current session: do not revoke the live request's own session.
-            None => Ok(()),
+            // Without the caller's refresh token there is no way to tell which session to
+            // keep. Refuse rather than answer success having done nothing: a user who clicks
+            // "sign out my other devices" because they believe one is compromised is making a
+            // statement about right now, and a silent 204 tells them it was acted on when it
+            // was not. `SessionNotFound` rather than `RefreshTokenInvalid` — this is a missing
+            // credential, not a rejected one, and the distinction keeps a client from
+            // pointlessly attempting a refresh. `nest-auth` has always answered this way.
+            None => Err(AuthError::SessionNotFound),
         }
     }
 
@@ -439,11 +445,10 @@ impl AuthEngine {
         &self,
         access_token: &str,
         raw_refresh: &str,
-        admin_id: &str,
-    ) -> Result<(), AuthError> {
+    ) -> Result<String, AuthError> {
         self.platform_auth()
             .ok_or(AuthError::PlatformAuthRequired)?
-            .logout(access_token, raw_refresh, admin_id)
+            .logout(access_token, raw_refresh)
             .await
     }
 
@@ -667,18 +672,26 @@ mod tests {
         ));
     }
 
-    /// `revoke_other_user_sessions` with no identifiable current session (absent/malformed
-    /// refresh token) is a no-op `Ok(())` — it never wipes the live request's own session.
+    /// `revoke_other_user_sessions` with no identifiable current session (absent or malformed
+    /// refresh token) REFUSES. It used to answer `Ok(())` having revoked nothing, which reads
+    /// as success to a caller who just clicked "sign out my other devices" because they
+    /// believe one is compromised — and in a bearer-mode deployment, where no cookie is ever
+    /// planted, that was every call. `SessionNotFound` rather than `RefreshTokenInvalid`: the
+    /// credential is missing, not rejected, and the distinction keeps a client from
+    /// pointlessly attempting a refresh.
     #[tokio::test]
-    async fn revoke_other_user_sessions_without_a_current_hash_is_a_noop() {
+    async fn revoke_other_user_sessions_without_a_current_hash_refuses() {
         let Some(h) = harness(base_config(), None) else { return };
-        assert!(h.engine.revoke_other_user_sessions("u", None).await.is_ok());
-        assert!(
+        assert!(matches!(
+            h.engine.revoke_other_user_sessions("u", None).await,
+            Err(AuthError::SessionNotFound)
+        ));
+        assert!(matches!(
             h.engine
                 .revoke_other_user_sessions("u", Some("not-shaped"))
-                .await
-                .is_ok()
-        );
+                .await,
+            Err(AuthError::SessionNotFound)
+        ));
     }
 
     /// A sample set of dashboard claims for the ticket surfaces.
@@ -870,7 +883,7 @@ mod tests {
             Err(AuthError::PlatformAuthRequired)
         ));
         assert!(matches!(
-            h.engine.platform_logout("t", "r", "a").await,
+            h.engine.platform_logout("t", "r").await,
             Err(AuthError::PlatformAuthRequired)
         ));
         assert!(matches!(

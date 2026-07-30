@@ -223,7 +223,7 @@ async fn platform_login_me_refresh_logout_and_revoke_all_against_redis() {
     let pre_logout = redis.all_keys().await;
     assert!(pre_logout.iter().any(|k| k.starts_with("auth:prp:")));
     assert!(
-        svc.logout(&auth.access_token, &auth.refresh_token, &id)
+        svc.logout(&auth.access_token, &auth.refresh_token)
             .await
             .is_ok()
     );
@@ -242,7 +242,7 @@ async fn platform_login_me_refresh_logout_and_revoke_all_against_redis() {
     // Logout also revokes the live (rotated) session: the rotated refresh token no longer rotates,
     // proving the primary refresh key was cleaned in the platform keyspace.
     assert!(
-        svc.logout(&rotated.access_token, &rotated.refresh_token, &id)
+        svc.logout(&rotated.access_token, &rotated.refresh_token)
             .await
             .is_ok()
     );

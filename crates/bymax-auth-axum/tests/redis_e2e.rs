@@ -147,6 +147,14 @@ fn build_engine(
 }
 
 /// Seed an active dashboard user; returns its id.
+/// The id of an account created through the HTTP route, looked up by address.
+async fn user_id_of(users: &InMemoryUserRepository, email: &str) -> String {
+    match users.find_by_email(email, TENANT).await {
+        Ok(Some(user)) => user.id,
+        _ => String::new(),
+    }
+}
+
 async fn seed_user(users: &InMemoryUserRepository, email: &str, role: &str) -> String {
     let created = users
         .create(CreateUserData {
@@ -350,6 +358,33 @@ async fn full_router_against_real_redis() {
     // The safe user is the top-level body — no `{ user: … }` wrapper (nest-auth parity).
     assert_eq!(me.json()["email"], "r@e.com");
 
+    // Rotation is refused while the address is unproven. `register` issues a full session
+    // deliberately — a consumer needs one to render the "check your inbox" screen — and the
+    // verification requirement has to survive rotation, or that window is unbounded: the gate
+    // used to live only on `login`, a door the caller never has to open again once register
+    // handed them a refresh token. This assertion is the reason the next lines verify first.
+    let unverified = call(
+        &app,
+        Method::POST,
+        "/auth/refresh",
+        None,
+        &[("refresh_token", &refresh)],
+    )
+    .await;
+    assert_eq!(unverified.status, StatusCode::FORBIDDEN);
+    assert_eq!(
+        unverified.json()["error"]["code"],
+        "auth.email_not_verified"
+    );
+
+    // Prove the address (the OTP round trip has its own tests; this one is about the router
+    // against real Redis), then rotate.
+    assert!(
+        users
+            .update_email_verified(&user_id_of(&users, "r@e.com").await, true)
+            .await
+            .is_ok()
+    );
     let rotated = call(
         &app,
         Method::POST,

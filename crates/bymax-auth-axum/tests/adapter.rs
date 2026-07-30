@@ -121,6 +121,55 @@ async fn the_set_cookie_header_is_marked_sensitive_so_tracing_cannot_print_the_t
 }
 
 #[tokio::test]
+async fn revoke_all_sessions_works_in_bearer_mode_and_never_reports_a_silent_success() {
+    // A bearer deployment plants no cookies at all, and this route read the caller's current
+    // session only from the jar — so it could never identify one, and the engine treated that
+    // as "revoke nothing, successfully". A user with a compromised second device clicked
+    // "sign out my other devices", got 204, and nothing happened: the attacker's refresh token
+    // kept rotating. The body channel now works, and an unidentifiable session is refused
+    // rather than answered.
+    let Some(h) = build(EngineSpec {
+        delivery: bymax_auth_core::config::TokenDelivery::Bearer,
+        sessions: true,
+        ..EngineSpec::default()
+    }) else {
+        return;
+    };
+    let app = router(&h);
+
+    let reg = Req::post("/auth/register")
+        .json(serde_json::json!({
+            "email": "revoker@e.com", "password": "password123", "name": "Reva", "tenantId": TENANT
+        }))
+        .send(&app)
+        .await;
+    assert_eq!(reg.status, StatusCode::CREATED);
+    let body = reg.json();
+    let access = body["accessToken"].as_str().unwrap_or_default().to_owned();
+    let refresh = body["refreshToken"].as_str().unwrap_or_default().to_owned();
+    assert!(
+        !refresh.is_empty(),
+        "bearer mode returns the tokens in the body"
+    );
+
+    // No body-supplied token: the route cannot tell which session to keep, and says so.
+    let blind = Req::delete("/auth/sessions/all")
+        .bearer(&access)
+        .send(&app)
+        .await;
+    assert_eq!(blind.status, StatusCode::NOT_FOUND);
+    assert_eq!(blind.json()["error"]["code"], "auth.session_not_found");
+
+    // With the token in the body — the channel a bearer client actually has — it works.
+    let revoked = Req::delete("/auth/sessions/all")
+        .bearer(&access)
+        .json(serde_json::json!({ "refreshToken": refresh }))
+        .send(&app)
+        .await;
+    assert_eq!(revoked.status, StatusCode::NO_CONTENT);
+}
+
+#[tokio::test]
 async fn session_cookies_are_host_only_unless_a_domain_resolver_is_configured() {
     // Default: no `Domain` attribute at all. A cookie carrying `Domain=app.example.com` is
     // sent to every subdomain of that name (RFC 6265 §5.2.3), so deriving it from the request
@@ -2266,14 +2315,15 @@ async fn platform_me_and_revoke_error_arms_with_a_ghost_admin() {
         .await;
     assert_eq!(revoke.status, StatusCode::NO_CONTENT);
     // The token that performed the revoke is now dead like every other token the ghost held:
-    // revoke-all reaches the access tokens too, not only the refresh sessions. (The plain
-    // ghost-logout 204 arm is covered by the real-admin logout test; one token cannot both
-    // revoke-all and then log out, which is the point.)
-    let logout = Req::post("/auth/platform/logout")
+    // revoke-all reaches the access tokens too, not only the refresh sessions. Probed with
+    // `me` rather than `logout` — logout is deliberately public now, so that an operator whose
+    // access token expired can still end their session, which makes it useless as evidence
+    // that a token is still alive.
+    let dead = Req::get("/auth/platform/me")
         .bearer(&ghost)
         .send(&app)
         .await;
-    assert_eq!(logout.status, StatusCode::UNAUTHORIZED);
+    assert_eq!(dead.status, StatusCode::UNAUTHORIZED);
 }
 
 #[tokio::test]
