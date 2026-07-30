@@ -712,6 +712,7 @@ Route groups mount only when their feature **and** runtime toggle are enabled, s
 | POST   | `/auth/password/reset-password`  | Public                       | Submit a new password                                |
 | POST   | `/auth/password/verify-otp`   | Public                          | Verify a password-reset OTP                          |
 | POST   | `/auth/password/resend-otp`   | Public                          | Resend the password-reset OTP                        |
+| POST   | `/auth/password/change`       | `AuthUser` + `UserStatus`       | Change the password, proving the current one         |
 | POST   | `/auth/mfa/setup`             | `AuthUser`                      | Generate the TOTP secret + recovery codes            |
 | POST   | `/auth/mfa/verify-enable`     | `AuthUser`                      | Confirm setup and enable MFA                         |
 | POST   | `/auth/mfa/challenge`         | Public (MFA temp token)         | Submit a TOTP / recovery code after login            |
