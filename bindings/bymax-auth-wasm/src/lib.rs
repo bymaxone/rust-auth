@@ -140,6 +140,8 @@ mod tests {
         use bymax_auth_jwt::{HsKey, sign};
         use bymax_auth_types::{DashboardClaims, DashboardType};
         let claims = DashboardClaims {
+            iss: None,
+            aud: None,
             sub: "u_1".to_owned(),
             jti: "jti-1".to_owned(),
             tenant_id: "t_1".to_owned(),

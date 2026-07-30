@@ -193,6 +193,8 @@ mod tests {
 
     fn dashboard(iat: i64, exp: i64) -> DashboardClaims {
         DashboardClaims {
+            iss: None,
+            aud: None,
             sub: "u_1".to_owned(),
             jti: "jti-1".to_owned(),
             tenant_id: "t_1".to_owned(),
@@ -226,6 +228,8 @@ mod tests {
     fn verifies_a_platform_token() {
         // Platform access tokens dispatch to PlatformClaims and round-trip to JSON.
         let claims = PlatformClaims {
+            iss: None,
+            aud: None,
             sub: "p_1".to_owned(),
             jti: "jti-2".to_owned(),
             role: "admin".to_owned(),
@@ -245,6 +249,8 @@ mod tests {
     fn verifies_an_mfa_temp_token() {
         // MFA-temp tokens dispatch to MfaTempClaims.
         let claims = MfaTempClaims {
+            iss: None,
+            aud: None,
             sub: "u_1".to_owned(),
             jti: "jti-3".to_owned(),
             token_type: MfaTempType::MfaChallenge,
@@ -349,6 +355,8 @@ mod tests {
         // Exercise the platform and mfa-temp projection arms too.
         let platform = sign(
             &PlatformClaims {
+                iss: None,
+                aud: None,
                 sub: "p_1".to_owned(),
                 jti: "jti-2".to_owned(),
                 role: "admin".to_owned(),
@@ -368,6 +376,8 @@ mod tests {
 
         let mfa = sign(
             &MfaTempClaims {
+                iss: None,
+                aud: None,
                 sub: "u_1".to_owned(),
                 jti: "jti-3".to_owned(),
                 token_type: MfaTempType::MfaChallenge,

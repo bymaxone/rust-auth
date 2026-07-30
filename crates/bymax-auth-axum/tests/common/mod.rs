@@ -328,6 +328,8 @@ pub async fn seed_user(harness: &Harness, email: &str, password: &str, role: &st
 pub fn mint_dashboard_token(sub: &str, role: &str, status: &str) -> String {
     use bymax_auth_types::{DashboardClaims, DashboardType};
     let claims = DashboardClaims {
+        iss: None,
+        aud: None,
         sub: sub.to_owned(),
         jti: "jti-mint".to_owned(),
         tenant_id: TENANT.to_owned(),
@@ -348,6 +350,8 @@ pub fn mint_dashboard_token(sub: &str, role: &str, status: &str) -> String {
 pub fn mint_platform_token(sub: &str, role: &str) -> String {
     use bymax_auth_types::{PlatformClaims, PlatformType};
     let claims = PlatformClaims {
+        iss: None,
+        aud: None,
         sub: sub.to_owned(),
         jti: "jti-mint-p".to_owned(),
         role: role.to_owned(),

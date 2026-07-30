@@ -426,7 +426,24 @@ impl AuthEngineBuilder {
             grace_window,
             absolute_session_lifetime_days,
         )
-        .with_hooks(hooks.clone());
+        .with_hooks(hooks.clone())
+        // Empty strings read as unconfigured rather than as "require the empty issuer": a
+        // host threading an unset environment variable through must not silently turn the
+        // check on and start minting tokens its own verifier rejects.
+        .with_binding(crate::services::token_manager::TokenBinding {
+            issuer: config
+                .config()
+                .jwt
+                .issuer
+                .clone()
+                .filter(|value| !value.is_empty()),
+            audience: config
+                .config()
+                .jwt
+                .audience
+                .clone()
+                .filter(|value| !value.is_empty()),
+        });
         // Wire the MFA temp-token single-use support when an MFA store is supplied, so the
         // challenge token planted at login is store-backed and brute-force-capped.
         #[cfg(feature = "mfa")]

@@ -59,6 +59,8 @@ mod tests {
 
         // Mint a token with mfa_enabled=true, mfa_verified=false (no normal flow issues one).
         let claims = DashboardClaims {
+            iss: None,
+            aud: None,
             sub: id.clone(),
             jti: "jti-unverified".to_owned(),
             tenant_id: "t1".to_owned(),

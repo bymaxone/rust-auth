@@ -557,6 +557,8 @@ mod tests {
         // and logout still succeeds.
         let now = crate::services::now_unix();
         let expired = DashboardClaims {
+            iss: None,
+            aud: None,
             sub: "user-x".to_owned(),
             jti: crate::services::new_uuid_v4(),
             tenant_id: "t1".to_owned(),

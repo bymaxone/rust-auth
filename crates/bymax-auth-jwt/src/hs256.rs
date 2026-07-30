@@ -183,6 +183,8 @@ mod tests {
 
     fn dashboard(iat: i64, exp: i64) -> DashboardClaims {
         DashboardClaims {
+            iss: None,
+            aud: None,
             sub: "u_1".to_owned(),
             jti: "jti-1".to_owned(),
             tenant_id: "t_1".to_owned(),
@@ -217,6 +219,8 @@ mod tests {
         );
 
         let platform = PlatformClaims {
+            iss: None,
+            aud: None,
             sub: "p_1".to_owned(),
             jti: "jti-2".to_owned(),
             role: "admin".to_owned(),
@@ -234,6 +238,8 @@ mod tests {
         );
 
         let mfa = MfaTempClaims {
+            iss: None,
+            aud: None,
             sub: "u_1".to_owned(),
             jti: "jti-3".to_owned(),
             token_type: MfaTempType::MfaChallenge,
@@ -533,6 +539,8 @@ mod tests {
             let key = key();
             let exp = iat + span;
             let claims = DashboardClaims {
+                iss: None,
+                aud: None,
                 sub, jti, tenant_id: "t".to_owned(), role,
                 token_type: DashboardType::Dashboard, status: "ACTIVE".to_owned(),
                 mfa_enabled, mfa_verified, iat, exp, epoch,

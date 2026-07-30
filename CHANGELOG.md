@@ -12,6 +12,27 @@ version bump.
 
 ### Added
 
+- **`jwt.issuer` and `jwt.audience` — binding tokens to who minted them and who they are for.**
+  Optional and `None` by default, so an existing deployment is unchanged. When set, the value
+  is stamped on every token this backend mints — dashboard, platform and MFA challenge alike —
+  and **required** on every token it verifies: one carrying a different value, or none at all,
+  is rejected. Accepting an unstamped token would give an attacker a way to opt out of the
+  check simply by omitting the claim.
+
+  This matters because HS256 means the verifier can also sign: every service holding the secret
+  to check a token can mint one, so audience binding is what stops a token minted for one
+  service being replayed at another that trusts the same secret. The check sits at the single
+  verification chokepoint, so a retired signing key does not waive it — a retired key buys a
+  token signature acceptance and nothing else.
+
+  Opt-in because both backends of a shared deployment must carry the same pair or they stop
+  accepting each other's tokens, and because turning it on invalidates the access tokens
+  already in flight. An empty string reads as unconfigured rather than as "require the empty
+  issuer". `DashboardClaims`, `PlatformClaims` and `MfaTempClaims` gain `iss`/`aud` fields,
+  both `Option<String>` and both skipped when absent, so the wire shape is unchanged for a
+  deployment that configures neither.
+
+
 - **Changing the address on an account** — `POST /auth/email/change` and
   `POST /auth/email/change/confirm`, opt-in behind `controllers.email_change`. The address is
   the account's recovery credential: whoever controls it can drive a password reset to a

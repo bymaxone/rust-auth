@@ -120,6 +120,20 @@ pub struct DashboardClaims {
     #[serde(default)]
     #[cfg_attr(feature = "ts-export", ts(as = "Option::<f64>", optional))]
     pub epoch: u64,
+    /// The `iss` claim, present only when the deployment configured `jwt.issuer`.
+    ///
+    /// Absent by default. When the verifier is configured with a value, a token carrying a
+    /// different one — or none at all — is rejected: accepting an unstamped token would give
+    /// an attacker a way to opt out of the check by omitting the claim.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts-export", ts(optional))]
+    pub iss: Option<String>,
+    /// The `aud` claim, with the same semantics as [`Self::iss`]. With HS256 the verifier can
+    /// also sign, so audience binding is what stops a token minted for one service being
+    /// replayed at another that trusts the same secret.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts-export", ts(optional))]
+    pub aud: Option<String>,
 }
 
 /// Access token for platform admins — no `tenantId`. The TypeScript counterpart is
@@ -160,6 +174,20 @@ pub struct PlatformClaims {
     #[serde(default)]
     #[cfg_attr(feature = "ts-export", ts(as = "Option::<f64>", optional))]
     pub epoch: u64,
+    /// The `iss` claim, present only when the deployment configured `jwt.issuer`.
+    ///
+    /// Absent by default. When the verifier is configured with a value, a token carrying a
+    /// different one — or none at all — is rejected: accepting an unstamped token would give
+    /// an attacker a way to opt out of the check by omitting the claim.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts-export", ts(optional))]
+    pub iss: Option<String>,
+    /// The `aud` claim, with the same semantics as [`Self::iss`]. With HS256 the verifier can
+    /// also sign, so audience binding is what stops a token minted for one service being
+    /// replayed at another that trusts the same secret.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts-export", ts(optional))]
+    pub aud: Option<String>,
 }
 
 /// Short-lived token bridging the password step and the MFA challenge. The TypeScript
@@ -187,6 +215,14 @@ pub struct MfaTempClaims {
     /// Expiry (seconds since the Unix epoch).
     #[cfg_attr(feature = "ts-export", ts(type = "number"))]
     pub exp: i64,
+    /// The `iss` claim, present only when the deployment configured `jwt.issuer`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts-export", ts(optional))]
+    pub iss: Option<String>,
+    /// The `aud` claim, with the same semantics as [`Self::iss`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts-export", ts(optional))]
+    pub aud: Option<String>,
 }
 
 #[cfg(test)]
@@ -195,6 +231,8 @@ mod tests {
 
     fn dashboard_claims() -> DashboardClaims {
         DashboardClaims {
+            iss: None,
+            aud: None,
             sub: "u_1".to_owned(),
             jti: "jti-1".to_owned(),
             tenant_id: "t_1".to_owned(),
@@ -244,6 +282,8 @@ mod tests {
     fn platform_claims_have_no_tenant_id() {
         // Platform tokens never carry a tenant scope; the field is absent by type.
         let claims = PlatformClaims {
+            iss: None,
+            aud: None,
             sub: "p_1".to_owned(),
             jti: "jti-2".to_owned(),
             role: "super_admin".to_owned(),
@@ -265,6 +305,8 @@ mod tests {
         // The temp token's `type` is `mfa_challenge` and its `context` routes
         // persistence to the dashboard or platform store downstream.
         let claims = MfaTempClaims {
+            iss: None,
+            aud: None,
             sub: "u_1".to_owned(),
             jti: "jti-3".to_owned(),
             token_type: MfaTempType::MfaChallenge,
@@ -344,6 +386,8 @@ mod tests {
         let dashboard = serde_json::to_value(dashboard_claims()).unwrap_or_default();
         assert_eq!(dashboard.get("epoch"), Some(&serde_json::json!(3)));
         let platform = serde_json::to_value(PlatformClaims {
+            iss: None,
+            aud: None,
             sub: "p_1".to_owned(),
             jti: "jti-2".to_owned(),
             role: "super_admin".to_owned(),

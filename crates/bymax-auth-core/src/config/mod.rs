@@ -177,6 +177,24 @@ pub struct JwtConfig {
     pub absolute_session_lifetime_days: u32,
     /// Pinned to HS256.
     pub algorithm: JwtAlgorithm,
+    /// The `iss` claim stamped on every token this backend mints, and REQUIRED on every token
+    /// it verifies. `None` by default, so an existing deployment is unchanged.
+    ///
+    /// When set, a token carrying a different issuer — or none at all — is rejected. That is
+    /// the point: a verifier that accepted an unstamped token would give an attacker a way to
+    /// opt out of the check by omitting the claim.
+    ///
+    /// Both backends sharing a deployment must carry the same value, or they stop accepting
+    /// each other's tokens. Turning it on invalidates the access tokens already in flight; the
+    /// window is one access-token lifetime and clients recover by refreshing, since the
+    /// refresh token is opaque and carries no claims.
+    pub issuer: Option<String>,
+    /// The `aud` claim, with the same semantics as [`Self::issuer`].
+    ///
+    /// Names who the token is *for*. With HS256 the verifier can also sign, so audience
+    /// binding is what stops a token minted for one service being replayed at another that
+    /// trusts the same secret.
+    pub audience: Option<String>,
     /// Grace window during which a rotated refresh token stays valid, default 30s.
     pub refresh_grace_window: Duration,
 }
@@ -194,6 +212,8 @@ impl Default for JwtConfig {
             refresh_expires_in_days: 7,
             absolute_session_lifetime_days: 0,
             algorithm: JwtAlgorithm::Hs256,
+            issuer: None,
+            audience: None,
             refresh_grace_window: Duration::from_secs(30),
         }
     }

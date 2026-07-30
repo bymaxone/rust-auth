@@ -104,9 +104,19 @@ pub trait JwtClaims: sealed::Sealed {
     fn exp(&self) -> i64;
     /// Issued-at, in Unix seconds.
     fn iat(&self) -> i64;
+    /// The `iss` claim, when the token carries one.
+    fn iss(&self) -> Option<&str>;
+    /// The `aud` claim, when the token carries one.
+    fn aud(&self) -> Option<&str>;
 }
 
 impl JwtClaims for DashboardClaims {
+    fn iss(&self) -> Option<&str> {
+        self.iss.as_deref()
+    }
+    fn aud(&self) -> Option<&str> {
+        self.aud.as_deref()
+    }
     fn exp(&self) -> i64 {
         self.exp
     }
@@ -116,6 +126,12 @@ impl JwtClaims for DashboardClaims {
 }
 
 impl JwtClaims for PlatformClaims {
+    fn iss(&self) -> Option<&str> {
+        self.iss.as_deref()
+    }
+    fn aud(&self) -> Option<&str> {
+        self.aud.as_deref()
+    }
     fn exp(&self) -> i64 {
         self.exp
     }
@@ -125,6 +141,12 @@ impl JwtClaims for PlatformClaims {
 }
 
 impl JwtClaims for MfaTempClaims {
+    fn iss(&self) -> Option<&str> {
+        self.iss.as_deref()
+    }
+    fn aud(&self) -> Option<&str> {
+        self.aud.as_deref()
+    }
     fn exp(&self) -> i64 {
         self.exp
     }
@@ -263,6 +285,8 @@ mod tests {
         // The sealed trait surfaces exp/iat for the temporal check; confirm each claim
         // type forwards its own fields.
         let dashboard = DashboardClaims {
+            iss: None,
+            aud: None,
             sub: "u".to_owned(),
             jti: "j".to_owned(),
             tenant_id: "t".to_owned(),
@@ -279,6 +303,8 @@ mod tests {
         assert_eq!(JwtClaims::exp(&dashboard), 20);
 
         let platform = PlatformClaims {
+            iss: None,
+            aud: None,
             sub: "u".to_owned(),
             jti: "j".to_owned(),
             role: "r".to_owned(),
@@ -293,6 +319,8 @@ mod tests {
         assert_eq!(JwtClaims::exp(&platform), 21);
 
         let mfa = MfaTempClaims {
+            iss: None,
+            aud: None,
             sub: "u".to_owned(),
             jti: "j".to_owned(),
             token_type: bymax_auth_types::MfaTempType::MfaChallenge,

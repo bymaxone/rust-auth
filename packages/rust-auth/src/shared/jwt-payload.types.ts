@@ -60,7 +60,21 @@ exp: number,
  * applies when deserializing into this struct). Rendered via `Option::<f64>` because
  * ts-rs maps 64-bit integers to `bigint`, while `JSON.parse` yields a `number`.
  */
-epoch?: number, };
+epoch?: number, 
+/**
+ * The `iss` claim, present only when the deployment configured `jwt.issuer`.
+ *
+ * Absent by default. When the verifier is configured with a value, a token carrying a
+ * different one — or none at all — is rejected: accepting an unstamped token would give
+ * an attacker a way to opt out of the check by omitting the claim.
+ */
+iss?: string, 
+/**
+ * The `aud` claim, with the same semantics as [`Self::iss`]. With HS256 the verifier can
+ * also sign, so audience binding is what stops a token minted for one service being
+ * replayed at another that trusts the same secret.
+ */
+aud?: string, };
 
 /**
  * Discriminator value for a dashboard access token. Serializes to `"dashboard"`.
@@ -101,7 +115,15 @@ iat: number,
 /**
  * Expiry (seconds since the Unix epoch).
  */
-exp: number, };
+exp: number, 
+/**
+ * The `iss` claim, present only when the deployment configured `jwt.issuer`.
+ */
+iss?: string, 
+/**
+ * The `aud` claim, with the same semantics as [`Self::iss`].
+ */
+aud?: string, };
 
 /**
  * Discriminator value for an MFA-temp token. Serializes to `"mfa_challenge"`.
@@ -153,7 +175,21 @@ exp: number,
  * claim is absent, and is exported as an optional TS property for the same reason as
  * [`DashboardClaims::epoch`].
  */
-epoch?: number, };
+epoch?: number, 
+/**
+ * The `iss` claim, present only when the deployment configured `jwt.issuer`.
+ *
+ * Absent by default. When the verifier is configured with a value, a token carrying a
+ * different one — or none at all — is rejected: accepting an unstamped token would give
+ * an attacker a way to opt out of the check by omitting the claim.
+ */
+iss?: string, 
+/**
+ * The `aud` claim, with the same semantics as [`Self::iss`]. With HS256 the verifier can
+ * also sign, so audience binding is what stops a token minted for one service being
+ * replayed at another that trusts the same secret.
+ */
+aud?: string, };
 
 /**
  * Discriminator value for a platform access token. Serializes to `"platform"`.

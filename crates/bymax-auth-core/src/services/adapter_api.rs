@@ -231,6 +231,8 @@ impl AuthEngine {
         let snapshot = store.redeem(ticket).await?.ok_or(AuthError::TokenInvalid)?;
         let now = now_unix();
         Ok(DashboardClaims {
+            iss: None,
+            aud: None,
             sub: snapshot.sub,
             jti: new_uuid_v4(),
             tenant_id: snapshot.tenant_id.unwrap_or_default(),
@@ -718,6 +720,8 @@ mod tests {
     /// A sample set of dashboard claims for the ticket surfaces.
     fn sample_claims() -> DashboardClaims {
         DashboardClaims {
+            iss: None,
+            aud: None,
             sub: "u".to_owned(),
             jti: new_uuid_v4(),
             tenant_id: "t1".to_owned(),

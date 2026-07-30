@@ -72,6 +72,46 @@ fn jti_hash(jti: &str) -> String {
     crate::services::to_hex(&bymax_auth_crypto::mac::sha256(jti.as_bytes()))
 }
 
+/// The `iss`/`aud` pair a deployment binds its tokens to, or neither.
+///
+/// Absent by default, so an existing deployment is unchanged. Both backends sharing a
+/// deployment must carry the same pair or they stop accepting each other's tokens, which is
+/// the one way this setting can split them — and the reason it is opt-in.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct TokenBinding {
+    /// The `iss` to stamp and require.
+    pub issuer: Option<String>,
+    /// The `aud` to stamp and require.
+    pub audience: Option<String>,
+}
+
+/// Claims that can carry the binding. Implemented for the three minted shapes so one helper
+/// stamps them all — a shape the stamping skipped would be a shape the verifier rejects.
+pub(crate) trait Stampable {
+    /// A copy of these claims carrying `iss`/`aud`.
+    fn stamped(&self, issuer: Option<String>, audience: Option<String>) -> Self;
+}
+
+impl Stampable for DashboardClaims {
+    fn stamped(&self, issuer: Option<String>, audience: Option<String>) -> Self {
+        Self {
+            iss: issuer,
+            aud: audience,
+            ..self.clone()
+        }
+    }
+}
+
+impl Stampable for PlatformClaims {
+    fn stamped(&self, issuer: Option<String>, audience: Option<String>) -> Self {
+        Self {
+            iss: issuer,
+            aud: audience,
+            ..self.clone()
+        }
+    }
+}
+
 /// Issues and rotates the dashboard token pair over the [`SessionStore`] seam. Platform
 /// issuance (`SafeAuthPlatformUser`/`PlatformClaims`) is a separate identity surface and
 /// is wired with the platform domain.
@@ -91,6 +131,11 @@ pub struct TokenManagerService {
     /// error would lose the family id, and losing it leaves a consumer with nothing to
     /// correlate against — every replay would look like any other invalid token.
     hooks: Arc<dyn AuthHooks>,
+    /// The `iss`/`aud` pair to stamp and to require, empty when the deployment configured
+    /// neither. Held here so the sign and the verify sides read the same value — a token
+    /// stamped with an issuer the verifier does not require, or required where none is
+    /// stamped, is a deployment that rejects its own tokens.
+    binding: TokenBinding,
     /// The MFA single-use temp-token support, wired only when an MFA store is supplied.
     #[cfg(feature = "mfa")]
     mfa: Option<MfaTokenSupport>,
@@ -122,16 +167,33 @@ impl TokenManagerService {
         token: &str,
         opts: &VerifyOptions,
     ) -> Result<C, bymax_auth_jwt::JwtError> {
-        let current = verify::<C>(token, &self.key, opts);
+        let current = verify::<C>(token, &self.key, opts).and_then(|claims| self.bound(claims));
         if current.is_ok() || self.previous_keys.is_empty() {
             return current;
         }
         for key in &self.previous_keys {
-            if let Ok(claims) = verify::<C>(token, key, opts) {
+            if let Ok(claims) = verify::<C>(token, key, opts).and_then(|c| self.bound(c)) {
                 return Ok(claims);
             }
         }
         current
+    }
+
+    /// Gate verified claims on the configured binding, mapping a failure onto the same opaque
+    /// error every other rejection uses. A retired signing key buys a token signature
+    /// acceptance and nothing else — the binding still has to hold.
+    fn bound<C: bymax_auth_jwt::JwtClaims>(
+        &self,
+        claims: C,
+    ) -> Result<C, bymax_auth_jwt::JwtError> {
+        if self.binding_holds(&claims) {
+            Ok(claims)
+        } else {
+            // Reported as a decode failure, which maps to the public `token_invalid` like
+            // every other rejection: telling a holder that their token was well-formed but
+            // aimed at the wrong audience is telling them which audience to aim at next.
+            Err(bymax_auth_jwt::JwtError::Decode)
+        }
     }
 
     /// Verify an access token's signature under the pinned algorithm while **ignoring its
@@ -204,6 +266,7 @@ impl TokenManagerService {
             grace_ttl_secs: grace_window.as_secs(),
             absolute_lifetime_secs: u64::from(absolute_session_lifetime_days) * 86_400,
             hooks: Arc::new(crate::traits::NoOpAuthHooks),
+            binding: TokenBinding::default(),
             #[cfg(feature = "mfa")]
             mfa: None,
         }
@@ -218,6 +281,40 @@ impl TokenManagerService {
     pub(crate) fn with_hooks(mut self, hooks: Arc<dyn AuthHooks>) -> Self {
         self.hooks = hooks;
         self
+    }
+
+    /// Bind every token this service mints — and every one it accepts — to an issuer and an
+    /// audience.
+    ///
+    /// Absent by default. With HS256 the verifier can also sign, so audience binding is what
+    /// stops a token minted for one service being replayed at another that trusts the same
+    /// secret; issuer binding is what a verifier needs when it is not the issuer.
+    #[must_use]
+    pub(crate) fn with_binding(mut self, binding: TokenBinding) -> Self {
+        self.binding = binding;
+        self
+    }
+
+    /// Stamp the configured pair onto claims about to be signed.
+    fn stamp<C: Stampable>(&self, claims: &C) -> C {
+        claims.stamped(self.binding.issuer.clone(), self.binding.audience.clone())
+    }
+
+    /// Refuse claims whose `iss`/`aud` do not satisfy the configured binding.
+    ///
+    /// A token carrying NO claim is refused as firmly as one carrying the wrong value: a
+    /// verifier that accepted an unstamped token would give an attacker a way to opt out of
+    /// the check simply by omitting it.
+    fn binding_holds<C: bymax_auth_jwt::JwtClaims>(&self, claims: &C) -> bool {
+        let issuer_ok = match self.binding.issuer.as_deref() {
+            Some(expected) => claims.iss() == Some(expected),
+            None => true,
+        };
+        let audience_ok = match self.binding.audience.as_deref() {
+            Some(expected) => claims.aud() == Some(expected),
+            None => true,
+        };
+        issuer_ok && audience_ok
     }
 
     /// Attach the MFA temp-token support (the single-use `mfa:` marker store and the
@@ -236,7 +333,7 @@ impl TokenManagerService {
     /// Returns [`AuthError::Internal`] only if claim serialization fails (unreachable for
     /// the crate's claim types).
     pub fn issue_access(&self, claims: &DashboardClaims) -> Result<String, AuthError> {
-        sign(claims, &self.key).map_err(signing_failed)
+        sign(&self.stamp(claims), &self.key).map_err(signing_failed)
     }
 
     /// Issue a fresh access JWT plus an opaque refresh token for `user`, persisting the
@@ -263,6 +360,8 @@ impl TokenManagerService {
             .current_epoch(SessionKind::Dashboard, &user.id)
             .await?;
         let claims = DashboardClaims {
+            iss: None,
+            aud: None,
             sub: user.id.clone(),
             jti: new_uuid_v4(),
             tenant_id: user.tenant_id.clone(),
@@ -438,7 +537,7 @@ impl TokenManagerService {
     /// crate's claim types).
     #[cfg(feature = "platform")]
     pub fn issue_platform_access(&self, claims: &PlatformClaims) -> Result<String, AuthError> {
-        sign(claims, &self.key).map_err(signing_failed)
+        sign(&self.stamp(claims), &self.key).map_err(signing_failed)
     }
 
     /// Issue a fresh platform access JWT plus an opaque refresh token for `admin`, persisting
@@ -465,6 +564,8 @@ impl TokenManagerService {
             .current_epoch(SessionKind::Platform, &admin.id)
             .await?;
         let claims = PlatformClaims {
+            iss: None,
+            aud: None,
             sub: admin.id.clone(),
             jti: new_uuid_v4(),
             role: admin.role.clone(),
@@ -664,6 +765,8 @@ impl TokenManagerService {
     fn rotated_platform_claims(&self, record: &SessionRecord, epoch: u64) -> PlatformClaims {
         let now = now_unix();
         PlatformClaims {
+            iss: None,
+            aud: None,
             sub: record.user_id.clone(),
             jti: new_uuid_v4(),
             role: record.role.clone(),
@@ -731,6 +834,8 @@ impl TokenManagerService {
         let now = now_unix();
         let jti = new_uuid_v4();
         let claims = MfaTempClaims {
+            iss: None,
+            aud: None,
             sub: user_id.to_owned(),
             jti: jti.clone(),
             token_type: MfaTempType::MfaChallenge,
@@ -921,6 +1026,8 @@ impl TokenManagerService {
     fn rotated_claims(&self, record: &SessionRecord, epoch: u64) -> DashboardClaims {
         let now = now_unix();
         DashboardClaims {
+            iss: None,
+            aud: None,
             sub: record.user_id.clone(),
             jti: new_uuid_v4(),
             tenant_id: record.tenant_id.clone().unwrap_or_default(),
@@ -1488,6 +1595,8 @@ mod tests {
         // Craft an already-expired token by signing claims with exp in the past.
         let now = now_unix();
         let expired = DashboardClaims {
+            iss: None,
+            aud: None,
             sub: "u1".to_owned(),
             jti: new_uuid_v4(),
             tenant_id: "t1".to_owned(),
@@ -1985,6 +2094,165 @@ mod tests {
             rotating.verify_access(&issued.access_token).await,
             Ok(claims) if claims.sub == "u1"
         ));
+    }
+    // ---------------------------------------------------------------------------
+    // iss / aud binding
+    // ---------------------------------------------------------------------------
+
+    /// A service bound to an issuer and/or an audience.
+    fn bound_service(
+        store: Arc<InMemoryStores>,
+        issuer: Option<&str>,
+        audience: Option<&str>,
+    ) -> TokenManagerService {
+        service(store).with_binding(TokenBinding {
+            issuer: issuer.map(str::to_owned),
+            audience: audience.map(str::to_owned),
+        })
+    }
+
+    #[tokio::test]
+    async fn an_unbound_deployment_mints_and_accepts_unstamped_tokens() {
+        // Absent by default, so an existing deployment is unchanged.
+        let store = Arc::new(InMemoryStores::new());
+        let svc = service(store);
+        let Ok(issued) = svc
+            .issue_tokens(&user(), "10.0.0.1", "agent/1.0", false)
+            .await
+        else {
+            return;
+        };
+
+        let Ok(claims) = svc.verify_access(&issued.access_token).await else {
+            return;
+        };
+        assert_eq!(claims.iss, None);
+        assert_eq!(claims.aud, None);
+    }
+
+    #[tokio::test]
+    async fn a_bound_deployment_stamps_what_it_mints() {
+        // The claim has to be ON the token, or the verifier that requires it rejects the
+        // backend's own output.
+        let store = Arc::new(InMemoryStores::new());
+        let svc = bound_service(store, Some("bymax"), Some("dashboard"));
+        let Ok(issued) = svc
+            .issue_tokens(&user(), "10.0.0.1", "agent/1.0", false)
+            .await
+        else {
+            return;
+        };
+
+        let Ok(claims) = svc.verify_access(&issued.access_token).await else {
+            return;
+        };
+        assert_eq!(claims.iss.as_deref(), Some("bymax"));
+        assert_eq!(claims.aud.as_deref(), Some("dashboard"));
+    }
+
+    #[tokio::test]
+    async fn a_bound_verifier_refuses_an_unstamped_token() {
+        // The whole point. A verifier that accepted an unstamped token would give an attacker
+        // a way to opt out of the check simply by omitting the claim.
+        let store = Arc::new(InMemoryStores::new());
+        let unbound = service(store.clone());
+        let Ok(issued) = unbound
+            .issue_tokens(&user(), "10.0.0.1", "agent/1.0", false)
+            .await
+        else {
+            return;
+        };
+
+        // Same signing key, same session store — only the binding differs.
+        let bound = bound_service(store, Some("bymax"), None);
+        assert!(bound.verify_access(&issued.access_token).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn a_bound_verifier_refuses_the_wrong_value() {
+        // The case that matters when one deployment's token is replayed at another that
+        // happens to trust the same secret.
+        let store = Arc::new(InMemoryStores::new());
+        let theirs = bound_service(store.clone(), Some("someone-else"), Some("their-service"));
+        let Ok(issued) = theirs
+            .issue_tokens(&user(), "10.0.0.1", "agent/1.0", false)
+            .await
+        else {
+            return;
+        };
+
+        let ours = bound_service(store, Some("bymax"), Some("dashboard"));
+        assert!(ours.verify_access(&issued.access_token).await.is_err());
+    }
+
+    #[cfg(feature = "platform")]
+    #[tokio::test]
+    async fn the_platform_plane_is_bound_too() {
+        // The plane that carries the most authority is not the one to leave unstamped.
+        let store = Arc::new(InMemoryStores::new());
+        let svc = bound_service(store.clone(), Some("bymax"), Some("platform"));
+        let Ok(issued) = svc
+            .issue_platform_tokens(&platform_admin(), "10.0.0.1", "agent/1.0", false)
+            .await
+        else {
+            return;
+        };
+
+        let Ok(claims) = svc.verify_platform_access(&issued.access_token).await else {
+            return;
+        };
+        assert_eq!(claims.iss.as_deref(), Some("bymax"));
+        assert_eq!(claims.aud.as_deref(), Some("platform"));
+
+        // …and a token minted without the binding is refused on this plane as on the other.
+        let unbound = service(store);
+        let Ok(plain) = unbound
+            .issue_platform_tokens(&platform_admin(), "10.0.0.1", "agent/1.0", false)
+            .await
+        else {
+            return;
+        };
+        assert!(
+            svc.verify_platform_access(&plain.access_token)
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_retired_signing_key_does_not_waive_the_binding() {
+        // A retired key buys a token signature acceptance and nothing else. Without this the
+        // binding would be bypassable by anyone holding a secret the deployment used to use.
+        let store = Arc::new(InMemoryStores::new());
+        let retired = HsKey::from_bytes(b"retired-secret-retired-secret-32");
+        let old = TokenManagerService::new(
+            retired,
+            Vec::new(),
+            store.clone(),
+            Duration::from_secs(900),
+            7,
+            Duration::from_secs(30),
+            0,
+        );
+        let Ok(issued) = old
+            .issue_tokens(&user(), "10.0.0.1", "agent/1.0", false)
+            .await
+        else {
+            return;
+        };
+
+        // A service that accepts the retired key, and requires the binding the old one never
+        // stamped.
+        let rotating = service_rotating(
+            store,
+            vec![HsKey::from_bytes(b"retired-secret-retired-secret-32")],
+        )
+        .with_binding(TokenBinding {
+            issuer: Some("bymax".to_owned()),
+            audience: None,
+        });
+
+        assert!(rotating.verify_access(&issued.access_token).await.is_err());
     }
 }
 

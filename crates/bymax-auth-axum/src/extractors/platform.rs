@@ -124,6 +124,8 @@ mod tests {
 
     fn platform_claims(role: &str) -> PlatformClaims {
         PlatformClaims {
+            iss: None,
+            aud: None,
             sub: "admin-1".to_owned(),
             jti: "jti-platform".to_owned(),
             role: role.to_owned(),
