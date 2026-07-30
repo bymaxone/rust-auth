@@ -339,6 +339,11 @@ impl MfaService {
     /// The plane-shared core of [`Self::accept_recovery_code`]: match the code against a stored
     /// set, then claim it. Split out because the platform path already holds the stored set and
     /// has no `AuthUser` to hand over.
+    ///
+    /// Gated on `platform` because [`Self::challenge_platform`] is its only caller and carries the
+    /// same gate; without it the method is dead in every build that leaves the feature off, and
+    /// `-D dead-code` turns that into a compile error.
+    #[cfg(feature = "platform")]
     async fn claim_matched_recovery_code(
         &self,
         ctx: MfaContext,

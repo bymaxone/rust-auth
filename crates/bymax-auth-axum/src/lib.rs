@@ -41,9 +41,10 @@ mod test_support;
 
 pub use dto::{
     AcceptInvitationDto, ChangePasswordDto, CreateInvitationDto, ForgotPasswordDto, LoginDto,
-    MfaChallengeDto, MfaDisableDto, MfaRegenerateRecoveryCodesDto, MfaVerifyDto,
+    MfaChallengeDto, MfaDisableDto, MfaRegenerateRecoveryCodesDto, MfaSetupDto, MfaVerifyDto,
     OAuthCallbackQuery, OAuthInitiateQuery, PlatformLoginDto, RefreshDto, RegisterDto,
-    ResendOtpDto, ResendVerificationDto, ResetPasswordDto, VerifyEmailDto, VerifyOtpDto,
+    ResendOtpDto, ResendVerificationDto, ResetPasswordDto, RevokeInvitationDto, VerifyEmailDto,
+    VerifyOtpDto,
 };
 pub use extractors::{
     AdminRole, AuthUser, CurrentUser, MfaSatisfied, OptionalAuthUser, RequireRole, Role,

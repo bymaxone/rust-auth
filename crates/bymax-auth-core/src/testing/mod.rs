@@ -349,6 +349,7 @@ pub struct InMemoryStores {
     #[cfg(feature = "mfa")]
     mfa_replay: Mutex<HashSet<String>>,
     /// Single-use claims on MFA recovery codes (`rcu:`).
+    #[cfg(feature = "mfa")]
     recovery_claims: Mutex<HashSet<String>>,
     /// `os:` — the single-use OAuth `state` + PKCE payload keyed by `sha256(state)`.
     #[cfg(feature = "oauth")]

@@ -67,6 +67,11 @@ pub(crate) struct TokenDelivery<'a> {
 impl<'a> TokenDelivery<'a> {
     /// Construct a delivery helper over the resolved adapter config, planting host-only
     /// cookies. Use [`TokenDelivery::with_domains`] on the routes that deliver a session.
+    ///
+    /// Gated on the features that own its call sites: outside tests it is only reached from the
+    /// platform and OAuth route groups, so a build with neither compiles it away rather than
+    /// tripping `-D dead-code`.
+    #[cfg(any(test, feature = "platform", feature = "oauth"))]
     pub(crate) fn new(config: &'a ResolvedConfig) -> Self {
         Self {
             config,
