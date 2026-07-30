@@ -184,6 +184,14 @@ impl AuthEngine {
             return Err(AuthError::InvalidInvitationToken);
         }
 
+        // …and re-validate the INVITER, whose authority is what the invitation rests on. It was
+        // checked when the link was minted and never again, so for the token's whole lifetime
+        // the invitation outlived the person behind it: an admin could send one, be banned and
+        // stripped of their role, and the invitee would still arrive as an admin of that tenant
+        // with a live session. That is a clean way to keep a foothold across the account kill
+        // switch, which makes the switch advisory.
+        self.assert_inviter_still_authorised(&invitation).await?;
+
         // Duplicate-registration guard within the tenant.
         if self
             .user_repository()
@@ -240,6 +248,44 @@ impl AuthEngine {
         ));
         Ok(result)
     }
+
+    /// Re-check, at redemption time, everything that was true of the inviter when the link was
+    /// minted.
+    ///
+    /// An invitation is a delegation of authority, and authority is revocable. Validating it
+    /// only at creation means a token carries whatever power its author had at the moment they
+    /// clicked send — surviving their suspension, their demotion, and their removal from the
+    /// tenant. The failure is answered as `InvalidInvitationToken` rather than as a role error:
+    /// the redeemer is not the one who lost authority, and telling them *why* would describe
+    /// the inviter's account status to someone who may be a stranger to it.
+    async fn assert_inviter_still_authorised(
+        &self,
+        invitation: &crate::traits::StoredInvitation,
+    ) -> Result<(), AuthError> {
+        let inviter = self
+            .user_repository()
+            .find_by_id(&invitation.inviter_user_id, None)
+            .await
+            .map_err(map_repository_error)?;
+        let still_authorised = inviter.is_some_and(|inviter| {
+            self.assert_user_not_blocked(&inviter.status).is_ok()
+                && inviter.tenant_id == invitation.tenant_id
+                && has_role(
+                    &inviter.role,
+                    &invitation.role,
+                    &self.config().config().roles.hierarchy,
+                )
+        });
+        if !still_authorised {
+            tracing::warn!(
+                inviter_user_id = %invitation.inviter_user_id,
+                role = %invitation.role,
+                "invitation: the inviter can no longer grant this invitation"
+            );
+            return Err(AuthError::InvalidInvitationToken);
+        }
+        Ok(())
+    }
 }
 
 /// Whether `holder` satisfies `required` against the fully-denormalized role hierarchy:
@@ -254,7 +300,6 @@ fn has_role(holder: &str, required: &str, hierarchy: &HashMap<String, Vec<String
         .get(holder)
         .is_some_and(|included| included.iter().any(|r| r == required))
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -475,6 +520,62 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn accept_refuses_an_invitation_whose_inviter_lost_their_authority() {
+        // An invitation is a delegation of authority, and authority is revocable. Validating it
+        // only at creation meant a 48-hour token carried whatever power its author had when
+        // they clicked send: an admin could invite, then be banned and stripped of their role,
+        // and the invitee would still arrive as an admin of that tenant with a live session —
+        // a clean way to keep a foothold across the account kill switch, which makes the switch
+        // advisory.
+        let Some(s) = setup(invite_config()) else { return };
+        let inviter = seed_admin(&s.users, "deposed@example.com", "ADMIN").await;
+        let token = "f".repeat(64);
+        assert!(
+            s.stores
+                .put_invitation(
+                    &token,
+                    &StoredInvitation {
+                        email: "newcomer@example.com".to_owned(),
+                        role: "ADMIN".to_owned(),
+                        tenant_id: "t1".to_owned(),
+                        inviter_user_id: inviter.clone(),
+                        created_at: OffsetDateTime::UNIX_EPOCH,
+                    },
+                    600
+                )
+                .await
+                .is_ok()
+        );
+
+        // The inviter is banned between minting and redemption.
+        assert!(s.users.update_status(&inviter, "BANNED").await.is_ok());
+
+        assert!(matches!(
+            s.engine
+                .accept_invitation(
+                    AcceptInvitationInput {
+                        token,
+                        name: "N".to_owned(),
+                        password: "glidingwalnut42".to_owned(),
+                    },
+                    "1.2.3.4",
+                    "agent",
+                    BTreeMap::new(),
+                )
+                .await,
+            // Answered as an invalid token, not a role error: the redeemer is not the one who
+            // lost authority, and saying why would describe the inviter's account status to
+            // someone who may be a stranger to it.
+            Err(AuthError::InvalidInvitationToken)
+        ));
+        // Nothing was provisioned.
+        assert!(matches!(
+            s.users.find_by_email("newcomer@example.com", "t1").await,
+            Ok(None)
+        ));
+    }
+
+    #[tokio::test]
     async fn accept_rejects_a_tampered_role_and_a_duplicate_email() {
         // A stored invitation whose role is not a declared role (tamper) is rejected; an
         // invitee who already has an account is EmailAlreadyExists.
@@ -513,7 +614,10 @@ mod tests {
             Err(AuthError::InvalidInvitationToken)
         ));
 
-        // Duplicate email.
+        // Duplicate email. The inviter has to be a real, still-authorised account: the
+        // authority re-check runs first, so a placeholder id would refuse this as an invalid
+        // token and the duplicate-email arm would never be reached.
+        let inviter = seed_admin(&s.users, "dup-inviter@example.com", "ADMIN").await;
         let _ = seed_admin(&s.users, "dup@example.com", "MEMBER").await;
         let dup = "e".repeat(64);
         assert!(
@@ -524,7 +628,7 @@ mod tests {
                         email: "dup@example.com".to_owned(),
                         role: "MEMBER".to_owned(),
                         tenant_id: "t1".to_owned(),
-                        inviter_user_id: "x".to_owned(),
+                        inviter_user_id: inviter,
                         created_at: OffsetDateTime::UNIX_EPOCH,
                     },
                     600

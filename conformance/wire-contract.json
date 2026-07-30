@@ -148,7 +148,8 @@
     },
     "passwordResetContext": {
       "key": "pw_reset:{sha256(token)}",
-      "fields": ["userId", "email", "tenantId"]
+      "fields": ["userId", "email", "tenantId", "passwordFingerprint"],
+      "passwordFingerprint": "sha256 of the account's password hash at the moment the token was minted, or the empty string when the account had none. Several reset tokens can be alive at once, and completing one used to leave the rest valid — the wrong end state exactly when it matters, since a victim resetting BECAUSE an attacker read a link from their mailbox had not closed the link the attacker read. The binding makes the first completed reset invalidate all of them, with no per-user index to keep in step. An ABSENT field is read as 'no binding' and accepted, so a rolling deploy does not break the resets already in flight."
     }
   },
 

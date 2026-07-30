@@ -1534,6 +1534,7 @@ mod tests {
             user_id: "u1".to_owned(),
             email: "u@example.com".to_owned(),
             tenant_id: "t1".to_owned(),
+            password_fingerprint: String::new(),
         };
         assert!(store.put_token("tok", &context, 600).await.is_ok());
         assert!(matches!(

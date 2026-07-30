@@ -23,7 +23,7 @@ use crate::engine::AuthEngine;
 use crate::normalize::normalize_email;
 use crate::services::auth::detached::run_after_password_reset;
 use crate::services::auth::{map_repository_error, normalize_anti_enum, spawn_guarded};
-use crate::services::is_refresh_token_shape;
+use crate::services::{is_refresh_token_shape, to_hex};
 use crate::traits::{HookContext, OtpPurpose, ResetContext, SessionKind};
 
 /// The lifetime, in seconds, of the short-lived verified token that bridges a successful
@@ -281,6 +281,7 @@ impl AuthEngine {
         {
             return Err(AuthError::PasswordResetTokenInvalid);
         }
+        self.assert_proof_still_bound(&context).await?;
         self.apply_password_reset(&context, &input.new_password)
             .await
     }
@@ -303,6 +304,7 @@ impl AuthEngine {
             user_id: user.id.clone(),
             email: input.email.clone(),
             tenant_id: input.tenant_id.clone(),
+            password_fingerprint: password_fingerprint(&user),
         };
         self.apply_password_reset(&context, &input.new_password)
             .await
@@ -350,6 +352,7 @@ impl AuthEngine {
             .ok_or(AuthError::PasswordResetTokenInvalid)?;
         let raw = generate_secure_token(RESET_TOKEN_BYTES);
         let context = ResetContext {
+            password_fingerprint: password_fingerprint(&user),
             user_id: user.id,
             email: input.email,
             tenant_id: input.tenant_id,
@@ -469,6 +472,7 @@ impl AuthEngine {
             user_id: user.id.clone(),
             email: email.to_owned(),
             tenant_id: tenant_id.to_owned(),
+            password_fingerprint: password_fingerprint(user),
         };
         store.put_token(&raw, &context, ttl).await?;
 
@@ -600,6 +604,39 @@ impl AuthEngine {
         ));
     }
 
+    /// Refuse a reset proof whose binding no longer matches the account's current password.
+    ///
+    /// Several proofs can be alive at once, and completing one used to leave the rest valid —
+    /// the wrong end state precisely when it matters, since a victim resetting *because* an
+    /// attacker read a link from their mailbox had not closed the link the attacker read. The
+    /// binding makes the first completed rotation, reset or authenticated change, invalidate
+    /// all of them.
+    ///
+    /// An empty stored fingerprint means the proof predates the binding (a rolling deploy, or a
+    /// sibling implementation that has not taken this change) and is accepted: refusing those
+    /// would break every reset in flight for a window this narrow.
+    async fn assert_proof_still_bound(&self, context: &ResetContext) -> Result<(), AuthError> {
+        if context.password_fingerprint.is_empty() {
+            return Ok(());
+        }
+        let current = self
+            .user_repository()
+            .find_by_id(&context.user_id, None)
+            .await
+            .map_err(map_repository_error)?
+            .map(|user| password_fingerprint(&user))
+            .unwrap_or_default();
+
+        if current == context.password_fingerprint {
+            return Ok(());
+        }
+        tracing::warn!(
+            user_id = %context.user_id,
+            "password reset: refusing a proof issued against a password that has since changed"
+        );
+        Err(AuthError::PasswordResetTokenInvalid)
+    }
+
     /// **Operation order is security-critical:** the password is updated **before** sessions
     /// are invalidated. A crash between the two leaves stale refresh tokens alive only until
     /// their TTL — but the old password is already dead, so a stolen password cannot mint new
@@ -706,6 +743,19 @@ fn reset_context_hooks(context: &ResetContext) -> HookContext {
     }
 }
 
+/// A digest of the account's current password hash, binding a reset proof to that password.
+///
+/// The hash itself never leaves the repository — only this digest goes into the store, so a
+/// leaked snapshot of the reset keyspace reveals nothing about the credential. An account with
+/// no local password yields the empty string, which is a value like any other: a proof minted
+/// then is invalidated as soon as one is set.
+fn password_fingerprint(user: &AuthUser) -> String {
+    match user.password_hash.as_deref() {
+        Some(phc) => to_hex(&sha256(phc.as_bytes())),
+        None => String::new(),
+    }
+}
+
 /// Send the "password changed" email (a named future so the detached spawn owns its data).
 async fn run_send_password_changed(
     email: std::sync::Arc<dyn crate::traits::EmailProvider>,
@@ -724,6 +774,7 @@ mod tests {
     };
     use bymax_auth_types::{AuthResult, CreateUserData, LoginResult};
     use std::time::Duration;
+    use time::OffsetDateTime;
 
     fn token_harness() -> Option<Harness> {
         let mut cfg = base_config();
@@ -803,6 +854,7 @@ mod tests {
                         user_id: user.id.clone(),
                         email: "reset@example.com".to_owned(),
                         tenant_id: "t1".to_owned(),
+                        password_fingerprint: String::new(),
                     },
                     600
                 )
@@ -862,6 +914,7 @@ mod tests {
                         user_id: id.clone(),
                         email: "epoch@example.com".to_owned(),
                         tenant_id: "t1".to_owned(),
+                        password_fingerprint: String::new(),
                     },
                     600,
                 )
@@ -898,6 +951,7 @@ mod tests {
                         user_id: id,
                         email: "bind@example.com".to_owned(),
                         tenant_id: "t1".to_owned(),
+                        password_fingerprint: String::new(),
                     },
                     600
                 )
@@ -2007,6 +2061,93 @@ mod tests {
         Some(*auth)
     }
 
+    /// An account with no local password fingerprints as the empty string, which the consume
+    /// path reads as "no binding". That is the right reading: there was no password to bind to,
+    /// and a proof minted then is invalidated the moment one is set — because the fingerprint
+    /// computed at consume time will no longer be empty.
+    #[test]
+    fn a_passwordless_account_fingerprints_as_empty() {
+        let mut user = AuthUser {
+            id: "u1".into(),
+            email: "user@example.com".into(),
+            name: "User".into(),
+            password_hash: None,
+            role: "MEMBER".into(),
+            status: "ACTIVE".into(),
+            tenant_id: "t1".into(),
+            email_verified: true,
+            mfa_enabled: false,
+            mfa_secret: None,
+            mfa_recovery_codes: None,
+            oauth_provider: Some("google".into()),
+            oauth_provider_id: Some("google-123".into()),
+            last_login_at: None,
+            created_at: OffsetDateTime::UNIX_EPOCH,
+        };
+        assert_eq!(password_fingerprint(&user), "");
+
+        user.password_hash = Some("$scrypt$abc".to_owned());
+        assert_ne!(password_fingerprint(&user), "");
+    }
+
+    #[tokio::test]
+    async fn a_completed_reset_invalidates_the_tokens_issued_beside_it() {
+        // Each `forgot-password` writes its own key, so several proofs can be alive at once, and
+        // completing one used to leave the rest valid. That is the wrong end state exactly when
+        // it matters: a victim who resets BECAUSE an attacker read a link from their mailbox had
+        // not closed the link the attacker read, and the attacker could set the password again
+        // for the rest of the TTL.
+        let Some(h) = token_harness() else { return };
+        let id = h
+            .seed(SeedUser::active("siblings@example.com", "oldsecret77"))
+            .await;
+        let Some(store) = h.engine.password_reset_store() else { return };
+
+        // Two proofs, both bound to the password in force now.
+        let Ok(Some(user)) = h.users.find_by_id(&id, None).await else { return };
+        let context = ResetContext {
+            user_id: id.clone(),
+            email: "siblings@example.com".to_owned(),
+            tenant_id: "t1".to_owned(),
+            password_fingerprint: password_fingerprint(&user),
+        };
+        let first = "1".repeat(64);
+        let second = "2".repeat(64);
+        assert!(store.put_token(&first, &context, 600).await.is_ok());
+        assert!(store.put_token(&second, &context, 600).await.is_ok());
+
+        // The victim completes the reset with the second link.
+        let input = |token: &str, password: &str| ResetPasswordInput {
+            email: "siblings@example.com".to_owned(),
+            tenant_id: "t1".to_owned(),
+            new_password: password.to_owned(),
+            token: Some(token.to_owned()),
+            otp: None,
+            verified_token: None,
+        };
+        assert!(
+            h.engine
+                .reset_password(input(&second, "victimchosen456"), &ctx())
+                .await
+                .is_ok()
+        );
+
+        // The first link — the one the attacker read — no longer works.
+        assert!(matches!(
+            h.engine
+                .reset_password(input(&first, "attackerchosen789"), &ctx())
+                .await,
+            Err(AuthError::PasswordResetTokenInvalid)
+        ));
+
+        // …and the victim's password is the one that stands.
+        assert!(
+            login_ok(&h, "siblings@example.com", "victimchosen456")
+                .await
+                .is_some()
+        );
+    }
+
     #[tokio::test]
     async fn change_password_requires_the_current_one_and_rotates() {
         // ASVS v5 §6.2.2 and §6.2.3 at Level 1: users can change their password, and the change
@@ -2141,6 +2282,7 @@ mod tests {
                         user_id: "ghost-user-id".to_owned(),
                         email: "vanish@example.com".to_owned(),
                         tenant_id: "t1".to_owned(),
+                        password_fingerprint: String::new(),
                     },
                     600
                 )

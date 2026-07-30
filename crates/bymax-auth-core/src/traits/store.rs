@@ -496,6 +496,20 @@ pub struct ResetContext {
     pub email: String,
     /// The tenant scope the reset proof was issued for (re-checked on consume).
     pub tenant_id: String,
+    /// A digest of the password hash this proof was issued against, binding it to that password.
+    ///
+    /// Several reset tokens can be alive at once — a 60-second send cooldown against a
+    /// 600-second TTL allows up to ten — and completing one used to leave the rest valid. That
+    /// is the wrong end state precisely when it matters: a victim who resets *because* an
+    /// attacker read a link from their mailbox had not closed the link the attacker read. The
+    /// binding makes the first completed rotation invalidate all of them, with no per-user
+    /// index to keep in step.
+    ///
+    /// Empty when the account had no password at issue time. **Absent** on a record written by
+    /// an older build, or by a sibling that has not taken this change, which `serde` reads as
+    /// empty — accepted as "no binding" so a rolling deploy does not break resets in flight.
+    #[serde(default)]
+    pub password_fingerprint: String,
 }
 
 /// The trusted metadata stored for a pending invitation under `inv:` keyed by
@@ -1004,6 +1018,7 @@ mod tests {
             user_id: "u1".into(),
             email: "user@example.com".into(),
             tenant_id: "t1".into(),
+            password_fingerprint: String::new(),
         };
         let json = serde_json::to_string(&context)?;
         assert!(json.contains("\"userId\":\"u1\""));
@@ -1226,6 +1241,7 @@ mod tests {
             user_id: "u1".into(),
             email: "u1@example.com".into(),
             tenant_id: "t1".into(),
+            password_fingerprint: String::new(),
         };
         let json: serde_json::Value = serde_json::to_value(context)?;
         for field in contract_fields("passwordResetContext") {

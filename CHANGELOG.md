@@ -288,6 +288,23 @@ version bump.
   independent of the transaction that bound the new credential, and this was the one credential
   change the trait stayed silent about while announcing every MFA change unprompted. Defaulted
   to a no-op so an existing provider keeps compiling.
+- **An invitation is re-validated against its inviter at redemption.** The inviter's authority
+  was checked when the link was minted and never again, so for the token's whole life the
+  invitation outlived the person behind it: an admin could send one, be banned and stripped of
+  their role, and the invitee would still arrive as an admin of that tenant with a live session.
+  That is a clean way to keep a foothold across the account kill switch, which makes the switch
+  advisory. The inviter must now still exist, still be in good standing, still belong to the
+  tenant, and still out-rank the role being granted — answered as an invalid token, because the
+  redeemer is not the one who lost authority. `nest-auth` takes the same change.
+- **A completed reset or password change invalidates the proofs issued beside it.**
+  `ResetContext` gains `passwordFingerprint`, a digest of the password hash in force when the
+  proof was minted; a proof is refused once that no longer matches. Several proofs can be alive
+  at once — a 60-second send cooldown against a 600-second TTL allows up to ten — and completing
+  one left the rest valid, which is the wrong end state exactly when it matters: a victim who
+  resets *because* an attacker read a link from their mailbox had not closed the link the
+  attacker read. The hash itself never leaves the repository, and an absent field is read as
+  "no binding" so a rolling deploy does not break the resets already in flight. Pinned in
+  `conformance/wire-contract.json`.
 - **The platform recovery-code challenge gates on winning the temp-token consume**, which the
   dashboard path already did. Found while chasing a coverage gap the enrolment change exposed:
   the two planes carry the same logic separately, and only one had been fixed.

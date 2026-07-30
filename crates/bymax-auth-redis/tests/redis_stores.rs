@@ -983,6 +983,7 @@ async fn keys_are_namespaced_no_pii_and_carry_a_ttl() {
         user_id: "user-42".to_owned(),
         email: "victim@example.com".to_owned(),
         tenant_id: "t1".to_owned(),
+        password_fingerprint: String::new(),
     };
     assert!(
         stores
@@ -1053,6 +1054,7 @@ async fn password_reset_and_invitation_stores_are_single_use_via_getdel() {
         user_id: "u1".to_owned(),
         email: "u@example.com".to_owned(),
         tenant_id: "t1".to_owned(),
+        password_fingerprint: String::new(),
     };
     assert!(stores.put_token("rt-secret", &reset, 600).await.is_ok());
     assert!(matches!(
@@ -1175,6 +1177,7 @@ async fn engine_runs_password_reset_via_token_against_redis() {
                     user_id: auth.user.id.clone(),
                     email: "reset@example.com".to_owned(),
                     tenant_id: "t1".to_owned(),
+                    password_fingerprint: String::new(),
                 },
                 600,
             )
