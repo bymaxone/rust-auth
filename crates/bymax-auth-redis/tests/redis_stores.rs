@@ -34,6 +34,15 @@ use time::OffsetDateTime;
 /// A dashboard/platform session record for the given user. All of a user's sessions share one
 /// family here, so a rotation (whose `new_record` is `record(user)`) inherits it and the whole
 /// lineage stays revocable together.
+/// `sha256(token)` in lowercase hex — the form every opaque-token keyspace is keyed by, and
+/// the value the invitee index points at.
+fn token_hash(token: &str) -> String {
+    bymax_auth_crypto::mac::sha256(token.as_bytes())
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
 fn record(user: &str) -> SessionRecord {
     SessionRecord {
         user_id: user.to_owned(),
@@ -1110,6 +1119,137 @@ async fn password_reset_and_invitation_stores_are_single_use_via_getdel() {
     assert!(matches!(
         stores.consume_invitation("never-seen").await,
         Ok(None)
+    ));
+}
+
+#[tokio::test]
+async fn the_invitee_index_is_the_only_handle_on_a_pending_invitation() {
+    // The invitation record is keyed by the hash of a token only the invitee's mailbox ever
+    // held, so the index is the whole of what the issuing side can name. Its behaviour is
+    // asserted HERE, at the store, and not through the route: the withdrawal answers 204
+    // whether or not anything was pending — deliberately, so it cannot be used as an oracle
+    // for which addresses have invitations — which leaves an end-to-end test unable to tell a
+    // working index from one that does nothing at all.
+    let Some(redis) = common::try_start().await else {
+        return;
+    };
+    let Some(stores) = redis.stores() else {
+        return;
+    };
+
+    let invitation = StoredInvitation {
+        email: "invitee@example.com".to_owned(),
+        role: "MEMBER".to_owned(),
+        tenant_id: "t1".to_owned(),
+        inviter_user_id: "owner".to_owned(),
+        created_at: OffsetDateTime::UNIX_EPOCH,
+    };
+    let hash = token_hash("inv-secret");
+    assert!(
+        stores
+            .put_invitation("inv-secret", &invitation, 604_800)
+            .await
+            .is_ok()
+    );
+    assert!(
+        stores
+            .put_invitation_index("t1", "invitee@example.com", &hash, 604_800)
+            .await
+            .is_ok()
+    );
+
+    // The index points at the record, and the record reads back through the hash it points at
+    // — the two halves of the only path a withdrawal has.
+    assert!(matches!(
+        stores.read_invitation_index("t1", "invitee@example.com").await,
+        Ok(Some(h)) if h == hash
+    ));
+    assert!(matches!(
+        stores.read_invitation_by_hash(&hash).await,
+        Ok(Some(i)) if i.role == "MEMBER" && i.email == "invitee@example.com"
+    ));
+
+    // The key is derived from BOTH the tenant and the address. A key that ignored either
+    // would let one tenant read — and withdraw — another's invitations, or let any address
+    // withdraw any other's.
+    assert!(matches!(
+        stores
+            .read_invitation_index("t2", "invitee@example.com")
+            .await,
+        Ok(None)
+    ));
+    assert!(matches!(
+        stores
+            .read_invitation_index("t1", "someone@example.com")
+            .await,
+        Ok(None)
+    ));
+
+    // Reading leaves the entry in place; TAKING removes it. `invite` supersedes through the
+    // taking form, and a read that consumed would drop the index on every revoke that then
+    // refuses on the role check.
+    assert!(matches!(
+        stores
+            .read_invitation_index("t1", "invitee@example.com")
+            .await,
+        Ok(Some(_))
+    ));
+    assert!(matches!(
+        stores.take_invitation_index("t1", "invitee@example.com").await,
+        Ok(Some(h)) if h == hash
+    ));
+    assert!(matches!(
+        stores
+            .take_invitation_index("t1", "invitee@example.com")
+            .await,
+        Ok(None)
+    ));
+
+    // Deleting by hash reports whether THIS call removed the record. The second call finds
+    // nothing: a withdrawal that reported success over an already-accepted invitation would
+    // tell an operator the link was live when it was already spent.
+    assert!(matches!(
+        stores.delete_invitation_by_hash(&hash).await,
+        Ok(true)
+    ));
+    assert!(matches!(
+        stores.delete_invitation_by_hash(&hash).await,
+        Ok(false)
+    ));
+    // …and the record is gone for the accept path too.
+    assert!(matches!(
+        stores.read_invitation_by_hash(&hash).await,
+        Ok(None)
+    ));
+    assert!(matches!(
+        stores.consume_invitation("inv-secret").await,
+        Ok(None)
+    ));
+}
+
+#[tokio::test]
+async fn a_stored_invitation_that_no_longer_parses_reads_as_absent() {
+    // The revocation path reaches the record through the index rather than through a token, so
+    // it can meet a value the accept path never would. A corrupted record answers `None` — the
+    // withdrawal then removes it without a role check, which is the right end state: it could
+    // not have been accepted either, and leaving it indexed would be worse.
+    let Some(redis) = common::try_start().await else {
+        return;
+    };
+    let Some(stores) = redis.stores() else {
+        return;
+    };
+
+    assert!(redis.set_raw("auth:inv:deadbeef", r#"{"nope":true}"#).await);
+
+    assert!(matches!(
+        stores.read_invitation_by_hash("deadbeef").await,
+        Ok(None)
+    ));
+    // …and it is still deletable, or the corrupted record would sit there for its whole TTL.
+    assert!(matches!(
+        stores.delete_invitation_by_hash("deadbeef").await,
+        Ok(true)
     ));
 }
 

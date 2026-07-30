@@ -1378,11 +1378,31 @@ mod tests {
         // The live descendant h2 is present until the family is revoked; revoke_family then
         // deletes it and clears the owner's index, and is idempotent on unknown/empty families.
         assert!(matches!(store.find_session(kind, "h2").await, Ok(Some(_))));
-        assert!(store.revoke_family(kind, "famA").await.is_ok());
+        // …and it reports the account the family belonged to. That owner is the only thing
+        // reuse detection can name its victim with: the replayed token's own key was deleted
+        // when it was rotated, so the family index is the last surviving link to an account.
+        assert!(matches!(
+            store.revoke_family(kind, "famA").await,
+            Ok(Some(owner)) if owner == "u1"
+        ));
         assert!(matches!(store.find_session(kind, "h2").await, Ok(None)));
         assert!(matches!(store.list_sessions(kind, "u1").await, Ok(v) if v.is_empty()));
-        assert!(store.revoke_family(kind, "famA").await.is_ok());
-        assert!(store.revoke_family(kind, "").await.is_ok());
+        // A family with nothing left readable names nobody rather than someone.
+        assert!(matches!(store.revoke_family(kind, "famA").await, Ok(None)));
+        assert!(matches!(store.revoke_family(kind, "").await, Ok(None)));
+
+        // A member whose record carries no owner is skipped rather than reported: an event
+        // naming the empty string is worse than no event, because a consumer would act on it.
+        // One member only — the family index is a set, so a family holding both an anonymous
+        // and a named record would be read in whichever order the set happened to yield, and
+        // the assertion would pass or fail by luck.
+        assert!(
+            store
+                .create_session(kind, "anon", &record_in_family("", "famB"), 60)
+                .await
+                .is_ok()
+        );
+        assert!(matches!(store.revoke_family(kind, "famB").await, Ok(None)));
 
         // A session with no family plants no consumed marker, so a post-grace replay is a
         // plain Invalid, never a reuse.
@@ -1668,6 +1688,113 @@ mod tests {
             store.consume_invitation("inv-tok").await,
             Ok(Some(i)) if i.role == "MEMBER"
         ));
+        assert!(matches!(
+            store.consume_invitation("inv-tok").await,
+            Ok(None)
+        ));
+    }
+
+    #[tokio::test]
+    async fn invitation_index_is_keyed_by_tenant_and_address() {
+        // The double has to behave like the Redis store it stands in for, because a consumer
+        // testing their own withdrawal flow against it is relying on exactly that. An index
+        // keyed by anything less than (tenant, address) would let one tenant's withdrawal
+        // reach another's invitation, and the double would report the flow as correct.
+        let store = InMemoryStores::new();
+        assert!(
+            store
+                .put_invitation_index("t1", "invitee@example.com", "hash-1", 600)
+                .await
+                .is_ok()
+        );
+        assert!(
+            store
+                .put_invitation_index("t2", "invitee@example.com", "hash-2", 600)
+                .await
+                .is_ok()
+        );
+
+        // Same address, different tenants: two entries, not one overwriting the other.
+        assert!(matches!(
+            store.read_invitation_index("t1", "invitee@example.com").await,
+            Ok(Some(h)) if h == "hash-1"
+        ));
+        assert!(matches!(
+            store.read_invitation_index("t2", "invitee@example.com").await,
+            Ok(Some(h)) if h == "hash-2"
+        ));
+        // …and a different address in a tenant that has one names nothing.
+        assert!(matches!(
+            store.read_invitation_index("t1", "other@example.com").await,
+            Ok(None)
+        ));
+
+        // Reading leaves the entry; taking removes it, exactly once.
+        assert!(matches!(
+            store
+                .read_invitation_index("t1", "invitee@example.com")
+                .await,
+            Ok(Some(_))
+        ));
+        assert!(matches!(
+            store.take_invitation_index("t1", "invitee@example.com").await,
+            Ok(Some(h)) if h == "hash-1"
+        ));
+        assert!(matches!(
+            store
+                .take_invitation_index("t1", "invitee@example.com")
+                .await,
+            Ok(None)
+        ));
+        // …and taking one tenant's entry left the other's alone.
+        assert!(matches!(
+            store
+                .read_invitation_index("t2", "invitee@example.com")
+                .await,
+            Ok(Some(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn an_invitation_is_readable_and_deletable_by_its_stored_hash() {
+        // The revocation path reaches the record through the index rather than through a raw
+        // token, so the double needs the by-hash pair the withdrawal actually calls.
+        let store = InMemoryStores::new();
+        let invitation = StoredInvitation {
+            email: "invitee@example.com".to_owned(),
+            role: "MEMBER".to_owned(),
+            tenant_id: "t1".to_owned(),
+            inviter_user_id: "owner".to_owned(),
+            created_at: OffsetDateTime::UNIX_EPOCH,
+        };
+        assert!(
+            store
+                .put_invitation("inv-tok", &invitation, 600)
+                .await
+                .is_ok()
+        );
+        let hash = token_key("inv-tok");
+
+        assert!(matches!(
+            store.read_invitation_by_hash(&hash).await,
+            Ok(Some(i)) if i.role == "MEMBER"
+        ));
+        assert!(matches!(
+            store.read_invitation_by_hash("never-stored").await,
+            Ok(None)
+        ));
+
+        // The delete reports whether THIS call removed it, so a withdrawal cannot report
+        // success over an invitation that was already accepted.
+        assert!(matches!(
+            store.delete_invitation_by_hash(&hash).await,
+            Ok(true)
+        ));
+        assert!(matches!(
+            store.delete_invitation_by_hash(&hash).await,
+            Ok(false)
+        ));
+        // …and the accept path no longer finds it either.
         assert!(matches!(
             store.consume_invitation("inv-tok").await,
             Ok(None)
