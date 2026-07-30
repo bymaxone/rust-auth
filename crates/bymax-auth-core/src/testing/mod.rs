@@ -348,6 +348,8 @@ pub struct InMemoryStores {
     /// `tu:` — the TOTP anti-replay markers keyed by `hmac_sha256("{user_id}:{code}")`.
     #[cfg(feature = "mfa")]
     mfa_replay: Mutex<HashSet<String>>,
+    /// Single-use claims on MFA recovery codes (`rcu:`).
+    recovery_claims: Mutex<HashSet<String>>,
     /// `os:` — the single-use OAuth `state` + PKCE payload keyed by `sha256(state)`.
     #[cfg(feature = "oauth")]
     oauth_state: Mutex<HashMap<String, String>>,
@@ -908,6 +910,12 @@ impl crate::traits::MfaStore for InMemoryStores {
         // `HashSet::insert` returns whether the value was newly added — exactly the `SET NX`
         // "was it new?" decision the real `tu:` marker reports.
         Ok(lock(&self.mfa_replay).insert(replay_id.to_owned()))
+    }
+
+    async fn claim_recovery_code(&self, claim_id: &str, _ttl: u64) -> Result<bool, AuthError> {
+        // Same "was it new?" decision as the TOTP marker, over its own set so a code and a
+        // TOTP value can never collide into one another's claim.
+        Ok(lock(&self.recovery_claims).insert(claim_id.to_owned()))
     }
 
     async fn challenge_consume(

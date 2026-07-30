@@ -720,6 +720,13 @@ impl bymax_auth_core::traits::MfaStore for FailingStores {
     ) -> Result<bool, bymax_auth_types::AuthError> {
         self.inner.mark_totp_used(replay_id, ttl).await
     }
+    async fn claim_recovery_code(
+        &self,
+        claim_id: &str,
+        ttl: u64,
+    ) -> Result<bool, bymax_auth_types::AuthError> {
+        self.inner.claim_recovery_code(claim_id, ttl).await
+    }
     async fn challenge_consume(
         &self,
         replay_id: &str,

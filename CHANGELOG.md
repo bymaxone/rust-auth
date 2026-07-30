@@ -354,6 +354,18 @@ version bump.
 
 ### Changed
 
+- **A recovery code is claimed before it is accepted.** Consuming one is a read-modify-write
+  against the consumer's user repository: the challenge reads the whole array, removes one
+  entry, and writes the rest back. Two challenges landing together both read the array
+  containing the code, both match it, and both write — one code minting two sessions, which is
+  the one property a recovery code has. The per-token consume does not cover it, because two
+  logins hold two temp tokens. The engine cannot make the consumer's repository atomic, so it
+  claims the code in the store it owns: `MfaStore::claim_recovery_code` sets
+  `rcu:{hmac(plane:userId:code)}` with `NX EX`, and the loser reads as an invalid code — which
+  is what a code already spent is. Same construction as the TOTP anti-replay marker, for the
+  same reasons. Implementors of `MfaStore` must supply the new method.
+
+
 - **The session index is maintained by the rotation script, not after it**
   (`crates/bymax-auth-redis/src/lua/refresh_rotate.lua`). The script gained `KEYS[6]`
   (`sess:{userId}`) and two member prefixes, and does the index bookkeeping itself. Doing it in

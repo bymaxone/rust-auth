@@ -100,14 +100,16 @@ impl RedisStores {
         Ok(removed > 0)
     }
 
-    /// `SET tu:{replay_id} "1" NX EX ttl` — set the standalone anti-replay marker, returning
-    /// whether it was newly created (the code had not been seen).
-    async fn mark_totp_used_inner(
+    /// `SET {prefix}:{id} "1" NX EX ttl` — a single-use marker, returning whether this call
+    /// created it. Two keyspaces share the shape: the TOTP anti-replay marker (`tu:`) and the
+    /// recovery-code claim (`rcu:`). Both mean the same thing — presence is "already spent".
+    async fn set_nx_marker(
         &self,
-        replay_id: &str,
+        prefix: Prefix,
+        id: &str,
         ttl: u64,
     ) -> Result<bool, RedisStoreError> {
-        let key = self.keys().key(Prefix::Tu, replay_id);
+        let key = self.keys().key(prefix, id);
         let mut conn = self.connection().await?;
         let set: Option<String> = redis::cmd("SET")
             .arg(&key)
@@ -118,6 +120,16 @@ impl RedisStores {
             .query_async(&mut conn)
             .await?;
         Ok(set.is_some())
+    }
+
+    /// `SET tu:{replay_id} "1" NX EX ttl` — set the standalone anti-replay marker, returning
+    /// whether it was newly created (the code had not been seen).
+    async fn mark_totp_used_inner(
+        &self,
+        replay_id: &str,
+        ttl: u64,
+    ) -> Result<bool, RedisStoreError> {
+        self.set_nx_marker(Prefix::Tu, replay_id, ttl).await
     }
 
     /// The fused `mfa_challenge` Lua: set `tu:{replay_id}` `NX EX ttl` and, iff newly created,
@@ -182,6 +194,12 @@ impl MfaStore for RedisStores {
 
     async fn del_temp(&self, jti_hash: &str) -> Result<bool, AuthError> {
         self.del_temp_inner(jti_hash).await.map_err(AuthError::from)
+    }
+
+    async fn claim_recovery_code(&self, claim_id: &str, ttl: u64) -> Result<bool, AuthError> {
+        self.set_nx_marker(Prefix::Rcu, claim_id, ttl)
+            .await
+            .map_err(AuthError::from)
     }
 
     async fn mark_totp_used(&self, replay_id: &str, ttl: u64) -> Result<bool, AuthError> {

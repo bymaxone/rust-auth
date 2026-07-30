@@ -106,7 +106,10 @@ impl MfaService {
             }
             None
         } else {
-            match self.accept_recovery_code(&user, code) {
+            match self
+                .accept_recovery_code(MfaContext::Dashboard, &user, code)
+                .await?
+            {
                 Some(index) => {
                     // The recovery-code path carries no `tu:` marker, so the temp token is
                     // consumed standalone now that the code is confirmed valid — and the
@@ -224,7 +227,9 @@ impl MfaService {
             }
             None
         } else {
-            match super::verify_recovery_code(&recovery_codes, &self.recovery_code_candidates(code))
+            match self
+                .claim_matched_recovery_code(MfaContext::Platform, &user_id, code, &recovery_codes)
+                .await?
             {
                 Some(index) => {
                     // The recovery-code path carries no `tu:` marker, so the temp token is
@@ -308,10 +313,71 @@ impl MfaService {
 
     /// Scan the stored recovery-code digests for a constant-time match of `code`, returning
     /// the matched index or `None`.
-    fn accept_recovery_code(&self, user: &AuthUser, code: &str) -> Option<usize> {
+    async fn accept_recovery_code(
+        &self,
+        ctx: MfaContext,
+        user: &AuthUser,
+        code: &str,
+    ) -> Result<Option<usize>, AuthError> {
         let candidates = self.recovery_code_candidates(code);
         let stored = user.mfa_recovery_codes.clone().unwrap_or_default();
-        super::verify_recovery_code(&stored, &candidates)
+        let Some(index) = super::verify_recovery_code(&stored, &candidates) else {
+            return Ok(None);
+        };
+        // A matched code still has to be CLAIMED. Splicing it out of the stored set is a
+        // read-modify-write against the consumer's repository, so two challenges landing
+        // together both read the array containing it, both match, and both write — one code
+        // minting two sessions, the one property a recovery code has. The engine cannot make
+        // that repository atomic; it can be atomic in the store it owns. The loser reads as an
+        // invalid code, which is what a code already spent is.
+        if !self.claim_recovery_code(ctx, &user.id, code).await? {
+            return Ok(None);
+        }
+        Ok(Some(index))
+    }
+
+    /// The plane-shared core of [`Self::accept_recovery_code`]: match the code against a stored
+    /// set, then claim it. Split out because the platform path already holds the stored set and
+    /// has no `AuthUser` to hand over.
+    async fn claim_matched_recovery_code(
+        &self,
+        ctx: MfaContext,
+        user_id: &str,
+        code: &str,
+        stored: &[String],
+    ) -> Result<Option<usize>, AuthError> {
+        let Some(index) = super::verify_recovery_code(stored, &self.recovery_code_candidates(code))
+        else {
+            return Ok(None);
+        };
+        if !self.claim_recovery_code(ctx, user_id, code).await? {
+            return Ok(None);
+        }
+        Ok(Some(index))
+    }
+
+    /// Claim a matched recovery code for exactly one challenge, `SET NX` over an HMAC of plane,
+    /// user and code.
+    ///
+    /// Identical construction to the TOTP anti-replay marker, for identical reasons: the key
+    /// discloses neither the user nor the code, and binding the plane stops a dashboard user
+    /// and a platform admin who share an id from burning each other's codes.
+    ///
+    /// The marker is deliberately short-lived. It serializes a race measured in milliseconds;
+    /// the durable record of consumption is the repository write. Outliving that write would
+    /// turn a failed write into a code the account can still see in its list but can never use.
+    async fn claim_recovery_code(
+        &self,
+        ctx: MfaContext,
+        user_id: &str,
+        code: &str,
+    ) -> Result<bool, AuthError> {
+        self.mfa_store
+            .claim_recovery_code(
+                &self.replay_id(ctx, user_id, code),
+                super::RECOVERY_CODE_CLAIM_TTL_SECONDS,
+            )
+            .await
     }
 
     /// Remove the just-used recovery code from the stored set and persist the smaller set

@@ -63,7 +63,27 @@
     "totpReplayMarker": "tu",
     "oauthState": "os",
     "wsTicket": "wst",
-    "invitation": "inv"
+    "invitation": "inv",
+    "recoveryCodeClaim": "rcu"
+  },
+
+  "recoveryCodeClaim": {
+    "key": "rcu:{hmac_sha256(hmacKey, '{plane}:{userId}:{code}')}",
+    "value": "'1' — presence is the whole meaning",
+    "ttlSeconds": 300,
+    "$comment": [
+      "Consuming a recovery code is a read-modify-write against the CONSUMER's user repository:",
+      "the challenge reads the whole array, removes one entry, and writes the rest back. Two",
+      "challenges landing together both read the array, both match, and both write — one code",
+      "mints two sessions, which is the one property a recovery code has. Neither library can fix",
+      "that in the repository, whose atomicity is the consumer's to define, so both claim the code",
+      "with SET NX in the store they share. First claim wins; every other reads as an invalid code.",
+      "Same construction as the TOTP anti-replay marker: the key discloses neither the user nor the",
+      "code, and binding the plane stops a dashboard user and a platform admin with the same id",
+      "burning each other's codes. Deliberately short-lived — it serializes a race, it is not the",
+      "durable record of consumption, and outliving the repository write would turn a failed write",
+      "into a code the account can see but can never use."
+    ]
   },
 
   "sessionIndexMembers": {

@@ -1383,6 +1383,9 @@ struct LosingConsumeMfaStore {
 
 #[async_trait]
 impl MfaStore for LosingConsumeMfaStore {
+    async fn claim_recovery_code(&self, id: &str, ttl: u64) -> Result<bool, AuthError> {
+        self.inner.claim_recovery_code(id, ttl).await
+    }
     async fn put_setup_nx(&self, k: &str, v: &str, ttl: u64) -> Result<bool, AuthError> {
         self.inner.put_setup_nx(k, v, ttl).await
     }
@@ -1420,6 +1423,9 @@ struct ScriptedMfaStore {
 
 #[async_trait]
 impl MfaStore for ScriptedMfaStore {
+    async fn claim_recovery_code(&self, _id: &str, _ttl: u64) -> Result<bool, AuthError> {
+        Ok(true)
+    }
     async fn put_setup_nx(&self, _k: &str, _v: &str, _ttl: u64) -> Result<bool, AuthError> {
         Ok(self.put_nx)
     }
@@ -2472,6 +2478,102 @@ async fn a_recovery_challenge_that_loses_the_temp_token_consume_issues_no_sessio
     );
 }
 
+#[tokio::test]
+async fn one_recovery_code_cannot_be_spent_twice_even_with_two_temp_tokens() {
+    // Splicing a code out of the stored set is a read-modify-write against the CONSUMER's
+    // repository: two challenges landing together both read the array containing the code, both
+    // match it, and both write. The temp-token consume does not cover this — that gate is per
+    // token, and two logins hold two tokens. One code, two sessions, which is the one property
+    // a recovery code has. The claim in the store the engine owns is what closes it.
+    let users = Arc::new(InMemoryUserRepository::new());
+    let stores = Arc::new(InMemoryStores::new());
+    let created = users
+        .create(bymax_auth_types::CreateUserData {
+            email: "twice@example.com".to_owned(),
+            name: "T".to_owned(),
+            password_hash: Some("$scrypt$x".to_owned()),
+            role: Some("USER".to_owned()),
+            status: Some("ACTIVE".to_owned()),
+            tenant_id: TENANT.to_owned(),
+            email_verified: Some(true),
+        })
+        .await;
+    let Ok(user) = created else { return };
+
+    // The token manager needs MFA support over the SAME store, or the temp tokens it issues
+    // are not store-backed and no challenge can consume one.
+    let mfa_store: Arc<dyn MfaStore> = stores.clone();
+    let mut deps = service_deps(mfa_store.clone(), users.clone());
+    deps.tokens = Arc::new(
+        TokenManagerService::new(
+            HsKey::from_bytes(b"0123456789abcdef0123456789abcdef"),
+            Vec::new(),
+            stores.clone(),
+            Duration::from_secs(900),
+            7,
+            Duration::from_secs(30),
+            0,
+        )
+        .with_mfa_support(crate::services::token_manager::MfaTokenSupport::new(
+            mfa_store,
+        )),
+    );
+    let service = MfaService::new(deps);
+    let plain = "AAAA-BBBB-CCCC-DDDD-EEEE-FFFF";
+    let digest = crate::services::to_hex(&bymax_auth_crypto::mac::hmac_sha256(
+        &[9u8; 64],
+        plain.as_bytes(),
+    ));
+    let material = service.generate_setup_material();
+    let Ok((_, _, data)) = material else { return };
+    // The SAME digest stored twice, so the second challenge would still find a match after the
+    // first spliced one out — the shape a stale read produces, without needing real
+    // concurrency to reproduce it.
+    assert!(
+        users
+            .update_mfa(
+                &user.id,
+                bymax_auth_types::UpdateMfaData {
+                    mfa_enabled: true,
+                    mfa_secret: Some(data.encrypted_secret),
+                    mfa_recovery_codes: Some(vec![digest.clone(), digest]),
+                },
+            )
+            .await
+            .is_ok()
+    );
+
+    // Two temp tokens: two independent logins, so the per-token consume gate does not apply.
+    let Ok(first_token) = service
+        .tokens
+        .issue_mfa_temp_token(&user.id, MfaContext::Dashboard)
+        .await
+    else {
+        return;
+    };
+    let Ok(second_token) = service
+        .tokens
+        .issue_mfa_temp_token(&user.id, MfaContext::Dashboard)
+        .await
+    else {
+        return;
+    };
+
+    let first = service
+        .challenge(&first_token, plain, "1.2.3.4", "ua")
+        .await;
+    assert!(first.is_ok(), "the first use must succeed: {first:?}");
+
+    let second = service
+        .challenge(&second_token, plain, "1.2.3.4", "ua")
+        .await;
+    // The code is spent. It reads as an invalid code, which is what it now is.
+    assert!(
+        matches!(second, Err(AuthError::MfaInvalidCode)),
+        "a spent recovery code must not mint a second session, got {second:?}"
+    );
+}
+
 #[test]
 fn every_mfa_key_is_namespaced_by_identity_plane() {
     // The two planes draw their ids from DIFFERENT consumer repositories, which may hand out
@@ -2656,5 +2758,89 @@ async fn a_platform_recovery_challenge_that_loses_the_consume_issues_no_session(
     assert!(
         matches!(outcome, Err(AuthError::MfaTempTokenInvalid)),
         "a lost consume must issue no platform session, got {outcome:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_platform_recovery_code_is_claimed_before_it_is_accepted() {
+    // The platform twin of the double-spend gate. Splicing a code out is a read-modify-write
+    // against the consumer's platform repository, so two challenges landing together both read
+    // the array containing it, both match, and both write — and the per-token consume does not
+    // cover it, because two logins hold two tokens. This is the plane where a spent code buys
+    // the most.
+    let users = Arc::new(InMemoryUserRepository::new());
+    let admins = Arc::new(InMemoryPlatformUserRepository::new());
+    let stores = Arc::new(InMemoryStores::new());
+    let mfa_store: Arc<dyn MfaStore> = stores.clone();
+
+    let plain = "AAAA-BBBB-CCCC-DDDD-EEEE-FFFF";
+    let digest = crate::services::to_hex(&bymax_auth_crypto::mac::hmac_sha256(
+        &[9u8; 64],
+        plain.as_bytes(),
+    ));
+
+    let mut deps = service_deps(mfa_store.clone(), users);
+    deps.platform_repo = Some(admins.clone());
+    deps.tokens = Arc::new(
+        TokenManagerService::new(
+            HsKey::from_bytes(b"0123456789abcdef0123456789abcdef"),
+            Vec::new(),
+            stores.clone(),
+            Duration::from_secs(900),
+            7,
+            Duration::from_secs(30),
+            0,
+        )
+        .with_mfa_support(crate::services::token_manager::MfaTokenSupport::new(
+            mfa_store,
+        )),
+    );
+    let service = MfaService::new(deps);
+
+    let material = service.generate_setup_material();
+    let Ok((_, _, data)) = material else { return };
+    // The same digest twice, so the second challenge still finds a match after the first
+    // spliced one out — the shape a stale read produces, without needing real concurrency.
+    admins.insert(AuthPlatformUser {
+        id: "ptwice".to_owned(),
+        email: "ptwice@example.com".to_owned(),
+        name: "Admin".to_owned(),
+        password_hash: admin_password_hash(),
+        role: "SUPER_ADMIN".to_owned(),
+        status: "ACTIVE".to_owned(),
+        mfa_enabled: true,
+        mfa_secret: Some(data.encrypted_secret),
+        mfa_recovery_codes: Some(vec![digest.clone(), digest]),
+        platform_id: None,
+        last_login_at: None,
+        updated_at: OffsetDateTime::UNIX_EPOCH,
+        created_at: OffsetDateTime::UNIX_EPOCH,
+    });
+
+    let Ok(first_token) = service
+        .tokens
+        .issue_mfa_temp_token("ptwice", MfaContext::Platform)
+        .await
+    else {
+        return;
+    };
+    let first = service
+        .challenge(&first_token, plain, "1.2.3.4", "ua")
+        .await;
+    assert!(first.is_ok(), "the first use must succeed: {first:?}");
+
+    let Ok(second_token) = service
+        .tokens
+        .issue_mfa_temp_token("ptwice", MfaContext::Platform)
+        .await
+    else {
+        return;
+    };
+    let second = service
+        .challenge(&second_token, plain, "1.2.3.4", "ua")
+        .await;
+    assert!(
+        matches!(second, Err(AuthError::MfaInvalidCode)),
+        "a spent platform recovery code must not mint a second session, got {second:?}"
     );
 }

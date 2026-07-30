@@ -43,6 +43,15 @@ const MFA_SETUP_TTL_SECONDS: u64 = 600;
 /// the anti-replay marker TTL from the acceptance window.
 const TOTP_STEP_SECONDS: u64 = 30;
 /// The number of random bytes behind one recovery code (96 bits of entropy, §7.5).
+/// TTL of the single-use claim on a recovery code (5 minutes).
+///
+/// The claim serializes concurrent challenges presenting the same code; it is not the durable
+/// record of consumption, which is the repository write that removes the code from the account.
+/// Outliving that write by much would turn a failed write into a code the user can no longer
+/// use but can still see in their list — so the marker is deliberately far shorter than the
+/// code's real lifetime, and long enough that no plausible request pair slips past it.
+pub(super) const RECOVERY_CODE_CLAIM_TTL_SECONDS: u64 = 300;
+
 const RECOVERY_CODE_BYTES: usize = 12;
 /// The number of random bytes behind a TOTP secret (160 bits, RFC 6238 / §7.5.1).
 const TOTP_SECRET_BYTES: usize = 20;

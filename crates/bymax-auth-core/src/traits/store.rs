@@ -721,6 +721,17 @@ pub trait MfaStore: Send + Sync {
     /// `regenerate_recovery_codes`, which have no temp token to consume.
     async fn mark_totp_used(&self, replay_id: &str, ttl: u64) -> Result<bool, AuthError>;
 
+    /// Claim a recovery code for exactly one challenge: `rcu:{claim_id} = "1"` with `NX EX
+    /// ttl`. Returns `true` when this caller created the marker.
+    ///
+    /// Consuming a recovery code is a read-modify-write against the CONSUMER's user
+    /// repository — read the array, remove one entry, write the rest back. Two challenges
+    /// landing together both read the array containing the code, both match it, and both
+    /// write, so one code mints two sessions: the one property a recovery code has. The
+    /// engine cannot make that repository atomic, since its atomicity is the consumer's to
+    /// define. It can be atomic here, in the store it owns.
+    async fn claim_recovery_code(&self, claim_id: &str, ttl: u64) -> Result<bool, AuthError>;
+
     /// The **fused** challenge step (§7.5.6): set `tu:{replay_id}` `NX EX ttl` and, *iff* that
     /// marker was newly created, delete the temp token `mfa:{jti_hash}` — in one atomic Lua
     /// script. The temp-token deletion is the single-consume gate: returns `true` only when this
