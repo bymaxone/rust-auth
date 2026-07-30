@@ -101,6 +101,12 @@ additional_cargo_args = ["--all-features"]
 # 12. `replace | with ^ in decode_hex` — same shape as 1 and 10: `(hi << 4) | lo` combines a
 #     high nibble with a value `hex_nibble` bounds to 0..=15, so the two never share a set bit
 #     and XOR writes the identical byte.
+# 13. `EmailProvider::send_email_changed_notification` default body — the same shape as 8: it is
+#     literally `let _ = (args); Ok(())`, where the binding exists only to tell the compiler the
+#     arguments are deliberately unused. Replacing it with `Ok(())` is the same program. The
+#     pattern matches the TRAIT default only; a real provider's implementation is still mutated,
+#     which is what catches a notice that stops firing. The verification sender next to it is
+#     deliberately NOT defaulted, so it generates no such mutant.
 exclude_re = [
     'replace \| with \^ in new_uuid_v4',
     'replace AuthEngine::builder -> AuthEngineBuilder with Default::default\(\)',
@@ -115,4 +121,5 @@ exclude_re = [
     'replace \| with \^ in hotp',
     'replace is_legacy -> bool with false',
     'replace \| with \^ in decode_hex',
+    'replace EmailProvider::send_email_changed_notification -> Result<\(\), EmailError> with Ok\(\(\)\)',
 ]

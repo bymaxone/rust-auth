@@ -981,6 +981,89 @@ mod tests {
         assert!(matches!(&result, Ok(engine) if engine.oauth_state_store().is_some()));
     }
 
+    /// A minimal verified user, for the tests that mint a token through a built engine.
+    fn builder_user() -> bymax_auth_types::SafeAuthUser {
+        bymax_auth_types::SafeAuthUser {
+            id: "u1".to_owned(),
+            email: "u@example.com".to_owned(),
+            name: "U".to_owned(),
+            role: "ADMIN".to_owned(),
+            tenant_id: "t1".to_owned(),
+            status: "ACTIVE".to_owned(),
+            email_verified: true,
+            mfa_enabled: false,
+            created_at: time::OffsetDateTime::UNIX_EPOCH,
+            last_login_at: None,
+            oauth_provider: None,
+            oauth_provider_id: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn an_empty_issuer_or_audience_reads_as_unconfigured() {
+        // A host threading an unset environment variable through must not silently turn the
+        // binding on: the engine would start stamping the empty string and requiring it, and
+        // every token it minted would be rejected by any peer that left the setting alone.
+        // Empty is "not configured", not "require the empty issuer".
+        let s = stores();
+        let mut cfg = valid_config();
+        cfg.jwt.issuer = Some(String::new());
+        cfg.jwt.audience = Some(String::new());
+        let engine = AuthEngine::builder()
+            .config(cfg)
+            .user_repository(user_repo())
+            .redis_stores(s)
+            .build();
+        assert!(engine.is_ok(), "an empty binding must still build");
+        let Ok(engine) = engine else { return };
+
+        let issued = engine
+            .tokens()
+            .issue_tokens(&builder_user(), "10.0.0.1", "agent/1.0", false)
+            .await;
+        assert!(issued.is_ok(), "an empty binding must still mint");
+        let Ok(issued) = issued else { return };
+        let claims = engine.tokens().verify_access(&issued.access_token).await;
+        assert!(claims.is_ok(), "an empty binding rejected its own token");
+        // …and nothing was stamped, so a peer that configured neither still accepts it.
+        let Ok(claims) = claims else { return };
+        assert_eq!(claims.iss, None);
+        assert_eq!(claims.aud, None);
+    }
+
+    #[tokio::test]
+    async fn a_configured_issuer_and_audience_reach_the_minted_token() {
+        // The other half: a real value does turn the binding on, end to end through the
+        // builder — the wiring between the config and the token manager is what these two
+        // tests hold, and it is the one place a `!is_empty()` inversion would hide.
+        let s = stores();
+        let mut cfg = valid_config();
+        cfg.jwt.issuer = Some("bymax".to_owned());
+        cfg.jwt.audience = Some("dashboard".to_owned());
+        let engine = AuthEngine::builder()
+            .config(cfg)
+            .user_repository(user_repo())
+            .redis_stores(s)
+            .build();
+        assert!(engine.is_ok(), "a configured binding must build");
+        let Ok(engine) = engine else { return };
+
+        let issued = engine
+            .tokens()
+            .issue_tokens(&builder_user(), "10.0.0.1", "agent/1.0", false)
+            .await;
+        assert!(issued.is_ok(), "a configured binding must mint");
+        let Ok(issued) = issued else { return };
+        let claims = engine.tokens().verify_access(&issued.access_token).await;
+        assert!(
+            claims.is_ok(),
+            "a configured binding rejected its own token"
+        );
+        let Ok(claims) = claims else { return };
+        assert_eq!(claims.iss.as_deref(), Some("bymax"));
+        assert_eq!(claims.aud.as_deref(), Some("dashboard"));
+    }
+
     #[test]
     fn oauth_enabled_without_custom_hook_flags_only_the_default_hook_case() {
         // The warning predicate fires exactly when OAuth is enabled AND no custom hooks were

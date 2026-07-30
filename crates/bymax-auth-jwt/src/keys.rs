@@ -330,5 +330,43 @@ mod tests {
         };
         assert_eq!(JwtClaims::iat(&mfa), 12);
         assert_eq!(JwtClaims::exp(&mfa), 22);
+
+        // …and the binding accessors, on all three. They are what the engine's issuer/audience
+        // check reads, and that check lives in another crate — so without asserting them here
+        // this crate ships three pairs of accessors its own suite never calls. An accessor that
+        // answered `None` for a stamped token, or a constant for any token, would disarm the
+        // binding wherever it is configured: the verifier would compare the wrong value and
+        // either accept everything or reject everything.
+        assert_eq!(JwtClaims::iss(&dashboard), None);
+        assert_eq!(JwtClaims::aud(&dashboard), None);
+        assert_eq!(JwtClaims::iss(&platform), None);
+        assert_eq!(JwtClaims::aud(&platform), None);
+        assert_eq!(JwtClaims::iss(&mfa), None);
+        assert_eq!(JwtClaims::aud(&mfa), None);
+
+        // A stamped claim forwards its own value rather than a constant.
+        let stamped_dashboard = DashboardClaims {
+            iss: Some("bymax".to_owned()),
+            aud: Some("dashboard".to_owned()),
+            ..dashboard
+        };
+        assert_eq!(JwtClaims::iss(&stamped_dashboard), Some("bymax"));
+        assert_eq!(JwtClaims::aud(&stamped_dashboard), Some("dashboard"));
+
+        let stamped_platform = PlatformClaims {
+            iss: Some("bymax".to_owned()),
+            aud: Some("platform".to_owned()),
+            ..platform
+        };
+        assert_eq!(JwtClaims::iss(&stamped_platform), Some("bymax"));
+        assert_eq!(JwtClaims::aud(&stamped_platform), Some("platform"));
+
+        let stamped_mfa = MfaTempClaims {
+            iss: Some("bymax".to_owned()),
+            aud: Some("challenge".to_owned()),
+            ..mfa
+        };
+        assert_eq!(JwtClaims::iss(&stamped_mfa), Some("bymax"));
+        assert_eq!(JwtClaims::aud(&stamped_mfa), Some("challenge"));
     }
 }

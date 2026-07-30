@@ -112,6 +112,16 @@ impl Stampable for PlatformClaims {
     }
 }
 
+impl Stampable for MfaTempClaims {
+    fn stamped(&self, issuer: Option<String>, audience: Option<String>) -> Self {
+        Self {
+            iss: issuer,
+            aud: audience,
+            ..self.clone()
+        }
+    }
+}
+
 /// Issues and rotates the dashboard token pair over the [`SessionStore`] seam. Platform
 /// issuance (`SafeAuthPlatformUser`/`PlatformClaims`) is a separate identity surface and
 /// is wired with the platform domain.
@@ -843,7 +853,7 @@ impl TokenManagerService {
             iat: now,
             exp: now.saturating_add(MFA_TEMP_TOKEN_TTL_SECONDS),
         };
-        let token = sign(&claims, &self.key).map_err(signing_failed)?;
+        let token = sign(&self.stamp(&claims), &self.key).map_err(signing_failed)?;
         Ok((token, jti))
     }
 
@@ -2123,9 +2133,12 @@ mod tests {
             return;
         };
 
-        let Ok(claims) = svc.verify_access(&issued.access_token).await else {
-            return;
-        };
+        let verified = svc.verify_access(&issued.access_token).await;
+        assert!(
+            verified.is_ok(),
+            "an unbound service rejected its own token"
+        );
+        let Ok(claims) = verified else { return };
         assert_eq!(claims.iss, None);
         assert_eq!(claims.aud, None);
     }
@@ -2143,9 +2156,15 @@ mod tests {
             return;
         };
 
-        let Ok(claims) = svc.verify_access(&issued.access_token).await else {
-            return;
-        };
+        // Asserted, not `let-else`-ed: on this test the verification failing IS the failure
+        // under test — a stamp that never happened makes the bound verifier reject the
+        // backend's own token, and an early return would score that as a pass.
+        let verified = svc.verify_access(&issued.access_token).await;
+        assert!(
+            verified.is_ok(),
+            "a bound service rejected its own token: {verified:?}"
+        );
+        let Ok(claims) = verified else { return };
         assert_eq!(claims.iss.as_deref(), Some("bymax"));
         assert_eq!(claims.aud.as_deref(), Some("dashboard"));
     }
@@ -2185,6 +2204,112 @@ mod tests {
         assert!(ours.verify_access(&issued.access_token).await.is_err());
     }
 
+    #[tokio::test]
+    async fn each_half_of_the_binding_is_checked_on_its_own() {
+        // Both clauses need their own case. A token whose ISSUER matches but whose AUDIENCE
+        // does not is the shape that catches an inverted audience comparison, and vice versa —
+        // a test that only ever varies both at once cannot tell the two apart, and half the
+        // check could be inverted without a single failure.
+        let store = Arc::new(InMemoryStores::new());
+        let ours = bound_service(store.clone(), Some("bymax"), Some("dashboard"));
+
+        // Right issuer, wrong audience.
+        let wrong_audience = bound_service(store.clone(), Some("bymax"), Some("another-service"));
+        let Ok(issued) = wrong_audience
+            .issue_tokens(&user(), "10.0.0.1", "agent/1.0", false)
+            .await
+        else {
+            return;
+        };
+        assert!(
+            ours.verify_access(&issued.access_token).await.is_err(),
+            "a token aimed at another audience was accepted"
+        );
+
+        // Wrong issuer, right audience.
+        let wrong_issuer = bound_service(store, Some("someone-else"), Some("dashboard"));
+        let Ok(issued) = wrong_issuer
+            .issue_tokens(&user(), "10.0.0.1", "agent/1.0", false)
+            .await
+        else {
+            return;
+        };
+        assert!(
+            ours.verify_access(&issued.access_token).await.is_err(),
+            "a token from another issuer was accepted"
+        );
+    }
+
+    #[tokio::test]
+    async fn binding_only_one_half_leaves_the_other_unchecked() {
+        // Configuring an issuer alone must not start requiring an audience: a deployment that
+        // set one field would otherwise reject every token, including its own.
+        let store = Arc::new(InMemoryStores::new());
+        let issuer_only = bound_service(store.clone(), Some("bymax"), None);
+        let Ok(issued) = issuer_only
+            .issue_tokens(&user(), "10.0.0.1", "agent/1.0", false)
+            .await
+        else {
+            return;
+        };
+
+        let verified = issuer_only.verify_access(&issued.access_token).await;
+        assert!(
+            verified.is_ok(),
+            "an issuer-only binding rejected its own token"
+        );
+        let Ok(claims) = verified else { return };
+        assert_eq!(claims.iss.as_deref(), Some("bymax"));
+        assert_eq!(claims.aud, None);
+
+        // …and the same for an audience alone.
+        let audience_only = bound_service(store, None, Some("dashboard"));
+        let Ok(issued) = audience_only
+            .issue_tokens(&user(), "10.0.0.1", "agent/1.0", false)
+            .await
+        else {
+            return;
+        };
+        let verified = audience_only.verify_access(&issued.access_token).await;
+        assert!(
+            verified.is_ok(),
+            "an audience-only binding rejected its own token"
+        );
+        let Ok(claims) = verified else { return };
+        assert_eq!(claims.iss, None);
+        assert_eq!(claims.aud.as_deref(), Some("dashboard"));
+    }
+
+    #[cfg(feature = "mfa")]
+    #[tokio::test]
+    async fn the_mfa_challenge_token_is_stamped_like_every_other() {
+        // The token that bridges the password step and the second factor is minted by this
+        // service and verified by it, so it has to carry the binding too. Stamping the two
+        // access shapes and forgetting this one would leave a bound deployment rejecting its
+        // own challenge token — MFA login broken outright, and only for the deployments that
+        // turned the binding on.
+        let store = Arc::new(InMemoryStores::new());
+        let svc = service_with_mfa(store).with_binding(TokenBinding {
+            issuer: Some("bymax".to_owned()),
+            audience: Some("dashboard".to_owned()),
+        });
+
+        let issued = svc
+            .issue_mfa_temp_token("user-1", MfaContext::Dashboard)
+            .await;
+        assert!(
+            issued.is_ok(),
+            "a bound service must still mint an MFA challenge token"
+        );
+        let Ok(token) = issued else { return };
+
+        let verified = svc.verify_mfa_temp_token(&token).await;
+        assert!(
+            verified.is_ok(),
+            "a bound service rejected its own MFA challenge token: {verified:?}"
+        );
+    }
+
     #[cfg(feature = "platform")]
     #[tokio::test]
     async fn the_platform_plane_is_bound_too() {
@@ -2198,9 +2323,12 @@ mod tests {
             return;
         };
 
-        let Ok(claims) = svc.verify_platform_access(&issued.access_token).await else {
-            return;
-        };
+        let verified = svc.verify_platform_access(&issued.access_token).await;
+        assert!(
+            verified.is_ok(),
+            "a bound service rejected its own platform token: {verified:?}"
+        );
+        let Ok(claims) = verified else { return };
         assert_eq!(claims.iss.as_deref(), Some("bymax"));
         assert_eq!(claims.aud.as_deref(), Some("platform"));
 

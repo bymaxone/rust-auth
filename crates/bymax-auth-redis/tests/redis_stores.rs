@@ -22,9 +22,9 @@ use bymax_auth_core::services::auth::{
 use bymax_auth_core::services::auth::{LoginInput, RegisterInput};
 use bymax_auth_core::testing::InMemoryUserRepository;
 use bymax_auth_core::traits::{
-    BruteForceStore, InvitationStore, OtpPurpose, OtpStore, PasswordResetStore, ResetContext,
-    RotateOutcome, SessionKind, SessionRecord, SessionRotation, SessionStore, StoredInvitation,
-    UserRepository, WsTicketSnapshot, WsTicketStore,
+    BruteForceStore, EmailChangeContext, InvitationStore, OtpPurpose, OtpStore, PasswordResetStore,
+    ResetContext, RotateOutcome, SessionKind, SessionRecord, SessionRotation, SessionStore,
+    StoredInvitation, UserRepository, WsTicketSnapshot, WsTicketStore,
 };
 use bymax_auth_core::{AuthConfig, AuthEngine, Environment};
 use bymax_auth_types::{AuthError, LoginResult};
@@ -1223,6 +1223,57 @@ async fn the_invitee_index_is_the_only_handle_on_a_pending_invitation() {
     ));
     assert!(matches!(
         stores.consume_invitation("inv-secret").await,
+        Ok(None)
+    ));
+}
+
+#[tokio::test]
+async fn a_pending_address_change_round_trips_and_is_consumed_once() {
+    // Asserted at the store, not through the route: the request answers 204 and the
+    // confirmation answers 204, so an end-to-end test cannot tell a working `ec:` keyspace
+    // from one that writes nothing and reads nothing — the same blindness the invitation
+    // index had, for the same reason.
+    let Some(redis) = common::try_start().await else {
+        return;
+    };
+    let Some(stores) = redis.stores() else {
+        return;
+    };
+
+    let context = EmailChangeContext {
+        user_id: "user-42".to_owned(),
+        new_email: "new@example.com".to_owned(),
+        tenant_id: "t1".to_owned(),
+        password_fingerprint: "a".repeat(64),
+    };
+    assert!(
+        stores
+            .put_email_change("change-secret", &context, 3600)
+            .await
+            .is_ok()
+    );
+
+    // Every field survives the round trip. `new_email` and `tenant_id` drive the uniqueness
+    // re-check at confirm time, and `password_fingerprint` is what makes a planted request die
+    // when the victim changes their password — a field lost in transit silently disarms it.
+    assert!(matches!(
+        stores.consume_email_change("change-secret").await,
+        Ok(Some(c))
+            if c.user_id == "user-42"
+            && c.new_email == "new@example.com"
+            && c.tenant_id == "t1"
+            && c.password_fingerprint == "a".repeat(64)
+    ));
+
+    // Single-use: the read and the delete are one operation, so a link clicked twice — or
+    // raced — applies once.
+    assert!(matches!(
+        stores.consume_email_change("change-secret").await,
+        Ok(None)
+    ));
+    // …and a token that was never issued reaches nothing.
+    assert!(matches!(
+        stores.consume_email_change("never-issued").await,
         Ok(None)
     ));
 }
