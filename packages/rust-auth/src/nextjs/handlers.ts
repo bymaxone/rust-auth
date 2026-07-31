@@ -153,7 +153,16 @@ export function createClientRefreshHandler(
     const backendResponse = await callBackend(resolved, AUTH_ROUTES.REFRESH, request);
     if (!backendResponse || !backendResponse.ok) {
       return NextResponse.json(
-        { error: { code: AUTH_ERROR_CODES.SESSION_EXPIRED, message: "Session expired." } },
+        // The code the BACKEND answers a failed rotation with. It used to be
+        // `auth.session_expired`, which no backend ever sends — a client branching on it here
+        // and on the real code everywhere else was branching on a code that only this proxy
+        // invented.
+        {
+          error: {
+            code: AUTH_ERROR_CODES.REFRESH_TOKEN_INVALID,
+            message: "Session expired.",
+          },
+        },
         { status: 401 },
       );
     }

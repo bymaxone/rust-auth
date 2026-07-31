@@ -72,6 +72,18 @@ export interface AuthProxyConfig {
    * verify a token's signature and must not admit one it cannot prove genuine.
    */
   accessTokenSecret?: string | null;
+
+  /**
+   * The `iss` the backend stamps on its tokens, when `jwt.issuer` is configured there.
+   *
+   * The backend refuses any token that does not carry it. Leaving this unset here means the
+   * proxy accepts one minted for a different issuer that trusts the same secret — with HS256
+   * the verifier can also sign, so that is a real party, not a hypothetical one.
+   */
+  expectedIssuer?: string | null;
+
+  /** The `aud` the backend stamps, when `jwt.audience` is configured. See {@link expectedIssuer}. */
+  expectedAudience?: string | null;
   /** Path prefixes that bypass auth entirely (e.g. `/_next`, `/public`). */
   publicPaths?: readonly string[];
   /** RBAC rules applied to the first matching `pathPrefix`. */
@@ -92,6 +104,8 @@ export interface ResolvedAuthProxyConfig {
   loginPath: string;
   /** The resolved HS256 secret, or `null` to fail closed (no request is authenticated). */
   accessTokenSecret: string | null;
+  expectedIssuer: string | null;
+  expectedAudience: string | null;
   /** The resolved public path-prefix list. */
   publicPaths: readonly string[];
   /** The resolved RBAC rules. */
@@ -122,6 +136,8 @@ function resolveConfig(config: AuthProxyConfig): ResolvedAuthProxyConfig {
   return {
     loginPath: config.loginPath ?? DEFAULT_LOGIN_PATH,
     accessTokenSecret: config.accessTokenSecret ?? null,
+    expectedIssuer: config.expectedIssuer ?? null,
+    expectedAudience: config.expectedAudience ?? null,
     publicPaths: config.publicPaths ?? [],
     roleRules: config.roleRules ?? [],
     blockedStatuses: config.blockedStatuses ?? [],
@@ -158,7 +174,10 @@ export function createAuthProxy(config: AuthProxyConfig): AuthProxyInstance {
     // structurally valid (even forged) token, so a missing secret is unauthenticated.
     const decoded: DecodedToken =
       token !== undefined && typeof secret === "string" && secret.length > 0
-        ? await verifyJwtToken(token, secret)
+        ? await verifyJwtToken(token, secret, {
+            issuer: resolved.expectedIssuer,
+            audience: resolved.expectedAudience,
+          })
         : { isValid: false };
 
     // Reject an invalid, expired, or non-access token. Admitting a non-access type — notably

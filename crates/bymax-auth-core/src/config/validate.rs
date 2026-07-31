@@ -423,8 +423,8 @@ impl AuthConfig {
         Ok(secure_cookies)
     }
 
-    /// Validate that `cookies.trusted_origins` and `cookies.same_site` agree, and that every
-    /// entry is a bare absolute origin.
+    /// Validate that `cookies.trusted_origins` is reachable under the configured cookie
+    /// policy, and that every entry is a bare absolute origin.
     ///
     /// The shape check is deliberately strict: an entry must be exactly scheme, host and an
     /// optional port, with nothing after the authority. A trailing slash, a path, or a naked
@@ -433,11 +433,20 @@ impl AuthConfig {
     fn validate_trusted_origins(&self) -> Result<(), ConfigError> {
         let cross_site = self.cookies.same_site == SameSite::None;
         let listed = !self.cookies.trusted_origins.is_empty();
+        // A cookie-domain resolver puts the list back in play under `Lax`/`Strict` too. Those
+        // withhold the cookie CROSS-SITE, not cross-ORIGIN: a deployment serving
+        // `app.example.com` and `api.example.com` from one `.example.com` cookie is same-site,
+        // so the browser sends it on a POST between them — and `Sec-Fetch-Site: same-site` is
+        // not one of the values that proves a request came from the app itself, so the guard
+        // falls through to the origin check. Refusing the list there left that deployment with
+        // no configuration at all: the cookie arrives and the request is refused 403, and the
+        // only setting that would have allowed it was rejected at startup.
+        let shares_a_cookie_domain = self.cookies.resolve_domains.is_some();
 
         if cross_site && !listed {
             return Err(ConfigError::TrustedOriginsRequired);
         }
-        if !cross_site && listed {
+        if !cross_site && !shares_a_cookie_domain && listed {
             return Err(ConfigError::TrustedOriginsUnused);
         }
         for origin in &self.cookies.trusted_origins {
@@ -1416,6 +1425,40 @@ mod tests {
         list_without_none.cookies.trusted_origins = vec!["https://app.example.com".to_owned()];
         assert!(matches!(
             list_without_none.validate(Environment::Production),
+            Err(ConfigError::TrustedOriginsUnused)
+        ));
+    }
+
+    /// A resolver that shares one cookie across every subdomain of `example.com`.
+    #[derive(Debug)]
+    struct SharedDomain;
+
+    impl crate::config::resolvers::CookieDomainResolver for SharedDomain {
+        fn resolve(&self, _request_host: &str) -> Vec<String> {
+            vec![".example.com".to_owned()]
+        }
+    }
+
+    #[test]
+    fn a_shared_cookie_domain_puts_the_trusted_origin_list_back_in_play_under_lax() {
+        // `Lax` withholds the cookie CROSS-SITE, not cross-ORIGIN. A deployment serving
+        // `app.example.com` and `api.example.com` from one `.example.com` cookie is same-site,
+        // so the browser sends it on a POST between them — and `Sec-Fetch-Site: same-site` is
+        // not one of the values that proves a request came from the app itself, so the guard
+        // falls through to the origin check. Refusing the list here left that deployment with
+        // no configuration at all: the cookie arrives, the request is refused 403, and the one
+        // setting that would have allowed it was rejected at startup.
+        let mut subdomains = valid_config();
+        subdomains.cookies.trusted_origins = vec!["https://app.example.com".to_owned()];
+        subdomains.cookies.resolve_domains = Some(std::sync::Arc::new(SharedDomain));
+
+        assert!(subdomains.validate(Environment::Production).is_ok());
+
+        // Without the shared domain the list really is unreachable, and is still refused.
+        let mut single_host = valid_config();
+        single_host.cookies.trusted_origins = vec!["https://app.example.com".to_owned()];
+        assert!(matches!(
+            single_host.validate(Environment::Production),
             Err(ConfigError::TrustedOriginsUnused)
         ));
     }

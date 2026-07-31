@@ -10,6 +10,8 @@
 //! `Err` is logged and dropped, except where a flow is explicitly gated on delivery.
 
 use async_trait::async_trait;
+
+use crate::normalize::mask_email;
 use time::OffsetDateTime;
 
 /// The transactional-email contract, held on the engine as `Arc<dyn EmailProvider>`.
@@ -193,8 +195,13 @@ pub enum EmailError {
 
 /// The default email provider installed when the host supplies none. Every method
 /// returns `Ok(())` without sending anything, emitting a `tracing` debug line that
-/// records the event and recipient but redacts tokens and OTPs — keeping local
+/// records the event and a MASKED recipient, and redacts tokens and OTPs — keeping local
 /// development and tests running without an email backend.
+///
+/// The address is masked for the same reason every other log line in the engine masks it: a
+/// debug level is not a private one. Whoever ships these logs to an aggregator is not
+/// necessarily the operator, and a provider that only runs when none is configured is exactly
+/// the one likeliest to be running with verbose logging turned on.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct NoOpEmailProvider;
 
@@ -206,8 +213,12 @@ impl EmailProvider for NoOpEmailProvider {
         token: &str,
         _locale: Option<&str>,
     ) -> Result<(), EmailError> {
-        let _ = (new_email, token);
-        tracing::debug!("NoOpEmailProvider: send_email_change_verification");
+        let _ = token;
+        tracing::debug!(
+            event = "email_change_verification",
+            email = %mask_email(new_email),
+            "noop email: token redacted"
+        );
         Ok(())
     }
 
@@ -217,7 +228,7 @@ impl EmailProvider for NoOpEmailProvider {
         _token: &str,
         _locale: Option<&str>,
     ) -> Result<(), EmailError> {
-        tracing::debug!(event = "password_reset_token", %email, "noop email: token redacted");
+        tracing::debug!(event = "password_reset_token", email = %mask_email(email), "noop email: token redacted");
         Ok(())
     }
     async fn send_password_reset_otp(
@@ -226,7 +237,7 @@ impl EmailProvider for NoOpEmailProvider {
         _otp: &str,
         _locale: Option<&str>,
     ) -> Result<(), EmailError> {
-        tracing::debug!(event = "password_reset_otp", %email, "noop email: otp redacted");
+        tracing::debug!(event = "password_reset_otp", email = %mask_email(email), "noop email: otp redacted");
         Ok(())
     }
     async fn send_email_verification_otp(
@@ -235,11 +246,11 @@ impl EmailProvider for NoOpEmailProvider {
         _otp: &str,
         _locale: Option<&str>,
     ) -> Result<(), EmailError> {
-        tracing::debug!(event = "email_verification_otp", %email, "noop email: otp redacted");
+        tracing::debug!(event = "email_verification_otp", email = %mask_email(email), "noop email: otp redacted");
         Ok(())
     }
     async fn send_mfa_enabled(&self, email: &str, _locale: Option<&str>) -> Result<(), EmailError> {
-        tracing::debug!(event = "mfa_enabled", %email, "noop email");
+        tracing::debug!(event = "mfa_enabled", email = %mask_email(email), "noop email");
         Ok(())
     }
     async fn send_mfa_disabled(
@@ -247,7 +258,7 @@ impl EmailProvider for NoOpEmailProvider {
         email: &str,
         _locale: Option<&str>,
     ) -> Result<(), EmailError> {
-        tracing::debug!(event = "mfa_disabled", %email, "noop email");
+        tracing::debug!(event = "mfa_disabled", email = %mask_email(email), "noop email");
         Ok(())
     }
     async fn send_new_session_alert(
@@ -256,7 +267,7 @@ impl EmailProvider for NoOpEmailProvider {
         _session: &SessionInfo,
         _locale: Option<&str>,
     ) -> Result<(), EmailError> {
-        tracing::debug!(event = "new_session_alert", %email, "noop email");
+        tracing::debug!(event = "new_session_alert", email = %mask_email(email), "noop email");
         Ok(())
     }
     async fn send_invitation(
@@ -265,7 +276,7 @@ impl EmailProvider for NoOpEmailProvider {
         _invite: &InviteData,
         _locale: Option<&str>,
     ) -> Result<(), EmailError> {
-        tracing::debug!(event = "invitation", %email, "noop email: token redacted");
+        tracing::debug!(event = "invitation", email = %mask_email(email), "noop email: token redacted");
         Ok(())
     }
 }

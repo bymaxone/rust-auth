@@ -126,15 +126,18 @@ describe("createClientRefreshHandler", () => {
   });
 
   // The client distinguishes "refresh failed" from every other error by this envelope, so the
-  // shape is a contract with the fetch wrapper, not a detail.
-  it("answers 401 with the session-expired envelope when the refresh fails", async () => {
+  // shape is a contract with the fetch wrapper, not a detail. The code is the one the BACKEND
+  // answers a failed rotation with: `auth.session_expired` is a code no backend sends, so a
+  // client branching on it here and on the real one everywhere else was branching on a code
+  // this proxy alone invented.
+  it("answers 401 with the refresh-token-invalid envelope when the refresh fails", async () => {
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response("", { status: 401 })));
 
     const response = await createClientRefreshHandler({ backendUrl: BACKEND })(requestWith());
 
     expect(response.status).toBe(401);
     await expect(response.json()).resolves.toEqual({
-      error: { code: "auth.session_expired", message: "Session expired." },
+      error: { code: "auth.refresh_token_invalid", message: "Session expired." },
     });
     expect(setCookies(response)).toEqual([]);
   });

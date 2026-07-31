@@ -837,20 +837,37 @@ impl TokenManagerService {
         Ok((token, jti))
     }
 
-    /// Issue a short-lived MFA temp token bridging the password step and the second factor
-    /// (build-only fallback for a build without a wired MFA store: the signed challenge JWT is
-    /// returned, but no single-use `mfa:` marker is planted).
+    /// Refuse to issue an MFA challenge in a build compiled without the `mfa` feature.
+    ///
+    /// This used to sign and return the challenge JWT anyway. Nothing could redeem it: the
+    /// verification surface is not compiled in, so an account whose stored `mfa_enabled` is
+    /// true — a row left behind when a deployment turned the feature off, say — got a token
+    /// with nowhere to spend it and a "challenge issued" line in the log. The user could not
+    /// sign in and the log said the flow was working.
+    ///
+    /// The refusal is opaque and the cause goes to the log. It reveals nothing new: the caller
+    /// has already proved the password, and a build WITH the feature answers the same account
+    /// with a challenge, which says the same thing about it.
     ///
     /// # Errors
     ///
-    /// Returns [`AuthError::Internal`] only if claim serialization fails (unreachable).
+    /// Always returns [`AuthError::Internal`] — a build that cannot verify a second factor has
+    /// no honest answer for an account that requires one.
     #[cfg(not(feature = "mfa"))]
     pub async fn issue_mfa_temp_token(
         &self,
         user_id: &str,
         context: MfaContext,
     ) -> Result<String, AuthError> {
-        Ok(self.build_mfa_temp_token(user_id, context)?.0)
+        let _ = context;
+        tracing::error!(
+            %user_id,
+            "mfa challenge requested, but this build has no MFA surface — enable the `mfa` \
+             feature or clear `mfa_enabled` on the account"
+        );
+        Err(internal_error(
+            "account requires MFA but this build has no MFA support",
+        ))
     }
 
     /// Issue a short-lived MFA temp token bridging the password step and the second factor.

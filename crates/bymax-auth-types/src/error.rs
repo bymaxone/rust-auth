@@ -55,12 +55,6 @@ pub enum AuthErrorCode {
     /// Refresh token absent from the store and outside the grace window.
     #[serde(rename = "auth.refresh_token_invalid")]
     RefreshTokenInvalid,
-    /// Session backing a refresh token no longer exists.
-    #[serde(rename = "auth.session_expired")]
-    SessionExpired,
-    /// Concurrent-session cap reached (informational).
-    #[serde(rename = "auth.session_limit_reached")]
-    SessionLimitReached,
     /// Revoke targeted a session not owned by the caller (anti-IDOR).
     #[serde(rename = "auth.session_not_found")]
     SessionNotFound,
@@ -101,25 +95,16 @@ pub enum AuthErrorCode {
     /// MFA-temp JWT expired, malformed, or already consumed.
     #[serde(rename = "auth.mfa_temp_token_invalid")]
     MfaTempTokenInvalid,
-    /// Submitted recovery code matches no stored hash.
-    #[serde(rename = "auth.recovery_code_invalid")]
-    RecoveryCodeInvalid,
 
     // Password
-    /// New password fails the minimum policy.
-    #[serde(rename = "auth.password_too_weak")]
-    PasswordTooWeak,
-    /// The password appears in a known-breach corpus. Distinct from `PasswordTooWeak`: it may
-    /// satisfy every complexity rule and still be one an attacker tries first.
+    /// The password appears in a known-breach corpus, or on the offline common-password
+    /// screen. It may satisfy every length and complexity rule and still be one an attacker
+    /// tries first, which is why the policy checks live in the request DTO and this does not.
     #[serde(rename = "auth.password_compromised")]
     PasswordCompromised,
     /// Reset token absent from the store.
     #[serde(rename = "auth.password_reset_token_invalid")]
     PasswordResetTokenInvalid,
-    /// Defined for completeness; the reset flow consumes tokens with `GETDEL`, so this
-    /// is unreachable by design (expired and missing both map to the invalid code).
-    #[serde(rename = "auth.password_reset_token_expired")]
-    PasswordResetTokenExpired,
 
     // OTP
     /// OTP code mismatch.
@@ -191,11 +176,9 @@ impl AuthErrorCode {
             | Self::TokenRevoked
             | Self::TokenInvalid
             | Self::RefreshTokenInvalid
-            | Self::SessionExpired
             | Self::TokenMissing
             | Self::MfaInvalidCode
             | Self::MfaTempTokenInvalid
-            | Self::RecoveryCodeInvalid
             | Self::OtpInvalid
             | Self::OtpExpired
             | Self::OauthFailed
@@ -210,16 +193,11 @@ impl AuthErrorCode {
             | Self::Forbidden
             | Self::UntrustedOrigin => 403,
             Self::SessionNotFound => 404,
-            Self::EmailAlreadyExists
-            | Self::SessionLimitReached
-            | Self::MfaAlreadyEnabled
-            | Self::OauthEmailMismatch => 409,
+            Self::EmailAlreadyExists | Self::MfaAlreadyEnabled | Self::OauthEmailMismatch => 409,
             Self::MfaNotEnabled
             | Self::MfaSetupRequired
-            | Self::PasswordTooWeak
             | Self::PasswordCompromised
             | Self::PasswordResetTokenInvalid
-            | Self::PasswordResetTokenExpired
             | Self::InvalidInvitationToken
             | Self::EmailChangeTokenInvalid
             | Self::Validation => 400,
@@ -244,8 +222,6 @@ impl AuthErrorCode {
             Self::TokenRevoked => "Token revoked",
             Self::TokenInvalid => "Invalid token",
             Self::RefreshTokenInvalid => "Invalid or expired refresh token",
-            Self::SessionExpired => "Session expired",
-            Self::SessionLimitReached => "Session limit reached",
             Self::SessionNotFound => "Session not found",
             Self::TokenMissing => "Token missing",
             Self::EmailAlreadyExists => "Email already registered",
@@ -257,13 +233,10 @@ impl AuthErrorCode {
             Self::MfaNotEnabled => "MFA is not enabled",
             Self::MfaSetupRequired => "MFA setup required",
             Self::MfaTempTokenInvalid => "Invalid or expired temporary MFA token",
-            Self::RecoveryCodeInvalid => "Invalid recovery code",
-            Self::PasswordTooWeak => "Password too weak",
             Self::PasswordCompromised => {
                 "This password has appeared in a data breach. Please choose a different one."
             }
             Self::PasswordResetTokenInvalid => "Invalid password reset token",
-            Self::PasswordResetTokenExpired => "Expired password reset token",
             Self::OtpInvalid => "Invalid OTP code",
             Self::OtpExpired => "Expired OTP code",
             Self::OtpMaxAttempts => "Maximum number of attempts exceeded",
@@ -406,12 +379,6 @@ pub enum AuthError {
     /// Refresh token absent and outside the grace window.
     #[error("refresh token invalid")]
     RefreshTokenInvalid,
-    /// Session backing a refresh token no longer exists.
-    #[error("session expired")]
-    SessionExpired,
-    /// Concurrent-session cap reached.
-    #[error("session limit reached")]
-    SessionLimitReached,
     /// Revoke targeted a session not owned by the caller.
     #[error("session not found")]
     SessionNotFound,
@@ -449,23 +416,14 @@ pub enum AuthError {
     /// MFA-temp token expired, malformed, or already consumed.
     #[error("mfa temp token invalid")]
     MfaTempTokenInvalid,
-    /// Submitted recovery code matches no stored hash.
-    #[error("recovery code invalid")]
-    RecoveryCodeInvalid,
 
     // Password
-    /// New password fails the minimum policy.
-    #[error("password too weak")]
-    PasswordTooWeak,
     /// The password appears in a known-breach corpus.
     #[error("password compromised")]
     PasswordCompromised,
     /// Reset token absent from the store.
     #[error("password reset token invalid")]
     PasswordResetTokenInvalid,
-    /// Reset token expired (unreachable by design; see [`AuthErrorCode`]).
-    #[error("password reset token expired")]
-    PasswordResetTokenExpired,
 
     // OTP
     /// OTP code mismatch.
@@ -542,8 +500,6 @@ impl AuthError {
             Self::TokenRevoked => AuthErrorCode::TokenRevoked,
             Self::TokenInvalid => AuthErrorCode::TokenInvalid,
             Self::RefreshTokenInvalid => AuthErrorCode::RefreshTokenInvalid,
-            Self::SessionExpired => AuthErrorCode::SessionExpired,
-            Self::SessionLimitReached => AuthErrorCode::SessionLimitReached,
             Self::SessionNotFound => AuthErrorCode::SessionNotFound,
             Self::TokenMissing => AuthErrorCode::TokenMissing,
             Self::EmailAlreadyExists => AuthErrorCode::EmailAlreadyExists,
@@ -555,11 +511,8 @@ impl AuthError {
             Self::MfaNotEnabled => AuthErrorCode::MfaNotEnabled,
             Self::MfaSetupRequired => AuthErrorCode::MfaSetupRequired,
             Self::MfaTempTokenInvalid => AuthErrorCode::MfaTempTokenInvalid,
-            Self::RecoveryCodeInvalid => AuthErrorCode::RecoveryCodeInvalid,
-            Self::PasswordTooWeak => AuthErrorCode::PasswordTooWeak,
             Self::PasswordCompromised => AuthErrorCode::PasswordCompromised,
             Self::PasswordResetTokenInvalid => AuthErrorCode::PasswordResetTokenInvalid,
-            Self::PasswordResetTokenExpired => AuthErrorCode::PasswordResetTokenExpired,
             Self::OtpInvalid => AuthErrorCode::OtpInvalid,
             Self::OtpExpired => AuthErrorCode::OtpExpired,
             Self::OtpMaxAttempts => AuthErrorCode::OtpMaxAttempts,

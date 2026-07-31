@@ -400,6 +400,30 @@ version bump.
   dashboard path already did. Found while chasing a coverage gap the enrolment change exposed:
   the two planes carry the same logic separately, and only one had been fixed.
 
+- **`VerifyOptions::expected_iss` / `expected_aud`, enforced inside `verify`.** The binding was
+  checked by the engine after `bymax_auth_jwt::verify` returned, so the `wasm32` edge build — a
+  Worker validating a session cookie, with no engine behind it — accepted a token minted for a
+  different service. With HS256 the verifier can also sign, so "a different service that trusts
+  the same secret" is the realistic attacker, not a hypothetical one. The check moves into the
+  verifier, leaving one implementation of the rule; the engine passes its configured binding in
+  and `verify_jwt_hs256` takes the pair too. A token carrying no such claim is refused as firmly
+  as one carrying the wrong value. **Breaking:** `VerifyOptions` gains a lifetime, and the WASM
+  entry point two optional arguments.
+- **A concurrency limiter around the password KDF.** `spawn_blocking` bounds nothing useful:
+  Tokio's blocking pool defaults to 512 threads and each derivation holds ~16–19 MiB for its
+  whole run, so a few hundred concurrent logins reach gigabytes of resident memory — on a route
+  an unauthenticated caller drives, because the derivation runs before the password is known to
+  be right and the absent-user path runs one deliberately. A semaphore admits one per core,
+  which is the useful ceiling for CPU- and memory-bound work; past it, requests queue, and the
+  wait is identical for a real and an absent account. `nest-auth` reaches the same bound through
+  libuv's four-thread pool.
+- **`identifierPreimages`, `requestFieldBounds` and `errorCatalog` in the shared contract.** The
+  preimages each backend HMACs, the length bounds every request DTO applies, and the full
+  `auth.*` vocabulary with the codes that must never reach a client. Both conformance tiers
+  assert against them by exercising the real derivations and the real validators. Writing the
+  catalog down immediately found that this crate's own catalog test was missing three codes it
+  does emit.
+
 ### Changed
 
 - **A recovery code is claimed before it is accepted.** Consuming one is a read-modify-write
@@ -468,6 +492,51 @@ version bump.
   inside the window, so one captured consumed token could mint a session
   repeatedly. It is consumed on use now, matching `nest-auth`.
 
+- **Every OTP failure answers `auth.otp_invalid`, in the same time.** `forgot_password` answers
+  the same whether or not the address exists — but it only writes an OTP record when it does, so
+  `auth.otp_expired` for an absent record and `auth.otp_invalid` for a wrong code turned that
+  uniform answer definitive after one extra request. `auth.otp_max_attempts` said the same thing
+  more slowly, since only a record that exists can reach a ceiling. Both collapse through
+  `to_wire`, the treatment the three token sentinels already get, and `AuthError::http_status`
+  now reads the **wire** code — otherwise the oracle survived as 429-vs-401, which is also where
+  the two libraries disagreed on the status for one failure.
+- **The invitee index is keyed by an HMAC of the address.** It used a bare SHA-256, which an
+  address carries far too little entropy to survive, and this key is the one handle anyone
+  reading a keyspace dump has on who a tenant has been inviting. **Breaking:** the
+  `InvitationStore` methods take the derived identifier rather than the raw address, and
+  invitations pending across the upgrade stay redeemable but can no longer be superseded or
+  withdrawn by address.
+- **`revoke_invitation` answers an outranked revoker exactly as it answers an address with
+  nothing pending.** The caller names an address and nothing else, so `InsufficientRole` said
+  "there is a pending invitation here, at a role above yours" while `Ok(false)` said "there is
+  none" — an oracle any member could walk an address list through, and precisely the disclosure
+  hashing the address into the index exists to prevent. The revoker's own standing is a fact
+  about the caller, so it still refuses out loud, and now does so before any lookup.
+- **The new password is judged before any reset proof is spent.** Every proof is single-use and
+  consumed atomically, so a screen rejection that arrived afterwards burned it: the caller was
+  told their password was unacceptable and, in the same breath, that the credential they needed
+  to fix it was gone.
+- **Request bounds are held identical to `nest-auth`'s** and pinned by `requestFieldBounds`. The
+  address, the tenant, the display name, the three reset proofs, the invitation token and five
+  accepted-but-unused OAuth query fields were unbounded here; the email-verification OTP accepted
+  4–8 digits when six is the only length either backend issues; and the login password gains the
+  explicit floor of 1 that `ChangePasswordDto` already reasons for.
+- **`cookies.trusted_origins` is accepted under `Lax`/`Strict` when a cookie-domain resolver is
+  configured.** Those withhold the cookie cross-**site**, not cross-**origin**: a deployment
+  serving `app.example.com` and `api.example.com` from one `.example.com` cookie is same-site, so
+  the browser sends it on a POST between them — and `Sec-Fetch-Site: same-site` is not proof the
+  request came from the app itself, so the guard falls through to the origin check. Refusing the
+  list there left that deployment with no configuration at all: the cookie arrives, the request
+  is refused 403, and the one setting that would have allowed it was rejected at startup.
+- **`NoOpEmailProvider` masks the recipient.** A debug level is not a private one, and a provider
+  that only runs when none is configured is the one likeliest to be running with verbose logging
+  turned on.
+- **A build without the `mfa` feature refuses an MFA challenge instead of signing one nobody can
+  redeem.** `issue_mfa_temp_token` used to return the JWT anyway: an account whose stored
+  `mfa_enabled` is true — a row left behind when a deployment turned the feature off — got a
+  token with nowhere to spend it and a "challenge issued" line in the log. The user could not
+  sign in and the log said the flow was working.
+
 ### Removed
 
 - **Every legacy-compatibility path in the credential surface.** Both libraries are new and
@@ -477,6 +546,17 @@ version bump.
     `N = 2^15` assumption and its bounded-hex parser,
   - the UUID-v4 refresh-token shape,
   - and the corresponding `refreshTokenLegacy` / `recoveryCodeDigestLegacy` contract entries.
+
+- **Five error codes nothing could emit.** `SessionExpired` and `SessionLimitReached` describe
+  behaviours neither library has — rotation answers `RefreshTokenInvalid`, and the session cap
+  evicts rather than refuses. `RecoveryCodeInvalid` is unreachable on purpose: a wrong recovery
+  code answers `MfaInvalidCode`, so a caller cannot learn which kind of credential they guessed
+  wrong. `PasswordTooWeak` is the request DTO's job, and `PasswordResetTokenExpired` was already
+  documented as unreachable by design. A code nothing can emit is a client branch that never
+  fires. **Breaking** for a consumer matching on them; gone from both libraries.
+- **`TokenManagerService::binding_holds`.** The rule it implemented now lives inside
+  `bymax_auth_jwt::verify`, which is what lets the edge apply it too. Two implementations of one
+  rule is how they drift.
 
 ### Fixed
 
@@ -539,6 +619,32 @@ version bump.
 - **`handlers.ts` in `packages/rust-auth` had no tests at all** — the one module
   that writes `Set-Cookie` back to a browser. It is at 100 % lines now, and the
   package runs under a coverage ratchet in CI so it can only go up.
+
+- **Both login doors answered before proving the password.** The dashboard and platform logins
+  ran the status and email-verification gates ahead of `passwords.verify`, so a caller who never
+  held the credential learned an account's moderation state from the error code alone — and
+  learned it in single-digit milliseconds, because the KDF was skipped. A wrong password now
+  answers `InvalidCredentials` whatever the account's state is, and only the password holder is
+  told why they still cannot sign in.
+- **A tenant named `platform` shared the platform lockout counter.** The login path keyed its
+  brute-force counter on `hashed_identifier`, whose preimage is `{tenantId}:{email}`, while the
+  platform door builds `platform:{email}` — and the tenant comes from the request body whenever
+  no resolver is configured, which is the default. Nothing stopped the two colliding, so five
+  unauthenticated dashboard logins against an operator's address could lock that operator out of
+  the console, repeatably, and a successful one cleared their lockout mid-attack. The login path
+  derives through `lockout_identifier` now, which namespaces it with `dashboard:`;
+  `hashed_identifier` is left alone because it also keys the OTP records, whose keyspace is
+  shared byte-for-byte with `nest-auth`.
+- **Platform rotation never re-read the admin.** `refresh` worked entirely from the session
+  record, so blocking an administrator closed only the login door: they kept minting access
+  tokens for the refresh token's whole lifetime, which ASVS v5 §7.4.2 asks a disable to end. A
+  blocked or deleted admin now loses every platform session, including the one just minted.
+- **Rotation froze the role and the tenant.** Claims were built from the session record written
+  at login and inherited unchanged through every later rotation, so demoting an ADMIN to MEMBER,
+  or moving a user between tenants, had no effect on a live session for the refresh token's whole
+  lifetime — while every role check reads that claim. The dashboard refresh already re-read the
+  account for the gates above; the authority was sitting there, unused. It is re-stamped now, and
+  only when it differs.
 
 ### Internal
 

@@ -195,6 +195,68 @@ describe("server-only enforcement", () => {
   });
 });
 
+describe("verifyJwtToken — the iss/aud binding the backend enforces", () => {
+  // A backend configured with `jwt.issuer` / `jwt.audience` refuses any token that does not
+  // carry them. An edge that skips the check accepts one minted for a different service — and
+  // with HS256 the verifier can also sign, so that is a real party holding the same secret, not
+  // a hypothetical one.
+  const bound = () => dashboardToken({ iss: "bymax-one", aud: "dashboard" });
+
+  it("accepts a token carrying the expected pair", async () => {
+    const result = await verifyJwtToken(bound(), SECRET, {
+      issuer: "bymax-one",
+      audience: "dashboard",
+    });
+    expect(result.isValid).toBe(true);
+  });
+
+  it("refuses a token minted for another issuer or another audience", async () => {
+    const wrongIssuer = await verifyJwtToken(bound(), SECRET, {
+      issuer: "someone-else",
+      audience: "dashboard",
+    });
+    const wrongAudience = await verifyJwtToken(bound(), SECRET, {
+      issuer: "bymax-one",
+      audience: "some-other-service",
+    });
+    expect(wrongIssuer.isValid).toBe(false);
+    expect(wrongAudience.isValid).toBe(false);
+  });
+
+  it("refuses an unstamped token as firmly as a wrongly stamped one", async () => {
+    // Otherwise omitting the claim is how an attacker opts out of the binding, which is the
+    // same as the deployment not having one.
+    const result = await verifyJwtToken(dashboardToken(), SECRET, { issuer: "bymax-one" });
+    expect(result.isValid).toBe(false);
+  });
+
+  it("checks nothing when the deployment configures nothing, which is the default", async () => {
+    expect((await verifyJwtToken(dashboardToken(), SECRET)).isValid).toBe(true);
+  });
+});
+
+describe("createAuthProxy — carries the binding to the edge verifier", () => {
+  // The proxy is where most consumers meet the edge, so a binding it cannot pass through is a
+  // binding most deployments do not have.
+  it("admits a correctly bound token and refuses one bound to another service", async () => {
+    const { proxy } = createAuthProxy({
+      accessTokenSecret: SECRET,
+      expectedIssuer: "bymax-one",
+      expectedAudience: "dashboard",
+    });
+
+    const admitted = await proxy(
+      protectedRequest(dashboardToken({ iss: "bymax-one", aud: "dashboard", mfaEnabled: false })),
+    );
+    const refused = await proxy(
+      protectedRequest(dashboardToken({ iss: "bymax-one", aud: "billing", mfaEnabled: false })),
+    );
+
+    expect(admittedUserId(admitted)).toBe("u_1");
+    expect(redirectedToLogin(refused)).toBe(true);
+  });
+});
+
 describe("createAuthProxy — fail-closed verification (S1) and token-type assertion (S2)", () => {
   it("admits a validly-signed access token when a non-empty secret is configured", async () => {
     // The happy path: an authoritative HS256 verification with the matching secret admits the

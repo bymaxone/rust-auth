@@ -22,28 +22,25 @@ fn catalog() -> Vec<(AuthErrorCode, &'static str, u16)> {
         (TokenRevoked, "auth.token_revoked", 401),
         (TokenInvalid, "auth.token_invalid", 401),
         (RefreshTokenInvalid, "auth.refresh_token_invalid", 401),
-        (SessionExpired, "auth.session_expired", 401),
-        (SessionLimitReached, "auth.session_limit_reached", 409),
         (SessionNotFound, "auth.session_not_found", 404),
         (TokenMissing, "auth.token_missing", 401),
         (EmailAlreadyExists, "auth.email_already_exists", 409),
         (EmailNotVerified, "auth.email_not_verified", 403),
+        (
+            EmailChangeTokenInvalid,
+            "auth.email_change_token_invalid",
+            400,
+        ),
         (MfaRequired, "auth.mfa_required", 403),
         (MfaInvalidCode, "auth.mfa_invalid_code", 401),
         (MfaAlreadyEnabled, "auth.mfa_already_enabled", 409),
         (MfaNotEnabled, "auth.mfa_not_enabled", 400),
         (MfaSetupRequired, "auth.mfa_setup_required", 400),
         (MfaTempTokenInvalid, "auth.mfa_temp_token_invalid", 401),
-        (RecoveryCodeInvalid, "auth.recovery_code_invalid", 401),
-        (PasswordTooWeak, "auth.password_too_weak", 400),
+        (PasswordCompromised, "auth.password_compromised", 400),
         (
             PasswordResetTokenInvalid,
             "auth.password_reset_token_invalid",
-            400,
-        ),
-        (
-            PasswordResetTokenExpired,
-            "auth.password_reset_token_expired",
             400,
         ),
         (OtpInvalid, "auth.otp_invalid", 401),
@@ -51,6 +48,7 @@ fn catalog() -> Vec<(AuthErrorCode, &'static str, u16)> {
         (OtpMaxAttempts, "auth.otp_max_attempts", 429),
         (InsufficientRole, "auth.insufficient_role", 403),
         (Forbidden, "auth.forbidden", 403),
+        (UntrustedOrigin, "auth.untrusted_origin", 403),
         (InvalidInvitationToken, "auth.invalid_invitation_token", 400),
         (OauthFailed, "auth.oauth_failed", 401),
         (OauthEmailMismatch, "auth.oauth_email_mismatch", 409),
@@ -77,8 +75,6 @@ fn all_errors() -> Vec<AuthError> {
         AuthError::TokenRevoked,
         AuthError::TokenInvalid,
         AuthError::RefreshTokenInvalid,
-        AuthError::SessionExpired,
-        AuthError::SessionLimitReached,
         AuthError::SessionNotFound,
         AuthError::TokenMissing,
         AuthError::EmailAlreadyExists,
@@ -89,11 +85,8 @@ fn all_errors() -> Vec<AuthError> {
         AuthError::MfaNotEnabled,
         AuthError::MfaSetupRequired,
         AuthError::MfaTempTokenInvalid,
-        AuthError::RecoveryCodeInvalid,
-        AuthError::PasswordTooWeak,
         AuthError::PasswordCompromised,
         AuthError::PasswordResetTokenInvalid,
-        AuthError::PasswordResetTokenExpired,
         AuthError::OtpInvalid,
         AuthError::OtpExpired,
         AuthError::OtpMaxAttempts,
@@ -120,8 +113,8 @@ fn all_errors() -> Vec<AuthError> {
 #[test]
 fn every_code_serializes_to_its_string_and_maps_to_its_status() {
     // Table-driven parity check: each code's `auth.*` string and HTTP status must match
-    // the catalog exactly. The catalog covers all 38 codes.
-    assert_eq!(catalog().len(), 38);
+    // the catalog exactly. The catalog covers all 36 codes.
+    assert_eq!(catalog().len(), 36);
     for (code, wire, status) in catalog() {
         let json = serde_json::to_string(&code).unwrap_or_default();
         assert_eq!(json, format!("\"{wire}\""), "wrong string for {code:?}");
@@ -288,4 +281,66 @@ fn field_error_round_trips_with_camel_case() {
     let json = serde_json::to_string(&fe).unwrap_or_default();
     let back = serde_json::from_str::<FieldError>(&json).ok();
     assert_eq!(back, Some(fe));
+}
+
+/// Read a string array from `errorCatalog.{key}` in the shared cross-implementation contract.
+///
+/// The file at `conformance/wire-contract.json` is held byte-identical by nest-auth, which can
+/// back the same deployment. Reading it here rather than repeating the list means a code added
+/// or removed on one side turns that side red, instead of surfacing as a client branch that
+/// never fires against the other backend.
+fn contract_codes(key: &str) -> Vec<String> {
+    let path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../conformance/wire-contract.json"
+    );
+    let raw = std::fs::read_to_string(path).unwrap_or_default();
+    let root: serde_json::Value = serde_json::from_str(&raw).unwrap_or(serde_json::Value::Null);
+    root.get("errorCatalog")
+        .and_then(|s| s.get(key))
+        .and_then(serde_json::Value::as_array)
+        .map(|values| {
+            values
+                .iter()
+                .filter_map(|v| v.as_str().map(str::to_owned))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+#[test]
+fn the_catalog_names_exactly_the_codes_the_shared_contract_does() {
+    // One vocabulary across both implementations: a code present on one side only is a client
+    // branch that never fires against the other, and a code neither side emits is a branch that
+    // never fires at all — which is what five of them were before this check existed.
+    let mut expected = contract_codes("codes");
+    let mut actual: Vec<String> = catalog()
+        .iter()
+        .filter_map(|(code, _, _)| serde_json::to_value(code).ok())
+        .filter_map(|v| v.as_str().map(str::to_owned))
+        .collect();
+    expected.sort();
+    actual.sort();
+    assert_eq!(
+        actual, expected,
+        "the catalog drifted from the shared contract"
+    );
+}
+
+#[test]
+fn the_internal_only_codes_are_exactly_the_ones_the_contract_names() {
+    // Each collapses onto a public code so a caller cannot tell "valid until revoked" from
+    // "never valid", or "no record was ever written here" from "wrong code". The set has to
+    // match on both sides, or one backend hands back a distinction the other withholds.
+    let expected = contract_codes("internalOnly");
+    let mut actual: Vec<String> = catalog()
+        .iter()
+        .filter(|(code, _, _)| code.is_internal_only())
+        .filter_map(|(code, _, _)| serde_json::to_value(code).ok())
+        .filter_map(|v| v.as_str().map(str::to_owned))
+        .collect();
+    actual.sort();
+    let mut expected = expected;
+    expected.sort();
+    assert_eq!(actual, expected);
 }

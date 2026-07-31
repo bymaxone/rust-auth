@@ -435,7 +435,7 @@ Everything is configured through `AuthConfig`. Two ready-made profiles bundle se
 | **controllers**    | per-group route toggles                                                      | feature-driven             |
 
 > [!NOTE]
-> `build()` validates every cross-field invariant (secret length/entropy, role referential integrity, parameter floors, `SameSite=None ⇒ Secure`, `SameSite=None ⇔ trusted_origins`, OAuth redirect allow-listing, required stores) and rejects an invalid config with a precise `ConfigError`.
+> `build()` validates every cross-field invariant (secret length/entropy, role referential integrity, parameter floors, `SameSite=None ⇒ Secure`, `trusted_origins` reachable under the cookie posture, OAuth redirect allow-listing, required stores) and rejects an invalid config with a precise `ConfigError`.
 
 > [!TIP]
 > **Binding tokens to an issuer and an audience.** `jwt.issuer` and `jwt.audience` are `None`
@@ -500,9 +500,13 @@ sessions and origins that already exist:
 
 - `jwt.absolute_session_lifetime_days` caps how long one login can be extended by rotation.
   Without it, a client refreshing every fifteen minutes keeps a session alive forever.
-- `cookies.trusted_origins` is required as soon as `same_site` is `None`, and refused under any
-  other posture — that is the only setting where the browser sends the session cookie
-  cross-site, and therefore the only one where an origin needs authorizing.
+- `cookies.trusted_origins` is required as soon as `same_site` is `None` — that is the setting
+  where the browser sends the session cookie cross-site, so an origin has to be authorized. It
+  is also accepted under `Lax`/`Strict` when `cookies.resolve_domains` is configured: those
+  withhold the cookie cross-**site**, not cross-**origin**, so a deployment serving
+  `app.example.com` and `api.example.com` from one `.example.com` cookie is same-site and the
+  browser does send it. Without a shared cookie domain the list can never be consulted, and is
+  still refused.
 
 The breached-password check is opt-in for a different reason: it is the only part of the
 credential path that reaches the network, and a library should not start talking to a third

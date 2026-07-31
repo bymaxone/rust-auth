@@ -88,24 +88,48 @@ export async function decodeJwtToken(token: string): Promise<DecodedToken> {
 }
 
 /**
+ * The `iss`/`aud` pair the backend was configured to stamp, when it was configured to stamp one.
+ *
+ * Pass it wherever `jwt.issuer` / `jwt.audience` are set on the backend. The backend refuses any
+ * token that does not carry them; an edge that skips the check accepts tokens minted for a
+ * different service, and with HS256 every holder of the secret is a potential minter. A token
+ * carrying no such claim is refused as firmly as one carrying the wrong value, so omitting the
+ * claim is not a way out of the check. Leave a field out only when the backend leaves it out.
+ */
+export interface TokenBinding {
+  /** The `iss` the token must name. */
+  issuer?: string | null;
+  /** The `aud` the token must name. */
+  audience?: string | null;
+}
+
+/**
  * Verify a token at the edge. When `secret` is a non-empty string, the WASM HS256 verifier is
- * authoritative — it checks the signature, `exp`, and `iat`, and rejects `none`/`RS256`/`ES256`.
- * When `secret` is `null`/`undefined`, it falls back to a decode-only read (non-authoritative).
- * Never throws: any failure resolves `{ isValid: false }`.
+ * authoritative — it checks the signature, `exp`, `iat` and the configured `iss`/`aud` binding,
+ * and rejects `none`/`RS256`/`ES256`. When `secret` is `null`/`undefined`, it falls back to a
+ * decode-only read (non-authoritative). Never throws: any failure resolves `{ isValid: false }`.
  *
  * @param token - The compact JWS to verify.
  * @param secret - The HS256 secret for authoritative verification, or `null`/`undefined` to
  *   decode only.
+ * @param binding - The `iss`/`aud` pair the backend stamps. See {@link TokenBinding}.
  * @returns The verified (or decoded) {@link DecodedToken}.
  */
 export async function verifyJwtToken(
   token: string,
   secret?: string | null,
+  binding?: TokenBinding,
 ): Promise<DecodedToken> {
   try {
     const { decode_jwt, verify_jwt_hs256 } = await loadEdgeWasm();
     if (typeof secret === "string" && secret.length > 0) {
-      const raw = verify_jwt_hs256(token, secret);
+      const raw = verify_jwt_hs256(
+        token,
+        secret,
+        undefined,
+        binding?.issuer ?? undefined,
+        binding?.audience ?? undefined,
+      );
       if (raw === undefined) return { isValid: false };
       return { isValid: true, payload: JSON.parse(raw) as AuthJwtPayload };
     }

@@ -68,7 +68,7 @@ fn shared_dir() -> PathBuf {
 }
 
 /// Every catalog code, in a fixed order, so the generated map is deterministic.
-fn all_error_codes() -> [AuthErrorCode; 38] {
+fn all_error_codes() -> [AuthErrorCode; 33] {
     use AuthErrorCode::*;
     [
         InvalidCredentials,
@@ -81,8 +81,6 @@ fn all_error_codes() -> [AuthErrorCode; 38] {
         TokenRevoked,
         TokenInvalid,
         RefreshTokenInvalid,
-        SessionExpired,
-        SessionLimitReached,
         SessionNotFound,
         TokenMissing,
         EmailAlreadyExists,
@@ -93,10 +91,7 @@ fn all_error_codes() -> [AuthErrorCode; 38] {
         MfaNotEnabled,
         MfaSetupRequired,
         MfaTempTokenInvalid,
-        RecoveryCodeInvalid,
-        PasswordTooWeak,
         PasswordResetTokenInvalid,
-        PasswordResetTokenExpired,
         OtpInvalid,
         OtpExpired,
         OtpMaxAttempts,
