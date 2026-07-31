@@ -44,7 +44,7 @@ impl AuthEngine {
         };
         let config = self.config().config();
         let tenant_id = self.resolve_tenant(&input.tenant_id, ctx).await?;
-        let identifier = self.hashed_identifier(&tenant_id, &input.email);
+        let identifier = self.lockout_identifier(&tenant_id, &input.email);
 
         let hook_ctx = HookContext::from_request(
             ctx,
@@ -99,32 +99,6 @@ impl AuthEngine {
                 .await;
         };
 
-        // Status gate runs before the KDF so a blocked account never consumes hashing CPU.
-        if let Err(error) = self.assert_user_not_blocked(&user.status) {
-            self.fire_login_failed(
-                &input.email,
-                &tenant_id,
-                Some(&user.id),
-                LoginFailureReason::AccountBlocked,
-                &hook_ctx,
-            )
-            .await;
-            return Err(error);
-        }
-
-        // Email-verification gate.
-        if config.email_verification.required && !user.email_verified {
-            self.fire_login_failed(
-                &input.email,
-                &tenant_id,
-                Some(&user.id),
-                LoginFailureReason::EmailNotVerified,
-                &hook_ctx,
-            )
-            .await;
-            return Err(AuthError::EmailNotVerified);
-        }
-
         // A present local hash is guaranteed by the filter above.
         let phc = user.password_hash.clone().unwrap_or_default();
         let outcome = self.passwords().verify(&input.password, &phc).await?;
@@ -139,6 +113,42 @@ impl AuthEngine {
                     &hook_ctx,
                 )
                 .await;
+        }
+
+        // Only NOW, with the password proved, may the account's own state be described.
+        //
+        // Both gates used to run before the KDF, to spare the CPU of hashing against an
+        // account that could never sign in. The saving was real and the cost was worse: a
+        // blocked or unverified account answered with its own status, in ~1 ms against the
+        // 300 ms anti-enumeration floor every other refusal pays, and without touching the
+        // failure counter — so anyone could enumerate addresses AND read their moderation
+        // state at whatever rate the per-IP limiter allowed, and never trip a lockout. The CPU
+        // it saved is bounded by that limiter; the disclosure it bought was bounded by nothing.
+        //
+        // The holder of the credential is not the attacker this hides from, and telling them
+        // "your address is unverified" is the whole point of the flow.
+        if let Err(error) = self.assert_user_not_blocked(&user.status) {
+            self.fire_login_failed(
+                &input.email,
+                &tenant_id,
+                Some(&user.id),
+                LoginFailureReason::AccountBlocked,
+                &hook_ctx,
+            )
+            .await;
+            return Err(error);
+        }
+
+        if config.email_verification.required && !user.email_verified {
+            self.fire_login_failed(
+                &input.email,
+                &tenant_id,
+                Some(&user.id),
+                LoginFailureReason::EmailNotVerified,
+                &hook_ctx,
+            )
+            .await;
+            return Err(AuthError::EmailNotVerified);
         }
 
         // Password proven: clear the failure counter.
@@ -295,7 +305,7 @@ impl AuthEngine {
     pub async fn unlock_account(&self, email: &str, tenant_id: &str) -> Result<(), AuthError> {
         // Normalized exactly as login normalizes it, or the derived key misses the counter the
         // lockout actually wrote and the unlock silently does nothing.
-        let identifier = self.hashed_identifier(tenant_id, &normalize_email(email));
+        let identifier = self.lockout_identifier(tenant_id, &normalize_email(email));
         self.brute_force().reset(&identifier).await?;
         tracing::info!(email = %mask_email(email), %tenant_id, "lockout cleared");
         Ok(())
@@ -902,6 +912,104 @@ mod tests {
                 "siem unreachable".to_owned(),
             ))
         }
+    }
+
+    #[tokio::test]
+    async fn a_tenant_named_platform_never_reaches_the_platform_lockout_key() {
+        // The plane collision. A tenant whose id is literally `platform` used to produce a
+        // byte-identical lockout identifier to the platform plane's own `platform:{email}`, so
+        // five unauthenticated dashboard logins locked an operator out of the console — and a
+        // successful one cleared their lockout mid-attack. `tenant_id` comes from the request
+        // body whenever no resolver is configured, which is the default.
+        let Some(h) = harness(base_config(), None) else {
+            return;
+        };
+
+        let dashboard = h.engine.lockout_identifier("platform", "admin@example.com");
+        // The platform plane's own preimage, reproduced here rather than called, because the
+        // point is that the two can never be equal whatever either side does internally.
+        let platform = crate::services::to_hex(&bymax_auth_crypto::mac::hmac_sha256(
+            h.engine.config().hmac_key(),
+            b"platform:admin@example.com",
+        ));
+
+        assert_ne!(
+            dashboard, platform,
+            "a tenant named `platform` collided with the platform lockout counter"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_wrong_password_answers_the_same_whatever_state_the_account_is_in() {
+        // The enumeration oracle this ordering exists to close. A blocked or unverified
+        // account must be indistinguishable from a non-existent one to anyone who does NOT
+        // hold the password — same error, and the failure counter advances so probing is
+        // bounded by the lockout rather than only by the per-IP limit.
+        let mut cfg = base_config();
+        cfg.email_verification.required = true;
+        let Some(h) = harness(cfg, None) else { return };
+        let _ = h
+            .seed(SeedUser::active("active@example.com", "right"))
+            .await;
+        let _ = h
+            .seed(SeedUser {
+                status: "SUSPENDED".to_owned(),
+                ..SeedUser::active("blocked@example.com", "right")
+            })
+            .await;
+        let _ = h
+            .seed(SeedUser {
+                email_verified: false,
+                ..SeedUser::active("unverified@example.com", "right")
+            })
+            .await;
+
+        for email in [
+            "nobody@example.com",
+            "active@example.com",
+            "blocked@example.com",
+            "unverified@example.com",
+        ] {
+            let outcome = h.engine.login(login_input(email, "wrong"), &ctx()).await;
+            assert!(
+                matches!(outcome, Err(AuthError::InvalidCredentials)),
+                "{email} answered differently to a wrong password: {outcome:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn the_password_holder_is_told_why_the_account_cannot_sign_in() {
+        // The other half: the flow is useless if the real account holder cannot learn that
+        // their address is unverified or their account suspended.
+        let mut cfg = base_config();
+        cfg.email_verification.required = true;
+        let Some(h) = harness(cfg, None) else { return };
+        let _ = h
+            .seed(SeedUser {
+                email_verified: false,
+                ..SeedUser::active("unverified@example.com", "right")
+            })
+            .await;
+        let _ = h
+            .seed(SeedUser {
+                status: "SUSPENDED".to_owned(),
+                ..SeedUser::active("blocked@example.com", "right")
+            })
+            .await;
+
+        assert!(matches!(
+            h.engine
+                .login(login_input("unverified@example.com", "right"), &ctx())
+                .await,
+            Err(AuthError::EmailNotVerified)
+        ));
+        assert!(matches!(
+            h.engine
+                .login(login_input("blocked@example.com", "right"), &ctx())
+                .await,
+            Err(AuthError::AccountSuspended)
+        ));
     }
 
     #[tokio::test]

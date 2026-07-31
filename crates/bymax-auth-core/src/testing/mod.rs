@@ -61,6 +61,25 @@ impl InMemoryUserRepository {
         lock(&self.users).remove(id).is_some()
     }
 
+    /// Move a user's authority — role, tenant, or both — the way an operator's own admin
+    /// surface would, so a test can drive the "the account was demoted while a session was
+    /// live" branch. Returns whether a row was updated.
+    ///
+    /// The `UserRepository` trait has no role or tenant mutator: who may do what is the
+    /// host's domain, not the engine's. This exists only on the double, to reach a branch the
+    /// engine has to handle once a host does move someone.
+    pub fn set_authority(&self, id: &str, role: Option<&str>, tenant_id: Option<&str>) -> bool {
+        let mut users = lock(&self.users);
+        let Some(user) = users.get_mut(id) else { return false };
+        if let Some(role) = role {
+            user.role = role.to_owned();
+        }
+        if let Some(tenant_id) = tenant_id {
+            user.tenant_id = tenant_id.to_owned();
+        }
+        true
+    }
+
     /// Allocate a fresh, monotonically-increasing user id.
     fn allocate_id(&self) -> String {
         format!("user-{}", self.next_id.fetch_add(1, Ordering::Relaxed))

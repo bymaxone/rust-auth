@@ -137,11 +137,13 @@ impl PlatformAuthService {
             return self.record_failure_and_reject(&identifier, started).await;
         };
 
-        // Status gate runs before the KDF so a blocked account never consumes hashing CPU. The
-        // platform domain has NO email-verification gate (admins are provisioned directly) and
-        // NO OAuth path — both are absent by construction.
-        self.assert_not_blocked(&admin.status)?;
-
+        // The password is proved FIRST. The status gate below used to run ahead of the KDF to
+        // spare hashing an account that could never sign in — but it answered with the
+        // administrator's own status, well inside the anti-enumeration floor every other
+        // refusal pays, and without touching the failure counter. That enumerated operator
+        // accounts and read their moderation state on the highest-privilege plane in the
+        // system. The hashing it saved is bounded by the per-IP limiter; the disclosure was
+        // bounded by nothing.
         let outcome = self
             .passwords
             .verify(password, &admin.password_hash)
@@ -149,6 +151,11 @@ impl PlatformAuthService {
         if !outcome.matched {
             return self.record_failure_and_reject(&identifier, started).await;
         }
+
+        // Only now is the account's state described. The platform domain has NO
+        // email-verification gate (admins are provisioned directly) and NO OAuth path — both
+        // are absent by construction.
+        self.assert_not_blocked(&admin.status)?;
 
         // Password proven: clear the failure counter.
         self.brute_force.reset(&identifier).await?;
@@ -217,9 +224,42 @@ impl PlatformAuthService {
         ip: &str,
         user_agent: &str,
     ) -> Result<bymax_auth_types::RotatedTokens, AuthError> {
-        self.tokens
+        let rotated = self
+            .tokens
             .reissue_platform_tokens(old_refresh, ip, user_agent)
+            .await?;
+
+        // Re-read the administrator and re-apply the status gate — the backstop the dashboard
+        // plane has carried since ASVS v5 §7.4.2 was applied to it, and which this plane went
+        // without. Rotation works entirely from the stored `prt:` record, so nothing else on
+        // this path ever looks at the account again: a SUSPENDED or BANNED operator kept
+        // renewing access every fifteen minutes for the refresh token's whole lifetime, on the
+        // highest-privilege identity in the system, and the kill switch was advisory exactly
+        // where it mattered most.
+        let claims = self
+            .tokens
+            .verify_platform_access(&rotated.access_token)
+            .await?;
+        let admin = self
+            .repo
+            .find_by_id(&claims.sub)
             .await
+            .map_err(repository_error)?;
+        let Some(admin) = admin else {
+            // The account was deleted while the session outlived it. Clear what is left rather
+            // than leaving the freshly rotated records to be rotated again.
+            self.revoke_all_platform_sessions(&claims.sub).await?;
+            return Err(AuthError::RefreshTokenInvalid);
+        };
+
+        if let Err(error) = self.assert_not_blocked(&admin.status) {
+            // Compensated, not merely refused: the rotation above already minted a live pair,
+            // and leaving it would hand back exactly the access this gate exists to end.
+            self.revoke_all_platform_sessions(&admin.id).await?;
+            return Err(error);
+        }
+
+        Ok(rotated)
     }
 
     /// Revoke the current platform session: blacklist the access token's `jti` for its
@@ -672,8 +712,72 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_blocked_admin_cannot_rotate_and_loses_every_platform_session() {
+        // Rotation works entirely from the stored `prt:` record, so without this backstop a
+        // SUSPENDED or BANNED operator kept renewing access every fifteen minutes for the
+        // refresh token's whole lifetime — on the highest-privilege identity in the system.
+        let Some(h) = harness(platform_config()) else { return };
+        h.admins.insert(AuthPlatformUser {
+            id: "admin-live".to_owned(),
+            email: "live@admin.io".to_owned(),
+            name: "Admin".to_owned(),
+            password_hash: hash_password("pw"),
+            role: "SUPER_ADMIN".to_owned(),
+            status: "ACTIVE".to_owned(),
+            mfa_enabled: false,
+            mfa_secret: None,
+            mfa_recovery_codes: None,
+            platform_id: None,
+            last_login_at: None,
+            updated_at: OffsetDateTime::UNIX_EPOCH,
+            created_at: OffsetDateTime::UNIX_EPOCH,
+        });
+        let Some(svc) = h.engine.platform_auth() else { return };
+        let Ok(PlatformLoginResult::Success(auth)) =
+            svc.login("live@admin.io", "pw", "1.2.3.4", "a").await
+        else {
+            return;
+        };
+
+        // While active, the rotation works.
+        let rotated = svc.refresh(&auth.refresh_token, "1.2.3.4", "a").await;
+        assert!(rotated.is_ok(), "an active admin must rotate: {rotated:?}");
+        let Ok(rotated) = rotated else { return };
+
+        // Suspended through the host's admin surface — the record in Redis is untouched.
+        h.admins.insert(AuthPlatformUser {
+            id: "admin-live".to_owned(),
+            email: "live@admin.io".to_owned(),
+            name: "Admin".to_owned(),
+            password_hash: hash_password("pw"),
+            role: "SUPER_ADMIN".to_owned(),
+            status: "SUSPENDED".to_owned(),
+            mfa_enabled: false,
+            mfa_secret: None,
+            mfa_recovery_codes: None,
+            platform_id: None,
+            last_login_at: None,
+            updated_at: OffsetDateTime::UNIX_EPOCH,
+            created_at: OffsetDateTime::UNIX_EPOCH,
+        });
+
+        assert!(matches!(
+            svc.refresh(&rotated.refresh_token, "1.2.3.4", "a").await,
+            Err(AuthError::AccountSuspended)
+        ));
+        // Compensated, not merely refused: the rotation that just ran minted a live pair, and
+        // leaving it would hand back the access the suspension exists to end.
+        assert!(matches!(
+            svc.refresh(&rotated.refresh_token, "1.2.3.4", "a").await,
+            Err(AuthError::RefreshTokenInvalid)
+        ));
+    }
+
+    #[tokio::test]
     async fn each_blocked_status_maps_to_its_specific_error() {
-        // The status gate runs before the KDF and maps every blocked status to its 403.
+        // Every blocked status maps to its own 403 — for the holder of the password. The gate
+        // runs AFTER the KDF now: answering before it enumerated operator accounts and read
+        // their moderation state, so each call here proves the password first.
         let Some(h) = harness(platform_config()) else { return };
         for (email, status) in [
             ("banned@admin.io", "BANNED"),

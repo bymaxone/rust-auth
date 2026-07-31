@@ -1036,6 +1036,41 @@ impl TokenManagerService {
     /// refuses a token only when `mfa_enabled && !mfa_verified`, so minting `false` here
     /// would let one routine refresh turn an enrolled account's token into one that clears
     /// every MFA-gated route without ever completing a challenge.
+    /// Re-sign a rotated access token with the authority the account holds *now*.
+    ///
+    /// Rotation builds its claims from the session record written at login, so the role and
+    /// tenant it carries are the ones the account had then. This re-stamps both from the
+    /// freshly read account, keeping everything else the rotated token already established —
+    /// including `mfa_verified`, because a second factor already cleared on this session must
+    /// not be silently demanded again. A fresh `jti`, window, and epoch are issued: the token
+    /// this replaces was never handed out.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AuthError::Internal`] only if claim serialization fails (unreachable for the
+    /// concrete claim type), or a store failure while reading the epoch.
+    pub(crate) async fn reissue_access_with_authority(
+        &self,
+        claims: &DashboardClaims,
+        role: &str,
+        tenant_id: &str,
+    ) -> Result<String, AuthError> {
+        let now = now_unix();
+        let epoch = self
+            .session_store
+            .current_epoch(SessionKind::Dashboard, &claims.sub)
+            .await?;
+        self.issue_access(&DashboardClaims {
+            epoch,
+            jti: new_uuid_v4(),
+            role: role.to_owned(),
+            tenant_id: tenant_id.to_owned(),
+            iat: now,
+            exp: now.saturating_add(self.access_ttl.as_secs().min(i64::MAX as u64) as i64),
+            ..claims.clone()
+        })
+    }
+
     fn rotated_claims(&self, record: &SessionRecord, epoch: u64) -> DashboardClaims {
         let now = now_unix();
         DashboardClaims {

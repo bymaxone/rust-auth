@@ -164,7 +164,7 @@ impl AuthEngine {
         // available on both the live and the grace path. The adapter verified this same token
         // to build its response body, so the work is moved rather than added.
         let claims = self.tokens().verify_access(&rotated.access_token).await?;
-        let user_id = claims.sub;
+        let user_id = claims.sub.clone();
 
         // Re-read the account and re-apply the two gates `login` applies. Rotation works
         // entirely from the store record, so nothing else on this path ever looks at the user
@@ -205,6 +205,29 @@ impl AuthEngine {
         if self.config().config().email_verification.required && !user.email_verified {
             return Err(AuthError::EmailNotVerified);
         }
+
+        // Re-stamp the access token from the account just re-read.
+        //
+        // Rotation builds its claims from the session record written at LOGIN, and that record
+        // carries the role and tenant the account had then, inherited unchanged through every
+        // later rotation. So demoting an ADMIN to MEMBER, or moving a user between tenants,
+        // had no effect on a live session: it kept minting tokens carrying the old authority
+        // for the refresh token's whole lifetime, and every role check in the system reads
+        // that claim. The gates above already re-read the account — the current authority was
+        // sitting right there, unused.
+        //
+        // Re-signed only when it actually differs, so ordinary rotation costs nothing extra.
+        let rotated = if claims.role == user.role && claims.tenant_id == user.tenant_id {
+            rotated
+        } else {
+            RotatedTokens {
+                access_token: self
+                    .tokens()
+                    .reissue_access_with_authority(&claims, &user.role, &user.tenant_id)
+                    .await?,
+                refresh_token: rotated.refresh_token,
+            }
+        };
 
         Ok(RefreshedSession {
             tokens: rotated,
@@ -373,6 +396,107 @@ mod tests {
             matches!(again, Err(AuthError::RefreshTokenInvalid)),
             "unexpected ok"
         );
+    }
+
+    #[tokio::test]
+    async fn a_demoted_user_stops_carrying_the_old_role_on_the_very_next_rotation() {
+        // Rotation used to build its claims from the session record written at login, so the
+        // role travelled unchanged for the refresh token's whole lifetime. Demoting an ADMIN
+        // therefore did nothing to a live session, and every role check reads that claim.
+        let mut cfg = base_config();
+        cfg.email_verification.required = false;
+        let Some(h) = harness(cfg, None) else { return };
+        let Some((id, auth)) = logged_in(&h, "demoted@e.com", "pw123456").await else { return };
+        assert!(h.users.set_authority(&id, Some("ADMIN"), None));
+
+        // One rotation to put ADMIN into the session's own lineage, then the demotion.
+        let Ok(promoted) = h
+            .engine
+            .refresh(&auth.refresh_token, "1.2.3.4", "agent")
+            .await
+        else {
+            return;
+        };
+        let Ok(before) = h
+            .engine
+            .verify_access_token(&promoted.tokens.access_token)
+            .await
+        else {
+            return;
+        };
+        assert_eq!(before.role, "ADMIN");
+
+        assert!(h.users.set_authority(&id, Some("MEMBER"), None));
+        let Ok(rotated) = h
+            .engine
+            .refresh(&promoted.tokens.refresh_token, "1.2.3.4", "agent")
+            .await
+        else {
+            return;
+        };
+        let Ok(after) = h
+            .engine
+            .verify_access_token(&rotated.tokens.access_token)
+            .await
+        else {
+            return;
+        };
+        assert_eq!(after.role, "MEMBER");
+    }
+
+    #[tokio::test]
+    async fn moving_a_user_between_tenants_lands_on_the_next_rotation_too() {
+        // Same freeze, other claim: the tenant scopes every lookup the host performs, so a
+        // stale one reads another tenant's data with a token the engine itself minted.
+        let mut cfg = base_config();
+        cfg.email_verification.required = false;
+        let Some(h) = harness(cfg, None) else { return };
+        let Some((id, auth)) = logged_in(&h, "moved@e.com", "pw123456").await else { return };
+        assert!(h.users.set_authority(&id, None, Some("tenant-b")));
+
+        let Ok(rotated) = h
+            .engine
+            .refresh(&auth.refresh_token, "1.2.3.4", "agent")
+            .await
+        else {
+            return;
+        };
+        let Ok(claims) = h
+            .engine
+            .verify_access_token(&rotated.tokens.access_token)
+            .await
+        else {
+            return;
+        };
+        assert_eq!(claims.tenant_id, "tenant-b");
+    }
+
+    #[tokio::test]
+    async fn an_unchanged_authority_leaves_the_rotated_token_exactly_as_rotation_built_it() {
+        // The re-stamp is conditional on purpose: the ordinary rotation — every rotation, for
+        // every user who was not moved — must not pay for a second signature.
+        let mut cfg = base_config();
+        cfg.email_verification.required = false;
+        let Some(h) = harness(cfg, None) else { return };
+        let Some((id, auth)) = logged_in(&h, "steady@e.com", "pw123456").await else { return };
+
+        let Ok(rotated) = h
+            .engine
+            .refresh(&auth.refresh_token, "1.2.3.4", "agent")
+            .await
+        else {
+            return;
+        };
+        let Ok(claims) = h
+            .engine
+            .verify_access_token(&rotated.tokens.access_token)
+            .await
+        else {
+            return;
+        };
+        let Ok(Some(user)) = h.users.find_by_id(&id, None).await else { return };
+        assert_eq!(claims.role, user.role);
+        assert_eq!(claims.tenant_id, user.tenant_id);
     }
 
     #[tokio::test]

@@ -65,7 +65,11 @@
     "wsTicket": "wst",
     "invitation": "inv",
     "recoveryCodeClaim": "rcu",
-    "emailChangeToken": "ec"
+    "emailChangeToken": "ec",
+    "pendingMfaSetup": "mfa_setup",
+    "mfaTempTokenMarker": "mfa",
+    "otpResendCooldown": "resend",
+    "invitationIndex": "invidx"
   },
 
   "recoveryCodeClaim": {
@@ -85,6 +89,25 @@
       "durable record of consumption, and outliving the repository write would turn a failed write",
       "into a code the account can see but can never use."
     ]
+  },
+
+  "lockoutIdentifiers": {
+    "$comment": [
+      "The preimage each plane HMACs into its `lf:` counter key. The identity PLANE is part of",
+      "it, not just the tenant: without the `dashboard:` segment a tenant whose id is literally",
+      "`platform` produced a byte-identical identifier to the platform plane's own, so five",
+      "unauthenticated dashboard logins against an operator's address locked that operator out",
+      "of the console — repeatably, without the platform surface ever being touched — and a",
+      "successful one cleared their lockout mid-attack. `tenantId` comes from the request body",
+      "whenever no resolver is configured, which is the default, so it was attacker-chosen.",
+      "",
+      "The OTP identifier is deliberately NOT plane-scoped and keeps the bare",
+      "`{tenantId}:{email}` shape: its keyspace is already purpose-scoped (`otp:{purpose}:`),",
+      "the platform plane has no OTP flow, and moving it would split records in flight."
+    ],
+    "dashboard": "hmac_sha256(hmacKey, 'dashboard:{tenantId}:{email}')",
+    "platform": "hmac_sha256(hmacKey, 'platform:{email}')",
+    "otpRecord": "hmac_sha256(hmacKey, '{tenantId}:{email}')"
   },
 
   "sessionIndexMembers": {

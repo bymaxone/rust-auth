@@ -195,6 +195,24 @@ impl AuthEngine {
     /// same value keys the brute-force counter and the OTP record (§7.1.2 / §7.1.6 / §7.7);
     /// HMAC blocks dictionary reversal of the low-entropy email and the output is pure hex,
     /// so it never carries PII into a store key.
+    /// The brute-force counter key for a dashboard account.
+    ///
+    /// The identity PLANE is part of the preimage, not just the tenant. Without it a tenant
+    /// whose id is literally `platform` produced a byte-identical identifier to the platform
+    /// plane's own `platform:{email}` — so five unauthenticated dashboard logins against an
+    /// operator's address locked that operator out of the console, repeatably, without the
+    /// platform surface ever being touched. The reverse held too: a successful dashboard login
+    /// in that tenant cleared the operator's lockout mid-attack. The MFA counters already
+    /// carry their plane for exactly this reason.
+    ///
+    /// Deliberately NOT [`Self::hashed_identifier`]: that value also keys the OTP records,
+    /// whose keyspace is shared byte-for-byte with nest-auth and is already purpose-scoped
+    /// (`otp:{purpose}:`), so it cannot collide and must not move.
+    pub(crate) fn lockout_identifier(&self, tenant_id: &str, email: &str) -> String {
+        let input = format!("dashboard:{tenant_id}:{email}");
+        to_hex(&hmac_sha256(self.config().hmac_key(), input.as_bytes()))
+    }
+
     pub(crate) fn hashed_identifier(&self, tenant_id: &str, email: &str) -> String {
         let input = format!("{tenant_id}:{email}");
         to_hex(&hmac_sha256(self.config().hmac_key(), input.as_bytes()))
