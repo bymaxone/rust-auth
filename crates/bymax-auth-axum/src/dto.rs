@@ -14,16 +14,16 @@ use serde::Deserialize;
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RegisterDto {
     /// The email being registered.
-    #[garde(email)]
+    #[garde(email, length(max = 255))]
     pub email: String,
     /// The plaintext password (8–128 chars).
     #[garde(length(min = 8, max = 128))]
     pub password: String,
-    /// The display name (≥ 2 chars).
-    #[garde(length(min = 2))]
+    /// The display name (2–128 chars).
+    #[garde(length(min = 2, max = 128))]
     pub name: String,
     /// The tenant scope; ignored when a `TenantIdResolver` is configured.
-    #[garde(length(min = 1))]
+    #[garde(length(min = 1, max = 128))]
     pub tenant_id: String,
 }
 
@@ -32,13 +32,19 @@ pub struct RegisterDto {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct LoginDto {
     /// The login email.
-    #[garde(email)]
+    #[garde(email, length(max = 255))]
     pub email: String,
-    /// The plaintext password (≤ 128 chars).
-    #[garde(length(max = 128))]
+    /// The plaintext password (1–128 chars).
+    ///
+    /// The floor is 1, not the deployment's policy length: this is a login, and the password
+    /// may predate whatever the policy says today — refusing it here would lock someone out
+    /// with a validation error rather than an authentication one, while telling an
+    /// unauthenticated caller what the policy is before any derivation runs. Rejecting the
+    /// empty string still keeps a caller from spending a KDF derivation for free.
+    #[garde(length(min = 1, max = 128))]
     pub password: String,
     /// The tenant scope; ignored when a `TenantIdResolver` is configured.
-    #[garde(length(min = 1))]
+    #[garde(length(min = 1, max = 128))]
     pub tenant_id: String,
 }
 
@@ -47,10 +53,10 @@ pub struct LoginDto {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ForgotPasswordDto {
     /// The account email (anti-enumeration; the same response regardless of existence).
-    #[garde(email)]
+    #[garde(email, length(max = 255))]
     pub email: String,
     /// The tenant scope.
-    #[garde(length(min = 1))]
+    #[garde(length(min = 1, max = 128))]
     pub tenant_id: String,
 }
 
@@ -79,7 +85,10 @@ pub struct ChangePasswordDto {
     /// device that made the change stays signed in; without it, every session goes, this one
     /// included. A change that leaves an unidentified session alive is the failure the control
     /// exists to prevent, so the safe branch is the one that takes them all.
-    #[garde(skip)]
+    ///
+    /// Bounded, like every other free-text field: the value is hashed before it is looked up,
+    /// so an oversized one buys nothing but the bytes it costs to carry and log.
+    #[garde(inner(length(min = 1, max = 2048)))]
     pub refresh_token: Option<String>,
 }
 
@@ -89,22 +98,28 @@ pub struct ChangePasswordDto {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ResetPasswordDto {
     /// The account email.
-    #[garde(email)]
+    #[garde(email, length(max = 255))]
     pub email: String,
     /// The new password (8–128 chars).
     #[garde(length(min = 8, max = 128))]
     pub new_password: String,
     /// `method = "token"`: the emailed reset token.
-    #[garde(skip)]
+    ///
+    /// Which of the three proofs is required is the engine's decision — it depends on the
+    /// configured method, and answering "wrong proof for this deployment" before that decision
+    /// would describe the configuration to an unauthenticated caller. What garde does here is
+    /// only the shape: the same bounds nest-auth's DTO carries, so an oversized or absurd value
+    /// never reaches the lookup on either backend.
+    #[garde(inner(length(min = 1, max = 2048)))]
     pub token: Option<String>,
-    /// `method = "otp"`: the numeric OTP.
-    #[garde(skip)]
+    /// `method = "otp"`: the numeric OTP (4–8 digits).
+    #[garde(inner(length(min = 4, max = 8)))]
     pub otp: Option<String>,
-    /// 2-step flow: the verified-token issued by `verify-otp`.
-    #[garde(skip)]
+    /// 2-step flow: the verified-token issued by `verify-otp` (64 hex chars).
+    #[garde(inner(length(min = 64, max = 64)))]
     pub verified_token: Option<String>,
     /// The tenant scope.
-    #[garde(length(min = 1))]
+    #[garde(length(min = 1, max = 128))]
     pub tenant_id: String,
 }
 
@@ -113,13 +128,13 @@ pub struct ResetPasswordDto {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct VerifyOtpDto {
     /// The account email.
-    #[garde(email)]
+    #[garde(email, length(max = 255))]
     pub email: String,
     /// The numeric OTP (4–8 digits).
     #[garde(length(min = 4, max = 8))]
     pub otp: String,
     /// The tenant scope.
-    #[garde(length(min = 1))]
+    #[garde(length(min = 1, max = 128))]
     pub tenant_id: String,
 }
 
@@ -128,10 +143,10 @@ pub struct VerifyOtpDto {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ResendOtpDto {
     /// The account email (anti-enumeration).
-    #[garde(email)]
+    #[garde(email, length(max = 255))]
     pub email: String,
     /// The tenant scope.
-    #[garde(length(min = 1))]
+    #[garde(length(min = 1, max = 128))]
     pub tenant_id: String,
 }
 
@@ -140,13 +155,18 @@ pub struct ResendOtpDto {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct VerifyEmailDto {
     /// The account email.
-    #[garde(email)]
+    #[garde(email, length(max = 255))]
     pub email: String,
-    /// The verification OTP (4–8 digits).
-    #[garde(length(min = 4, max = 8))]
+    /// The verification OTP — exactly 6 digits.
+    //
+    // Six exactly: the verification OTP has a fixed length on both backends, unlike the
+    // password-reset OTP whose length is configurable. Accepting 4-8 here let a caller spend
+    // the verify path — and one of the five attempts on the record — on a value that could
+    // never have been issued.
+    #[garde(length(min = 6, max = 6))]
     pub otp: String,
     /// The tenant scope.
-    #[garde(length(min = 1))]
+    #[garde(length(min = 1, max = 128))]
     pub tenant_id: String,
 }
 
@@ -155,10 +175,10 @@ pub struct VerifyEmailDto {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ResendVerificationDto {
     /// The account email (anti-enumeration).
-    #[garde(email)]
+    #[garde(email, length(max = 255))]
     pub email: String,
     /// The tenant scope.
-    #[garde(length(min = 1))]
+    #[garde(length(min = 1, max = 128))]
     pub tenant_id: String,
 }
 
@@ -232,10 +252,16 @@ pub struct MfaRegenerateRecoveryCodesDto {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct PlatformLoginDto {
     /// The admin email.
-    #[garde(email)]
+    #[garde(email, length(max = 255))]
     pub email: String,
-    /// The plaintext password (≤ 128 chars).
-    #[garde(length(max = 128))]
+    /// The plaintext password (1–128 chars).
+    ///
+    /// The floor is 1, not the deployment's policy length: this is a login, and the password
+    /// may predate whatever the policy says today — refusing it here would lock someone out
+    /// with a validation error rather than an authentication one, while telling an
+    /// unauthenticated caller what the policy is before any derivation runs. Rejecting the
+    /// empty string still keeps a caller from spending a KDF derivation for free.
+    #[garde(length(min = 1, max = 128))]
     pub password: String,
 }
 
@@ -245,13 +271,13 @@ pub struct PlatformLoginDto {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CreateInvitationDto {
     /// The invitee email.
-    #[garde(email)]
+    #[garde(email, length(max = 255))]
     pub email: String,
     /// The invited role (validated against the hierarchy by the engine).
-    #[garde(length(min = 1))]
+    #[garde(length(min = 1, max = 64))]
     pub role: String,
     /// Optional human-readable tenant name for the invitation email.
-    #[garde(skip)]
+    #[garde(inner(length(min = 1, max = 128)))]
     pub tenant_name: Option<String>,
 }
 
@@ -263,7 +289,7 @@ pub struct CreateInvitationDto {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ChangeEmailDto {
     /// The address to move to.
-    #[garde(email)]
+    #[garde(email, length(max = 255))]
     pub new_email: String,
     /// The account's current password, re-proved because the address is the recovery
     /// credential. Bounded at 128 to match the hasher's input limit — an unbounded field is a
@@ -295,7 +321,7 @@ pub struct ConfirmEmailChangeDto {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RevokeInvitationDto {
     /// The invited address whose pending invitation is being withdrawn.
-    #[garde(email)]
+    #[garde(email, length(max = 255))]
     pub email: String,
 }
 
@@ -303,11 +329,11 @@ pub struct RevokeInvitationDto {
 #[derive(Debug, Deserialize, Validate)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct AcceptInvitationDto {
-    /// The single-use invitation token.
-    #[garde(length(min = 1))]
+    /// The single-use invitation token — exactly 64 hex characters.
+    #[garde(length(min = 64, max = 64))]
     pub token: String,
-    /// The new user's display name (≥ 2 chars).
-    #[garde(length(min = 2))]
+    /// The new user's display name (2–100 chars).
+    #[garde(length(min = 2, max = 100))]
     pub name: String,
     /// The new user's password (8–128 chars).
     #[garde(length(min = 8, max = 128))]
@@ -320,7 +346,10 @@ pub struct AcceptInvitationDto {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RefreshDto {
     /// The refresh token, present only in bearer/both mode.
-    #[garde(skip)]
+    ///
+    /// Bounded like every other free-text field: the value is hashed before it is looked up,
+    /// so an oversized one buys nothing but the bytes it costs to carry and log.
+    #[garde(inner(length(min = 1, max = 2048)))]
     pub refresh_token: Option<String>,
 }
 
@@ -371,19 +400,171 @@ pub struct OAuthCallbackQuery {
     /// The CSRF `state` nonce (matched against the stored single-use record).
     #[garde(length(min = 1, max = 128))]
     pub state: String,
+    // The five below are accepted and unused, but still bounded — at the same ceilings
+    // nest-auth's DTO carries. A field nothing reads is still a field an unauthenticated
+    // caller fills, and the callback is a public route: unbounded, they are free bytes to
+    // carry, parse and log.
     /// RFC 9207 issuer (accepted, unused).
-    #[garde(skip)]
+    #[garde(inner(length(max = 512)))]
     pub iss: Option<String>,
     /// RFC 6749 scope echo (accepted, unused).
-    #[garde(skip)]
+    #[garde(inner(length(max = 2048)))]
     pub scope: Option<String>,
     /// Google `authuser` (accepted, unused).
-    #[garde(skip)]
+    #[garde(inner(length(max = 16)))]
     pub authuser: Option<String>,
     /// Google `prompt` (accepted, unused).
-    #[garde(skip)]
+    #[garde(inner(length(max = 64)))]
     pub prompt: Option<String>,
-    /// Google `hd` hosted-domain hint (accepted, unused).
-    #[garde(skip)]
+    /// Google `hd` hosted-domain hint (accepted, unused) — bounded at the DNS name limit.
+    #[garde(inner(length(max = 253)))]
     pub hd: Option<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Read `requestFieldBounds.{name}` from the shared cross-implementation wire contract.
+    ///
+    /// The file at `conformance/wire-contract.json` is held byte-identical by nest-auth, which
+    /// can serve the same clients. Reading it here rather than repeating its numbers means a
+    /// bound that moves on one side turns that side red, instead of surfacing as a request one
+    /// backend accepts and the other refuses.
+    fn contract_bound(name: &str) -> (Option<usize>, Option<usize>) {
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../conformance/wire-contract.json"
+        );
+        let raw = std::fs::read_to_string(path).unwrap_or_default();
+        let root: serde_json::Value = serde_json::from_str(&raw).unwrap_or(serde_json::Value::Null);
+        let field = root
+            .get("requestFieldBounds")
+            .and_then(|s| s.get(name))
+            .cloned()
+            .unwrap_or(serde_json::Value::Null);
+        let read = |key: &str| {
+            field
+                .get(key)
+                .and_then(serde_json::Value::as_u64)
+                .and_then(|n| usize::try_from(n).ok())
+        };
+        (read("min"), read("max"))
+    }
+
+    /// A well-formed address of exactly `n` characters.
+    fn address(n: usize) -> String {
+        format!("{}@e.com", "a".repeat(n.saturating_sub(6).max(1)))
+    }
+
+    /// Whether the DTO built by `build` from a field of exactly `n` characters validates.
+    fn accepts<T: Validate<Context = ()>>(
+        build: impl Fn(String) -> T,
+        filler: char,
+        n: usize,
+    ) -> bool {
+        build(std::iter::repeat_n(filler, n).collect::<String>())
+            .validate()
+            .is_ok()
+    }
+
+    /// Assert a field enforces the contract's bound at both edges.
+    fn assert_bounded<T: Validate<Context = ()>>(
+        name: &str,
+        filler: char,
+        build: impl Fn(String) -> T,
+    ) {
+        let (min, max) = contract_bound(name);
+        // The contract is required to name a ceiling for every field listed here; a missing
+        // one is a red test, not a silent skip.
+        assert!(max.is_some(), "the contract names no max for {name}");
+        let Some(max) = max else { return };
+        assert!(
+            accepts(&build, filler, max),
+            "{name} refused its own maximum"
+        );
+        assert!(
+            !accepts(&build, filler, max + 1),
+            "{name} accepted a value past the contract maximum"
+        );
+        if let Some(min) = min
+            && min > 1
+        {
+            assert!(
+                !accepts(&build, filler, min - 1),
+                "{name} accepted a value below the contract minimum"
+            );
+        }
+    }
+
+    #[test]
+    fn every_shared_field_enforces_the_contract_bound() {
+        // These decide which requests each backend accepts. An unbounded field on a public
+        // route is a free byte sink to carry, parse and log; a bound that differs between the
+        // two means the same request is taken by one backend and refused by the other, which
+        // for a deployment running both behind one address nobody can explain from the outside.
+        assert_bounded("newPassword", 'a', |password| RegisterDto {
+            email: "a@e.com".to_owned(),
+            password,
+            name: "Ok".to_owned(),
+            tenant_id: "t1".to_owned(),
+        });
+        assert_bounded("provenPassword", 'a', |password| LoginDto {
+            email: "a@e.com".to_owned(),
+            password,
+            tenant_id: "t1".to_owned(),
+        });
+        assert_bounded("tenantId", 'a', |tenant_id| LoginDto {
+            email: "a@e.com".to_owned(),
+            password: "hunter2hunter2".to_owned(),
+            tenant_id,
+        });
+        assert_bounded("displayName", 'a', |name| RegisterDto {
+            email: "a@e.com".to_owned(),
+            password: "hunter2hunter2".to_owned(),
+            name,
+            tenant_id: "t1".to_owned(),
+        });
+        assert_bounded("invitationDisplayName", 'a', |name| AcceptInvitationDto {
+            token: "a".repeat(64),
+            name,
+            password: "hunter2hunter2".to_owned(),
+        });
+        assert_bounded("singleUseToken", 'a', |token| AcceptInvitationDto {
+            token,
+            name: "Ok".to_owned(),
+            password: "hunter2hunter2".to_owned(),
+        });
+        assert_bounded("verificationOtp", '1', |otp| VerifyEmailDto {
+            email: "a@e.com".to_owned(),
+            otp,
+            tenant_id: "t1".to_owned(),
+        });
+        assert_bounded("resetOtp", '1', |otp| VerifyOtpDto {
+            email: "a@e.com".to_owned(),
+            otp,
+            tenant_id: "t1".to_owned(),
+        });
+        assert_bounded("totpCode", '1', |code| MfaVerifyDto { code });
+    }
+
+    #[test]
+    fn an_oversized_address_is_refused_at_the_contract_ceiling() {
+        // Only the upper edge, and only from above: `garde(email)` already refuses an address
+        // near that length on its own grounds (the domain-label limits), so "accepted at
+        // exactly 255" is not a property this DTO has. The half that matters is that an
+        // oversized value never reaches the lookup.
+        let (_, max) = contract_bound("email");
+        assert!(max.is_some(), "the contract names no max for email");
+        let Some(max) = max else { return };
+        let over = LoginDto {
+            email: address(max + 1),
+            password: "hunter2hunter2".to_owned(),
+            tenant_id: "t1".to_owned(),
+        };
+        assert!(
+            over.validate().is_err(),
+            "an oversized address was accepted"
+        );
+    }
 }

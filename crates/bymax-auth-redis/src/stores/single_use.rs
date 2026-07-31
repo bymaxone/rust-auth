@@ -22,14 +22,15 @@ impl RedisStores {
         self.keys().key(prefix, &to_hex(&sha256(token.as_bytes())))
     }
 
-    /// The invitee index key: `invidx:{tenantId}:{sha256(email)}`. The address is hashed so a
-    /// dump of the keyspace does not enumerate who a tenant has been inviting, which the
-    /// invitation record itself never exposes either.
-    fn invitee_key(&self, tenant_id: &str, email: &str) -> String {
-        self.keys().key(
-            Prefix::Invidx,
-            &format!("{tenant_id}:{}", to_hex(&sha256(email.as_bytes()))),
-        )
+    /// The invitee index key: `invidx:{tenantId}:{invitee_hash}`.
+    ///
+    /// The identifier arrives already derived — the engine HMACs the address, so a dump of the
+    /// keyspace does not enumerate who a tenant has been inviting, which the invitation record
+    /// itself never exposes either. Hashing it again here would move the keyspace away from
+    /// nest-auth's, which writes the same keys into the same Redis.
+    fn invitee_key(&self, tenant_id: &str, invitee_hash: &str) -> String {
+        self.keys()
+            .key(Prefix::Invidx, &format!("{tenant_id}:{invitee_hash}"))
     }
 
     /// Store a JSON-serializable value under `prefix:{sha256(token)}` with a TTL.

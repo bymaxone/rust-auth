@@ -146,6 +146,16 @@ fn internal_only_codes_remap_to_token_invalid_on_the_wire() {
         assert!(code.is_internal_only());
         assert_eq!(code.to_wire(), AuthErrorCode::TokenInvalid);
     }
+    // The OTP sentinels collapse the same way, onto `otp_invalid`. `forgot_password` answers
+    // uniformly whether or not an address exists, but only writes an OTP record when it does —
+    // so an absent record answering differently from a wrong code turned that uniform answer
+    // definitive after one extra request.
+    for code in [AuthErrorCode::OtpExpired, AuthErrorCode::OtpMaxAttempts] {
+        assert!(code.is_internal_only());
+        assert_eq!(code.to_wire(), AuthErrorCode::OtpInvalid);
+        // …including the status, or the oracle survives as 429-vs-401.
+        assert_eq!(code.to_wire().http_status(), 401);
+    }
     // A public code is its own wire form and is not internal-only.
     assert!(!AuthErrorCode::TokenInvalid.is_internal_only());
     assert_eq!(AuthErrorCode::Forbidden.to_wire(), AuthErrorCode::Forbidden);
@@ -156,11 +166,14 @@ fn auth_error_exposes_code_status_and_message_for_every_variant() {
     // Walk one instance of every variant so the `code`/`http_status`/
     // `client_message`/`is_internal_only` arms are all exercised.
     for err in all_errors() {
-        assert_eq!(err.http_status(), err.code().http_status());
+        // The wire code decides both, because both are part of the answer a client sees.
+        assert_eq!(err.http_status(), err.code().to_wire().http_status());
         assert!(!err.client_message().is_empty());
-        // Internal-only errors report the public (token_invalid) message.
+        // An internal-only error reports the message of the code it collapses onto, never its
+        // own — the message would give back exactly what the collapse took away.
         if err.is_internal_only() {
-            assert_eq!(err.client_message(), "Invalid token");
+            assert_eq!(err.client_message(), err.code().to_wire().client_message());
+            assert_ne!(err.client_message(), err.code().client_message());
         }
     }
 }

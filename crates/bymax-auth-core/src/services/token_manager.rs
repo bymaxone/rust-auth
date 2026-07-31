@@ -180,33 +180,27 @@ impl TokenManagerService {
         token: &str,
         opts: &VerifyOptions,
     ) -> Result<C, bymax_auth_jwt::JwtError> {
-        let current = verify::<C>(token, &self.key, opts).and_then(|claims| self.bound(claims));
+        // The configured binding travels INTO the verifier rather than being re-checked after
+        // it. There is one rule and one implementation of it, which is what lets the edge — a
+        // `wasm32` build that calls `bymax_auth_jwt::verify` directly, with no engine behind it
+        // — apply the same `iss`/`aud` check the native server does.
+        let opts = VerifyOptions {
+            expected_iss: self.binding.issuer.as_deref(),
+            expected_aud: self.binding.audience.as_deref(),
+            ..*opts
+        };
+        let current = verify::<C>(token, &self.key, &opts);
         if current.is_ok() || self.previous_keys.is_empty() {
             return current;
         }
         for key in &self.previous_keys {
-            if let Ok(claims) = verify::<C>(token, key, opts).and_then(|c| self.bound(c)) {
+            // A retired signing key buys a signature acceptance and nothing else — the binding
+            // is checked inside `verify`, so it still has to hold.
+            if let Ok(claims) = verify::<C>(token, key, &opts) {
                 return Ok(claims);
             }
         }
         current
-    }
-
-    /// Gate verified claims on the configured binding, mapping a failure onto the same opaque
-    /// error every other rejection uses. A retired signing key buys a token signature
-    /// acceptance and nothing else — the binding still has to hold.
-    fn bound<C: bymax_auth_jwt::JwtClaims>(
-        &self,
-        claims: C,
-    ) -> Result<C, bymax_auth_jwt::JwtError> {
-        if self.binding_holds(&claims) {
-            Ok(claims)
-        } else {
-            // Reported as a decode failure, which maps to the public `token_invalid` like
-            // every other rejection: telling a holder that their token was well-formed but
-            // aimed at the wrong audience is telling them which audience to aim at next.
-            Err(bymax_auth_jwt::JwtError::Decode)
-        }
     }
 
     /// Verify an access token's signature under the pinned algorithm while **ignoring its
@@ -311,23 +305,6 @@ impl TokenManagerService {
     /// Stamp the configured pair onto claims about to be signed.
     fn stamp<C: Stampable>(&self, claims: &C) -> C {
         claims.stamped(self.binding.issuer.clone(), self.binding.audience.clone())
-    }
-
-    /// Refuse claims whose `iss`/`aud` do not satisfy the configured binding.
-    ///
-    /// A token carrying NO claim is refused as firmly as one carrying the wrong value: a
-    /// verifier that accepted an unstamped token would give an attacker a way to opt out of
-    /// the check simply by omitting it.
-    fn binding_holds<C: bymax_auth_jwt::JwtClaims>(&self, claims: &C) -> bool {
-        let issuer_ok = match self.binding.issuer.as_deref() {
-            Some(expected) => claims.iss() == Some(expected),
-            None => true,
-        };
-        let audience_ok = match self.binding.audience.as_deref() {
-            Some(expected) => claims.aud() == Some(expected),
-            None => true,
-        };
-        issuer_ok && audience_ok
     }
 
     /// Attach the MFA temp-token support (the single-use `mfa:` marker store and the

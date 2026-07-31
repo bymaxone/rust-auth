@@ -19,7 +19,7 @@ bymax-auth-jwt = { workspace = true }
 # Tokio backs the async engine surface and the fire-and-forget hook model (detached
 # tasks under a timeout ceiling). The core takes only the runtime + timer + macro
 # features — no net/fs — keeping it transport-agnostic.
-tokio = { version = "1", features = ["rt", "macros", "time"] }
+tokio = { version = "1", features = ["rt", "macros", "time", "sync"] }
 # Object-safe async plugin traits (`UserRepository`, `EmailProvider`, hooks, stores,
 # `OAuthProvider`, `HttpClient`) desugar through `#[async_trait]` so they are usable as
 # `Arc<dyn _>`.

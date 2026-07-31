@@ -788,9 +788,11 @@ impl WsTicketStore for InMemoryStores {
 /// Hash an opaque token to its store-key form, mirroring the real store's
 /// "the raw token is never a key" guarantee (so the test double exercises the same
 /// hash-then-key path the engine relies on).
-/// The invitee index key, mirroring the Redis store's `invidx:{tenantId}:{sha256(email)}`.
-fn invitee_key(tenant_id: &str, email: &str) -> String {
-    format!("{tenant_id}:{}", token_key(email))
+/// The invitee index key, mirroring the Redis store's `invidx:{tenantId}:{invitee_hash}`.
+/// The identifier arrives already derived, and is used verbatim — see
+/// [`crate::traits::InvitationStore::put_invitation_index`].
+fn invitee_key(tenant_id: &str, invitee_hash: &str) -> String {
+    format!("{tenant_id}:{invitee_hash}")
 }
 
 fn token_key(token: &str) -> String {

@@ -39,10 +39,31 @@ use wasm_bindgen::prelude::wasm_bindgen;
 /// (30 seconds). The current time is read from the host clock (the JS `Date` clock on the
 /// edge). The `secret` is consumed and zeroized immediately after the HMAC check — it must
 /// never be exposed to a browser bundle.
+///
+/// `expectedIss`/`expectedAud` MUST be passed wherever the deployment configures
+/// `jwt.issuer`/`jwt.audience`. The backend refuses any token that does not carry them; an
+/// edge that omits the check accepts tokens minted for a different service, and with HS256
+/// every holder of the secret is a potential minter. A token carrying no such claim is
+/// refused as firmly as one carrying the wrong value, so omitting the claim is not a way to
+/// opt out. Leave both `undefined` only for a deployment that configures neither.
 #[wasm_bindgen]
-pub fn verify_jwt_hs256(token: &str, secret: String, leeway_secs: Option<u32>) -> Option<String> {
+pub fn verify_jwt_hs256(
+    token: &str,
+    secret: String,
+    leeway_secs: Option<u32>,
+    expected_iss: Option<String>,
+    expected_aud: Option<String>,
+) -> Option<String> {
     let leeway = leeway_secs.map_or(jwt_edge::DEFAULT_EDGE_LEEWAY_SECS, u64::from);
-    jwt_edge::verify_claims_json(token, secret, leeway, now_unix_secs()).ok()
+    jwt_edge::verify_claims_json(
+        token,
+        secret,
+        leeway,
+        now_unix_secs(),
+        expected_iss.as_deref(),
+        expected_aud.as_deref(),
+    )
+    .ok()
 }
 
 /// Decode a token's header and payload to `{"header":…,"payload":…}` JSON, or `undefined`
@@ -103,12 +124,12 @@ mod tests {
         let secret = "an-edge-test-hs256-secret-key-0123456789";
         let token = sign_dashboard(secret, 0, i64::MAX);
         // Default leeway (the `None` arm).
-        assert!(verify_jwt_hs256(&token, secret.to_owned(), None).is_some());
+        assert!(verify_jwt_hs256(&token, secret.to_owned(), None, None, None).is_some());
         // Explicit leeway (the `Some` arm).
-        assert!(verify_jwt_hs256(&token, secret.to_owned(), Some(5)).is_some());
+        assert!(verify_jwt_hs256(&token, secret.to_owned(), Some(5), None, None).is_some());
         // An already-expired token yields `undefined`.
         let expired = sign_dashboard(secret, 0, 1);
-        assert!(verify_jwt_hs256(&expired, secret.to_owned(), None).is_none());
+        assert!(verify_jwt_hs256(&expired, secret.to_owned(), None, None, None).is_none());
     }
 
     #[test]

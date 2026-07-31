@@ -238,21 +238,46 @@ impl AuthEngine {
             _ => return Err(AuthError::PasswordResetTokenInvalid),
         };
 
-        match (self.config().config().password_reset.method, proof) {
+        // Pair the proof with the configured method first: a request that names the wrong kind
+        // of proof for this deployment is malformed, and nothing below should run for it.
+        enum Dispatch<'a> {
+            Stored(&'a str, ProofKind),
+            Otp(&'a str),
+        }
+        let dispatch = match (self.config().config().password_reset.method, proof) {
             // The token method accepts only a reset link token.
-            (ResetMethod::Token, Proof::Token(token)) => {
-                self.reset_with_stored_proof(token, &input, ProofKind::Token)
-                    .await
-            }
+            (ResetMethod::Token, Proof::Token(token)) => Dispatch::Stored(token, ProofKind::Token),
             // The OTP method accepts a direct OTP or the verified-token bridge.
-            (ResetMethod::Otp, Proof::Otp(otp)) => self.reset_with_otp(otp, &input).await,
+            (ResetMethod::Otp, Proof::Otp(otp)) => Dispatch::Otp(otp),
             (ResetMethod::Otp, Proof::Verified(verified)) => {
-                self.reset_with_stored_proof(verified, &input, ProofKind::Verified)
-                    .await
+                Dispatch::Stored(verified, ProofKind::Verified)
             }
             // Any other method/proof pairing is an explicit mismatch (e.g. a token submitted to
             // the OTP method, or an OTP/verified token submitted to the token method).
-            _ => Err(AuthError::PasswordResetTokenInvalid),
+            _ => return Err(AuthError::PasswordResetTokenInvalid),
+        };
+
+        // The new password is judged BEFORE any proof is spent.
+        //
+        // Every proof below is single-use and consumed atomically — `getdel` for the two token
+        // shapes, the verify script for the OTP — so a screen rejection that arrived after the
+        // consumption burned the proof: the caller was told their password was unacceptable
+        // and, in the same breath, that the only credential they had to fix it was gone. The
+        // whole mail round trip had to be repeated for a mistake the request itself carried.
+        //
+        // Judging first means a caller holding no valid proof can drive the screen, which for
+        // the bundled HIBP checker is an outbound range query. That is the same exposure
+        // `register` already carries on the same screen, and this route is rate-limited — the
+        // burned proof was the larger of the two costs by a wide margin.
+        self.passwords()
+            .assert_not_compromised(&input.new_password)
+            .await?;
+
+        match dispatch {
+            Dispatch::Stored(token, kind) => {
+                self.reset_with_stored_proof(token, &input, kind).await
+            }
+            Dispatch::Otp(otp) => self.reset_with_otp(otp, &input).await,
         }
     }
 
@@ -648,9 +673,8 @@ impl AuthEngine {
         context: &ResetContext,
         new_password: &str,
     ) -> Result<(), AuthError> {
-        self.passwords()
-            .assert_not_compromised(new_password)
-            .await?;
+        // The breach screen ran in `reset_password`, before the proof was spent — see the note
+        // there.
         let new_hash = self.passwords().hash(new_password).await?;
         self.user_repository()
             .update_password(&context.user_id, &new_hash)
@@ -864,7 +888,7 @@ mod tests {
         let reset = ResetPasswordInput {
             email: "reset@example.com".to_owned(),
             tenant_id: "t1".to_owned(),
-            new_password: "brand-new-pw".to_owned(),
+            new_password: "brandnewwalnut42".to_owned(),
             token: Some(known.clone()),
             otp: None,
             verified_token: None,
@@ -882,7 +906,7 @@ mod tests {
         let replay = ResetPasswordInput {
             email: "reset@example.com".to_owned(),
             tenant_id: "t1".to_owned(),
-            new_password: "another-pw".to_owned(),
+            new_password: "anotherwalnut42".to_owned(),
             token: Some(known),
             otp: None,
             verified_token: None,
@@ -924,7 +948,7 @@ mod tests {
         let reset = ResetPasswordInput {
             email: "epoch@example.com".to_owned(),
             tenant_id: "t1".to_owned(),
-            new_password: "brand-new-pw".to_owned(),
+            new_password: "brandnewwalnut42".to_owned(),
             token: Some(known),
             otp: None,
             verified_token: None,
@@ -935,6 +959,57 @@ mod tests {
             h.stores.current_epoch(SessionKind::Dashboard, &id).await,
             Ok(1)
         ));
+    }
+
+    #[tokio::test]
+    async fn a_rejected_new_password_leaves_the_reset_token_unspent() {
+        // The proof is single-use and consumed atomically, so a screen rejection that arrived
+        // after the consumption told the caller their password was unacceptable and, in the
+        // same breath, that the only credential they had to fix it was gone — the whole mail
+        // round trip repeated for a mistake the request itself carried.
+        let Some(h) = token_harness() else { return };
+        let id = h.seed(SeedUser::active("spend@example.com", "pw")).await;
+        let known = "c".repeat(64);
+        assert!(
+            h.stores
+                .put_token(
+                    &known,
+                    &ResetContext {
+                        user_id: id,
+                        email: "spend@example.com".to_owned(),
+                        tenant_id: "t1".to_owned(),
+                        password_fingerprint: String::new(),
+                    },
+                    600
+                )
+                .await
+                .is_ok()
+        );
+
+        // `password1` is exactly what the default screen exists to refuse.
+        let refused = ResetPasswordInput {
+            email: "spend@example.com".to_owned(),
+            tenant_id: "t1".to_owned(),
+            new_password: "password1".to_owned(),
+            token: Some(known.clone()),
+            otp: None,
+            verified_token: None,
+        };
+        assert!(matches!(
+            h.engine.reset_password(refused, &ctx()).await,
+            Err(AuthError::PasswordCompromised)
+        ));
+
+        // The same token still works, which is the whole point.
+        let retried = ResetPasswordInput {
+            email: "spend@example.com".to_owned(),
+            tenant_id: "t1".to_owned(),
+            new_password: "glidingwalnut42".to_owned(),
+            token: Some(known),
+            otp: None,
+            verified_token: None,
+        };
+        assert!(h.engine.reset_password(retried, &ctx()).await.is_ok());
     }
 
     #[tokio::test]
@@ -962,7 +1037,7 @@ mod tests {
         let reset = ResetPasswordInput {
             email: "attacker@example.com".to_owned(),
             tenant_id: "t1".to_owned(),
-            new_password: "x".to_owned(),
+            new_password: "glidingwalnut42".to_owned(),
             token: Some(known),
             otp: None,
             verified_token: None,
@@ -992,7 +1067,7 @@ mod tests {
         let reset = ResetPasswordInput {
             email: "otp@example.com".to_owned(),
             tenant_id: "t1".to_owned(),
-            new_password: "new-via-otp".to_owned(),
+            new_password: "walnutviaotp42".to_owned(),
             token: None,
             otp: Some(code.clone()),
             verified_token: None,
@@ -1030,7 +1105,7 @@ mod tests {
         let reset2 = ResetPasswordInput {
             email: "otp@example.com".to_owned(),
             tenant_id: "t1".to_owned(),
-            new_password: "new-via-verified".to_owned(),
+            new_password: "walnutviaverified42".to_owned(),
             token: None,
             otp: None,
             verified_token: Some(verified_token.clone()),
@@ -1041,7 +1116,7 @@ mod tests {
         let replay = ResetPasswordInput {
             email: "otp@example.com".to_owned(),
             tenant_id: "t1".to_owned(),
-            new_password: "x".to_owned(),
+            new_password: "glidingwalnut42".to_owned(),
             token: None,
             otp: None,
             verified_token: Some(verified_token),
@@ -1139,7 +1214,7 @@ mod tests {
         let reset = ResetPasswordInput {
             email: "Case@Example.com".to_owned(),
             tenant_id: "t1".to_owned(),
-            new_password: "new-after-case-change".to_owned(),
+            new_password: "walnutaftercasechange42".to_owned(),
             token: None,
             otp: Some(code),
             verified_token: None,
@@ -1184,7 +1259,7 @@ mod tests {
         let bridged = ResetPasswordInput {
             email: "CASE@example.com".to_owned(),
             tenant_id: "t1".to_owned(),
-            new_password: "new-again".to_owned(),
+            new_password: "walnutagain42".to_owned(),
             token: None,
             otp: None,
             verified_token: Some(verified_token),
@@ -1836,7 +1911,7 @@ mod tests {
                     ResetPasswordInput {
                         email: "fail@example.com".to_owned(),
                         tenant_id: "t1".to_owned(),
-                        new_password: "x".to_owned(),
+                        new_password: "glidingwalnut42".to_owned(),
                         token: Some("a".repeat(64)),
                         otp: None,
                         verified_token: None,

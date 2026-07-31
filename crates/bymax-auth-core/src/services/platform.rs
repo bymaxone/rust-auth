@@ -361,7 +361,7 @@ impl PlatformAuthService {
 
     /// The hashed brute-force identifier for a platform login: `hmac_sha256("platform:{email}")`
     /// (hex) under the engine's derived key. The `platform:` namespace keeps it disjoint from the
-    /// dashboard `{tenant}:{email}` identifiers and carries no PII into a store key.
+    /// dashboard `dashboard:{tenant}:{email}` identifier and carries no PII into a store key.
     fn brute_force_identifier(&self, email: &str) -> String {
         to_hex(&bymax_auth_crypto::mac::hmac_sha256(
             self.identifier_key.as_ref(),
@@ -586,6 +586,35 @@ mod tests {
             created_at: OffsetDateTime::UNIX_EPOCH,
         });
         id
+    }
+
+    #[test]
+    fn the_platform_lockout_preimage_matches_the_shared_wire_contract() {
+        // The `platform:` namespace is what keeps this counter disjoint from the dashboard's.
+        // Without it a tenant whose id is literally `platform` produced a byte-identical
+        // identifier, so five unauthenticated dashboard logins against an operator's address
+        // locked that operator out of the console — and a successful one cleared the lockout
+        // mid-attack. nest-auth writes the same counter into the same Redis, so the preimage is
+        // read from the shared contract rather than repeated here.
+        let Some(h) = harness(platform_config()) else { return };
+        let Some(service) = h.engine.platform_auth() else { return };
+
+        let template = crate::services::contract_preimage("platform")
+            .replace("{email}", "operator@example.com");
+        assert_eq!(
+            service.brute_force_identifier("operator@example.com"),
+            to_hex(&bymax_auth_crypto::mac::hmac_sha256(
+                service.identifier_key.as_ref(),
+                template.as_bytes(),
+            )),
+            "the platform lockout preimage drifted from the shared contract"
+        );
+        // And it is not the dashboard's, for any tenant id — including the one that collided.
+        assert_ne!(
+            service.brute_force_identifier("operator@example.com"),
+            h.engine
+                .lockout_identifier("platform", "operator@example.com"),
+        );
     }
 
     #[test]

@@ -1283,11 +1283,13 @@ async fn invitation_create_and_accept() {
         .await;
     assert_eq!(no_auth.status, StatusCode::UNAUTHORIZED);
 
-    // Accepting a bogus token is an invalid-invitation-token 400.
+    // Accepting a well-shaped token that names no invitation is an invalid-invitation-token
+    // 400. Well-shaped on purpose: a token of the wrong LENGTH is refused by the DTO before
+    // the engine sees it, which exercises the validation envelope rather than this arm.
     let accept = Req::post("/auth/invitations/accept")
-        .json(
-            serde_json::json!({ "token": "bogus", "name": "New User", "password": "glidingwalnut42" }),
-        )
+        .json(serde_json::json!({
+            "token": "b".repeat(64), "name": "New User", "password": "glidingwalnut42"
+        }))
         .send(&app)
         .await;
     assert_eq!(accept.status, StatusCode::BAD_REQUEST);
@@ -2241,6 +2243,10 @@ async fn an_oversized_body_is_rejected_as_validation() {
     assert_eq!(resp.json()["error"]["code"], "auth.validation");
 }
 
+/// A realistically shaped invitation token: 64 hex characters, exactly what the engine
+/// mints and exactly what the DTO now requires.
+const INVITE_TOKEN: &str = "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1";
+
 #[tokio::test]
 async fn invitation_accept_success_creates_a_session() {
     // Seed an invitation directly into the store, then accept it — covering the accept success
@@ -2263,12 +2269,12 @@ async fn invitation_accept_success_creates_a_session() {
     };
     let _ = h
         .stores
-        .put_invitation("invite-token-xyz", &invitation, 600)
+        .put_invitation(INVITE_TOKEN, &invitation, 600)
         .await;
 
     let accept = Req::post("/auth/invitations/accept")
         .json(serde_json::json!({
-            "token": "invite-token-xyz", "name": "New Joiner", "password": "glidingwalnut42"
+            "token": INVITE_TOKEN, "name": "New Joiner", "password": "glidingwalnut42"
         }))
         .send(&app)
         .await;

@@ -657,34 +657,40 @@ pub trait InvitationStore: Send + Sync {
     /// expired, or already consumed.
     async fn consume_invitation(&self, token: &str) -> Result<Option<StoredInvitation>, AuthError>;
 
-    /// Point the invitee index (`invidx:{tenantId}:{sha256(email)}`) at a pending
-    /// invitation's token hash, with the invitation's own TTL so the pair expires together.
+    /// Point the invitee index (`invidx:{tenantId}:{invitee_hash}`) at a pending invitation's
+    /// token hash, with the invitation's own TTL so the pair expires together.
     ///
     /// The index is what makes an invitation manageable at all: the record is keyed by the
     /// hash of a token only the invitee's mailbox ever held, so without it nobody on the
-    /// issuing side can name a pending invitation, let alone withdraw one. The email is
-    /// hashed by the implementation — a dump of the keyspace must not enumerate who a tenant
-    /// has been inviting.
+    /// issuing side can name a pending invitation, let alone withdraw one.
+    ///
+    /// `invitee_hash` arrives already derived — `hmac_sha256(email)`, hex — and goes into the
+    /// key verbatim. Implementations must NOT hash it again: the keyspace is shared
+    /// byte-for-byte with nest-auth. It is an HMAC rather than a plain digest because an
+    /// address is low-entropy, and a dump of the keyspace must not enumerate who a tenant has
+    /// been inviting.
     async fn put_invitation_index(
         &self,
         tenant_id: &str,
-        email: &str,
+        invitee_hash: &str,
         token_hash: &str,
         ttl_secs: u64,
     ) -> Result<(), AuthError>;
 
     /// Read the token hash the invitee index points at, leaving the entry in place.
+    /// `invitee_hash` is the derived identifier — see [`Self::put_invitation_index`].
     async fn read_invitation_index(
         &self,
         tenant_id: &str,
-        email: &str,
+        invitee_hash: &str,
     ) -> Result<Option<String>, AuthError>;
 
     /// Atomically take (`getdel`) the invitee index entry.
+    /// `invitee_hash` is the derived identifier — see [`Self::put_invitation_index`].
     async fn take_invitation_index(
         &self,
         tenant_id: &str,
-        email: &str,
+        invitee_hash: &str,
     ) -> Result<Option<String>, AuthError>;
 
     /// Read an invitation by its stored token **hash**, without consuming it — the revocation

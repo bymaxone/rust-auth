@@ -60,7 +60,7 @@ impl fmt::Debug for HsKey {
 /// Policy for [`crate::verify`]. The algorithm is **not** a field — HS256 is pinned
 /// internally and is never selected from the token.
 #[derive(Clone, Copy, Debug)]
-pub struct VerifyOptions {
+pub struct VerifyOptions<'a> {
     /// Clock-skew tolerance, in seconds. The native server runs with `0` (its clock is
     /// authoritative); the edge accepts a small value because edge nodes may drift.
     pub leeway_secs: u64,
@@ -73,16 +73,38 @@ pub struct VerifyOptions {
     /// edge build has no system clock and MUST set `Some(now)` (e.g. from the JS clock);
     /// leaving it `None` there would read an unavailable clock.
     pub now_unix: Option<i64>,
+    /// The issuer the token must name. `None` skips the check.
+    ///
+    /// Set this wherever the deployment configures `jwt.issuer`. Verification lives here,
+    /// not only in the engine, because the edge is a verifier too: a Worker validating a
+    /// session cookie sees the same tokens the native server does, and without this it would
+    /// accept one minted by a different issuer that the engine itself refuses.
+    ///
+    /// A token carrying NO `iss` is refused as firmly as one carrying the wrong value —
+    /// otherwise omitting the claim is a way to opt out of the check.
+    pub expected_iss: Option<&'a str>,
+    /// The audience the token must name. `None` skips the check.
+    ///
+    /// With HS256 the verifier can also sign, so audience binding is what stops a token
+    /// minted for one service being replayed at another that trusts the same secret. Same
+    /// absent-is-refused rule as [`Self::expected_iss`].
+    pub expected_aud: Option<&'a str>,
 }
 
-impl Default for VerifyOptions {
-    /// Server defaults: zero leeway, both temporal checks on, system clock.
+impl Default for VerifyOptions<'_> {
+    /// Server defaults: zero leeway, both temporal checks on, system clock, no binding.
+    ///
+    /// The binding defaults to unchecked because it is optional configuration — most
+    /// deployments run without `jwt.issuer`/`jwt.audience`. A deployment that sets either
+    /// MUST fill the matching field in, on every verifier it runs, including the edge.
     fn default() -> Self {
         Self {
             leeway_secs: 0,
             validate_exp: true,
             validate_iat: true,
             now_unix: None,
+            expected_iss: None,
+            expected_aud: None,
         }
     }
 }

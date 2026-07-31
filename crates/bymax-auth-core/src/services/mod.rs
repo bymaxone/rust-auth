@@ -52,6 +52,30 @@ pub(crate) fn internal_error(context: &'static str) -> AuthError {
     AuthError::Internal(context.into())
 }
 
+/// Read `identifierPreimages.{name}` from the shared cross-implementation wire contract and
+/// return just the template inside the quotes.
+///
+/// The file at `conformance/wire-contract.json` is held byte-identical by nest-auth, which
+/// can back the same deployment over the same Redis. Reading it here rather than repeating
+/// its values means a preimage change on either side turns that side red immediately,
+/// instead of surfacing later as counters and records that silently stopped being shared.
+#[cfg(test)]
+pub(crate) fn contract_preimage(name: &str) -> String {
+    let path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../conformance/wire-contract.json"
+    );
+    let raw = std::fs::read_to_string(path).unwrap_or_default();
+    let root: serde_json::Value = serde_json::from_str(&raw).unwrap_or(serde_json::Value::Null);
+    let rendered = root
+        .get("identifierPreimages")
+        .and_then(|s| s.get(name))
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default();
+    // `hmac_sha256(hmacKey, '<template>')` — take what is between the single quotes.
+    rendered.split('\'').nth(1).unwrap_or_default().to_owned()
+}
+
 /// Lower-case hex-encode a byte slice. Used to render a digest (a SHA-256 / HMAC-SHA-256
 /// output) into the no-PII identifier form a store key uses.
 pub(crate) fn to_hex(bytes: &[u8]) -> String {

@@ -65,8 +65,8 @@ pub enum Prefix {
     /// Pending address change (`ec`).
     Ec,
     /// Invitee index for a pending invitation (`invidx`). Keyed by
-    /// `{tenantId}:{sha256(email)}` and holding the invitation's token hash — the only handle
-    /// the issuing side has on a record keyed by a token it never saw.
+    /// `{tenantId}:{hmacSha256(email)}` and holding the invitation's token hash — the only
+    /// handle the issuing side has on a record keyed by a token it never saw.
     Invidx,
     /// Platform-admin refresh session (`prt`).
     Prt,

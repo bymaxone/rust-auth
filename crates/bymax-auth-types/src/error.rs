@@ -281,25 +281,31 @@ impl AuthErrorCode {
     }
 
     /// Whether this code is internal-only and MUST be remapped before reaching a
-    /// client. True for the three token sentinels (`TokenExpired`, `TokenRevoked`,
-    /// `TokenMissing`); see [`AuthErrorCode::to_wire`].
+    /// client — that is, whether [`AuthErrorCode::to_wire`] moves it.
     #[must_use]
     pub fn is_internal_only(self) -> bool {
-        matches!(
-            self,
-            Self::TokenExpired | Self::TokenRevoked | Self::TokenMissing
-        )
+        self.to_wire() != self
     }
 
-    /// The code as it is allowed to appear on the wire: the internal-only token
-    /// sentinels collapse to [`AuthErrorCode::TokenInvalid`]; every other code maps to
-    /// itself.
+    /// The code as it is allowed to appear on the wire. Two families collapse; every other
+    /// code maps to itself.
+    ///
+    /// The three token sentinels become [`AuthErrorCode::TokenInvalid`]: a caller must not be
+    /// able to tell "this token was valid until it was revoked" from "this was never a token".
+    ///
+    /// The two OTP sentinels become [`AuthErrorCode::OtpInvalid`], and this one is load-bearing
+    /// for the anti-enumeration in front of them. `forgot_password` deliberately answers the
+    /// same whether or not the address exists — but it only writes an OTP record when it does,
+    /// so a caller could ask for a reset and then submit one wrong code: `OtpExpired` meant "no
+    /// record was ever written, that address has no account" and `OtpInvalid` meant "there is
+    /// one". `OtpMaxAttempts` said the same thing more slowly, since only a record that exists
+    /// can reach a ceiling. One extra request turned a uniform answer into a definitive one.
     #[must_use]
     pub fn to_wire(self) -> Self {
-        if self.is_internal_only() {
-            Self::TokenInvalid
-        } else {
-            self
+        match self {
+            Self::TokenExpired | Self::TokenRevoked | Self::TokenMissing => Self::TokenInvalid,
+            Self::OtpExpired | Self::OtpMaxAttempts => Self::OtpInvalid,
+            other => other,
         }
     }
 }
@@ -573,7 +579,11 @@ impl AuthError {
     /// The HTTP status for this error (from its code).
     #[must_use]
     pub fn http_status(&self) -> u16 {
-        self.code().http_status()
+        // The WIRE code decides the status, because the status is part of the answer. Reading
+        // it from the internal code would have re-opened by status exactly what `to_wire`
+        // closes by code: `OtpMaxAttempts` carries 429 and `OtpInvalid` 401, so a caller could
+        // still tell a record that exists from one that never did.
+        self.code().to_wire().http_status()
     }
 
     /// The English default client message for this error (from its **wire** code, so

@@ -576,10 +576,11 @@ async fn full_router_against_real_redis() {
 
     // Withdrawal is authority-checked against the role recorded on the INVITATION, not the one
     // named in the request — the caller only supplies an address. A USER naming an address that
-    // holds an ADMIN invitation is refused, which is the single path where `revoke` answers with
-    // an error instead of its idempotent 204. Without this case the endpoint's whole `Err` arm
-    // is unexercised, and a regression that downgraded the refusal into a successful withdrawal
-    // would let any account cancel an administrator's invitation.
+    // holds an ADMIN invitation is refused, and the refusal is SILENT: it answers the same 204
+    // an address with nothing pending gets. Reporting it would have told any member that a
+    // pending invitation exists for that address and roughly at what authority, which is the
+    // disclosure hashing the address into the index exists to prevent. What has to hold end to
+    // end is that the invitation survives — the refusal is silent, not a no-op.
     let peer = call(
         &app,
         Method::POST,
@@ -589,7 +590,7 @@ async fn full_router_against_real_redis() {
     )
     .await;
     assert_eq!(peer.status, StatusCode::NO_CONTENT);
-    seed_user(&users, "plain@e.com", "USER").await;
+    let plain_id = seed_user(&users, "plain@e.com", "USER").await;
     let plogin = call(
         &app,
         Method::POST,
@@ -609,8 +610,28 @@ async fn full_router_against_real_redis() {
         &[("access_token", &plain_access)],
     )
     .await;
-    assert_eq!(denied.status, StatusCode::FORBIDDEN);
-    // The invitation survived the refused withdrawal: the ADMIN who issued it still can.
+    assert_eq!(denied.status, StatusCode::NO_CONTENT);
+    // That the invitation actually survived is asserted in the engine's own tests, where the
+    // index can be read directly; over HTTP the two answers are identical by design, which is
+    // the property this call pins.
+    //
+    // The endpoint does still refuse out loud, for facts about the CALLER alone. A revoker
+    // suspended after signing in is the reachable one here, and it is the only path where this
+    // handler's `Err` arm runs — without it the arm is unexercised over HTTP, and a regression
+    // that turned every refusal into a silent 204 would let a revoked operator keep managing
+    // invitations.
+    assert!(users.update_status(&plain_id, "SUSPENDED").await.is_ok());
+    let suspended = call(
+        &app,
+        Method::POST,
+        "/auth/invitations/revoke",
+        Some(serde_json::json!({ "email": "peer@e.com" })),
+        &[("access_token", &plain_access)],
+    )
+    .await;
+    assert_eq!(suspended.status, StatusCode::FORBIDDEN);
+
+    // The ADMIN who issued it withdraws it for real.
     let cleanup = call(
         &app,
         Method::POST,

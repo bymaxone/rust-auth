@@ -64,8 +64,11 @@ async fn create(
 /// the caller's claims — never the body — so a request cannot withdraw another tenant's
 /// invitations.
 ///
-/// Answers 204 whether or not anything was pending: reporting the difference would turn the
-/// endpoint into an oracle for which addresses have invitations.
+/// Answers 204 whether or not anything was pending, and whether or not the caller out-ranked
+/// what was pending: reporting either difference would turn the endpoint into an oracle for
+/// which addresses have invitations, and at what authority. It still refuses out loud for
+/// facts about the CALLER alone — another tenant, or an account not in good standing — which
+/// describe nobody else.
 async fn revoke(
     State(state): State<AuthState>,
     user: AuthUser,

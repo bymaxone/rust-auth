@@ -14,6 +14,7 @@ use std::sync::Arc;
 use bymax_auth_crypto::CryptoError;
 use bymax_auth_crypto::password::{PasswordParams, hash, needs_rehash, verify};
 use bymax_auth_types::AuthError;
+use tokio::sync::Semaphore;
 use tokio::task::JoinError;
 
 use crate::ConfigError;
@@ -48,6 +49,31 @@ pub struct PasswordService {
     rehash_on_verify: bool,
     sentinel: String,
     breach_checker: Arc<dyn PasswordBreachChecker>,
+    /// Bounds how many memory-hard derivations run at once. See [`kdf_permit_count`].
+    kdf_permits: Arc<Semaphore>,
+}
+
+/// How many KDF derivations may run concurrently: one per available core, never fewer than two.
+///
+/// `spawn_blocking` alone bounds nothing useful here. Tokio's blocking pool defaults to 512
+/// threads, and every one of these tasks holds the KDF's working memory for its whole run —
+/// ~16 MiB for scrypt at the default cost, ~19 MiB for Argon2id. Unbounded, a few hundred
+/// concurrent logins reach several gigabytes of resident memory, and login is a route an
+/// unauthenticated caller can drive: the derivation runs before the password is known to be
+/// right, and the absent-user path deliberately runs one too. The per-IP limiter does not help
+/// against a distributed caller, and the per-account lockout does not fire on distinct
+/// addresses.
+///
+/// One per core is the useful ceiling rather than a compromise: the work is CPU- and
+/// memory-bound, so admitting more than that adds memory pressure without adding throughput.
+/// Past the ceiling requests queue, which is the behaviour to want under load. The wait is
+/// identical for a real and an absent account, so the timing-uniformity property the sentinel
+/// exists for survives the queue.
+///
+/// nest-auth reaches the same bound by construction: Node's `crypto.scrypt` runs on the libuv
+/// thread pool, which is four threads by default.
+fn kdf_permit_count() -> usize {
+    std::thread::available_parallelism().map_or(2, |n| n.get().max(2))
 }
 
 impl PasswordService {
@@ -71,7 +97,21 @@ impl PasswordService {
             rehash_on_verify: config.rehash_on_verify,
             sentinel,
             breach_checker,
+            kdf_permits: Arc::new(Semaphore::new(kdf_permit_count())),
         })
+    }
+
+    /// Take one of the KDF's concurrency permits, held for the whole derivation.
+    ///
+    /// # Errors
+    ///
+    /// Returns a generic [`AuthError::Internal`] if the semaphore has been closed, which this
+    /// crate never does — it is owned by the service and lives as long as it.
+    async fn acquire_kdf_permit(&self) -> Result<tokio::sync::OwnedSemaphorePermit, AuthError> {
+        Arc::clone(&self.kdf_permits)
+            .acquire_owned()
+            .await
+            .map_err(|_| internal_error("kdf concurrency limiter closed"))
     }
 
     /// Reject a password that appears in a known-breach corpus.
@@ -108,6 +148,7 @@ impl PasswordService {
     pub async fn hash(&self, password: &str) -> Result<String, AuthError> {
         let params = self.params;
         let password = password.to_owned();
+        let _permit = self.acquire_kdf_permit().await?;
         let joined = tokio::task::spawn_blocking(move || hash(password.as_bytes(), &params)).await;
         flatten_hash(joined)
     }
@@ -124,6 +165,7 @@ impl PasswordService {
         let params = self.params;
         let password = password.to_owned();
         let phc = phc.to_owned();
+        let _permit = self.acquire_kdf_permit().await?;
         let joined = tokio::task::spawn_blocking(move || {
             // The crypto verifier never returns `Err`; collapse the `Result` to a bool so a
             // malformed stored hash is an authentication failure, not an error path.
@@ -226,6 +268,55 @@ mod tests {
     /// `let-else`.
     fn service() -> Option<PasswordService> {
         PasswordService::new(&config(), Arc::new(AllowAllBreachChecker)).ok()
+    }
+
+    #[test]
+    fn the_kdf_admits_one_derivation_per_core_and_never_fewer_than_two() {
+        // `spawn_blocking` bounds nothing useful on its own: Tokio's blocking pool defaults to
+        // 512 threads, and each of these tasks holds ~16-19 MiB of KDF working memory for its
+        // whole run. Unbounded, a few hundred concurrent logins reach gigabytes of resident
+        // memory — and login is a route an unauthenticated caller drives, because the
+        // derivation runs before the password is known to be right and the absent-user path
+        // deliberately runs one too.
+        let expected = std::thread::available_parallelism().map_or(2, |n| n.get().max(2));
+        assert_eq!(kdf_permit_count(), expected);
+        assert!(
+            kdf_permit_count() >= 2,
+            "a single permit would serialize login"
+        );
+        assert!(
+            kdf_permit_count() < 512,
+            "the point is to be below the blocking pool's default"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_kdf_limiter_admits_no_more_than_its_permits_at_once() {
+        // The permit is held for the whole derivation, not merely taken and dropped. Draining
+        // the semaphore and watching a hash fail to make progress is what proves it: without
+        // the acquire, the hash would complete while every permit is held elsewhere.
+        let Some(svc) = service() else { return };
+        let permits = u32::try_from(kdf_permit_count()).unwrap_or(u32::MAX);
+        let Ok(held) = Arc::clone(&svc.kdf_permits)
+            .acquire_many_owned(permits)
+            .await
+        else {
+            return;
+        };
+
+        let blocked = tokio::time::timeout(
+            std::time::Duration::from_millis(250),
+            svc.hash("correct horse battery staple"),
+        )
+        .await;
+        assert!(
+            blocked.is_err(),
+            "a derivation ran with no permit available"
+        );
+
+        // Released, it proceeds — the limiter queues work, it does not reject it.
+        drop(held);
+        assert!(svc.hash("correct horse battery staple").await.is_ok());
     }
 
     #[tokio::test]

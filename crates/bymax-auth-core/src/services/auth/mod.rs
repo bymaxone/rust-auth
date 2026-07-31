@@ -213,6 +213,20 @@ impl AuthEngine {
         to_hex(&hmac_sha256(self.config().hmac_key(), input.as_bytes()))
     }
 
+    /// The invitee-index identifier for an address: `hmac_sha256(email)`, hex.
+    ///
+    /// The index used to key on a bare `sha256(email)`, which is reversible by dictionary — an
+    /// address carries far too little entropy for a plain digest to hide it, and this is the
+    /// one handle an operator (or anyone reading a keyspace dump) has on who a tenant has been
+    /// inviting. Every other identifier in both libraries is an HMAC for exactly that reason;
+    /// this one was the exception. The tenant is not in the preimage because it is already a
+    /// literal segment of the key.
+    ///
+    /// Shared byte-for-byte with nest-auth and pinned by `conformance/wire-contract.json`.
+    pub(crate) fn invitee_identifier(&self, email: &str) -> String {
+        to_hex(&hmac_sha256(self.config().hmac_key(), email.as_bytes()))
+    }
+
     pub(crate) fn hashed_identifier(&self, tenant_id: &str, email: &str) -> String {
         let input = format!("{tenant_id}:{email}");
         to_hex(&hmac_sha256(self.config().hmac_key(), input.as_bytes()))
@@ -463,6 +477,43 @@ mod tests {
                 Some(host) => Ok(host.to_owned()),
             }
         }
+    }
+
+    #[tokio::test]
+    async fn every_identifier_preimage_matches_the_shared_wire_contract() {
+        // These decide which records the two backends share. The `dashboard:` segment is what
+        // keeps a tenant whose id is literally `platform` out of the platform lockout counter;
+        // the OTP preimage stays bare because its keyspace is already purpose-scoped; the
+        // invitee index is an HMAC rather than a plain digest because an address carries far
+        // too little entropy for SHA-256 to hide it. Any of them drifting on one side alone
+        // splits a keyspace the two implementations are supposed to share.
+        let Some(h) = test_support::harness(test_support::base_config(), None) else {
+            return;
+        };
+        let key = h.engine.config().hmac_key();
+        let expect_preimage = |name: &str, actual: &str| {
+            let template = crate::services::contract_preimage(name)
+                .replace("{tenantId}", "t1")
+                .replace("{email}", "user@example.com");
+            assert_eq!(
+                to_hex(&hmac_sha256(key, template.as_bytes())),
+                actual,
+                "the {name} preimage drifted from the shared contract"
+            );
+        };
+
+        expect_preimage(
+            "dashboard",
+            &h.engine.lockout_identifier("t1", "user@example.com"),
+        );
+        expect_preimage(
+            "otpRecord",
+            &h.engine.hashed_identifier("t1", "user@example.com"),
+        );
+        expect_preimage(
+            "inviteeIndex",
+            &h.engine.invitee_identifier("user@example.com"),
+        );
     }
 
     #[test]

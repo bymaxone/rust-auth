@@ -91,6 +91,11 @@ fn to_json<C: Serialize>(claims: &C) -> Result<String, EdgeError> {
 /// HS256 is pinned in [`bymax_auth_jwt::verify`]; `none`/`RS256`/`ES256` are rejected
 /// before any signature math.
 ///
+/// `expected_iss`/`expected_aud` must be filled in wherever the deployment configures
+/// `jwt.issuer`/`jwt.audience`; leaving them `None` there makes this verifier accept tokens
+/// the native server refuses. A token carrying no such claim is refused as firmly as one
+/// carrying the wrong value.
+///
 /// # Errors
 ///
 /// Returns [`EdgeError`] when the token is malformed, carries an unknown `type`, fails the
@@ -100,6 +105,8 @@ pub fn verify_claims_json(
     secret: String,
     leeway_secs: u64,
     now_unix: i64,
+    expected_iss: Option<&str>,
+    expected_aud: Option<&str>,
 ) -> Result<String, EdgeError> {
     // Construct the zeroizing key FIRST, before any fallible step, so the secret bytes are
     // wiped on drop no matter which path returns. `into_bytes` reuses the String's buffer,
@@ -110,6 +117,14 @@ pub fn verify_claims_json(
         validate_exp: true,
         validate_iat: true,
         now_unix: Some(now_unix),
+        // The binding is the edge's to enforce too. A deployment that configures
+        // `jwt.issuer`/`jwt.audience` has its native server refuse anything that does not
+        // carry them; an edge that skipped the check would accept a token minted for a
+        // different service — and with HS256 the verifier can also sign, so "a different
+        // service that trusts the same secret" is the realistic attacker. Left unset, the
+        // check is skipped, which is correct for the (default) unbound deployment.
+        expected_iss,
+        expected_aud,
     };
     let result = match peek_kind(token) {
         Ok(TokenKind::Dashboard) => verify::<DashboardClaims>(token, &key, &opts)
@@ -214,11 +229,63 @@ mod tests {
     }
 
     #[test]
+    fn the_edge_applies_the_same_issuer_and_audience_binding_the_backend_does() {
+        // A deployment that configures `jwt.issuer`/`jwt.audience` has its native server
+        // refuse anything that does not carry them. The edge is a verifier of the same
+        // tokens, and it used to have no way to say so — so a Worker in front of that backend
+        // accepted a token minted for a different service. With HS256 the verifier can also
+        // sign, so "a different service that trusts the same secret" is the realistic
+        // attacker, not a hypothetical one.
+        let mut claims = dashboard(1_000, 9_999_999_999);
+        claims.iss = Some("bymax-one".to_owned());
+        claims.aud = Some("dashboard".to_owned());
+        let token = sign(&claims, &HsKey::from_bytes(SECRET)).unwrap_or_default();
+
+        assert!(
+            verify_claims_json(
+                &token,
+                secret_string(),
+                0,
+                1_500,
+                Some("bymax-one"),
+                Some("dashboard")
+            )
+            .is_ok()
+        );
+        for (iss, aud) in [
+            (Some("someone-else"), Some("dashboard")),
+            (Some("bymax-one"), Some("some-other-service")),
+        ] {
+            assert!(
+                verify_claims_json(&token, secret_string(), 0, 1_500, iss, aud).is_err(),
+                "the edge accepted a token bound to another service"
+            );
+        }
+    }
+
+    #[test]
+    fn an_unstamped_token_does_not_slip_past_a_bound_edge() {
+        // Otherwise omitting the claim is how an attacker opts out of the binding, which is
+        // the same as the deployment not having one.
+        let token = sign_dashboard(1_000, 9_999_999_999);
+
+        assert!(
+            verify_claims_json(&token, secret_string(), 0, 1_500, Some("bymax-one"), None).is_err()
+        );
+        assert!(
+            verify_claims_json(&token, secret_string(), 0, 1_500, None, Some("dashboard")).is_err()
+        );
+        // …and an unbound edge, which is the default, still accepts it.
+        assert!(verify_claims_json(&token, secret_string(), 0, 1_500, None, None).is_ok());
+    }
+
+    #[test]
     fn verifies_a_dashboard_token_and_returns_its_claims_json() {
         // A backend-signed access token verifies at the edge and the JSON carries the
         // wire field names (the server/edge-parity guarantee).
         let token = sign_dashboard(1_000, 2_000);
-        let json = verify_claims_json(&token, secret_string(), 0, 1_500).unwrap_or_default();
+        let json =
+            verify_claims_json(&token, secret_string(), 0, 1_500, None, None).unwrap_or_default();
         assert!(json.contains("\"type\":\"dashboard\""));
         assert!(json.contains("\"tenantId\":\"t_1\""));
         assert!(json.contains("\"mfaEnabled\":true"));
@@ -241,7 +308,7 @@ mod tests {
             epoch: 0,
         };
         let token = sign(&claims, &HsKey::from_bytes(SECRET)).unwrap_or_default();
-        let json = verify_claims_json(&token, secret_string(), 0, 1_500);
+        let json = verify_claims_json(&token, secret_string(), 0, 1_500, None, None);
         assert!(matches!(&json, Ok(j) if j.contains("\"type\":\"platform\"")));
     }
 
@@ -259,7 +326,7 @@ mod tests {
             exp: 2_000,
         };
         let token = sign(&claims, &HsKey::from_bytes(SECRET)).unwrap_or_default();
-        let json = verify_claims_json(&token, secret_string(), 0, 1_500);
+        let json = verify_claims_json(&token, secret_string(), 0, 1_500, None, None);
         assert!(matches!(&json, Ok(j) if j.contains("\"type\":\"mfa_challenge\"")));
     }
 
@@ -267,9 +334,9 @@ mod tests {
     fn rejects_an_expired_token() {
         // `exp` is the first invalid second; at `exp` the edge rejects.
         let token = sign_dashboard(1_000, 2_000);
-        assert!(verify_claims_json(&token, secret_string(), 0, 2_000).is_err());
+        assert!(verify_claims_json(&token, secret_string(), 0, 2_000, None, None).is_err());
         // One second earlier it is still valid.
-        assert!(verify_claims_json(&token, secret_string(), 0, 1_999).is_ok());
+        assert!(verify_claims_json(&token, secret_string(), 0, 1_999, None, None).is_ok());
     }
 
     #[test]
@@ -277,15 +344,15 @@ mod tests {
         // A small edge leeway keeps an expiring token valid up to (but not including)
         // `exp + leeway`, tolerating edge clock drift.
         let token = sign_dashboard(1_000, 2_000);
-        assert!(verify_claims_json(&token, secret_string(), 5, 2_004).is_ok());
-        assert!(verify_claims_json(&token, secret_string(), 5, 2_005).is_err());
+        assert!(verify_claims_json(&token, secret_string(), 5, 2_004, None, None).is_ok());
+        assert!(verify_claims_json(&token, secret_string(), 5, 2_005, None, None).is_err());
     }
 
     #[test]
     fn rejects_a_token_issued_in_the_future_beyond_leeway() {
         // An `iat` beyond now+leeway is an invalid token (TokenInvalid at the boundary).
         let token = sign_dashboard(5_000, 9_000);
-        assert!(verify_claims_json(&token, secret_string(), 0, 1_000).is_err());
+        assert!(verify_claims_json(&token, secret_string(), 0, 1_000, None, None).is_err());
     }
 
     #[test]
@@ -293,7 +360,7 @@ mod tests {
         // A token signed with one secret must not verify under another.
         let token = sign_dashboard(1_000, 2_000);
         let other = String::from("a-different-edge-secret-9876543210ab-xx");
-        assert!(verify_claims_json(&token, other, 0, 1_500).is_err());
+        assert!(verify_claims_json(&token, other, 0, 1_500, None, None).is_err());
     }
 
     #[test]
@@ -306,7 +373,7 @@ mod tests {
         )
         .unwrap_or_default();
         assert!(matches!(
-            verify_claims_json(&weird, secret_string(), 0, 5),
+            verify_claims_json(&weird, secret_string(), 0, 5, None, None),
             Err(EdgeError::UnknownType)
         ));
         // And the decode-only projection rejects it the same way.
@@ -321,7 +388,7 @@ mod tests {
         // No `type` field at all is a decode failure on the peek (mapped through Jwt).
         let no_type =
             sign(&serde_json::json!({ "x": 1 }), &HsKey::from_bytes(SECRET)).unwrap_or_default();
-        assert!(verify_claims_json(&no_type, secret_string(), 0, 5).is_err());
+        assert!(verify_claims_json(&no_type, secret_string(), 0, 5, None, None).is_err());
     }
 
     #[test]
@@ -336,7 +403,7 @@ mod tests {
             &HsKey::from_bytes(SECRET),
         )
         .unwrap_or_default();
-        assert!(verify_claims_json(&token, secret_string(), 0, 5).is_err());
+        assert!(verify_claims_json(&token, secret_string(), 0, 5, None, None).is_err());
     }
 
     #[test]

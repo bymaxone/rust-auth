@@ -91,7 +91,7 @@
     ]
   },
 
-  "lockoutIdentifiers": {
+  "identifierPreimages": {
     "$comment": [
       "The preimage each plane HMACs into its `lf:` counter key. The identity PLANE is part of",
       "it, not just the tenant: without the `dashboard:` segment a tenant whose id is literally",
@@ -103,13 +103,45 @@
       "",
       "The OTP identifier is deliberately NOT plane-scoped and keeps the bare",
       "`{tenantId}:{email}` shape: its keyspace is already purpose-scoped (`otp:{purpose}:`),",
-      "the platform plane has no OTP flow, and moving it would split records in flight."
+      "the platform plane has no OTP flow, and moving it would split records in flight.",
+      "",
+      "The invitee index takes the canonicalized address alone — the tenant is already a literal",
+      "segment of that key. It is an HMAC and not a bare digest for the reason all of these are:",
+      "an address carries too little entropy for a plain SHA-256 to hide it."
     ],
     "dashboard": "hmac_sha256(hmacKey, 'dashboard:{tenantId}:{email}')",
     "platform": "hmac_sha256(hmacKey, 'platform:{email}')",
-    "otpRecord": "hmac_sha256(hmacKey, '{tenantId}:{email}')"
+    "otpRecord": "hmac_sha256(hmacKey, '{tenantId}:{email}')",
+    "inviteeIndex": "hmac_sha256(hmacKey, '{email}')"
   },
 
+  "requestFieldBounds": {
+    "$comment": [
+      "The length bounds every request DTO applies to a shared field, held identical by both",
+      "implementations. They matter beyond tidiness: an unbounded field on a public route is a",
+      "free byte sink to carry, parse and log, and a bound that differs between the two backends",
+      "means the same request is accepted by one and refused by the other — for a deployment that",
+      "runs both behind one address, that is a difference nobody can explain from the outside.",
+      "",
+      "The password bounds split deliberately. Setting a password enforces the policy minimum;",
+      "PROVING one (login, or the current-password re-proof) floors at 1, because the credential",
+      "may predate whatever the policy says today and a policy floor on a login door refuses a",
+      "legitimate holder with a validation error while telling an unauthenticated caller what the",
+      "policy is, before any key derivation runs."
+    ],
+    "email": { "max": 255 },
+    "newPassword": { "min": 8, "max": 128 },
+    "provenPassword": { "min": 1, "max": 128 },
+    "tenantId": { "min": 1, "max": 128 },
+    "displayName": { "min": 2, "max": 128 },
+    "invitationDisplayName": { "min": 2, "max": 100 },
+    "singleUseToken": { "min": 64, "max": 64 },
+    "resetOtp": { "min": 4, "max": 8 },
+    "verificationOtp": { "min": 6, "max": 6 },
+    "totpCode": { "min": 6, "max": 6 },
+    "role": { "min": 1, "max": 64 },
+    "opaqueToken": { "min": 1, "max": 2048 }
+  },
   "sessionIndexMembers": {
     "$comment": [
       "Index members are FULL key suffixes, not bare hashes. The member has to name its own",
@@ -190,7 +222,7 @@
       "$comment": "Consumption is a single-use GETDEL, so a record the reader rejects is destroyed rather than retried — a missing field loses the invitation outright."
     },
     "invitationIndex": {
-      "key": "invidx:{tenantId}:{sha256(email)}",
+      "key": "invidx:{tenantId}:{hmacSha256(email, hmacKey)}",
       "value": "the invitation's token hash (lowercase hex), pointing at its `inv:` record",
       "$comment": [
         "The one handle the issuing side has on a pending invitation: the record itself is keyed by",
@@ -199,7 +231,11 @@
         "together. The email is hashed rather than stored in the clear — a dump of the keyspace must",
         "not enumerate who a tenant has been inviting. Re-inviting an address supersedes the previous",
         "invitation through this key: two live tokens for one invitee is two chances for an",
-        "intercepted link, and a revoke would only ever reach the newest."
+        "intercepted link, and a revoke would only ever reach the newest.",
+        "The address is HMAC'd, not plainly digested: an address carries too little entropy for a",
+        "bare SHA-256 to hide it, and this key is the one handle anyone reading a keyspace dump has",
+        "on who a tenant has been inviting. The preimage is the canonicalized address alone — the",
+        "tenant is already a literal segment of the key."
       ]
     },
     "wsTicket": {

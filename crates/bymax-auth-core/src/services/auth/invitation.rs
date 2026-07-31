@@ -126,7 +126,10 @@ impl AuthEngine {
         // second one. Two live tokens for one invitee is two chances for an intercepted link
         // to be redeemed, and a revoke would only ever reach the newest — the older would sit
         // valid and unreferenced for the rest of its TTL.
-        if let Some(previous) = store.take_invitation_index(tenant_id, &email).await? {
+        if let Some(previous) = store
+            .take_invitation_index(tenant_id, &self.invitee_identifier(&email))
+            .await?
+        {
             store.delete_invitation_by_hash(&previous).await?;
         }
         store.put_invitation(&raw, &invitation, ttl).await?;
@@ -134,7 +137,12 @@ impl AuthEngine {
         // by the hash of a token only the recipient's mailbox holds, so without this nobody on
         // the issuing side can name a pending invitation, let alone withdraw one.
         store
-            .put_invitation_index(tenant_id, &email, &token_hash(&raw), ttl)
+            .put_invitation_index(
+                tenant_id,
+                &self.invitee_identifier(&email),
+                &token_hash(&raw),
+                ttl,
+            )
             .await?;
 
         // The email provider builds the accept URL from the raw token (never logged).
@@ -208,7 +216,10 @@ impl AuthEngine {
         // this is tidiness rather than correctness — but a stale pointer is exactly the kind of
         // thing an operator reads as "still pending".
         store
-            .take_invitation_index(&invitation.tenant_id, &invitation.email)
+            .take_invitation_index(
+                &invitation.tenant_id,
+                &self.invitee_identifier(&invitation.email),
+            )
             .await?;
 
         // …and re-validate the INVITER, whose authority is what the invitation rests on. It was
@@ -296,8 +307,10 @@ impl AuthEngine {
     /// # Errors
     ///
     /// Returns [`AuthError::TokenInvalid`] when the revoker no longer exists,
-    /// [`AuthError::InsufficientRole`] when they may not withdraw this invitation, or a
-    /// store/repository [`AuthError`].
+    /// [`AuthError::InsufficientRole`] when the revoker belongs to another tenant or is not in
+    /// good standing — both facts about the caller alone — or a store/repository
+    /// [`AuthError`]. A revoker who merely does not out-rank the invitation is answered
+    /// `Ok(false)`, exactly as one asking about an address with nothing pending.
     pub async fn revoke_invitation(
         &self,
         revoker_user_id: &str,
@@ -318,8 +331,16 @@ impl AuthEngine {
         if revoker.tenant_id != tenant_id {
             return Err(AuthError::InsufficientRole);
         }
+        // Standing is a fact about the CALLER, so refusing out loud describes nobody else — and
+        // it is settled before any lookup, so a suspended account cannot use this door to ask
+        // questions at all. The rank comparison below is the opposite kind of check, and is
+        // answered the opposite way.
+        self.assert_user_not_blocked(&revoker.status)?;
 
-        let Some(hash) = store.read_invitation_index(tenant_id, &email).await? else {
+        let Some(hash) = store
+            .read_invitation_index(tenant_id, &self.invitee_identifier(&email))
+            .await?
+        else {
             return Ok(false);
         };
 
@@ -327,18 +348,32 @@ impl AuthEngine {
         // an address, not a role, so the only way to know what authority is being withdrawn is
         // to look. A record that no longer parses reads as absent and is withdrawn without a
         // role check — it can no longer be accepted either, and leaving it would be worse.
+        //
+        // An outranked revoker is answered exactly as one who asked about an address with
+        // nothing pending. `InsufficientRole` here was an oracle: the caller names an address
+        // and nothing else, so the refusal said "there is a pending invitation for this
+        // address, at a role above yours" while `Ok(false)` said "there is none" — letting any
+        // member enumerate a tenant's pending invitations, and roughly at what authority. That
+        // is precisely the disclosure hashing the address into the index exists to prevent.
+        // The refusal is recorded, where an operator can see it and the prober cannot.
         if let Some(invitation) = store.read_invitation_by_hash(&hash).await?
-            && !(self.assert_user_not_blocked(&revoker.status).is_ok()
-                && has_role(
-                    &revoker.role,
-                    &invitation.role,
-                    &self.config().config().roles.hierarchy,
-                ))
+            && !has_role(
+                &revoker.role,
+                &invitation.role,
+                &self.config().config().roles.hierarchy,
+            )
         {
-            return Err(AuthError::InsufficientRole);
+            tracing::warn!(
+                %tenant_id,
+                %revoker_user_id,
+                "invitation: revoke refused — outranked by the invitation"
+            );
+            return Ok(false);
         }
 
-        store.take_invitation_index(tenant_id, &email).await?;
+        store
+            .take_invitation_index(tenant_id, &self.invitee_identifier(&email))
+            .await?;
         let removed = store.delete_invitation_by_hash(&hash).await?;
         tracing::info!(%tenant_id, %revoker_user_id, "invitation: withdrawn");
         Ok(removed)
@@ -1040,8 +1075,10 @@ mod tests {
 
     /// Read the token the invitee index points at, so a test can assert over the record.
     async fn indexed(s: &Setup, email: &str) -> Option<String> {
+        // Through the engine's own derivation: the index is keyed by an HMAC of the address,
+        // so a test that spelled the key itself would pass over a changed preimage.
         s.stores
-            .read_invitation_index("t1", &normalize_email(email))
+            .read_invitation_index("t1", &s.engine.invitee_identifier(&normalize_email(email)))
             .await
             .ok()
             .flatten()
@@ -1107,11 +1144,22 @@ mod tests {
                 .is_ok()
         );
 
+        // Silently, and that is the point. The caller names an address and nothing else, so
+        // `InsufficientRole` would say "there is a pending invitation here, at a role above
+        // yours" while `Ok(false)` says "there is none" — an oracle any member could walk an
+        // address list through, which is what hashing the address into the index prevents.
         assert!(matches!(
             s.engine
                 .revoke_invitation(&member, "invitee@example.com", "t1")
                 .await,
-            Err(AuthError::InsufficientRole)
+            Ok(false)
+        ));
+        // The same caller, against an address with nothing pending: the same answer.
+        assert!(matches!(
+            s.engine
+                .revoke_invitation(&member, "nobody@example.com", "t1")
+                .await,
+            Ok(false)
         ));
         // …and the invitation survived the refusal.
         assert!(indexed(&s, "invitee@example.com").await.is_some());
@@ -1128,6 +1176,71 @@ mod tests {
                 .await,
             Err(AuthError::InsufficientRole)
         ));
+    }
+
+    #[tokio::test]
+    async fn a_suspended_revoker_is_refused_out_loud_and_before_any_lookup() {
+        // The opposite side of the line from the rank check above: standing is a fact about
+        // the CALLER, so refusing out loud describes nobody else — and refusing before the
+        // lookup means a suspended account cannot use this door to ask questions at all.
+        let Some(s) = setup(invite_config()) else { return };
+        let admin = seed_admin(&s.users, "admin@example.com", "ADMIN").await;
+        let suspended = seed_admin(&s.users, "gone@example.com", "ADMIN").await;
+        assert!(s.users.update_status(&suspended, "SUSPENDED").await.is_ok());
+        assert!(
+            s.engine
+                .invite(&admin, "invitee@example.com", "MEMBER", "t1", None)
+                .await
+                .is_ok()
+        );
+
+        assert!(matches!(
+            s.engine
+                .revoke_invitation(&suspended, "invitee@example.com", "t1")
+                .await,
+            Err(AuthError::AccountSuspended)
+        ));
+        assert!(indexed(&s, "invitee@example.com").await.is_some());
+    }
+
+    #[tokio::test]
+    async fn the_invitee_index_is_keyed_by_an_hmac_of_the_address() {
+        // An address carries far too little entropy for a plain digest to hide it: the index
+        // used to key on a bare `sha256(email)`, reversible by dictionary, and it is the one
+        // handle anyone reading a keyspace dump has on who a tenant has been inviting. The
+        // preimage is pinned here because nest-auth writes the same keys into the same Redis.
+        let Some(s) = setup(invite_config()) else { return };
+        let inviter = seed_admin(&s.users, "admin@example.com", "ADMIN").await;
+        assert!(
+            s.engine
+                .invite(&inviter, "Invitee@Example.COM", "MEMBER", "t1", None)
+                .await
+                .is_ok()
+        );
+
+        let expected = crate::services::to_hex(&bymax_auth_crypto::mac::hmac_sha256(
+            s.engine.config().hmac_key(),
+            b"invitee@example.com",
+        ));
+        assert!(
+            s.stores
+                .read_invitation_index("t1", &expected)
+                .await
+                .ok()
+                .flatten()
+                .is_some(),
+            "the index is not keyed by hmac(canonical address)"
+        );
+        // And nothing sits under the bare digest the key used to carry.
+        let bare = crate::services::to_hex(&bymax_auth_crypto::mac::sha256(b"invitee@example.com"));
+        assert!(
+            s.stores
+                .read_invitation_index("t1", &bare)
+                .await
+                .ok()
+                .flatten()
+                .is_none()
+        );
     }
 
     #[tokio::test]
@@ -1210,7 +1323,12 @@ mod tests {
         );
         assert!(
             s.stores
-                .put_invitation_index("t1", "invitee@example.com", &hash, 600)
+                .put_invitation_index(
+                    "t1",
+                    &s.engine.invitee_identifier("invitee@example.com"),
+                    &hash,
+                    600
+                )
                 .await
                 .is_ok()
         );
