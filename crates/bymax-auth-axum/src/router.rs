@@ -94,20 +94,13 @@ impl AuthRouter {
 /// Mount the feature- and toggle-gated optional groups. Each arm is doubly gated: a
 /// `#[cfg(feature = ...)]` removes the code when the Cargo feature is off, and the runtime
 /// toggle removes the routes when the engine did not wire the capability.
-#[cfg_attr(
-    not(any(
-        feature = "mfa",
-        feature = "sessions",
-        feature = "platform",
-        feature = "oauth",
-        feature = "invitations"
-    )),
-    expect(
-        unused_variables,
-        unused_mut,
-        reason = "a bare adapter mounts no optional groups, so the inputs are unused"
-    )
-)]
+// No `expect(unused_variables, unused_mut)` here any more. It was correct while every optional
+// group sat behind a Cargo feature: with none of them on, the function mounted nothing and its
+// inputs really were unused. The email-change group is not feature-gated — the flow ships with
+// the adapter and is switched on at runtime — so the parameters are read in every build, and
+// the expectation became unfulfilled. Under `-D warnings` an unfulfilled expectation is an
+// error, which is the right outcome: it is the compiler saying the annotation stopped
+// describing the code.
 fn mount_optional_groups(
     mut router: Router<AuthState>,
     groups: RouteGroups,

@@ -42,7 +42,7 @@ fn verifies_a_backend_signed_token_in_wasm() {
     // A token whose window spans the JS `Date` clock verifies in the real wasm runtime —
     // the server/edge-parity property, proven against the actual artifact.
     let token = sign_dashboard(0, i64::MAX);
-    let claims = verify_jwt_hs256(&token, SECRET.to_owned(), None);
+    let claims = verify_jwt_hs256(&token, SECRET.to_owned(), None, None, None);
     assert!(claims.is_some());
     assert!(
         claims
@@ -55,7 +55,7 @@ fn verifies_a_backend_signed_token_in_wasm() {
 fn rejects_an_expired_token_in_wasm() {
     // An already-expired token yields `undefined` under the live clock.
     let expired = sign_dashboard(0, 1);
-    assert!(verify_jwt_hs256(&expired, SECRET.to_owned(), None).is_none());
+    assert!(verify_jwt_hs256(&expired, SECRET.to_owned(), None, None, None).is_none());
 }
 
 #[wasm_bindgen_test]
@@ -66,6 +66,8 @@ fn rejects_a_wrong_secret_in_wasm() {
         verify_jwt_hs256(
             &token,
             "a-different-edge-secret-key-abcdef0".to_owned(),
+            None,
+            None,
             None
         )
         .is_none()
@@ -81,7 +83,7 @@ fn rejects_an_alg_confusion_token_in_wasm() {
     let rs256_header = B64.encode(r#"{"alg":"RS256","typ":"JWT"}"#);
     let payload = B64.encode(r#"{"type":"dashboard","sub":"u","jti":"j","tenantId":"t","role":"r","status":"ACTIVE","mfaEnabled":false,"mfaVerified":false,"iat":0,"exp":9999999999}"#);
     let forged = format!("{rs256_header}.{payload}.sig");
-    assert!(verify_jwt_hs256(&forged, SECRET.to_owned(), None).is_none());
+    assert!(verify_jwt_hs256(&forged, SECRET.to_owned(), None, None, None).is_none());
 }
 
 #[wasm_bindgen_test]

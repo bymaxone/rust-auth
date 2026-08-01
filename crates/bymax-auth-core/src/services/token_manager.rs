@@ -13,9 +13,13 @@ use std::time::Duration;
 use bymax_auth_jwt::keys::{HsKey, VerifyOptions};
 use bymax_auth_jwt::{RawRefreshToken, sign, verify};
 use bymax_auth_types::{
-    AuthError, AuthResult, DashboardClaims, DashboardType, MfaContext, MfaTempClaims, MfaTempType,
+    AuthError, AuthResult, DashboardClaims, DashboardType, MfaContext, MfaTempClaims,
     RotatedTokens, SafeAuthUser,
 };
+// Only the token-building path names the discriminant, and that path is `mfa`-gated: a build
+// without the feature refuses the challenge rather than signing one nothing can redeem.
+#[cfg(feature = "mfa")]
+use bymax_auth_types::MfaTempType;
 #[cfg(feature = "platform")]
 use bymax_auth_types::{PlatformAuthResult, PlatformClaims, PlatformType, SafeAuthPlatformUser};
 
@@ -27,6 +31,10 @@ use crate::traits::{
 };
 
 /// MFA temp-token lifetime, in seconds (§7.3 constant `MFA_TEMP_TOKEN_TTL_SECONDS`).
+///
+/// Feature-gated with the only thing that mints one: a build without `mfa` refuses the
+/// challenge rather than signing a token nothing can redeem, so nothing here reads it.
+#[cfg(feature = "mfa")]
 const MFA_TEMP_TOKEN_TTL_SECONDS: i64 = 300;
 
 /// The verified payload of an MFA temp token, returned by
@@ -816,6 +824,10 @@ impl TokenManagerService {
     ///
     /// Returns [`AuthError::Internal`] only if claim serialization fails (unreachable for the
     /// concrete claim type).
+    ///
+    /// Feature-gated: a build without `mfa` refuses the challenge rather than signing a token
+    /// nothing can redeem, so it has no reason to build one.
+    #[cfg(feature = "mfa")]
     fn build_mfa_temp_token(
         &self,
         user_id: &str,
