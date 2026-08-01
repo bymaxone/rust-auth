@@ -25,6 +25,18 @@ use crate::traits::{HttpClient, HttpError, HttpMethod, HttpRequest, HttpResponse
 /// The default per-request timeout (§11.1.1), bounding a slow origin.
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// The ceiling on a response body, in bytes.
+///
+/// The timeout above bounds how LONG an origin can take; nothing bounded how MUCH it could
+/// send. Every response this client reads is a small JSON document or a HIBP range listing, and
+/// the largest of those is a few hundred kilobytes — but `bytes()` buffers whatever arrives,
+/// so a hostile or compromised origin could answer a breach check with gigabytes and the
+/// process would hold all of it. `HibpBreachChecker::is_breached` runs on `register` and on
+/// `reset_password` *before any proof is spent*, so the trigger is unauthenticated.
+///
+/// One megabyte is roughly an order of magnitude above the largest legitimate response.
+const MAX_RESPONSE_BYTES: usize = 1024 * 1024;
+
 /// A [`HttpClient`] backed by a shared `reqwest::Client`. Cloning the client is cheap (it
 /// shares an internal connection pool), so one instance serves every provider request.
 pub struct ReqwestHttpClient {
@@ -79,7 +91,23 @@ impl HttpClient for ReqwestHttpClient {
                 )
             })
             .collect();
-        let body = response.bytes().await.map_err(map_reqwest_error)?.to_vec();
+        // Refuse an over-long body before buffering it. `Content-Length` is only a hint — a
+        // chunked response carries none — so the streamed read below is the real bound and
+        // this is the cheap early exit.
+        if response
+            .content_length()
+            .is_some_and(|len| len > MAX_RESPONSE_BYTES as u64)
+        {
+            return Err(HttpError::Transport("response body too large".to_owned()));
+        }
+        let mut body: Vec<u8> = Vec::new();
+        let mut stream = response;
+        while let Some(chunk) = stream.chunk().await.map_err(map_reqwest_error)? {
+            if body.len() + chunk.len() > MAX_RESPONSE_BYTES {
+                return Err(HttpError::Transport("response body too large".to_owned()));
+            }
+            body.extend_from_slice(&chunk);
+        }
         Ok(HttpResponse {
             status,
             headers,
@@ -268,5 +296,79 @@ mod tests {
             })
             .await;
         assert!(matches!(res, Err(HttpError::Timeout)));
+    }
+    /// A raw `200 OK` whose `Content-Length` claims more than the cap, with no body written.
+    ///
+    /// The claim alone is enough: the early exit reads the header and refuses before any body
+    /// is buffered, which is the point — the alternative is allocating what the header asked
+    /// for on an unauthenticated path.
+    fn oversized_length_response() -> Vec<u8> {
+        format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            MAX_RESPONSE_BYTES + 1
+        )
+        .into_bytes()
+    }
+
+    /// A chunked `200 OK` that streams past the cap without ever declaring a length.
+    fn oversized_chunked_response() -> Vec<u8> {
+        let mut out = b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n".to_vec();
+        // 64 KiB per chunk until the cap is comfortably passed. Nothing terminates the body:
+        // the client must refuse on its own rather than wait for a `0\r\n\r\n` that a hostile
+        // peer has no reason to send.
+        let chunk = vec![b'a'; 64 * 1024];
+        for _ in 0..(MAX_RESPONSE_BYTES / chunk.len() + 2) {
+            out.extend_from_slice(format!("{:x}\r\n", chunk.len()).as_bytes());
+            out.extend_from_slice(&chunk);
+            out.extend_from_slice(b"\r\n");
+        }
+        out
+    }
+
+    /// A declared length above the cap is refused before the body is read.
+    #[tokio::test]
+    async fn a_response_declaring_more_than_the_cap_is_refused() {
+        let started = spawn_server(Behavior::Respond(oversized_length_response())).await;
+        let Some((addr, _handle)) = started else { return };
+        let Ok(client) = ReqwestHttpClient::new() else { return };
+
+        let res = client
+            .send(HttpRequest {
+                method: HttpMethod::Get,
+                url: format!("http://{addr}/userinfo"),
+                headers: Vec::new(),
+                body: None,
+            })
+            .await;
+
+        assert!(
+            matches!(&res, Err(HttpError::Transport(msg)) if msg.contains("too large")),
+            "a declared oversize must be refused: {res:?}"
+        );
+    }
+
+    /// A body that streams past the cap with no declared length is refused too — the case the
+    /// early exit cannot see, and the one an attacker controls.
+    #[tokio::test]
+    async fn a_chunked_response_that_exceeds_the_cap_is_refused() {
+        let started = spawn_server(Behavior::Respond(oversized_chunked_response())).await;
+        let Some((addr, _handle)) = started else { return };
+        let Ok(client) = ReqwestHttpClient::new() else { return };
+
+        let res = client
+            .send(HttpRequest {
+                method: HttpMethod::Get,
+                url: format!("http://{addr}/userinfo"),
+                headers: Vec::new(),
+                body: None,
+            })
+            .await;
+
+        // The message matters: a truncated chunked body is ALSO an error, so `is_err()` alone
+        // would pass with the bound removed. Only the cap produces this one.
+        assert!(
+            matches!(&res, Err(HttpError::Transport(msg)) if msg.contains("too large")),
+            "an unbounded body must be refused by the cap, not by the peer hanging up: {res:?}"
+        );
     }
 }
