@@ -270,6 +270,16 @@ impl SessionService {
                 Err(other) => return Err(other),
             }
         }
+        // Every rotation grace pointer the account holds goes too. `list_sessions` filters
+        // `rp:` members out by construction and `revoke_session` touches only the primary
+        // refresh keys, so a pointer survived both — including the one naming the session this
+        // call deliberately KEEPS, which anyone holding its predecessor token could still
+        // recover through the grace window into a brand-new full-lifetime session. The epoch
+        // bump below does not close that: a recovered session signs from the current epoch.
+        self.store
+            .sweep_grace_pointers(SessionKind::Dashboard, user_id)
+            .await?;
+
         // Last, and only once every victim is gone: a failure above leaves the epoch untouched
         // rather than signing the caller out of a device the loop never got to revoke.
         self.store
@@ -469,7 +479,7 @@ mod tests {
     use crate::config::resolvers::MaxSessionsResolver;
     use crate::config::{AuthConfig, EvictionStrategy};
     use crate::testing::{InMemoryStores, InMemoryUserRepository};
-    use crate::traits::NoOpAuthHooks;
+    use crate::traits::{NoOpAuthHooks, RotateOutcome};
     use bymax_auth_types::{AuthUser, CreateUserData};
     use std::collections::BTreeMap;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -902,6 +912,101 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn revoke_all_except_current_sweeps_the_kept_session_grace_pointer() {
+        // `list_sessions` filters `rp:` members out by construction and `revoke_session`
+        // touches only the primary refresh keys, so a grace pointer used to survive this call
+        // entirely. For a revoked session that is harmless — the grace branch needs the
+        // successor's `rt:` key and it is gone. The gap is the session deliberately KEPT: its
+        // predecessor's pointer names a hash that is still alive, so whoever holds that
+        // predecessor token could take the grace branch and mint a brand-new full-lifetime
+        // session for the rest of the window, right after the user asked to sign out their
+        // other devices. The epoch bump does not close it: a recovered session signs its
+        // access token from the current epoch.
+        let store = Arc::new(InMemoryStores::new());
+        let users = Arc::new(InMemoryUserRepository::new());
+        let uid = seed_user(&users, "grace-sweep").await;
+        let base = OffsetDateTime::UNIX_EPOCH;
+        let predecessor = hash("7777");
+        let kept = hash("8888");
+
+        assert!(
+            store
+                .create_session(
+                    SessionKind::Dashboard,
+                    &predecessor,
+                    &record(&uid, base),
+                    3600
+                )
+                .await
+                .is_ok()
+        );
+        // Rotating predecessor -> kept plants the grace pointer at the predecessor's hash.
+        let rotated = store
+            .rotate(
+                SessionKind::Dashboard,
+                &SessionRotation {
+                    old_hash: predecessor.clone(),
+                    new_hash: kept.clone(),
+                    new_raw: "new-raw-token".to_owned(),
+                    new_record: record(&uid, base),
+                    refresh_ttl: 3600,
+                    grace_ttl: 30,
+                },
+            )
+            .await;
+        assert!(
+            matches!(rotated, Ok(RotateOutcome::Rotated(_))),
+            "{rotated:?}"
+        );
+
+        // The pointer is live: presenting the predecessor again recovers through the grace arm.
+        let recovers = store
+            .rotate(
+                SessionKind::Dashboard,
+                &SessionRotation {
+                    old_hash: predecessor.clone(),
+                    new_hash: hash("9999"),
+                    new_raw: "another-raw-token".to_owned(),
+                    new_record: record(&uid, base),
+                    refresh_ttl: 3600,
+                    grace_ttl: 30,
+                },
+            )
+            .await;
+        assert!(
+            matches!(recovers, Ok(RotateOutcome::Grace(_))),
+            "{recovers:?}"
+        );
+
+        let svc = service(
+            store.clone(),
+            users,
+            Arc::new(NoOpAuthHooks),
+            config(5, None),
+        );
+        assert!(svc.revoke_all_except_current(&uid, &kept).await.is_ok());
+
+        // After the sweep the predecessor no longer recovers anything.
+        let after = store
+            .rotate(
+                SessionKind::Dashboard,
+                &SessionRotation {
+                    old_hash: predecessor,
+                    new_hash: hash("aaaa"),
+                    new_raw: "third-raw-token".to_owned(),
+                    new_record: record(&uid, base),
+                    refresh_ttl: 3600,
+                    grace_ttl: 30,
+                },
+            )
+            .await;
+        assert!(
+            !matches!(after, Ok(RotateOutcome::Grace(_))),
+            "the kept session's grace pointer survived the revocation: {after:?}"
+        );
+    }
+
+    #[tokio::test]
     async fn rotate_session_moves_the_detail_and_is_a_noop_for_equal_hashes() {
         // Rotating old -> new moves the detail to the new hash; rotating a hash to itself is
         // an early no-op; a malformed hash is rejected.
@@ -1185,6 +1290,22 @@ mod tests {
         ) -> Result<(), AuthError> {
             Ok(())
         }
+        async fn create_recovered_session(
+            &self,
+            _kind: SessionKind,
+            _token_hash: &str,
+            _detail: &SessionRecord,
+            _ttl_secs: u64,
+        ) -> Result<bool, AuthError> {
+            Ok(true)
+        }
+        async fn sweep_grace_pointers(
+            &self,
+            _kind: SessionKind,
+            _user_id: &str,
+        ) -> Result<(), AuthError> {
+            Ok(())
+        }
         async fn revoke_all(&self, _kind: SessionKind, _user_id: &str) -> Result<(), AuthError> {
             Ok(())
         }
@@ -1215,6 +1336,79 @@ mod tests {
         async fn bump_epoch(&self, _kind: SessionKind, _user_id: &str) -> Result<u64, AuthError> {
             Ok(1)
         }
+    }
+
+    /// The sweep has to run over a pointer that is actually there.
+    ///
+    /// The existing coverage rotates, recovers THROUGH the grace arm (consuming the pointer),
+    /// and only then revokes — so the sweep ran over an empty set and the filter it applies was
+    /// never exercised. Here the pointer is left untouched, which is the ordinary state of an
+    /// account that rotated recently: whoever holds the predecessor token can still recover
+    /// with it until the window closes, and "log out everywhere" has to take that away.
+    #[tokio::test]
+    async fn revoking_other_devices_sweeps_a_grace_pointer_that_was_never_used() {
+        let store = Arc::new(InMemoryStores::new());
+        let users = Arc::new(InMemoryUserRepository::new());
+        let uid = seed_user(&users, "unused-grace").await;
+        let base = OffsetDateTime::UNIX_EPOCH;
+        let predecessor = hash("1111");
+        let kept = hash("2222");
+
+        assert!(
+            store
+                .create_session(
+                    SessionKind::Dashboard,
+                    &predecessor,
+                    &record(&uid, base),
+                    3600
+                )
+                .await
+                .is_ok()
+        );
+        let rotated = store
+            .rotate(
+                SessionKind::Dashboard,
+                &SessionRotation {
+                    old_hash: predecessor.clone(),
+                    new_hash: kept.clone(),
+                    new_raw: "raw".to_owned(),
+                    new_record: record(&uid, base),
+                    refresh_ttl: 3600,
+                    grace_ttl: 30,
+                },
+            )
+            .await;
+        assert!(
+            matches!(rotated, Ok(RotateOutcome::Rotated(_))),
+            "{rotated:?}"
+        );
+
+        let svc = service(
+            store.clone(),
+            users,
+            Arc::new(NoOpAuthHooks),
+            config(5, None),
+        );
+        assert!(svc.revoke_all_except_current(&uid, &kept).await.is_ok());
+
+        // The untouched pointer is gone: the predecessor recovers nothing.
+        let after = store
+            .rotate(
+                SessionKind::Dashboard,
+                &SessionRotation {
+                    old_hash: predecessor,
+                    new_hash: hash("3333"),
+                    new_raw: "raw2".to_owned(),
+                    new_record: record(&uid, base),
+                    refresh_ttl: 3600,
+                    grace_ttl: 30,
+                },
+            )
+            .await;
+        assert!(
+            !matches!(after, Ok(RotateOutcome::Grace(_))),
+            "an unused grace pointer survived the revocation: {after:?}"
+        );
     }
 
     #[tokio::test]
@@ -1264,6 +1458,19 @@ mod tests {
                 .await
                 .is_ok()
         );
+        assert!(
+            store
+                .sweep_grace_pointers(SessionKind::Dashboard, "u1")
+                .await
+                .is_ok()
+        );
+        let recovered = record("u1", OffsetDateTime::UNIX_EPOCH);
+        assert!(matches!(
+            store
+                .create_recovered_session(SessionKind::Dashboard, "h", &recovered, 60)
+                .await,
+            Ok(true)
+        ));
         assert!(store.revoke_all(SessionKind::Dashboard, "u1").await.is_ok());
         assert!(
             store

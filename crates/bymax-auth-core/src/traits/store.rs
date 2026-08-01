@@ -350,6 +350,26 @@ pub trait SessionStore: Send + Sync {
         user_id: &str,
     ) -> Result<Vec<SessionDetail>, AuthError>;
 
+    /// Write the session a **grace recovery** produced, atomically with the check that the
+    /// account has not been swept out from under it. Returns `false` when a revoke-all (or a
+    /// family revocation) had already run, in which case the caller must refuse the rotation.
+    ///
+    /// [`SessionStore::create_session`] is the ordinary issuance path and is a plain write.
+    /// The grace arm cannot use it: the rotation script returns the recovered record and the
+    /// write lands several awaits later, so a `revoke_all` arriving in between swept an index
+    /// the session was not yet in — and the session survived a revocation the user was told had
+    /// happened, with an access token signed afterwards under the *post-bump* epoch. An
+    /// attacker holding a stolen token gets one grace-eligible token per rotation, so they can
+    /// keep a stream of these in flight for exactly as long as the victim's password reset
+    /// takes.
+    async fn create_recovered_session(
+        &self,
+        kind: SessionKind,
+        token_hash: &str,
+        detail: &SessionRecord,
+        ttl_secs: u64,
+    ) -> Result<bool, AuthError>;
+
     /// Ownership-checked single revoke. Returns [`AuthError::SessionNotFound`] when the
     /// hash is not owned by the user.
     async fn revoke_session(
@@ -369,6 +389,28 @@ pub trait SessionStore: Send + Sync {
         kind: SessionKind,
         session_hash: &str,
     ) -> Result<(), AuthError>;
+
+    /// Delete **every** rotation grace pointer the user's session index names, removing each
+    /// from the index as it goes. Idempotent: a user with no pointers is a no-op.
+    ///
+    /// [`SessionStore::delete_grace_pointer`] serves logout, which knows the one hash it was
+    /// handed. `revoke_all_except_current` does not: it sources its victims from
+    /// [`SessionStore::list_sessions`], which filters `rp:`/`prp:` members out by construction,
+    /// and [`SessionStore::revoke_session`] touches only the primary refresh keys. So a grace
+    /// pointer survived that call entirely.
+    ///
+    /// For a session that call *revoked* that is harmless — the grace branch requires the
+    /// successor's `rt:` key and it is gone. The gap is the session deliberately **kept**: its
+    /// predecessor's pointer names a hash that is still alive, so whoever holds that
+    /// predecessor token can take the grace branch and mint a brand-new full-lifetime session
+    /// for the rest of the window — after the user asked to sign out their other devices. The
+    /// epoch bump does not close it, because a recovered session signs its access token from
+    /// the current epoch.
+    ///
+    /// "Sign out my other devices" is a statement about right now, so no credential minted
+    /// before that moment may still produce a session.
+    async fn sweep_grace_pointers(&self, kind: SessionKind, user_id: &str)
+    -> Result<(), AuthError>;
 
     /// Revoke every session for a user in one transaction.
     async fn revoke_all(&self, kind: SessionKind, user_id: &str) -> Result<(), AuthError>;
@@ -780,6 +822,29 @@ pub trait MfaStore: Send + Sync {
     /// engine cannot make that repository atomic, since its atomicity is the consumer's to
     /// define. It can be atomic here, in the store it owns.
     async fn claim_recovery_code(&self, claim_id: &str, ttl: u64) -> Result<bool, AuthError>;
+
+    /// Take the per-account MFA transition lock: `mfalock:{lock_id} = "1"` with `NX EX ttl`.
+    /// Returns `true` when this caller created it and therefore holds the lock.
+    ///
+    /// Every MFA transition rewrites a single repository record carrying `mfa_enabled`, the
+    /// encrypted secret and the recovery-code digests **together**, and `update_mfa` replaces
+    /// all three wholesale — the repository is the consumer's and offers no compare-and-set, so
+    /// the engine cannot add one. Read-modify-write over that with no serialization is
+    /// last-write-wins, and three things fell out of it: two challenges spending *different*
+    /// recovery codes each wrote the full list minus their own, resurrecting the loser's code;
+    /// a challenge that read the list before `regenerate_recovery_codes` and spliced after it
+    /// restored the whole replaced set, unspending codes the user rotated because they leaked;
+    /// and a challenge that spliced after `disable` completed wrote `mfa_enabled: true` back
+    /// with the pre-disable secret.
+    ///
+    /// [`MfaStore::claim_recovery_code`] covers none of them — it is keyed on the code, so it
+    /// serializes two attempts at the *same* code and nothing else.
+    async fn acquire_mfa_lock(&self, lock_id: &str, ttl: u64) -> Result<bool, AuthError>;
+
+    /// Release the per-account MFA transition lock. Idempotent: an already-expired lock is a
+    /// no-op. Called in the transition's cleanup path so an ordinary failure does not leave the
+    /// account unchangeable for the lock's whole TTL.
+    async fn release_mfa_lock(&self, lock_id: &str) -> Result<(), AuthError>;
 
     /// The **fused** challenge step (§7.5.6): set `tu:{replay_id}` `NX EX ttl` and, *iff* that
     /// marker was newly created, delete the temp token `mfa:{jti_hash}` — in one atomic Lua

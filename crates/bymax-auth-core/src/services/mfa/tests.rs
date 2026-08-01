@@ -1395,6 +1395,12 @@ impl MfaStore for LosingConsumeMfaStore {
     async fn claim_recovery_code(&self, id: &str, ttl: u64) -> Result<bool, AuthError> {
         self.inner.claim_recovery_code(id, ttl).await
     }
+    async fn acquire_mfa_lock(&self, id: &str, ttl: u64) -> Result<bool, AuthError> {
+        self.inner.acquire_mfa_lock(id, ttl).await
+    }
+    async fn release_mfa_lock(&self, id: &str) -> Result<(), AuthError> {
+        self.inner.release_mfa_lock(id).await
+    }
     async fn put_setup_nx(&self, k: &str, v: &str, ttl: u64) -> Result<bool, AuthError> {
         self.inner.put_setup_nx(k, v, ttl).await
     }
@@ -1434,6 +1440,12 @@ struct ScriptedMfaStore {
 impl MfaStore for ScriptedMfaStore {
     async fn claim_recovery_code(&self, _id: &str, _ttl: u64) -> Result<bool, AuthError> {
         Ok(true)
+    }
+    async fn acquire_mfa_lock(&self, _id: &str, _ttl: u64) -> Result<bool, AuthError> {
+        Ok(true)
+    }
+    async fn release_mfa_lock(&self, _id: &str) -> Result<(), AuthError> {
+        Ok(())
     }
     async fn put_setup_nx(&self, _k: &str, _v: &str, _ttl: u64) -> Result<bool, AuthError> {
         Ok(self.put_nx)

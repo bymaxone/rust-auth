@@ -396,6 +396,10 @@ pub struct InMemoryStores {
     /// Single-use claims on MFA recovery codes (`rcu:`).
     #[cfg(feature = "mfa")]
     recovery_claims: Mutex<HashSet<String>>,
+    /// Held per-account MFA transition locks (`mfalock:`). A separate keyspace from the
+    /// recovery claims: a code claim and a transition lock must never contend.
+    #[cfg(feature = "mfa")]
+    mfa_locks: Mutex<HashSet<String>>,
     /// `os:` — the single-use OAuth `state` + PKCE payload keyed by `sha256(state)`.
     #[cfg(feature = "oauth")]
     oauth_state: Mutex<HashMap<String, String>>,
@@ -497,6 +501,30 @@ impl InMemoryStores {
 
 #[async_trait]
 impl SessionStore for InMemoryStores {
+    async fn create_recovered_session(
+        &self,
+        kind: SessionKind,
+        token_hash: &str,
+        detail: &SessionRecord,
+        ttl_secs: u64,
+    ) -> Result<bool, AuthError> {
+        // The real store gates the write on the per-user index still existing, because
+        // `invalidate_user_sessions` deletes that set once it has emptied it. The in-memory
+        // twin models the same witness: `revoke_all` removes the entry, so its absence is
+        // exactly "a revoke-all ran while this recovery was in flight".
+        if !lock(&self.session_index).contains_key(&(kind, detail.user_id.clone())) {
+            return Ok(false);
+        }
+        if !detail.family_id.is_empty()
+            && !lock(&self.families).contains_key(&(kind, detail.family_id.clone()))
+        {
+            return Ok(false);
+        }
+        self.create_session(kind, token_hash, detail, ttl_secs)
+            .await?;
+        Ok(true)
+    }
+
     async fn create_session(
         &self,
         kind: SessionKind,
@@ -649,6 +677,20 @@ impl SessionStore for InMemoryStores {
         // The grace pointer is keyed by the OLD token's hash; deleting it (idempotently) blocks a
         // post-logout grace-window recovery, mirroring the real store's `DEL rp:`/`prp:`.
         lock(&self.grace).remove(&(kind, session_hash.to_owned()));
+        Ok(())
+    }
+
+    async fn sweep_grace_pointers(
+        &self,
+        kind: SessionKind,
+        user_id: &str,
+    ) -> Result<(), AuthError> {
+        self.take_forced_failure()?;
+        // Every pointer this account owns, not just one hash: the real store reads the `rp:`
+        // members out of the user's session index, and the record each pointer holds names its
+        // owner, so the in-memory twin filters on that.
+        lock(&self.grace)
+            .retain(|(entry_kind, _), record| *entry_kind != kind || record.user_id != user_id);
         Ok(())
     }
 
@@ -814,10 +856,13 @@ impl BruteForceStore for InMemoryStores {
 #[async_trait]
 impl WsTicketStore for InMemoryStores {
     async fn mint(&self, snapshot: &WsTicketSnapshot, _ttl_secs: u64) -> Result<String, AuthError> {
-        let ticket = format!(
-            "wst-{}",
-            self.ticket_counter.fetch_add(1, Ordering::Relaxed)
-        );
+        // The real store mints `generate_secure_token(32)` — 64 lower-case hex — and the engine
+        // shape-checks a presented ticket before hashing it, so a double that minted `wst-0`
+        // produced tickets its own engine refuses. A double whose output shape differs from the
+        // real one cannot exercise the guard it is supposed to pass through. The counter still
+        // rides along so a test can tell two tickets apart by their prefix.
+        let ticket = bymax_auth_crypto::token::generate_secure_token(32);
+        let _ = self.ticket_counter.fetch_add(1, Ordering::Relaxed);
         lock(&self.tickets).insert(ticket.clone(), snapshot.clone());
         Ok(ticket)
     }
@@ -1010,6 +1055,17 @@ impl crate::traits::MfaStore for InMemoryStores {
         // Same "was it new?" decision as the TOTP marker, over its own set so a code and a
         // TOTP value can never collide into one another's claim.
         Ok(lock(&self.recovery_claims).insert(claim_id.to_owned()))
+    }
+
+    async fn acquire_mfa_lock(&self, lock_id: &str, _ttl: u64) -> Result<bool, AuthError> {
+        // The same "was it new?" decision, over its own set: a transition lock and a recovery
+        // claim are different keyspaces and must never contend with one another.
+        Ok(lock(&self.mfa_locks).insert(lock_id.to_owned()))
+    }
+
+    async fn release_mfa_lock(&self, lock_id: &str) -> Result<(), AuthError> {
+        lock(&self.mfa_locks).remove(lock_id);
+        Ok(())
     }
 
     async fn challenge_consume(
@@ -1907,7 +1963,13 @@ mod tests {
             mfa_verified: false,
         };
         let ticket = store.mint(&snapshot, 30).await;
-        assert!(matches!(&ticket, Ok(t) if t.starts_with("wst-")));
+        // Same shape the real store mints — 64 lower-case hex — because the engine
+        // shape-checks a presented ticket before hashing it, and a double whose output the
+        // engine would refuse cannot exercise the path it stands in for.
+        assert!(
+            matches!(&ticket, Ok(t) if t.len() == 64 && t.bytes().all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())),
+            "{ticket:?}"
+        );
         let Ok(ticket) = ticket else { return };
         assert!(matches!(store.redeem(&ticket).await, Ok(Some(_))));
         // A second redeem of the same ticket finds nothing (single-use).

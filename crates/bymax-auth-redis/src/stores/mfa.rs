@@ -100,9 +100,20 @@ impl RedisStores {
         Ok(removed > 0)
     }
 
+    /// `DEL mfalock:{lock_id}` — release the per-account MFA transition lock. Idempotent: an
+    /// already-expired lock deletes nothing and is still a success, because the caller's only
+    /// obligation is that the lock not outlive its transition.
+    async fn release_mfa_lock_inner(&self, lock_id: &str) -> Result<(), RedisStoreError> {
+        let key = self.keys().key(Prefix::Mfalock, lock_id);
+        let mut conn = self.connection().await?;
+        let _: i64 = conn.del(&key).await?;
+        Ok(())
+    }
+
     /// `SET {prefix}:{id} "1" NX EX ttl` — a single-use marker, returning whether this call
     /// created it. Two keyspaces share the shape: the TOTP anti-replay marker (`tu:`) and the
-    /// recovery-code claim (`rcu:`). Both mean the same thing — presence is "already spent".
+    /// recovery-code claim (`rcu:`), and the MFA transition lock (`mfalock:`). All three mean
+    /// the same thing — presence is "already taken".
     async fn set_nx_marker(
         &self,
         prefix: Prefix,
@@ -198,6 +209,18 @@ impl MfaStore for RedisStores {
 
     async fn claim_recovery_code(&self, claim_id: &str, ttl: u64) -> Result<bool, AuthError> {
         self.set_nx_marker(Prefix::Rcu, claim_id, ttl)
+            .await
+            .map_err(AuthError::from)
+    }
+
+    async fn acquire_mfa_lock(&self, lock_id: &str, ttl: u64) -> Result<bool, AuthError> {
+        self.set_nx_marker(Prefix::Mfalock, lock_id, ttl)
+            .await
+            .map_err(AuthError::from)
+    }
+
+    async fn release_mfa_lock(&self, lock_id: &str) -> Result<(), AuthError> {
+        self.release_mfa_lock_inner(lock_id)
             .await
             .map_err(AuthError::from)
     }
