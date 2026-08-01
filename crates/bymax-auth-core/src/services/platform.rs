@@ -875,31 +875,35 @@ mod tests {
         let Ok(PlatformLoginResult::Success(auth)) = signed_in else { return };
 
         // One rotation to put SUPER_ADMIN into this lineage, then the demotion.
-        let Ok(promoted) = svc.refresh(&auth.refresh_token, "1.2.3.4", "a").await else {
-            return;
-        };
-        let Ok(before) = h
+        let promoted = svc.refresh(&auth.refresh_token, "1.2.3.4", "a").await;
+        assert!(
+            promoted.is_ok(),
+            "the first rotation must succeed: {promoted:?}"
+        );
+        let Ok(promoted) = promoted else { return };
+        let before = h
             .engine
             .tokens()
             .verify_platform_access(&promoted.access_token)
-            .await
-        else {
-            return;
-        };
+            .await;
+        assert!(before.is_ok(), "the rotated token must verify: {before:?}");
+        let Ok(before) = before else { return };
         assert_eq!(before.role, "SUPER_ADMIN");
 
         h.admins.insert(make("SUPPORT", false));
-        let Ok(rotated) = svc.refresh(&promoted.refresh_token, "1.2.3.4", "a").await else {
-            return;
-        };
-        let Ok(after) = h
+        let rotated = svc.refresh(&promoted.refresh_token, "1.2.3.4", "a").await;
+        assert!(
+            rotated.is_ok(),
+            "the demoting rotation must succeed: {rotated:?}"
+        );
+        let Ok(rotated) = rotated else { return };
+        let after = h
             .engine
             .tokens()
             .verify_platform_access(&rotated.access_token)
-            .await
-        else {
-            return;
-        };
+            .await;
+        assert!(after.is_ok(), "the demoted token must verify: {after:?}");
+        let Ok(after) = after else { return };
         assert_eq!(
             after.role, "SUPPORT",
             "the demotion never reached the token"
@@ -909,17 +913,22 @@ mod tests {
         // token only when `mfa_enabled && !mfa_verified`, so a console session created before
         // the admin enrolled stayed exempt for the refresh token's whole lifetime.
         h.admins.insert(make("SUPPORT", true));
-        let Ok(with_mfa) = svc.refresh(&rotated.refresh_token, "1.2.3.4", "a").await else {
-            return;
-        };
-        let Ok(claims) = h
+        let with_mfa = svc.refresh(&rotated.refresh_token, "1.2.3.4", "a").await;
+        assert!(
+            with_mfa.is_ok(),
+            "the MFA rotation must succeed: {with_mfa:?}"
+        );
+        let Ok(with_mfa) = with_mfa else { return };
+        let claims = h
             .engine
             .tokens()
             .verify_platform_access(&with_mfa.access_token)
-            .await
-        else {
-            return;
-        };
+            .await;
+        assert!(
+            claims.is_ok(),
+            "the MFA-stamped token must verify: {claims:?}"
+        );
+        let Ok(claims) = claims else { return };
         assert!(claims.mfa_enabled, "the MFA flag never reached the token");
     }
 

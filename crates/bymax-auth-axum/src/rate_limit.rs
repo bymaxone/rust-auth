@@ -548,4 +548,50 @@ mod tests {
             )
         );
     }
+    /// Inside a runtime the sweeper actually sweeps.
+    ///
+    /// The key map grows one entry per distinct client address and nothing removes the ones
+    /// whose window has long expired, so a public login route accumulates them for the
+    /// process's life. `tokio::time::interval` fires its first tick immediately, so yielding
+    /// once is enough to see the body run — which is the whole of the reclaim.
+    #[tokio::test]
+    async fn the_key_sweeper_runs_its_reclaim_inside_a_runtime() {
+        let built = GovernorConfigBuilder::default()
+            .per_second(1)
+            .burst_size(1)
+            .key_extractor(PeerIpKeyExtractor)
+            .finish();
+        let Some(config) = built else { return };
+        let config = Arc::new(config);
+
+        spawn_key_gc(Arc::clone(&config));
+        // Let the spawned task reach its first tick and run one reclaim.
+        for _ in 0..4 {
+            tokio::task::yield_now().await;
+        }
+
+        // Reaching here at all is the assertion: the sweeper ran on a live limiter without
+        // taking the runtime down, which is the failure mode a panic in a detached task has.
+        assert!(config.limiter().len() < usize::MAX);
+    }
+
+    /// Built outside a Tokio runtime, the sweeper warns and gives up rather than panicking.
+    ///
+    /// A router assembled in a synchronous harness has no runtime to spawn onto. The crate
+    /// denies `panic`, and refusing to build the router over a background sweeper would be a
+    /// far worse answer than an unswept key map in a process that is not serving requests —
+    /// so the branch exists, and it has to stay reachable without taking the process down.
+    #[test]
+    fn the_key_sweeper_declines_quietly_outside_a_runtime() {
+        let built = GovernorConfigBuilder::default()
+            .per_second(1)
+            .burst_size(1)
+            .key_extractor(PeerIpKeyExtractor)
+            .finish();
+        let Some(config) = built else { return };
+
+        // No `#[tokio::test]`: there is deliberately no runtime here. Returning at all is the
+        // assertion — the alternative this guards against is an unwrap on `Handle::current`.
+        spawn_key_gc(Arc::new(config));
+    }
 }

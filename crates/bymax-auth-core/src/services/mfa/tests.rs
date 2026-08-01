@@ -56,6 +56,8 @@ struct Harness {
     engine: AuthEngine,
     users: Arc<InMemoryUserRepository>,
     platform: Arc<InMemoryPlatformUserRepository>,
+    /// The same stores the engine holds, so a test can arm the transition-lock window.
+    stores: Arc<InMemoryStores>,
 }
 
 /// Build the harness. `sessions` toggles session tracking; `wire_platform` wires a platform
@@ -117,7 +119,7 @@ fn build_full(
         .config(config)
         .environment(Environment::Test)
         .user_repository(users.clone())
-        .redis_stores(stores);
+        .redis_stores(stores.clone());
     if wire_platform {
         builder = builder.platform_user_repository(platform.clone());
     }
@@ -132,6 +134,7 @@ fn build_full(
         engine,
         users,
         platform,
+        stores,
     })
 }
 
@@ -1057,6 +1060,72 @@ async fn disable_locks_out_after_repeated_wrong_codes() {
     );
 }
 
+/// The platform plane's recovery splice abandons for the same reason the dashboard's does —
+/// and it is the plane where a resurrected factor is worth more, since the account it guards
+/// is an operator console.
+#[tokio::test]
+async fn the_platform_recovery_splice_abandons_when_mfa_vanished_under_the_lock() {
+    let Some(h) = build(false, true) else { return };
+    let admin = AuthPlatformUser {
+        id: "p-abandon".to_owned(),
+        email: "abandon@admin.io".to_owned(),
+        name: "Admin".to_owned(),
+        password_hash: admin_password_hash(),
+        role: "SUPER".to_owned(),
+        status: "ACTIVE".to_owned(),
+        mfa_enabled: false,
+        mfa_secret: None,
+        mfa_recovery_codes: None,
+        platform_id: None,
+        last_login_at: None,
+        updated_at: OffsetDateTime::UNIX_EPOCH,
+        created_at: OffsetDateTime::UNIX_EPOCH,
+    };
+    h.platform.insert(admin);
+    let Some(mfa) = h.engine.mfa() else { return };
+    let Ok(setup) = mfa
+        .setup("p-abandon", MfaContext::Platform, Some(PASSWORD))
+        .await
+    else {
+        return;
+    };
+    assert!(
+        mfa.verify_and_enable(
+            "p-abandon",
+            &code(&setup.secret, 0),
+            "1.2.3.4",
+            "ua",
+            MfaContext::Platform
+        )
+        .await
+        .is_ok()
+    );
+    let Some(recovery) = setup.recovery_codes.first().cloned() else {
+        return;
+    };
+    let Ok(temp) = h
+        .engine
+        .tokens()
+        .issue_mfa_temp_token("p-abandon", MfaContext::Platform)
+        .await
+    else {
+        return;
+    };
+
+    // The `disable` completes in the window the splice's own lock opens.
+    let gone = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    h.platform.report_mfa_gone_when(gone.clone());
+    h.stores.raise_on_next_mfa_lock(gone);
+
+    let _ = mfa.challenge(&temp, &recovery, "1.2.3.4", "ua").await;
+
+    let after = h.platform.find_by_id("p-abandon").await;
+    assert!(
+        matches!(&after, Ok(Some(a)) if !a.mfa_enabled),
+        "the abandoned platform splice must not have written: {after:?}"
+    );
+}
+
 #[tokio::test]
 async fn platform_context_routes_to_the_platform_repository() {
     // With a platform repository wired, the full lifecycle routes to it: setup, enable, the
@@ -1532,6 +1601,185 @@ async fn the_transition_releases_with_the_token_it_acquired_with() {
         acquired_token.chars().all(|c| c.is_ascii_hexdigit()),
         "the lock token must be hex, got {acquired_token:?}"
     );
+}
+
+/// The recovery-code splice abandons when the account lost MFA under the lock.
+///
+/// A challenge that read the code list before a `disable` completed, and splices after it,
+/// would write `mfa_enabled: true` back with the pre-disable secret — putting the account under
+/// a factor the user removed and may no longer hold. The code still counts as spent (its claim
+/// already stands), so nothing is written and the challenge fails; what must not happen is the
+/// resurrection.
+#[tokio::test]
+async fn the_recovery_splice_abandons_when_mfa_vanished_under_the_lock() {
+    let Some(h) = build_with(true, false, None, None) else {
+        return;
+    };
+    let Some(uid) = register(&h.engine, "splice-abandon@example.com").await else {
+        return;
+    };
+    let Some(mfa) = h.engine.mfa() else { return };
+    let base = now_secs();
+    let Ok(setup) = mfa.setup(&uid, MfaContext::Dashboard, Some(PASSWORD)).await else {
+        return;
+    };
+    let enabled = mfa
+        .verify_and_enable(
+            &uid,
+            &code_at(&setup.secret, base),
+            "1.2.3.4",
+            "ua",
+            MfaContext::Dashboard,
+        )
+        .await;
+    assert!(enabled.is_ok(), "enrolment should succeed: {enabled:?}");
+    let Some(recovery) = setup.recovery_codes.first().cloned() else {
+        return;
+    };
+
+    let Some(temp) = login_temp_token(&h.engine, "splice-abandon@example.com").await else {
+        return;
+    };
+
+    // The `disable` lands exactly in the window: the flag is raised by the transition lock,
+    // so the challenge's own read of the account happened before it and the splice's re-read
+    // inside the lock happens after.
+    let gone = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    h.users.report_mfa_gone_when(gone.clone());
+    h.stores.raise_on_next_mfa_lock(gone);
+
+    // The challenge itself may still answer: the code was genuinely presented and its claim
+    // stands, so it is spent either way. What must not happen is the WRITE — the resurrection
+    // of a factor the user removed, with the secret they removed it to be rid of.
+    let _ = mfa.challenge(&temp, &recovery, "1.2.3.4", "ua").await;
+
+    // The account is left as the `disable` left it — not re-enabled by the loser.
+    let after = h.users.find_by_id(&uid, None).await;
+    assert!(
+        matches!(&after, Ok(Some(u)) if !u.mfa_enabled),
+        "the abandoned splice must not have written: {after:?}"
+    );
+}
+
+/// A `disable` that completes between a transition's first read and its re-read inside the
+/// lock must not be undone by that transition.
+///
+/// This is the interleaving `transition_mfa_record` exists for, and it is the one an in-memory
+/// store cannot produce on its own: the two reads sit either side of `acquire_mfa_lock`, so a
+/// store that turns MFA off *while granting the lock* lands exactly in the window. Every
+/// mutation then sees `mfa_enabled: false` on the record it was handed and abandons — which is
+/// what keeps a challenge or a regenerate from writing `mfa_enabled: true` back with the
+/// pre-disable secret, putting the account under a factor the user removed.
+#[tokio::test]
+async fn a_transition_abandons_when_mfa_is_disabled_under_the_lock() {
+    let users = Arc::new(InMemoryUserRepository::new());
+    let Some(uid) = seed_user(&users, "vanishes@example.com").await else {
+        return;
+    };
+    let store = Arc::new(DisableOnLockMfaStore {
+        inner: Arc::new(InMemoryStores::new()),
+        user_id: uid.clone(),
+        users: users.clone(),
+        armed: Mutex::new(false),
+    });
+    let mfa = service_over(store.clone(), users.clone());
+
+    // Enrol first: the account really does have MFA when the caller starts.
+    let base = now_secs();
+    let Ok(setup) = mfa.setup(&uid, MfaContext::Dashboard, None).await else {
+        return;
+    };
+    let enable_code = code_at(&setup.secret, base);
+    let regen_code = code_at(&setup.secret, base + 60);
+    let enabled = mfa
+        .verify_and_enable(&uid, &enable_code, "1.2.3.4", "ua", MfaContext::Dashboard)
+        .await;
+    assert!(enabled.is_ok(), "enrolment should succeed: {enabled:?}");
+
+    // From here on, the store disables MFA as it hands over the lock — so the re-read inside
+    // the lock reports it off and the mutation abandons rather than writing the codes back.
+    if let Ok(mut armed) = store.armed.lock() {
+        *armed = true;
+    }
+    let regenerated = mfa
+        .regenerate_recovery_codes(&uid, &regen_code, "1.2.3.4", "ua", MfaContext::Dashboard)
+        .await;
+    assert!(
+        matches!(regenerated, Err(AuthError::MfaNotEnabled)),
+        "an abandoned transition must report the factor gone, got {regenerated:?}"
+    );
+
+    // And the account is left as the `disable` left it — not re-enabled by the loser.
+    let after = users.find_by_id(&uid, None).await;
+    assert!(
+        matches!(&after, Ok(Some(u)) if !u.mfa_enabled),
+        "the abandoned transition must not have written: {after:?}"
+    );
+}
+
+/// An MFA store that delegates everything to a real in-memory one, but turns the account's MFA
+/// off at the moment it grants the transition lock — placing a completed `disable` in the one
+/// window `transition_mfa_record` re-reads across.
+struct DisableOnLockMfaStore {
+    inner: Arc<InMemoryStores>,
+    user_id: String,
+    users: Arc<InMemoryUserRepository>,
+    /// Off until the enrolment has completed — otherwise the store would undo the very
+    /// transition that turns MFA on, and the test would never reach the state it is about.
+    armed: Mutex<bool>,
+}
+
+#[async_trait]
+impl MfaStore for DisableOnLockMfaStore {
+    async fn acquire_mfa_lock(&self, id: &str, token: &str, ttl: u64) -> Result<bool, AuthError> {
+        let granted = self.inner.acquire_mfa_lock(id, token, ttl).await?;
+        let armed = self.armed.lock().map(|a| *a).unwrap_or(false);
+        if granted && armed {
+            // The `disable` that completed while this caller was in flight.
+            let _ = self
+                .users
+                .update_mfa(
+                    &self.user_id,
+                    bymax_auth_types::UpdateMfaData {
+                        mfa_enabled: false,
+                        mfa_secret: None,
+                        mfa_recovery_codes: None,
+                    },
+                )
+                .await;
+        }
+        Ok(granted)
+    }
+    async fn release_mfa_lock(&self, id: &str, token: &str) -> Result<(), AuthError> {
+        self.inner.release_mfa_lock(id, token).await
+    }
+    async fn claim_recovery_code(&self, id: &str, ttl: u64) -> Result<bool, AuthError> {
+        self.inner.claim_recovery_code(id, ttl).await
+    }
+    async fn put_setup_nx(&self, k: &str, v: &str, ttl: u64) -> Result<bool, AuthError> {
+        self.inner.put_setup_nx(k, v, ttl).await
+    }
+    async fn get_setup(&self, k: &str) -> Result<Option<String>, AuthError> {
+        self.inner.get_setup(k).await
+    }
+    async fn take_setup(&self, k: &str) -> Result<Option<String>, AuthError> {
+        self.inner.take_setup(k).await
+    }
+    async fn put_temp(&self, j: &str, u: &str, ttl: u64) -> Result<(), AuthError> {
+        self.inner.put_temp(j, u, ttl).await
+    }
+    async fn get_temp(&self, j: &str) -> Result<Option<String>, AuthError> {
+        self.inner.get_temp(j).await
+    }
+    async fn del_temp(&self, j: &str) -> Result<bool, AuthError> {
+        self.inner.del_temp(j).await
+    }
+    async fn mark_totp_used(&self, r: &str, ttl: u64) -> Result<bool, AuthError> {
+        self.inner.mark_totp_used(r, ttl).await
+    }
+    async fn challenge_consume(&self, r: &str, j: &str, ttl: u64) -> Result<bool, AuthError> {
+        self.inner.challenge_consume(r, j, ttl).await
+    }
 }
 
 /// An MFA store that delegates everything to a real in-memory one, recording the lock token
@@ -2586,6 +2834,66 @@ async fn a_totp_challenge_rewrites_a_secret_stored_under_a_retired_key() {
     assert_eq!(
         strict.decrypt_secret(&rewritten).as_deref(),
         Some(raw_secret.as_slice())
+    );
+}
+
+/// The retired-key rewrite abandons for the same reason the splice does.
+///
+/// A TOTP challenge persists nothing on its own, so the rewrite is its own write — and it
+/// carries `mfa_enabled: true` and the secret. Landing it after a completed `disable` would
+/// re-enrol the account under the very secret the user removed, from a path whose whole purpose
+/// is bookkeeping.
+#[tokio::test]
+async fn the_retired_key_rewrite_abandons_when_mfa_vanished_under_the_lock() {
+    let retired_bytes = [4u8; 32];
+    let retired_b64 = base64::engine::general_purpose::STANDARD.encode(retired_bytes);
+    let Some(h) = build_rotating(retired_b64) else {
+        return;
+    };
+    let Some(uid) = register(&h.engine, "rot-abandon@example.com").await else {
+        return;
+    };
+
+    let mut old_deps = service_deps(Arc::new(InMemoryStores::new()), h.users.clone());
+    old_deps.encryption_key = zeroize::Zeroizing::new(retired_bytes);
+    let old_service = MfaService::new(old_deps);
+    let Ok((raw_secret, _codes, data)) = old_service.generate_setup_material() else {
+        return;
+    };
+    let stored_under_retired = data.encrypted_secret.clone();
+    assert!(
+        h.users
+            .update_mfa(
+                &uid,
+                bymax_auth_types::UpdateMfaData {
+                    mfa_enabled: true,
+                    mfa_secret: Some(stored_under_retired.clone()),
+                    mfa_recovery_codes: Some(data.hashed_codes),
+                },
+            )
+            .await
+            .is_ok()
+    );
+
+    let Some(mfa) = h.engine.mfa() else { return };
+    let Some(temp) = login_temp_token(&h.engine, "rot-abandon@example.com").await else {
+        return;
+    };
+
+    // The `disable` completes in the window the rewrite's own lock opens.
+    let gone = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    h.users.report_mfa_gone_when(gone.clone());
+    h.stores.raise_on_next_mfa_lock(gone);
+
+    let _ = mfa
+        .challenge(&temp, &raw_code(&raw_secret, now_secs()), "1.2.3.4", "ua")
+        .await;
+
+    // The rewrite did not put the removed factor back.
+    let after = h.users.find_by_id(&uid, None).await;
+    assert!(
+        matches!(&after, Ok(Some(u)) if !u.mfa_enabled),
+        "the abandoned rewrite must not have re-enrolled the account: {after:?}"
     );
 }
 

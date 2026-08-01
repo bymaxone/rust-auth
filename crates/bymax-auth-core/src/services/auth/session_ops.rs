@@ -487,9 +487,8 @@ mod tests {
         let mut cfg = base_config();
         cfg.email_verification.required = false;
         let Some(h) = harness(cfg, None) else { return };
-        let Some((id, auth)) = logged_in(&h, "mfa-out-of-band@e.com", "pw123456").await else {
-            return;
-        };
+        let signed_in = logged_in(&h, "mfa-out-of-band@e.com", "pw123456").await;
+        let Some((id, auth)) = signed_in else { return };
 
         // The session was minted before MFA existed on the account.
         let Some(before) = rotate(&h, &auth.refresh_token).await else { return };

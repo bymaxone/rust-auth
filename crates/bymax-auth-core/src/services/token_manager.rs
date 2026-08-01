@@ -2522,6 +2522,94 @@ mod tests {
 
         assert!(rotating.verify_access(&issued.access_token).await.is_err());
     }
+
+    /// A grace recovery that lands after a "log out everywhere" must not mint a session.
+    ///
+    /// The grace window exists so a rotation that lost a race can still recover. That makes it
+    /// a way back in after a revoke: the sweep deletes the live sessions, the replay of a
+    /// consumed token finds its grace pointer, and the recovery writes a fresh session on an
+    /// account the user was told had been swept — carrying the post-bump epoch, so it verifies.
+    /// The write is gated on the per-user index still existing, which is precisely "no sweep
+    /// has run", and the caller is refused when it has.
+    #[tokio::test]
+    async fn a_recovery_whose_account_was_swept_is_refused() {
+        let store = Arc::new(InMemoryStores::new());
+        let svc = service(store.clone());
+        let Some(issued) = issued_for(&svc).await else { return };
+
+        // Rotate once, leaving the old token consumed but inside its grace window.
+        let rotated = rotated_for(&svc, &issued.refresh_token).await;
+        assert!(rotated.is_some(), "the first rotation must succeed");
+
+        // The sweep lands between the grace pointer's read and the recovery's write. A store
+        // cannot produce that ordering on its own — by the time it could answer, it would
+        // already have refused the grace arm — so the answer is armed directly.
+        store.refuse_next_recovered_writes(1);
+
+        let replayed = svc
+            .reissue_tokens(&issued.refresh_token, "10.0.0.1", "agent/1.0")
+            .await;
+        assert!(
+            matches!(replayed, Err(AuthError::RefreshTokenInvalid)),
+            "a recovery whose account was swept must be refused, got {replayed:?}"
+        );
+    }
+
+    /// The same on the platform plane, whose grace arm is a separate code path — and the plane
+    /// where an unswept console session is worth more.
+    #[tokio::test]
+    async fn a_platform_recovery_whose_account_was_swept_is_refused() {
+        let store = Arc::new(InMemoryStores::new());
+        let svc = service(store.clone());
+        let Some(issued) = platform_issued_for(&svc).await else { return };
+
+        let rotated = platform_rotated_for(&svc, &issued.refresh_token).await;
+        assert!(
+            rotated.is_some(),
+            "the first platform rotation must succeed"
+        );
+
+        store.refuse_next_recovered_writes(1);
+
+        let replayed = svc
+            .reissue_platform_tokens(&issued.refresh_token, "10.0.0.1", "agent/1.0")
+            .await;
+        assert!(
+            matches!(replayed, Err(AuthError::RefreshTokenInvalid)),
+            "a platform recovery whose account was swept must be refused, got {replayed:?}"
+        );
+    }
+
+    /// An MFA temp token dies with the rest of the account's credentials.
+    ///
+    /// It is issued to someone who has proven a password and NOT a second factor, and it lives
+    /// long enough to be worth revoking: without the epoch stamp, a password reset — which
+    /// bumps the epoch precisely to kill everything outstanding — would leave a challenge token
+    /// alive, and completing that challenge mints a full session on the account just secured.
+    #[cfg(feature = "mfa")]
+    #[tokio::test]
+    async fn an_mfa_temp_token_issued_before_an_epoch_bump_stops_verifying() {
+        let store = Arc::new(InMemoryStores::new());
+        let svc = service_with_mfa(store.clone());
+
+        let issued = svc.issue_mfa_temp_token("u1", MfaContext::Dashboard).await;
+        let Ok(temp) = issued else { return };
+
+        // Before the bump it verifies.
+        let first = svc.verify_mfa_temp_token(&temp).await;
+        assert!(
+            first.is_ok(),
+            "a freshly issued challenge token must verify: {first:?}"
+        );
+
+        assert!(store.bump_epoch(SessionKind::Dashboard, "u1").await.is_ok());
+
+        let after = svc.verify_mfa_temp_token(&temp).await;
+        assert!(
+            matches!(after, Err(AuthError::MfaTempTokenInvalid)),
+            "a challenge token minted before the bump must stop verifying, got {after:?}"
+        );
+    }
 }
 
 #[cfg(test)]

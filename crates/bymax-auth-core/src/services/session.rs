@@ -1338,6 +1338,79 @@ mod tests {
         }
     }
 
+    /// The sweep has to run over a pointer that is actually there.
+    ///
+    /// The existing coverage rotates, recovers THROUGH the grace arm (consuming the pointer),
+    /// and only then revokes — so the sweep ran over an empty set and the filter it applies was
+    /// never exercised. Here the pointer is left untouched, which is the ordinary state of an
+    /// account that rotated recently: whoever holds the predecessor token can still recover
+    /// with it until the window closes, and "log out everywhere" has to take that away.
+    #[tokio::test]
+    async fn revoking_other_devices_sweeps_a_grace_pointer_that_was_never_used() {
+        let store = Arc::new(InMemoryStores::new());
+        let users = Arc::new(InMemoryUserRepository::new());
+        let uid = seed_user(&users, "unused-grace").await;
+        let base = OffsetDateTime::UNIX_EPOCH;
+        let predecessor = hash("1111");
+        let kept = hash("2222");
+
+        assert!(
+            store
+                .create_session(
+                    SessionKind::Dashboard,
+                    &predecessor,
+                    &record(&uid, base),
+                    3600
+                )
+                .await
+                .is_ok()
+        );
+        let rotated = store
+            .rotate(
+                SessionKind::Dashboard,
+                &SessionRotation {
+                    old_hash: predecessor.clone(),
+                    new_hash: kept.clone(),
+                    new_raw: "raw".to_owned(),
+                    new_record: record(&uid, base),
+                    refresh_ttl: 3600,
+                    grace_ttl: 30,
+                },
+            )
+            .await;
+        assert!(
+            matches!(rotated, Ok(RotateOutcome::Rotated(_))),
+            "{rotated:?}"
+        );
+
+        let svc = service(
+            store.clone(),
+            users,
+            Arc::new(NoOpAuthHooks),
+            config(5, None),
+        );
+        assert!(svc.revoke_all_except_current(&uid, &kept).await.is_ok());
+
+        // The untouched pointer is gone: the predecessor recovers nothing.
+        let after = store
+            .rotate(
+                SessionKind::Dashboard,
+                &SessionRotation {
+                    old_hash: predecessor,
+                    new_hash: hash("3333"),
+                    new_raw: "raw2".to_owned(),
+                    new_record: record(&uid, base),
+                    refresh_ttl: 3600,
+                    grace_ttl: 30,
+                },
+            )
+            .await;
+        assert!(
+            !matches!(after, Ok(RotateOutcome::Grace(_))),
+            "an unused grace pointer survived the revocation: {after:?}"
+        );
+    }
+
     #[tokio::test]
     async fn revoke_all_except_current_propagates_a_non_not_found_error() {
         // A backend error (not `SessionNotFound`) on a victim revoke is propagated, unlike the
@@ -1385,6 +1458,19 @@ mod tests {
                 .await
                 .is_ok()
         );
+        assert!(
+            store
+                .sweep_grace_pointers(SessionKind::Dashboard, "u1")
+                .await
+                .is_ok()
+        );
+        let recovered = record("u1", OffsetDateTime::UNIX_EPOCH);
+        assert!(matches!(
+            store
+                .create_recovered_session(SessionKind::Dashboard, "h", &recovered, 60)
+                .await,
+            Ok(true)
+        ));
         assert!(store.revoke_all(SessionKind::Dashboard, "u1").await.is_ok());
         assert!(
             store

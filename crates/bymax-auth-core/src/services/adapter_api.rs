@@ -780,6 +780,134 @@ mod tests {
         }
     }
 
+    /// A revoke whose epoch bump fails reports the failure rather than claiming success.
+    ///
+    /// The bump runs after the session is already gone, so the operation is half-done by the
+    /// time it can fail: the device cannot rotate any more, but every access token the account
+    /// holds — the revoked device's included — is still verifying. Swallowing that would tell a
+    /// user who just signed out a device they believe is compromised that it worked.
+    #[tokio::test]
+    async fn a_device_revoke_propagates_a_failed_epoch_bump() {
+        use crate::services::auth::test_support::SeedUser;
+        use crate::traits::SessionStore as _;
+        let Some(h) = harness(base_config(), None) else { return };
+        let id = h
+            .seed(SeedUser::active("bump-fails@example.com", "pw123456"))
+            .await;
+
+        // A real, owned session: the revoke is ownership-checked and would refuse a bogus hash
+        // long before it reached the bump.
+        let session_hash = "b1".repeat(32);
+        let record = crate::traits::SessionRecord {
+            user_id: id.clone(),
+            tenant_id: Some("t1".to_owned()),
+            role: "USER".to_owned(),
+            device: "d".to_owned(),
+            ip: "1.2.3.4".to_owned(),
+            created_at: time::OffsetDateTime::UNIX_EPOCH,
+            mfa_enabled: false,
+            family_id: String::new(),
+            family_created_at: None,
+        };
+        assert!(
+            h.stores
+                .create_session(
+                    crate::traits::SessionKind::Dashboard,
+                    &session_hash,
+                    &record,
+                    3600
+                )
+                .await
+                .is_ok()
+        );
+
+        h.stores.fail_next_epoch_bumps(1);
+
+        let revoked = h.engine.revoke_user_session(&id, &session_hash).await;
+        assert!(
+            revoked.is_err(),
+            "a revoke whose epoch bump failed must not report success: {revoked:?}"
+        );
+    }
+
+    /// A suspended account mints no ticket either, whatever its token still says.
+    ///
+    /// The status claim is stamped empty by rotation, so the token cannot be trusted to carry
+    /// it — and the account may have been suspended after the token was issued in any case. A
+    /// socket authorized for its whole lifetime is exactly what a suspension has to stop, and
+    /// this is the last point that can stop it.
+    #[tokio::test]
+    async fn ws_ticket_refuses_a_suspended_account() {
+        use crate::services::auth::test_support::SeedUser;
+        let Some(h) = harness(base_config(), None) else { return };
+        let id = h
+            .seed(SeedUser {
+                status: "SUSPENDED".to_owned(),
+                ..SeedUser::active("ws-suspended@example.com", "pw123456")
+            })
+            .await;
+        let claims = DashboardClaims {
+            sub: id,
+            ..sample_claims()
+        };
+
+        let minted = h.engine.issue_ws_ticket(&claims).await;
+        assert!(
+            minted.is_err(),
+            "a suspended account must not be handed a socket ticket: {minted:?}"
+        );
+    }
+
+    /// A repository failure is reported, never read as "no such account".
+    ///
+    /// The two answers lead opposite ways: a missing account is a refusal the caller deserves,
+    /// while a store that could not answer is a question nobody asked yet. Collapsing the
+    /// second into the first would let a datastore outage read as a wave of deleted users —
+    /// and, on the paths that gate on status, as a wave of accounts in good standing.
+    #[tokio::test]
+    async fn a_repository_failure_on_the_status_gate_is_propagated() {
+        let Some(h) = harness(base_config(), None) else { return };
+        let claims = seeded_claims(&h).await;
+
+        h.users.fail_next_reads(1);
+        let gated = h.engine.assert_user_active(&claims.sub).await;
+        let matched = matches!(gated, Err(AuthError::Internal(_)));
+        assert!(
+            matched,
+            "a store that could not answer must not read as a missing account: {gated:?}"
+        );
+
+        // The same on the ticket path, which re-reads the account for its snapshot.
+        h.users.fail_next_reads(1);
+        let issued = h.engine.issue_ws_ticket(&claims).await;
+        let matched = matches!(issued, Err(AuthError::Internal(_)));
+        assert!(
+            matched,
+            "a ticket must not be minted off a read that failed: {issued:?}"
+        );
+    }
+
+    /// A token whose account no longer exists mints no ticket.
+    ///
+    /// The snapshot is read from the account, so a deleted user has nothing to describe — and
+    /// the alternative is worse than an error: a ticket authorizes a socket for its whole
+    /// lifetime with no gate behind it, so one minted from a token alone would outlive the
+    /// account it names. The refusal is the same opaque `token_invalid` a forged ticket gets,
+    /// which keeps deletion from being observable through this endpoint.
+    #[tokio::test]
+    async fn ws_ticket_refuses_a_token_whose_account_is_gone() {
+        let Some(h) = harness(base_config(), None) else { return };
+        let claims = seeded_claims(&h).await;
+
+        // The account is deleted between the token being issued and the ticket being asked for.
+        assert!(h.users.remove(&claims.sub));
+
+        assert!(matches!(
+            h.engine.issue_ws_ticket(&claims).await,
+            Err(AuthError::TokenInvalid)
+        ));
+    }
+
     /// With a WS-ticket store wired, `issue_ws_ticket` mints an opaque ticket and
     /// `redeem_ws_ticket` reconstructs the same identity snapshot once; a second redemption of
     /// the consumed ticket, and a bogus ticket, both refuse with `token_invalid`.
@@ -797,10 +925,8 @@ mod tests {
         let Ok(ticket) = minted else { return };
 
         let redeemed = h.engine.redeem_ws_ticket(&ticket).await;
-        assert!(
-            matches!(&redeemed, Ok(c) if c.sub == claims.sub && c.role == "USER"),
-            "{redeemed:?}"
-        );
+        let matched = matches!(&redeemed, Ok(c) if c.sub == claims.sub && c.role == "USER");
+        assert!(matched, "{redeemed:?}");
 
         // The single-use ticket is consumed: a replay and a never-minted ticket both refuse.
         assert!(matches!(
@@ -853,11 +979,10 @@ mod tests {
             "abc".to_owned(),      // too short
             String::new(),         // empty
         ] {
+            let refused = h.engine.redeem_ws_ticket(&bogus).await;
+            let matched = matches!(refused, Err(AuthError::TokenInvalid));
             assert!(
-                matches!(
-                    h.engine.redeem_ws_ticket(&bogus).await,
-                    Err(AuthError::TokenInvalid)
-                ),
+                matched,
                 "a malformed ticket must be refused before it is hashed"
             );
         }

@@ -1237,6 +1237,70 @@ mod tests {
         ));
     }
 
+    /// The predicate above is the defence; this is the deployment that needs it.
+    ///
+    /// A single-tenant host writing `find_by_email(email)` and dropping the second argument is
+    /// the shape nobody notices — every distinct tenant in a request body then resolves the
+    /// same account while deriving a DIFFERENT lockout counter, so rotating the field yields an
+    /// unlimited supply of fresh five-attempt budgets and the lockout never engages. The login
+    /// refuses the mismatch, and the caller is told nothing that distinguishes it from an
+    /// unknown address.
+    #[tokio::test]
+    async fn a_repository_that_ignores_its_tenant_argument_is_refused() {
+        let mut cfg = base_config();
+        cfg.email_verification.required = false;
+        let Some(h) = harness(cfg, None) else { return };
+        let _ = h
+            .seed(SeedUser::active("cross@example.com", "s3cret-pass"))
+            .await;
+
+        // Scoping correctly, the account is simply not in `t2`.
+        let scoped = h
+            .engine
+            .login(
+                LoginInput {
+                    email: "cross@example.com".to_owned(),
+                    password: "s3cret-pass".to_owned(),
+                    tenant_id: "t2".to_owned(),
+                },
+                &ctx(),
+            )
+            .await;
+        assert!(matches!(scoped, Err(AuthError::InvalidCredentials)));
+
+        // Now the misconfigured host: the repository hands back the `t1` account for a request
+        // that named `t2`. Without the check the login would succeed on the wrong tenant and
+        // meter the attempt under a counter the caller chose.
+        h.users.ignore_tenant_on_email();
+        let unscoped = h
+            .engine
+            .login(
+                LoginInput {
+                    email: "cross@example.com".to_owned(),
+                    password: "s3cret-pass".to_owned(),
+                    tenant_id: "t2".to_owned(),
+                },
+                &ctx(),
+            )
+            .await;
+        assert!(
+            matches!(unscoped, Err(AuthError::InvalidCredentials)),
+            "an account the repository returned from another tenant must be refused exactly \
+             like an unknown address, got {unscoped:?}"
+        );
+
+        // And the same credentials in their OWN tenant still work, so the guard refuses the
+        // mismatch rather than the account.
+        let correct = h
+            .engine
+            .login(login_input("cross@example.com", "s3cret-pass"), &ctx())
+            .await;
+        assert!(
+            correct.is_ok(),
+            "the account's own tenant must log in: {correct:?}"
+        );
+    }
+
     #[test]
     fn tenant_scoped_refuses_an_account_from_another_tenant() {
         // The guard against a repository that ignores its `tenant_id` argument. Under such a
