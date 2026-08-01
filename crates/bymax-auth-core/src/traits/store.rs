@@ -823,8 +823,15 @@ pub trait MfaStore: Send + Sync {
     /// define. It can be atomic here, in the store it owns.
     async fn claim_recovery_code(&self, claim_id: &str, ttl: u64) -> Result<bool, AuthError>;
 
-    /// Take the per-account MFA transition lock: `mfalock:{lock_id} = "1"` with `NX EX ttl`.
+    /// Take the per-account MFA transition lock: `mfalock:{lock_id} = token` with `NX EX ttl`.
     /// Returns `true` when this caller created it and therefore holds the lock.
+    ///
+    /// `token` is a per-call nonce, and it is what makes the release safe. A fixed value would
+    /// not: the TTL is short, the transition calls into the consumer's repository twice, and a
+    /// run that overruns has already lost the lock by the time it releases. Releasing it
+    /// unconditionally then removes whichever transition holds it *now*, and a third caller
+    /// enters beside the second — the serialization undone precisely under the load that makes
+    /// concurrent transitions likely. See [`MfaStore::release_mfa_lock`].
     ///
     /// Every MFA transition rewrites a single repository record carrying `mfa_enabled`, the
     /// encrypted secret and the recovery-code digests **together**, and `update_mfa` replaces
@@ -839,12 +846,25 @@ pub trait MfaStore: Send + Sync {
     ///
     /// [`MfaStore::claim_recovery_code`] covers none of them — it is keyed on the code, so it
     /// serializes two attempts at the *same* code and nothing else.
-    async fn acquire_mfa_lock(&self, lock_id: &str, ttl: u64) -> Result<bool, AuthError>;
+    async fn acquire_mfa_lock(
+        &self,
+        lock_id: &str,
+        token: &str,
+        ttl: u64,
+    ) -> Result<bool, AuthError>;
 
-    /// Release the per-account MFA transition lock. Idempotent: an already-expired lock is a
-    /// no-op. Called in the transition's cleanup path so an ordinary failure does not leave the
-    /// account unchangeable for the lock's whole TTL.
-    async fn release_mfa_lock(&self, lock_id: &str) -> Result<(), AuthError>;
+    /// Release the per-account MFA transition lock, **only** while it still holds `token`.
+    ///
+    /// A compare-and-delete, not a `DEL`. Reading the value and then deleting it as two
+    /// operations does not express this either: the key can expire and be retaken between the
+    /// two, which is the exact interleaving the token exists to catch. An implementation must
+    /// make the comparison and the delete atomic.
+    ///
+    /// Idempotent: a lock already expired or already retaken deletes nothing and is still a
+    /// success, because the caller's only obligation is that its own lock not outlive its
+    /// transition. Called in the transition's cleanup path so an ordinary failure does not
+    /// leave the account unchangeable for the lock's whole TTL.
+    async fn release_mfa_lock(&self, lock_id: &str, token: &str) -> Result<(), AuthError>;
 
     /// The **fused** challenge step (§7.5.6): set `tu:{replay_id}` `NX EX ttl` and, *iff* that
     /// marker was newly created, delete the temp token `mfa:{jti_hash}` — in one atomic Lua

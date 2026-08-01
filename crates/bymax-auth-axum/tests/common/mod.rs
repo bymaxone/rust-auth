@@ -771,12 +771,17 @@ impl bymax_auth_core::traits::MfaStore for FailingStores {
     async fn acquire_mfa_lock(
         &self,
         lock_id: &str,
+        token: &str,
         ttl: u64,
     ) -> Result<bool, bymax_auth_types::AuthError> {
-        self.inner.acquire_mfa_lock(lock_id, ttl).await
+        self.inner.acquire_mfa_lock(lock_id, token, ttl).await
     }
-    async fn release_mfa_lock(&self, lock_id: &str) -> Result<(), bymax_auth_types::AuthError> {
-        self.inner.release_mfa_lock(lock_id).await
+    async fn release_mfa_lock(
+        &self,
+        lock_id: &str,
+        token: &str,
+    ) -> Result<(), bymax_auth_types::AuthError> {
+        self.inner.release_mfa_lock(lock_id, token).await
     }
     async fn challenge_consume(
         &self,

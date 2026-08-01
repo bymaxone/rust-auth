@@ -68,8 +68,67 @@
     "emailChangeToken": "ec",
     "pendingMfaSetup": "mfa_setup",
     "mfaTempTokenMarker": "mfa",
+    "mfaTransitionLock": "mfalock",
     "otpResendCooldown": "resend",
     "invitationIndex": "invidx"
+  },
+
+  "graceRecoveryWrite": {
+    "$comment": [
+      "The session a grace recovery produces is written in ONE atomic step, gated on the",
+      "per-user session index still existing.",
+      "The rotation script moved the session-index bookkeeping inside itself precisely to close",
+      "the window in which 'log out everywhere' could miss a session a rotation had just",
+      "minted. The GRACE arm was left outside it: the script returned the recovered record and",
+      "the engine wrote the session keys several round trips later. A revoke-all landing in",
+      "between — a password reset, an MFA enable, a ban compensation — swept an index that did",
+      "not yet contain the session, so the session survived a revocation the user was told had",
+      "happened, and its access token, signed afterwards, carried the POST-bump epoch and",
+      "verified. An attacker holding a stolen token gets one grace-eligible token per rotation,",
+      "so they can keep a continuous stream of these in flight for as long as the reset takes.",
+      "The witness is the per-user session index: the revoke-all transaction deletes that set",
+      "once it has removed every member, so its absence is exactly 'a revoke-all has run', and",
+      "the successor the grace pointer named is itself indexed, so a legitimate recovery always",
+      "finds it present. The family index is re-checked in the same step, because the engine's",
+      "own EXISTS ran before the write and a revoke-family in between would be undone by it.",
+      "A refused write must surface as auth.refresh_token_invalid: the grace pointer is already",
+      "consumed, so there is nothing to retry against, and the revocation is what the caller",
+      "must obey. Both implementations must gate on the same witness, or one of them keeps the",
+      "window the other closed."
+    ],
+    "gate": "EXISTS {sessionIndex}:{userId}, and EXISTS {familyIndex}:{familyId} when the record names a family",
+    "writes": ["refreshSession", "sessionIndex", "sessionDetail", "familyIndex"],
+    "refusedError": "auth.refresh_token_invalid"
+  },
+
+  "mfaTransitionLock": {
+    "key": "mfalock:{hmac_sha256(hmacKey, '{plane}:{userId}')}",
+    "value": "a per-call nonce (16 CSPRNG bytes, hex) — the release compares against it",
+    "ttlSeconds": 10,
+    "$comment": [
+      "Serializes MFA state transitions for one account. Every transition rewrites a single",
+      "repository record carrying mfaEnabled, the encrypted secret and the recovery-code",
+      "digests TOGETHER, and the update replaces all three wholesale — the repository is the",
+      "host's and offers no compare-and-set — so interleaved transitions are last-write-wins.",
+      "Three ways that bit: two challenges spending DIFFERENT recovery codes each write the",
+      "full list minus their own, resurrecting the loser's code; a challenge that read the list",
+      "before a regenerate and splices after it restores the whole replaced set; and a challenge",
+      "that splices after a disable completes writes mfaEnabled back with the pre-disable",
+      "secret. The recoveryCodeClaim below does not cover any of them — it is keyed on the code,",
+      "so it serializes two attempts at the SAME code and nothing else.",
+      "A caller that cannot take the lock is refused with auth.mfa_state_conflict rather than",
+      "made to wait. The TTL is short because the lock is released explicitly; it bounds only a",
+      "process that dies mid-transition, and an account whose MFA is briefly unchangeable is",
+      "worse than a window this narrow.",
+      "The release must be a compare-and-delete against that nonce, in ONE step. The TTL is",
+      "short and a transition calls into the consumer's repository twice, so a run that",
+      "overruns has already lost the lock: deleting the key unconditionally then removes",
+      "whichever transition holds it now, and a third caller enters beside the second. A GET",
+      "followed by a DEL does not express the check either — the key can be retaken between",
+      "the two round trips, which is the interleaving the nonce exists to catch.",
+      "Both implementations must derive the same key, or the two halves of one deployment",
+      "serialize against different locks and the property is lost."
+    ]
   },
 
   "recoveryCodeClaim": {
@@ -423,6 +482,7 @@
       "auth.mfa_not_enabled",
       "auth.mfa_setup_required",
       "auth.mfa_temp_token_invalid",
+      "auth.mfa_state_conflict",
       "auth.password_compromised",
       "auth.password_reset_token_invalid",
       "auth.otp_invalid",

@@ -37,6 +37,7 @@ fn catalog() -> Vec<(AuthErrorCode, &'static str, u16)> {
         (MfaNotEnabled, "auth.mfa_not_enabled", 400),
         (MfaSetupRequired, "auth.mfa_setup_required", 400),
         (MfaTempTokenInvalid, "auth.mfa_temp_token_invalid", 401),
+        (MfaStateConflict, "auth.mfa_state_conflict", 409),
         (PasswordCompromised, "auth.password_compromised", 400),
         (
             PasswordResetTokenInvalid,
@@ -85,6 +86,7 @@ fn all_errors() -> Vec<AuthError> {
         AuthError::MfaNotEnabled,
         AuthError::MfaSetupRequired,
         AuthError::MfaTempTokenInvalid,
+        AuthError::MfaStateConflict,
         AuthError::PasswordCompromised,
         AuthError::PasswordResetTokenInvalid,
         AuthError::OtpInvalid,
@@ -113,8 +115,8 @@ fn all_errors() -> Vec<AuthError> {
 #[test]
 fn every_code_serializes_to_its_string_and_maps_to_its_status() {
     // Table-driven parity check: each code's `auth.*` string and HTTP status must match
-    // the catalog exactly. The catalog covers all 36 codes.
-    assert_eq!(catalog().len(), 36);
+    // the catalog exactly. The catalog covers all 37 codes.
+    assert_eq!(catalog().len(), 37);
     for (code, wire, status) in catalog() {
         let json = serde_json::to_string(&code).unwrap_or_default();
         assert_eq!(json, format!("\"{wire}\""), "wrong string for {code:?}");

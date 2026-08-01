@@ -7,10 +7,15 @@
 //! attempt counting and single-use consume, fixed-window brute-force counters, and
 //! single-use WebSocket tickets — over plain `Mutex<HashMap>` state.
 
+// Only the MFA transition lock uses the entry API, and that lives behind the feature — an
+// unconditional import is an unused one under `--no-default-features --features testing`.
+#[cfg(feature = "mfa")]
+use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::PoisonError;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use async_trait::async_trait;
 use bymax_auth_crypto::compare::constant_time_eq;
@@ -42,6 +47,27 @@ fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 pub struct InMemoryUserRepository {
     users: Mutex<HashMap<String, AuthUser>>,
     next_id: AtomicU64,
+    /// When set, `find_by_email` drops its `tenant_id` argument — reproducing the
+    /// single-tenant host that writes `find_by_email(email)` and ignores the second parameter.
+    /// The engine cannot make a consumer's repository scope correctly; it can only refuse an
+    /// answer from the wrong tenant, and testing that refusal needs a repository that actually
+    /// returns one.
+    ignore_tenant_on_email_lookup: AtomicBool,
+    /// When set and raised, every read reports the account with MFA gone.
+    ///
+    /// A transition re-reads the account inside its lock, and the mutation abandons when that
+    /// re-read reports MFA gone — a `disable` that completed while the caller was in flight.
+    /// Nothing single-threaded can land a write in that window, so the flag is raised BY the
+    /// lock (see `InMemoryStores::raise_on_next_mfa_lock`), which is the boundary itself: the
+    /// caller's copy is read before it, the transition's copy after.
+    mfa_gone_flag: Mutex<Option<Arc<AtomicBool>>>,
+    /// Armed count of `find_by_id` reads that must fail with a datastore error.
+    ///
+    /// Every authorization path that re-reads the account propagates a repository failure
+    /// rather than treating it as "no such user" — the difference between refusing a request
+    /// the store could not answer and silently deciding it. A double that always succeeds
+    /// leaves that propagation unasserted.
+    forced_read_failures: Mutex<usize>,
 }
 
 impl InMemoryUserRepository {
@@ -49,6 +75,34 @@ impl InMemoryUserRepository {
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Make `find_by_email` ignore its `tenant_id`, as a misconfigured consumer repository
+    /// would. See the field of the same name.
+    pub fn ignore_tenant_on_email(&self) {
+        self.ignore_tenant_on_email_lookup
+            .store(true, Ordering::SeqCst);
+    }
+
+    /// Report MFA gone on every read taken once `flag` is raised — the completed `disable` a
+    /// transition's re-read has to see. The flag is raised by the MFA transition lock, which is
+    /// the boundary: the caller's copy is read before it, the transition's copy after.
+    pub fn report_mfa_gone_when(&self, flag: Arc<AtomicBool>) {
+        *lock(&self.mfa_gone_flag) = Some(flag);
+    }
+
+    /// Fail the next `count` `find_by_id` reads with a datastore error, so a path that
+    /// propagates a repository failure rather than reading it as "no such account" can be
+    /// asserted against a store that would otherwise always succeed.
+    pub fn fail_next_reads(&self, count: usize) {
+        *lock(&self.forced_read_failures) = count;
+    }
+
+    /// Whether the armed flag is currently raised.
+    fn mfa_reported_gone(&self) -> bool {
+        lock(&self.mfa_gone_flag)
+            .as_ref()
+            .is_some_and(|flag| flag.load(Ordering::SeqCst))
     }
 
     /// Delete a user outright, so a test can drive the "the account is gone but its session
@@ -93,14 +147,33 @@ impl UserRepository for InMemoryUserRepository {
         id: &str,
         tenant_id: Option<&str>,
     ) -> Result<Option<AuthUser>, RepositoryError> {
+        {
+            let mut armed = lock(&self.forced_read_failures);
+            if *armed > 0 {
+                *armed -= 1;
+                return Err(RepositoryError::Backend("forced read failure".into()));
+            }
+        }
         let users = lock(&self.users);
-        Ok(users
+        let answer = users
             .get(id)
             .filter(|u| match tenant_id {
-                Some(tenant) => u.tenant_id == tenant,
+                Some(scope) => u.tenant_id == scope,
                 None => true,
             })
-            .cloned())
+            .cloned();
+        drop(users);
+        // The flag is raised by the transition lock, so a read taken before it sees the account
+        // as it was and a read taken after it sees the `disable` that completed in between.
+        if self.mfa_reported_gone() {
+            return Ok(answer.map(|mut user| {
+                user.mfa_enabled = false;
+                user.mfa_secret = None;
+                user.mfa_recovery_codes = None;
+                user
+            }));
+        }
+        Ok(answer)
     }
 
     async fn find_by_email(
@@ -109,9 +182,10 @@ impl UserRepository for InMemoryUserRepository {
         tenant_id: &str,
     ) -> Result<Option<AuthUser>, RepositoryError> {
         let users = lock(&self.users);
+        let scoped = !self.ignore_tenant_on_email_lookup.load(Ordering::SeqCst);
         Ok(users
             .values()
-            .find(|u| u.email.eq_ignore_ascii_case(email) && u.tenant_id == tenant_id)
+            .find(|u| u.email.eq_ignore_ascii_case(email) && (!scoped || u.tenant_id == tenant_id))
             .cloned())
     }
 
@@ -261,9 +335,18 @@ impl UserRepository for InMemoryUserRepository {
 #[derive(Debug, Default)]
 pub struct InMemoryPlatformUserRepository {
     users: Mutex<HashMap<String, AuthPlatformUser>>,
+    /// The platform twin of the dashboard repository's MFA-gone flag, for the transitions that
+    /// route to this repository.
+    mfa_gone_flag: Mutex<Option<Arc<AtomicBool>>>,
 }
 
 impl InMemoryPlatformUserRepository {
+    /// Report MFA gone on every read taken once `flag` is raised. See
+    /// [`InMemoryUserRepository::report_mfa_gone_when`].
+    pub fn report_mfa_gone_when(&self, flag: Arc<AtomicBool>) {
+        *lock(&self.mfa_gone_flag) = Some(flag);
+    }
+
     /// Create an empty repository.
     #[must_use]
     pub fn new() -> Self {
@@ -290,7 +373,19 @@ impl InMemoryPlatformUserRepository {
 #[async_trait]
 impl PlatformUserRepository for InMemoryPlatformUserRepository {
     async fn find_by_id(&self, id: &str) -> Result<Option<AuthPlatformUser>, RepositoryError> {
-        Ok(lock(&self.users).get(id).cloned())
+        let answer = lock(&self.users).get(id).cloned();
+        let gone = lock(&self.mfa_gone_flag)
+            .as_ref()
+            .is_some_and(|flag| flag.load(Ordering::SeqCst));
+        if gone {
+            return Ok(answer.map(|mut admin| {
+                admin.mfa_enabled = false;
+                admin.mfa_secret = None;
+                admin.mfa_recovery_codes = None;
+                admin
+            }));
+        }
+        Ok(answer)
     }
 
     async fn find_by_email(
@@ -358,6 +453,24 @@ pub struct InMemoryStores {
     /// through [`InMemoryStores::fail_next_cleanup_writes`]. Zero — the default — means every
     /// call behaves normally.
     forced_write_failures: Mutex<usize>,
+    /// Armed count of `create_recovered_session` calls that must report the account swept.
+    ///
+    /// The real refusal is a race: a `revoke_all` landing between the grace pointer's read and
+    /// the recovery's write. A coherent store cannot produce it single-threaded — this one
+    /// refuses the grace arm outright once the lineage is dead, so the write is never reached
+    /// with a dead account — and the engine's answer to it (refuse, do not mint) is exactly the
+    /// behaviour worth pinning. Arming the answer is what makes that reachable.
+    forced_recovery_refusals: Mutex<usize>,
+    /// Raised the first time the MFA transition lock is granted, so a test can place a
+    /// completed `disable` in the one window `transition_mfa_record` re-reads across.
+    disable_mfa_on_lock: Mutex<Option<Arc<AtomicBool>>>,
+    /// Armed count of `bump_epoch` calls that must fail.
+    ///
+    /// The bump is the second half of a device revoke, and it runs after the session is already
+    /// gone — so a failure there leaves the operation visibly incomplete rather than silently
+    /// half-done, and the caller has to hear about it. A store that always succeeds leaves that
+    /// propagation unasserted.
+    forced_epoch_bump_failures: Mutex<usize>,
     /// `ep:`/`pep:` per-user token epoch (generation counter), keyed by `(kind, user_id)`. A
     /// bump invalidates every access token stamped below the new value. Absent reads as `0`.
     epochs: Mutex<HashMap<(SessionKind, String), u64>>,
@@ -396,10 +509,13 @@ pub struct InMemoryStores {
     /// Single-use claims on MFA recovery codes (`rcu:`).
     #[cfg(feature = "mfa")]
     recovery_claims: Mutex<HashSet<String>>,
-    /// Held per-account MFA transition locks (`mfalock:`). A separate keyspace from the
-    /// recovery claims: a code claim and a transition lock must never contend.
+    /// Held per-account MFA transition locks (`mfalock:`), each mapped to the token of the call
+    /// holding it. A separate keyspace from the recovery claims: a code claim and a transition
+    /// lock must never contend. The token is stored, not discarded, because the release is a
+    /// compare-and-delete — a double that dropped it would accept a release from any caller and
+    /// so could never fail the way the real store can.
     #[cfg(feature = "mfa")]
-    mfa_locks: Mutex<HashSet<String>>,
+    mfa_locks: Mutex<HashMap<String, String>>,
     /// `os:` — the single-use OAuth `state` + PKCE payload keyed by `sha256(state)`.
     #[cfg(feature = "oauth")]
     oauth_state: Mutex<HashMap<String, String>>,
@@ -423,6 +539,26 @@ impl InMemoryStores {
     /// affected call; the default of zero leaves every call behaving normally.
     pub fn fail_next_cleanup_writes(&self, count: usize) {
         *lock(&self.forced_write_failures) = count;
+    }
+
+    /// Make the next `count` `create_recovered_session` calls report the account swept — the
+    /// race a coherent store cannot produce single-threaded, since it refuses the grace arm
+    /// outright once the lineage is dead, so the write is never reached with a dead account.
+    pub fn refuse_next_recovered_writes(&self, count: usize) {
+        *lock(&self.forced_recovery_refusals) = count;
+    }
+
+    /// Raise `flag` when the next MFA transition lock is granted, placing a completed `disable`
+    /// in the one window `transition_mfa_record` re-reads across.
+    pub fn raise_on_next_mfa_lock(&self, flag: Arc<AtomicBool>) {
+        *lock(&self.disable_mfa_on_lock) = Some(flag);
+    }
+
+    /// Fail the next `count` `bump_epoch` calls. The bump is the second half of a device
+    /// revoke and runs after the session is already gone, so a failure there has to reach the
+    /// caller rather than leave the operation silently half-done.
+    pub fn fail_next_epoch_bumps(&self, count: usize) {
+        *lock(&self.forced_epoch_bump_failures) = count;
     }
 
     /// Let the next `skip` `is_locked` reads through, then fail `count` of them.
@@ -512,6 +648,13 @@ impl SessionStore for InMemoryStores {
         // `invalidate_user_sessions` deletes that set once it has emptied it. The in-memory
         // twin models the same witness: `revoke_all` removes the entry, so its absence is
         // exactly "a revoke-all ran while this recovery was in flight".
+        {
+            let mut armed = lock(&self.forced_recovery_refusals);
+            if *armed > 0 {
+                *armed -= 1;
+                return Ok(false);
+            }
+        }
         if !lock(&self.session_index).contains_key(&(kind, detail.user_id.clone())) {
             return Ok(false);
         }
@@ -763,6 +906,13 @@ impl SessionStore for InMemoryStores {
     }
 
     async fn bump_epoch(&self, kind: SessionKind, user_id: &str) -> Result<u64, AuthError> {
+        {
+            let mut armed = lock(&self.forced_epoch_bump_failures);
+            if *armed > 0 {
+                *armed -= 1;
+                return Err(AuthError::Internal("forced epoch bump failure".into()));
+            }
+        }
         let mut epochs = lock(&self.epochs);
         let entry = epochs.entry((kind, user_id.to_owned())).or_insert(0);
         *entry += 1;
@@ -1057,14 +1207,37 @@ impl crate::traits::MfaStore for InMemoryStores {
         Ok(lock(&self.recovery_claims).insert(claim_id.to_owned()))
     }
 
-    async fn acquire_mfa_lock(&self, lock_id: &str, _ttl: u64) -> Result<bool, AuthError> {
-        // The same "was it new?" decision, over its own set: a transition lock and a recovery
-        // claim are different keyspaces and must never contend with one another.
-        Ok(lock(&self.mfa_locks).insert(lock_id.to_owned()))
+    async fn acquire_mfa_lock(
+        &self,
+        lock_id: &str,
+        token: &str,
+        _ttl: u64,
+    ) -> Result<bool, AuthError> {
+        // The same "was it new?" decision, over its own keyspace: a transition lock and a
+        // recovery claim must never contend with one another. `Entry::Vacant` is the in-memory
+        // spelling of `SET NX` — it writes the token only when nobody holds the lock.
+        match lock(&self.mfa_locks).entry(lock_id.to_owned()) {
+            Entry::Occupied(_) => Ok(false),
+            Entry::Vacant(slot) => {
+                slot.insert(token.to_owned());
+                // Raised only on the GRANTED arm. Firing it on a refusal too would arm the
+                // window for a caller that never entered it, which is the opposite of what the
+                // flag models: the `disable` is supposed to land inside a lock somebody holds.
+                if let Some(flag) = lock(&self.disable_mfa_on_lock).take() {
+                    flag.store(true, Ordering::SeqCst);
+                }
+                Ok(true)
+            }
+        }
     }
 
-    async fn release_mfa_lock(&self, lock_id: &str) -> Result<(), AuthError> {
-        lock(&self.mfa_locks).remove(lock_id);
+    async fn release_mfa_lock(&self, lock_id: &str, token: &str) -> Result<(), AuthError> {
+        // Compare-and-delete, mirroring the `release_lock` Lua: a lock whose token no longer
+        // matches belongs to a successor, and removing it would let a third caller in beside it.
+        let mut locks = lock(&self.mfa_locks);
+        if locks.get(lock_id).is_some_and(|held| held == token) {
+            locks.remove(lock_id);
+        }
         Ok(())
     }
 
