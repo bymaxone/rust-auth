@@ -108,10 +108,14 @@ impl PasswordService {
     /// Returns a generic [`AuthError::Internal`] if the semaphore has been closed, which this
     /// crate never does — it is owned by the service and lives as long as it.
     async fn acquire_kdf_permit(&self) -> Result<tokio::sync::OwnedSemaphorePermit, AuthError> {
-        Arc::clone(&self.kdf_permits)
-            .acquire_owned()
-            .await
-            .map_err(|_| internal_error("kdf concurrency limiter closed"))
+        // `let-else` rather than `map_err`: a closure is a function of its own to the coverage
+        // instrumentation, and this one runs only if the semaphore is closed — which this crate
+        // never does, since it owns it and it lives as long as the service. A branch nothing can
+        // reach is a branch; a function nothing can reach fails a 100% function gate.
+        let Ok(permit) = Arc::clone(&self.kdf_permits).acquire_owned().await else {
+            return Err(internal_error("kdf concurrency limiter closed"));
+        };
+        Ok(permit)
     }
 
     /// Reject a password that appears in a known-breach corpus.
@@ -288,6 +292,26 @@ mod tests {
             kdf_permit_count() < 512,
             "the point is to be below the blocking pool's default"
         );
+    }
+
+    #[tokio::test]
+    async fn a_closed_limiter_refuses_rather_than_deriving_unbounded() {
+        // The semaphore is owned by the service and lives as long as it, so nothing in this
+        // crate closes it — but "nothing closes it" is a property of today's code, not of the
+        // type. Closing it here proves the refusal is a refusal: the derivation does not fall
+        // through to running unbounded, which is the one outcome the limiter exists to prevent.
+        let Some(svc) = service() else { return };
+        svc.kdf_permits.close();
+
+        assert!(matches!(
+            svc.hash("correct horse battery staple").await,
+            Err(AuthError::Internal(_))
+        ));
+        assert!(matches!(
+            svc.verify("correct horse battery staple", "$scrypt$x")
+                .await,
+            Err(AuthError::Internal(_))
+        ));
     }
 
     #[tokio::test]

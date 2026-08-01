@@ -431,7 +431,7 @@ mod tests {
     /// can serve the same clients. Reading it here rather than repeating its numbers means a
     /// bound that moves on one side turns that side red, instead of surfacing as a request one
     /// backend accepts and the other refuses.
-    fn contract_bound(name: &str) -> (Option<usize>, Option<usize>) {
+    fn contract_bound(name: &str) -> (Option<usize>, usize) {
         let path = concat!(
             env!("CARGO_MANIFEST_DIR"),
             "/../../conformance/wire-contract.json"
@@ -449,7 +449,11 @@ mod tests {
                 .and_then(serde_json::Value::as_u64)
                 .and_then(|n| usize::try_from(n).ok())
         };
-        (read("min"), read("max"))
+        // The max comes back as a plain `usize`, with 0 standing for "the contract names none".
+        // An `Option` would need unwrapping at every call, and the unwrap's `None` arm is dead
+        // the moment the contract is complete — a branch no run reaches, which is the shape a
+        // 100% gate is right to refuse. A zero is asserted instead, in one place.
+        (read("min"), read("max").unwrap_or(0))
     }
 
     /// A well-formed address of exactly `n` characters.
@@ -458,40 +462,42 @@ mod tests {
     }
 
     /// Whether the DTO built by `build` from a field of exactly `n` characters validates.
-    fn accepts<T: Validate<Context = ()>>(
-        build: impl Fn(String) -> T,
+    ///
+    /// Takes an already-erased `&dyn Fn` rather than a generic `impl Fn`: a generic is
+    /// instantiated once per DTO, and every instantiation is a separate function to the
+    /// coverage instrumentation. One erased helper is one function, exercised by every entry
+    /// in the table below.
+    fn accepts(
+        build: &dyn Fn(String) -> Result<(), garde::Report>,
         filler: char,
         n: usize,
     ) -> bool {
-        build(std::iter::repeat_n(filler, n).collect::<String>())
-            .validate()
-            .is_ok()
+        build(std::iter::repeat_n(filler, n).collect::<String>()).is_ok()
     }
 
     /// Assert a field enforces the contract's bound at both edges.
-    fn assert_bounded<T: Validate<Context = ()>>(
+    fn assert_bounded(
         name: &str,
         filler: char,
-        build: impl Fn(String) -> T,
+        build: &dyn Fn(String) -> Result<(), garde::Report>,
     ) {
         let (min, max) = contract_bound(name);
         // The contract is required to name a ceiling for every field listed here; a missing
         // one is a red test, not a silent skip.
-        assert!(max.is_some(), "the contract names no max for {name}");
-        let Some(max) = max else { return };
+        assert!(max > 0, "the contract names no max for {name}");
         assert!(
-            accepts(&build, filler, max),
+            accepts(build, filler, max),
             "{name} refused its own maximum"
         );
         assert!(
-            !accepts(&build, filler, max + 1),
+            !accepts(build, filler, max + 1),
             "{name} accepted a value past the contract maximum"
         );
         if let Some(min) = min
             && min > 1
         {
             assert!(
-                !accepts(&build, filler, min - 1),
+                !accepts(build, filler, min - 1),
                 "{name} accepted a value below the contract minimum"
             );
         }
@@ -503,49 +509,73 @@ mod tests {
         // route is a free byte sink to carry, parse and log; a bound that differs between the
         // two means the same request is taken by one backend and refused by the other, which
         // for a deployment running both behind one address nobody can explain from the outside.
-        assert_bounded("newPassword", 'a', |password| RegisterDto {
-            email: "a@e.com".to_owned(),
-            password,
-            name: "Ok".to_owned(),
-            tenant_id: "t1".to_owned(),
+        assert_bounded("newPassword", 'a', &|password| {
+            RegisterDto {
+                email: "a@e.com".to_owned(),
+                password,
+                name: "Ok".to_owned(),
+                tenant_id: "t1".to_owned(),
+            }
+            .validate()
         });
-        assert_bounded("provenPassword", 'a', |password| LoginDto {
-            email: "a@e.com".to_owned(),
-            password,
-            tenant_id: "t1".to_owned(),
+        assert_bounded("provenPassword", 'a', &|password| {
+            LoginDto {
+                email: "a@e.com".to_owned(),
+                password,
+                tenant_id: "t1".to_owned(),
+            }
+            .validate()
         });
-        assert_bounded("tenantId", 'a', |tenant_id| LoginDto {
-            email: "a@e.com".to_owned(),
-            password: "hunter2hunter2".to_owned(),
-            tenant_id,
+        assert_bounded("tenantId", 'a', &|tenant_id| {
+            LoginDto {
+                email: "a@e.com".to_owned(),
+                password: "hunter2hunter2".to_owned(),
+                tenant_id,
+            }
+            .validate()
         });
-        assert_bounded("displayName", 'a', |name| RegisterDto {
-            email: "a@e.com".to_owned(),
-            password: "hunter2hunter2".to_owned(),
-            name,
-            tenant_id: "t1".to_owned(),
+        assert_bounded("displayName", 'a', &|name| {
+            RegisterDto {
+                email: "a@e.com".to_owned(),
+                password: "hunter2hunter2".to_owned(),
+                name,
+                tenant_id: "t1".to_owned(),
+            }
+            .validate()
         });
-        assert_bounded("invitationDisplayName", 'a', |name| AcceptInvitationDto {
-            token: "a".repeat(64),
-            name,
-            password: "hunter2hunter2".to_owned(),
+        assert_bounded("invitationDisplayName", 'a', &|name| {
+            AcceptInvitationDto {
+                token: "a".repeat(64),
+                name,
+                password: "hunter2hunter2".to_owned(),
+            }
+            .validate()
         });
-        assert_bounded("singleUseToken", 'a', |token| AcceptInvitationDto {
-            token,
-            name: "Ok".to_owned(),
-            password: "hunter2hunter2".to_owned(),
+        assert_bounded("singleUseToken", 'a', &|token| {
+            AcceptInvitationDto {
+                token,
+                name: "Ok".to_owned(),
+                password: "hunter2hunter2".to_owned(),
+            }
+            .validate()
         });
-        assert_bounded("verificationOtp", '1', |otp| VerifyEmailDto {
-            email: "a@e.com".to_owned(),
-            otp,
-            tenant_id: "t1".to_owned(),
+        assert_bounded("verificationOtp", '1', &|otp| {
+            VerifyEmailDto {
+                email: "a@e.com".to_owned(),
+                otp,
+                tenant_id: "t1".to_owned(),
+            }
+            .validate()
         });
-        assert_bounded("resetOtp", '1', |otp| VerifyOtpDto {
-            email: "a@e.com".to_owned(),
-            otp,
-            tenant_id: "t1".to_owned(),
+        assert_bounded("resetOtp", '1', &|otp| {
+            VerifyOtpDto {
+                email: "a@e.com".to_owned(),
+                otp,
+                tenant_id: "t1".to_owned(),
+            }
+            .validate()
         });
-        assert_bounded("totpCode", '1', |code| MfaVerifyDto { code });
+        assert_bounded("totpCode", '1', &|code| MfaVerifyDto { code }.validate());
     }
 
     #[test]
@@ -555,8 +585,7 @@ mod tests {
         // exactly 255" is not a property this DTO has. The half that matters is that an
         // oversized value never reaches the lookup.
         let (_, max) = contract_bound("email");
-        assert!(max.is_some(), "the contract names no max for email");
-        let Some(max) = max else { return };
+        assert!(max > 0, "the contract names no max for email");
         let over = LoginDto {
             email: address(max + 1),
             password: "hunter2hunter2".to_owned(),

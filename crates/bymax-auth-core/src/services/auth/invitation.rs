@@ -1257,6 +1257,35 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn withdrawing_without_an_invitation_store_refuses_rather_than_reporting_success() {
+        // Invitations OFF, so no invitation store is wired — the builder requires one whenever
+        // they are on, which is why this is the only shape that reaches the guard. Answering
+        // the usual idempotent `Ok(false)` would tell an operator the withdrawal happened,
+        // which is the one thing a revoke is read for. `invite` refuses on the same grounds.
+        let mut cfg = invite_config();
+        cfg.invitations.enabled = false;
+        let users = Arc::new(InMemoryUserRepository::new());
+        let stores = Arc::new(InMemoryStores::new());
+        let built = AuthEngine::builder()
+            .config(cfg)
+            .environment(Environment::Test)
+            .user_repository(users.clone())
+            // Wire only the three required stores; no invitation store.
+            .session_store(stores.clone())
+            .otp_store(stores.clone())
+            .brute_force_store(stores)
+            .build();
+        assert!(built.is_ok(), "the engine refused to build");
+        let Ok(engine) = built else { return };
+        let revoker = seed_admin(&users, "noinv@example.com", "ADMIN").await;
+
+        let refused = engine
+            .revoke_invitation(&revoker, "invitee@example.com", "t1")
+            .await;
+        assert!(matches!(refused, Err(AuthError::Internal(_))));
+    }
+
+    #[tokio::test]
     async fn a_revoker_who_no_longer_exists_is_refused() {
         let Some(s) = setup(invite_config()) else { return };
 
