@@ -465,6 +465,24 @@ impl bymax_auth_core::traits::SessionStore for FailingStores {
     ) -> Result<(), bymax_auth_types::AuthError> {
         self.inner.delete_grace_pointer(kind, session_hash).await
     }
+    async fn create_recovered_session(
+        &self,
+        kind: bymax_auth_core::traits::SessionKind,
+        token_hash: &str,
+        detail: &bymax_auth_core::traits::SessionRecord,
+        ttl_secs: u64,
+    ) -> Result<bool, bymax_auth_types::AuthError> {
+        self.inner
+            .create_recovered_session(kind, token_hash, detail, ttl_secs)
+            .await
+    }
+    async fn sweep_grace_pointers(
+        &self,
+        kind: bymax_auth_core::traits::SessionKind,
+        user_id: &str,
+    ) -> Result<(), bymax_auth_types::AuthError> {
+        self.inner.sweep_grace_pointers(kind, user_id).await
+    }
     async fn revoke_all(
         &self,
         _kind: bymax_auth_core::traits::SessionKind,
@@ -749,6 +767,16 @@ impl bymax_auth_core::traits::MfaStore for FailingStores {
         ttl: u64,
     ) -> Result<bool, bymax_auth_types::AuthError> {
         self.inner.claim_recovery_code(claim_id, ttl).await
+    }
+    async fn acquire_mfa_lock(
+        &self,
+        lock_id: &str,
+        ttl: u64,
+    ) -> Result<bool, bymax_auth_types::AuthError> {
+        self.inner.acquire_mfa_lock(lock_id, ttl).await
+    }
+    async fn release_mfa_lock(&self, lock_id: &str) -> Result<(), bymax_auth_types::AuthError> {
+        self.inner.release_mfa_lock(lock_id).await
     }
     async fn challenge_consume(
         &self,

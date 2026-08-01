@@ -171,6 +171,142 @@ async fn session_create_rotate_grace_revoke_and_blacklist() {
     ));
 }
 
+/// `recover_grace.lua` refuses the write when either witness is already gone.
+///
+/// This is the script the whole grace-recovery race turns on, and it was reachable only through
+/// the in-memory twin — which has no namespace and no Lua, so it cannot disagree with the real
+/// store the way the real store can disagree with itself. That is not hypothetical: the sweep
+/// in this same commit built its key from the index member without the namespace and therefore
+/// deleted nothing, and only a test against a real Redis could see it. The three cases here are
+/// the script's whole contract.
+#[tokio::test]
+async fn a_grace_recovery_is_refused_once_either_witness_is_gone() {
+    let Some(redis) = common::try_start().await else {
+        return;
+    };
+    let Some(stores) = redis.stores() else { return };
+    let kind = SessionKind::Dashboard;
+
+    // (1) Both witnesses present: the write lands, and every key it owes is there.
+    assert!(
+        stores
+            .create_session(kind, "w1", &record("wu"), 3600)
+            .await
+            .is_ok()
+    );
+    let written = stores
+        .create_recovered_session(kind, "w2", &record("wu"), 3600)
+        .await;
+    assert!(matches!(written, Ok(true)), "{written:?}");
+    assert!(redis.ttl("auth:rt:w2").await > 0, "the session record");
+    assert!(redis.ttl("auth:sd:w2").await > 0, "the detail record");
+    let members = redis.smembers("auth:sess:wu").await;
+    assert!(members.iter().any(|m| m == "rt:w2"), "index: {members:?}");
+    let family = redis.smembers("auth:fam:fam-wu").await;
+    assert!(family.iter().any(|m| m == "w2"), "family: {family:?}");
+
+    // (2) The per-user index is gone — the witness `invalidate_user_sessions` deletes once it
+    // has emptied the set, so its absence IS "a revoke-all has run". Nothing is written.
+    assert!(redis.del("auth:sess:wu").await);
+    let swept = stores
+        .create_recovered_session(kind, "w3", &record("wu"), 3600)
+        .await;
+    assert!(matches!(swept, Ok(false)), "{swept:?}");
+    assert_eq!(redis.ttl("auth:rt:w3").await, -2, "nothing may be written");
+
+    // (3) The index is back but the LINEAGE is gone — the shape reuse detection leaves behind.
+    // A recovery into a revoked family would hand back the login the detection just killed.
+    assert!(
+        stores
+            .create_session(kind, "w4", &record("wu"), 3600)
+            .await
+            .is_ok()
+    );
+    assert!(redis.del("auth:fam:fam-wu").await);
+    let orphaned = stores
+        .create_recovered_session(kind, "w5", &record("wu"), 3600)
+        .await;
+    assert!(matches!(orphaned, Ok(false)), "{orphaned:?}");
+    assert_eq!(redis.ttl("auth:rt:w5").await, -2, "nothing may be written");
+}
+
+/// `sweep_grace_pointers` removes every `rp:` the user's session index names, and takes each
+/// out of the index as it goes.
+///
+/// The grace pointer is what lets a rotation that lost a race still recover, so a "log out
+/// everywhere" that deletes the live sessions and leaves the pointers behind leaves a way back
+/// in: the next replay of a consumed token finds its pointer, recovers, and mints a session on
+/// an account the user was told had been swept. The engine calls this before the revoke so the
+/// two cannot disagree.
+#[tokio::test]
+async fn sweep_grace_pointers_clears_every_pointer_and_its_index_entry() {
+    let Some(redis) = common::try_start().await else {
+        return;
+    };
+    let Some(stores) = redis.stores() else { return };
+    let kind = SessionKind::Dashboard;
+
+    // Two live sessions for one user, each rotated so each leaves a grace pointer behind.
+    for (old, new) in [("g1", "g2"), ("g3", "g4")] {
+        assert!(
+            stores
+                .create_session(kind, old, &record("gu"), 3600)
+                .await
+                .is_ok()
+        );
+        assert!(matches!(
+            stores.rotate(kind, &rotation(old, new, "gu")).await,
+            Ok(RotateOutcome::Rotated(_))
+        ));
+    }
+
+    // Both pointers exist and both are named by the user's session index.
+    assert!(redis.ttl("auth:rp:g1").await > 0);
+    assert!(redis.ttl("auth:rp:g3").await > 0);
+    let before = redis.smembers("auth:sess:gu").await;
+    assert!(before.iter().any(|m| m == "rp:g1"), "index: {before:?}");
+    assert!(before.iter().any(|m| m == "rp:g3"), "index: {before:?}");
+
+    assert!(stores.sweep_grace_pointers(kind, "gu").await.is_ok());
+
+    // Every pointer key is gone (an absent key reports a -2 TTL)...
+    assert_eq!(redis.ttl("auth:rp:g1").await, -2);
+    assert_eq!(redis.ttl("auth:rp:g3").await, -2);
+    // ...and so is every pointer MEMBER, which is the half a bare key delete would miss: a
+    // member naming a key that no longer exists would keep the index reporting sessions the
+    // account does not have.
+    let after = redis.smembers("auth:sess:gu").await;
+    assert!(
+        !after.iter().any(|m| m.starts_with("rp:")),
+        "no grace member may survive the sweep: {after:?}"
+    );
+    // The live sessions are untouched — this sweeps pointers, not sessions.
+    assert!(after.iter().any(|m| m == "rt:g2"), "index: {after:?}");
+    assert!(after.iter().any(|m| m == "rt:g4"), "index: {after:?}");
+}
+
+/// A user with no grace pointers at all is not an error, and touches nothing.
+#[tokio::test]
+async fn sweep_grace_pointers_is_a_no_op_when_there_are_none() {
+    let Some(redis) = common::try_start().await else {
+        return;
+    };
+    let Some(stores) = redis.stores() else { return };
+    let kind = SessionKind::Dashboard;
+
+    assert!(
+        stores
+            .create_session(kind, "n1", &record("nu"), 3600)
+            .await
+            .is_ok()
+    );
+
+    assert!(stores.sweep_grace_pointers(kind, "nu").await.is_ok());
+
+    let after = redis.smembers("auth:sess:nu").await;
+    assert!(after.iter().any(|m| m == "rt:n1"), "index: {after:?}");
+}
+
 #[tokio::test]
 async fn rotate_with_zero_grace_writes_no_grace_pointer() {
     let Some(redis) = common::try_start().await else {

@@ -37,6 +37,11 @@ impl LuaScript {
 pub static REFRESH_ROTATE: LazyLock<LuaScript> =
     LazyLock::new(|| LuaScript::new(include_str!("lua/refresh_rotate.lua")));
 
+/// `recover_grace` — write a grace-recovered session atomically with the check that a
+/// revoke-all has not already swept the account.
+pub static RECOVER_GRACE: LazyLock<LuaScript> =
+    LazyLock::new(|| LuaScript::new(include_str!("lua/recover_grace.lua")));
+
 /// `session_revoke` — ownership-checked single revoke (section 12.5.2).
 pub static SESSION_REVOKE: LazyLock<LuaScript> =
     LazyLock::new(|| LuaScript::new(include_str!("lua/session_revoke.lua")));

@@ -211,6 +211,46 @@ impl RedisStores {
         Ok(())
     }
 
+    /// Run the `recover_grace` script: write the recovered session, its index membership, its
+    /// detail record and its family membership in one atomic step, gated on the per-user index
+    /// still existing. See `lua/recover_grace.lua` for what that gate closes.
+    async fn create_recovered_session_inner(
+        &self,
+        kind: SessionKind,
+        token_hash: &str,
+        detail: &SessionRecord,
+        ttl_secs: u64,
+    ) -> Result<bool, RedisStoreError> {
+        let prefixes = kind_prefixes(kind);
+        let keys = self.keys();
+        let rt_key = keys.key(prefixes.rt, token_hash);
+        let sess_key = keys.key(prefixes.sess, &detail.user_id);
+        let sd_key = keys.key(prefixes.sd, token_hash);
+        // An empty family has no index key; the script never touches KEYS[4] in that case, but
+        // a placeholder still has to be passed so the key count matches.
+        let fam_key = keys.key(prefixes.fam, &detail.family_id);
+        let record_json = serde_json::to_string(detail)?;
+        let detail_json = serde_json::to_string(&SessionDetailValue::at_creation(detail))?;
+        let live_member = index_member(prefixes.rt, token_hash);
+
+        let mut conn = self.connection().await?;
+        let written: i64 = script::RECOVER_GRACE
+            .prepare()
+            .key(&rt_key)
+            .key(&sess_key)
+            .key(&sd_key)
+            .key(&fam_key)
+            .arg(&record_json)
+            .arg(&detail_json)
+            .arg(ttl_secs)
+            .arg(&detail.family_id)
+            .arg(&live_member)
+            .arg(token_hash)
+            .invoke_async(&mut conn)
+            .await?;
+        Ok(written == 1)
+    }
+
     /// Run the `refresh_rotate` script and, on a live rotation, move the session-index
     /// membership and detail from the old hash to the new one.
     async fn rotate_inner(
@@ -505,6 +545,41 @@ impl RedisStores {
         Ok(())
     }
 
+    /// Delete every `rp:`/`prp:` member the user's session index names, removing each from the
+    /// index as it goes.
+    ///
+    /// A member carries its own key prefix but NOT the namespace — the index holds `rp:{hash}`
+    /// while the key is `{namespace}:rp:{hash}` — so the fully-qualified key has to be rebuilt
+    /// before the delete. `invalidate_user_sessions.lua` takes the namespace as an argument for
+    /// exactly this reason and concatenates it the same way; deleting the bare member instead
+    /// removes nothing, while the `SREM` still succeeds — leaving the pointer alive, off the
+    /// index, and therefore invisible to the wholesale sweep that runs after this one.
+    async fn sweep_grace_pointers_inner(
+        &self,
+        kind: SessionKind,
+        user_id: &str,
+    ) -> Result<(), RedisStoreError> {
+        let prefixes = kind_prefixes(kind);
+        let keys = self.keys();
+        let sess_key = keys.key(prefixes.sess, user_id);
+        let namespace = keys.namespace().to_owned();
+        let mut conn = self.connection().await?;
+        let members: Vec<String> = conn.smembers(&sess_key).await?;
+        let grace_prefix = format!("{}:", prefixes.rp.as_str());
+        for member in members.iter().filter(|m| m.starts_with(&grace_prefix)) {
+            redis::cmd("DEL")
+                .arg(format!("{namespace}:{member}"))
+                .query_async::<i64>(&mut conn)
+                .await?;
+            redis::cmd("SREM")
+                .arg(&sess_key)
+                .arg(member)
+                .query_async::<i64>(&mut conn)
+                .await?;
+        }
+        Ok(())
+    }
+
     /// Run the `invalidate_user_sessions` transaction, deleting the key each member names
     /// (`rt:`/`prt:` live sessions **and** `rp:`/`prp:` grace pointers), each live member's
     /// `sd:`/`psd:` detail, and the `sess:` SET itself in one atomic step.
@@ -666,12 +741,34 @@ impl SessionStore for RedisStores {
         }
     }
 
+    async fn create_recovered_session(
+        &self,
+        kind: SessionKind,
+        token_hash: &str,
+        detail: &SessionRecord,
+        ttl_secs: u64,
+    ) -> Result<bool, AuthError> {
+        self.create_recovered_session_inner(kind, token_hash, detail, ttl_secs)
+            .await
+            .map_err(AuthError::from)
+    }
+
     async fn delete_grace_pointer(
         &self,
         kind: SessionKind,
         session_hash: &str,
     ) -> Result<(), AuthError> {
         self.delete_grace_pointer_inner(kind, session_hash)
+            .await
+            .map_err(AuthError::from)
+    }
+
+    async fn sweep_grace_pointers(
+        &self,
+        kind: SessionKind,
+        user_id: &str,
+    ) -> Result<(), AuthError> {
+        self.sweep_grace_pointers_inner(kind, user_id)
             .await
             .map_err(AuthError::from)
     }

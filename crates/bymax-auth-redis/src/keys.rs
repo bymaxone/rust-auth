@@ -86,6 +86,10 @@ pub enum Prefix {
     MfaSetup,
     /// MFA temp-token single-use marker (`mfa`).
     Mfa,
+    /// Per-account MFA transition lock (`mfalock`). Serializes the read-modify-write every MFA
+    /// state change performs over the one repository record that carries `mfa_enabled`, the
+    /// secret and the recovery codes together.
+    Mfalock,
     /// TOTP anti-replay marker (`tu`).
     Tu,
     /// Single-use OAuth `state` + PKCE record (`os`).
@@ -124,6 +128,7 @@ impl Prefix {
             Self::Psd => "psd",
             Self::MfaSetup => "mfa_setup",
             Self::Mfa => "mfa",
+            Self::Mfalock => "mfalock",
             Self::Tu => "tu",
             Self::Os => "os",
         }
@@ -325,6 +330,7 @@ mod tests {
             (Prefix::Psess, "auth:psess:abc"),
             (Prefix::Psd, "auth:psd:abc"),
             (Prefix::MfaSetup, "auth:mfa_setup:abc"),
+            (Prefix::Mfalock, "auth:mfalock:abc"),
             (Prefix::Mfa, "auth:mfa:abc"),
             (Prefix::Tu, "auth:tu:abc"),
             (Prefix::Os, "auth:os:abc"),
