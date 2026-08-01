@@ -296,10 +296,13 @@ pub fn build_oauth_with_failing_state_store() -> Option<Harness> {
     })
 }
 
-/// Assemble the adapter router for the harness engine with default adapter config.
+/// Assemble the adapter router for the harness engine, keyed on the socket peer address.
 pub fn router(harness: &Harness) -> Router {
-    bymax_auth_axum::AuthRouter::from_engine(harness.engine.clone(), AxumAuthConfig::default())
-        .into_router()
+    bymax_auth_axum::AuthRouter::from_engine(
+        harness.engine.clone(),
+        AxumAuthConfig::new(bymax_auth_axum::ClientIpSource::PeerAddr),
+    )
+    .into_router()
 }
 
 /// Seed an active, verified dashboard user with the given role; returns the id.

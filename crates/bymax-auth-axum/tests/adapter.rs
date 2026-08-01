@@ -88,7 +88,7 @@ async fn always_on_groups_are_mounted_and_optional_groups_are_absent_by_default(
     // The router reports exactly the derived groups.
     let derived = bymax_auth_axum::AuthRouter::from_engine(
         h.engine.clone(),
-        bymax_auth_axum::AxumAuthConfig::default(),
+        bymax_auth_axum::AxumAuthConfig::new(bymax_auth_axum::ClientIpSource::PeerAddr),
     )
     .groups();
     assert!(derived.auth && derived.password_reset);
@@ -1493,7 +1493,7 @@ async fn a_custom_rate_limit_override_changes_the_threshold() {
     };
     let config = AxumAuthConfig {
         rate_limits: limits,
-        ..AxumAuthConfig::default()
+        ..AxumAuthConfig::new(bymax_auth_axum::ClientIpSource::PeerAddr)
     };
     let app = AuthRouter::from_engine(h.engine.clone(), config).into_router();
 
@@ -1521,7 +1521,7 @@ async fn custom_config_with_forwarded_for_cors_and_prefix() {
         route_prefix: "api/auth".to_owned(),
         client_ip_source: ClientIpSource::TrustedForwardedFor,
         cors: Some(tower_http::cors::CorsLayer::permissive()),
-        ..AxumAuthConfig::default()
+        ..AxumAuthConfig::new(bymax_auth_axum::ClientIpSource::PeerAddr)
     };
     let app = AuthRouter::from_engine(h.engine.clone(), config).into_router();
 
@@ -2063,7 +2063,11 @@ async fn oauth_callback_redirect_branches() {
     // Build an engine with the three redirect URLs configured.
     let Some(h) = build_oauth_with_redirects() else { return };
     let _ = TokenDelivery::Cookie;
-    let app = AuthRouter::from_engine(h.engine.clone(), AxumAuthConfig::default()).into_router();
+    let app = AuthRouter::from_engine(
+        h.engine.clone(),
+        AxumAuthConfig::new(bymax_auth_axum::ClientIpSource::PeerAddr),
+    )
+    .into_router();
 
     // initiate to get a valid state.
     let initiate = Req::get("/auth/oauth/google?tenantId=t1").send(&app).await;
@@ -2229,7 +2233,7 @@ async fn an_oversized_body_is_rejected_as_validation() {
     let Some(h) = build(EngineSpec::default()) else { return };
     let config = AxumAuthConfig {
         max_body_bytes: 16,
-        ..AxumAuthConfig::default()
+        ..AxumAuthConfig::new(bymax_auth_axum::ClientIpSource::PeerAddr)
     };
     let app = AuthRouter::from_engine(h.engine.clone(), config).into_router();
     let big = "x".repeat(4096);
@@ -2350,7 +2354,7 @@ async fn oauth_callback_with_mfa_user_takes_the_mfa_redirect_branch() {
 
     let app = bymax_auth_axum::AuthRouter::from_engine(
         h.engine.clone(),
-        bymax_auth_axum::AxumAuthConfig::default(),
+        bymax_auth_axum::AxumAuthConfig::new(bymax_auth_axum::ClientIpSource::PeerAddr),
     )
     .into_router();
 
@@ -2393,7 +2397,10 @@ async fn auth_router_free_function_builds_a_working_router() {
         Ok(engine) => engine,
         Err(_) => return,
     };
-    let app = bymax_auth_axum::auth_router(engine, bymax_auth_axum::AxumAuthConfig::default());
+    let app = bymax_auth_axum::auth_router(
+        engine,
+        bymax_auth_axum::AxumAuthConfig::new(bymax_auth_axum::ClientIpSource::PeerAddr),
+    );
     let me = Req::get("/auth/me").send(&app).await;
     assert_eq!(me.status, StatusCode::UNAUTHORIZED);
 }

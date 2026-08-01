@@ -187,11 +187,16 @@ pub(crate) fn throttled(
 ) -> MethodRouter<AuthState> {
     match build_governor_config(limit, ip_source) {
         Some(GovernorConfigKind::Peer(config)) => {
+            // The governor keys its state in a map that is only ever inserted into, so each
+            // throttled route gets a sweeper. See `spawn_key_gc` for why this is the library's
+            // job rather than the consumer's.
+            crate::rate_limit::spawn_key_gc(Arc::clone(&config));
             let layer =
                 GovernorLayer::<_, _, Body>::new(config).error_handler(governor_error_to_response);
             method_router.route_layer(layer)
         }
         Some(GovernorConfigKind::Smart(config)) => {
+            crate::rate_limit::spawn_key_gc(Arc::clone(&config));
             let layer =
                 GovernorLayer::<_, _, Body>::new(config).error_handler(governor_error_to_response);
             method_router.route_layer(layer)

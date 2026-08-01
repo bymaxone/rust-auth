@@ -21,16 +21,30 @@ use crate::rate_limit::RateLimitConfig;
 pub const DEFAULT_MAX_BODY_BYTES: usize = 1024 * 1024;
 
 /// How the adapter derives the trusted client IP for the per-route rate limiter (§16.2 /
-/// §16.4). The default never trusts a raw `X-Forwarded-For`, so a spoofed header cannot
-/// bypass the limit; a deployment behind a known proxy opts into trusting the **last**
-/// `X-Forwarded-For` hop (the address the trusted proxy observed).
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+/// §16.4).
+///
+/// **There is deliberately no default.** The two failure modes are opposite and both are
+/// silent, so a default would pick one for a deployment shape this crate cannot see:
+///
+/// - [`ClientIpSource::PeerAddr`] reads the socket address. Correct when the service is
+///   directly exposed. Behind ANY proxy it is the *proxy's* address for every client, so all
+///   of them share one bucket — and a single caller sending five logins in a minute rate-limits
+///   the entire user base, with no credential.
+/// - [`ClientIpSource::TrustedForwardedFor`] reads the last `X-Forwarded-For` hop. Correct
+///   behind exactly one trusted proxy. Directly exposed it is whatever the caller wrote, and a
+///   limiter whose key the attacker picks enforces nothing.
+///
+/// Nothing detects the mismatch at runtime: both look like a working limiter. So
+/// [`AxumAuthConfig`] has no `Default` either — the value is named at construction, and a
+/// deployment that has not thought about it does not compile.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ClientIpSource {
-    /// Use the socket peer address only — never read `X-Forwarded-For`. The safe default.
-    #[default]
+    /// Use the socket peer address only — never read `X-Forwarded-For`. Correct only when the
+    /// service is directly exposed; behind a proxy every client shares one bucket.
     PeerAddr,
     /// Trust the last `X-Forwarded-For` entry (set by a trusted reverse proxy), falling
-    /// back to the peer address when the header is absent or malformed.
+    /// back to the peer address when the header is absent or malformed. Correct only behind a
+    /// proxy that overwrites the header.
     TrustedForwardedFor,
 }
 
@@ -52,13 +66,20 @@ pub struct AxumAuthConfig {
     pub cors: Option<tower_http::cors::CorsLayer>,
 }
 
-impl Default for AxumAuthConfig {
-    fn default() -> Self {
+impl AxumAuthConfig {
+    /// Build the adapter configuration, naming how the client IP is derived and defaulting
+    /// everything else.
+    ///
+    /// There is no `Default` impl, and that is the point: [`ClientIpSource`] has no safe
+    /// default value, so the type refuses to be built without one. See its documentation for
+    /// what each choice gets wrong in the other deployment shape — both silently.
+    #[must_use]
+    pub fn new(client_ip_source: ClientIpSource) -> Self {
         Self {
             route_prefix: bymax_auth_types::constants::AUTH_ROUTE_PREFIX.to_owned(),
             max_body_bytes: DEFAULT_MAX_BODY_BYTES,
             rate_limits: RateLimitConfig::default(),
-            client_ip_source: ClientIpSource::default(),
+            client_ip_source,
             cors: None,
         }
     }
@@ -212,8 +233,11 @@ mod tests {
 
     #[test]
     fn defaults_and_client_ip_source() {
-        // The config default carries the canonical prefix/body-limit and the safe IP source.
-        let config = AxumAuthConfig::default();
+        // `new` carries the canonical prefix and body limit, and the IP source the caller
+        // named. There is no `Default` for either type on purpose: neither `ClientIpSource`
+        // value is safe in the wrong deployment shape and neither failure is visible at
+        // runtime, so the type refuses to be built without the decision.
+        let config = AxumAuthConfig::new(ClientIpSource::PeerAddr);
         assert_eq!(config.route_prefix, "auth");
         // Pinned to the literal, not to the constant: a body cap is a security bound, and
         // asserting it against itself would accept any value the expression happened to
@@ -222,7 +246,11 @@ mod tests {
         assert_eq!(DEFAULT_MAX_BODY_BYTES, 1_048_576);
         assert_eq!(config.client_ip_source, ClientIpSource::PeerAddr);
         assert!(config.cors.is_none());
-        assert_eq!(ClientIpSource::default(), ClientIpSource::PeerAddr);
+        // The other arm is reachable and distinct — the choice is the caller's.
+        assert_eq!(
+            AxumAuthConfig::new(ClientIpSource::TrustedForwardedFor).client_ip_source,
+            ClientIpSource::TrustedForwardedFor
+        );
     }
 
     #[test]

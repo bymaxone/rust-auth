@@ -24,7 +24,7 @@ use async_trait::async_trait;
 use axum::Router;
 use axum::body::Body;
 use axum::extract::ConnectInfo;
-use bymax_auth_axum::{AuthRouter, AxumAuthConfig};
+use bymax_auth_axum::{AuthRouter, AxumAuthConfig, ClientIpSource};
 use bymax_auth_core::config::MfaConfig;
 use bymax_auth_core::testing::{
     InMemoryPlatformUserRepository, InMemoryUserRepository, MockOAuthProvider,
@@ -328,7 +328,11 @@ async fn full_router_against_real_redis() {
         "engine/router setup must succeed once the Redis container is running"
     );
     let Some((engine, users, admins)) = built else { return };
-    let app = AuthRouter::from_engine(engine.clone(), AxumAuthConfig::default()).into_router();
+    let app = AuthRouter::from_engine(
+        engine.clone(),
+        AxumAuthConfig::new(ClientIpSource::PeerAddr),
+    )
+    .into_router();
 
     // ---- register → login → refresh → logout → me, all over real Redis -----------------
     let reg = call(
