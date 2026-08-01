@@ -100,31 +100,61 @@ impl RedisStores {
         Ok(removed > 0)
     }
 
-    /// `DEL mfalock:{lock_id}` — release the per-account MFA transition lock. Idempotent: an
-    /// already-expired lock deletes nothing and is still a success, because the caller's only
-    /// obligation is that the lock not outlive its transition.
-    async fn release_mfa_lock_inner(&self, lock_id: &str) -> Result<(), RedisStoreError> {
+    /// The `release_lock` Lua — release `mfalock:{lock_id}` only while it still holds `token`.
+    ///
+    /// A bare `DEL` here removed whichever transition held the lock at that moment, not the one
+    /// this call took: an overrunning transition has already lost its lock to the TTL, and
+    /// deleting it lets a third caller in beside the second. The comparison and the delete are
+    /// one script because the key can expire and be retaken between a `GET` and a `DEL`, which
+    /// is the interleaving the token exists to catch.
+    ///
+    /// Idempotent: a lock already expired or retaken deletes nothing and is still a success —
+    /// the caller's only obligation is that its own lock not outlive its transition.
+    async fn release_mfa_lock_inner(
+        &self,
+        lock_id: &str,
+        token: &str,
+    ) -> Result<(), RedisStoreError> {
         let key = self.keys().key(Prefix::Mfalock, lock_id);
         let mut conn = self.connection().await?;
-        let _: i64 = conn.del(&key).await?;
+        let _: i64 = script::RELEASE_LOCK
+            .prepare()
+            .key(&key)
+            .arg(token)
+            .invoke_async(&mut conn)
+            .await?;
         Ok(())
     }
 
     /// `SET {prefix}:{id} "1" NX EX ttl` — a single-use marker, returning whether this call
     /// created it. Two keyspaces share the shape: the TOTP anti-replay marker (`tu:`) and the
-    /// recovery-code claim (`rcu:`), and the MFA transition lock (`mfalock:`). All three mean
-    /// the same thing — presence is "already taken".
+    /// recovery-code claim (`rcu:`). Both mean the same thing — presence is "already taken",
+    /// and the value carries nothing, because nobody ever reads it back.
     async fn set_nx_marker(
         &self,
         prefix: Prefix,
         id: &str,
         ttl: u64,
     ) -> Result<bool, RedisStoreError> {
+        self.set_nx_value(prefix, id, "1", ttl).await
+    }
+
+    /// `SET {prefix}:{id} value NX EX ttl` — the same claim, with a value that will be read
+    /// back. The MFA transition lock (`mfalock:`) needs one: its release compares against the
+    /// token stored here, which is the whole difference between releasing one's own lock and
+    /// releasing a successor's.
+    async fn set_nx_value(
+        &self,
+        prefix: Prefix,
+        id: &str,
+        value: &str,
+        ttl: u64,
+    ) -> Result<bool, RedisStoreError> {
         let key = self.keys().key(prefix, id);
         let mut conn = self.connection().await?;
         let set: Option<String> = redis::cmd("SET")
             .arg(&key)
-            .arg("1")
+            .arg(value)
             .arg("NX")
             .arg("EX")
             .arg(ttl)
@@ -213,14 +243,19 @@ impl MfaStore for RedisStores {
             .map_err(AuthError::from)
     }
 
-    async fn acquire_mfa_lock(&self, lock_id: &str, ttl: u64) -> Result<bool, AuthError> {
-        self.set_nx_marker(Prefix::Mfalock, lock_id, ttl)
+    async fn acquire_mfa_lock(
+        &self,
+        lock_id: &str,
+        token: &str,
+        ttl: u64,
+    ) -> Result<bool, AuthError> {
+        self.set_nx_value(Prefix::Mfalock, lock_id, token, ttl)
             .await
             .map_err(AuthError::from)
     }
 
-    async fn release_mfa_lock(&self, lock_id: &str) -> Result<(), AuthError> {
-        self.release_mfa_lock_inner(lock_id)
+    async fn release_mfa_lock(&self, lock_id: &str, token: &str) -> Result<(), AuthError> {
+        self.release_mfa_lock_inner(lock_id, token)
             .await
             .map_err(AuthError::from)
     }

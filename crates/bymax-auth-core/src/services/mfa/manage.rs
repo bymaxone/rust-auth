@@ -30,8 +30,11 @@ impl MfaService {
     ) -> Result<(), AuthError> {
         let view = self.fetch_user_mfa(user_id, ctx).await?;
         self.reauth_gate(ctx, user_id, code, &view).await?;
-        // The TOTP code verified; clear MFA, revoke sessions, and notify.
-        self.persist_mfa(user_id, ctx, false, None, None).await?;
+        // The TOTP code verified; clear MFA, revoke sessions, and notify. Serialized against
+        // every other MFA transition so a challenge that read the record a moment earlier
+        // cannot splice `mfa_enabled: true` and the old secret back on top of this.
+        self.transition_mfa_record(user_id, ctx, |_| Some((false, None, None)))
+            .await?;
         // Revoke every refresh session AND advance the token epoch: an auth-state change
         // revokes everything issued under the previous state, in both directions — the same
         // rule the password-reset flow applies (see the enable path for the full rationale).
@@ -75,9 +78,27 @@ impl MfaService {
             .map(|code| self.hash_recovery_code(code))
             .collect();
         // Preserve the existing encrypted secret and atomically replace the recovery codes.
-        let encrypted_secret = view.mfa_secret.clone().ok_or(AuthError::TokenInvalid)?;
-        self.persist_mfa(user_id, ctx, true, Some(encrypted_secret), Some(hashed))
+        //
+        // Serialized: the promise that the prior set is replaced wholesale, so an old code can
+        // never coexist with the new one, held only until a challenge that had read the old
+        // list spliced it back on top of this write. The secret is taken from the record as it
+        // stands INSIDE the lock rather than the copy read above, for the same reason.
+        let replaced = self
+            .transition_mfa_record(user_id, ctx, |current| {
+                // MFA was disabled while the new codes were being derived. Writing them would
+                // re-enable it with the pre-disable secret, so the transition is abandoned.
+                if !current.mfa_enabled {
+                    return None;
+                }
+                current
+                    .mfa_secret
+                    .clone()
+                    .map(|secret| (true, Some(secret), Some(hashed)))
+            })
             .await?;
+        if !replaced {
+            return Err(AuthError::MfaNotEnabled);
+        }
         // Sessions are deliberately NOT revoked here (factor unchanged).
         self.notify_regenerated(&view, user_id, ip, user_agent);
         Ok(plain_codes)

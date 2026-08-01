@@ -52,6 +52,21 @@ const TOTP_STEP_SECONDS: u64 = 30;
 /// code's real lifetime, and long enough that no plausible request pair slips past it.
 pub(super) const RECOVERY_CODE_CLAIM_TTL_SECONDS: u64 = 300;
 
+/// TTL of the per-account MFA transition lock, in seconds.
+///
+/// Short on purpose: the lock is released on every exit path, so this bound only matters when
+/// a process dies mid-transition, and an account whose MFA is briefly unchangeable is a worse
+/// outcome than a window this narrow. Long enough to cover a repository read plus a write on
+/// any plausible backend. Pinned by `conformance/wire-contract.json`.
+const MFA_TRANSITION_LOCK_TTL_SECONDS: u64 = 10;
+
+/// Random bytes behind the per-call MFA transition lock token (128 bits).
+///
+/// The token only has to be unguessable within one lock's ten-second life, and it never leaves
+/// the store — but it decides whether a release removes this call's lock or a successor's, so
+/// it comes from the CSPRNG like every other nonce here rather than from a counter or a clock.
+const MFA_TRANSITION_LOCK_TOKEN_BYTES: usize = 16;
+
 const RECOVERY_CODE_BYTES: usize = 12;
 /// The number of random bytes behind a TOTP secret (160 bits, RFC 6238 / §7.5.1).
 const TOTP_SECRET_BYTES: usize = 20;
@@ -123,6 +138,9 @@ struct MfaUserView {
     email: String,
     mfa_enabled: bool,
     mfa_secret: Option<String>,
+    /// The stored recovery-code digests. Read so a serialized transition can splice against
+    /// the list as it stands inside the lock rather than a copy taken before it.
+    mfa_recovery_codes: Option<Vec<String>>,
     dashboard_user: Option<SafeAuthUser>,
     /// The account's stored password hash, or `None` for an account provisioned purely
     /// through OAuth. Enrolment re-authenticates against it; an account without one has
@@ -435,14 +453,30 @@ impl MfaService {
             .await
     }
 
-    /// Load the MFA-relevant view of the challenged account for `ctx`. A `Platform` context
-    /// with no platform repository fails fast with [`AuthError::MfaNotEnabled`] (never persist
-    /// a platform secret on a tenant row); a missing account is also `MfaNotEnabled`.
+    /// Load the MFA-relevant view of the challenged account for `ctx`, refusing one whose
+    /// account is blocked. A `Platform` context with no platform repository fails fast with
+    /// [`AuthError::MfaNotEnabled`] (never persist a platform secret on a tenant row); a
+    /// missing account is also `MfaNotEnabled`.
+    ///
+    /// The status gate lives here rather than in each caller because the four entry points
+    /// that reach this method — `setup`, `verify_and_enable`, `disable` and
+    /// `regenerate_recovery_codes` — each change or spend an authentication factor, and every
+    /// one of them must refuse a suspended or banned account. The gate used to exist only in
+    /// `challenge`, which reads the account directly, so those four had none: an operator who
+    /// suspended a compromised account bought nothing against an attacker still holding an
+    /// unexpired access token, who could turn the second factor off — or enrol their own
+    /// authenticator over it — for the token's remaining lifetime. Nothing else covers that
+    /// window, because no status change bumps the token epoch, so this per-request check is
+    /// the only defence, and the MFA routes compose no `UserStatus` extractor.
+    ///
+    /// Gating the fetch rather than the callers is deliberate: a method added later inherits
+    /// the check instead of having to remember it.
     ///
     /// # Errors
     ///
     /// Returns [`AuthError::MfaNotEnabled`] for a misconfigured platform context or a missing
-    /// account, or a repository [`AuthError::Internal`] on a backend failure.
+    /// account, the status error when the account is blocked, or a repository
+    /// [`AuthError::Internal`] on a backend failure.
     async fn fetch_user_mfa(
         &self,
         user_id: &str,
@@ -456,10 +490,12 @@ impl MfaService {
                     .await
                     .map_err(repository_error)?
                     .ok_or(AuthError::MfaNotEnabled)?;
+                crate::status_gate::assert_not_blocked(&user.status, &self.blocked_statuses)?;
                 Ok(MfaUserView {
                     email: user.email.clone(),
                     mfa_enabled: user.mfa_enabled,
                     mfa_secret: user.mfa_secret.clone(),
+                    mfa_recovery_codes: user.mfa_recovery_codes.clone(),
                     password_hash: user.password_hash.clone(),
                     dashboard_user: Some(SafeAuthUser::from(user)),
                 })
@@ -474,15 +510,116 @@ impl MfaService {
                     .await
                     .map_err(repository_error)?
                     .ok_or(AuthError::MfaNotEnabled)?;
+                crate::status_gate::assert_not_blocked(&admin.status, &self.blocked_statuses)?;
                 Ok(MfaUserView {
                     email: admin.email,
                     mfa_enabled: admin.mfa_enabled,
                     mfa_secret: admin.mfa_secret,
+                    mfa_recovery_codes: admin.mfa_recovery_codes,
                     password_hash: Some(admin.password_hash),
                     dashboard_user: None,
                 })
             }
         }
+    }
+
+    /// The identifier of the per-account MFA transition lock: `hmac(plane:user_id)`, keyed by
+    /// the engine's identifier key so no raw id reaches a store key. Both implementations
+    /// derive it identically — the preimage is pinned by `conformance/wire-contract.json`, and
+    /// two halves of one deployment serializing against different locks would lose the
+    /// property entirely.
+    fn mfa_lock_id(&self, ctx: MfaContext, user_id: &str) -> String {
+        to_hex(&hmac_sha256(
+            self.identifier_key.as_ref(),
+            format!("{}:{user_id}", ctx.as_str()).as_bytes(),
+        ))
+    }
+
+    /// Perform one MFA state transition as a serialized read-modify-write.
+    ///
+    /// Every transition rewrites a single repository record carrying `mfa_enabled`, the
+    /// encrypted secret and the recovery-code digests **together**, and `update_mfa` replaces
+    /// all three wholesale — the repository is the consumer's and offers no compare-and-set, so
+    /// the engine cannot add one. Read-modify-write over that with no serialization is
+    /// last-write-wins, and three things fell out of it:
+    ///
+    /// - two challenges spending *different* recovery codes each wrote the full list minus
+    ///   their own code, so the loser's code came back and verified again once the `rcu:` claim
+    ///   expired. That claim is keyed on the code, so it serializes two attempts at the *same*
+    ///   code and nothing else;
+    /// - a challenge that read the list before `regenerate_recovery_codes` and spliced after it
+    ///   restored the entire old set, unspending codes the user had just rotated — typically
+    ///   because they leaked — while the ones they printed were gone;
+    /// - a challenge that spliced after `disable` completed wrote `mfa_enabled: true` back with
+    ///   the pre-disable secret, putting the account under a factor the user had removed and
+    ///   may no longer hold.
+    ///
+    /// `mutate` is handed the record as it stands **inside** the lock — never the copy the
+    /// caller read earlier — and returns the fields to write, or `None` to abandon the
+    /// transition because the record moved underneath it.
+    ///
+    /// A caller that cannot take the lock is refused with [`AuthError::MfaStateConflict`]
+    /// rather than made to wait: concurrent MFA state changes on one account are pathological,
+    /// and "try again" is the honest answer. The lock is released on every exit, so an ordinary
+    /// failure does not strand the account either.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AuthError::MfaStateConflict`] when another transition holds the lock,
+    /// [`AuthError::MfaNotEnabled`] when the account cannot be read, or a repository/store
+    /// [`AuthError`].
+    async fn transition_mfa_record<F>(
+        &self,
+        user_id: &str,
+        ctx: MfaContext,
+        mutate: F,
+    ) -> Result<bool, AuthError>
+    where
+        F: FnOnce(&MfaUserView) -> Option<(bool, Option<String>, Option<Vec<String>>)> + Send,
+    {
+        let lock_id = self.mfa_lock_id(ctx, user_id);
+        // A per-call nonce, so the release below can only remove the lock this call took. With
+        // a fixed value it could not tell them apart: the TTL is short and the transition calls
+        // into the consumer's repository twice, so an overrunning run has already lost the lock
+        // by the time it releases, and deleting it unconditionally removes the successor's —
+        // letting a third caller in beside the second.
+        let lock_token = token::generate_secure_token(MFA_TRANSITION_LOCK_TOKEN_BYTES);
+        if !self
+            .mfa_store
+            .acquire_mfa_lock(&lock_id, &lock_token, MFA_TRANSITION_LOCK_TTL_SECONDS)
+            .await?
+        {
+            return Err(AuthError::MfaStateConflict);
+        }
+        let outcome = self.transition_locked(user_id, ctx, mutate).await;
+        // Released on every exit, including the error one: a failed transition must not leave
+        // the account unchangeable for the lock's whole TTL.
+        self.mfa_store
+            .release_mfa_lock(&lock_id, &lock_token)
+            .await?;
+        outcome
+    }
+
+    /// The body of [`Self::transition_mfa_record`], split out so the lock release is a single
+    /// statement on every path rather than repeated at each `?`.
+    async fn transition_locked<F>(
+        &self,
+        user_id: &str,
+        ctx: MfaContext,
+        mutate: F,
+    ) -> Result<bool, AuthError>
+    where
+        F: FnOnce(&MfaUserView) -> Option<(bool, Option<String>, Option<Vec<String>>)> + Send,
+    {
+        // Re-read inside the lock. The caller's copy was read before the lock existed and may
+        // already be stale — reusing it would leave exactly the window this closes.
+        let current = self.fetch_user_mfa(user_id, ctx).await?;
+        let Some((enabled, secret, codes)) = mutate(&current) else {
+            return Ok(false);
+        };
+        self.persist_mfa(user_id, ctx, enabled, secret, codes)
+            .await?;
+        Ok(true)
     }
 
     /// Persist a new MFA configuration to the correct repository for `ctx`. The caller has
@@ -657,7 +794,7 @@ impl MfaService {
 }
 
 /// The session-domain selector for an MFA context.
-fn session_kind(ctx: MfaContext) -> SessionKind {
+pub(crate) fn session_kind(ctx: MfaContext) -> SessionKind {
     match ctx {
         MfaContext::Dashboard => SessionKind::Dashboard,
         MfaContext::Platform => SessionKind::Platform,

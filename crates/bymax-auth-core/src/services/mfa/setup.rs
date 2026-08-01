@@ -139,13 +139,14 @@ impl MfaService {
 
         // Persist the AES-encrypted secret and the keyed recovery-code digests from the record
         // (never re-encrypted), enable MFA, and force re-auth through the new factor.
-        self.persist_mfa(
-            user_id,
-            ctx,
-            true,
-            Some(data.encrypted_secret),
-            Some(data.hashed_codes),
-        )
+        //
+        // Serialized against every other MFA transition. The single-shot `take_setup` above
+        // already makes the enable one-per-record among concurrent verify calls; this puts it
+        // in the same queue as `disable` and the challenge splice, which write the same three
+        // fields over the same record.
+        self.transition_mfa_record(user_id, ctx, |_| {
+            Some((true, Some(data.encrypted_secret), Some(data.hashed_codes)))
+        })
         .await?;
         // Revoke every refresh session AND advance the token epoch. Every access token issued
         // before this moment is stamped `mfa_enabled: false`, and the MFA gate refuses only

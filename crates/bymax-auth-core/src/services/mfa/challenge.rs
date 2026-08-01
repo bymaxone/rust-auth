@@ -142,13 +142,18 @@ impl MfaService {
                 .await?;
         } else if under_retired_key {
             // A TOTP challenge persists nothing on its own, so the rewrite needs its own write.
-            self.persist_mfa(
-                &user_id,
-                MfaContext::Dashboard,
-                true,
-                Some(stored_secret),
-                user.mfa_recovery_codes.clone(),
-            )
+            // Serialized like every other transition, and carrying the code list from the
+            // record inside the lock so the rewrite cannot roll back a concurrent regenerate.
+            self.transition_mfa_record(&user_id, MfaContext::Dashboard, |current| {
+                if !current.mfa_enabled {
+                    return None;
+                }
+                Some((
+                    true,
+                    Some(stored_secret),
+                    current.mfa_recovery_codes.clone(),
+                ))
+            })
             .await?;
         }
 
@@ -255,17 +260,20 @@ impl MfaService {
         // single-use, persisting the smaller set through the PLATFORM repository.
         self.brute_force.reset(&bf_id).await?;
         if let Some(index) = recovery_index {
-            let mut codes = recovery_codes;
-            if index < codes.len() {
-                codes.remove(index);
-            }
-            self.persist_mfa(
-                &admin.id,
-                MfaContext::Platform,
-                true,
-                Some(encrypted_secret),
-                Some(codes),
-            )
+            // The platform twin of the dashboard splice, serialized and re-located by value
+            // against the record inside the lock for exactly the same reasons.
+            let spent = recovery_codes.get(index).cloned();
+            self.transition_mfa_record(&admin.id, MfaContext::Platform, |current| {
+                if !current.mfa_enabled {
+                    return None;
+                }
+                let mut codes = current.mfa_recovery_codes.clone().unwrap_or_default();
+                let live = spent
+                    .as_ref()
+                    .and_then(|d| codes.iter().position(|c| c == d))?;
+                codes.remove(live);
+                Some((true, Some(encrypted_secret), Some(codes)))
+            })
             .await?;
         }
 
@@ -387,24 +395,43 @@ impl MfaService {
 
     /// Remove the just-used recovery code from the stored set and persist the smaller set
     /// (preserving the encrypted secret), making the code single-use.
+    ///
+    /// Serialized, and spliced against the record as it stands INSIDE the lock rather than the
+    /// copy the challenge read earlier. Splicing the stale copy is what let a concurrent
+    /// `regenerate_recovery_codes` be rolled back wholesale and a completed `disable` be undone
+    /// — see [`super::MfaService::transition_mfa_record`].
     async fn splice_recovery_code(
         &self,
         user: &AuthUser,
         encrypted_secret: &str,
         index: usize,
     ) -> Result<(), AuthError> {
-        let mut codes = user.mfa_recovery_codes.clone().unwrap_or_default();
-        if index < codes.len() {
-            codes.remove(index);
-        }
-        self.persist_mfa(
-            &user.id,
-            MfaContext::Dashboard,
-            true,
-            Some(encrypted_secret.to_owned()),
-            Some(codes),
-        )
+        // The digest actually spent, resolved against the caller's copy. The index is only
+        // meaningful for that copy, so the live list is searched by value below.
+        let spent = user
+            .mfa_recovery_codes
+            .as_ref()
+            .and_then(|codes| codes.get(index))
+            .cloned();
+        self.transition_mfa_record(&user.id, MfaContext::Dashboard, |current| {
+            // The account stopped having MFA while this challenge was in flight — a `disable`
+            // that has already completed. Writing here would re-enable it with the pre-disable
+            // secret, so the code stays spent (its `rcu:` claim already stands) and nothing is
+            // written back.
+            if !current.mfa_enabled {
+                return None;
+            }
+            let mut codes = current.mfa_recovery_codes.clone().unwrap_or_default();
+            // Re-locate by value: the index computed against the earlier read may name a
+            // different code, or none, after a concurrent write.
+            let live = spent
+                .as_ref()
+                .and_then(|d| codes.iter().position(|c| c == d))?;
+            codes.remove(live);
+            Some((true, Some(encrypted_secret.to_owned()), Some(codes)))
+        })
         .await
+        .map(|_| ())
     }
 
     /// Record a failed challenge attempt and return the retryable [`AuthError::MfaInvalidCode`]

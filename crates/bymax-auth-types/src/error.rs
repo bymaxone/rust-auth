@@ -95,6 +95,17 @@ pub enum AuthErrorCode {
     /// MFA-temp JWT expired, malformed, or already consumed.
     #[serde(rename = "auth.mfa_temp_token_invalid")]
     MfaTempTokenInvalid,
+    /// Another MFA state change for the same account is already in flight.
+    ///
+    /// Every MFA transition is a read-modify-write over one repository record carrying
+    /// `mfa_enabled`, the secret and the recovery codes together, and the write replaces all
+    /// three wholesale. Interleaved, two of them silently undo each other: a challenge that
+    /// read the codes before a `regenerate` and splices after it restores the whole old set the
+    /// user had just replaced, and a challenge that splices after a `disable` completes puts
+    /// `mfa_enabled` back with the pre-disable secret. Refusing the second caller is how the
+    /// library serializes them. Retryable.
+    #[serde(rename = "auth.mfa_state_conflict")]
+    MfaStateConflict,
 
     // Password
     /// The password appears in a known-breach corpus, or on the offline common-password
@@ -193,7 +204,10 @@ impl AuthErrorCode {
             | Self::Forbidden
             | Self::UntrustedOrigin => 403,
             Self::SessionNotFound => 404,
-            Self::EmailAlreadyExists | Self::MfaAlreadyEnabled | Self::OauthEmailMismatch => 409,
+            Self::EmailAlreadyExists
+            | Self::MfaAlreadyEnabled
+            | Self::MfaStateConflict
+            | Self::OauthEmailMismatch => 409,
             Self::MfaNotEnabled
             | Self::MfaSetupRequired
             | Self::PasswordCompromised
@@ -233,6 +247,7 @@ impl AuthErrorCode {
             Self::MfaNotEnabled => "MFA is not enabled",
             Self::MfaSetupRequired => "MFA setup required",
             Self::MfaTempTokenInvalid => "Invalid or expired temporary MFA token",
+            Self::MfaStateConflict => "Another MFA change is in progress. Please try again.",
             Self::PasswordCompromised => {
                 "This password has appeared in a data breach. Please choose a different one."
             }
@@ -416,6 +431,9 @@ pub enum AuthError {
     /// MFA-temp token expired, malformed, or already consumed.
     #[error("mfa temp token invalid")]
     MfaTempTokenInvalid,
+    /// Another MFA state change for the same account is already in flight; retryable.
+    #[error("mfa state conflict")]
+    MfaStateConflict,
 
     // Password
     /// The password appears in a known-breach corpus.
@@ -511,6 +529,7 @@ impl AuthError {
             Self::MfaNotEnabled => AuthErrorCode::MfaNotEnabled,
             Self::MfaSetupRequired => AuthErrorCode::MfaSetupRequired,
             Self::MfaTempTokenInvalid => AuthErrorCode::MfaTempTokenInvalid,
+            Self::MfaStateConflict => AuthErrorCode::MfaStateConflict,
             Self::PasswordCompromised => AuthErrorCode::PasswordCompromised,
             Self::PasswordResetTokenInvalid => AuthErrorCode::PasswordResetTokenInvalid,
             Self::OtpInvalid => AuthErrorCode::OtpInvalid,

@@ -7,6 +7,10 @@
 //! attempt counting and single-use consume, fixed-window brute-force counters, and
 //! single-use WebSocket tickets — over plain `Mutex<HashMap>` state.
 
+// Only the MFA transition lock uses the entry API, and that lives behind the feature — an
+// unconditional import is an unused one under `--no-default-features --features testing`.
+#[cfg(feature = "mfa")]
+use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet};
 use std::sync::Mutex;
 use std::sync::PoisonError;
@@ -396,10 +400,13 @@ pub struct InMemoryStores {
     /// Single-use claims on MFA recovery codes (`rcu:`).
     #[cfg(feature = "mfa")]
     recovery_claims: Mutex<HashSet<String>>,
-    /// Held per-account MFA transition locks (`mfalock:`). A separate keyspace from the
-    /// recovery claims: a code claim and a transition lock must never contend.
+    /// Held per-account MFA transition locks (`mfalock:`), each mapped to the token of the call
+    /// holding it. A separate keyspace from the recovery claims: a code claim and a transition
+    /// lock must never contend. The token is stored, not discarded, because the release is a
+    /// compare-and-delete — a double that dropped it would accept a release from any caller and
+    /// so could never fail the way the real store can.
     #[cfg(feature = "mfa")]
-    mfa_locks: Mutex<HashSet<String>>,
+    mfa_locks: Mutex<HashMap<String, String>>,
     /// `os:` — the single-use OAuth `state` + PKCE payload keyed by `sha256(state)`.
     #[cfg(feature = "oauth")]
     oauth_state: Mutex<HashMap<String, String>>,
@@ -1057,14 +1064,31 @@ impl crate::traits::MfaStore for InMemoryStores {
         Ok(lock(&self.recovery_claims).insert(claim_id.to_owned()))
     }
 
-    async fn acquire_mfa_lock(&self, lock_id: &str, _ttl: u64) -> Result<bool, AuthError> {
-        // The same "was it new?" decision, over its own set: a transition lock and a recovery
-        // claim are different keyspaces and must never contend with one another.
-        Ok(lock(&self.mfa_locks).insert(lock_id.to_owned()))
+    async fn acquire_mfa_lock(
+        &self,
+        lock_id: &str,
+        token: &str,
+        _ttl: u64,
+    ) -> Result<bool, AuthError> {
+        // The same "was it new?" decision, over its own keyspace: a transition lock and a
+        // recovery claim must never contend with one another. `Entry::Vacant` is the in-memory
+        // spelling of `SET NX` — it writes the token only when nobody holds the lock.
+        match lock(&self.mfa_locks).entry(lock_id.to_owned()) {
+            Entry::Occupied(_) => Ok(false),
+            Entry::Vacant(slot) => {
+                slot.insert(token.to_owned());
+                Ok(true)
+            }
+        }
     }
 
-    async fn release_mfa_lock(&self, lock_id: &str) -> Result<(), AuthError> {
-        lock(&self.mfa_locks).remove(lock_id);
+    async fn release_mfa_lock(&self, lock_id: &str, token: &str) -> Result<(), AuthError> {
+        // Compare-and-delete, mirroring the `release_lock` Lua: a lock whose token no longer
+        // matches belongs to a successor, and removing it would let a third caller in beside it.
+        let mut locks = lock(&self.mfa_locks);
+        if locks.get(lock_id).is_some_and(|held| held == token) {
+            locks.remove(lock_id);
+        }
         Ok(())
     }
 

@@ -67,3 +67,8 @@ pub static OTP_VERIFY: LazyLock<LuaScript> =
 #[cfg(feature = "mfa")]
 pub static MFA_CHALLENGE: LazyLock<LuaScript> =
     LazyLock::new(|| LuaScript::new(include_str!("lua/mfa_challenge.lua")));
+
+/// `release_lock` — compare-and-delete, so a lock can only be released by the call that took it.
+#[cfg(feature = "mfa")]
+pub static RELEASE_LOCK: LazyLock<LuaScript> =
+    LazyLock::new(|| LuaScript::new(include_str!("lua/release_lock.lua")));
