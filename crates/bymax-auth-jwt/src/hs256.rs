@@ -332,6 +332,7 @@ mod tests {
             sub: "u_1".to_owned(),
             jti: "jti-3".to_owned(),
             token_type: MfaTempType::MfaChallenge,
+            epoch: 0,
             context: MfaContext::Platform,
             iat: 1_000,
             exp: 2_000,

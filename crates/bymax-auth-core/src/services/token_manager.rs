@@ -483,14 +483,26 @@ impl TokenManagerService {
                 // rather than re-planting a grace pointer.
                 let fresh = RawRefreshToken::generate();
                 let fresh_record = identity_record(&recovered, ip, user_agent);
-                self.session_store
-                    .create_session(
+                // One atomic step, not a plain write. Written loosely, this landed several
+                // awaits after the script returned, and a `revoke_all` arriving in that gap
+                // swept an index the recovered session was not in yet — so it survived a
+                // revocation the user was told had happened, and its access token, signed
+                // below, carried the post-bump epoch and verified.
+                if !self
+                    .session_store
+                    .create_recovered_session(
                         SessionKind::Dashboard,
                         &fresh.redis_hash(),
                         &fresh_record,
                         self.refresh_ttl_secs,
                     )
-                    .await?;
+                    .await?
+                {
+                    // The account was swept while this recovery was in flight. The grace
+                    // pointer is already consumed, so there is nothing left to retry against —
+                    // which is the right end state: the revocation is what the caller obeys.
+                    return Err(AuthError::RefreshTokenInvalid);
+                }
                 let epoch = self
                     .session_store
                     .current_epoch(SessionKind::Dashboard, &fresh_record.user_id)
@@ -681,14 +693,21 @@ impl TokenManagerService {
                 // identity rather than re-planting a grace pointer.
                 let fresh = RawRefreshToken::generate();
                 let fresh_record = platform_identity_record(&recovered, ip, user_agent);
-                self.session_store
-                    .create_session(
+                // The platform twin of the dashboard grace write, atomic for the same reason —
+                // on the plane where the surviving session is the highest-privilege identity
+                // in the system.
+                if !self
+                    .session_store
+                    .create_recovered_session(
                         SessionKind::Platform,
                         &fresh.redis_hash(),
                         &fresh_record,
                         self.refresh_ttl_secs,
                     )
-                    .await?;
+                    .await?
+                {
+                    return Err(AuthError::RefreshTokenInvalid);
+                }
                 let epoch = self
                     .session_store
                     .current_epoch(SessionKind::Platform, &fresh_record.user_id)
@@ -755,10 +774,55 @@ impl TokenManagerService {
         Ok(claims)
     }
 
+    /// Re-sign a rotated platform access token with the authority the administrator holds
+    /// *now*.
+    ///
+    /// The platform twin of [`Self::reissue_access_with_authority`]. Platform rotation builds
+    /// its claims from the `prt:` record written at login, so the role and MFA flag it carries
+    /// are the ones the admin had then, inherited unchanged through every later rotation.
+    /// Demoting a `super_admin` to `support` therefore had no effect on a live console
+    /// session: it kept minting tokens with the old authority for the refresh token's whole
+    /// lifetime, and every role check reads that claim — on the highest-privilege identity in
+    /// the system. The dashboard plane closed this; the platform plane was left with the
+    /// identical hole.
+    ///
+    /// Everything the rotated token already established is kept, including `mfa_verified`: a
+    /// second factor already cleared on this session must not be silently demanded again. A
+    /// fresh `jti`, window and epoch are issued — the token this replaces was never handed out.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AuthError::Internal`] only if claim serialization fails (unreachable for the
+    /// concrete claim type), or a store failure while reading the epoch.
+    #[cfg(feature = "platform")]
+    pub(crate) async fn reissue_platform_access_with_authority(
+        &self,
+        claims: &PlatformClaims,
+        role: &str,
+        mfa_enabled: bool,
+    ) -> Result<String, AuthError> {
+        let now = now_unix();
+        let epoch = self
+            .session_store
+            .current_epoch(SessionKind::Platform, &claims.sub)
+            .await?;
+        self.issue_platform_access(&PlatformClaims {
+            epoch,
+            jti: new_uuid_v4(),
+            role: role.to_owned(),
+            mfa_enabled,
+            iat: now,
+            exp: now.saturating_add(self.access_ttl.as_secs().min(i64::MAX as u64) as i64),
+            ..claims.clone()
+        })
+    }
+
     /// Build the platform access claims for a rotated/recovered session. As with the dashboard
     /// rotation, `mfa_verified` is dropped (re-acquired only via the MFA challenge) while
     /// `mfa_enabled` is carried over from the stored record; the claims carry no `tenant_id`.
-    /// The `epoch` is the admin's current generation, read at rotation time.
+    /// The `epoch` is the admin's current generation, read at rotation time. `refresh` then
+    /// re-stamps the role and MFA flag from the account it re-reads, via
+    /// [`Self::reissue_platform_access_with_authority`].
     #[cfg(feature = "platform")]
     fn rotated_platform_claims(&self, record: &SessionRecord, epoch: u64) -> PlatformClaims {
         let now = now_unix();
@@ -832,6 +896,7 @@ impl TokenManagerService {
         &self,
         user_id: &str,
         context: MfaContext,
+        epoch: u64,
     ) -> Result<(String, String), AuthError> {
         let now = now_unix();
         let jti = new_uuid_v4();
@@ -842,6 +907,7 @@ impl TokenManagerService {
             jti: jti.clone(),
             token_type: MfaTempType::MfaChallenge,
             context,
+            epoch,
             iat: now,
             exp: now.saturating_add(MFA_TEMP_TOKEN_TTL_SECONDS),
         };
@@ -905,7 +971,13 @@ impl TokenManagerService {
         user_id: &str,
         context: MfaContext,
     ) -> Result<String, AuthError> {
-        let (token, jti) = self.build_mfa_temp_token(user_id, context)?;
+        // Stamped so the challenge token dies with the rest of the account's credentials. See
+        // the claim's own documentation for what it was surviving.
+        let epoch = self
+            .session_store
+            .current_epoch(crate::services::mfa::session_kind(context), user_id)
+            .await?;
+        let (token, jti) = self.build_mfa_temp_token(user_id, context, epoch)?;
         if let Some(support) = &self.mfa {
             support
                 .store
@@ -948,6 +1020,26 @@ impl TokenManagerService {
             stored_user.as_bytes(),
             claims.sub.as_bytes(),
         ) {
+            return Err(AuthError::MfaTempTokenInvalid);
+        }
+        // The same bulk-revocation gate the access-token verifiers apply, on the plane the
+        // challenge was issued for. A password reset bumps the epoch and kills every access
+        // token, but nothing deleted an outstanding `mfa:` marker — so a challenge token minted
+        // before the reset stayed redeemable for its whole TTL, and completing it handed back a
+        // full session under the new epoch. The reset is supposed to end everything the old
+        // credential could still reach, and this was the one credential it did not reach.
+        //
+        // The check lives here rather than in `MfaService::challenge` so every caller of the
+        // temp token inherits it.
+        if claims.epoch
+            < self
+                .session_store
+                .current_epoch(
+                    crate::services::mfa::session_kind(claims.context),
+                    &claims.sub,
+                )
+                .await?
+        {
             return Err(AuthError::MfaTempTokenInvalid);
         }
         Ok(MfaTempVerified {
@@ -1032,24 +1124,22 @@ impl TokenManagerService {
         Ok(())
     }
 
-    /// Build the access claims for a rotated/recovered session. Rotation always drops
-    /// `mfa_verified` (the user re-acquires it only via the MFA challenge) and issues an
-    /// empty `status` — status guards consult the repository/status cache, not the rotated
-    /// JWT, because the stored session record carries no live status. The `epoch` is the user's
-    /// current generation, read at rotation time.
-    ///
-    /// `mfa_enabled` is carried over from the stored record rather than reset: the MFA gate
-    /// refuses a token only when `mfa_enabled && !mfa_verified`, so minting `false` here
-    /// would let one routine refresh turn an enrolled account's token into one that clears
-    /// every MFA-gated route without ever completing a challenge.
     /// Re-sign a rotated access token with the authority the account holds *now*.
     ///
-    /// Rotation builds its claims from the session record written at login, so the role and
-    /// tenant it carries are the ones the account had then. This re-stamps both from the
-    /// freshly read account, keeping everything else the rotated token already established —
-    /// including `mfa_verified`, because a second factor already cleared on this session must
-    /// not be silently demanded again. A fresh `jti`, window, and epoch are issued: the token
-    /// this replaces was never handed out.
+    /// Rotation builds its claims from the session record written at login, so the role,
+    /// tenant and MFA flag it carries are the ones the account had then. This re-stamps all
+    /// three from the freshly read account, keeping everything else the rotated token already
+    /// established — including `mfa_verified`, because a second factor already cleared on this
+    /// session must not be silently demanded again. A fresh `jti`, window, and epoch are
+    /// issued: the token this replaces was never handed out.
+    ///
+    /// `mfa_enabled` is re-stamped rather than inherited because it gates a security control:
+    /// `MfaSatisfied` refuses a token only when `mfa_enabled && !mfa_verified`, so a session
+    /// created while the account had no second factor would otherwise keep minting
+    /// `mfa_enabled: false` tokens for the refresh token's whole lifetime, clearing every
+    /// MFA-gated route without a challenge. That is reachable whenever the host enables MFA
+    /// through its own admin surface rather than this library's `verify_and_enable`, which is
+    /// the only path that revokes the sessions and bumps the epoch.
     ///
     /// # Errors
     ///
@@ -1060,6 +1150,7 @@ impl TokenManagerService {
         claims: &DashboardClaims,
         role: &str,
         tenant_id: &str,
+        mfa_enabled: bool,
     ) -> Result<String, AuthError> {
         let now = now_unix();
         let epoch = self
@@ -1071,12 +1162,25 @@ impl TokenManagerService {
             jti: new_uuid_v4(),
             role: role.to_owned(),
             tenant_id: tenant_id.to_owned(),
+            mfa_enabled,
             iat: now,
             exp: now.saturating_add(self.access_ttl.as_secs().min(i64::MAX as u64) as i64),
             ..claims.clone()
         })
     }
 
+    /// Build the access claims for a rotated/recovered session. Rotation always drops
+    /// `mfa_verified` (the user re-acquires it only via the MFA challenge) and issues an
+    /// empty `status` — status guards consult the repository/status cache, not the rotated
+    /// JWT, because the stored session record carries no live status. The `epoch` is the
+    /// user's current generation, read at rotation time.
+    ///
+    /// `mfa_enabled` is carried over from the stored record rather than reset: the MFA gate
+    /// refuses a token only when `mfa_enabled && !mfa_verified`, so minting `false` here
+    /// would let one routine refresh turn an enrolled account's token into one that clears
+    /// every MFA-gated route without ever completing a challenge. `refresh` then re-stamps it
+    /// from the account it re-reads, via [`Self::reissue_access_with_authority`], so a flag
+    /// the host changed outside this library does not stay stale for the session's lifetime.
     fn rotated_claims(&self, record: &SessionRecord, epoch: u64) -> DashboardClaims {
         let now = now_unix();
         DashboardClaims {
@@ -2005,7 +2109,7 @@ mod tests {
             Err(AuthError::MfaTempTokenInvalid)
         ));
         // Mint a token for "u1" but point its marker at "intruder": the cross-check rejects it.
-        let built = svc.build_mfa_temp_token("u1", MfaContext::Dashboard);
+        let built = svc.build_mfa_temp_token("u1", MfaContext::Dashboard, 0);
         let Ok((token, jti)) = built else { return };
         let mfa_store: Arc<dyn crate::traits::MfaStore> = store;
         assert!(

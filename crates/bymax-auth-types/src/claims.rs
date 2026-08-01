@@ -209,6 +209,21 @@ pub struct MfaTempClaims {
     pub token_type: MfaTempType,
     /// Which identity domain this challenge belongs to.
     pub context: MfaContext,
+    /// The subject's token **epoch** at issuance, in the plane named by [`Self::context`].
+    ///
+    /// The challenge token is a credential like any other — half of one, held by a caller who
+    /// has already proved the password — and it must die with the rest when the account's
+    /// credentials are rotated. Without this claim it did not: a password reset bumps the epoch
+    /// and kills every access token, but nothing touched an outstanding `mfa:` marker, so a
+    /// challenge token minted before the reset stayed redeemable for its whole TTL and
+    /// completing it issued a full session under the *new* epoch. The reset is meant to end
+    /// everything the old credential could still reach.
+    ///
+    /// Defaults to `0` when the claim is absent, so the mechanism stays inert until the first
+    /// bump — the same contract as [`DashboardClaims::epoch`].
+    #[serde(default)]
+    #[cfg_attr(feature = "ts-export", ts(as = "Option::<f64>", optional))]
+    pub epoch: u64,
     /// Issued-at (seconds since the Unix epoch).
     #[cfg_attr(feature = "ts-export", ts(type = "number"))]
     pub iat: i64,
@@ -311,12 +326,15 @@ mod tests {
             jti: "jti-3".to_owned(),
             token_type: MfaTempType::MfaChallenge,
             context: MfaContext::Platform,
+            epoch: 7,
             iat: 1,
             exp: 2,
         };
         let json = serde_json::to_value(claims).unwrap_or_default();
         assert_eq!(json["type"], "mfa_challenge");
         assert_eq!(json["context"], "platform");
+        // The challenge token carries the epoch so a credential rotation kills it too.
+        assert_eq!(json["epoch"], 7);
     }
 
     #[test]

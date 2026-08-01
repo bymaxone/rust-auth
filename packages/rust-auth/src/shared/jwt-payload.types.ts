@@ -109,6 +109,21 @@ type: MfaTempType,
  */
 context: MfaContext, 
 /**
+ * The subject's token **epoch** at issuance, in the plane named by [`Self::context`].
+ *
+ * The challenge token is a credential like any other — half of one, held by a caller who
+ * has already proved the password — and it must die with the rest when the account's
+ * credentials are rotated. Without this claim it did not: a password reset bumps the epoch
+ * and kills every access token, but nothing touched an outstanding `mfa:` marker, so a
+ * challenge token minted before the reset stayed redeemable for its whole TTL and
+ * completing it issued a full session under the *new* epoch. The reset is meant to end
+ * everything the old credential could still reach.
+ *
+ * Defaults to `0` when the claim is absent, so the mechanism stays inert until the first
+ * bump — the same contract as [`DashboardClaims::epoch`].
+ */
+epoch?: number, 
+/**
  * Issued-at (seconds since the Unix epoch).
  */
 iat: number, 

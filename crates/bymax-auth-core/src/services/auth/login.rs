@@ -83,9 +83,33 @@ impl AuthEngine {
             .await
             .map_err(map_repository_error)?;
 
-        // Unknown email or an OAuth-only account (no local hash): run the sentinel verify so
-        // the KDF cost is paid either way, then record the failure and return generically.
-        let Some(user) = user.filter(has_local_hash) else {
+        // The tenant the repository answered with must be the tenant that was asked for. The
+        // lookup passes `tenant_id` and the trait says to scope by it, but the repository is
+        // the host's and a trait can only ask — and a single-tenant host writing
+        // `find_by_email` that ignores its second argument is the shape nobody notices. Under
+        // one, every distinct `tenantId` in the request body resolves the same account while
+        // deriving a *different* `lf:` counter, so rotating the value gives an unlimited supply
+        // of fresh five-attempt budgets and the lockout never engages. Refusing the mismatch is
+        // also tenant isolation in its own right: an account in tenant A must not authenticate
+        // through a request naming tenant B, whatever the repository returns.
+        if user
+            .as_ref()
+            .is_some_and(|candidate| candidate.tenant_id != tenant_id)
+        {
+            tracing::warn!(
+                "login: repository returned an account outside the requested tenant — check \
+                 that UserRepository::find_by_email scopes by its tenant_id argument"
+            );
+        }
+
+        // Unknown email, an account outside the requested tenant, or an OAuth-only account (no
+        // local hash): run the sentinel verify so the KDF cost is paid either way, then record
+        // the failure and return generically. Folded into one refusal so the three are
+        // indistinguishable in status, body and timing.
+        let Some(user) = user
+            .filter(|candidate| candidate.tenant_id == tenant_id)
+            .filter(has_local_hash)
+        else {
             self.passwords().verify_sentinel(&input.password).await?;
             return self
                 .record_failure_and_reject(
@@ -1211,6 +1235,42 @@ mod tests {
                 .await,
             Err(AuthError::InvalidCredentials)
         ));
+    }
+
+    #[test]
+    fn tenant_scoped_refuses_an_account_from_another_tenant() {
+        // The guard against a repository that ignores its `tenant_id` argument. Under such a
+        // host every distinct `tenantId` in a request body resolves the same account while
+        // deriving a DIFFERENT `lf:` counter, so rotating the field hands an attacker an
+        // unlimited supply of fresh five-attempt budgets and the lockout never engages. The
+        // shipped in-memory repository scopes correctly, so this exercises the predicate
+        // directly — it is the whole of the defence, and it must not be reachable by accident.
+        use crate::services::auth::tenant_scoped;
+        use time::OffsetDateTime;
+        let user = AuthUser {
+            id: "u".into(),
+            email: "e".into(),
+            name: "n".into(),
+            password_hash: Some("$scrypt$x".into()),
+            role: "USER".into(),
+            status: "ACTIVE".into(),
+            tenant_id: "t1".into(),
+            email_verified: true,
+            mfa_enabled: false,
+            mfa_secret: None,
+            mfa_recovery_codes: None,
+            oauth_provider: None,
+            oauth_provider_id: None,
+            last_login_at: None,
+            created_at: OffsetDateTime::UNIX_EPOCH,
+        };
+
+        assert!(tenant_scoped(Some(user.clone()), "t1").is_some());
+        assert!(
+            tenant_scoped(Some(user), "t2").is_none(),
+            "an account outside the requested tenant must collapse to the not-found path"
+        );
+        assert!(tenant_scoped(None, "t1").is_none());
     }
 
     #[test]
