@@ -178,12 +178,17 @@ export function createAuthProxy(config: AuthProxyConfig): AuthProxyInstance {
             issuer: resolved.expectedIssuer,
             audience: resolved.expectedAudience,
           })
-        : { isValid: false };
+        : { isValid: false, signatureVerified: false };
 
-    // Reject an invalid, expired, or non-access token. Admitting a non-access type — notably
-    // the MFA-temp `mfa_challenge` issued before the second factor clears — would let a
-    // half-authenticated session reach a protected route, so only an access token is admitted.
-    if (!decoded.isValid || isTokenExpired(decoded) || !isAccessToken(decoded)) {
+    // Reject an unverified, expired, or non-access token. `signatureVerified` rather than
+    // `isValid`: the latter is `true` for any structurally decodable, unexpired token, which is
+    // exactly what `decodeJwtToken` produces without checking a signature at all. Reading it
+    // here would therefore admit a forged token to anyone who could route one through a
+    // decode. `verifyJwtToken` itself now fails closed on a missing secret, so this is the
+    // second lock on the same door — and the one that survives a refactor of the first. Admitting a non-access type —
+    // notably the MFA-temp `mfa_challenge` issued before the second factor clears — would let
+    // a half-authenticated session reach a protected route, so only an access token is admitted.
+    if (!decoded.signatureVerified || isTokenExpired(decoded) || !isAccessToken(decoded)) {
       return handleUnauthenticated(request, resolved);
     }
 
@@ -232,13 +237,75 @@ function handleUnauthenticated(
   // A live `has_session` signal plus headroom under the bounce ceiling means a silent refresh
   // is worth attempting before falling back to the sign-in redirect.
   if (hasSession && bounces < config.maxRedirects) {
-    const url = new URL(config.silentRefreshPath, request.nextUrl.origin);
-    url.searchParams.set("redirectTo", request.nextUrl.pathname + request.nextUrl.search);
-    url.searchParams.set(REDIRECT_COUNT_PARAM, String(bounces + 1));
-    return NextResponse.redirect(url);
+    return redirectToPath(config.silentRefreshPath, {
+      redirectTo: request.nextUrl.pathname + request.nextUrl.search,
+      [REDIRECT_COUNT_PARAM]: String(bounces + 1),
+    });
   }
 
   return redirectToLogin(request, config.loginPath, "expired");
+}
+
+/** The base a relative path is parsed against; discarded, never emitted. */
+const RELATIVE_BASE = "https://placeholder.invalid";
+
+/** Control characters that must never reach a header value: a raw CR or LF splits the response. */
+// eslint-disable-next-line no-control-regex -- matching control characters is the point
+const FORBIDDEN_IN_PATH = /[\u0000-\u001f\u007f]/;
+
+/**
+ * Reduce `path` to something that can only ever name a location on this origin.
+ *
+ * Not naming an origin is necessary and not sufficient. `//attacker.example` carries no
+ * scheme, satisfies `startsWith('/')`, and is read by every browser as an authority — as is
+ * its backslash spelling, which browsers normalise to the same thing. Resolving it against the
+ * placeholder base and taking `pathname` does keep the redirect same-origin, but it does so by
+ * silently substituting a different destination for the caller's: `//attacker.example/login`
+ * becomes `/login`, and nothing anywhere reports that the input was rejected.
+ *
+ * A refused path falls back to `/` rather than throwing. This runs in middleware, where a throw
+ * is a 500 on a request that was otherwise fine.
+ *
+ * @param path - The intended same-origin path.
+ * @returns `path` when it can only name this origin, `/` otherwise.
+ */
+function toSameOriginPath(path: string): string {
+  if (!path.startsWith("/")) return "/";
+  if (path.startsWith("//") || path.startsWith("/\\")) return "/";
+  if (FORBIDDEN_IN_PATH.test(path)) return "/";
+  return path;
+}
+
+/**
+ * Build a redirect to a same-origin `path`, without naming an origin at all.
+ *
+ * Every redirect this proxy issues targets a path on its own app, and the path is already
+ * validated as same-origin before it gets here. The ORIGIN was supplied by
+ * `request.nextUrl.origin`, which Next derives from the `Host` header — so a self-hosted
+ * deployment that answers on any host handed an attacker who controls that header a
+ * `Location: https://attacker.example/login`. The path validation could not see it: the path
+ * was fine, and the origin was never checked at all.
+ *
+ * A relative `Location` removes the question. RFC 7231 §7.1.2 has allowed one since 2014 and
+ * every current browser resolves it against the URL it actually requested — which is the real
+ * origin as the browser knows it, not as a header claims it.
+ *
+ * @param path - A same-origin path beginning with `/`, optionally carrying a query string.
+ * @param params - Query parameters to set on it.
+ * @returns A 307 response whose `Location` is relative.
+ */
+function redirectToPath(path: string, params: Record<string, string> = {}): NextResponse {
+  const url = new URL(toSameOriginPath(path), RELATIVE_BASE);
+  for (const [key, value] of Object.entries(params)) {
+    url.searchParams.set(key, value);
+  }
+  return new NextResponse(null, {
+    status: 307,
+    // The fragment rides along. It never reaches the server, so nothing here can act on it —
+    // but it is where the browser lands, and a deployment using hash routing, or a configured
+    // `loginPath` carrying an anchor, would otherwise be redirected somewhere else silently.
+    headers: { location: `${url.pathname}${url.search}${url.hash}` },
+  });
 }
 
 /**
@@ -265,17 +332,14 @@ function redirectToLogin(
   loginPath: string,
   reason: string,
 ): NextResponse {
-  const url = new URL(loginPath, request.nextUrl.origin);
-  url.searchParams.set("reason", reason);
-  url.searchParams.set(
-    "redirectTo",
-    resolveSafeDestination(
+  return redirectToPath(loginPath, {
+    reason,
+    redirectTo: resolveSafeDestination(
       request.nextUrl.pathname + request.nextUrl.search,
       request.nextUrl.origin,
       loginPath,
     ),
-  );
-  return NextResponse.redirect(url);
+  });
 }
 
 /**

@@ -51,10 +51,29 @@ export interface JwtHeader {
  * The result of decoding or verifying a token. `isValid` means "structurally decodable" for
  * {@link decodeJwtToken} and "signature + temporally valid" for the authoritative
  * {@link verifyJwtToken}. `payload`/`header` are present only when `isValid` is `true`.
+ *
+ * `isValid` alone must never gate an authorization decision: it is `true` on the decode-only
+ * paths, where no signature was checked and the claims are whatever the bearer wrote. Gate on
+ * {@link DecodedToken.signatureVerified} instead.
  */
 export interface DecodedToken {
   /** Whether the token decoded (decode path) or verified (verify path) successfully. */
   isValid: boolean;
+  /**
+   * Whether the signature was actually checked against a secret.
+   *
+   * `true` only on the authoritative branch of {@link verifyJwtToken} — a real HS256
+   * verification against a non-empty secret, with `exp`/`iat` and the `iss`/`aud` binding
+   * enforced. `false` on every decode-only result, including the ones that carry a fully
+   * populated `payload`.
+   *
+   * This flag exists because the two branches are otherwise indistinguishable at runtime:
+   * a caller writing `if (decoded.isValid && decoded.payload.role === 'ADMIN')` — the natural
+   * reading of a function called `verifyJwtToken` — would admit an unsigned token carrying an
+   * arbitrary `sub`, `role`, `tenantId` and `status`. Any authorization decision reads this
+   * field, not `isValid`.
+   */
+  signatureVerified: boolean;
   /** The claims, present when `isValid` is `true`. */
   payload?: AuthJwtPayload;
   /** The JOSE header, present for the decode-only paths. */
@@ -69,21 +88,24 @@ interface DecodedHeaderPayload {
 
 /**
  * Decode a token's header and payload WITHOUT verifying its signature. Never throws: a
- * malformed token yields `{ isValid: false }`. The result is non-authoritative — it proves
+ * malformed token yields `{ isValid: false, signatureVerified: false }` — the flag is always
+ * present, and always `false` here, since this function checks no signature. The result is non-authoritative — it proves
  * the token is well-formed, never that it is genuine — so it must not gate a decision.
  *
  * @param token - The compact JWS to decode.
- * @returns `{ isValid: true, header, payload }` when decodable, else `{ isValid: false }`.
+ * @returns `{ isValid: true, signatureVerified: false, header, payload }` when decodable, else
+ *   `{ isValid: false, signatureVerified: false }`. `signatureVerified` is `false` on every
+ *   result this function can produce — it never checks a signature.
  */
 export async function decodeJwtToken(token: string): Promise<DecodedToken> {
   try {
     const { decode_jwt } = await loadEdgeWasm();
     const raw = decode_jwt(token);
-    if (raw === undefined) return { isValid: false };
+    if (raw === undefined) return { isValid: false, signatureVerified: false };
     const { header, payload } = JSON.parse(raw) as DecodedHeaderPayload;
-    return { isValid: true, header, payload };
+    return { isValid: true, signatureVerified: false, header, payload };
   } catch {
-    return { isValid: false };
+    return { isValid: false, signatureVerified: false };
   }
 }
 
@@ -104,41 +126,52 @@ export interface TokenBinding {
 }
 
 /**
- * Verify a token at the edge. When `secret` is a non-empty string, the WASM HS256 verifier is
- * authoritative — it checks the signature, `exp`, `iat` and the configured `iss`/`aud` binding,
- * and rejects `none`/`RS256`/`ES256`. When `secret` is `null`/`undefined`, it falls back to a
- * decode-only read (non-authoritative). Never throws: any failure resolves `{ isValid: false }`.
+ * Verify a token at the edge with the WASM HS256 verifier — it checks the signature, `exp`,
+ * `iat` and the configured `iss`/`aud` binding, and rejects `none`/`RS256`/`ES256`. Never
+ * throws: any failure resolves `{ isValid: false, signatureVerified: false }`.
+ *
+ * **A missing secret fails closed.** `null`, `undefined` and the empty string all make every
+ * token invalid. This function used to fall back to a decode-only read, and that branch
+ * returned the same shape with the same `isValid: true` — so a caller writing
+ * `if (d.isValid && d.payload.role === 'ADMIN')`, the natural reading of the name, admitted a
+ * token an attacker minted with `alg: none` and an arbitrary `sub`/`role`/`tenantId` the
+ * moment the secret went missing. An unset environment variable was enough to arrange that. A
+ * function that cannot verify must refuse rather than quietly answer a weaker question;
+ * {@link decodeJwtToken} remains the explicit, correctly-named entry point for the
+ * non-authoritative read.
  *
  * @param token - The compact JWS to verify.
- * @param secret - The HS256 secret for authoritative verification, or `null`/`undefined` to
- *   decode only.
+ * @param secret - The HS256 secret. A missing or empty value makes every token invalid.
  * @param binding - The `iss`/`aud` pair the backend stamps. See {@link TokenBinding}.
- * @returns The verified (or decoded) {@link DecodedToken}.
+ * @returns The verified {@link DecodedToken}. `signatureVerified` is `true` only when a
+ *   signature was actually checked, and is the field an authorization decision reads.
  */
 export async function verifyJwtToken(
   token: string,
   secret?: string | null,
   binding?: TokenBinding,
 ): Promise<DecodedToken> {
+  // Fail closed on a missing or empty secret — see the doc comment above for rationale.
+  if (typeof secret !== "string" || secret.length === 0) {
+    return { isValid: false, signatureVerified: false };
+  }
   try {
-    const { decode_jwt, verify_jwt_hs256 } = await loadEdgeWasm();
-    if (typeof secret === "string" && secret.length > 0) {
-      const raw = verify_jwt_hs256(
-        token,
-        secret,
-        undefined,
-        binding?.issuer ?? undefined,
-        binding?.audience ?? undefined,
-      );
-      if (raw === undefined) return { isValid: false };
-      return { isValid: true, payload: JSON.parse(raw) as AuthJwtPayload };
-    }
-    const raw = decode_jwt(token);
-    if (raw === undefined) return { isValid: false };
-    const { header, payload } = JSON.parse(raw) as DecodedHeaderPayload;
-    return { isValid: true, header, payload };
+    const { verify_jwt_hs256 } = await loadEdgeWasm();
+    const raw = verify_jwt_hs256(
+      token,
+      secret,
+      undefined,
+      binding?.issuer ?? undefined,
+      binding?.audience ?? undefined,
+    );
+    if (raw === undefined) return { isValid: false, signatureVerified: false };
+    return {
+      isValid: true,
+      signatureVerified: true,
+      payload: JSON.parse(raw) as AuthJwtPayload,
+    };
   } catch {
-    return { isValid: false };
+    return { isValid: false, signatureVerified: false };
   }
 }
 
