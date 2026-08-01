@@ -267,9 +267,7 @@ mod tests {
         // Otherwise omitting the claim is a way to opt out of the check — the attacker picks
         // whether the binding applies, which is the same as not having one.
         let k = key();
-        let Ok(token) = sign(&dashboard(1_000, 9_999_999_999), &k) else {
-            return;
-        };
+        let Ok(token) = sign(&dashboard(1_000, 9_999_999_999), &k) else { return };
 
         for expectation in [
             VerifyOptions {

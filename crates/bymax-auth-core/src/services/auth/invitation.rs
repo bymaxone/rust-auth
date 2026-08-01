@@ -932,6 +932,21 @@ mod tests {
 
     /// An email provider whose invitation send always fails, so the best-effort delivery path
     /// is observable. Every other method succeeds — only the send under test errors.
+    #[tokio::test]
+    async fn the_failing_invite_double_answers_the_address_change_send() {
+        // The double exists to fail ONE send. Everything else about it succeeding is the
+        // property that makes it a valid `EmailProvider`, and a method nothing calls is a
+        // method nothing proves.
+        use crate::traits::EmailProvider as _;
+
+        assert!(
+            FailingInviteEmail
+                .send_email_change_verification("new@example.com", "t", None)
+                .await
+                .is_ok()
+        );
+    }
+
     struct FailingInviteEmail;
 
     #[async_trait::async_trait]
@@ -1096,9 +1111,7 @@ mod tests {
                 .await
                 .is_ok()
         );
-        let Some(hash) = indexed(&s, "invitee@example.com").await else {
-            return;
-        };
+        let Some(hash) = indexed(&s, "invitee@example.com").await else { return };
 
         assert!(matches!(
             s.engine
@@ -1268,9 +1281,7 @@ mod tests {
                 .await
                 .is_ok()
         );
-        let Some(first) = indexed(&s, "invitee@example.com").await else {
-            return;
-        };
+        let Some(first) = indexed(&s, "invitee@example.com").await else { return };
 
         assert!(
             s.engine
@@ -1278,9 +1289,7 @@ mod tests {
                 .await
                 .is_ok()
         );
-        let Some(second) = indexed(&s, "invitee@example.com").await else {
-            return;
-        };
+        let Some(second) = indexed(&s, "invitee@example.com").await else { return };
 
         assert_ne!(first, second, "the re-invite reused the first token");
         assert!(

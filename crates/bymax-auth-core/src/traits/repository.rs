@@ -279,6 +279,9 @@ mod tests {
         assert!(users.update_last_login("x").await.is_ok());
         assert!(users.update_status("x", "ACTIVE").await.is_ok());
         assert!(users.update_email_verified("x", true).await.is_ok());
+        // The address-change mutator too: the trait grew it with the email-change flow, and a
+        // method nothing here calls is a method whose dispatch nothing here proves.
+        assert!(users.update_email("x", "new@example.com").await.is_ok());
         assert!(matches!(
             users.find_by_oauth_id("google", "1", "t").await,
             Ok(None)

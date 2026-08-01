@@ -275,6 +275,16 @@ impl InMemoryPlatformUserRepository {
     pub fn insert(&self, user: AuthPlatformUser) {
         lock(&self.users).insert(user.id.clone(), user);
     }
+
+    /// Delete an admin outright, so a test can drive the "the account is gone but its session
+    /// record outlived it" branch. Returns whether a row was removed.
+    ///
+    /// `PlatformUserRepository` deliberately has no delete — provisioning operators is the
+    /// host's domain — so this exists only on the double, and only to reach a branch the engine
+    /// has to handle when a host does remove one.
+    pub fn remove(&self, id: &str) -> bool {
+        lock(&self.users).remove(id).is_some()
+    }
 }
 
 #[async_trait]
@@ -362,6 +372,9 @@ pub struct InMemoryStores {
     otps: Mutex<HashMap<(OtpPurpose, String), (String, u32)>>,
     resend: Mutex<HashSet<(OtpPurpose, String)>>,
     brute_force: Mutex<HashMap<String, (i64, u64)>>,
+    /// `(reads still to let through, reads to fail after them)` for `is_locked`, set through
+    /// [`InMemoryStores::fail_lockout_reads`]. `(0, 0)` — the default — reads normally.
+    forced_lockout_read_failures: Mutex<(usize, usize)>,
     tickets: Mutex<HashMap<String, WsTicketSnapshot>>,
     ticket_counter: AtomicU64,
     reset_tokens: Mutex<HashMap<String, ResetContext>>,
@@ -406,6 +419,34 @@ impl InMemoryStores {
     /// affected call; the default of zero leaves every call behaving normally.
     pub fn fail_next_cleanup_writes(&self, count: usize) {
         *lock(&self.forced_write_failures) = count;
+    }
+
+    /// Let the next `skip` `is_locked` reads through, then fail `count` of them.
+    ///
+    /// `skip` is what makes this usable: one login performs two of these reads, and they are
+    /// answered very differently. The gate at the top propagates a store failure — a lockout
+    /// that cannot be read is a lockout assumed, which is the safe direction. The second read
+    /// decides whether the failure just recorded closed the window, and THAT one is swallowed:
+    /// a store that cannot say means the *hook* cannot be decided, not that the login should
+    /// answer differently. Skipping the gate read is the only way to reach the swallowed arm,
+    /// which is otherwise unreachable against a double that always succeeds.
+    pub fn fail_lockout_reads(&self, skip: usize, count: usize) {
+        *lock(&self.forced_lockout_read_failures) = (skip, count);
+    }
+
+    /// Consume one armed lockout-read failure, if any.
+    fn take_forced_lockout_read_failure(&self) -> Result<(), AuthError> {
+        let mut armed = lock(&self.forced_lockout_read_failures);
+        let (skip, remaining) = *armed;
+        if skip > 0 {
+            *armed = (skip - 1, remaining);
+            return Ok(());
+        }
+        if remaining == 0 {
+            return Ok(());
+        }
+        *armed = (0, remaining - 1);
+        Err(AuthError::Internal("brute-force store unavailable".into()))
     }
 
     /// Consume one armed failure, if any, returning the error the caller should surface.
@@ -737,6 +778,7 @@ impl OtpStore for InMemoryStores {
 #[async_trait]
 impl BruteForceStore for InMemoryStores {
     async fn is_locked(&self, identifier: &str, max_attempts: u32) -> Result<bool, AuthError> {
+        self.take_forced_lockout_read_failure()?;
         Ok(lock(&self.brute_force)
             .get(identifier)
             .is_some_and(|(count, _)| *count >= i64::from(max_attempts)))

@@ -487,9 +487,7 @@ mod tests {
         // invitee index is an HMAC rather than a plain digest because an address carries far
         // too little entropy for SHA-256 to hide it. Any of them drifting on one side alone
         // splits a keyspace the two implementations are supposed to share.
-        let Some(h) = test_support::harness(test_support::base_config(), None) else {
-            return;
-        };
+        let Some(h) = test_support::harness(test_support::base_config(), None) else { return };
         let key = h.engine.config().hmac_key();
         let expect_preimage = |name: &str, actual: &str| {
             let template = crate::services::contract_preimage(name)

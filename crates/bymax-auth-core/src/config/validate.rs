@@ -1453,6 +1453,13 @@ mod tests {
         subdomains.cookies.resolve_domains = Some(std::sync::Arc::new(SharedDomain));
 
         assert!(subdomains.validate(Environment::Production).is_ok());
+        // The resolver is what makes the listed origin same-site, so what it returns is the
+        // premise of the rule above — asserted rather than assumed.
+        use crate::config::resolvers::CookieDomainResolver as _;
+        assert_eq!(
+            SharedDomain.resolve("api.example.com"),
+            vec![".example.com".to_owned()]
+        );
 
         // Without the shared domain the list really is unreachable, and is still refused.
         let mut single_host = valid_config();

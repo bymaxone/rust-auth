@@ -1188,6 +1188,42 @@ mod tests {
         HsKey::from_bytes(b"a-test-hs256-secret-key-0123456789")
     }
 
+    /// Issue a dashboard pair from `svc`, or `None` when it could not.
+    ///
+    /// A helper rather than an inline `let-else`: the chained call spans several lines, which
+    /// pushes the `return` onto a line of its own — a line no run ever reaches, and one
+    /// llvm-cov counts. Behind a helper the `else { return }` fits inline, which is the idiom
+    /// the rest of the suite uses.
+    async fn issued_for(svc: &TokenManagerService) -> Option<AuthResult> {
+        svc.issue_tokens(&user(), "10.0.0.1", "agent/1.0", false)
+            .await
+            .ok()
+    }
+
+    /// Rotate `refresh` through `svc`, or `None` when it could not.
+    async fn rotated_for(svc: &TokenManagerService, refresh: &str) -> Option<RotatedTokens> {
+        svc.reissue_tokens(refresh, "10.0.0.1", "agent/1.0")
+            .await
+            .ok()
+    }
+
+    /// Issue a platform pair from `svc`, or `None` when it could not. See [`issued_for`].
+    async fn platform_issued_for(svc: &TokenManagerService) -> Option<PlatformAuthResult> {
+        svc.issue_platform_tokens(&platform_admin(), "10.0.0.1", "agent/1.0", false)
+            .await
+            .ok()
+    }
+
+    /// Rotate a platform `refresh` through `svc`, or `None` when it could not.
+    async fn platform_rotated_for(
+        svc: &TokenManagerService,
+        refresh: &str,
+    ) -> Option<RotatedTokens> {
+        svc.reissue_platform_tokens(refresh, "10.0.0.1", "agent/1.0")
+            .await
+            .ok()
+    }
+
     fn service(store: Arc<InMemoryStores>) -> TokenManagerService {
         TokenManagerService::new(
             key(),
@@ -1356,6 +1392,46 @@ mod tests {
         ));
     }
 
+    /// A hooks collaborator whose reuse handler always fails, so the swallowed arm is reachable.
+    struct BrokenReuseHook;
+
+    #[async_trait::async_trait]
+    impl crate::traits::AuthHooks for BrokenReuseHook {
+        async fn on_refresh_token_reuse_detected(
+            &self,
+            _user_id: &str,
+            _family_id: &str,
+            _ctx: &crate::traits::HookContext,
+        ) -> Result<(), crate::traits::HookError> {
+            Err(crate::traits::HookError::Internal("siem down".into()))
+        }
+    }
+
+    #[tokio::test]
+    async fn a_hook_that_fails_on_a_reuse_does_not_change_what_the_caller_sees() {
+        // The event is fire-and-forget by design: a consumer's SIEM being down is not a reason
+        // to answer a token replay differently, and it is certainly not a reason to let the
+        // replay through. The failure is logged and the refusal stands — swallowed, which is
+        // what leaves the arm unreachable against a hook that always succeeds.
+        let store = Arc::new(InMemoryStores::new());
+        let svc = service(store.clone()).with_hooks(Arc::new(BrokenReuseHook));
+        let Some(issued) = issued_for(&svc).await else { return };
+        let old_hash = RawRefreshToken::from_raw(issued.refresh_token.clone()).redis_hash();
+        let Some(_rotated) = rotated_for(&svc, &issued.refresh_token).await else { return };
+        assert!(
+            store
+                .delete_grace_pointer(SessionKind::Dashboard, &old_hash)
+                .await
+                .is_ok()
+        );
+
+        assert!(matches!(
+            svc.reissue_tokens(&issued.refresh_token, "10.0.0.1", "agent/1.0")
+                .await,
+            Err(AuthError::RefreshTokenInvalid)
+        ));
+    }
+
     /// Records the reuse events the rotation reports.
     #[derive(Default)]
     struct ReuseSpy {
@@ -1393,19 +1469,9 @@ mod tests {
         let spy = Arc::new(ReuseSpy::default());
         let store = Arc::new(InMemoryStores::new());
         let svc = service(store.clone()).with_hooks(spy.clone());
-        let Ok(issued) = svc
-            .issue_tokens(&user(), "10.0.0.1", "agent/1.0", false)
-            .await
-        else {
-            return;
-        };
+        let Some(issued) = issued_for(&svc).await else { return };
         let old_hash = RawRefreshToken::from_raw(issued.refresh_token.clone()).redis_hash();
-        let Ok(_rotated) = svc
-            .reissue_tokens(&issued.refresh_token, "10.0.0.1", "agent/1.0")
-            .await
-        else {
-            return;
-        };
+        let Some(_rotated) = rotated_for(&svc, &issued.refresh_token).await else { return };
         assert!(
             store
                 .delete_grace_pointer(SessionKind::Dashboard, &old_hash)
@@ -1438,19 +1504,9 @@ mod tests {
         let spy = Arc::new(ReuseSpy::default());
         let store = Arc::new(InMemoryStores::new());
         let svc = service(store.clone()).with_hooks(spy.clone());
-        let Ok(issued) = svc
-            .issue_tokens(&user(), "10.0.0.1", "agent/1.0", false)
-            .await
-        else {
-            return;
-        };
+        let Some(issued) = issued_for(&svc).await else { return };
         let old_hash = RawRefreshToken::from_raw(issued.refresh_token.clone()).redis_hash();
-        let Ok(rotated) = svc
-            .reissue_tokens(&issued.refresh_token, "10.0.0.1", "agent/1.0")
-            .await
-        else {
-            return;
-        };
+        let Some(rotated) = rotated_for(&svc, &issued.refresh_token).await else { return };
         assert!(
             store
                 .delete_grace_pointer(SessionKind::Dashboard, &old_hash)
@@ -1485,19 +1541,10 @@ mod tests {
         let spy = Arc::new(ReuseSpy::default());
         let store = Arc::new(InMemoryStores::new());
         let svc = service(store.clone()).with_hooks(spy.clone());
-        let Ok(issued) = svc
-            .issue_platform_tokens(&platform_admin(), "10.0.0.1", "agent/1.0", false)
-            .await
-        else {
-            return;
-        };
+        let Some(issued) = platform_issued_for(&svc).await else { return };
         let old_hash = RawRefreshToken::from_raw(issued.refresh_token.clone()).redis_hash();
-        let Ok(_rotated) = svc
-            .reissue_platform_tokens(&issued.refresh_token, "10.0.0.1", "agent/1.0")
-            .await
-        else {
-            return;
-        };
+        let rotated = platform_rotated_for(&svc, &issued.refresh_token).await;
+        let Some(_rotated) = rotated else { return };
         assert!(
             store
                 .delete_grace_pointer(SessionKind::Platform, &old_hash)
@@ -2170,12 +2217,7 @@ mod tests {
         // Absent by default, so an existing deployment is unchanged.
         let store = Arc::new(InMemoryStores::new());
         let svc = service(store);
-        let Ok(issued) = svc
-            .issue_tokens(&user(), "10.0.0.1", "agent/1.0", false)
-            .await
-        else {
-            return;
-        };
+        let Some(issued) = issued_for(&svc).await else { return };
 
         let verified = svc.verify_access(&issued.access_token).await;
         assert!(
@@ -2193,12 +2235,7 @@ mod tests {
         // backend's own output.
         let store = Arc::new(InMemoryStores::new());
         let svc = bound_service(store, Some("bymax"), Some("dashboard"));
-        let Ok(issued) = svc
-            .issue_tokens(&user(), "10.0.0.1", "agent/1.0", false)
-            .await
-        else {
-            return;
-        };
+        let Some(issued) = issued_for(&svc).await else { return };
 
         // Asserted, not `let-else`-ed: on this test the verification failing IS the failure
         // under test — a stamp that never happened makes the bound verifier reject the
@@ -2219,12 +2256,7 @@ mod tests {
         // a way to opt out of the check simply by omitting the claim.
         let store = Arc::new(InMemoryStores::new());
         let unbound = service(store.clone());
-        let Ok(issued) = unbound
-            .issue_tokens(&user(), "10.0.0.1", "agent/1.0", false)
-            .await
-        else {
-            return;
-        };
+        let Some(issued) = issued_for(&unbound).await else { return };
 
         // Same signing key, same session store — only the binding differs.
         let bound = bound_service(store, Some("bymax"), None);
@@ -2237,12 +2269,7 @@ mod tests {
         // happens to trust the same secret.
         let store = Arc::new(InMemoryStores::new());
         let theirs = bound_service(store.clone(), Some("someone-else"), Some("their-service"));
-        let Ok(issued) = theirs
-            .issue_tokens(&user(), "10.0.0.1", "agent/1.0", false)
-            .await
-        else {
-            return;
-        };
+        let Some(issued) = issued_for(&theirs).await else { return };
 
         let ours = bound_service(store, Some("bymax"), Some("dashboard"));
         assert!(ours.verify_access(&issued.access_token).await.is_err());
@@ -2259,12 +2286,7 @@ mod tests {
 
         // Right issuer, wrong audience.
         let wrong_audience = bound_service(store.clone(), Some("bymax"), Some("another-service"));
-        let Ok(issued) = wrong_audience
-            .issue_tokens(&user(), "10.0.0.1", "agent/1.0", false)
-            .await
-        else {
-            return;
-        };
+        let Some(issued) = issued_for(&wrong_audience).await else { return };
         assert!(
             ours.verify_access(&issued.access_token).await.is_err(),
             "a token aimed at another audience was accepted"
@@ -2272,12 +2294,7 @@ mod tests {
 
         // Wrong issuer, right audience.
         let wrong_issuer = bound_service(store, Some("someone-else"), Some("dashboard"));
-        let Ok(issued) = wrong_issuer
-            .issue_tokens(&user(), "10.0.0.1", "agent/1.0", false)
-            .await
-        else {
-            return;
-        };
+        let Some(issued) = issued_for(&wrong_issuer).await else { return };
         assert!(
             ours.verify_access(&issued.access_token).await.is_err(),
             "a token from another issuer was accepted"
@@ -2290,12 +2307,7 @@ mod tests {
         // set one field would otherwise reject every token, including its own.
         let store = Arc::new(InMemoryStores::new());
         let issuer_only = bound_service(store.clone(), Some("bymax"), None);
-        let Ok(issued) = issuer_only
-            .issue_tokens(&user(), "10.0.0.1", "agent/1.0", false)
-            .await
-        else {
-            return;
-        };
+        let Some(issued) = issued_for(&issuer_only).await else { return };
 
         let verified = issuer_only.verify_access(&issued.access_token).await;
         assert!(
@@ -2308,12 +2320,7 @@ mod tests {
 
         // …and the same for an audience alone.
         let audience_only = bound_service(store, None, Some("dashboard"));
-        let Ok(issued) = audience_only
-            .issue_tokens(&user(), "10.0.0.1", "agent/1.0", false)
-            .await
-        else {
-            return;
-        };
+        let Some(issued) = issued_for(&audience_only).await else { return };
         let verified = audience_only.verify_access(&issued.access_token).await;
         assert!(
             verified.is_ok(),
@@ -2360,12 +2367,7 @@ mod tests {
         // The plane that carries the most authority is not the one to leave unstamped.
         let store = Arc::new(InMemoryStores::new());
         let svc = bound_service(store.clone(), Some("bymax"), Some("platform"));
-        let Ok(issued) = svc
-            .issue_platform_tokens(&platform_admin(), "10.0.0.1", "agent/1.0", false)
-            .await
-        else {
-            return;
-        };
+        let Some(issued) = platform_issued_for(&svc).await else { return };
 
         let verified = svc.verify_platform_access(&issued.access_token).await;
         assert!(
@@ -2378,12 +2380,7 @@ mod tests {
 
         // …and a token minted without the binding is refused on this plane as on the other.
         let unbound = service(store);
-        let Ok(plain) = unbound
-            .issue_platform_tokens(&platform_admin(), "10.0.0.1", "agent/1.0", false)
-            .await
-        else {
-            return;
-        };
+        let Some(plain) = platform_issued_for(&unbound).await else { return };
         assert!(
             svc.verify_platform_access(&plain.access_token)
                 .await
@@ -2406,12 +2403,7 @@ mod tests {
             Duration::from_secs(30),
             0,
         );
-        let Ok(issued) = old
-            .issue_tokens(&user(), "10.0.0.1", "agent/1.0", false)
-            .await
-        else {
-            return;
-        };
+        let Some(issued) = issued_for(&old).await else { return };
 
         // A service that accepts the retired key, and requires the binding the old one never
         // stamped.

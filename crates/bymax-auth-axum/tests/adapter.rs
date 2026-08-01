@@ -3139,7 +3139,7 @@ async fn the_address_change_routes_move_an_account_only_after_the_new_address_pr
         return;
     };
     let app = router(&h);
-    seed_user(&h, "old@e.com", "glidingwalnut42", "USER").await;
+    let user_id = seed_user(&h, "old@e.com", "glidingwalnut42", "USER").await;
     let login = Req::post("/auth/login")
         .json(serde_json::json!({
             "email": "old@e.com", "password": "glidingwalnut42", "tenantId": TENANT
@@ -3198,4 +3198,47 @@ async fn the_address_change_routes_move_an_account_only_after_the_new_address_pr
         .send(&app)
         .await;
     assert_eq!(malformed.status, StatusCode::BAD_REQUEST);
+
+    // The real token only ever reaches the new mailbox, so a known one is planted — exactly the
+    // pair `request_email_change` writes — and the confirmation is driven over HTTP. Without
+    // this the route's success arm is never taken, and the whole point of the flow is what
+    // happens when the new address does prove itself.
+    let token = "7".repeat(64);
+    use bymax_auth_core::traits::PasswordResetStore as _;
+    let planted = h
+        .stores
+        .put_email_change(
+            &token,
+            &bymax_auth_core::traits::EmailChangeContext {
+                user_id: user_id.clone(),
+                new_email: "new@e.com".to_owned(),
+                tenant_id: TENANT.to_owned(),
+                password_fingerprint: String::new(),
+            },
+            600,
+        )
+        .await;
+    assert!(planted.is_ok());
+
+    let confirmed = Req::post("/auth/email/change/confirm")
+        .json(serde_json::json!({ "token": token }))
+        .send(&app)
+        .await;
+    assert_eq!(confirmed.status, StatusCode::NO_CONTENT);
+
+    // The account answers under the NEW address now, and no longer under the old one.
+    let under_new = Req::post("/auth/login")
+        .json(serde_json::json!({
+            "email": "new@e.com", "password": "glidingwalnut42", "tenantId": TENANT
+        }))
+        .send(&app)
+        .await;
+    assert_eq!(under_new.status, StatusCode::OK);
+    let under_old = Req::post("/auth/login")
+        .json(serde_json::json!({
+            "email": "old@e.com", "password": "glidingwalnut42", "tenantId": TENANT
+        }))
+        .send(&app)
+        .await;
+    assert_eq!(under_old.status, StatusCode::UNAUTHORIZED);
 }

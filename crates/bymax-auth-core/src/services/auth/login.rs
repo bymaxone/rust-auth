@@ -921,9 +921,7 @@ mod tests {
         // five unauthenticated dashboard logins locked an operator out of the console — and a
         // successful one cleared their lockout mid-attack. `tenant_id` comes from the request
         // body whenever no resolver is configured, which is the default.
-        let Some(h) = harness(base_config(), None) else {
-            return;
-        };
+        let Some(h) = harness(base_config(), None) else { return };
 
         let dashboard = h.engine.lockout_identifier("platform", "admin@example.com");
         // The platform plane's own preimage, reproduced here rather than called, because the
@@ -1021,9 +1019,7 @@ mod tests {
         let spy = Arc::new(FailureSpy::default());
         let mut cfg = base_config();
         cfg.email_verification.required = true;
-        let Some(h) = harness(cfg, Some(spy.clone())) else {
-            return;
-        };
+        let Some(h) = harness(cfg, Some(spy.clone())) else { return };
         let known = h.seed(SeedUser::active("known@example.com", "right")).await;
         let blocked = h
             .seed(SeedUser {
@@ -1059,6 +1055,47 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_store_that_cannot_report_the_lockout_costs_the_hook_and_nothing_else() {
+        // Deciding whether to fire `on_lockout` needs one read the login itself does not: has
+        // the failure just recorded closed the window? A store that cannot answer means the
+        // HOOK cannot be decided — not that the login should answer differently, and certainly
+        // not that it should fail. The refusal has to stay exactly what it was, and the failure
+        // hook has to keep firing; only the lockout event is lost, and it is logged.
+        let spy = Arc::new(FailureSpy::default());
+        let mut cfg = base_config();
+        cfg.email_verification.required = false;
+        let Some(h) = harness(cfg, Some(spy.clone())) else { return };
+        let _ = h.seed(SeedUser::active("blind@example.com", "right")).await;
+
+        // One attempt performs two of these reads. The gate at the top must keep working —
+        // it propagates a failure on purpose, since a lockout that cannot be read is a lockout
+        // assumed — so the first is let through and the second, the hook decision, is the one
+        // that fails.
+        h.stores.fail_lockout_reads(1, 1);
+        let refused = h
+            .engine
+            .login(login_input("blind@example.com", "wrong"), &ctx())
+            .await;
+        assert!(
+            matches!(refused, Err(AuthError::InvalidCredentials)),
+            "the store failure changed the answer the caller sees"
+        );
+
+        let seen = spy.seen();
+        assert!(
+            seen.iter().all(|call| !call.starts_with("lockout:")),
+            "a lockout event fired off a read that failed: {seen:?}"
+        );
+        assert_eq!(
+            seen.iter()
+                .filter(|call| call.starts_with("failed:invalid_credentials:"))
+                .count(),
+            1,
+            "the failure hook stopped firing: {seen:?}"
+        );
+    }
+
+    #[tokio::test]
     async fn the_lockout_hook_fires_on_the_attempt_that_crosses_the_threshold() {
         // Not on the next one. An attacker who trips the lock and walks away never makes a
         // sixth attempt, so a hook fired from the already-locked gate would never run and the
@@ -1067,9 +1104,7 @@ mod tests {
         let spy = Arc::new(FailureSpy::default());
         let mut cfg = base_config();
         cfg.email_verification.required = false;
-        let Some(h) = harness(cfg, Some(spy.clone())) else {
-            return;
-        };
+        let Some(h) = harness(cfg, Some(spy.clone())) else { return };
         let _ = h.seed(SeedUser::active("lock@example.com", "right")).await;
 
         for _ in 0..5 {
@@ -1112,9 +1147,7 @@ mod tests {
         // is still a refusal, and the lockout still locks.
         let mut cfg = base_config();
         cfg.email_verification.required = false;
-        let Some(h) = harness(cfg, Some(Arc::new(BrokenFailureHooks))) else {
-            return;
-        };
+        let Some(h) = harness(cfg, Some(Arc::new(BrokenFailureHooks))) else { return };
         let _ = h
             .seed(SeedUser::active("broken@example.com", "right"))
             .await;

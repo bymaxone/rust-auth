@@ -159,18 +159,31 @@ async fn refresh(
         Err(error) => return error_response(&error),
     };
     let refresh = dto.refresh_token.unwrap_or_default();
-    let tokens = match state
-        .engine()
-        .platform_refresh(&refresh, &ctx.ip, &ctx.user_agent)
-        .await
-    {
-        Ok(tokens) => tokens,
-        Err(error) => return error_response(&error),
-    };
-    match rotated_into_platform_result(&state, tokens).await {
+    // One fallible sequence, one error arm. Split in two, the second arm could only fire if the
+    // admin vanished between the rotation and the re-read a microsecond later — the rotation
+    // itself re-reads and refuses a missing or blocked one — so it was an arm no test could
+    // reach and no request would take.
+    match rotate_platform_session(&state, &refresh, &ctx).await {
         Ok(result) => deliver_platform(&state, &result, StatusCode::OK),
         Err(error) => error_response(&error),
     }
+}
+
+/// Rotate the platform pair and project it into the response body the controller returns.
+///
+/// The admin is re-read rather than carried out of the rotation because the engine's platform
+/// refresh answers with tokens alone, exactly as nest-auth's does — the two adapters build this
+/// body the same way.
+async fn rotate_platform_session(
+    state: &AuthState,
+    refresh: &str,
+    ctx: &crate::routes::RequestContext,
+) -> Result<PlatformAuthResult, bymax_auth_types::AuthError> {
+    let tokens = state
+        .engine()
+        .platform_refresh(refresh, &ctx.ip, &ctx.user_agent)
+        .await?;
+    rotated_into_platform_result(state, tokens).await
 }
 
 /// `DELETE /auth/platform/sessions` (204). Requires [`PlatformUser`]. Revokes every platform

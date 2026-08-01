@@ -1505,6 +1505,45 @@ mod tests {
 
     /// An email provider whose reset-token send always fails, to drive the delete-on-failure
     /// cleanup of an undeliverable reset token.
+    #[tokio::test]
+    async fn the_failing_lookup_repo_still_answers_the_mutators() {
+        // The double exists to fail ONE read. Its mutators are what make it a valid
+        // `UserRepository`, and `update_email` is the one the trait grew last — a method
+        // nothing calls is a method nothing proves, including that it does not accidentally
+        // fail a flow that shares the double.
+        use crate::traits::UserRepository as _;
+
+        assert!(
+            FailingLookupRepo
+                .update_email("u1", "new@example.com")
+                .await
+                .is_ok()
+        );
+    }
+
+    #[tokio::test]
+    async fn the_reset_doubles_answer_every_send_the_trait_declares() {
+        // These doubles exist to fail (or capture) ONE send. Their remaining methods are what
+        // make them valid `EmailProvider`s at all, and a method nothing calls is a method
+        // nothing proves — including that it does not accidentally fail the flows that share
+        // the double. The address-change send is the one the trait grew last.
+        use crate::traits::EmailProvider as _;
+
+        assert!(
+            FailingResetEmail
+                .send_email_change_verification("new@example.com", "t", None)
+                .await
+                .is_ok()
+        );
+        let capturing = CapturingResetEmail::default();
+        assert!(
+            capturing
+                .send_email_change_verification("new@example.com", "t", None)
+                .await
+                .is_ok()
+        );
+    }
+
     struct FailingResetEmail;
 
     #[async_trait::async_trait]

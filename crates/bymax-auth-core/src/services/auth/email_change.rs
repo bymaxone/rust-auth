@@ -216,6 +216,7 @@ fn assert_still_bound(context: &EmailChangeContext, user: &AuthUser) -> Result<(
 mod tests {
     use super::*;
     use crate::services::auth::test_support::{Harness, SeedUser, base_config, harness};
+    use crate::testing::InMemoryUserRepository;
     use crate::traits::{PasswordResetStore, UserRepository};
 
     /// A harness with the address-change flow tunable, and email verification off so seeding
@@ -234,6 +235,365 @@ mod tests {
             .ok()
             .flatten()
             .map(|user| user.email)
+    }
+
+    /// An email provider whose two address-change sends always fail, so the delivery arms —
+    /// which the flow treats very differently — can be reached at all.
+    struct FailingChangeEmail;
+
+    #[async_trait::async_trait]
+    impl crate::traits::EmailProvider for FailingChangeEmail {
+        async fn send_email_change_verification(
+            &self,
+            _new_email: &str,
+            _token: &str,
+            _locale: Option<&str>,
+        ) -> Result<(), crate::traits::EmailError> {
+            Err(crate::traits::EmailError::Delivery("smtp down".into()))
+        }
+
+        async fn send_email_changed_notification(
+            &self,
+            _old_email: &str,
+            _new_email: &str,
+            _locale: Option<&str>,
+        ) -> Result<(), crate::traits::EmailError> {
+            Err(crate::traits::EmailError::Delivery("smtp down".into()))
+        }
+
+        async fn send_password_reset_token(
+            &self,
+            _email: &str,
+            _token: &str,
+            _locale: Option<&str>,
+        ) -> Result<(), crate::traits::EmailError> {
+            Ok(())
+        }
+
+        async fn send_password_reset_otp(
+            &self,
+            _email: &str,
+            _otp: &str,
+            _locale: Option<&str>,
+        ) -> Result<(), crate::traits::EmailError> {
+            Ok(())
+        }
+
+        async fn send_email_verification_otp(
+            &self,
+            _email: &str,
+            _otp: &str,
+            _locale: Option<&str>,
+        ) -> Result<(), crate::traits::EmailError> {
+            Ok(())
+        }
+
+        async fn send_mfa_enabled(
+            &self,
+            _email: &str,
+            _locale: Option<&str>,
+        ) -> Result<(), crate::traits::EmailError> {
+            Ok(())
+        }
+
+        async fn send_mfa_disabled(
+            &self,
+            _email: &str,
+            _locale: Option<&str>,
+        ) -> Result<(), crate::traits::EmailError> {
+            Ok(())
+        }
+
+        async fn send_new_session_alert(
+            &self,
+            _email: &str,
+            _session: &crate::traits::email::SessionInfo,
+            _locale: Option<&str>,
+        ) -> Result<(), crate::traits::EmailError> {
+            Ok(())
+        }
+
+        async fn send_invitation(
+            &self,
+            _email: &str,
+            _invite: &crate::traits::email::InviteData,
+            _locale: Option<&str>,
+        ) -> Result<(), crate::traits::EmailError> {
+            Ok(())
+        }
+    }
+
+    /// A harness whose email provider fails both address-change sends.
+    fn setup_with_failing_email() -> Option<Harness> {
+        let mut cfg = base_config();
+        cfg.email_verification.required = false;
+        let users = std::sync::Arc::new(InMemoryUserRepository::new());
+        let stores = std::sync::Arc::new(crate::testing::InMemoryStores::new());
+        crate::engine::AuthEngine::builder()
+            .config(cfg)
+            .environment(crate::config::Environment::Test)
+            .user_repository(users.clone())
+            .redis_stores(stores.clone())
+            .email_provider(std::sync::Arc::new(FailingChangeEmail))
+            .build()
+            .ok()
+            .map(|engine| Harness {
+                engine,
+                users,
+                stores,
+            })
+    }
+
+    /// An engine wired without a password-reset store, which is where the pending change lives.
+    fn engine_without_the_store() -> Option<(
+        crate::engine::AuthEngine,
+        std::sync::Arc<InMemoryUserRepository>,
+    )> {
+        let mut cfg = base_config();
+        cfg.email_verification.required = false;
+        let users = std::sync::Arc::new(InMemoryUserRepository::new());
+        let stores = std::sync::Arc::new(crate::testing::InMemoryStores::new());
+        crate::engine::AuthEngine::builder()
+            .config(cfg)
+            .environment(crate::config::Environment::Test)
+            .user_repository(users.clone())
+            // The three required stores only — no password-reset store, so no `ec:` keyspace.
+            .session_store(stores.clone())
+            .otp_store(stores.clone())
+            .brute_force_store(stores)
+            .build()
+            .ok()
+            .map(|engine| (engine, users))
+    }
+
+    #[tokio::test]
+    async fn an_engine_without_the_single_use_store_refuses_both_steps() {
+        // The pending change lives in the password-reset keyspace. Without that store there is
+        // nowhere to put the token and nowhere to read it back, so both ends refuse rather than
+        // half-completing — a request that appeared to succeed would mail a link to a token
+        // that was never written.
+        let Some((engine, users)) = engine_without_the_store() else { return };
+        let created = users
+            .create(bymax_auth_types::CreateUserData {
+                email: "nostore@example.com".to_owned(),
+                name: "N".to_owned(),
+                password_hash: Some("$scrypt$x".to_owned()),
+                role: Some("USER".to_owned()),
+                status: Some("ACTIVE".to_owned()),
+                tenant_id: "t1".to_owned(),
+                email_verified: Some(true),
+            })
+            .await;
+        let Ok(user) = created else { return };
+
+        let requested = engine
+            .request_email_change(&user.id, "new@example.com", "right")
+            .await;
+        assert!(matches!(requested, Err(AuthError::Internal(_))));
+
+        let confirmed = engine.confirm_email_change(&"a".repeat(64)).await;
+        assert!(matches!(confirmed, Err(AuthError::Internal(_))));
+    }
+
+    #[tokio::test]
+    async fn an_account_with_no_local_password_cannot_move_its_address() {
+        // An OAuth-only account has no credential this library can re-prove, and the address is
+        // exactly what a re-prove protects. It answers as a wrong password does, so the caller
+        // cannot tell the two apart — an account that exists but has no local password is not
+        // something a stranger should learn.
+        let Some(h) = setup() else { return };
+        let created = h
+            .users
+            .create(bymax_auth_types::CreateUserData {
+                email: "oauth@example.com".to_owned(),
+                name: "N".to_owned(),
+                password_hash: None,
+                role: Some("USER".to_owned()),
+                status: Some("ACTIVE".to_owned()),
+                tenant_id: "t1".to_owned(),
+                email_verified: Some(true),
+            })
+            .await;
+        let Ok(user) = created else { return };
+
+        let refused = h
+            .engine
+            .request_email_change(&user.id, "new@example.com", "anything")
+            .await;
+        assert!(matches!(refused, Err(AuthError::InvalidCredentials)));
+    }
+
+    #[tokio::test]
+    async fn an_undeliverable_verification_fails_the_request_rather_than_stranding_it() {
+        // The opposite of the notification below, and deliberately so: the verification IS the
+        // flow. Answering Ok would leave the user waiting on a message that is never coming,
+        // with a token they cannot reach sitting in the store until it expires.
+        let Some(h) = setup_with_failing_email() else { return };
+        let id = h.seed(SeedUser::active("old@example.com", "right")).await;
+
+        let refused = h
+            .engine
+            .request_email_change(&id, "new@example.com", "right")
+            .await;
+        assert!(matches!(refused, Err(AuthError::Internal(_))));
+    }
+
+    #[tokio::test]
+    async fn an_undeliverable_notice_does_not_undo_a_change_the_user_proved() {
+        // The notice to the PREVIOUS address is the owner's last chance to see a takeover, so
+        // its failure is logged — but the change itself was asked for and proved, and rolling
+        // it back because a mail server was down would punish the user for the operator's
+        // outage. Fire-and-forget, and the address moves.
+        let Some(h) = setup_with_failing_email() else { return };
+        let id = h.seed(SeedUser::active("old@example.com", "right")).await;
+        let token = "d".repeat(64);
+        let Some(store) = h.engine.password_reset_store() else { return };
+        let stored = store
+            .put_email_change(
+                &token,
+                &EmailChangeContext {
+                    user_id: id.clone(),
+                    new_email: "new@example.com".to_owned(),
+                    tenant_id: "t1".to_owned(),
+                    password_fingerprint: String::new(),
+                },
+                600,
+            )
+            .await;
+        assert!(stored.is_ok());
+
+        assert!(h.engine.confirm_email_change(&token).await.is_ok());
+        assert_eq!(
+            stored_email(&h, &id).await.as_deref(),
+            Some("new@example.com")
+        );
+    }
+
+    #[tokio::test]
+    async fn a_token_still_bound_to_the_password_is_accepted() {
+        // The other side of the binding. An absent fingerprint is accepted because it predates
+        // the check; a PRESENT one has to match, and matching is the ordinary case — every
+        // token the flow itself mints carries the fingerprint of the password in force when it
+        // was minted, and the overwhelming majority are confirmed without a password change in
+        // between.
+        let Some(h) = setup() else { return };
+        let id = h.seed(SeedUser::active("bound@example.com", "right")).await;
+        let Ok(Some(user)) = h.users.find_by_id(&id, None).await else { return };
+        let token = "f".repeat(64);
+        let Some(store) = h.engine.password_reset_store() else { return };
+        let stored = store
+            .put_email_change(
+                &token,
+                &EmailChangeContext {
+                    user_id: id.clone(),
+                    new_email: "bound-new@example.com".to_owned(),
+                    tenant_id: "t1".to_owned(),
+                    password_fingerprint: super::super::password_reset::password_fingerprint(&user),
+                },
+                600,
+            )
+            .await;
+        assert!(stored.is_ok());
+
+        assert!(h.engine.confirm_email_change(&token).await.is_ok());
+        assert_eq!(
+            stored_email(&h, &id).await.as_deref(),
+            Some("bound-new@example.com")
+        );
+    }
+
+    #[tokio::test]
+    async fn the_failing_change_double_still_answers_every_other_send() {
+        // The double exists to fail the TWO address-change sends. That everything else about it
+        // succeeds is what makes it a valid `EmailProvider` — and what makes the tests above
+        // about the address change rather than about a provider that is broken everywhere.
+        use crate::traits::EmailProvider as _;
+
+        let session = crate::traits::email::SessionInfo {
+            device: "Chrome".to_owned(),
+            ip: "1.2.3.4".to_owned(),
+            session_hash: "abcd1234".to_owned(),
+        };
+        let invite = crate::traits::email::InviteData {
+            inviter_name: "Inviter".to_owned(),
+            tenant_name: "Tenant".to_owned(),
+            invite_token: "t".to_owned(),
+            expires_at: time::OffsetDateTime::UNIX_EPOCH,
+        };
+
+        assert!(
+            FailingChangeEmail
+                .send_password_reset_token("e@x.io", "t", None)
+                .await
+                .is_ok()
+        );
+        assert!(
+            FailingChangeEmail
+                .send_password_reset_otp("e@x.io", "123456", None)
+                .await
+                .is_ok()
+        );
+        assert!(
+            FailingChangeEmail
+                .send_email_verification_otp("e@x.io", "123456", None)
+                .await
+                .is_ok()
+        );
+        assert!(
+            FailingChangeEmail
+                .send_mfa_enabled("e@x.io", None)
+                .await
+                .is_ok()
+        );
+        assert!(
+            FailingChangeEmail
+                .send_mfa_disabled("e@x.io", None)
+                .await
+                .is_ok()
+        );
+        assert!(
+            FailingChangeEmail
+                .send_new_session_alert("e@x.io", &session, None)
+                .await
+                .is_ok()
+        );
+        assert!(
+            FailingChangeEmail
+                .send_invitation("e@x.io", &invite, None)
+                .await
+                .is_ok()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_token_carrying_no_binding_is_accepted() {
+        // An absent fingerprint reads as "no binding", not as "binding failed". It is what a
+        // sibling implementation that has not taken this change writes, and refusing it would
+        // break every change in flight across a rolling deploy — a window this narrow is not
+        // worth an outage. The binding still holds whenever the field is present.
+        let Some(h) = setup() else { return };
+        let id = h.seed(SeedUser::active("old@example.com", "right")).await;
+        let token = "e".repeat(64);
+        let Some(store) = h.engine.password_reset_store() else { return };
+        let stored = store
+            .put_email_change(
+                &token,
+                &EmailChangeContext {
+                    user_id: id.clone(),
+                    new_email: "unbound@example.com".to_owned(),
+                    tenant_id: "t1".to_owned(),
+                    password_fingerprint: String::new(),
+                },
+                600,
+            )
+            .await;
+        assert!(stored.is_ok());
+
+        assert!(h.engine.confirm_email_change(&token).await.is_ok());
+        assert_eq!(
+            stored_email(&h, &id).await.as_deref(),
+            Some("unbound@example.com")
+        );
     }
 
     #[tokio::test]

@@ -18,6 +18,10 @@ const SECRET: &str = "an-edge-test-hs256-secret-key-0123456789";
 /// Sign a dashboard token with the given validity window.
 fn sign_dashboard(iat: i64, exp: i64) -> String {
     let claims = DashboardClaims {
+        // Unstamped: the deployment these smokes model configures no `jwt.issuer` /
+        // `jwt.audience`, which is the default, so the edge checks neither.
+        iss: None,
+        aud: None,
         sub: "u_1".to_owned(),
         jti: "jti-1".to_owned(),
         tenant_id: "t_1".to_owned(),

@@ -297,12 +297,10 @@ mod tests {
         // the acquire, the hash would complete while every permit is held elsewhere.
         let Some(svc) = service() else { return };
         let permits = u32::try_from(kdf_permit_count()).unwrap_or(u32::MAX);
-        let Ok(held) = Arc::clone(&svc.kdf_permits)
+        let all = Arc::clone(&svc.kdf_permits)
             .acquire_many_owned(permits)
-            .await
-        else {
-            return;
-        };
+            .await;
+        let Ok(held) = all else { return };
 
         let blocked = tokio::time::timeout(
             std::time::Duration::from_millis(250),

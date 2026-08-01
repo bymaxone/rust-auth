@@ -741,6 +741,34 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_deleted_admin_cannot_rotate_and_leaves_nothing_behind() {
+        // The session record outlived the account. Rotation used to work entirely from that
+        // record, so a removed operator kept minting console access for the refresh token's
+        // whole lifetime. The refusal is compensated, not merely returned: the rotation above
+        // already minted a live pair, and leaving it would hand back exactly the access this
+        // gate exists to end.
+        let Some(h) = harness(platform_config()) else { return };
+        let id = seed_admin(&h.admins, "ghost@admin.io", "glidingwalnut42");
+        let signed_in = h
+            .engine
+            .platform_auth()
+            .map(|svc| svc.login("ghost@admin.io", "glidingwalnut42", "1.2.3.4", "a"));
+        let Some(login) = signed_in else { return };
+        let Ok(PlatformLoginResult::Success(auth)) = login.await else { return };
+
+        assert!(h.admins.remove(&id));
+
+        let Some(svc) = h.engine.platform_auth() else { return };
+        let refused = svc.refresh(&auth.refresh_token, "1.2.3.4", "a").await;
+        assert!(matches!(refused, Err(AuthError::RefreshTokenInvalid)));
+
+        // Total compensation: the pair minted a moment ago went with every other one, so a
+        // second attempt has nothing left to rotate.
+        let again = svc.refresh(&auth.refresh_token, "1.2.3.4", "a").await;
+        assert!(matches!(again, Err(AuthError::RefreshTokenInvalid)));
+    }
+
+    #[tokio::test]
     async fn a_blocked_admin_cannot_rotate_and_loses_every_platform_session() {
         // Rotation works entirely from the stored `prt:` record, so without this backstop a
         // SUSPENDED or BANNED operator kept renewing access every fifteen minutes for the
@@ -762,11 +790,8 @@ mod tests {
             created_at: OffsetDateTime::UNIX_EPOCH,
         });
         let Some(svc) = h.engine.platform_auth() else { return };
-        let Ok(PlatformLoginResult::Success(auth)) =
-            svc.login("live@admin.io", "pw", "1.2.3.4", "a").await
-        else {
-            return;
-        };
+        let signed_in = svc.login("live@admin.io", "pw", "1.2.3.4", "a").await;
+        let Ok(PlatformLoginResult::Success(auth)) = signed_in else { return };
 
         // While active, the rotation works.
         let rotated = svc.refresh(&auth.refresh_token, "1.2.3.4", "a").await;

@@ -385,6 +385,20 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn the_recording_double_answers_the_address_change_send_too() {
+        // The double records the sends the detached tasks make. Its remaining methods are what
+        // make it a valid `EmailProvider`, and a method nothing calls is a method nothing
+        // proves — including that it does not accidentally fail a flow that shares it.
+        let emails = RecordingEmails::default();
+        assert!(
+            emails
+                .send_email_change_verification("new@example.com", "t", None)
+                .await
+                .is_ok()
+        );
+    }
+
+    #[tokio::test]
     async fn each_email_wrapper_sends_its_own_message() {
         // The recipient and the payload are the whole content of these wrappers, and both are
         // dropped by the detached spawn — so a wrapper that sent nothing, or sent the
