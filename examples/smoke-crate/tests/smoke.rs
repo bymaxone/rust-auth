@@ -14,7 +14,7 @@ use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-use bymax_auth_axum::{AuthRouter, AxumAuthConfig};
+use bymax_auth_axum::{AuthRouter, AxumAuthConfig, ClientIpSource};
 use bymax_auth_client::{AuthClient, AuthClientError, AuthOutcome, LoginRequest, RegisterRequest};
 use bymax_auth_core::config::TokenDelivery;
 use bymax_auth_core::testing::{InMemoryPlatformUserRepository, InMemoryUserRepository};
@@ -77,7 +77,8 @@ fn build_engine(redis: &TestRedis) -> Option<Arc<AuthEngine>> {
 async fn serve(engine: Arc<AuthEngine>) -> Option<(String, tokio::task::JoinHandle<()>)> {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.ok()?;
     let addr = listener.local_addr().ok()?;
-    let app = AuthRouter::from_engine(engine, AxumAuthConfig::default()).into_router();
+    let app = AuthRouter::from_engine(engine, AxumAuthConfig::new(ClientIpSource::PeerAddr))
+        .into_router();
     let handle = tokio::spawn(async move {
         let service = app.into_make_service_with_connect_info::<SocketAddr>();
         let _ = axum::serve(listener, service).await;

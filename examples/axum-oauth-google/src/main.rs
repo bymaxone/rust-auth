@@ -25,7 +25,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use bymax_auth_axum::{AxumAuthConfig, auth_router};
+use bymax_auth_axum::{AxumAuthConfig, ClientIpSource, auth_router};
 use bymax_auth_core::config::GoogleOAuthConfig;
 use bymax_auth_core::providers::GoogleOAuthProvider;
 use bymax_auth_core::providers::ReqwestHttpClient;
@@ -69,7 +69,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .init();
 
     let engine = build_engine()?;
-    let router = auth_router(engine, AxumAuthConfig::default());
+    let router = auth_router(engine, AxumAuthConfig::new(ClientIpSource::PeerAddr));
 
     let bind = std::env::var("BIND_ADDR").unwrap_or_else(|_| DEFAULT_BIND_ADDR.to_owned());
     let listener = tokio::net::TcpListener::bind(&bind).await?;

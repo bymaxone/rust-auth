@@ -230,6 +230,55 @@ pub(crate) enum GovernorConfigKind {
     Smart(Arc<GovernorConfig<RightmostForwardedIpKeyExtractor, NoOpMiddleware>>),
 }
 
+/// How often the per-route key maps are swept, in seconds.
+///
+/// The sweep is O(live keys) and the maps are only ever grown by traffic, so a minute is far
+/// more often than needed to keep them bounded and far too rare to matter for cost.
+const KEY_GC_INTERVAL_SECS: u64 = 60;
+
+/// Start a timer that periodically drops rate-limit keys whose budget has fully replenished.
+///
+/// `tower_governor` keys its state on the extracted client IP in a `DashMap` that is only ever
+/// **inserted** into; the documented prune is `retain_recent`, which the application is expected
+/// to run on a timer. Nothing did. `ClientIpSource::PeerAddr` — one of the two a deployment now
+/// has to choose between, and the one a directly exposed service picks — keys on the peer
+/// socket address, so an unauthenticated `POST /auth/login` from a routine IPv6 /64 offers
+/// 2^64 distinct keys — and because the per-route limit is *per key*, every new address is both
+/// a fresh burst budget and a permanent map entry. The throttle was the mechanism that grew the
+/// map rather than a bound on it, and with the default config enabling 27 routes there were 27
+/// such maps, all process-lifetime. That is monotonic RSS growth with no ceiling, reachable
+/// without a credential.
+///
+/// The consumer could not compensate: [`GovernorConfigKind`], [`build_governor_config`] and
+/// `throttled` are all crate-private and the public `AuthRouter` exposes no path to the
+/// limiters. So the library starts the sweep itself rather than documenting an obligation
+/// nobody can discharge.
+///
+/// Spawning needs a Tokio runtime. A router built outside one — a synchronous test harness,
+/// say — gets a warning rather than a panic: the crate denies `panic`, and refusing to build a
+/// router would be a far worse answer than an unswept map in a process that is not serving.
+pub(crate) fn spawn_key_gc<K>(config: Arc<GovernorConfig<K, NoOpMiddleware>>)
+where
+    K: KeyExtractor + Send + Sync + 'static,
+    K::Key: Send + Sync + 'static,
+{
+    let Ok(handle) = tokio::runtime::Handle::try_current() else {
+        tracing::warn!(
+            "rate limiter built outside a Tokio runtime — its key map will not be swept; \
+             build the auth router inside the runtime that serves it"
+        );
+        return;
+    };
+    handle.spawn(async move {
+        let mut ticker =
+            tokio::time::interval(std::time::Duration::from_secs(KEY_GC_INTERVAL_SECS));
+        loop {
+            ticker.tick().await;
+            config.limiter().retain_recent();
+        }
+    });
+}
+
 /// Build a per-route governor config for `limit` under the configured `ip_source`.
 /// Returns `None` when `limit` is `None` (the route is mounted unthrottled). The build can
 /// only fail if the period/burst were zero, which [`RateLimit::replenish_secs`] and the

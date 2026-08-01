@@ -48,6 +48,10 @@ time = { version = "0.3", default-features = false, features = ["std"] }
 # Structured spans/events; the adapter emits them but installs NO subscriber (the
 # consuming application owns subscriber setup).
 tracing = "0.1"
+# The rate-limit key maps only shrink when something calls `retain_recent` on them, so the
+# router spawns one timer per throttled route to do it. `rt` for the spawn, `time` for the
+# interval — no runtime is started here, only joined.
+tokio = { version = "1", default-features = false, features = ["rt", "time"] }
 
 [dev-dependencies]
 # A multi-threaded runtime + the assertion-friendly macros for the async E2E tests.
