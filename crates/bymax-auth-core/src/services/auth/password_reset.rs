@@ -174,12 +174,13 @@ impl AuthEngine {
         }
 
         // Look up the account; an unknown email or a blocked account takes no visible branch.
-        if let Some(user) = self
-            .user_repository()
-            .find_by_email(&input.email, &input.tenant_id)
-            .await
-            .map_err(map_repository_error)?
-            && self.assert_user_not_blocked(&user.status).is_ok()
+        if let Some(user) = crate::services::auth::tenant_scoped(
+            self.user_repository()
+                .find_by_email(&input.email, &input.tenant_id)
+                .await
+                .map_err(map_repository_error)?,
+            &input.tenant_id,
+        ) && self.assert_user_not_blocked(&user.status).is_ok()
         {
             // Dispatch by configured method. Both paths are best-effort: a store or send
             // failure is logged and dropped so the uniform response is never perturbed.
@@ -319,12 +320,14 @@ impl AuthEngine {
         self.otp()
             .verify(OtpPurpose::PasswordReset, &identifier, otp)
             .await?;
-        let user = self
-            .user_repository()
-            .find_by_email(&input.email, &input.tenant_id)
-            .await
-            .map_err(map_repository_error)?
-            .ok_or(AuthError::PasswordResetTokenInvalid)?;
+        let user = crate::services::auth::tenant_scoped(
+            self.user_repository()
+                .find_by_email(&input.email, &input.tenant_id)
+                .await
+                .map_err(map_repository_error)?,
+            &input.tenant_id,
+        )
+        .ok_or(AuthError::PasswordResetTokenInvalid)?;
         let context = ResetContext {
             user_id: user.id.clone(),
             email: input.email.clone(),
@@ -365,12 +368,14 @@ impl AuthEngine {
         self.otp()
             .verify(OtpPurpose::PasswordReset, &identifier, &input.otp)
             .await?;
-        let user = self
-            .user_repository()
-            .find_by_email(&input.email, &input.tenant_id)
-            .await
-            .map_err(map_repository_error)?
-            .ok_or(AuthError::PasswordResetTokenInvalid)?;
+        let user = crate::services::auth::tenant_scoped(
+            self.user_repository()
+                .find_by_email(&input.email, &input.tenant_id)
+                .await
+                .map_err(map_repository_error)?,
+            &input.tenant_id,
+        )
+        .ok_or(AuthError::PasswordResetTokenInvalid)?;
 
         let store = self
             .password_reset_store()
@@ -441,12 +446,13 @@ impl AuthEngine {
             return Ok(());
         }
 
-        if let Some(user) = self
-            .user_repository()
-            .find_by_email(&input.email, &input.tenant_id)
-            .await
-            .map_err(map_repository_error)?
-            && self.assert_user_not_blocked(&user.status).is_ok()
+        if let Some(user) = crate::services::auth::tenant_scoped(
+            self.user_repository()
+                .find_by_email(&input.email, &input.tenant_id)
+                .await
+                .map_err(map_repository_error)?,
+            &input.tenant_id,
+        ) && self.assert_user_not_blocked(&user.status).is_ok()
         {
             // Best-effort: a store/dispatch failure must not change the uniform response.
             let _ = self.send_reset_otp(&input.tenant_id, &input.email).await;

@@ -26,7 +26,7 @@ use std::time::Instant;
 use bymax_auth_jwt::RawRefreshToken;
 use bymax_auth_types::{
     AuthError, AuthPlatformUser, MfaChallengeResult, MfaContext, PlatformLoginResult,
-    SafeAuthPlatformUser,
+    RotatedTokens, SafeAuthPlatformUser,
 };
 
 use crate::normalize::{mask_email, normalize_email};
@@ -259,7 +259,26 @@ impl PlatformAuthService {
             return Err(error);
         }
 
-        Ok(rotated)
+        // Re-stamp the access token from the administrator just re-read — the same fix the
+        // dashboard plane carries, on the plane where the authority is worth more. Rotation
+        // builds its claims from the `prt:` record written at login, so a demotion from
+        // `super_admin` to `support` had no effect on a live console session: it kept minting
+        // tokens with the old role for the refresh token's whole lifetime, and every role check
+        // reads that claim. `mfa_enabled` is re-stamped for the same reason as on the dashboard
+        // plane — it gates whether a second factor is demanded at all.
+        //
+        // The account was already read a few lines above for the status gate; the authority was
+        // sitting there, unused. Only re-signed when a claim actually differs.
+        if claims.role == admin.role && claims.mfa_enabled == admin.mfa_enabled {
+            return Ok(rotated);
+        }
+        Ok(RotatedTokens {
+            access_token: self
+                .tokens
+                .reissue_platform_access_with_authority(&claims, &admin.role, admin.mfa_enabled)
+                .await?,
+            refresh_token: rotated.refresh_token,
+        })
     }
 
     /// Revoke the current platform session: blacklist the access token's `jti` for its
@@ -825,6 +844,92 @@ mod tests {
             svc.refresh(&rotated.refresh_token, "1.2.3.4", "a").await,
             Err(AuthError::RefreshTokenInvalid)
         ));
+    }
+
+    #[tokio::test]
+    async fn a_demoted_admin_stops_carrying_the_old_role_on_the_very_next_rotation() {
+        // The dashboard plane closed this and the platform plane was left with the identical
+        // hole — on the higher-privilege identity. Rotation builds its claims from the `prt:`
+        // record written at login, so a demotion from SUPER_ADMIN to SUPPORT had no effect on
+        // a live console session: it kept minting SUPER_ADMIN-roled tokens for the refresh
+        // token's whole lifetime, and every role check reads that claim.
+        let Some(h) = harness(platform_config()) else { return };
+        let make = |role: &str, mfa: bool| AuthPlatformUser {
+            id: "admin-demoted".to_owned(),
+            email: "demoted@admin.io".to_owned(),
+            name: "Admin".to_owned(),
+            password_hash: hash_password("pw"),
+            role: role.to_owned(),
+            status: "ACTIVE".to_owned(),
+            mfa_enabled: mfa,
+            mfa_secret: None,
+            mfa_recovery_codes: None,
+            platform_id: None,
+            last_login_at: None,
+            updated_at: OffsetDateTime::UNIX_EPOCH,
+            created_at: OffsetDateTime::UNIX_EPOCH,
+        };
+        h.admins.insert(make("SUPER_ADMIN", false));
+        let Some(svc) = h.engine.platform_auth() else { return };
+        let signed_in = svc.login("demoted@admin.io", "pw", "1.2.3.4", "a").await;
+        let Ok(PlatformLoginResult::Success(auth)) = signed_in else { return };
+
+        // One rotation to put SUPER_ADMIN into this lineage, then the demotion.
+        let promoted = svc.refresh(&auth.refresh_token, "1.2.3.4", "a").await;
+        assert!(
+            promoted.is_ok(),
+            "the first rotation must succeed: {promoted:?}"
+        );
+        let Ok(promoted) = promoted else { return };
+        let before = h
+            .engine
+            .tokens()
+            .verify_platform_access(&promoted.access_token)
+            .await;
+        assert!(before.is_ok(), "the rotated token must verify: {before:?}");
+        let Ok(before) = before else { return };
+        assert_eq!(before.role, "SUPER_ADMIN");
+
+        h.admins.insert(make("SUPPORT", false));
+        let rotated = svc.refresh(&promoted.refresh_token, "1.2.3.4", "a").await;
+        assert!(
+            rotated.is_ok(),
+            "the demoting rotation must succeed: {rotated:?}"
+        );
+        let Ok(rotated) = rotated else { return };
+        let after = h
+            .engine
+            .tokens()
+            .verify_platform_access(&rotated.access_token)
+            .await;
+        assert!(after.is_ok(), "the demoted token must verify: {after:?}");
+        let Ok(after) = after else { return };
+        assert_eq!(
+            after.role, "SUPPORT",
+            "the demotion never reached the token"
+        );
+
+        // The same freeze on the claim that gates the second factor: `MfaSatisfied` refuses a
+        // token only when `mfa_enabled && !mfa_verified`, so a console session created before
+        // the admin enrolled stayed exempt for the refresh token's whole lifetime.
+        h.admins.insert(make("SUPPORT", true));
+        let with_mfa = svc.refresh(&rotated.refresh_token, "1.2.3.4", "a").await;
+        assert!(
+            with_mfa.is_ok(),
+            "the MFA rotation must succeed: {with_mfa:?}"
+        );
+        let Ok(with_mfa) = with_mfa else { return };
+        let claims = h
+            .engine
+            .tokens()
+            .verify_platform_access(&with_mfa.access_token)
+            .await;
+        assert!(
+            claims.is_ok(),
+            "the MFA-stamped token must verify: {claims:?}"
+        );
+        let Ok(claims) = claims else { return };
+        assert!(claims.mfa_enabled, "the MFA flag never reached the token");
     }
 
     #[tokio::test]

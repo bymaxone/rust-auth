@@ -281,6 +281,28 @@ impl AuthEngine {
     }
 }
 
+/// Returns `user` only when it belongs to `tenant_id`, and `None` otherwise.
+///
+/// [`crate::traits::UserRepository::find_by_email`] takes a `tenant_id` and its contract says
+/// to scope by it — but the repository is the host's and a trait can only ask. A single-tenant
+/// host writing `find_by_email(email)` that ignores its second argument is the shape nobody
+/// notices, and under one every distinct `tenantId` in a request body resolves the same account
+/// while deriving a *different* HMAC-keyed identifier. That turns the brute-force lockout and
+/// the resend cooldown — both keyed on `hmac(tenant:email)` — into per-value budgets an
+/// attacker refills by rotating a field they control, so the five-attempt ceiling and the
+/// sixty-second cooldown never engage.
+///
+/// Collapsing a cross-tenant answer to `None` puts those callers on the path they already have
+/// for "no such account": the same generic error, the same sentinel-KDF timing, the same silent
+/// `Ok`. Nothing new is disclosed, and the account in tenant A stops being reachable through a
+/// request naming tenant B whatever the repository returns.
+pub(crate) fn tenant_scoped(
+    user: Option<bymax_auth_types::AuthUser>,
+    tenant_id: &str,
+) -> Option<bymax_auth_types::AuthUser> {
+    user.filter(|candidate| candidate.tenant_id == tenant_id)
+}
+
 /// Shared fixtures for the flow integration tests: a valid base config, a crypto-parameter
 /// helper that tracks the compiled hasher, a password-hashing helper, a user seeder, and an
 /// engine harness that exposes the in-memory repository and stores alongside the engine.

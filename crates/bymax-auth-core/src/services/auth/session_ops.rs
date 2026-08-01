@@ -216,14 +216,36 @@ impl AuthEngine {
         // that claim. The gates above already re-read the account — the current authority was
         // sitting right there, unused.
         //
-        // Re-signed only when it actually differs, so ordinary rotation costs nothing extra.
-        let rotated = if claims.role == user.role && claims.tenant_id == user.tenant_id {
+        // The comparison covers every claim the token carries authority in, not just the two
+        // that motivated the original fix. Naming a subset is what left `mfa_enabled` stale:
+        // `MfaSatisfied` decides on `mfa_enabled && !mfa_verified`, so a session created while
+        // the account had no second factor kept minting `mfa_enabled: false` tokens for the
+        // refresh token's whole lifetime and every MFA-gated route waved it through —
+        // reachable whenever the host enables MFA through its own admin surface rather than
+        // this library's, since only `verify_and_enable` revokes the sessions and bumps.
+        //
+        // `status` is deliberately NOT compared: `rotated_claims` stamps it empty by
+        // construction, because the session record carries no live status, so comparing it
+        // would differ on every refresh and prove nothing. It is re-validated per request
+        // against the repository/status cache instead.
+        //
+        // Re-signed only when a claim actually differs, so ordinary rotation costs nothing
+        // extra.
+        let rotated = if claims.role == user.role
+            && claims.tenant_id == user.tenant_id
+            && claims.mfa_enabled == user.mfa_enabled
+        {
             rotated
         } else {
             RotatedTokens {
                 access_token: self
                     .tokens()
-                    .reissue_access_with_authority(&claims, &user.role, &user.tenant_id)
+                    .reissue_access_with_authority(
+                        &claims,
+                        &user.role,
+                        &user.tenant_id,
+                        user.mfa_enabled,
+                    )
                     .await?,
                 refresh_token: rotated.refresh_token,
             }
@@ -448,6 +470,52 @@ mod tests {
         let Some(rotated) = rotate(&h, &auth.refresh_token).await else { return };
         let Some(claims) = claims_of(&h, &rotated.tokens.access_token).await else { return };
         assert_eq!(claims.tenant_id, "tenant-b");
+    }
+
+    #[tokio::test]
+    async fn enabling_mfa_outside_this_library_lands_on_the_very_next_rotation() {
+        // The same freeze as the two above, on the claim that gates a security control rather
+        // than an authorization one. `MfaSatisfied` refuses a token only when
+        // `mfa_enabled && !mfa_verified`, so a session created while the account had no second
+        // factor kept minting `mfa_enabled: false` for the refresh token's whole lifetime and
+        // cleared every MFA-gated route without a challenge.
+        //
+        // `verify_and_enable` revokes the sessions and bumps the epoch, which hides this — but
+        // it is not the only way an account gains MFA. The repository is the host's, and a host
+        // that flips the flag through its own admin surface leaves every existing session
+        // permanently exempt with no reconciliation path. That is what this closes.
+        let mut cfg = base_config();
+        cfg.email_verification.required = false;
+        let Some(h) = harness(cfg, None) else { return };
+        let signed_in = logged_in(&h, "mfa-out-of-band@e.com", "pw123456").await;
+        let Some((id, auth)) = signed_in else { return };
+
+        // The session was minted before MFA existed on the account.
+        let Some(before) = rotate(&h, &auth.refresh_token).await else { return };
+        let Some(exempt) = claims_of(&h, &before.tokens.access_token).await else { return };
+        assert!(!exempt.mfa_enabled, "fixture should start without MFA");
+
+        // The host enables MFA directly on its own record, never touching this library.
+        assert!(
+            h.users
+                .update_mfa(
+                    &id,
+                    bymax_auth_types::UpdateMfaData {
+                        mfa_enabled: true,
+                        mfa_secret: Some("encrypted-secret".to_owned()),
+                        mfa_recovery_codes: None,
+                    },
+                )
+                .await
+                .is_ok()
+        );
+
+        let Some(rotated) = rotate(&h, &before.tokens.refresh_token).await else { return };
+        let Some(after) = claims_of(&h, &rotated.tokens.access_token).await else { return };
+        assert!(
+            after.mfa_enabled,
+            "the rotated token still claims the account has no second factor"
+        );
     }
 
     #[tokio::test]
