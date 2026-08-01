@@ -198,17 +198,40 @@ impl AuthEngine {
     ///
     /// # Errors
     ///
-    /// Returns [`AuthError::Internal`] when no WS-ticket store is wired, or a store
+    /// Returns [`AuthError::Internal`] when no WS-ticket store is wired or when the account
+    /// read fails, [`AuthError::TokenInvalid`] when the token names an account that no longer
+    /// exists, the status-specific error for a blocked account (the snapshot is read from the
+    /// account, so its standing is checked here rather than trusted from the token), or a store
     /// [`AuthError`] on a persistence failure.
     pub async fn issue_ws_ticket(&self, claims: &DashboardClaims) -> Result<String, AuthError> {
         let store = self
             .ws_ticket_store()
             .ok_or_else(|| crate::services::internal_error("ws-ticket store not configured"))?;
+
+        // The snapshot is read from the ACCOUNT, not from the token.
+        //
+        // A ticket authorizes a socket for that socket's whole lifetime — there is no
+        // per-request gate behind it — so the snapshot is the last chance to describe the
+        // account correctly. Copying `claims.status` did not: `rotated_claims` stamps that
+        // claim empty by construction, so every ticket minted from a rotated token carried no
+        // status at all and the socket ran with a blank authorization field for as long as it
+        // stayed open. Re-reading also supplies the status gate this path never had — a banned
+        // account holding a live access token could mint a ticket, and nothing downstream
+        // would notice — and gives the socket the role and tenant the account holds now rather
+        // than the ones its login did.
+        let user = self
+            .user_repository()
+            .find_by_id(&claims.sub, None)
+            .await
+            .map_err(crate::services::auth::map_repository_error)?
+            .ok_or(AuthError::TokenInvalid)?;
+        self.assert_user_not_blocked(&user.status)?;
+
         let snapshot = WsTicketSnapshot {
-            sub: claims.sub.clone(),
-            tenant_id: Some(claims.tenant_id.clone()),
-            role: claims.role.clone(),
-            status: claims.status.clone(),
+            sub: user.id,
+            tenant_id: Some(user.tenant_id),
+            role: user.role,
+            status: user.status,
             mfa_enabled: claims.mfa_enabled,
             mfa_verified: claims.mfa_verified,
         };
@@ -228,6 +251,16 @@ impl AuthEngine {
         let store = self
             .ws_ticket_store()
             .ok_or_else(|| crate::services::internal_error("ws-ticket store not configured"))?;
+        // Shape-check before hashing, the same guard `reissue_tokens` and `logout` apply to a
+        // refresh token and `take_state` applies to an OAuth `state`. The ticket arrives in a
+        // `?ticket=` query parameter on a route the consumer mounts itself, so it inherits
+        // neither the body-size limit nor any rate-limit entry: without this the store hashes
+        // whatever the request line carried, which is SHA-256 work proportional to an
+        // attacker-chosen length on an unauthenticated path. A value outside the shape could
+        // never match a stored ticket anyway.
+        if !is_refresh_token_shape(ticket) {
+            return Err(AuthError::TokenInvalid);
+        }
         let snapshot = store.redeem(ticket).await?.ok_or(AuthError::TokenInvalid)?;
         let now = now_unix();
         Ok(DashboardClaims {
@@ -736,6 +769,17 @@ mod tests {
         }
     }
 
+    /// Seed the account `sample_claims` describes and return claims naming it, so the
+    /// account-backed snapshot has something to read.
+    async fn seeded_claims(h: &crate::services::auth::test_support::Harness) -> DashboardClaims {
+        use crate::services::auth::test_support::SeedUser;
+        let id = h.seed(SeedUser::active("ws@example.com", "pw123456")).await;
+        DashboardClaims {
+            sub: id,
+            ..sample_claims()
+        }
+    }
+
     /// With a WS-ticket store wired, `issue_ws_ticket` mints an opaque ticket and
     /// `redeem_ws_ticket` reconstructs the same identity snapshot once; a second redemption of
     /// the consumed ticket, and a bogus ticket, both refuse with `token_invalid`.
@@ -743,14 +787,20 @@ mod tests {
     async fn ws_ticket_mints_and_redeems_once_then_refuses_replay() {
         let Some(h) = harness(base_config(), None) else { return };
         assert!(h.engine.ws_ticket_store().is_some());
-        let claims = sample_claims();
+        // The snapshot is read from the ACCOUNT now, not from the token, so the account has to
+        // exist — a ticket authorizes a socket for its whole lifetime with no gate behind it,
+        // and the claim it used to copy is stamped empty by rotation.
+        let claims = seeded_claims(&h).await;
 
         let minted = h.engine.issue_ws_ticket(&claims).await;
         assert!(minted.is_ok());
         let Ok(ticket) = minted else { return };
 
         let redeemed = h.engine.redeem_ws_ticket(&ticket).await;
-        assert!(matches!(redeemed, Ok(c) if c.sub == "u" && c.role == "USER"));
+        assert!(
+            matches!(&redeemed, Ok(c) if c.sub == claims.sub && c.role == "USER"),
+            "{redeemed:?}"
+        );
 
         // The single-use ticket is consumed: a replay and a never-minted ticket both refuse.
         assert!(matches!(
@@ -758,7 +808,7 @@ mod tests {
             Err(AuthError::TokenInvalid)
         ));
         assert!(matches!(
-            h.engine.redeem_ws_ticket("never-minted").await,
+            h.engine.redeem_ws_ticket(&"a1".repeat(32)).await,
             Err(AuthError::TokenInvalid)
         ));
     }
@@ -786,16 +836,59 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn a_malformed_ws_ticket_is_refused_before_it_is_hashed() {
+        // The ticket arrives in a `?ticket=` query parameter on a route the consumer mounts
+        // itself, so it inherits neither the body-size limit nor any rate-limit entry. Without
+        // a shape check the store hashes whatever the request line carried — SHA-256 work
+        // proportional to an attacker-chosen length, on an unauthenticated path. Every sibling
+        // entry point (`reissue_tokens`, `logout`, `take_state`) guards the same way, and this
+        // was the one that skipped it. A value outside the shape could never match a stored
+        // ticket, so refusing costs nothing.
+        let Some(h) = harness(base_config(), None) else { return };
+
+        for bogus in [
+            "x".repeat(1_000_000), // the amplification case
+            "SHOUTING".repeat(8),  // right length, wrong alphabet
+            "abc".to_owned(),      // too short
+            String::new(),         // empty
+        ] {
+            assert!(
+                matches!(
+                    h.engine.redeem_ws_ticket(&bogus).await,
+                    Err(AuthError::TokenInvalid)
+                ),
+                "a malformed ticket must be refused before it is hashed"
+            );
+        }
+    }
+
     /// Both ticket surfaces propagate a backend failure from a present store as-is — the
     /// store-error arms, separate from the not-found (`Ok(None)`) and absent-store arms.
     #[tokio::test]
     async fn ws_ticket_surfaces_propagate_a_store_backend_failure() {
         use crate::config::Environment;
         use crate::testing::{InMemoryStores, InMemoryUserRepository};
+        use crate::traits::UserRepository as _;
         use std::sync::Arc;
 
         let users = Arc::new(InMemoryUserRepository::new());
         let stores = Arc::new(InMemoryStores::new());
+        // The account has to exist for the mint to reach the store at all: the snapshot is
+        // read from the repository now, so a missing account refuses before the backend is
+        // ever consulted and this test would prove nothing about the store-error arm.
+        let seeded = users
+            .create(bymax_auth_types::CreateUserData {
+                email: "ws-fail@example.com".to_owned(),
+                name: "U".to_owned(),
+                password_hash: None,
+                role: Some("USER".to_owned()),
+                status: Some("ACTIVE".to_owned()),
+                tenant_id: "t1".to_owned(),
+                email_verified: Some(true),
+            })
+            .await;
+        let Ok(seeded) = seeded else { return };
         let built = AuthEngine::builder()
             .config(base_config())
             .environment(Environment::Test)
@@ -807,12 +900,16 @@ mod tests {
             .build();
         assert!(built.is_ok());
         let Ok(engine) = built else { return };
+        let claims = DashboardClaims {
+            sub: seeded.id,
+            ..sample_claims()
+        };
         assert!(matches!(
-            engine.issue_ws_ticket(&sample_claims()).await,
+            engine.issue_ws_ticket(&claims).await,
             Err(AuthError::Internal(_))
         ));
         assert!(matches!(
-            engine.redeem_ws_ticket("any-ticket").await,
+            engine.redeem_ws_ticket(&"a1".repeat(32)).await,
             Err(AuthError::Internal(_))
         ));
     }
@@ -848,7 +945,7 @@ mod tests {
             Err(AuthError::Internal(_))
         ));
         assert!(matches!(
-            engine.redeem_ws_ticket("any-ticket").await,
+            engine.redeem_ws_ticket(&"a1".repeat(32)).await,
             Err(AuthError::Internal(_))
         ));
     }

@@ -68,6 +68,14 @@ impl AuthEngine {
             return Err(AuthError::InvalidCredentials);
         };
 
+        // A suspended or banned account may not move its own recovery credential. The address
+        // is where every reset link and verification code goes, so changing it is at least as
+        // privileged as minting an invitation — which this library already refuses a blocked
+        // caller. nest-auth gates the matching route with `UserStatusGuard`; this plane had no
+        // equivalent, so the operator's kill switch bought nothing here against an attacker
+        // still holding an unexpired access token and the password.
+        self.assert_user_not_blocked(&user.status)?;
+
         if !self
             .passwords()
             .verify(current_password, &phc)
@@ -135,6 +143,13 @@ impl AuthEngine {
             .ok_or(AuthError::EmailChangeTokenInvalid)?;
 
         assert_still_bound(&context, &user)?;
+        // The account's standing is re-read here too, and for the same reason the address is:
+        // the request and the confirmation are separated by the whole TTL. A token minted
+        // before a suspension would otherwise still move the recovery address of an account
+        // that has since been suspended or banned — and the recovery address is what a
+        // password reset is sent to, so it is the one field a blocked account must not be able
+        // to change.
+        self.assert_user_not_blocked(&user.status)?;
         // Re-checked here and not only at request time: the two are separated by the whole TTL,
         // and whoever registers the address in between would otherwise lose it to this change.
         self.assert_address_is_free(&user, &context.new_email)
@@ -421,6 +436,31 @@ mod tests {
             .request_email_change(&user.id, "new@example.com", "anything")
             .await;
         assert!(matches!(refused, Err(AuthError::InvalidCredentials)));
+    }
+
+    #[tokio::test]
+    async fn a_blocked_account_cannot_move_its_address() {
+        // The address is where every reset link and verification code goes, so moving it is at
+        // least as privileged as minting an invitation — which this library already refuses a
+        // blocked caller. This path had no status gate at all, so an operator who suspended a
+        // compromised account bought nothing against an attacker still holding an unexpired
+        // access token and the password: they could redirect the account's recovery credential
+        // to an address of their own. nest-auth gates the matching route with `UserStatusGuard`.
+        let Some(h) = setup() else { return };
+        let id = h
+            .seed(SeedUser::active("blocked@example.com", "right"))
+            .await;
+        assert!(h.users.update_status(&id, "SUSPENDED").await.is_ok());
+
+        let refused = h
+            .engine
+            .request_email_change(&id, "attacker@example.com", "right")
+            .await;
+
+        assert!(
+            matches!(refused, Err(AuthError::AccountSuspended)),
+            "a suspended account must not move its address: {refused:?}"
+        );
     }
 
     #[tokio::test]
@@ -800,6 +840,46 @@ mod tests {
         assert_eq!(
             stored_email(&h, &id).await.as_deref(),
             Some("old@example.com")
+        );
+    }
+    /// A suspension landing between the request and the confirmation stops the change.
+    ///
+    /// The two are separated by the whole token TTL, so a link minted while the account was in
+    /// good standing is still in a mailbox when the suspension happens. The address it moves is
+    /// the one a password reset is sent to — the single field a blocked account most needs to
+    /// be unable to change, since changing it is how a suspension gets undone from outside.
+    #[tokio::test]
+    async fn a_confirmation_is_refused_once_the_account_is_blocked() {
+        let Some(h) = setup() else { return };
+        let id = h
+            .seed(SeedUser::active("blocked@example.com", "right"))
+            .await;
+
+        let token = "3".repeat(64);
+        let context = EmailChangeContext {
+            user_id: id.clone(),
+            new_email: "attacker@example.com".to_owned(),
+            tenant_id: "t1".to_owned(),
+            password_fingerprint: String::new(),
+        };
+        assert!(
+            h.stores
+                .put_email_change(&token, &context, 3600)
+                .await
+                .is_ok()
+        );
+
+        // The account is suspended while the link sits in a mailbox.
+        assert!(h.users.update_status(&id, "SUSPENDED").await.is_ok());
+
+        let confirmed = h.engine.confirm_email_change(&token).await;
+        assert!(
+            matches!(confirmed, Err(AuthError::AccountSuspended)),
+            "a blocked account must be refused with its status error: {confirmed:?}"
+        );
+        assert_eq!(
+            stored_email(&h, &id).await.as_deref(),
+            Some("blocked@example.com")
         );
     }
 }
