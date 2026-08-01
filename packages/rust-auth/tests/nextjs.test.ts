@@ -138,17 +138,52 @@ describe("verifyJwtToken — real WASM HS256 parity (server == edge)", () => {
   });
 });
 
-describe("verifyJwtToken — decode-only fallback is non-authoritative", () => {
-  it("decodes a forged token without a secret even though authoritative verification rejects it", async () => {
+describe("verifyJwtToken — a missing secret fails closed", () => {
+  // This used to fall back to a decode-only read that reported `isValid: true` for any
+  // well-formed token, including a forged one. The two branches were indistinguishable at
+  // runtime, so a consumer writing `if (d.isValid && d.payload.role === 'ADMIN')` — the
+  // natural reading of a function called `verifyJwtToken` — admitted an attacker-minted token
+  // with an arbitrary `sub`/`role`/`tenantId` the moment the secret went missing. An unset
+  // environment variable was enough to arrange that. `decodeJwtToken` is the explicit,
+  // correctly-named entry point for a non-authoritative read; this one refuses instead.
+  it.each([
+    ["null", null],
+    ["undefined", undefined],
+    ["the empty string", ""],
+  ])("refuses every token when the secret is %s", async (_label, secret) => {
+    const genuine = dashboardToken();
+    const result = await verifyJwtToken(genuine, secret);
+
+    expect(result.isValid).toBe(false);
+    expect(result.signatureVerified).toBe(false);
+    // No claims escape either — a caller cannot read a role off a refused result.
+    expect(result.payload).toBeUndefined();
+  });
+
+  it("refuses a forged token whether or not the secret is supplied", async () => {
     const forged = tamperSignature(dashboardToken());
 
-    // Authoritative verification (with the secret) rejects the forged signature.
     expect((await verifyJwtToken(forged, SECRET)).isValid).toBe(false);
+    expect((await verifyJwtToken(forged, null)).isValid).toBe(false);
+    expect((await verifyJwtToken(forged, SECRET)).signatureVerified).toBe(false);
+  });
 
-    // Decode-only (no secret) returns the claims but never checks the signature.
-    const decoded = await verifyJwtToken(forged, null);
+  // `signatureVerified` is the flag an authorisation decision reads, and only a real HS256
+  // verification against a non-empty secret sets it.
+  it("marks only a genuine authoritative verification as signatureVerified", async () => {
+    const verified = await verifyJwtToken(dashboardToken(), SECRET);
+    expect(verified.isValid).toBe(true);
+    expect(verified.signatureVerified).toBe(true);
+  });
+
+  // `decodeJwtToken` still reads a token without checking anything — that is its contract —
+  // so it must never claim a verified signature.
+  it("never marks a decodeJwtToken result as signatureVerified", async () => {
+    const decoded = await decodeJwtToken(dashboardToken());
     expect(decoded.isValid).toBe(true);
+    expect(decoded.signatureVerified).toBe(false);
     expect(getUserId(decoded)).toBe("u_1");
+    expect((await decodeJwtToken("not-a-token")).signatureVerified).toBe(false);
   });
 });
 
@@ -467,5 +502,79 @@ describe("isBackgroundRequest — signal coverage", () => {
     // with no signal at all is a top-level navigation that still deserves a redirect.
     expect(isBackgroundRequest(backgroundRequest({ "Next-Router-State-Tree": "" }))).toBe(false);
     expect(isBackgroundRequest(backgroundRequest({}))).toBe(false);
+  });
+});
+
+describe("createAuthProxy — redirects stay on the request's own origin", () => {
+  // Next feeds the `Location` this middleware sets straight into `new NextURL(location, ...)`,
+  // passing options and no base. A relative `Location` — legal per RFC 7231 §7.1.2, and what
+  // this proxy used to emit — has nothing to resolve against there and throws `ERR_INVALID_URL`
+  // before the response is sent, turning every unauthenticated request into a 500. `new URL`
+  // with no base is that same parse, so this asserts the constraint Next actually imposes.
+  it("emits a Location that parses with no base, as Next's adapter parses it", async () => {
+    const { proxy } = createAuthProxy({ accessTokenSecret: SECRET });
+    const request = new NextRequest("https://app.example/dashboard");
+
+    const response = await proxy(request);
+    const location = response.headers.get("location") ?? "";
+
+    expect(() => new URL(location)).not.toThrow();
+    expect(new URL(location).origin).toBe("https://app.example");
+  });
+
+  // The origin comes from `request.nextUrl.origin`, which Next derives from the `Host` header,
+  // so a forged host does reach the header. It does not reach the browser: Next compares the
+  // redirect's host against the request's and, when they match — which they always do here,
+  // both being this same request — rewrites `Location` down to a path. What Next leaves alone
+  // is a redirect to a DIFFERENT origin, so naming only our own is the invariant that matters.
+  it("names the requested origin and never a third-party one", async () => {
+    const { proxy } = createAuthProxy({ accessTokenSecret: SECRET });
+    const request = new NextRequest("https://attacker.example/dashboard");
+
+    const response = await proxy(request);
+    const location = response.headers.get("location") ?? "";
+
+    expect(new URL(location).origin).toBe("https://attacker.example");
+  });
+
+  // A configured `loginPath` that is not a path is refused rather than salvaged. Resolving
+  // `//attacker.example/login` against our own origin and keeping only `pathname` would also
+  // stay same-origin — but it does so by substituting `/login` for the destination the caller
+  // asked for, with nothing anywhere reporting that the input was rejected. The reduction
+  // states the invariant where the header is written, matching nest-auth's `redirectToPath`.
+  it.each([
+    ["a protocol-relative reference", "//attacker.example/login"],
+    ["its backslash spelling", "/\\attacker.example"],
+    ["an absolute URL", "https://attacker.example/login"],
+    ["a bare relative reference", "attacker.example/login"],
+    ["a carriage return", "/login\r\nSet-Cookie: session=stolen"],
+  ])("falls back to the app root for %s", async (_case, loginPath) => {
+    const { proxy } = createAuthProxy({ accessTokenSecret: SECRET, loginPath });
+    const request = new NextRequest("https://app.example/dashboard");
+
+    const response = await proxy(request);
+    const location = response.headers.get("location") ?? "";
+
+    expect(new URL(location).origin).toBe("https://app.example");
+    expect(new URL(location).pathname).toBe("/");
+    expect(location).not.toContain("attacker.example");
+    expect(location).not.toContain("Set-Cookie");
+  });
+
+  // The fragment never reaches the server, so nothing here acts on it — but it is where the
+  // browser lands. A deployment using hash routing, or a `loginPath` carrying an anchor, would
+  // otherwise be redirected somewhere else with nothing reporting the change.
+  it("keeps a fragment on the configured path", async () => {
+    const { proxy } = createAuthProxy({
+      accessTokenSecret: SECRET,
+      loginPath: "/signin#form",
+    });
+    const request = new NextRequest("https://app.example/dashboard");
+
+    const response = await proxy(request);
+    const location = response.headers.get("location") ?? "";
+
+    expect(new URL(location).pathname).toBe("/signin");
+    expect(new URL(location).hash).toBe("#form");
   });
 });

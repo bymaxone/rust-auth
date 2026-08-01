@@ -178,12 +178,17 @@ export function createAuthProxy(config: AuthProxyConfig): AuthProxyInstance {
             issuer: resolved.expectedIssuer,
             audience: resolved.expectedAudience,
           })
-        : { isValid: false };
+        : { isValid: false, signatureVerified: false };
 
-    // Reject an invalid, expired, or non-access token. Admitting a non-access type — notably
-    // the MFA-temp `mfa_challenge` issued before the second factor clears — would let a
-    // half-authenticated session reach a protected route, so only an access token is admitted.
-    if (!decoded.isValid || isTokenExpired(decoded) || !isAccessToken(decoded)) {
+    // Reject an unverified, expired, or non-access token. `signatureVerified` rather than
+    // `isValid`: the latter is `true` for any structurally decodable, unexpired token, which is
+    // exactly what `decodeJwtToken` produces without checking a signature at all. Reading it
+    // here would therefore admit a forged token to anyone who could route one through a
+    // decode. `verifyJwtToken` itself now fails closed on a missing secret, so this is the
+    // second lock on the same door — and the one that survives a refactor of the first. Admitting a non-access type —
+    // notably the MFA-temp `mfa_challenge` issued before the second factor clears — would let
+    // a half-authenticated session reach a protected route, so only an access token is admitted.
+    if (!decoded.signatureVerified || isTokenExpired(decoded) || !isAccessToken(decoded)) {
       return handleUnauthenticated(request, resolved);
     }
 
@@ -232,13 +237,83 @@ function handleUnauthenticated(
   // A live `has_session` signal plus headroom under the bounce ceiling means a silent refresh
   // is worth attempting before falling back to the sign-in redirect.
   if (hasSession && bounces < config.maxRedirects) {
-    const url = new URL(config.silentRefreshPath, request.nextUrl.origin);
-    url.searchParams.set("redirectTo", request.nextUrl.pathname + request.nextUrl.search);
-    url.searchParams.set(REDIRECT_COUNT_PARAM, String(bounces + 1));
-    return NextResponse.redirect(url);
+    return redirectToPath(request, config.silentRefreshPath, {
+      redirectTo: request.nextUrl.pathname + request.nextUrl.search,
+      [REDIRECT_COUNT_PARAM]: String(bounces + 1),
+    });
   }
 
   return redirectToLogin(request, config.loginPath, "expired");
+}
+
+/** Control characters that must never reach a header value: a raw CR or LF splits the response. */
+// eslint-disable-next-line no-control-regex -- matching control characters is the point
+const FORBIDDEN_IN_PATH = /[\u0000-\u001f\u007f]/;
+
+/**
+ * Reduce `path` to something that can only ever name a location on this origin.
+ *
+ * Not naming an origin is necessary and not sufficient. `//attacker.example` carries no
+ * scheme, satisfies `startsWith('/')`, and is read by every browser as an authority — as is
+ * its backslash spelling, which browsers normalise to the same thing. Resolving it against the
+ * placeholder base and taking `pathname` does keep the redirect same-origin, but it does so by
+ * silently substituting a different destination for the caller's: `//attacker.example/login`
+ * becomes `/login`, and nothing anywhere reports that the input was rejected.
+ *
+ * A refused path falls back to `/` rather than throwing. This runs in middleware, where a throw
+ * is a 500 on a request that was otherwise fine.
+ *
+ * @param path - The intended same-origin path.
+ * @returns `path` when it can only name this origin, `/` otherwise.
+ */
+function toSameOriginPath(path: string): string {
+  if (!path.startsWith("/")) return "/";
+  if (path.startsWith("//") || path.startsWith("/\\")) return "/";
+  if (FORBIDDEN_IN_PATH.test(path)) return "/";
+  return path;
+}
+
+/**
+ * Build a redirect to a same-origin `path`.
+ *
+ * The `Location` must be absolute, and that is not a stylistic choice: Next parses the header
+ * this middleware sets by handing it straight to `new NextURL(location, ...)`, with no base to
+ * resolve against. A relative `Location` — which RFC 7231 §7.1.2 permits and every browser
+ * resolves — throws `ERR_INVALID_URL` there, before the response is ever sent. Every
+ * unauthenticated request would 500.
+ *
+ * Naming `request.nextUrl.origin`, which Next derives from the `Host` header, does not hand a
+ * self-hosted deployment answering on any host an open redirect. Next compares the two hosts
+ * immediately afterwards and, when they match, rewrites `Location` to a path — and they always
+ * match here, because both sides come from this same request. A forged `Host` therefore never
+ * reaches the browser: it is stripped, and the browser resolves the path against the URL it
+ * actually requested.
+ *
+ * What that normalisation does NOT cover is a `Location` on a genuinely different origin, which
+ * Next leaves absolute and the browser follows. That is the case {@link toSameOriginPath} exists
+ * to refuse, and it is why the path is validated here rather than trusted.
+ *
+ * @param request - The request being answered; its origin is the only one this may name.
+ * @param path - A same-origin path beginning with `/`, optionally carrying a query string.
+ * @param params - Query parameters to set on it.
+ * @returns A 307 response whose `Location` is absolute and on this request's own origin.
+ */
+function redirectToPath(
+  request: NextRequest,
+  path: string,
+  params: Record<string, string> = {},
+): NextResponse {
+  const url = new URL(toSameOriginPath(path), request.nextUrl.origin);
+  for (const [key, value] of Object.entries(params)) {
+    url.searchParams.set(key, value);
+  }
+  return new NextResponse(null, {
+    status: 307,
+    // The fragment rides along. It never reaches the server, so nothing here can act on it —
+    // but it is where the browser lands, and a deployment using hash routing, or a configured
+    // `loginPath` carrying an anchor, would otherwise be redirected somewhere else silently.
+    headers: { location: url.toString() },
+  });
 }
 
 /**
@@ -265,17 +340,14 @@ function redirectToLogin(
   loginPath: string,
   reason: string,
 ): NextResponse {
-  const url = new URL(loginPath, request.nextUrl.origin);
-  url.searchParams.set("reason", reason);
-  url.searchParams.set(
-    "redirectTo",
-    resolveSafeDestination(
+  return redirectToPath(request, loginPath, {
+    reason,
+    redirectTo: resolveSafeDestination(
       request.nextUrl.pathname + request.nextUrl.search,
       request.nextUrl.origin,
       loginPath,
     ),
-  );
-  return NextResponse.redirect(url);
+  });
 }
 
 /**
