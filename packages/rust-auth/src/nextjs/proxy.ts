@@ -329,17 +329,41 @@ function backgroundUnauthorized(): NextResponse {
 }
 
 /**
+ * The same refusal for a background request that authenticated but is not allowed through —
+ * a blocked account, or a role the route does not admit.
+ *
+ * 403 rather than 401 because the caller's credential is genuine and re-authenticating will
+ * not help: a 401 invites the client to refresh a token that is already valid, and for a
+ * blocked account that loop never terminates.
+ */
+function backgroundForbidden(): NextResponse {
+  return new NextResponse(null, {
+    status: 403,
+    headers: { "Cache-Control": NO_STORE_CACHE_CONTROL },
+  });
+}
+
+/**
  * Build a sign-in redirect carrying a `reason` and a same-origin `redirectTo`; never a token.
  *
- * This applies to background requests too. A blocked account or a failed RBAC check must
- * refuse the request whatever headers it carries — short-circuiting to `NextResponse.next()`
- * for a background request would let a forged `RSC: 1` header render the guarded page.
+ * A background request is refused with a status instead. Both halves of that matter. It must
+ * not be let through — the headers marking a request as background are client-forgeable, so
+ * `NextResponse.next()` would make a forged `RSC: 1` render the guarded page — and it must not
+ * be REDIRECTED either, which is the half this used to get wrong: the client router caches the
+ * response against the route it asked for, so answering a prefetch of `/admin` with a redirect
+ * to `/login` puts a login document in the cache for `/admin`, and the next genuine navigation
+ * there renders it. `handleUnauthenticated` already refused for exactly that reason; a request
+ * that authenticated and then failed the status or RBAC gate poisons the same cache the same
+ * way.
  */
 function redirectToLogin(
   request: NextRequest,
   loginPath: string,
   reason: string,
 ): NextResponse {
+  if (isBackgroundRequest(request)) {
+    return backgroundForbidden();
+  }
   return redirectToPath(request, loginPath, {
     reason,
     redirectTo: resolveSafeDestination(

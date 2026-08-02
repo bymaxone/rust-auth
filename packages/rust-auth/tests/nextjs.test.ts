@@ -385,10 +385,11 @@ describe("createAuthProxy — forged background headers are not an auth bypass (
    * Whether a response is the bare, uncacheable 401 the proxy owes an unauthenticated
    * background request — the nest-auth parity shape (`no-store, no-cache`).
    */
+  /** The `Cache-Control` every background refusal carries, so none of them can be stored. */
+  const NO_STORE = "no-store, no-cache";
+
   function isBackgroundRefusal(response: NextResponse): boolean {
-    return (
-      response.status === 401 && response.headers.get("cache-control") === "no-store, no-cache"
-    );
+    return response.status === 401 && response.headers.get("cache-control") === NO_STORE;
   }
 
   it("answers a forged `RSC: 1` probe on a protected route with 401, never a pass-through", async () => {
@@ -451,9 +452,18 @@ describe("createAuthProxy — forged background headers are not an auth bypass (
       backgroundRequest({ RSC: "1" }, dashboardToken({ status: "SUSPENDED" })),
     );
 
-    expect(response.status).not.toBe(200);
     expect(admittedUserId(response)).toBeNull();
-    expect(response.headers.get("location")).toContain("reason=blocked");
+    // Refused with a status, not a redirect. The refusal is the point and always was; what
+    // changed is its shape. The client router caches the response against the route it asked
+    // for, so answering a prefetch of `/dashboard` with a redirect to `/login` leaves a login
+    // document cached for `/dashboard` — the poisoning this module refuses background requests
+    // to avoid, arriving through the branch that had not been given the same treatment.
+    expect(response.headers.get("location")).toBeNull();
+    // 403, not 401: the credential is genuine and re-authenticating cannot help. A 401 asks
+    // the client to refresh a token that is already valid, and for a blocked account that loop
+    // has no end.
+    expect(response.status).toBe(403);
+    expect(response.headers.get("cache-control")).toBe(NO_STORE);
   });
 
   it("refuses an RBAC-forbidden role on a background request instead of passing it through", async () => {
@@ -466,9 +476,11 @@ describe("createAuthProxy — forged background headers are not an auth bypass (
     });
     const response = await proxy(backgroundRequest({ RSC: "1" }, dashboardToken()));
 
-    expect(response.status).not.toBe(200);
     expect(admittedUserId(response)).toBeNull();
-    expect(response.headers.get("location")).toContain("reason=forbidden");
+    // Same shape as the blocked case: a status, never a redirect into the router cache.
+    expect(response.headers.get("location")).toBeNull();
+    expect(response.status).toBe(403);
+    expect(response.headers.get("cache-control")).toBe(NO_STORE);
   });
 
   it("still admits a genuine background request that carries a valid session", async () => {
