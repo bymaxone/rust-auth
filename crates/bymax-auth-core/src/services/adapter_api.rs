@@ -137,7 +137,28 @@ impl AuthEngine {
         user_id: &str,
         session_hash: &str,
     ) -> Result<(), AuthError> {
-        self.sessions().revoke_session(user_id, session_hash).await
+        self.sessions()
+            .revoke_session(user_id, session_hash)
+            .await?;
+        // …and cut the access tokens with it. Deleting the refresh session stops rotation but
+        // says nothing about the stateless access token that session's holder is already
+        // carrying, and that token keeps working until it expires — up to whatever
+        // `access_expires_in` allows. Someone who opens their session list and revokes a device
+        // does so because they think it is compromised: a decision about *right now*.
+        //
+        // The epoch is the only lever available, since a session hash does not name the `jti`
+        // of any access token. The collateral is that the account's other devices lose their
+        // access tokens too and silently re-mint one on their next rotation — they still hold
+        // live refresh sessions. The revoked device cannot, which is the point.
+        //
+        // Bumped AFTER the revoke: a failure above then leaves the epoch untouched and the
+        // operation visibly incomplete, rather than signing every device out for a session that
+        // is in fact still alive. `logout` keeps the plain revoke — it blacklists its own `jti`
+        // by name, and ending one session must not reach every other device's access token.
+        self.session_store()
+            .bump_epoch(crate::traits::SessionKind::Dashboard, user_id)
+            .await?;
+        Ok(())
     }
 
     /// Revoke every session for the caller except the current one (`DELETE /auth/sessions/all`).
@@ -159,8 +180,14 @@ impl AuthEngine {
                     .revoke_all_except_current(user_id, &current)
                     .await
             }
-            // No identifiable current session: do not revoke the live request's own session.
-            None => Ok(()),
+            // Without the caller's refresh token there is no way to tell which session to
+            // keep. Refuse rather than answer success having done nothing: a user who clicks
+            // "sign out my other devices" because they believe one is compromised is making a
+            // statement about right now, and a silent 204 tells them it was acted on when it
+            // was not. `SessionNotFound` rather than `RefreshTokenInvalid` — this is a missing
+            // credential, not a rejected one, and the distinction keeps a client from
+            // pointlessly attempting a refresh. `nest-auth` has always answered this way.
+            None => Err(AuthError::SessionNotFound),
         }
     }
 
@@ -171,17 +198,40 @@ impl AuthEngine {
     ///
     /// # Errors
     ///
-    /// Returns [`AuthError::Internal`] when no WS-ticket store is wired, or a store
+    /// Returns [`AuthError::Internal`] when no WS-ticket store is wired or when the account
+    /// read fails, [`AuthError::TokenInvalid`] when the token names an account that no longer
+    /// exists, the status-specific error for a blocked account (the snapshot is read from the
+    /// account, so its standing is checked here rather than trusted from the token), or a store
     /// [`AuthError`] on a persistence failure.
     pub async fn issue_ws_ticket(&self, claims: &DashboardClaims) -> Result<String, AuthError> {
         let store = self
             .ws_ticket_store()
             .ok_or_else(|| crate::services::internal_error("ws-ticket store not configured"))?;
+
+        // The snapshot is read from the ACCOUNT, not from the token.
+        //
+        // A ticket authorizes a socket for that socket's whole lifetime — there is no
+        // per-request gate behind it — so the snapshot is the last chance to describe the
+        // account correctly. Copying `claims.status` did not: `rotated_claims` stamps that
+        // claim empty by construction, so every ticket minted from a rotated token carried no
+        // status at all and the socket ran with a blank authorization field for as long as it
+        // stayed open. Re-reading also supplies the status gate this path never had — a banned
+        // account holding a live access token could mint a ticket, and nothing downstream
+        // would notice — and gives the socket the role and tenant the account holds now rather
+        // than the ones its login did.
+        let user = self
+            .user_repository()
+            .find_by_id(&claims.sub, None)
+            .await
+            .map_err(crate::services::auth::map_repository_error)?
+            .ok_or(AuthError::TokenInvalid)?;
+        self.assert_user_not_blocked(&user.status)?;
+
         let snapshot = WsTicketSnapshot {
-            sub: claims.sub.clone(),
-            tenant_id: Some(claims.tenant_id.clone()),
-            role: claims.role.clone(),
-            status: claims.status.clone(),
+            sub: user.id,
+            tenant_id: Some(user.tenant_id),
+            role: user.role,
+            status: user.status,
             mfa_enabled: claims.mfa_enabled,
             mfa_verified: claims.mfa_verified,
         };
@@ -201,9 +251,21 @@ impl AuthEngine {
         let store = self
             .ws_ticket_store()
             .ok_or_else(|| crate::services::internal_error("ws-ticket store not configured"))?;
+        // Shape-check before hashing, the same guard `reissue_tokens` and `logout` apply to a
+        // refresh token and `take_state` applies to an OAuth `state`. The ticket arrives in a
+        // `?ticket=` query parameter on a route the consumer mounts itself, so it inherits
+        // neither the body-size limit nor any rate-limit entry: without this the store hashes
+        // whatever the request line carried, which is SHA-256 work proportional to an
+        // attacker-chosen length on an unauthenticated path. A value outside the shape could
+        // never match a stored ticket anyway.
+        if !is_refresh_token_shape(ticket) {
+            return Err(AuthError::TokenInvalid);
+        }
         let snapshot = store.redeem(ticket).await?.ok_or(AuthError::TokenInvalid)?;
         let now = now_unix();
         Ok(DashboardClaims {
+            iss: None,
+            aud: None,
             sub: snapshot.sub,
             jti: new_uuid_v4(),
             tenant_id: snapshot.tenant_id.unwrap_or_default(),
@@ -228,16 +290,18 @@ impl AuthEngine {
     /// # Errors
     ///
     /// Returns [`AuthError::MfaNotEnabled`] when MFA is not configured, [`AuthError::MfaAlreadyEnabled`]
-    /// when already enrolled, or a store/crypto [`AuthError`].
+    /// when already enrolled, [`AuthError::InvalidCredentials`] when the account has a password
+    /// and `password` is absent or wrong, or a store/crypto [`AuthError`].
     #[cfg(feature = "mfa")]
     pub async fn mfa_setup(
         &self,
         user_id: &str,
         ctx: MfaContext,
+        password: Option<&str>,
     ) -> Result<MfaSetupResult, AuthError> {
         self.mfa()
             .ok_or(AuthError::MfaNotEnabled)?
-            .setup(user_id, ctx)
+            .setup(user_id, ctx, password)
             .await
     }
 
@@ -437,11 +501,10 @@ impl AuthEngine {
         &self,
         access_token: &str,
         raw_refresh: &str,
-        admin_id: &str,
-    ) -> Result<(), AuthError> {
+    ) -> Result<String, AuthError> {
         self.platform_auth()
             .ok_or(AuthError::PlatformAuthRequired)?
-            .logout(access_token, raw_refresh, admin_id)
+            .logout(access_token, raw_refresh)
             .await
     }
 
@@ -527,6 +590,23 @@ mod tests {
         {
             // No platform hierarchy is configured in the base fixture, so nothing is satisfied.
             assert!(!h.engine.platform_role_satisfies("SUPER_ADMIN", "SUPPORT"));
+
+            // And with one configured, the engine must actually consult it: asserted from
+            // both sides, because a delegator that always answered `false` would satisfy the
+            // negative case above on its own.
+            let mut with_hierarchy = base_config();
+            with_hierarchy.roles.platform_hierarchy = Some(std::collections::HashMap::from([
+                ("SUPER_ADMIN".to_owned(), vec!["SUPPORT".to_owned()]),
+                ("SUPPORT".to_owned(), Vec::new()),
+            ]));
+            let consulted = harness(with_hierarchy, None).map(|p| {
+                (
+                    p.engine.platform_role_satisfies("SUPER_ADMIN", "SUPPORT"),
+                    p.engine.platform_role_satisfies("SUPPORT", "SUPPORT"),
+                    p.engine.platform_role_satisfies("SUPPORT", "SUPER_ADMIN"),
+                )
+            });
+            assert_eq!(consulted, Some((true, true, false)));
         }
         let digest = h.engine.hashed_identifier_for("t1", "a@e.com");
         assert_eq!(digest.len(), 64);
@@ -543,6 +623,7 @@ mod tests {
     async fn verify_status_and_session_delegations_run_against_a_real_session() {
         use crate::context::RequestContext;
         use crate::services::auth::RegisterInput;
+        use crate::services::auth::test_support::SeedUser;
         use bymax_auth_types::LoginResult;
 
         let mut cfg = base_config();
@@ -580,6 +661,25 @@ mod tests {
             Err(AuthError::TokenInvalid)
         ));
 
+        // The gate has to refuse as well as admit: an unknown subject and a banned account
+        // are both rejected. Asserting only the admitting side would pass against a gate
+        // that admitted everything — which is the whole failure this guards.
+        assert!(matches!(
+            h.engine.assert_user_active("no-such-user").await,
+            Err(AuthError::TokenInvalid)
+        ));
+        let banned = h
+            .seed(SeedUser {
+                email: "banned@e.com".to_owned(),
+                status: "BANNED".to_owned(),
+                ..SeedUser::active("banned@e.com", "correct horse battery staple")
+            })
+            .await;
+        assert!(matches!(
+            h.engine.assert_user_active(&banned).await,
+            Err(AuthError::AccountBanned)
+        ));
+
         // The session lists, with the current session flagged via the presented refresh token.
         let sessions = h
             .engine
@@ -588,12 +688,38 @@ mod tests {
         assert!(matches!(&sessions, Ok(list) if list.iter().any(|s| s.is_current)));
 
         // Revoking all-but-current with the real refresh token takes the current-hash branch.
+        // A second login gives it something to revoke: with one session alive the call is a
+        // no-op either way, and the assertion would hold against a delegator that did nothing.
+        let second = h
+            .engine
+            .login(
+                crate::services::auth::LoginInput {
+                    email: "adapter@e.com".to_owned(),
+                    password: "correct horse battery staple".to_owned(),
+                    tenant_id: "t1".to_owned(),
+                },
+                &ctx,
+            )
+            .await;
+        assert!(matches!(&second, Ok(LoginResult::Success(_))));
+        let Ok(LoginResult::Success(second)) = second else { return };
+        assert!(matches!(
+            h.engine.list_user_sessions(&sub, None).await,
+            Ok(list) if list.len() == 2
+        ));
         assert!(
             h.engine
-                .revoke_other_user_sessions(&sub, Some(&auth.refresh_token))
+                .revoke_other_user_sessions(&sub, Some(&second.refresh_token))
                 .await
                 .is_ok()
         );
+        // Only the session that presented the token survives.
+        assert!(matches!(
+            h.engine
+                .list_user_sessions(&sub, Some(&second.refresh_token))
+                .await,
+            Ok(list) if list.len() == 1 && list[0].is_current
+        ));
 
         // A malformed/unowned session hash revokes as not-found (no IDOR oracle).
         assert!(matches!(
@@ -602,23 +728,33 @@ mod tests {
         ));
     }
 
-    /// `revoke_other_user_sessions` with no identifiable current session (absent/malformed
-    /// refresh token) is a no-op `Ok(())` — it never wipes the live request's own session.
+    /// `revoke_other_user_sessions` with no identifiable current session (absent or malformed
+    /// refresh token) REFUSES. It used to answer `Ok(())` having revoked nothing, which reads
+    /// as success to a caller who just clicked "sign out my other devices" because they
+    /// believe one is compromised — and in a bearer-mode deployment, where no cookie is ever
+    /// planted, that was every call. `SessionNotFound` rather than `RefreshTokenInvalid`: the
+    /// credential is missing, not rejected, and the distinction keeps a client from
+    /// pointlessly attempting a refresh.
     #[tokio::test]
-    async fn revoke_other_user_sessions_without_a_current_hash_is_a_noop() {
+    async fn revoke_other_user_sessions_without_a_current_hash_refuses() {
         let Some(h) = harness(base_config(), None) else { return };
-        assert!(h.engine.revoke_other_user_sessions("u", None).await.is_ok());
-        assert!(
+        assert!(matches!(
+            h.engine.revoke_other_user_sessions("u", None).await,
+            Err(AuthError::SessionNotFound)
+        ));
+        assert!(matches!(
             h.engine
                 .revoke_other_user_sessions("u", Some("not-shaped"))
-                .await
-                .is_ok()
-        );
+                .await,
+            Err(AuthError::SessionNotFound)
+        ));
     }
 
     /// A sample set of dashboard claims for the ticket surfaces.
     fn sample_claims() -> DashboardClaims {
         DashboardClaims {
+            iss: None,
+            aud: None,
             sub: "u".to_owned(),
             jti: new_uuid_v4(),
             tenant_id: "t1".to_owned(),
@@ -633,6 +769,145 @@ mod tests {
         }
     }
 
+    /// Seed the account `sample_claims` describes and return claims naming it, so the
+    /// account-backed snapshot has something to read.
+    async fn seeded_claims(h: &crate::services::auth::test_support::Harness) -> DashboardClaims {
+        use crate::services::auth::test_support::SeedUser;
+        let id = h.seed(SeedUser::active("ws@example.com", "pw123456")).await;
+        DashboardClaims {
+            sub: id,
+            ..sample_claims()
+        }
+    }
+
+    /// A revoke whose epoch bump fails reports the failure rather than claiming success.
+    ///
+    /// The bump runs after the session is already gone, so the operation is half-done by the
+    /// time it can fail: the device cannot rotate any more, but every access token the account
+    /// holds — the revoked device's included — is still verifying. Swallowing that would tell a
+    /// user who just signed out a device they believe is compromised that it worked.
+    #[tokio::test]
+    async fn a_device_revoke_propagates_a_failed_epoch_bump() {
+        use crate::services::auth::test_support::SeedUser;
+        use crate::traits::SessionStore as _;
+        let Some(h) = harness(base_config(), None) else { return };
+        let id = h
+            .seed(SeedUser::active("bump-fails@example.com", "pw123456"))
+            .await;
+
+        // A real, owned session: the revoke is ownership-checked and would refuse a bogus hash
+        // long before it reached the bump.
+        let session_hash = "b1".repeat(32);
+        let record = crate::traits::SessionRecord {
+            user_id: id.clone(),
+            tenant_id: Some("t1".to_owned()),
+            role: "USER".to_owned(),
+            device: "d".to_owned(),
+            ip: "1.2.3.4".to_owned(),
+            created_at: time::OffsetDateTime::UNIX_EPOCH,
+            mfa_enabled: false,
+            family_id: String::new(),
+            family_created_at: None,
+        };
+        assert!(
+            h.stores
+                .create_session(
+                    crate::traits::SessionKind::Dashboard,
+                    &session_hash,
+                    &record,
+                    3600
+                )
+                .await
+                .is_ok()
+        );
+
+        h.stores.fail_next_epoch_bumps(1);
+
+        let revoked = h.engine.revoke_user_session(&id, &session_hash).await;
+        assert!(
+            revoked.is_err(),
+            "a revoke whose epoch bump failed must not report success: {revoked:?}"
+        );
+    }
+
+    /// A suspended account mints no ticket either, whatever its token still says.
+    ///
+    /// The status claim is stamped empty by rotation, so the token cannot be trusted to carry
+    /// it — and the account may have been suspended after the token was issued in any case. A
+    /// socket authorized for its whole lifetime is exactly what a suspension has to stop, and
+    /// this is the last point that can stop it.
+    #[tokio::test]
+    async fn ws_ticket_refuses_a_suspended_account() {
+        use crate::services::auth::test_support::SeedUser;
+        let Some(h) = harness(base_config(), None) else { return };
+        let id = h
+            .seed(SeedUser {
+                status: "SUSPENDED".to_owned(),
+                ..SeedUser::active("ws-suspended@example.com", "pw123456")
+            })
+            .await;
+        let claims = DashboardClaims {
+            sub: id,
+            ..sample_claims()
+        };
+
+        let minted = h.engine.issue_ws_ticket(&claims).await;
+        assert!(
+            minted.is_err(),
+            "a suspended account must not be handed a socket ticket: {minted:?}"
+        );
+    }
+
+    /// A repository failure is reported, never read as "no such account".
+    ///
+    /// The two answers lead opposite ways: a missing account is a refusal the caller deserves,
+    /// while a store that could not answer is a question nobody asked yet. Collapsing the
+    /// second into the first would let a datastore outage read as a wave of deleted users —
+    /// and, on the paths that gate on status, as a wave of accounts in good standing.
+    #[tokio::test]
+    async fn a_repository_failure_on_the_status_gate_is_propagated() {
+        let Some(h) = harness(base_config(), None) else { return };
+        let claims = seeded_claims(&h).await;
+
+        h.users.fail_next_reads(1);
+        let gated = h.engine.assert_user_active(&claims.sub).await;
+        let matched = matches!(gated, Err(AuthError::Internal(_)));
+        assert!(
+            matched,
+            "a store that could not answer must not read as a missing account: {gated:?}"
+        );
+
+        // The same on the ticket path, which re-reads the account for its snapshot.
+        h.users.fail_next_reads(1);
+        let issued = h.engine.issue_ws_ticket(&claims).await;
+        let matched = matches!(issued, Err(AuthError::Internal(_)));
+        assert!(
+            matched,
+            "a ticket must not be minted off a read that failed: {issued:?}"
+        );
+    }
+
+    /// A token whose account no longer exists mints no ticket.
+    ///
+    /// The snapshot is read from the account, so a deleted user has nothing to describe — and
+    /// the alternative is worse than an error: a ticket authorizes a socket for its whole
+    /// lifetime with no gate behind it, so one minted from a token alone would outlive the
+    /// account it names. The refusal is the same opaque `token_invalid` a forged ticket gets,
+    /// which keeps deletion from being observable through this endpoint.
+    #[tokio::test]
+    async fn ws_ticket_refuses_a_token_whose_account_is_gone() {
+        let Some(h) = harness(base_config(), None) else { return };
+        let claims = seeded_claims(&h).await;
+
+        // The account is deleted between the token being issued and the ticket being asked for.
+        assert!(h.users.remove(&claims.sub));
+
+        assert!(matches!(
+            h.engine.issue_ws_ticket(&claims).await,
+            Err(AuthError::TokenInvalid)
+        ));
+    }
+
     /// With a WS-ticket store wired, `issue_ws_ticket` mints an opaque ticket and
     /// `redeem_ws_ticket` reconstructs the same identity snapshot once; a second redemption of
     /// the consumed ticket, and a bogus ticket, both refuse with `token_invalid`.
@@ -640,14 +915,18 @@ mod tests {
     async fn ws_ticket_mints_and_redeems_once_then_refuses_replay() {
         let Some(h) = harness(base_config(), None) else { return };
         assert!(h.engine.ws_ticket_store().is_some());
-        let claims = sample_claims();
+        // The snapshot is read from the ACCOUNT now, not from the token, so the account has to
+        // exist — a ticket authorizes a socket for its whole lifetime with no gate behind it,
+        // and the claim it used to copy is stamped empty by rotation.
+        let claims = seeded_claims(&h).await;
 
         let minted = h.engine.issue_ws_ticket(&claims).await;
         assert!(minted.is_ok());
         let Ok(ticket) = minted else { return };
 
         let redeemed = h.engine.redeem_ws_ticket(&ticket).await;
-        assert!(matches!(redeemed, Ok(c) if c.sub == "u" && c.role == "USER"));
+        let matched = matches!(&redeemed, Ok(c) if c.sub == claims.sub && c.role == "USER");
+        assert!(matched, "{redeemed:?}");
 
         // The single-use ticket is consumed: a replay and a never-minted ticket both refuse.
         assert!(matches!(
@@ -655,7 +934,7 @@ mod tests {
             Err(AuthError::TokenInvalid)
         ));
         assert!(matches!(
-            h.engine.redeem_ws_ticket("never-minted").await,
+            h.engine.redeem_ws_ticket(&"a1".repeat(32)).await,
             Err(AuthError::TokenInvalid)
         ));
     }
@@ -683,16 +962,58 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn a_malformed_ws_ticket_is_refused_before_it_is_hashed() {
+        // The ticket arrives in a `?ticket=` query parameter on a route the consumer mounts
+        // itself, so it inherits neither the body-size limit nor any rate-limit entry. Without
+        // a shape check the store hashes whatever the request line carried — SHA-256 work
+        // proportional to an attacker-chosen length, on an unauthenticated path. Every sibling
+        // entry point (`reissue_tokens`, `logout`, `take_state`) guards the same way, and this
+        // was the one that skipped it. A value outside the shape could never match a stored
+        // ticket, so refusing costs nothing.
+        let Some(h) = harness(base_config(), None) else { return };
+
+        for bogus in [
+            "x".repeat(1_000_000), // the amplification case
+            "SHOUTING".repeat(8),  // right length, wrong alphabet
+            "abc".to_owned(),      // too short
+            String::new(),         // empty
+        ] {
+            let refused = h.engine.redeem_ws_ticket(&bogus).await;
+            let matched = matches!(refused, Err(AuthError::TokenInvalid));
+            assert!(
+                matched,
+                "a malformed ticket must be refused before it is hashed"
+            );
+        }
+    }
+
     /// Both ticket surfaces propagate a backend failure from a present store as-is — the
     /// store-error arms, separate from the not-found (`Ok(None)`) and absent-store arms.
     #[tokio::test]
     async fn ws_ticket_surfaces_propagate_a_store_backend_failure() {
         use crate::config::Environment;
         use crate::testing::{InMemoryStores, InMemoryUserRepository};
+        use crate::traits::UserRepository as _;
         use std::sync::Arc;
 
         let users = Arc::new(InMemoryUserRepository::new());
         let stores = Arc::new(InMemoryStores::new());
+        // The account has to exist for the mint to reach the store at all: the snapshot is
+        // read from the repository now, so a missing account refuses before the backend is
+        // ever consulted and this test would prove nothing about the store-error arm.
+        let seeded = users
+            .create(bymax_auth_types::CreateUserData {
+                email: "ws-fail@example.com".to_owned(),
+                name: "U".to_owned(),
+                password_hash: None,
+                role: Some("USER".to_owned()),
+                status: Some("ACTIVE".to_owned()),
+                tenant_id: "t1".to_owned(),
+                email_verified: Some(true),
+            })
+            .await;
+        let Ok(seeded) = seeded else { return };
         let built = AuthEngine::builder()
             .config(base_config())
             .environment(Environment::Test)
@@ -704,12 +1025,16 @@ mod tests {
             .build();
         assert!(built.is_ok());
         let Ok(engine) = built else { return };
+        let claims = DashboardClaims {
+            sub: seeded.id,
+            ..sample_claims()
+        };
         assert!(matches!(
-            engine.issue_ws_ticket(&sample_claims()).await,
+            engine.issue_ws_ticket(&claims).await,
             Err(AuthError::Internal(_))
         ));
         assert!(matches!(
-            engine.redeem_ws_ticket("any-ticket").await,
+            engine.redeem_ws_ticket(&"a1".repeat(32)).await,
             Err(AuthError::Internal(_))
         ));
     }
@@ -745,7 +1070,7 @@ mod tests {
             Err(AuthError::Internal(_))
         ));
         assert!(matches!(
-            engine.redeem_ws_ticket("any-ticket").await,
+            engine.redeem_ws_ticket(&"a1".repeat(32)).await,
             Err(AuthError::Internal(_))
         ));
     }
@@ -759,7 +1084,7 @@ mod tests {
         use bymax_auth_types::MfaContext;
         let Some(h) = harness(base_config(), None) else { return };
         assert!(matches!(
-            h.engine.mfa_setup("u", MfaContext::Dashboard).await,
+            h.engine.mfa_setup("u", MfaContext::Dashboard, None).await,
             Err(AuthError::MfaNotEnabled)
         ));
         assert!(matches!(
@@ -805,7 +1130,7 @@ mod tests {
             Err(AuthError::PlatformAuthRequired)
         ));
         assert!(matches!(
-            h.engine.platform_logout("t", "r", "a").await,
+            h.engine.platform_logout("t", "r").await,
             Err(AuthError::PlatformAuthRequired)
         ));
         assert!(matches!(
@@ -871,7 +1196,7 @@ mod tests {
         }
         fn platform() -> PlatformAuthResult {
             PlatformAuthResult {
-                user: safe_admin(),
+                admin: safe_admin(),
                 access_token: "a".to_owned(),
                 refresh_token: "r".to_owned(),
             }

@@ -14,7 +14,7 @@ use tower_cookies::Cookies;
 use crate::delivery::TokenDelivery;
 use crate::dto::{OAuthCallbackQuery, OAuthInitiateQuery};
 use crate::response::error_response;
-use crate::routes::RequestMeta;
+use crate::routes::{CookieDomains, RequestMeta};
 use crate::state::{AuthState, AxumAuthConfig, ClientIpSource};
 use crate::validation::ValidatedQuery;
 
@@ -37,6 +37,19 @@ fn found(url: &str) -> Response {
     }
 }
 
+/// The response for an OAuth refusal: the configured error redirect when there is one, the
+/// `auth.oauth_failed` envelope otherwise. One helper so the provider's own error response and
+/// a failed exchange cannot drift apart in status, code, or destination.
+fn oauth_failure(state: &AuthState) -> Response {
+    match state
+        .engine()
+        .oauth_error_redirect_url(OAUTH_ERROR_SHORT_CODE)
+    {
+        Some(url) => found(&url),
+        None => error_response(&bymax_auth_types::AuthError::OauthFailed),
+    }
+}
+
 /// Assemble the `oauth` group under the `oauth` segment with per-route rate limits. Axum 0.8
 /// brace path syntax: `/{provider}` and `/{provider}/callback`.
 pub(crate) fn routes(config: &AxumAuthConfig, ip_source: ClientIpSource) -> Router<AuthState> {
@@ -55,6 +68,7 @@ pub(crate) fn routes(config: &AxumAuthConfig, ip_source: ClientIpSource) -> Rout
 /// `GET /auth/oauth/{provider}` (302). Public. Redirects to the provider authorize URL.
 async fn initiate(
     State(state): State<AuthState>,
+    cookies: Cookies,
     Path(provider): Path<String>,
     ValidatedQuery(query): ValidatedQuery<OAuthInitiateQuery>,
 ) -> Response {
@@ -63,7 +77,12 @@ async fn initiate(
         .oauth_initiate(&provider, &query.tenant_id)
         .await
     {
-        Ok(authorize_url) => found(&authorize_url),
+        Ok(redirect) => {
+            // Bind the flow to this browser: the callback refuses any request that does not
+            // send this cookie back (RFC 6749 §10.12). See `set_oauth_state_cookie`.
+            TokenDelivery::new(state.config()).set_oauth_state_cookie(&cookies, &redirect.state);
+            found(&redirect.authorize_url)
+        }
         Err(error) => error_response(&error),
     }
 }
@@ -73,17 +92,46 @@ async fn initiate(
 async fn callback(
     State(state): State<AuthState>,
     cookies: Cookies,
+    CookieDomains(domains): CookieDomains,
     Path(provider): Path<String>,
     RequestMeta(ctx): RequestMeta,
     ValidatedQuery(query): ValidatedQuery<OAuthCallbackQuery>,
 ) -> Response {
+    // The state cookie is single-use: it is spent the moment the callback is handled, whatever
+    // the outcome. Read before clearing, and cleared before the outcome is known, so a failed
+    // attempt cannot leave a stale cookie for the next flow to trip over.
+    let state_cookie = cookies
+        .get(bymax_auth_types::constants::OAUTH_STATE_COOKIE_NAME)
+        .map(|cookie| cookie.value().to_owned());
+    TokenDelivery::new(state.config()).clear_oauth_state_cookie(&cookies);
+
+    // The provider refused before it ever minted a code (RFC 6749 §4.1.2.1) — most often
+    // because the user clicked "Cancel" at the consent screen. That is a normal outcome of a
+    // normal flow, and it used to answer a validation error for the missing `code` instead of
+    // the configured error redirect. The provider's value is logged and never echoed back: it
+    // would otherwise be provider-chosen text landing in a URL the browser follows, and the
+    // caller learns nothing from it that `oauth_failed` does not already say.
+    //
+    // A callback carrying neither `code` nor `error` takes the same path: `code` is optional
+    // on the query only so the error response can validate, never so a codeless exchange can
+    // proceed.
+    let Some(code) = query.code.as_deref().filter(|_| query.error.is_none()) else {
+        let provider_error = query.error.as_deref().unwrap_or("<absent>");
+        tracing::warn!(
+            provider = %provider,
+            error = provider_error,
+            "oauth callback carried a provider error or no code"
+        );
+        return oauth_failure(&state);
+    };
+
     let outcome = state
         .engine()
-        .oauth_callback(&provider, &query.code, &query.state, &ctx)
+        .oauth_callback(&provider, code, &query.state, state_cookie.as_deref(), &ctx)
         .await;
     match outcome {
         Ok(OAuthOutcome::Authenticated(result)) => {
-            let delivery = TokenDelivery::new(state.config());
+            let delivery = TokenDelivery::with_domains(state.config(), &domains);
             match state.engine().oauth_success_redirect_url() {
                 // Browser flow: plant the auth cookies into the jar (the cookie-manager layer
                 // emits them on the redirect response), then 302 to the configured URL.
@@ -107,12 +155,8 @@ async fn callback(
         Err(error) => {
             // Only an `OauthFailed`-family error is converted to an error redirect; any other
             // (e.g. an internal transport failure) propagates so monitoring sees it.
-            if matches!(error, bymax_auth_types::AuthError::OauthFailed)
-                && let Some(url) = state
-                    .engine()
-                    .oauth_error_redirect_url(OAUTH_ERROR_SHORT_CODE)
-            {
-                return found(&url);
+            if matches!(error, bymax_auth_types::AuthError::OauthFailed) {
+                return oauth_failure(&state);
             }
             error_response(&error)
         }

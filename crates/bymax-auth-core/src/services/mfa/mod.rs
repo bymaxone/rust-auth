@@ -43,6 +43,30 @@ const MFA_SETUP_TTL_SECONDS: u64 = 600;
 /// the anti-replay marker TTL from the acceptance window.
 const TOTP_STEP_SECONDS: u64 = 30;
 /// The number of random bytes behind one recovery code (96 bits of entropy, §7.5).
+/// TTL of the single-use claim on a recovery code (5 minutes).
+///
+/// The claim serializes concurrent challenges presenting the same code; it is not the durable
+/// record of consumption, which is the repository write that removes the code from the account.
+/// Outliving that write by much would turn a failed write into a code the user can no longer
+/// use but can still see in their list — so the marker is deliberately far shorter than the
+/// code's real lifetime, and long enough that no plausible request pair slips past it.
+pub(super) const RECOVERY_CODE_CLAIM_TTL_SECONDS: u64 = 300;
+
+/// TTL of the per-account MFA transition lock, in seconds.
+///
+/// Short on purpose: the lock is released on every exit path, so this bound only matters when
+/// a process dies mid-transition, and an account whose MFA is briefly unchangeable is a worse
+/// outcome than a window this narrow. Long enough to cover a repository read plus a write on
+/// any plausible backend. Pinned by `conformance/wire-contract.json`.
+const MFA_TRANSITION_LOCK_TTL_SECONDS: u64 = 10;
+
+/// Random bytes behind the per-call MFA transition lock token (128 bits).
+///
+/// The token only has to be unguessable within one lock's ten-second life, and it never leaves
+/// the store — but it decides whether a release removes this call's lock or a successor's, so
+/// it comes from the CSPRNG like every other nonce here rather than from a counter or a clock.
+const MFA_TRANSITION_LOCK_TOKEN_BYTES: usize = 16;
+
 const RECOVERY_CODE_BYTES: usize = 12;
 /// The number of random bytes behind a TOTP secret (160 bits, RFC 6238 / §7.5.1).
 const TOTP_SECRET_BYTES: usize = 20;
@@ -114,7 +138,14 @@ struct MfaUserView {
     email: String,
     mfa_enabled: bool,
     mfa_secret: Option<String>,
+    /// The stored recovery-code digests. Read so a serialized transition can splice against
+    /// the list as it stands inside the lock rather than a copy taken before it.
+    mfa_recovery_codes: Option<Vec<String>>,
     dashboard_user: Option<SafeAuthUser>,
+    /// The account's stored password hash, or `None` for an account provisioned purely
+    /// through OAuth. Enrolment re-authenticates against it; an account without one has
+    /// nothing to re-prove here.
+    password_hash: Option<String>,
 }
 
 /// The MFA lifecycle service. Constructed by the engine builder only when `config.mfa` is
@@ -128,17 +159,27 @@ pub struct MfaService {
     sessions: Arc<SessionService>,
     session_store: Arc<dyn SessionStore>,
     brute_force: Arc<BruteForceService>,
+    passwords: Arc<crate::services::password::PasswordService>,
     email: Arc<dyn EmailProvider>,
     hooks: Arc<dyn AuthHooks>,
     /// AES-256-GCM key for the TOTP secret and the plaintext-codes record.
     encryption_key: Zeroizing<[u8; 32]>,
+    /// Keys retired by a rotation, tried only after [`Self::encryption_key`] and only to
+    /// decrypt. Empty unless a rotation is in progress; nothing is ever encrypted under one.
+    previous_encryption_keys: Vec<Zeroizing<[u8; 32]>>,
     /// The engine's identifier-hashing key, keying every `mfa_setup:`/`tu:` suffix, the
     /// `challenge:`/`disable:` brute-force ids, and the recovery-code digests.
-    identifier_key: Zeroizing<[u8; 32]>,
+    identifier_key: Zeroizing<[u8; 64]>,
+    /// Identifier keys retired by a secret rotation, used only to READ recovery-code digests
+    /// written before it. Empty unless a rotation is in progress.
+    previous_identifier_keys: Vec<Zeroizing<[u8; 64]>>,
     issuer: String,
     totp_window: u8,
     recovery_code_count: u8,
     sessions_enabled: bool,
+    /// Statuses that deny authentication, re-checked when a challenge is completed: the temp
+    /// token outlives the login-time gate by its whole TTL.
+    blocked_statuses: Vec<String>,
 }
 
 /// The collaborators an [`MfaService`] is assembled from. Grouped into a struct so the
@@ -152,14 +193,20 @@ pub(crate) struct MfaServiceDeps {
     pub(crate) sessions: Arc<SessionService>,
     pub(crate) session_store: Arc<dyn SessionStore>,
     pub(crate) brute_force: Arc<BruteForceService>,
+    pub(crate) passwords: Arc<crate::services::password::PasswordService>,
     pub(crate) email: Arc<dyn EmailProvider>,
     pub(crate) hooks: Arc<dyn AuthHooks>,
     pub(crate) encryption_key: Zeroizing<[u8; 32]>,
-    pub(crate) identifier_key: Zeroizing<[u8; 32]>,
+    /// MFA keys retired by a rotation (see the field of the same name).
+    pub(crate) previous_encryption_keys: Vec<Zeroizing<[u8; 32]>>,
+    pub(crate) identifier_key: Zeroizing<[u8; 64]>,
+    /// Identifier keys retired by a secret rotation (see the field of the same name).
+    pub(crate) previous_identifier_keys: Vec<Zeroizing<[u8; 64]>>,
     pub(crate) issuer: String,
     pub(crate) totp_window: u8,
     pub(crate) recovery_code_count: u8,
     pub(crate) sessions_enabled: bool,
+    pub(crate) blocked_statuses: Vec<String>,
 }
 
 impl MfaService {
@@ -173,33 +220,72 @@ impl MfaService {
             sessions: deps.sessions,
             session_store: deps.session_store,
             brute_force: deps.brute_force,
+            passwords: deps.passwords,
             email: deps.email,
             hooks: deps.hooks,
             encryption_key: deps.encryption_key,
+            previous_encryption_keys: deps.previous_encryption_keys,
             identifier_key: deps.identifier_key,
+            previous_identifier_keys: deps.previous_identifier_keys,
             issuer: deps.issuer,
             totp_window: deps.totp_window,
             recovery_code_count: deps.recovery_code_count,
             sessions_enabled: deps.sessions_enabled,
+            blocked_statuses: deps.blocked_statuses,
         }
     }
 
-    /// The `mfa_setup:` key suffix for a user (`hmac_sha256(user_id)`, hex). The low-entropy
-    /// id is keyed, never used raw, so no PII reaches a store key.
-    fn setup_key(&self, user_id: &str) -> String {
+    /// Require the caller to re-prove the account password before a factor is changed.
+    ///
+    /// An account provisioned purely through OAuth has no local password, so there is nothing
+    /// to re-authenticate against and refusing it would make MFA unreachable for those users
+    /// — their credential belongs to the provider, which this engine cannot re-verify inline.
+    ///
+    /// # Errors
+    ///
+    /// [`AuthError::InvalidCredentials`] when the account has a password and the submitted one
+    /// is absent or wrong. Deliberately the same error a failed login returns: an attacker
+    /// holding a stolen token learns nothing from it beyond what they already knew.
+    async fn assert_reauthenticated(
+        &self,
+        password_hash: Option<&str>,
+        password: Option<&str>,
+    ) -> Result<(), AuthError> {
+        let Some(hash) = password_hash else {
+            return Ok(());
+        };
+        // A missing password still pays the KDF, so "no password sent" and "wrong password"
+        // take the same time — otherwise the response separates them for free.
+        let outcome = self.passwords.verify(password.unwrap_or(""), hash).await?;
+        if outcome.matched {
+            Ok(())
+        } else {
+            Err(AuthError::InvalidCredentials)
+        }
+    }
+
+    /// The `mfa_setup:` key suffix for a user (`hmac_sha256("{plane}:{user_id}")`, hex). The
+    /// low-entropy id is keyed, never used raw, so no PII reaches a store key.
+    ///
+    /// The plane is part of the input because the two identity domains draw their ids from
+    /// different consumer repositories, which may hand out the same string. Keyed on the id
+    /// alone, an admin's pending enrolment and a user's shared one record: the second party to
+    /// call `verify_and_enable` would adopt the first party's secret and recovery digests.
+    fn setup_key(&self, ctx: MfaContext, user_id: &str) -> String {
         to_hex(&hmac_sha256(
             self.identifier_key.as_ref(),
-            user_id.as_bytes(),
+            format!("{}:{user_id}", ctx.as_str()).as_bytes(),
         ))
     }
 
-    /// The `tu:` anti-replay key suffix for a `(user_id, code)` pair
-    /// (`hmac_sha256("{user_id}:{code}")`, hex) — ties the marker to both the user and the
-    /// code value, with no plaintext code in the store and no cross-user replay.
-    fn replay_id(&self, user_id: &str, code: &str) -> String {
+    /// The `tu:` anti-replay key suffix for a `(plane, user_id, code)` triple
+    /// (`hmac_sha256("{plane}:{user_id}:{code}")`, hex) — ties the marker to the plane, the
+    /// user and the code value, with no plaintext code in the store and no cross-user or
+    /// cross-plane replay.
+    fn replay_id(&self, ctx: MfaContext, user_id: &str, code: &str) -> String {
         to_hex(&hmac_sha256(
             self.identifier_key.as_ref(),
-            format!("{user_id}:{code}").as_bytes(),
+            format!("{}:{user_id}:{code}", ctx.as_str()).as_bytes(),
         ))
     }
 
@@ -212,32 +298,57 @@ impl MfaService {
     /// while the code it protects is still accepted (which would re-open the replay window). A
     /// fixed literal would be wrong whenever `totp_window` is configured larger.
     fn anti_replay_ttl_seconds(&self) -> u64 {
-        let window = u64::from(self.totp_window);
+        // The CONFIGURED window is not necessarily the one in force: `totp::verify` clamps it
+        // to `MAX_VERIFY_WINDOW` so an oversized value cannot become a CPU-amplification
+        // vector. Sizing the marker from the unclamped value would over-reserve (harmless, but
+        // it makes the marker's TTL and the acceptance span disagree, which is exactly the
+        // kind of drift that later reads as a bug). Startup validation refuses anything above
+        // the clamp, so this only matters for a caller reaching the service directly.
+        let window = u64::from(
+            self.totp_window
+                .min(bymax_auth_crypto::totp::MAX_VERIFY_WINDOW),
+        );
         (2 * window + 1) * TOTP_STEP_SECONDS
     }
 
     /// The hashed brute-force identifier for the pre-auth challenge counter
-    /// (`hmac_sha256("challenge:{user_id}")`, hex), isolated from the `disable:` namespace.
-    fn challenge_bf_id(&self, user_id: &str) -> String {
+    /// (`hmac_sha256("challenge:{plane}:{user_id}")`, hex), isolated from the `disable:`
+    /// namespace and from the other identity plane — otherwise a colliding id lets either
+    /// party exhaust the other's lockout budget.
+    fn challenge_bf_id(&self, ctx: MfaContext, user_id: &str) -> String {
         to_hex(&hmac_sha256(
             self.identifier_key.as_ref(),
-            format!("challenge:{user_id}").as_bytes(),
+            format!("challenge:{}:{user_id}", ctx.as_str()).as_bytes(),
         ))
     }
 
     /// The hashed brute-force identifier for the authenticated management counter
     /// (`hmac_sha256("disable:{user_id}")`, hex), shared by `disable` and `regenerate` and
     /// isolated from the `challenge:` namespace.
-    fn disable_bf_id(&self, user_id: &str) -> String {
+    fn disable_bf_id(&self, ctx: MfaContext, user_id: &str) -> String {
         to_hex(&hmac_sha256(
             self.identifier_key.as_ref(),
-            format!("disable:{user_id}").as_bytes(),
+            format!("disable:{}:{user_id}", ctx.as_str()).as_bytes(),
         ))
     }
 
     /// The keyed HMAC-SHA-256 digest (hex) of a recovery code — the only form ever persisted.
     fn hash_recovery_code(&self, code: &str) -> String {
         to_hex(&hmac_sha256(self.identifier_key.as_ref(), code.as_bytes()))
+    }
+
+    /// Every digest a presented recovery code could legitimately match: the one under the
+    /// current identifier key, then one per key retired by a secret rotation.
+    ///
+    /// Only the first is ever written. The rest exist so a rotation does not invalidate codes
+    /// a user already holds — see [`verify_recovery_code`].
+    fn recovery_code_candidates(&self, code: &str) -> Vec<String> {
+        let mut candidates = Vec::with_capacity(1 + self.previous_identifier_keys.len());
+        candidates.push(self.hash_recovery_code(code));
+        for key in &self.previous_identifier_keys {
+            candidates.push(to_hex(&hmac_sha256(key.as_ref(), code.as_bytes())));
+        }
+        candidates
     }
 
     /// AES-256-GCM-encrypt `plaintext` under the configured MFA key.
@@ -258,7 +369,59 @@ impl MfaService {
     /// failure (wrong key, tampered ciphertext, malformed wire) so the failure mode is opaque
     /// — the caller maps `None` to the appropriate flow error with no padding/format oracle.
     fn decrypt(&self, wire: &str) -> Option<Vec<u8>> {
-        aead::decrypt(wire, &self.encryption_key).ok()
+        self.decrypt_with_rotation(wire)
+            .map(|(plaintext, _)| plaintext)
+    }
+
+    /// Decrypt under the current key, then under each retired one.
+    ///
+    /// The ciphertext records no key identifier, so without the retired keys a change of
+    /// `mfa.encryption_key` makes every stored secret undecryptable — every enrolled user's
+    /// authenticator stops matching at once, with no way back. AES-GCM authenticates, so a
+    /// wrong key fails unambiguously rather than returning garbage; trying them in order is
+    /// safe.
+    ///
+    /// Returns the plaintext and whether a RETIRED key produced it — the signal that the
+    /// record should be rewritten under the current key.
+    fn decrypt_with_rotation(&self, wire: &str) -> Option<(Vec<u8>, bool)> {
+        if let Ok(plaintext) = aead::decrypt(wire, &self.encryption_key) {
+            return Some((plaintext, false));
+        }
+        for key in &self.previous_encryption_keys {
+            if let Ok(plaintext) = aead::decrypt(wire, key) {
+                return Some((plaintext, true));
+            }
+        }
+        None
+    }
+
+    /// Decrypt a stored TOTP secret back to the raw bytes the HMAC uses as its key.
+    ///
+    /// The at-rest form is the encrypted Base32 TEXT (see [`Self::generate_setup_material`]),
+    /// so recovering the key means decrypting and then decoding. Returns `None` on every
+    /// failure — wrong key, tampered ciphertext, non-UTF-8, or invalid Base32 — so the caller
+    /// surfaces one opaque error and no decrypt/format oracle distinguishes them.
+    fn decrypt_secret(&self, wire: &str) -> Option<Vec<u8>> {
+        self.decrypt_secret_with_rotation(wire)
+            .map(|(secret, _)| secret)
+    }
+
+    /// As [`Self::decrypt_secret`], also reporting whether a key RETIRED by a rotation produced
+    /// the plaintext — the signal that the stored record should be rewritten under the current
+    /// key so the rotation drains.
+    fn decrypt_secret_with_rotation(&self, wire: &str) -> Option<(Vec<u8>, bool)> {
+        let (encoded, stale) = self.decrypt_with_rotation(wire)?;
+        let text = String::from_utf8(encoded).ok()?;
+        totp::decode_secret_base32(&text).ok().map(|s| (s, stale))
+    }
+
+    /// Re-encrypt a decrypted TOTP secret under the CURRENT key, for a record that opened under
+    /// a retired one.
+    ///
+    /// The secret goes back under the cipher in the same at-rest form it was stored in — the
+    /// Base32 text, not the raw bytes — because that is the shared contract with nest-auth.
+    fn reencrypt_secret(&self, raw_secret: &[u8]) -> Result<String, AuthError> {
+        self.encrypt(totp::encode_secret_base32(raw_secret).as_bytes())
     }
 
     /// Verify a 6-digit TOTP `code` against `secret` and, on success, atomically mark it used
@@ -272,6 +435,7 @@ impl MfaService {
     /// Returns a store [`AuthError`] only if the anti-replay marker cannot be written.
     async fn verify_totp_with_anti_replay(
         &self,
+        ctx: MfaContext,
         user_id: &str,
         secret: &[u8],
         code: &str,
@@ -283,20 +447,36 @@ impl MfaService {
         // newly created — `false` means the code was already seen, i.e. a replay.
         self.mfa_store
             .mark_totp_used(
-                &self.replay_id(user_id, code),
+                &self.replay_id(ctx, user_id, code),
                 self.anti_replay_ttl_seconds(),
             )
             .await
     }
 
-    /// Load the MFA-relevant view of the challenged account for `ctx`. A `Platform` context
-    /// with no platform repository fails fast with [`AuthError::MfaNotEnabled`] (never persist
-    /// a platform secret on a tenant row); a missing account is also `MfaNotEnabled`.
+    /// Load the MFA-relevant view of the challenged account for `ctx`, refusing one whose
+    /// account is blocked. A `Platform` context with no platform repository fails fast with
+    /// [`AuthError::MfaNotEnabled`] (never persist a platform secret on a tenant row); a
+    /// missing account is also `MfaNotEnabled`.
+    ///
+    /// The status gate lives here rather than in each caller because the four entry points
+    /// that reach this method — `setup`, `verify_and_enable`, `disable` and
+    /// `regenerate_recovery_codes` — each change or spend an authentication factor, and every
+    /// one of them must refuse a suspended or banned account. The gate used to exist only in
+    /// `challenge`, which reads the account directly, so those four had none: an operator who
+    /// suspended a compromised account bought nothing against an attacker still holding an
+    /// unexpired access token, who could turn the second factor off — or enrol their own
+    /// authenticator over it — for the token's remaining lifetime. Nothing else covers that
+    /// window, because no status change bumps the token epoch, so this per-request check is
+    /// the only defence, and the MFA routes compose no `UserStatus` extractor.
+    ///
+    /// Gating the fetch rather than the callers is deliberate: a method added later inherits
+    /// the check instead of having to remember it.
     ///
     /// # Errors
     ///
     /// Returns [`AuthError::MfaNotEnabled`] for a misconfigured platform context or a missing
-    /// account, or a repository [`AuthError::Internal`] on a backend failure.
+    /// account, the status error when the account is blocked, or a repository
+    /// [`AuthError::Internal`] on a backend failure.
     async fn fetch_user_mfa(
         &self,
         user_id: &str,
@@ -310,10 +490,13 @@ impl MfaService {
                     .await
                     .map_err(repository_error)?
                     .ok_or(AuthError::MfaNotEnabled)?;
+                crate::status_gate::assert_not_blocked(&user.status, &self.blocked_statuses)?;
                 Ok(MfaUserView {
                     email: user.email.clone(),
                     mfa_enabled: user.mfa_enabled,
                     mfa_secret: user.mfa_secret.clone(),
+                    mfa_recovery_codes: user.mfa_recovery_codes.clone(),
+                    password_hash: user.password_hash.clone(),
                     dashboard_user: Some(SafeAuthUser::from(user)),
                 })
             }
@@ -327,14 +510,116 @@ impl MfaService {
                     .await
                     .map_err(repository_error)?
                     .ok_or(AuthError::MfaNotEnabled)?;
+                crate::status_gate::assert_not_blocked(&admin.status, &self.blocked_statuses)?;
                 Ok(MfaUserView {
                     email: admin.email,
                     mfa_enabled: admin.mfa_enabled,
                     mfa_secret: admin.mfa_secret,
+                    mfa_recovery_codes: admin.mfa_recovery_codes,
+                    password_hash: Some(admin.password_hash),
                     dashboard_user: None,
                 })
             }
         }
+    }
+
+    /// The identifier of the per-account MFA transition lock: `hmac(plane:user_id)`, keyed by
+    /// the engine's identifier key so no raw id reaches a store key. Both implementations
+    /// derive it identically — the preimage is pinned by `conformance/wire-contract.json`, and
+    /// two halves of one deployment serializing against different locks would lose the
+    /// property entirely.
+    fn mfa_lock_id(&self, ctx: MfaContext, user_id: &str) -> String {
+        to_hex(&hmac_sha256(
+            self.identifier_key.as_ref(),
+            format!("{}:{user_id}", ctx.as_str()).as_bytes(),
+        ))
+    }
+
+    /// Perform one MFA state transition as a serialized read-modify-write.
+    ///
+    /// Every transition rewrites a single repository record carrying `mfa_enabled`, the
+    /// encrypted secret and the recovery-code digests **together**, and `update_mfa` replaces
+    /// all three wholesale — the repository is the consumer's and offers no compare-and-set, so
+    /// the engine cannot add one. Read-modify-write over that with no serialization is
+    /// last-write-wins, and three things fell out of it:
+    ///
+    /// - two challenges spending *different* recovery codes each wrote the full list minus
+    ///   their own code, so the loser's code came back and verified again once the `rcu:` claim
+    ///   expired. That claim is keyed on the code, so it serializes two attempts at the *same*
+    ///   code and nothing else;
+    /// - a challenge that read the list before `regenerate_recovery_codes` and spliced after it
+    ///   restored the entire old set, unspending codes the user had just rotated — typically
+    ///   because they leaked — while the ones they printed were gone;
+    /// - a challenge that spliced after `disable` completed wrote `mfa_enabled: true` back with
+    ///   the pre-disable secret, putting the account under a factor the user had removed and
+    ///   may no longer hold.
+    ///
+    /// `mutate` is handed the record as it stands **inside** the lock — never the copy the
+    /// caller read earlier — and returns the fields to write, or `None` to abandon the
+    /// transition because the record moved underneath it.
+    ///
+    /// A caller that cannot take the lock is refused with [`AuthError::MfaStateConflict`]
+    /// rather than made to wait: concurrent MFA state changes on one account are pathological,
+    /// and "try again" is the honest answer. The lock is released on every exit, so an ordinary
+    /// failure does not strand the account either.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AuthError::MfaStateConflict`] when another transition holds the lock,
+    /// [`AuthError::MfaNotEnabled`] when the account cannot be read, or a repository/store
+    /// [`AuthError`].
+    async fn transition_mfa_record<F>(
+        &self,
+        user_id: &str,
+        ctx: MfaContext,
+        mutate: F,
+    ) -> Result<bool, AuthError>
+    where
+        F: FnOnce(&MfaUserView) -> Option<(bool, Option<String>, Option<Vec<String>>)> + Send,
+    {
+        let lock_id = self.mfa_lock_id(ctx, user_id);
+        // A per-call nonce, so the release below can only remove the lock this call took. With
+        // a fixed value it could not tell them apart: the TTL is short and the transition calls
+        // into the consumer's repository twice, so an overrunning run has already lost the lock
+        // by the time it releases, and deleting it unconditionally removes the successor's —
+        // letting a third caller in beside the second.
+        let lock_token = token::generate_secure_token(MFA_TRANSITION_LOCK_TOKEN_BYTES);
+        if !self
+            .mfa_store
+            .acquire_mfa_lock(&lock_id, &lock_token, MFA_TRANSITION_LOCK_TTL_SECONDS)
+            .await?
+        {
+            return Err(AuthError::MfaStateConflict);
+        }
+        let outcome = self.transition_locked(user_id, ctx, mutate).await;
+        // Released on every exit, including the error one: a failed transition must not leave
+        // the account unchangeable for the lock's whole TTL.
+        self.mfa_store
+            .release_mfa_lock(&lock_id, &lock_token)
+            .await?;
+        outcome
+    }
+
+    /// The body of [`Self::transition_mfa_record`], split out so the lock release is a single
+    /// statement on every path rather than repeated at each `?`.
+    async fn transition_locked<F>(
+        &self,
+        user_id: &str,
+        ctx: MfaContext,
+        mutate: F,
+    ) -> Result<bool, AuthError>
+    where
+        F: FnOnce(&MfaUserView) -> Option<(bool, Option<String>, Option<Vec<String>>)> + Send,
+    {
+        // Re-read inside the lock. The caller's copy was read before the lock existed and may
+        // already be stale — reusing it would leave exactly the window this closes.
+        let current = self.fetch_user_mfa(user_id, ctx).await?;
+        let Some((enabled, secret, codes)) = mutate(&current) else {
+            return Ok(false);
+        };
+        self.persist_mfa(user_id, ctx, enabled, secret, codes)
+            .await?;
+        Ok(true)
     }
 
     /// Persist a new MFA configuration to the correct repository for `ctx`. The caller has
@@ -391,9 +676,18 @@ impl MfaService {
     ///
     /// Returns [`AuthError::AccountLocked`] when the window is tripped, or a store
     /// [`AuthError`] on failure.
-    async fn assert_not_locked(&self, bf_id: &str) -> Result<(), AuthError> {
+    async fn assert_not_locked(
+        &self,
+        flow: &str,
+        user_id: &str,
+        bf_id: &str,
+    ) -> Result<(), AuthError> {
         if self.brute_force.is_locked(bf_id).await? {
             let retry = self.brute_force.remaining_lockout_secs(bf_id).await?;
+            // The lockout itself is the security event an operator watches for: repeated hits
+            // on one account are a second-factor guessing campaign. The identifier is the
+            // caller's user id, never the hashed brute-force key, which says nothing on its own.
+            tracing::warn!(%flow, %user_id, "mfa: account locked");
             return Err(AuthError::AccountLocked {
                 retry_after_seconds: Some(retry),
             });
@@ -424,7 +718,14 @@ impl MfaService {
             .ok()
             .ok_or(internal_error("mfa codes encode"))?;
         let data = MfaSetupData {
-            encrypted_secret: self.encrypt(&raw_secret)?,
+            // The Base32 TEXT is what goes under the cipher, not the raw bytes. nest-auth
+            // encrypts `generateTotpSecret().base32` and both backends read the same
+            // `mfaSecret` column and the same `mfa_setup:` record: decrypting a nest-written
+            // secret as raw bytes would hand base32 ASCII to HMAC-SHA-1 as the key and reject
+            // every code the user's authenticator produces. Encrypting the presentation form
+            // is marginally redundant, but the published side already stores it that way and
+            // re-encrypting live MFA credentials to save 12 bytes is not a trade worth making.
+            encrypted_secret: self.encrypt(totp::encode_secret_base32(&raw_secret).as_bytes())?,
             hashed_codes,
             encrypted_plain_codes: self.encrypt(plain_json.as_bytes())?,
         };
@@ -448,7 +749,7 @@ impl MfaService {
         let data: MfaSetupData = serde_json::from_str(record_json)
             .map_err(|_| internal_error("mfa setup record decode"))?;
         let raw_secret = self
-            .decrypt(&data.encrypted_secret)
+            .decrypt_secret(&data.encrypted_secret)
             .ok_or_else(|| internal_error("mfa setup record secret decrypt"))?;
         let plain_json = self
             .decrypt(&data.encrypted_plain_codes)
@@ -493,7 +794,7 @@ impl MfaService {
 }
 
 /// The session-domain selector for an MFA context.
-fn session_kind(ctx: MfaContext) -> SessionKind {
+pub(crate) fn session_kind(ctx: MfaContext) -> SessionKind {
     match ctx {
         MfaContext::Dashboard => SessionKind::Dashboard,
         MfaContext::Platform => SessionKind::Platform,
@@ -530,14 +831,23 @@ fn generate_recovery_code() -> String {
 /// Find the index of the recovery code matching `code` among the stored keyed-HMAC digests,
 /// in constant time across the whole set (no early return on a match), so neither which code
 /// matched nor whether any matched leaks through timing. Returns the matched index, or `None`.
-fn verify_recovery_code(stored_digests: &[String], candidate_digest: &str) -> Option<usize> {
+fn verify_recovery_code(stored_digests: &[String], candidates: &[String]) -> Option<usize> {
     let mut found: Option<usize> = None;
     for (index, digest) in stored_digests.iter().enumerate() {
-        // Accumulate without short-circuiting: every element is compared. `or` keeps the FIRST
-        // match (a later duplicate digest cannot overwrite it) while still visiting every
-        // element, so the scan stays constant-time and the spliced index is unambiguous.
-        if constant_time_eq(digest.as_bytes(), candidate_digest.as_bytes()) {
-            found = found.or(Some(index));
+        // Accumulate without short-circuiting: every element is compared against every
+        // candidate. `or` keeps the FIRST match (a later duplicate digest cannot overwrite it)
+        // while still visiting every element, so the scan stays constant-time and the spliced
+        // index is unambiguous.
+        //
+        // More than one candidate means a secret rotation is in progress: the digest is keyed
+        // by an HMAC derived from the signing secret, so without the retired keys a rotation
+        // would silently invalidate every code a user printed and filed — discovered at the
+        // moment they most need it. Retired keys read only; a code that matches one is consumed
+        // and the set is regenerated under the current key.
+        for candidate in candidates {
+            if constant_time_eq(digest.as_bytes(), candidate.as_bytes()) {
+                found = found.or(Some(index));
+            }
         }
     }
     found

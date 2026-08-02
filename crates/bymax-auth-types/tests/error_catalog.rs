@@ -22,28 +22,26 @@ fn catalog() -> Vec<(AuthErrorCode, &'static str, u16)> {
         (TokenRevoked, "auth.token_revoked", 401),
         (TokenInvalid, "auth.token_invalid", 401),
         (RefreshTokenInvalid, "auth.refresh_token_invalid", 401),
-        (SessionExpired, "auth.session_expired", 401),
-        (SessionLimitReached, "auth.session_limit_reached", 409),
         (SessionNotFound, "auth.session_not_found", 404),
         (TokenMissing, "auth.token_missing", 401),
         (EmailAlreadyExists, "auth.email_already_exists", 409),
         (EmailNotVerified, "auth.email_not_verified", 403),
+        (
+            EmailChangeTokenInvalid,
+            "auth.email_change_token_invalid",
+            400,
+        ),
         (MfaRequired, "auth.mfa_required", 403),
         (MfaInvalidCode, "auth.mfa_invalid_code", 401),
         (MfaAlreadyEnabled, "auth.mfa_already_enabled", 409),
         (MfaNotEnabled, "auth.mfa_not_enabled", 400),
         (MfaSetupRequired, "auth.mfa_setup_required", 400),
         (MfaTempTokenInvalid, "auth.mfa_temp_token_invalid", 401),
-        (RecoveryCodeInvalid, "auth.recovery_code_invalid", 401),
-        (PasswordTooWeak, "auth.password_too_weak", 400),
+        (MfaStateConflict, "auth.mfa_state_conflict", 409),
+        (PasswordCompromised, "auth.password_compromised", 400),
         (
             PasswordResetTokenInvalid,
             "auth.password_reset_token_invalid",
-            400,
-        ),
-        (
-            PasswordResetTokenExpired,
-            "auth.password_reset_token_expired",
             400,
         ),
         (OtpInvalid, "auth.otp_invalid", 401),
@@ -51,6 +49,7 @@ fn catalog() -> Vec<(AuthErrorCode, &'static str, u16)> {
         (OtpMaxAttempts, "auth.otp_max_attempts", 429),
         (InsufficientRole, "auth.insufficient_role", 403),
         (Forbidden, "auth.forbidden", 403),
+        (UntrustedOrigin, "auth.untrusted_origin", 403),
         (InvalidInvitationToken, "auth.invalid_invitation_token", 400),
         (OauthFailed, "auth.oauth_failed", 401),
         (OauthEmailMismatch, "auth.oauth_email_mismatch", 409),
@@ -77,8 +76,6 @@ fn all_errors() -> Vec<AuthError> {
         AuthError::TokenRevoked,
         AuthError::TokenInvalid,
         AuthError::RefreshTokenInvalid,
-        AuthError::SessionExpired,
-        AuthError::SessionLimitReached,
         AuthError::SessionNotFound,
         AuthError::TokenMissing,
         AuthError::EmailAlreadyExists,
@@ -89,15 +86,15 @@ fn all_errors() -> Vec<AuthError> {
         AuthError::MfaNotEnabled,
         AuthError::MfaSetupRequired,
         AuthError::MfaTempTokenInvalid,
-        AuthError::RecoveryCodeInvalid,
-        AuthError::PasswordTooWeak,
+        AuthError::MfaStateConflict,
+        AuthError::PasswordCompromised,
         AuthError::PasswordResetTokenInvalid,
-        AuthError::PasswordResetTokenExpired,
         AuthError::OtpInvalid,
         AuthError::OtpExpired,
         AuthError::OtpMaxAttempts,
         AuthError::InsufficientRole,
         AuthError::Forbidden,
+        AuthError::UntrustedOrigin,
         AuthError::InvalidInvitationToken,
         AuthError::OauthFailed,
         AuthError::OauthEmailMismatch,
@@ -118,8 +115,8 @@ fn all_errors() -> Vec<AuthError> {
 #[test]
 fn every_code_serializes_to_its_string_and_maps_to_its_status() {
     // Table-driven parity check: each code's `auth.*` string and HTTP status must match
-    // the catalog exactly. The catalog covers all 38 codes.
-    assert_eq!(catalog().len(), 38);
+    // the catalog exactly. The catalog covers all 37 codes.
+    assert_eq!(catalog().len(), 37);
     for (code, wire, status) in catalog() {
         let json = serde_json::to_string(&code).unwrap_or_default();
         assert_eq!(json, format!("\"{wire}\""), "wrong string for {code:?}");
@@ -144,6 +141,16 @@ fn internal_only_codes_remap_to_token_invalid_on_the_wire() {
         assert!(code.is_internal_only());
         assert_eq!(code.to_wire(), AuthErrorCode::TokenInvalid);
     }
+    // The OTP sentinels collapse the same way, onto `otp_invalid`. `forgot_password` answers
+    // uniformly whether or not an address exists, but only writes an OTP record when it does —
+    // so an absent record answering differently from a wrong code turned that uniform answer
+    // definitive after one extra request.
+    for code in [AuthErrorCode::OtpExpired, AuthErrorCode::OtpMaxAttempts] {
+        assert!(code.is_internal_only());
+        assert_eq!(code.to_wire(), AuthErrorCode::OtpInvalid);
+        // …including the status, or the oracle survives as 429-vs-401.
+        assert_eq!(code.to_wire().http_status(), 401);
+    }
     // A public code is its own wire form and is not internal-only.
     assert!(!AuthErrorCode::TokenInvalid.is_internal_only());
     assert_eq!(AuthErrorCode::Forbidden.to_wire(), AuthErrorCode::Forbidden);
@@ -154,11 +161,14 @@ fn auth_error_exposes_code_status_and_message_for_every_variant() {
     // Walk one instance of every variant so the `code`/`http_status`/
     // `client_message`/`is_internal_only` arms are all exercised.
     for err in all_errors() {
-        assert_eq!(err.http_status(), err.code().http_status());
+        // The wire code decides both, because both are part of the answer a client sees.
+        assert_eq!(err.http_status(), err.code().to_wire().http_status());
         assert!(!err.client_message().is_empty());
-        // Internal-only errors report the public (token_invalid) message.
+        // An internal-only error reports the message of the code it collapses onto, never its
+        // own — the message would give back exactly what the collapse took away.
         if err.is_internal_only() {
-            assert_eq!(err.client_message(), "Invalid token");
+            assert_eq!(err.client_message(), err.code().to_wire().client_message());
+            assert_ne!(err.client_message(), err.code().client_message());
         }
     }
 }
@@ -202,12 +212,21 @@ fn validation_details_serialize_the_field_errors() {
 fn envelope_has_the_canonical_shape_and_uses_the_wire_code() {
     // The wire body must be exactly `{ error: { code, message, details } }`, and an
     // internal-only error must surface the remapped public code, never the sentinel.
+    //
+    // `details` is `null` here, not absent: the shared contract declares the key present with
+    // an `object|null` value, and one client library decodes both backends. This assertion used
+    // to omit it while the comment above already said "exactly" — the two disagreed, and the
+    // comment was right.
     let env = AuthError::TokenExpired.to_envelope();
     let json = serde_json::to_value(&env).unwrap_or_default();
     assert_eq!(
         json,
         serde_json::json!({
-            "error": { "code": "auth.token_invalid", "message": "Invalid token" }
+            "error": {
+                "code": "auth.token_invalid",
+                "message": "Invalid token",
+                "details": null
+            }
         })
     );
     // A details-bearing error includes the structured payload under `error.details`.
@@ -264,4 +283,66 @@ fn field_error_round_trips_with_camel_case() {
     let json = serde_json::to_string(&fe).unwrap_or_default();
     let back = serde_json::from_str::<FieldError>(&json).ok();
     assert_eq!(back, Some(fe));
+}
+
+/// Read a string array from `errorCatalog.{key}` in the shared cross-implementation contract.
+///
+/// The file at `conformance/wire-contract.json` is held byte-identical by nest-auth, which can
+/// back the same deployment. Reading it here rather than repeating the list means a code added
+/// or removed on one side turns that side red, instead of surfacing as a client branch that
+/// never fires against the other backend.
+fn contract_codes(key: &str) -> Vec<String> {
+    let path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../conformance/wire-contract.json"
+    );
+    let raw = std::fs::read_to_string(path).unwrap_or_default();
+    let root: serde_json::Value = serde_json::from_str(&raw).unwrap_or(serde_json::Value::Null);
+    root.get("errorCatalog")
+        .and_then(|s| s.get(key))
+        .and_then(serde_json::Value::as_array)
+        .map(|values| {
+            values
+                .iter()
+                .filter_map(|v| v.as_str().map(str::to_owned))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+#[test]
+fn the_catalog_names_exactly_the_codes_the_shared_contract_does() {
+    // One vocabulary across both implementations: a code present on one side only is a client
+    // branch that never fires against the other, and a code neither side emits is a branch that
+    // never fires at all — which is what five of them were before this check existed.
+    let mut expected = contract_codes("codes");
+    let mut actual: Vec<String> = catalog()
+        .iter()
+        .filter_map(|(code, _, _)| serde_json::to_value(code).ok())
+        .filter_map(|v| v.as_str().map(str::to_owned))
+        .collect();
+    expected.sort();
+    actual.sort();
+    assert_eq!(
+        actual, expected,
+        "the catalog drifted from the shared contract"
+    );
+}
+
+#[test]
+fn the_internal_only_codes_are_exactly_the_ones_the_contract_names() {
+    // Each collapses onto a public code so a caller cannot tell "valid until revoked" from
+    // "never valid", or "no record was ever written here" from "wrong code". The set has to
+    // match on both sides, or one backend hands back a distinction the other withholds.
+    let expected = contract_codes("internalOnly");
+    let mut actual: Vec<String> = catalog()
+        .iter()
+        .filter(|(code, _, _)| code.is_internal_only())
+        .filter_map(|(code, _, _)| serde_json::to_value(code).ok())
+        .filter_map(|v| v.as_str().map(str::to_owned))
+        .collect();
+    actual.sort();
+    let mut expected = expected;
+    expected.sort();
+    assert_eq!(actual, expected);
 }

@@ -11,9 +11,9 @@
 use std::time::Duration;
 
 use super::{
-    AuthConfig, BruteForceConfig, ControllerToggles, CookieConfig, EmailVerificationConfig,
-    InvitationConfig, JwtConfig, OAuthConfig, PasswordAlgorithm, PasswordConfig,
-    PasswordResetConfig, PlatformConfig, RolesConfig, SessionConfig, TokenDelivery,
+    AuthConfig, BruteForceConfig, ControllerToggles, CookieConfig, EmailChangeConfig,
+    EmailVerificationConfig, InvitationConfig, JwtConfig, OAuthConfig, PasswordAlgorithm,
+    PasswordConfig, PasswordResetConfig, PlatformConfig, RolesConfig, SessionConfig, TokenDelivery,
 };
 
 impl AuthConfig {
@@ -37,6 +37,7 @@ impl AuthConfig {
             email_verification: EmailVerificationConfig::default(),
             platform: PlatformConfig::default(),
             invitations: InvitationConfig::default(),
+            email_change: EmailChangeConfig::default(),
             oauth: OAuthConfig::default(),
             route_prefix: "auth".to_owned(),
             redis_namespace: "auth".to_owned(),
@@ -93,7 +94,7 @@ mod tests {
         assert_eq!(cfg.brute_force.max_attempts, 5);
         assert_eq!(cfg.password_reset.token_ttl, Duration::from_secs(600));
         assert_eq!(cfg.invitations.token_ttl, Duration::from_secs(172_800));
-        assert_eq!(cfg.password.scrypt.cost_factor, 1 << 15);
+        assert_eq!(cfg.password.scrypt.cost_factor, 1 << 17);
         assert_eq!(cfg.sessions.default_max_sessions, 5);
         assert_eq!(cfg.route_prefix, "auth");
         assert_eq!(cfg.redis_namespace, "auth");

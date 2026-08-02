@@ -7,14 +7,15 @@ use axum::extract::{FromRef, FromRequestParts};
 use bymax_auth_types::{AuthError, PlatformClaims};
 use http::request::Parts;
 
-use crate::extractors::source_access_token;
+use crate::extractors::source_platform_access_token;
 use crate::response::AuthRejection;
 use crate::state::AuthState;
 
 /// Verify the platform access token once per request, caching the claims on
-/// `parts.extensions`. The token is sourced from the same cookie/`Authorization`-header
-/// channels as the dashboard token (never a query string); a dashboard token presented here
-/// fails the `type == platform` assertion and is mapped to `PlatformAuthRequired`.
+/// `parts.extensions`. The token is sourced from the `Authorization: Bearer` header only —
+/// never a cookie, and never a query string, since platform sessions carry no cookie at all.
+/// A dashboard token presented here fails the `type == platform` assertion and is mapped to
+/// `PlatformAuthRequired`.
 async fn verified_platform_claims(
     parts: &mut Parts,
     state: &AuthState,
@@ -22,8 +23,7 @@ async fn verified_platform_claims(
     if let Some(cached) = parts.extensions.get::<PlatformClaims>() {
         return Ok(cached.clone());
     }
-    let token =
-        source_access_token(parts, state.config()).ok_or(AuthError::PlatformAuthRequired)?;
+    let token = source_platform_access_token(parts).ok_or(AuthError::PlatformAuthRequired)?;
     let claims = state
         .engine()
         .verify_platform_token(&token)
@@ -110,7 +110,10 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::{dashboard_token, mint_token, parts_with_cookie, scaffold, seed};
+    use crate::test_support::{
+        dashboard_token, mint_token, parts_empty, parts_with_bearer, parts_with_cookie, scaffold,
+        seed,
+    };
     use bymax_auth_core::config::TokenDelivery;
     use bymax_auth_types::{PlatformClaims, PlatformType};
 
@@ -121,6 +124,8 @@ mod tests {
 
     fn platform_claims(role: &str) -> PlatformClaims {
         PlatformClaims {
+            iss: None,
+            aud: None,
             sub: "admin-1".to_owned(),
             jti: "jti-platform".to_owned(),
             role: role.to_owned(),
@@ -160,10 +165,11 @@ mod tests {
 
     #[tokio::test]
     async fn platform_user_accepts_platform_token_and_rejects_dashboard_token() {
-        // A platform token resolves; a dashboard token here is `platform_auth_required`.
+        // A platform token on the bearer header resolves; a dashboard token there is
+        // `platform_auth_required`.
         let Some(s) = scaffold(TokenDelivery::Cookie) else { return };
         let token = mint_token(&platform_claims("SUPER_ADMIN"));
-        let mut parts = parts_with_cookie(&token);
+        let mut parts = parts_with_bearer(&token);
         let ok = PlatformUser::from_request_parts(&mut parts, &s.state).await;
         assert!(matches!(ok, Ok(PlatformUser(c)) if c.role == "SUPER_ADMIN"));
         // A second resolution on the same parts reads the cached claims (the read-through arm).
@@ -172,7 +178,7 @@ mod tests {
 
         let user_id = seed(&s.users, "d@e.com", "USER").await;
         let dash = dashboard_token(&s, &user_id).await;
-        let mut parts = parts_with_cookie(&dash);
+        let mut parts = parts_with_bearer(&dash);
         let denied = PlatformUser::from_request_parts(&mut parts, &s.state).await;
         assert!(matches!(
             denied,
@@ -180,7 +186,7 @@ mod tests {
         ));
 
         // An absent token is also `platform_auth_required`.
-        let mut empty = parts_with_cookie("");
+        let mut empty = parts_empty();
         let none = PlatformUser::from_request_parts(&mut empty, &s.state).await;
         assert!(matches!(
             none,
@@ -189,16 +195,36 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn platform_user_never_reads_the_access_cookie_even_in_cookie_mode() {
+        // Platform sessions are always bearer, so the platform guard must ignore the access
+        // cookie entirely — under `cookie` delivery a dashboard cookie would otherwise be
+        // picked up and verified as if it were a platform credential. A valid platform token
+        // placed in the cookie is refused; the same token on the header is accepted.
+        let Some(s) = scaffold(TokenDelivery::Cookie) else { return };
+        let token = mint_token(&platform_claims("SUPER_ADMIN"));
+        let mut cookie_parts = parts_with_cookie(&token);
+        let refused = PlatformUser::from_request_parts(&mut cookie_parts, &s.state).await;
+        assert!(matches!(
+            refused,
+            Err(AuthRejection(AuthError::PlatformAuthRequired))
+        ));
+
+        let mut header_parts = parts_with_bearer(&token);
+        let accepted = PlatformUser::from_request_parts(&mut header_parts, &s.state).await;
+        assert!(matches!(accepted, Ok(PlatformUser(_))));
+    }
+
+    #[tokio::test]
     async fn require_platform_role_checks_the_platform_hierarchy() {
         // SUPER_ADMIN satisfies SUPER_ADMIN; SUPPORT does not.
         let Some(s) = scaffold(TokenDelivery::Cookie) else { return };
         let super_token = mint_token(&platform_claims("SUPER_ADMIN"));
-        let mut parts = parts_with_cookie(&super_token);
+        let mut parts = parts_with_bearer(&super_token);
         let ok = RequirePlatformRole::<SuperAdmin>::from_request_parts(&mut parts, &s.state).await;
         assert!(matches!(ok, Ok(RequirePlatformRole(_, _))));
 
         let support_token = mint_token(&platform_claims("SUPPORT"));
-        let mut parts = parts_with_cookie(&support_token);
+        let mut parts = parts_with_bearer(&support_token);
         let denied =
             RequirePlatformRole::<SuperAdmin>::from_request_parts(&mut parts, &s.state).await;
         assert!(matches!(

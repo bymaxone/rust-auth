@@ -89,6 +89,7 @@ pub fn verify<C: DeserializeOwned + JwtClaims>(
     let claims: C = serde_json::from_slice(&payload_bytes).map_err(|_| JwtError::Decode)?;
 
     validate_temporal(&claims, opts)?;
+    validate_binding(&claims, opts)?;
     Ok(claims)
 }
 
@@ -140,6 +141,28 @@ fn validate_temporal<C: JwtClaims>(claims: &C, opts: &VerifyOptions) -> Result<(
     Ok(())
 }
 
+/// Refuse claims whose `iss`/`aud` do not satisfy the expectations in `opts`.
+///
+/// A token carrying NO claim is refused as firmly as one carrying the wrong value: a verifier
+/// that accepted an unstamped token would give an attacker a way to opt out of the check simply
+/// by omitting it. Reported as [`JwtError::Malformed`], which maps straight to the public
+/// `token_invalid`, so a caller cannot tell a wrong audience from a bad signature.
+fn validate_binding<C: JwtClaims>(claims: &C, opts: &VerifyOptions) -> Result<(), JwtError> {
+    let issuer_ok = match opts.expected_iss {
+        Some(expected) => claims.iss() == Some(expected),
+        None => true,
+    };
+    let audience_ok = match opts.expected_aud {
+        Some(expected) => claims.aud() == Some(expected),
+        None => true,
+    };
+    if issuer_ok && audience_ok {
+        Ok(())
+    } else {
+        Err(JwtError::Malformed)
+    }
+}
+
 /// The current Unix time for the temporal check: the caller-supplied `now_unix`, or the
 /// host system clock when `None` (native server). The bare-wasm edge always supplies
 /// `Some`, so the system-clock path is never taken there.
@@ -174,7 +197,7 @@ mod tests {
     }
 
     /// Verify options pinned to a fixed `now` so the temporal checks are deterministic.
-    fn opts_at(now: i64) -> VerifyOptions {
+    fn opts_at(now: i64) -> VerifyOptions<'static> {
         VerifyOptions {
             now_unix: Some(now),
             ..VerifyOptions::default()
@@ -183,6 +206,8 @@ mod tests {
 
     fn dashboard(iat: i64, exp: i64) -> DashboardClaims {
         DashboardClaims {
+            iss: None,
+            aud: None,
             sub: "u_1".to_owned(),
             jti: "jti-1".to_owned(),
             tenant_id: "t_1".to_owned(),
@@ -195,6 +220,72 @@ mod tests {
             exp,
             epoch: 0,
         }
+    }
+
+    #[test]
+    fn the_verifier_enforces_the_issuer_and_audience_binding_itself() {
+        // The binding used to be checked only by the engine, after `verify` returned. This
+        // crate is the edge verifier too: it compiles to `wasm32` and a Worker validating a
+        // session cookie calls `verify` directly, with no engine behind it. Without the check
+        // here, that Worker accepted a token minted for a different service — and with HS256
+        // the verifier can also sign, so "a different service that trusts the same secret" is
+        // the realistic attacker, not a hypothetical one.
+        let k = key();
+        let mut claims = dashboard(1_000, 9_999_999_999);
+        claims.iss = Some("issuer-a".to_owned());
+        claims.aud = Some("audience-a".to_owned());
+        let Ok(token) = sign(&claims, &k) else { return };
+
+        let matching = VerifyOptions {
+            expected_iss: Some("issuer-a"),
+            expected_aud: Some("audience-a"),
+            ..opts_at(2_000)
+        };
+        assert!(verify::<DashboardClaims>(&token, &k, &matching).is_ok());
+
+        for wrong in [
+            VerifyOptions {
+                expected_iss: Some("issuer-b"),
+                ..matching
+            },
+            VerifyOptions {
+                expected_aud: Some("audience-b"),
+                ..matching
+            },
+        ] {
+            assert_eq!(
+                verify::<DashboardClaims>(&token, &k, &wrong),
+                // Malformed, not a distinct code: telling a holder their token was well formed
+                // but aimed at the wrong audience tells them which audience to aim at next.
+                Err(JwtError::Malformed)
+            );
+        }
+    }
+
+    #[test]
+    fn an_unstamped_token_is_refused_as_firmly_as_a_wrongly_stamped_one() {
+        // Otherwise omitting the claim is a way to opt out of the check — the attacker picks
+        // whether the binding applies, which is the same as not having one.
+        let k = key();
+        let Ok(token) = sign(&dashboard(1_000, 9_999_999_999), &k) else { return };
+
+        for expectation in [
+            VerifyOptions {
+                expected_iss: Some("issuer-a"),
+                ..opts_at(2_000)
+            },
+            VerifyOptions {
+                expected_aud: Some("audience-a"),
+                ..opts_at(2_000)
+            },
+        ] {
+            assert_eq!(
+                verify::<DashboardClaims>(&token, &k, &expectation),
+                Err(JwtError::Malformed)
+            );
+        }
+        // …and an unbound deployment still accepts it, which is the default configuration.
+        assert!(verify::<DashboardClaims>(&token, &k, &opts_at(2_000)).is_ok());
     }
 
     /// Assemble a raw `h.p.s` token from already-encoded segments (for crafting the
@@ -217,6 +308,8 @@ mod tests {
         );
 
         let platform = PlatformClaims {
+            iss: None,
+            aud: None,
             sub: "p_1".to_owned(),
             jti: "jti-2".to_owned(),
             role: "admin".to_owned(),
@@ -234,9 +327,12 @@ mod tests {
         );
 
         let mfa = MfaTempClaims {
+            iss: None,
+            aud: None,
             sub: "u_1".to_owned(),
             jti: "jti-3".to_owned(),
             token_type: MfaTempType::MfaChallenge,
+            epoch: 0,
             context: MfaContext::Platform,
             iat: 1_000,
             exp: 2_000,
@@ -381,6 +477,21 @@ mod tests {
         let key = key();
         let token = sign(&dashboard(0, i64::MAX), &key).unwrap_or_default();
         assert!(verify::<DashboardClaims>(&token, &key, &VerifyOptions::default()).is_ok());
+
+        // And the other side, which is the one that matters: a token that expired a minute
+        // ago under the *real* clock is rejected. Without it a clock stuck at the epoch — or
+        // at any fixed point in the past — would keep accepting every expired token, and the
+        // far-future assertion above would still pass.
+        let real_now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        assert!(real_now > 1_700_000_000, "the host clock looks wrong");
+        let expired = sign(&dashboard(real_now - 120, real_now - 60), &key).unwrap_or_default();
+        assert_eq!(
+            verify::<DashboardClaims>(&expired, &key, &VerifyOptions::default()),
+            Err(JwtError::Expired)
+        );
     }
 
     #[test]
@@ -518,6 +629,8 @@ mod tests {
             let key = key();
             let exp = iat + span;
             let claims = DashboardClaims {
+                iss: None,
+                aud: None,
                 sub, jti, tenant_id: "t".to_owned(), role,
                 token_type: DashboardType::Dashboard, status: "ACTIVE".to_owned(),
                 mfa_enabled, mfa_verified, iat, exp, epoch,

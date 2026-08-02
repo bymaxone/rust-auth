@@ -7,6 +7,7 @@ use bymax_auth_types::{AuthError, AuthUser, CreateUserData, LoginResult, SafeAut
 
 use crate::context::RequestContext;
 use crate::engine::AuthEngine;
+use crate::normalize::normalize_email;
 use crate::services::auth::detached::run_after_register;
 use crate::services::auth::{RegisterInput, map_repository_error, spawn_guarded};
 use crate::traits::{BeforeRegisterResult, HookContext, RegisterAttempt, RegisterOverrides};
@@ -25,6 +26,13 @@ impl AuthEngine {
         input: RegisterInput,
         ctx: &RequestContext,
     ) -> Result<LoginResult, AuthError> {
+        // Canonicalize before the uniqueness check and the stored identity are derived, so a
+        // single address cannot be registered once per casing and later resolve to whichever
+        // row a lookup happens to hit.
+        let input = RegisterInput {
+            email: normalize_email(&input.email),
+            ..input
+        };
         // The resolver, when present, is authoritative — the body tenant is ignored (§24.8).
         let tenant_id = self.resolve_tenant(&input.tenant_id, ctx).await?;
         let hook_ctx = HookContext::from_request(
@@ -45,7 +53,17 @@ impl AuthEngine {
             Ok(BeforeRegisterResult::Reject { .. }) | Err(_) => return Err(AuthError::Forbidden),
         };
 
-        // Uniqueness-before-hash: never spend a memory-hard derivation on a duplicate email.
+        // Uniqueness before hashing — but the conflict path still spends the derivation.
+        //
+        // Skipping it is the cheaper thing to do and it leaks: a taken address answers in
+        // single-digit milliseconds while a free one spends ~100 ms deriving, which enumerates
+        // accounts by clock even for a caller who ignores the status code. The response itself
+        // cannot be made uniform here — registration issues tokens, and there are none to issue
+        // for an account the caller does not own — so the timing is the part that can be fixed.
+        // What bounds the disclosure that remains is the route's own rate limit.
+        //
+        // The sentinel verify is the same one the login path spends on an unknown address, so
+        // this adds no amplification a login could not already be used for.
         if self
             .user_repository()
             .find_by_email(&input.email, &tenant_id)
@@ -53,6 +71,7 @@ impl AuthEngine {
             .map_err(map_repository_error)?
             .is_some()
         {
+            self.passwords().verify_sentinel(&input.password).await?;
             return Err(AuthError::EmailAlreadyExists);
         }
 
@@ -61,6 +80,7 @@ impl AuthEngine {
             .await?;
 
         let safe = SafeAuthUser::from(user);
+        tracing::info!(user_id = %safe.id, tenant_id = %tenant_id, "register: user registered");
         let result = self
             .tokens()
             .issue_tokens(&safe, &ctx.ip, &ctx.user_agent, false)
@@ -92,6 +112,9 @@ impl AuthEngine {
         overrides: RegisterOverrides,
     ) -> Result<AuthUser, AuthError> {
         let verification_required = self.config().config().email_verification.required;
+        self.passwords()
+            .assert_not_compromised(&input.password)
+            .await?;
         let password_hash = self.passwords().hash(&input.password).await?;
 
         // When verification is required the new account is forced unverified; otherwise an
@@ -209,6 +232,19 @@ mod tests {
         let _ = engine.register(input("dup@example.com"), &ctx()).await;
         let again = engine.register(input("dup@example.com"), &ctx()).await;
         assert!(matches!(again, Err(AuthError::EmailAlreadyExists)));
+
+        // And a different casing is the same address. The in-memory repository compares
+        // case-insensitively, so the conflict alone does not prove canonicalization — what
+        // proves it is the *stored* address: a row keyed by whatever the user shouted would
+        // resolve to a different identity on any store that compares bytes, which is most of
+        // them.
+        let shouted = engine.register(input("DUP@Example.COM"), &ctx()).await;
+        assert!(matches!(shouted, Err(AuthError::EmailAlreadyExists)));
+
+        let fresh = engine.register(input("MiXeD@Example.COM"), &ctx()).await;
+        assert!(matches!(&fresh, Ok(LoginResult::Success(_))));
+        let Ok(LoginResult::Success(auth)) = fresh else { return };
+        assert_eq!(auth.user.email, "mixed@example.com");
     }
 
     /// A hook that rejects registration, to drive the `before_register` deny path.

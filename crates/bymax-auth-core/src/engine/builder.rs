@@ -19,9 +19,9 @@ use crate::services::token_manager::TokenManagerService;
 #[cfg(feature = "mfa")]
 use crate::traits::MfaStore;
 use crate::traits::{
-    AuthHooks, BruteForceStore, EmailProvider, HttpClient, InvitationStore, NoOpAuthHooks,
-    NoOpEmailProvider, OAuthProvider, OtpStore, PasswordResetStore, PlatformUserRepository,
-    SessionStore, UserRepository, WsTicketStore,
+    AuthHooks, BruteForceStore, CommonPasswordChecker, EmailProvider, HttpClient, InvitationStore,
+    NoOpAuthHooks, NoOpEmailProvider, OAuthProvider, OtpStore, PasswordBreachChecker,
+    PasswordResetStore, PlatformUserRepository, SessionStore, UserRepository, WsTicketStore,
 };
 
 /// Assembles an [`AuthEngine`] from a configuration plus the host's trait implementations.
@@ -33,6 +33,7 @@ pub struct AuthEngineBuilder {
     user_repository: Option<Arc<dyn UserRepository>>,
     platform_user_repository: Option<Arc<dyn PlatformUserRepository>>,
     email_provider: Option<Arc<dyn EmailProvider>>,
+    breach_checker: Option<Arc<dyn PasswordBreachChecker>>,
     hooks: Option<Arc<dyn AuthHooks>>,
     session_store: Option<Arc<dyn SessionStore>>,
     otp_store: Option<Arc<dyn OtpStore>>,
@@ -65,6 +66,7 @@ impl AuthEngineBuilder {
             user_repository: None,
             platform_user_repository: None,
             email_provider: None,
+            breach_checker: None,
             hooks: None,
             session_store: None,
             otp_store: None,
@@ -118,6 +120,26 @@ impl AuthEngineBuilder {
         self
     }
 
+    /// Set the password screen consulted wherever a password is set (defaults to
+    /// [`CommonPasswordChecker`], which refuses the common passwords offline).
+    ///
+    /// The *network* check stays opt-in: a crate should not start talking to a third-party
+    /// corpus because it was upgraded. The bundled `HibpBreachChecker` (feature `breach`) runs
+    /// over the same [`HttpClient`](crate::traits::HttpClient) seam the OAuth flows use.
+    ///
+    /// The offline screen is a different matter, and is on by default. NIST SP 800-63B
+    /// §3.1.1.2 says a verifier SHALL compare against a blocklist of common passwords and ASVS
+    /// v5 §6.2.4 asks for it at Level 1; the previous default,
+    /// [`AllowAllBreachChecker`](crate::traits::AllowAllBreachChecker), approved everything,
+    /// so a deployment on defaults accepted `password1`. That one is still available for a
+    /// deployment with a deliberate reason to screen nothing — a migration importing legacy
+    /// accounts — which now has to say so.
+    #[must_use]
+    pub fn breach_checker(mut self, checker: Arc<dyn PasswordBreachChecker>) -> Self {
+        self.breach_checker = Some(checker);
+        self
+    }
+
     /// Set the lifecycle hooks (defaults to [`NoOpAuthHooks`]).
     #[must_use]
     pub fn hooks(mut self, hooks: Arc<dyn AuthHooks>) -> Self {
@@ -153,7 +175,7 @@ impl AuthEngineBuilder {
         self
     }
 
-    /// Set the password-reset proof store (`pr:`/`prv:` single-use tokens). Required only when
+    /// Set the password-reset proof store (`pw_reset:`/`pw_vtok:` single-use tokens). Required only when
     /// the password-reset flow uses the token method or the OTP verified-token bridge.
     #[must_use]
     pub fn password_reset_store(mut self, store: Arc<dyn PasswordResetStore>) -> Self {
@@ -285,6 +307,7 @@ impl AuthEngineBuilder {
             user_repository,
             platform_user_repository,
             email_provider,
+            breach_checker,
             hooks,
             session_store,
             otp_store,
@@ -360,12 +383,16 @@ impl AuthEngineBuilder {
 
         // Build the password service (and its startup sentinel hash) from the validated
         // password config before it is moved into the resolved bundle.
-        let passwords = Arc::new(PasswordService::new(&config.password)?);
+        let breach_checker = breach_checker.unwrap_or_else(|| {
+            Arc::new(CommonPasswordChecker::new()) as Arc<dyn PasswordBreachChecker>
+        });
+        let passwords = Arc::new(PasswordService::new(&config.password, breach_checker)?);
 
         // Capture the scalar token/brute-force settings and the signing key before the
         // config is consumed by `ResolvedConfig::new`.
         let access_ttl = config.jwt.access_expires_in;
         let refresh_days = config.jwt.refresh_expires_in_days;
+        let absolute_session_lifetime_days = config.jwt.absolute_session_lifetime_days;
         let grace_window = config.jwt.refresh_grace_window;
         let brute_max_attempts = config.brute_force.max_attempts;
         let brute_window_secs = config.brute_force.window.as_secs();
@@ -383,24 +410,47 @@ impl AuthEngineBuilder {
         let sessions_enabled = session_config.enabled;
         let config = Arc::new(ResolvedConfig::new(config, environment, secure_cookies));
 
+        let previous_keys = config
+            .config()
+            .jwt
+            .previous_secrets
+            .iter()
+            .map(|secret| HsKey::from_bytes(secret.expose_secret().as_bytes()))
+            .collect();
         let tokens = TokenManagerService::new(
             signing_key,
+            previous_keys,
             session_store.clone(),
             access_ttl,
             refresh_days,
             grace_window,
-        );
+            absolute_session_lifetime_days,
+        )
+        .with_hooks(hooks.clone())
+        // Empty strings read as unconfigured rather than as "require the empty issuer": a
+        // host threading an unset environment variable through must not silently turn the
+        // check on and start minting tokens its own verifier rejects.
+        .with_binding(crate::services::token_manager::TokenBinding {
+            issuer: config
+                .config()
+                .jwt
+                .issuer
+                .clone()
+                .filter(|value| !value.is_empty()),
+            audience: config
+                .config()
+                .jwt
+                .audience
+                .clone()
+                .filter(|value| !value.is_empty()),
+        });
         // Wire the MFA temp-token single-use support when an MFA store is supplied, so the
         // challenge token planted at login is store-backed and brute-force-capped.
         #[cfg(feature = "mfa")]
         let tokens = match &mfa_store {
-            Some(store) => {
-                tokens.with_mfa_support(crate::services::token_manager::MfaTokenSupport::new(
-                    store.clone(),
-                    brute_force_store.clone(),
-                    config.hmac_key(),
-                ))
-            }
+            Some(store) => tokens.with_mfa_support(
+                crate::services::token_manager::MfaTokenSupport::new(store.clone()),
+            ),
             None => tokens,
         };
         let tokens = Arc::new(tokens);
@@ -430,6 +480,7 @@ impl AuthEngineBuilder {
             sessions: &sessions,
             session_store: &session_store,
             brute_force: &brute_force,
+            passwords: &passwords,
             email_provider: &email_provider,
             hooks: &hooks,
             sessions_enabled,
@@ -517,6 +568,7 @@ struct MfaWiring<'a> {
     sessions: &'a Arc<SessionService>,
     session_store: &'a Arc<dyn SessionStore>,
     brute_force: &'a Arc<BruteForceService>,
+    passwords: &'a Arc<crate::services::password::PasswordService>,
     email_provider: &'a Arc<dyn EmailProvider>,
     hooks: &'a Arc<dyn AuthHooks>,
     sessions_enabled: bool,
@@ -537,14 +589,23 @@ fn build_mfa_service(wiring: MfaWiring<'_>) -> Option<crate::services::mfa::MfaS
         sessions: wiring.sessions.clone(),
         session_store: wiring.session_store.clone(),
         brute_force: wiring.brute_force.clone(),
+        passwords: wiring.passwords.clone(),
         email: wiring.email_provider.clone(),
         hooks: wiring.hooks.clone(),
         encryption_key,
+        previous_encryption_keys: wiring.config.previous_mfa_encryption_keys(),
         identifier_key: zeroize::Zeroizing::new(*wiring.config.hmac_key()),
+        previous_identifier_keys: wiring
+            .config
+            .previous_hmac_keys()
+            .into_iter()
+            .map(zeroize::Zeroizing::new)
+            .collect(),
         issuer: mfa_config.issuer.clone(),
         totp_window: mfa_config.totp_window,
         recovery_code_count: mfa_config.recovery_code_count,
         sessions_enabled: wiring.sessions_enabled,
+        blocked_statuses: wiring.config.config().blocked_statuses.clone(),
     };
     Some(crate::services::mfa::MfaService::new(deps))
 }
@@ -575,6 +636,115 @@ mod tests {
         Arc::new(InMemoryStores::new())
     }
 
+    #[tokio::test]
+    async fn a_configured_rotation_reaches_the_token_manager() {
+        // The retired secrets have to become verification keys on the token manager, or the
+        // configuration would be accepted and do nothing — the worst outcome for a rotation
+        // setting, since the operator would believe old tokens keep working and find out
+        // otherwise from their users.
+        let mut cfg = valid_config();
+        let retired = "Zx4mQ7wLpR2nT9yB6vKdH3sJfCgA5eU8iO1rXwNqYtM0";
+        cfg.jwt.secret =
+            SecretString::from("kR7pQw9zTr4XmVn2PsB6yLdG3hJ8fCxZ5aNeU1oIqW0M".to_owned());
+        cfg.jwt.previous_secrets = vec![SecretString::from(retired.to_owned())];
+
+        let built = AuthEngine::builder()
+            .config(cfg)
+            .environment(Environment::Test)
+            .user_repository(user_repo())
+            .redis_stores(stores())
+            .build();
+        let Ok(engine) = built else { return };
+
+        // A token minted under the retired secret verifies through the assembled engine.
+        let minted = TokenManagerService::new(
+            HsKey::from_bytes(retired.as_bytes()),
+            Vec::new(),
+            stores(),
+            std::time::Duration::from_secs(900),
+            7,
+            std::time::Duration::from_secs(30),
+            0,
+        );
+        let issued = minted
+            .issue_tokens(
+                &bymax_auth_types::SafeAuthUser {
+                    id: "u1".to_owned(),
+                    email: "u@example.com".to_owned(),
+                    name: "U".to_owned(),
+                    role: "ADMIN".to_owned(),
+                    tenant_id: "t1".to_owned(),
+                    status: "ACTIVE".to_owned(),
+                    email_verified: true,
+                    mfa_enabled: false,
+                    created_at: time::OffsetDateTime::UNIX_EPOCH,
+                    last_login_at: None,
+                    oauth_provider: None,
+                    oauth_provider_id: None,
+                },
+                "1.2.3.4",
+                "agent",
+                false,
+            )
+            .await;
+        let Ok(issued) = issued else { return };
+
+        assert!(matches!(
+            engine.tokens().verify_access(&issued.access_token).await,
+            Ok(claims) if claims.sub == "u1"
+        ));
+    }
+
+    #[tokio::test]
+    async fn the_session_service_gets_the_configured_refresh_lifetime() {
+        // The builder derives the session-touch TTL from `refresh_expires_in_days`, separately
+        // from the token manager's copy, and hands it to the session service — where it lands
+        // on every rotation. Nothing else observes that arithmetic, so a `+` in place of the
+        // `*` would silently store rotated sessions with a 24-hour-and-change lifetime.
+        let stores = stores();
+        let mut cfg = valid_config();
+        cfg.jwt.refresh_expires_in_days = 7;
+        let built = AuthEngine::builder()
+            .config(cfg)
+            .user_repository(user_repo())
+            .redis_stores(stores.clone())
+            .build();
+        let Ok(engine) = built else { return };
+
+        let old_hash = "a".repeat(64);
+        let new_hash = "b".repeat(64);
+        let record = crate::traits::SessionRecord {
+            user_id: "u1".to_owned(),
+            tenant_id: Some("t1".to_owned()),
+            role: "ADMIN".to_owned(),
+            device: "Chrome".to_owned(),
+            ip: "203.0.113.4".to_owned(),
+            created_at: time::OffsetDateTime::UNIX_EPOCH,
+            mfa_enabled: false,
+            family_id: String::new(),
+            family_created_at: None,
+        };
+        assert!(
+            stores
+                .create_session(
+                    crate::traits::SessionKind::Dashboard,
+                    &old_hash,
+                    &record,
+                    3600
+                )
+                .await
+                .is_ok()
+        );
+        assert!(
+            engine
+                .sessions()
+                .rotate_session(&old_hash, &new_hash, &record)
+                .await
+                .is_ok()
+        );
+        assert_eq!(stores.peek_rotate_ttl(), Some(7 * 86_400));
+    }
+
     #[test]
     fn builds_with_noop_defaults_and_exposes_every_accessor() {
         // A minimal valid wiring assembles, defaulting the email provider and hooks to the
@@ -591,7 +761,7 @@ mod tests {
         assert!(!engine.config().secure_cookies());
         assert_eq!(engine.config().environment(), Environment::Development);
         assert_eq!(engine.config().config().jwt.refresh_expires_in_days, 7);
-        assert_eq!(engine.config().hmac_key().len(), 32);
+        assert_eq!(engine.config().hmac_key().len(), 64);
         // Required + defaulted collaborators are all reachable.
         let _ = engine.user_repository();
         assert!(engine.platform_user_repository().is_none());
@@ -649,6 +819,7 @@ mod tests {
         use base64::Engine as _;
         let mut cfg = valid_config();
         cfg.mfa = Some(MfaConfig {
+            previous_encryption_keys: Vec::new(),
             encryption_key: SecretString::from(
                 base64::engine::general_purpose::STANDARD.encode([3u8; 32]),
             ),
@@ -808,6 +979,89 @@ mod tests {
             .oauth_state_store(s)
             .build();
         assert!(matches!(&result, Ok(engine) if engine.oauth_state_store().is_some()));
+    }
+
+    /// A minimal verified user, for the tests that mint a token through a built engine.
+    fn builder_user() -> bymax_auth_types::SafeAuthUser {
+        bymax_auth_types::SafeAuthUser {
+            id: "u1".to_owned(),
+            email: "u@example.com".to_owned(),
+            name: "U".to_owned(),
+            role: "ADMIN".to_owned(),
+            tenant_id: "t1".to_owned(),
+            status: "ACTIVE".to_owned(),
+            email_verified: true,
+            mfa_enabled: false,
+            created_at: time::OffsetDateTime::UNIX_EPOCH,
+            last_login_at: None,
+            oauth_provider: None,
+            oauth_provider_id: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn an_empty_issuer_or_audience_reads_as_unconfigured() {
+        // A host threading an unset environment variable through must not silently turn the
+        // binding on: the engine would start stamping the empty string and requiring it, and
+        // every token it minted would be rejected by any peer that left the setting alone.
+        // Empty is "not configured", not "require the empty issuer".
+        let s = stores();
+        let mut cfg = valid_config();
+        cfg.jwt.issuer = Some(String::new());
+        cfg.jwt.audience = Some(String::new());
+        let engine = AuthEngine::builder()
+            .config(cfg)
+            .user_repository(user_repo())
+            .redis_stores(s)
+            .build();
+        assert!(engine.is_ok(), "an empty binding must still build");
+        let Ok(engine) = engine else { return };
+
+        let issued = engine
+            .tokens()
+            .issue_tokens(&builder_user(), "10.0.0.1", "agent/1.0", false)
+            .await;
+        assert!(issued.is_ok(), "an empty binding must still mint");
+        let Ok(issued) = issued else { return };
+        let claims = engine.tokens().verify_access(&issued.access_token).await;
+        assert!(claims.is_ok(), "an empty binding rejected its own token");
+        // …and nothing was stamped, so a peer that configured neither still accepts it.
+        let Ok(claims) = claims else { return };
+        assert_eq!(claims.iss, None);
+        assert_eq!(claims.aud, None);
+    }
+
+    #[tokio::test]
+    async fn a_configured_issuer_and_audience_reach_the_minted_token() {
+        // The other half: a real value does turn the binding on, end to end through the
+        // builder — the wiring between the config and the token manager is what these two
+        // tests hold, and it is the one place a `!is_empty()` inversion would hide.
+        let s = stores();
+        let mut cfg = valid_config();
+        cfg.jwt.issuer = Some("bymax".to_owned());
+        cfg.jwt.audience = Some("dashboard".to_owned());
+        let engine = AuthEngine::builder()
+            .config(cfg)
+            .user_repository(user_repo())
+            .redis_stores(s)
+            .build();
+        assert!(engine.is_ok(), "a configured binding must build");
+        let Ok(engine) = engine else { return };
+
+        let issued = engine
+            .tokens()
+            .issue_tokens(&builder_user(), "10.0.0.1", "agent/1.0", false)
+            .await;
+        assert!(issued.is_ok(), "a configured binding must mint");
+        let Ok(issued) = issued else { return };
+        let claims = engine.tokens().verify_access(&issued.access_token).await;
+        assert!(
+            claims.is_ok(),
+            "a configured binding rejected its own token"
+        );
+        let Ok(claims) = claims else { return };
+        assert_eq!(claims.iss.as_deref(), Some("bymax"));
+        assert_eq!(claims.aud.as_deref(), Some("dashboard"));
     }
 
     #[test]

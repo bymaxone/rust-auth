@@ -8,7 +8,9 @@ use std::time::Instant;
 
 use bymax_auth_types::{AuthError, SafeAuthUser};
 
+use crate::context::RequestContext;
 use crate::engine::AuthEngine;
+use crate::normalize::normalize_email;
 use crate::services::auth::detached::{run_after_email_verified, run_send_verification_email};
 use crate::services::auth::{map_repository_error, normalize_anti_enum, spawn_guarded};
 use crate::traits::{HookContext, OtpPurpose};
@@ -34,7 +36,17 @@ impl AuthEngine {
         tenant_id: &str,
         email: &str,
         otp: &str,
+        ctx: &RequestContext,
     ) -> Result<(), AuthError> {
+        // Canonicalize so the OTP identifier and the repository lookup agree on one
+        // spelling; a verification started under one casing must complete under any.
+        let email = normalize_email(email);
+        let email = email.as_str();
+        // The tenant goes through the resolver, exactly as `login` and `register` do: when one
+        // is configured it is authoritative and the body value is ignored. Without it a caller
+        // on one tenant could drive verification mail at, or probe for, accounts in another.
+        let tenant_id = self.resolve_tenant(tenant_id, ctx).await?;
+        let tenant_id = tenant_id.as_str();
         let identifier = self.hashed_identifier(tenant_id, email);
         self.otp()
             .verify(OtpPurpose::EmailVerification, &identifier, otp)
@@ -56,6 +68,7 @@ impl AuthEngine {
             .await
             .map_err(map_repository_error)?;
 
+        tracing::info!(user_id = %user.id, %tenant_id, "verify email: address verified");
         let hook_ctx = verification_context(&user.id, &user.email, tenant_id);
         let safe = SafeAuthUser::from(user);
         spawn_guarded(run_after_email_verified(
@@ -78,8 +91,18 @@ impl AuthEngine {
         &self,
         tenant_id: &str,
         email: &str,
+        ctx: &RequestContext,
     ) -> Result<(), AuthError> {
+        // Canonicalize so the OTP identifier and the repository lookup agree on one
+        // spelling; a verification started under one casing must complete under any.
+        let email = normalize_email(email);
+        let email = email.as_str();
         let started = Instant::now();
+        // The tenant goes through the resolver, exactly as `login` and `register` do: when one
+        // is configured it is authoritative and the body value is ignored. Without it a caller
+        // on one tenant could drive verification mail at, or probe for, accounts in another.
+        let tenant_id = self.resolve_tenant(tenant_id, ctx).await?;
+        let tenant_id = tenant_id.as_str();
         let identifier = self.hashed_identifier(tenant_id, email);
 
         // Atomic cooldown gate — a second resend inside the window is a silent success.
@@ -157,7 +180,7 @@ fn verification_context(user_id: &str, email: &str, tenant_id: &str) -> HookCont
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::services::auth::test_support::{Harness, SeedUser, base_config, harness};
+    use crate::services::auth::test_support::{Harness, SeedUser, base_config, ctx, harness};
     use crate::traits::UserRepository;
     use std::time::Duration;
 
@@ -195,7 +218,7 @@ mod tests {
         let Some(code) = stored else { return };
         assert!(
             h.engine
-                .verify_email("t1", "v@example.com", &code)
+                .verify_email("t1", "v@example.com", &code, &ctx())
                 .await
                 .is_ok()
         );
@@ -203,7 +226,9 @@ mod tests {
         assert!(matches!(stored, Ok(Some(u)) if u.email_verified));
         // The OTP is consumed: a second submission is now expired.
         assert!(matches!(
-            h.engine.verify_email("t1", "v@example.com", &code).await,
+            h.engine
+                .verify_email("t1", "v@example.com", &code, &ctx())
+                .await,
             Err(AuthError::OtpExpired)
         ));
     }
@@ -230,7 +255,9 @@ mod tests {
                 .is_ok()
         );
         assert!(matches!(
-            h.engine.verify_email("t1", "w@example.com", "000000").await,
+            h.engine
+                .verify_email("t1", "w@example.com", "000000", &ctx())
+                .await,
             Err(AuthError::OtpInvalid)
         ));
         // An OTP stored for an email with no backing user collapses to OtpInvalid on success.
@@ -247,7 +274,7 @@ mod tests {
         let Some(code) = stored else { return };
         assert!(matches!(
             h.engine
-                .verify_email("t1", "ghost@example.com", &code)
+                .verify_email("t1", "ghost@example.com", &code, &ctx())
                 .await,
             Err(AuthError::OtpInvalid)
         ));
@@ -272,22 +299,37 @@ mod tests {
         let started = Instant::now();
         assert!(
             h.engine
-                .resend_verification_email("t1", "r@example.com")
+                .resend_verification_email("t1", "r@example.com", &ctx())
                 .await
                 .is_ok()
         );
         assert!(started.elapsed() >= Duration::from_millis(300));
+        // Every branch here answers `Ok(())` by design — that uniformity is the
+        // anti-enumeration contract — so the response cannot say which one ran. The OTP
+        // record is what distinguishes them: an unverified account gets one.
+        let identifier = h.engine.hashed_identifier_for("t1", "r@example.com");
+        let minted = h
+            .stores
+            .peek_otp(crate::traits::OtpPurpose::EmailVerification, &identifier);
+        assert!(minted.is_some(), "the unverified account must get an OTP");
+
         // Second resend within the cooldown is the silent-success branch.
         assert!(
             h.engine
-                .resend_verification_email("t1", "r@example.com")
+                .resend_verification_email("t1", "r@example.com", &ctx())
                 .await
                 .is_ok()
+        );
+        // Silent means silent: no second code was minted.
+        assert_eq!(
+            h.stores
+                .peek_otp(crate::traits::OtpPurpose::EmailVerification, &identifier),
+            minted
         );
         // An absent account is indistinguishable (uniform Ok).
         assert!(
             h.engine
-                .resend_verification_email("t1", "absent@example.com")
+                .resend_verification_email("t1", "absent@example.com", &ctx())
                 .await
                 .is_ok()
         );
@@ -295,9 +337,16 @@ mod tests {
         let _ = h.seed(SeedUser::active("done@example.com", "pw")).await;
         assert!(
             h.engine
-                .resend_verification_email("t1", "done@example.com")
+                .resend_verification_email("t1", "done@example.com", &ctx())
                 .await
                 .is_ok()
+        );
+        // And mints nothing — there is nothing left to verify.
+        let done = h.engine.hashed_identifier_for("t1", "done@example.com");
+        assert!(
+            h.stores
+                .peek_otp(crate::traits::OtpPurpose::EmailVerification, &done)
+                .is_none()
         );
     }
 }

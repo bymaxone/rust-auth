@@ -26,7 +26,7 @@ tower = { version = "0.5", default-features = false }
 # The shared middleware layers: tracing spans, request-body limit, sensitive-header
 # redaction, and the optional CORS layer. No TLS feature — server-side termination is
 # external, so tower-http never pulls a TLS backend.
-tower-http = { version = "0.6", default-features = false, features = ["trace", "limit", "sensitive-headers", "cors"] }
+tower-http = { version = "0.6", default-features = false, features = ["trace", "limit", "sensitive-headers", "cors", "set-header"] }
 # The typed cookie jar + `CookieManagerLayer` for reading and emitting `Set-Cookie`
 # without parsing raw headers in handlers.
 tower-cookies = "0.11"
@@ -48,6 +48,10 @@ time = { version = "0.3", default-features = false, features = ["std"] }
 # Structured spans/events; the adapter emits them but installs NO subscriber (the
 # consuming application owns subscriber setup).
 tracing = "0.1"
+# The rate-limit key maps only shrink when something calls `retain_recent` on them, so the
+# router spawns one timer per throttled route to do it. `rt` for the spawn, `time` for the
+# interval — no runtime is started here, only joined.
+tokio = { version = "1", default-features = false, features = ["rt", "time"] }
 
 [dev-dependencies]
 # A multi-threaded runtime + the assertion-friendly macros for the async E2E tests.

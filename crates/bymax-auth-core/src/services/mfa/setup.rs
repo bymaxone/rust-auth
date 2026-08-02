@@ -20,12 +20,29 @@ impl MfaService {
     /// Returns [`AuthError::MfaNotEnabled`] for a platform context with no platform repository
     /// or a missing account, [`AuthError::MfaAlreadyEnabled`] when MFA is already on, or an
     /// internal/store [`AuthError`].
-    pub async fn setup(&self, user_id: &str, ctx: MfaContext) -> Result<MfaSetupResult, AuthError> {
+    pub async fn setup(
+        &self,
+        user_id: &str,
+        ctx: MfaContext,
+        password: Option<&str>,
+    ) -> Result<MfaSetupResult, AuthError> {
         let view = self.fetch_user_mfa(user_id, ctx).await?;
         if view.mfa_enabled {
             return Err(AuthError::MfaAlreadyEnabled);
         }
-        let key = self.setup_key(user_id);
+
+        // Re-authenticate before minting a factor. Enabling MFA changes how the account
+        // authenticates, and an access token alone is not proof of who is asking: a token
+        // lifted by XSS or from a shared machine could otherwise enrol an authenticator the
+        // attacker holds — and the enable then revokes every session and bumps the epoch,
+        // locking the real owner out of an account they still know the password to, with the
+        // recovery codes displayed only to the attacker. ASVS requires re-authentication
+        // before an authentication factor changes; `disable` already demands a TOTP code.
+        // Gating `setup` rather than `verify_and_enable` means the attacker cannot even obtain
+        // a secret they control, and it costs the user one prompt at the natural moment.
+        self.assert_reauthenticated(view.password_hash.as_deref(), password)
+            .await?;
+        let key = self.setup_key(ctx, user_id);
 
         // Fast-path idempotency: an existing pending record is re-returned verbatim, so a user
         // who refreshes the setup page sees the same secret/QR/codes they may already be
@@ -45,6 +62,7 @@ impl MfaService {
             .put_setup_nx(&key, &json, super::MFA_SETUP_TTL_SECONDS)
             .await?
         {
+            tracing::info!(%user_id, context = ?ctx, "mfa setup: initiated");
             return Ok(self.build_setup_result(&view.email, &raw_secret, plain_codes));
         }
 
@@ -87,7 +105,7 @@ impl MfaService {
         if view.mfa_enabled {
             return Err(AuthError::MfaAlreadyEnabled);
         }
-        let key = self.setup_key(user_id);
+        let key = self.setup_key(ctx, user_id);
 
         // Load and decrypt the pending record. A missing record, a record that will not parse,
         // and a secret that will not decrypt all collapse to the same opaque `MfaSetupRequired`
@@ -100,43 +118,53 @@ impl MfaService {
         let data: MfaSetupData =
             serde_json::from_str(&record_json).map_err(|_| AuthError::MfaSetupRequired)?;
         let raw_secret = self
-            .decrypt(&data.encrypted_secret)
+            .decrypt_secret(&data.encrypted_secret)
             .ok_or(AuthError::MfaSetupRequired)?;
 
         // Verify the code with anti-replay before the completion gate, so an invalid code never
         // consumes the pending record.
         if !self
-            .verify_totp_with_anti_replay(user_id, &raw_secret, code)
+            .verify_totp_with_anti_replay(ctx, user_id, &raw_secret, code)
             .await?
         {
+            tracing::warn!(%user_id, "mfa setup: invalid TOTP code");
             return Err(AuthError::MfaInvalidCode);
         }
 
         // Atomic completion gate: only the request that wins the `GETDEL` proceeds to enable.
         if self.mfa_store.take_setup(&key).await?.is_none() {
+            tracing::warn!(%user_id, "mfa setup: pending record consumed by a concurrent request");
             return Err(AuthError::MfaSetupRequired);
         }
 
         // Persist the AES-encrypted secret and the keyed recovery-code digests from the record
         // (never re-encrypted), enable MFA, and force re-auth through the new factor.
-        self.persist_mfa(
-            user_id,
-            ctx,
-            true,
-            Some(data.encrypted_secret),
-            Some(data.hashed_codes),
-        )
+        //
+        // Serialized against every other MFA transition. The single-shot `take_setup` above
+        // already makes the enable one-per-record among concurrent verify calls; this puts it
+        // in the same queue as `disable` and the challenge splice, which write the same three
+        // fields over the same record.
+        self.transition_mfa_record(user_id, ctx, |_| {
+            Some((true, Some(data.encrypted_secret), Some(data.hashed_codes)))
+        })
         .await?;
-        // Revoke the user's OTHER refresh sessions on the MFA-state change; the current session
-        // (which just performed the change) is expected to continue, so the token epoch is NOT
-        // bumped here. That stronger, sign-out-everywhere invalidation currently has exactly one
-        // trigger — the password-reset flow; `revoke_all` deliberately does not bump either, so
-        // it too leaves already-issued access tokens valid until they expire.
+        // Revoke every refresh session AND advance the token epoch. Every access token issued
+        // before this moment is stamped `mfa_enabled: false`, and the MFA gate refuses only
+        // `mfa_enabled && !mfa_verified` — so without the bump, a stolen access token keeps
+        // clearing every MFA-gated route for its remaining lifetime, at the exact moment the
+        // user enabled a second factor because they suspected that theft. (`revoke_all` kills
+        // the current session too, so the "current session continues" this comment once
+        // promised was never true — only its access token survived, the one artifact the
+        // epoch is able to reach.)
         self.session_store
             .revoke_all(session_kind(ctx), user_id)
             .await?;
+        self.session_store
+            .bump_epoch(session_kind(ctx), user_id)
+            .await?;
 
         self.notify_enabled(&view, user_id, ip, user_agent);
+        tracing::info!(%user_id, context = ?ctx, "mfa setup: enabled");
         Ok(())
     }
 

@@ -63,6 +63,23 @@ pub trait UserRepository: Send + Sync {
     /// Mark the email verified or unverified.
     async fn update_email_verified(&self, id: &str, verified: bool) -> Result<(), RepositoryError>;
 
+    /// Replace the account's email address.
+    ///
+    /// Called only after the new address has been proven — a token mailed to it and nothing
+    /// else has come back — so the account stays verified across the change. An implementation
+    /// that also cleared its own verification flag would sign the user out of a state they had
+    /// just proved.
+    ///
+    /// The uniqueness of `email` within the tenant is checked by the caller immediately before
+    /// this runs, but a unique index on `(tenant_id, email)` is still the right thing to have:
+    /// the check and this write are not one transaction, and the index is what makes the race
+    /// a failed write instead of two accounts sharing a recovery address.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RepositoryError`] when the address is taken or the write fails.
+    async fn update_email(&self, id: &str, email: &str) -> Result<(), RepositoryError>;
+
     /// Find a user by OAuth identity. Query by BOTH provider and provider id to avoid
     /// cross-provider id collisions, scoped by tenant for isolation.
     async fn find_by_oauth_id(
@@ -135,6 +152,10 @@ mod tests {
 
     #[async_trait]
     impl UserRepository for DummyRepo {
+        async fn update_email(&self, _id: &str, _email: &str) -> Result<(), RepositoryError> {
+            Ok(())
+        }
+
         async fn find_by_id(
             &self,
             _id: &str,
@@ -258,6 +279,9 @@ mod tests {
         assert!(users.update_last_login("x").await.is_ok());
         assert!(users.update_status("x", "ACTIVE").await.is_ok());
         assert!(users.update_email_verified("x", true).await.is_ok());
+        // The address-change mutator too: the trait grew it with the email-change flow, and a
+        // method nothing here calls is a method whose dispatch nothing here proves.
+        assert!(users.update_email("x", "new@example.com").await.is_ok());
         assert!(matches!(
             users.find_by_oauth_id("google", "1", "t").await,
             Ok(None)

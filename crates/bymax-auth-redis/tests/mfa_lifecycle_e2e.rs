@@ -59,6 +59,7 @@ fn build_engine(stores: Arc<RedisStores>) -> Option<(AuthEngine, Arc<InMemoryUse
     config.roles.hierarchy = HashMap::from([("USER".to_owned(), Vec::new())]);
     config.email_verification.required = false;
     config.mfa = Some(MfaConfig {
+        previous_encryption_keys: Vec::new(),
         encryption_key: SecretString::from(
             base64::engine::general_purpose::STANDARD.encode([9u8; 32]),
         ),
@@ -131,7 +132,7 @@ async fn full_lifecycle_against_real_redis() {
 
     // setup → enable. Compute the lifecycle's distinct TOTP codes from one captured base
     // (steps s, s+1, s+2, s-1), so they never collide as the clock advances mid-test.
-    let Ok(setup) = mfa.setup(&uid, MfaContext::Dashboard).await else { return };
+    let Ok(setup) = mfa.setup(&uid, MfaContext::Dashboard, None).await else { return };
     assert_eq!(setup.recovery_codes.len(), 8);
     let base = now_secs();
     let enable_code = code_at(&setup.secret, base);
@@ -216,7 +217,7 @@ async fn concurrent_correct_totp_yields_one_session() {
     let secret;
     {
         let Some(mfa) = engine.mfa() else { return };
-        let Ok(setup) = mfa.setup(&uid, MfaContext::Dashboard).await else { return };
+        let Ok(setup) = mfa.setup(&uid, MfaContext::Dashboard, None).await else { return };
         if mfa
             .verify_and_enable(
                 &uid,
@@ -278,7 +279,7 @@ async fn concurrent_distinct_valid_codes_yield_one_session() {
     let secret;
     {
         let Some(mfa) = engine.mfa() else { return };
-        let Ok(setup) = mfa.setup(&uid, MfaContext::Dashboard).await else { return };
+        let Ok(setup) = mfa.setup(&uid, MfaContext::Dashboard, None).await else { return };
         if mfa
             .verify_and_enable(
                 &uid,

@@ -7,10 +7,15 @@
 //! attempt counting and single-use consume, fixed-window brute-force counters, and
 //! single-use WebSocket tickets — over plain `Mutex<HashMap>` state.
 
+// Only the MFA transition lock uses the entry API, and that lives behind the feature — an
+// unconditional import is an unused one under `--no-default-features --features testing`.
+#[cfg(feature = "mfa")]
+use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::PoisonError;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use async_trait::async_trait;
 use bymax_auth_crypto::compare::constant_time_eq;
@@ -22,11 +27,11 @@ use time::OffsetDateTime;
 
 use crate::RepositoryError;
 use crate::traits::{
-    BruteForceStore, HttpClient, HttpError, HttpRequest, HttpResponse, InvitationStore,
-    OAuthProfile, OAuthProvider, OAuthProviderError, OAuthTokens, OtpPurpose, OtpStore,
-    PasswordResetStore, PlatformUserRepository, ResetContext, RotateOutcome, SessionDetail,
-    SessionKind, SessionRecord, SessionRotation, SessionStore, StoredInvitation, UserRepository,
-    WsTicketSnapshot, WsTicketStore,
+    BruteForceStore, EmailChangeContext, HttpClient, HttpError, HttpRequest, HttpResponse,
+    InvitationStore, OAuthProfile, OAuthProvider, OAuthProviderError, OAuthTokens, OtpPurpose,
+    OtpStore, PasswordResetStore, PlatformUserRepository, ResetContext, RotateOutcome,
+    SessionDetail, SessionKind, SessionRecord, SessionRotation, SessionStore, StoredInvitation,
+    UserRepository, WsTicketSnapshot, WsTicketStore,
 };
 
 pub use crate::traits::{NoOpAuthHooks, NoOpEmailProvider};
@@ -42,6 +47,27 @@ fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 pub struct InMemoryUserRepository {
     users: Mutex<HashMap<String, AuthUser>>,
     next_id: AtomicU64,
+    /// When set, `find_by_email` drops its `tenant_id` argument — reproducing the
+    /// single-tenant host that writes `find_by_email(email)` and ignores the second parameter.
+    /// The engine cannot make a consumer's repository scope correctly; it can only refuse an
+    /// answer from the wrong tenant, and testing that refusal needs a repository that actually
+    /// returns one.
+    ignore_tenant_on_email_lookup: AtomicBool,
+    /// When set and raised, every read reports the account with MFA gone.
+    ///
+    /// A transition re-reads the account inside its lock, and the mutation abandons when that
+    /// re-read reports MFA gone — a `disable` that completed while the caller was in flight.
+    /// Nothing single-threaded can land a write in that window, so the flag is raised BY the
+    /// lock (see `InMemoryStores::raise_on_next_mfa_lock`), which is the boundary itself: the
+    /// caller's copy is read before it, the transition's copy after.
+    mfa_gone_flag: Mutex<Option<Arc<AtomicBool>>>,
+    /// Armed count of `find_by_id` reads that must fail with a datastore error.
+    ///
+    /// Every authorization path that re-reads the account propagates a repository failure
+    /// rather than treating it as "no such user" — the difference between refusing a request
+    /// the store could not answer and silently deciding it. A double that always succeeds
+    /// leaves that propagation unasserted.
+    forced_read_failures: Mutex<usize>,
 }
 
 impl InMemoryUserRepository {
@@ -49,6 +75,63 @@ impl InMemoryUserRepository {
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Make `find_by_email` ignore its `tenant_id`, as a misconfigured consumer repository
+    /// would. See the field of the same name.
+    pub fn ignore_tenant_on_email(&self) {
+        self.ignore_tenant_on_email_lookup
+            .store(true, Ordering::SeqCst);
+    }
+
+    /// Report MFA gone on every read taken once `flag` is raised — the completed `disable` a
+    /// transition's re-read has to see. The flag is raised by the MFA transition lock, which is
+    /// the boundary: the caller's copy is read before it, the transition's copy after.
+    pub fn report_mfa_gone_when(&self, flag: Arc<AtomicBool>) {
+        *lock(&self.mfa_gone_flag) = Some(flag);
+    }
+
+    /// Fail the next `count` `find_by_id` reads with a datastore error, so a path that
+    /// propagates a repository failure rather than reading it as "no such account" can be
+    /// asserted against a store that would otherwise always succeed.
+    pub fn fail_next_reads(&self, count: usize) {
+        *lock(&self.forced_read_failures) = count;
+    }
+
+    /// Whether the armed flag is currently raised.
+    fn mfa_reported_gone(&self) -> bool {
+        lock(&self.mfa_gone_flag)
+            .as_ref()
+            .is_some_and(|flag| flag.load(Ordering::SeqCst))
+    }
+
+    /// Delete a user outright, so a test can drive the "the account is gone but its session
+    /// record outlived it" branch. Returns whether a row was removed.
+    ///
+    /// The `UserRepository` trait deliberately has no delete — account deletion is the host's
+    /// domain — so this exists only on the double, and only to reach a branch the engine has
+    /// to handle when a host does delete one.
+    pub fn remove(&self, id: &str) -> bool {
+        lock(&self.users).remove(id).is_some()
+    }
+
+    /// Move a user's authority — role, tenant, or both — the way an operator's own admin
+    /// surface would, so a test can drive the "the account was demoted while a session was
+    /// live" branch. Returns whether a row was updated.
+    ///
+    /// The `UserRepository` trait has no role or tenant mutator: who may do what is the
+    /// host's domain, not the engine's. This exists only on the double, to reach a branch the
+    /// engine has to handle once a host does move someone.
+    pub fn set_authority(&self, id: &str, role: Option<&str>, tenant_id: Option<&str>) -> bool {
+        let mut users = lock(&self.users);
+        let Some(user) = users.get_mut(id) else { return false };
+        if let Some(role) = role {
+            user.role = role.to_owned();
+        }
+        if let Some(tenant_id) = tenant_id {
+            user.tenant_id = tenant_id.to_owned();
+        }
+        true
     }
 
     /// Allocate a fresh, monotonically-increasing user id.
@@ -64,14 +147,33 @@ impl UserRepository for InMemoryUserRepository {
         id: &str,
         tenant_id: Option<&str>,
     ) -> Result<Option<AuthUser>, RepositoryError> {
+        {
+            let mut armed = lock(&self.forced_read_failures);
+            if *armed > 0 {
+                *armed -= 1;
+                return Err(RepositoryError::Backend("forced read failure".into()));
+            }
+        }
         let users = lock(&self.users);
-        Ok(users
+        let answer = users
             .get(id)
             .filter(|u| match tenant_id {
-                Some(tenant) => u.tenant_id == tenant,
+                Some(scope) => u.tenant_id == scope,
                 None => true,
             })
-            .cloned())
+            .cloned();
+        drop(users);
+        // The flag is raised by the transition lock, so a read taken before it sees the account
+        // as it was and a read taken after it sees the `disable` that completed in between.
+        if self.mfa_reported_gone() {
+            return Ok(answer.map(|mut user| {
+                user.mfa_enabled = false;
+                user.mfa_secret = None;
+                user.mfa_recovery_codes = None;
+                user
+            }));
+        }
+        Ok(answer)
     }
 
     async fn find_by_email(
@@ -80,9 +182,10 @@ impl UserRepository for InMemoryUserRepository {
         tenant_id: &str,
     ) -> Result<Option<AuthUser>, RepositoryError> {
         let users = lock(&self.users);
+        let scoped = !self.ignore_tenant_on_email_lookup.load(Ordering::SeqCst);
         Ok(users
             .values()
-            .find(|u| u.email.eq_ignore_ascii_case(email) && u.tenant_id == tenant_id)
+            .find(|u| u.email.eq_ignore_ascii_case(email) && (!scoped || u.tenant_id == tenant_id))
             .cloned())
     }
 
@@ -149,6 +252,17 @@ impl UserRepository for InMemoryUserRepository {
     async fn update_email_verified(&self, id: &str, verified: bool) -> Result<(), RepositoryError> {
         if let Some(user) = lock(&self.users).get_mut(id) {
             user.email_verified = verified;
+        }
+        Ok(())
+    }
+
+    async fn update_email(&self, id: &str, email: &str) -> Result<(), RepositoryError> {
+        // The address is proven before this runs, so the account stays verified across the
+        // change — a store that cleared the flag here would sign the user out of a state it
+        // had just proved.
+        let mut users = lock(&self.users);
+        if let Some(user) = users.get_mut(id) {
+            user.email = email.to_owned();
         }
         Ok(())
     }
@@ -221,9 +335,18 @@ impl UserRepository for InMemoryUserRepository {
 #[derive(Debug, Default)]
 pub struct InMemoryPlatformUserRepository {
     users: Mutex<HashMap<String, AuthPlatformUser>>,
+    /// The platform twin of the dashboard repository's MFA-gone flag, for the transitions that
+    /// route to this repository.
+    mfa_gone_flag: Mutex<Option<Arc<AtomicBool>>>,
 }
 
 impl InMemoryPlatformUserRepository {
+    /// Report MFA gone on every read taken once `flag` is raised. See
+    /// [`InMemoryUserRepository::report_mfa_gone_when`].
+    pub fn report_mfa_gone_when(&self, flag: Arc<AtomicBool>) {
+        *lock(&self.mfa_gone_flag) = Some(flag);
+    }
+
     /// Create an empty repository.
     #[must_use]
     pub fn new() -> Self {
@@ -235,12 +358,34 @@ impl InMemoryPlatformUserRepository {
     pub fn insert(&self, user: AuthPlatformUser) {
         lock(&self.users).insert(user.id.clone(), user);
     }
+
+    /// Delete an admin outright, so a test can drive the "the account is gone but its session
+    /// record outlived it" branch. Returns whether a row was removed.
+    ///
+    /// `PlatformUserRepository` deliberately has no delete — provisioning operators is the
+    /// host's domain — so this exists only on the double, and only to reach a branch the engine
+    /// has to handle when a host does remove one.
+    pub fn remove(&self, id: &str) -> bool {
+        lock(&self.users).remove(id).is_some()
+    }
 }
 
 #[async_trait]
 impl PlatformUserRepository for InMemoryPlatformUserRepository {
     async fn find_by_id(&self, id: &str) -> Result<Option<AuthPlatformUser>, RepositoryError> {
-        Ok(lock(&self.users).get(id).cloned())
+        let answer = lock(&self.users).get(id).cloned();
+        let gone = lock(&self.mfa_gone_flag)
+            .as_ref()
+            .is_some_and(|flag| flag.load(Ordering::SeqCst));
+        if gone {
+            return Ok(answer.map(|mut admin| {
+                admin.mfa_enabled = false;
+                admin.mfa_secret = None;
+                admin.mfa_recovery_codes = None;
+                admin
+            }));
+        }
+        Ok(answer)
     }
 
     async fn find_by_email(
@@ -304,18 +449,54 @@ pub struct InMemoryStores {
     /// `fam:` family index: a family id → the set of its live session hashes, so a whole
     /// lineage can be revoked on reuse detection. Keyed by `(kind, family_id)`.
     families: Mutex<HashMap<(SessionKind, String), HashSet<String>>>,
+    /// How many upcoming best-effort cleanup writes must fail with a backend error, set
+    /// through [`InMemoryStores::fail_next_cleanup_writes`]. Zero — the default — means every
+    /// call behaves normally.
+    forced_write_failures: Mutex<usize>,
+    /// Armed count of `create_recovered_session` calls that must report the account swept.
+    ///
+    /// The real refusal is a race: a `revoke_all` landing between the grace pointer's read and
+    /// the recovery's write. A coherent store cannot produce it single-threaded — this one
+    /// refuses the grace arm outright once the lineage is dead, so the write is never reached
+    /// with a dead account — and the engine's answer to it (refuse, do not mint) is exactly the
+    /// behaviour worth pinning. Arming the answer is what makes that reachable.
+    forced_recovery_refusals: Mutex<usize>,
+    /// Raised the first time the MFA transition lock is granted, so a test can place a
+    /// completed `disable` in the one window `transition_mfa_record` re-reads across.
+    disable_mfa_on_lock: Mutex<Option<Arc<AtomicBool>>>,
+    /// Armed count of `bump_epoch` calls that must fail.
+    ///
+    /// The bump is the second half of a device revoke, and it runs after the session is already
+    /// gone — so a failure there leaves the operation visibly incomplete rather than silently
+    /// half-done, and the caller has to hear about it. A store that always succeeds leaves that
+    /// propagation unasserted.
+    forced_epoch_bump_failures: Mutex<usize>,
     /// `ep:`/`pep:` per-user token epoch (generation counter), keyed by `(kind, user_id)`. A
     /// bump invalidates every access token stamped below the new value. Absent reads as `0`.
     epochs: Mutex<HashMap<(SessionKind, String), u64>>,
+    /// The refresh TTL the last `rotate` was given, in seconds — the session-touch path's
+    /// copy of the same lifetime, wired separately from the token manager's.
+    last_rotate_ttl_secs: Mutex<Option<u64>>,
+    /// The TTL the last `create_session` was given, in seconds. The real store turns this
+    /// into the key's expiry — the only thing that makes a session end on its own — so it is
+    /// recorded rather than discarded, and read back through [`InMemoryStores::peek_session_ttl`].
+    last_session_ttl_secs: Mutex<Option<u64>>,
     blacklist: Mutex<HashSet<String>>,
     otps: Mutex<HashMap<(OtpPurpose, String), (String, u32)>>,
     resend: Mutex<HashSet<(OtpPurpose, String)>>,
     brute_force: Mutex<HashMap<String, (i64, u64)>>,
+    /// `(reads still to let through, reads to fail after them)` for `is_locked`, set through
+    /// [`InMemoryStores::fail_lockout_reads`]. `(0, 0)` — the default — reads normally.
+    forced_lockout_read_failures: Mutex<(usize, usize)>,
     tickets: Mutex<HashMap<String, WsTicketSnapshot>>,
     ticket_counter: AtomicU64,
     reset_tokens: Mutex<HashMap<String, ResetContext>>,
     reset_verified: Mutex<HashMap<String, ResetContext>>,
     invitations: Mutex<HashMap<String, StoredInvitation>>,
+    /// The invitee index: `{tenantId}:{sha256(email)}` -> the invitation's token hash.
+    invitation_index: Mutex<HashMap<String, String>>,
+    /// Pending address changes (`ec:`), keyed by the token hash.
+    email_changes: Mutex<HashMap<String, EmailChangeContext>>,
     /// `mfa_setup:` — the AES-protected pending-setup record keyed by `hmac_sha256(user_id)`.
     #[cfg(feature = "mfa")]
     mfa_setup: Mutex<HashMap<String, String>>,
@@ -325,6 +506,16 @@ pub struct InMemoryStores {
     /// `tu:` — the TOTP anti-replay markers keyed by `hmac_sha256("{user_id}:{code}")`.
     #[cfg(feature = "mfa")]
     mfa_replay: Mutex<HashSet<String>>,
+    /// Single-use claims on MFA recovery codes (`rcu:`).
+    #[cfg(feature = "mfa")]
+    recovery_claims: Mutex<HashSet<String>>,
+    /// Held per-account MFA transition locks (`mfalock:`), each mapped to the token of the call
+    /// holding it. A separate keyspace from the recovery claims: a code claim and a transition
+    /// lock must never contend. The token is stored, not discarded, because the release is a
+    /// compare-and-delete — a double that dropped it would accept a release from any caller and
+    /// so could never fail the way the real store can.
+    #[cfg(feature = "mfa")]
+    mfa_locks: Mutex<HashMap<String, String>>,
     /// `os:` — the single-use OAuth `state` + PKCE payload keyed by `sha256(state)`.
     #[cfg(feature = "oauth")]
     oauth_state: Mutex<HashMap<String, String>>,
@@ -335,6 +526,102 @@ impl InMemoryStores {
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Make the next `count` best-effort cleanup writes fail with a backend error.
+    ///
+    /// Covers the calls the library deliberately swallows — `revoke_session`,
+    /// `delete_grace_pointer`, and the reset-token rollback `delete_token` — because logout,
+    /// over-cap eviction, and an undeliverable reset link must not fail on the store's account.
+    /// That swallowing leaves those paths unreachable against a double that always succeeds,
+    /// and so unasserted. Arming a finite number of failures is what lets a test prove the
+    /// failure is handled and reported rather than merely assumed to be. Counts down per
+    /// affected call; the default of zero leaves every call behaving normally.
+    pub fn fail_next_cleanup_writes(&self, count: usize) {
+        *lock(&self.forced_write_failures) = count;
+    }
+
+    /// Make the next `count` `create_recovered_session` calls report the account swept — the
+    /// race a coherent store cannot produce single-threaded, since it refuses the grace arm
+    /// outright once the lineage is dead, so the write is never reached with a dead account.
+    pub fn refuse_next_recovered_writes(&self, count: usize) {
+        *lock(&self.forced_recovery_refusals) = count;
+    }
+
+    /// Raise `flag` when the next MFA transition lock is granted, placing a completed `disable`
+    /// in the one window `transition_mfa_record` re-reads across.
+    pub fn raise_on_next_mfa_lock(&self, flag: Arc<AtomicBool>) {
+        *lock(&self.disable_mfa_on_lock) = Some(flag);
+    }
+
+    /// Fail the next `count` `bump_epoch` calls. The bump is the second half of a device
+    /// revoke and runs after the session is already gone, so a failure there has to reach the
+    /// caller rather than leave the operation silently half-done.
+    pub fn fail_next_epoch_bumps(&self, count: usize) {
+        *lock(&self.forced_epoch_bump_failures) = count;
+    }
+
+    /// Let the next `skip` `is_locked` reads through, then fail `count` of them.
+    ///
+    /// `skip` is what makes this usable: one login performs two of these reads, and they are
+    /// answered very differently. The gate at the top propagates a store failure — a lockout
+    /// that cannot be read is a lockout assumed, which is the safe direction. The second read
+    /// decides whether the failure just recorded closed the window, and THAT one is swallowed:
+    /// a store that cannot say means the *hook* cannot be decided, not that the login should
+    /// answer differently. Skipping the gate read is the only way to reach the swallowed arm,
+    /// which is otherwise unreachable against a double that always succeeds.
+    pub fn fail_lockout_reads(&self, skip: usize, count: usize) {
+        *lock(&self.forced_lockout_read_failures) = (skip, count);
+    }
+
+    /// Consume one armed lockout-read failure, if any.
+    fn take_forced_lockout_read_failure(&self) -> Result<(), AuthError> {
+        let mut armed = lock(&self.forced_lockout_read_failures);
+        let (skip, remaining) = *armed;
+        if skip > 0 {
+            *armed = (skip - 1, remaining);
+            return Ok(());
+        }
+        if remaining == 0 {
+            return Ok(());
+        }
+        *armed = (0, remaining - 1);
+        Err(AuthError::Internal("brute-force store unavailable".into()))
+    }
+
+    /// Consume one armed failure, if any, returning the error the caller should surface.
+    fn take_forced_failure(&self) -> Result<(), AuthError> {
+        let mut remaining = lock(&self.forced_write_failures);
+        if *remaining == 0 {
+            return Ok(());
+        }
+        *remaining -= 1;
+        Err(AuthError::Internal("session store unavailable".into()))
+    }
+
+    /// The TTL the last created session was stored with, in seconds. A test-only inspection
+    /// helper: the double cannot expire anything, so without this the lifetime the engine
+    /// computes would be unobservable.
+    #[must_use]
+    pub fn peek_session_ttl(&self) -> Option<u64> {
+        *lock(&self.last_session_ttl_secs)
+    }
+
+    /// The refresh TTL the last rotation was stored with, in seconds. A test-only inspection
+    /// helper, for the same reason as [`InMemoryStores::peek_session_ttl`].
+    #[must_use]
+    pub fn peek_rotate_ttl(&self) -> Option<u64> {
+        *lock(&self.last_rotate_ttl_secs)
+    }
+
+    /// Drop the resend-cooldown marker for `(purpose, identifier)`, letting a test drive a
+    /// second issuance without waiting out the window. Returns whether a marker was held.
+    ///
+    /// Production has no such door: the cooldown is what keeps a caller from re-minting an OTP
+    /// (and with it a fresh `attempts: 0`) as often as they like. A test that needs two
+    /// issuances is testing something else and says so by calling this.
+    pub fn expire_resend_cooldown(&self, purpose: OtpPurpose, identifier: &str) -> bool {
+        lock(&self.resend).remove(&(purpose, identifier.to_owned()))
     }
 
     /// Read the stored OTP code for a purpose + identifier without consuming it. A test-only
@@ -350,13 +637,45 @@ impl InMemoryStores {
 
 #[async_trait]
 impl SessionStore for InMemoryStores {
+    async fn create_recovered_session(
+        &self,
+        kind: SessionKind,
+        token_hash: &str,
+        detail: &SessionRecord,
+        ttl_secs: u64,
+    ) -> Result<bool, AuthError> {
+        // The real store gates the write on the per-user index still existing, because
+        // `invalidate_user_sessions` deletes that set once it has emptied it. The in-memory
+        // twin models the same witness: `revoke_all` removes the entry, so its absence is
+        // exactly "a revoke-all ran while this recovery was in flight".
+        {
+            let mut armed = lock(&self.forced_recovery_refusals);
+            if *armed > 0 {
+                *armed -= 1;
+                return Ok(false);
+            }
+        }
+        if !lock(&self.session_index).contains_key(&(kind, detail.user_id.clone())) {
+            return Ok(false);
+        }
+        if !detail.family_id.is_empty()
+            && !lock(&self.families).contains_key(&(kind, detail.family_id.clone()))
+        {
+            return Ok(false);
+        }
+        self.create_session(kind, token_hash, detail, ttl_secs)
+            .await?;
+        Ok(true)
+    }
+
     async fn create_session(
         &self,
         kind: SessionKind,
         token_hash: &str,
         detail: &SessionRecord,
-        _ttl_secs: u64,
+        ttl_secs: u64,
     ) -> Result<(), AuthError> {
+        *lock(&self.last_session_ttl_secs) = Some(ttl_secs);
         lock(&self.sessions).insert((kind, token_hash.to_owned()), detail.clone());
         lock(&self.session_index)
             .entry((kind, detail.user_id.clone()))
@@ -369,7 +688,7 @@ impl SessionStore for InMemoryStores {
                 last_activity_at: detail.created_at,
             });
         // Register the new session in its family index (a fresh login, or the grace-path fork),
-        // so the whole lineage is revocable on reuse detection. A legacy record with no family
+        // so the whole lineage is revocable on reuse detection. A record with no family
         // simply carries no index entry.
         if !detail.family_id.is_empty() {
             lock(&self.families)
@@ -385,6 +704,7 @@ impl SessionStore for InMemoryStores {
         kind: SessionKind,
         rotation: &SessionRotation,
     ) -> Result<RotateOutcome, AuthError> {
+        *lock(&self.last_rotate_ttl_secs) = Some(rotation.refresh_ttl);
         let mut sessions = lock(&self.sessions);
         if let Some(old_record) = sessions.remove(&(kind, rotation.old_hash.clone())) {
             sessions.insert(
@@ -423,26 +743,23 @@ impl SessionStore for InMemoryStores {
             }
             return Ok(RotateOutcome::Rotated(old_record));
         }
-        // Each lookup takes and releases its own guard: no two of these maps are ever held at
-        // once, so this path cannot invert the lock order used by `revoke_family`.
-        let recovered = lock(&self.grace)
-            .get(&(kind, rotation.old_hash.clone()))
-            .cloned();
-        if let Some(recovered) = recovered {
-            // Mirror `refresh_rotate.lua`: a grace pointer only recovers while its lineage is
-            // still live. `revoke_family` drops the family index but cannot reach the pointers of
-            // hashes that already rotated out of it, so honoring a leftover pointer would
-            // resurrect a revoked family. The consumed marker carries the family id and outlives
-            // the pointer; a legacy session has no marker and keeps the old behavior.
-            let consumed_family = lock(&self.consumed)
-                .get(&(kind, rotation.old_hash.clone()))
-                .cloned();
-            let lineage_revoked = consumed_family
-                .is_some_and(|family| !lock(&self.families).contains_key(&(kind, family)));
-            if lineage_revoked {
-                return Ok(RotateOutcome::Invalid);
+        // The grace window is single-shot, and only recovers into a lineage that is still alive.
+        // Removing the pointer keeps one captured token from minting a fresh session on every
+        // request for the whole window; the family check closes the resurrection path, where a
+        // pointer planted by an earlier rotation of a lineage outlives the reuse detection that
+        // revoked it and would hand the thief back the family the lockout just killed. Both
+        // mirror the Redis store, whose script consumes the pointer and whose host side runs the
+        // same `family_is_alive` test — the in-memory store is what the conformance tier and
+        // nest-auth's end-to-end tier run against, so a weaker rule here would let a divergence
+        // ship unnoticed. A record that names no family recovers as
+        // before.
+        if let Some(recovered) = lock(&self.grace).remove(&(kind, rotation.old_hash.clone())) {
+            if recovered.family_id.is_empty()
+                || lock(&self.families).contains_key(&(kind, recovered.family_id.clone()))
+            {
+                return Ok(RotateOutcome::Grace(recovered));
             }
-            return Ok(RotateOutcome::Grace(recovered));
+            return Ok(RotateOutcome::Invalid);
         }
         // Neither live nor in grace: a surviving consumed-token marker means this token was
         // validly issued and already rotated — a reuse of a consumed token (its grace window
@@ -480,6 +797,7 @@ impl SessionStore for InMemoryStores {
         user_id: &str,
         session_hash: &str,
     ) -> Result<(), AuthError> {
+        self.take_forced_failure()?;
         let mut index = lock(&self.session_index);
         let details = index
             .get_mut(&(kind, user_id.to_owned()))
@@ -498,9 +816,24 @@ impl SessionStore for InMemoryStores {
         kind: SessionKind,
         session_hash: &str,
     ) -> Result<(), AuthError> {
+        self.take_forced_failure()?;
         // The grace pointer is keyed by the OLD token's hash; deleting it (idempotently) blocks a
         // post-logout grace-window recovery, mirroring the real store's `DEL rp:`/`prp:`.
         lock(&self.grace).remove(&(kind, session_hash.to_owned()));
+        Ok(())
+    }
+
+    async fn sweep_grace_pointers(
+        &self,
+        kind: SessionKind,
+        user_id: &str,
+    ) -> Result<(), AuthError> {
+        self.take_forced_failure()?;
+        // Every pointer this account owns, not just one hash: the real store reads the `rp:`
+        // members out of the user's session index, and the record each pointer holds names its
+        // owner, so the in-memory twin filters on that.
+        lock(&self.grace)
+            .retain(|(entry_kind, _), record| *entry_kind != kind || record.user_id != user_id);
         Ok(())
     }
 
@@ -511,29 +844,45 @@ impl SessionStore for InMemoryStores {
                 sessions.remove(&(kind, detail.session_hash));
             }
         }
+        // Every grace pointer the user holds goes too. The real store deletes them because they
+        // are members of the same `sess:` index the sweep walks (`invalidate_user_sessions.lua`),
+        // and they are keyed by the SUPERSEDED hash — which is not the hash the index carries
+        // after a rotation, so mirroring this by index membership alone would miss them. A
+        // double that keeps them is *weaker* than production: a token inside its grace window
+        // would still recover a session after "sign out everywhere", a password reset, or an
+        // MFA change, which is the exact property those flows exist to guarantee.
+        lock(&self.grace).retain(|(k, _), record| *k != kind || record.user_id != user_id);
         Ok(())
     }
 
-    async fn revoke_family(&self, kind: SessionKind, family_id: &str) -> Result<(), AuthError> {
+    async fn revoke_family(
+        &self,
+        kind: SessionKind,
+        family_id: &str,
+    ) -> Result<Option<String>, AuthError> {
         // Idempotent: an empty, unknown, or already-cleared family drops nothing.
         if family_id.is_empty() {
-            return Ok(());
+            return Ok(None);
         }
         let Some(hashes) = lock(&self.families).remove(&(kind, family_id.to_owned())) else {
-            return Ok(());
+            return Ok(None);
         };
         let mut sessions = lock(&self.sessions);
         let mut index = lock(&self.session_index);
+        let mut owner = None;
         for hash in hashes {
             // Every live descendant of the compromised login is deleted, and pruned from its
             // owner's session index (all family members share one user).
-            if let Some(record) = sessions.remove(&(kind, hash.clone()))
-                && let Some(details) = index.get_mut(&(kind, record.user_id.clone()))
-            {
-                details.retain(|detail| detail.session_hash != hash);
+            if let Some(record) = sessions.remove(&(kind, hash.clone())) {
+                if owner.is_none() && !record.user_id.is_empty() {
+                    owner = Some(record.user_id.clone());
+                }
+                if let Some(details) = index.get_mut(&(kind, record.user_id.clone())) {
+                    details.retain(|detail| detail.session_hash != hash);
+                }
             }
         }
-        Ok(())
+        Ok(owner)
     }
 
     async fn blacklist_access(
@@ -557,6 +906,13 @@ impl SessionStore for InMemoryStores {
     }
 
     async fn bump_epoch(&self, kind: SessionKind, user_id: &str) -> Result<u64, AuthError> {
+        {
+            let mut armed = lock(&self.forced_epoch_bump_failures);
+            if *armed > 0 {
+                *armed -= 1;
+                return Err(AuthError::Internal("forced epoch bump failure".into()));
+            }
+        }
         let mut epochs = lock(&self.epochs);
         let entry = epochs.entry((kind, user_id.to_owned())).or_insert(0);
         *entry += 1;
@@ -614,6 +970,7 @@ impl OtpStore for InMemoryStores {
 #[async_trait]
 impl BruteForceStore for InMemoryStores {
     async fn is_locked(&self, identifier: &str, max_attempts: u32) -> Result<bool, AuthError> {
+        self.take_forced_lockout_read_failure()?;
         Ok(lock(&self.brute_force)
             .get(identifier)
             .is_some_and(|(count, _)| *count >= i64::from(max_attempts)))
@@ -636,21 +993,26 @@ impl BruteForceStore for InMemoryStores {
     }
 
     /// Returns the stored window while a counter exists (mirroring the real store, whose
-    /// counter key carries the window TTL from the first failure), else `0`.
+    /// counter key carries the window TTL from the first failure), else `0`. A stored counter
+    /// is always at least 1 — `record_failure` inserts and increments under one lock, and
+    /// `reset` removes the entry outright — so the entry's existence is the whole condition.
     async fn remaining_lockout_secs(&self, identifier: &str) -> Result<u64, AuthError> {
         Ok(lock(&self.brute_force)
             .get(identifier)
-            .map_or(0, |(count, window)| if *count > 0 { *window } else { 0 }))
+            .map_or(0, |(_, window)| *window))
     }
 }
 
 #[async_trait]
 impl WsTicketStore for InMemoryStores {
     async fn mint(&self, snapshot: &WsTicketSnapshot, _ttl_secs: u64) -> Result<String, AuthError> {
-        let ticket = format!(
-            "wst-{}",
-            self.ticket_counter.fetch_add(1, Ordering::Relaxed)
-        );
+        // The real store mints `generate_secure_token(32)` — 64 lower-case hex — and the engine
+        // shape-checks a presented ticket before hashing it, so a double that minted `wst-0`
+        // produced tickets its own engine refuses. A double whose output shape differs from the
+        // real one cannot exercise the guard it is supposed to pass through. The counter still
+        // rides along so a test can tell two tickets apart by their prefix.
+        let ticket = bymax_auth_crypto::token::generate_secure_token(32);
+        let _ = self.ticket_counter.fetch_add(1, Ordering::Relaxed);
         lock(&self.tickets).insert(ticket.clone(), snapshot.clone());
         Ok(ticket)
     }
@@ -663,6 +1025,13 @@ impl WsTicketStore for InMemoryStores {
 /// Hash an opaque token to its store-key form, mirroring the real store's
 /// "the raw token is never a key" guarantee (so the test double exercises the same
 /// hash-then-key path the engine relies on).
+/// The invitee index key, mirroring the Redis store's `invidx:{tenantId}:{invitee_hash}`.
+/// The identifier arrives already derived, and is used verbatim — see
+/// [`crate::traits::InvitationStore::put_invitation_index`].
+fn invitee_key(tenant_id: &str, invitee_hash: &str) -> String {
+    format!("{tenant_id}:{invitee_hash}")
+}
+
 fn token_key(token: &str) -> String {
     let mut out = String::with_capacity(64);
     for byte in bymax_auth_crypto::mac::sha256(token.as_bytes()) {
@@ -674,6 +1043,23 @@ fn token_key(token: &str) -> String {
 
 #[async_trait]
 impl PasswordResetStore for InMemoryStores {
+    async fn put_email_change(
+        &self,
+        token: &str,
+        context: &EmailChangeContext,
+        _ttl_secs: u64,
+    ) -> Result<(), AuthError> {
+        lock(&self.email_changes).insert(token_key(token), context.clone());
+        Ok(())
+    }
+
+    async fn consume_email_change(
+        &self,
+        token: &str,
+    ) -> Result<Option<EmailChangeContext>, AuthError> {
+        Ok(lock(&self.email_changes).remove(&token_key(token)))
+    }
+
     async fn put_token(
         &self,
         token: &str,
@@ -689,6 +1075,7 @@ impl PasswordResetStore for InMemoryStores {
     }
 
     async fn delete_token(&self, token: &str) -> Result<(), AuthError> {
+        self.take_forced_failure()?;
         lock(&self.reset_tokens).remove(&token_key(token));
         Ok(())
     }
@@ -722,6 +1109,46 @@ impl InvitationStore for InMemoryStores {
 
     async fn consume_invitation(&self, token: &str) -> Result<Option<StoredInvitation>, AuthError> {
         Ok(lock(&self.invitations).remove(&token_key(token)))
+    }
+
+    async fn put_invitation_index(
+        &self,
+        tenant_id: &str,
+        email: &str,
+        token_hash: &str,
+        _ttl_secs: u64,
+    ) -> Result<(), AuthError> {
+        lock(&self.invitation_index).insert(invitee_key(tenant_id, email), token_hash.to_owned());
+        Ok(())
+    }
+
+    async fn read_invitation_index(
+        &self,
+        tenant_id: &str,
+        email: &str,
+    ) -> Result<Option<String>, AuthError> {
+        Ok(lock(&self.invitation_index)
+            .get(&invitee_key(tenant_id, email))
+            .cloned())
+    }
+
+    async fn take_invitation_index(
+        &self,
+        tenant_id: &str,
+        email: &str,
+    ) -> Result<Option<String>, AuthError> {
+        Ok(lock(&self.invitation_index).remove(&invitee_key(tenant_id, email)))
+    }
+
+    async fn read_invitation_by_hash(
+        &self,
+        token_hash: &str,
+    ) -> Result<Option<StoredInvitation>, AuthError> {
+        Ok(lock(&self.invitations).get(token_hash).cloned())
+    }
+
+    async fn delete_invitation_by_hash(&self, token_hash: &str) -> Result<bool, AuthError> {
+        Ok(lock(&self.invitations).remove(token_hash).is_some())
     }
 }
 
@@ -762,15 +1189,56 @@ impl crate::traits::MfaStore for InMemoryStores {
         Ok(lock(&self.mfa_temp).get(jti_hash).cloned())
     }
 
-    async fn del_temp(&self, jti_hash: &str) -> Result<(), AuthError> {
-        lock(&self.mfa_temp).remove(jti_hash);
-        Ok(())
+    async fn del_temp(&self, jti_hash: &str) -> Result<bool, AuthError> {
+        // `HashMap::remove` answers with the previous value — present exactly for the caller
+        // that removed it, which is the same exactly-once signal Redis's `DEL` count gives.
+        Ok(lock(&self.mfa_temp).remove(jti_hash).is_some())
     }
 
     async fn mark_totp_used(&self, replay_id: &str, _ttl: u64) -> Result<bool, AuthError> {
         // `HashSet::insert` returns whether the value was newly added — exactly the `SET NX`
         // "was it new?" decision the real `tu:` marker reports.
         Ok(lock(&self.mfa_replay).insert(replay_id.to_owned()))
+    }
+
+    async fn claim_recovery_code(&self, claim_id: &str, _ttl: u64) -> Result<bool, AuthError> {
+        // Same "was it new?" decision as the TOTP marker, over its own set so a code and a
+        // TOTP value can never collide into one another's claim.
+        Ok(lock(&self.recovery_claims).insert(claim_id.to_owned()))
+    }
+
+    async fn acquire_mfa_lock(
+        &self,
+        lock_id: &str,
+        token: &str,
+        _ttl: u64,
+    ) -> Result<bool, AuthError> {
+        // The same "was it new?" decision, over its own keyspace: a transition lock and a
+        // recovery claim must never contend with one another. `Entry::Vacant` is the in-memory
+        // spelling of `SET NX` — it writes the token only when nobody holds the lock.
+        match lock(&self.mfa_locks).entry(lock_id.to_owned()) {
+            Entry::Occupied(_) => Ok(false),
+            Entry::Vacant(slot) => {
+                slot.insert(token.to_owned());
+                // Raised only on the GRANTED arm. Firing it on a refusal too would arm the
+                // window for a caller that never entered it, which is the opposite of what the
+                // flag models: the `disable` is supposed to land inside a lock somebody holds.
+                if let Some(flag) = lock(&self.disable_mfa_on_lock).take() {
+                    flag.store(true, Ordering::SeqCst);
+                }
+                Ok(true)
+            }
+        }
+    }
+
+    async fn release_mfa_lock(&self, lock_id: &str, token: &str) -> Result<(), AuthError> {
+        // Compare-and-delete, mirroring the `release_lock` Lua: a lock whose token no longer
+        // matches belongs to a successor, and removing it would let a third caller in beside it.
+        let mut locks = lock(&self.mfa_locks);
+        if locks.get(lock_id).is_some_and(|held| held == token) {
+            locks.remove(lock_id);
+        }
+        Ok(())
     }
 
     async fn challenge_consume(
@@ -856,13 +1324,27 @@ impl HttpClient for MockHttpClient {
 #[derive(Debug, Clone)]
 pub struct MockOAuthProvider {
     name: String,
+    email_verified: bool,
 }
 
 impl MockOAuthProvider {
-    /// A provider registered under `name`.
+    /// A provider registered under `name`, reporting a verified email.
     #[must_use]
     pub fn new(name: impl Into<String>) -> Self {
-        Self { name: name.into() }
+        Self {
+            name: name.into(),
+            email_verified: true,
+        }
+    }
+
+    /// The same provider, but reporting an email it has **not** verified — the shape of a
+    /// provider like GitHub, which hands back unverified addresses.
+    #[must_use]
+    pub fn unverified(name: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            email_verified: false,
+        }
     }
 }
 
@@ -901,6 +1383,7 @@ impl OAuthProvider for MockOAuthProvider {
             provider: self.name.clone(),
             provider_id: "mock-123".to_owned(),
             email: "mock@example.com".to_owned(),
+            email_verified: self.email_verified,
             name: Some("Mock User".to_owned()),
             avatar: None,
         })
@@ -1069,6 +1552,13 @@ mod tests {
         );
         assert!(repo.update_password("p1", "$scrypt$y").await.is_ok());
         assert!(repo.update_status("p1", "SUSPENDED").await.is_ok());
+        // Read back rather than trusting the `Ok`: a fake that answers `Ok(())` and stores
+        // nothing lets every test built on it pass while asserting nothing.
+        let stored = repo.find_by_id("p1").await;
+        assert!(matches!(&stored, Ok(Some(u)) if u.last_login_at.is_some()
+                && u.status == "SUSPENDED"
+                && u.password_hash == "$scrypt$y"
+                && u.mfa_enabled));
         // Absent-id no-ops.
         assert!(repo.update_last_login("missing").await.is_ok());
         assert!(
@@ -1099,7 +1589,9 @@ mod tests {
             device: "Chrome".to_owned(),
             ip: "203.0.113.4".to_owned(),
             created_at: OffsetDateTime::UNIX_EPOCH,
+            mfa_enabled: false,
             family_id: family.to_owned(),
+            family_created_at: Some(OffsetDateTime::UNIX_EPOCH),
         }
     }
 
@@ -1209,49 +1701,33 @@ mod tests {
         // The live descendant h2 is present until the family is revoked; revoke_family then
         // deletes it and clears the owner's index, and is idempotent on unknown/empty families.
         assert!(matches!(store.find_session(kind, "h2").await, Ok(Some(_))));
-        assert!(store.revoke_family(kind, "famA").await.is_ok());
+        // …and it reports the account the family belonged to. That owner is the only thing
+        // reuse detection can name its victim with: the replayed token's own key was deleted
+        // when it was rotated, so the family index is the last surviving link to an account.
+        assert!(matches!(
+            store.revoke_family(kind, "famA").await,
+            Ok(Some(owner)) if owner == "u1"
+        ));
         assert!(matches!(store.find_session(kind, "h2").await, Ok(None)));
         assert!(matches!(store.list_sessions(kind, "u1").await, Ok(v) if v.is_empty()));
-        assert!(store.revoke_family(kind, "famA").await.is_ok());
-        assert!(store.revoke_family(kind, "").await.is_ok());
+        // A family with nothing left readable names nobody rather than someone.
+        assert!(matches!(store.revoke_family(kind, "famA").await, Ok(None)));
+        assert!(matches!(store.revoke_family(kind, "").await, Ok(None)));
 
-        // A revoked family cannot be resurrected through a leftover grace pointer. `revoke_family`
-        // deletes the family index but cannot reach the `rp:` pointer of a hash that already
-        // rotated out of it, so a still-live pointer in a locked-out lineage must yield Invalid
-        // rather than Grace — otherwise the replay would mint a fresh session in the very family
-        // reuse detection just killed.
-        let store = InMemoryStores::new();
+        // A member whose record carries no owner is skipped rather than reported: an event
+        // naming the empty string is worse than no event, because a consumer would act on it.
+        // One member only — the family index is a set, so a family holding both an anonymous
+        // and a named record would be read in whichever order the set happened to yield, and
+        // the assertion would pass or fail by luck.
         assert!(
             store
-                .create_session(kind, "r1", &record_in_family("u3", "famB"), 60)
+                .create_session(kind, "anon", &record_in_family("", "famB"), 60)
                 .await
                 .is_ok()
         );
-        let first = SessionRotation {
-            old_hash: "r1".to_owned(),
-            new_hash: "r2".to_owned(),
-            new_raw: "rawr2".to_owned(),
-            new_record: record_in_family("u3", "famB"),
-            refresh_ttl: 60,
-            grace_ttl: 30,
-        };
-        assert!(matches!(
-            store.rotate(kind, &first).await,
-            Ok(RotateOutcome::Rotated(_))
-        ));
-        // The grace pointer for r1 is live, so a replay recovers while the lineage is intact.
-        assert!(matches!(
-            store.rotate(kind, &first).await,
-            Ok(RotateOutcome::Grace(_))
-        ));
-        // Reuse detection revokes famB; the r1 grace pointer survives it untouched.
-        assert!(store.revoke_family(kind, "famB").await.is_ok());
-        assert!(matches!(
-            store.rotate(kind, &first).await,
-            Ok(RotateOutcome::Invalid)
-        ));
+        assert!(matches!(store.revoke_family(kind, "famB").await, Ok(None)));
 
-        // A legacy session with no family plants no consumed marker, so a post-grace replay is a
+        // A session with no family plants no consumed marker, so a post-grace replay is a
         // plain Invalid, never a reuse.
         assert!(
             store
@@ -1259,7 +1735,7 @@ mod tests {
                 .await
                 .is_ok()
         );
-        let legacy = SessionRotation {
+        let familyless = SessionRotation {
             old_hash: "g1".to_owned(),
             new_hash: "g2".to_owned(),
             new_raw: "rawg".to_owned(),
@@ -1268,12 +1744,127 @@ mod tests {
             grace_ttl: 30,
         };
         assert!(matches!(
-            store.rotate(kind, &legacy).await,
+            store.rotate(kind, &familyless).await,
             Ok(RotateOutcome::Rotated(_))
         ));
         assert!(store.delete_grace_pointer(kind, "g1").await.is_ok());
         assert!(matches!(
-            store.rotate(kind, &legacy).await,
+            store.rotate(kind, &familyless).await,
+            Ok(RotateOutcome::Invalid)
+        ));
+    }
+
+    #[tokio::test]
+    async fn armed_cleanup_failures_are_finite() {
+        // The point of arming a COUNT is that it runs out. A counter that never reached zero
+        // would leave the store failing for the rest of the test, and every assertion that
+        // follows would be measuring an outage instead of the behaviour it names — silently,
+        // because these are exactly the writes the library swallows. So the third call here is
+        // the assertion that matters: it must behave normally again.
+        let store = InMemoryStores::new();
+        let kind = SessionKind::Dashboard;
+        assert!(
+            store
+                .create_session(kind, "a1", &record("u9"), 60)
+                .await
+                .is_ok()
+        );
+
+        store.fail_next_cleanup_writes(2);
+        // Armed: a backend error, not the `SessionNotFound` an absent session would give.
+        assert!(matches!(
+            store.revoke_session(kind, "u9", "a1").await,
+            Err(AuthError::Internal(_))
+        ));
+        assert!(matches!(
+            store.delete_grace_pointer(kind, "a1").await,
+            Err(AuthError::Internal(_))
+        ));
+        // Disarmed: the session is still there (both armed calls failed before touching it),
+        // so this one succeeds — which it could not if the counter had grown or stalled.
+        assert!(store.revoke_session(kind, "u9", "a1").await.is_ok());
+        assert!(store.delete_grace_pointer(kind, "a1").await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn session_store_grace_is_single_shot_and_refuses_a_revoked_lineage() {
+        let kind = SessionKind::Dashboard;
+
+        // A grace pointer recovers exactly once. Were it repeatable, one captured token would
+        // mint a fresh session on every request for the whole window instead of covering the
+        // single retry where the old token was consumed but the new one never arrived.
+        let store = InMemoryStores::new();
+        assert!(
+            store
+                .create_session(kind, "s1", &record_in_family("u3", "famB"), 60)
+                .await
+                .is_ok()
+        );
+        let rotation = SessionRotation {
+            old_hash: "s1".to_owned(),
+            new_hash: "s2".to_owned(),
+            new_raw: "raws2".to_owned(),
+            new_record: record_in_family("u3", "famB"),
+            refresh_ttl: 60,
+            grace_ttl: 30,
+        };
+        assert!(matches!(
+            store.rotate(kind, &rotation).await,
+            Ok(RotateOutcome::Rotated(_))
+        ));
+        assert!(matches!(
+            store.rotate(kind, &rotation).await,
+            Ok(RotateOutcome::Grace(_))
+        ));
+        // The second replay finds the pointer consumed and falls through to reuse detection.
+        assert!(matches!(
+            store.rotate(kind, &rotation).await,
+            Ok(RotateOutcome::Reused(family)) if family == "famB"
+        ));
+
+        // A revoked family cannot be resurrected through a leftover grace pointer. Reuse
+        // detection deletes the family index, but it cannot reach the `rp:` pointer of a hash
+        // that already rotated out of it — so a still-live pointer in a locked-out lineage must
+        // yield Invalid rather than Grace, or the replay would mint a fresh session in the very
+        // family the lockout just killed.
+        let store = InMemoryStores::new();
+        assert!(
+            store
+                .create_session(kind, "t1", &record_in_family("u4", "famC"), 60)
+                .await
+                .is_ok()
+        );
+        assert!(matches!(
+            store
+                .rotate(
+                    kind,
+                    &SessionRotation {
+                        old_hash: "t1".to_owned(),
+                        new_hash: "t2".to_owned(),
+                        new_raw: "rawt2".to_owned(),
+                        new_record: record_in_family("u4", "famC"),
+                        refresh_ttl: 60,
+                        grace_ttl: 30,
+                    },
+                )
+                .await,
+            Ok(RotateOutcome::Rotated(_))
+        ));
+        assert!(store.revoke_family(kind, "famC").await.is_ok());
+        assert!(matches!(
+            store
+                .rotate(
+                    kind,
+                    &SessionRotation {
+                        old_hash: "t1".to_owned(),
+                        new_hash: "t3".to_owned(),
+                        new_raw: "rawt3".to_owned(),
+                        new_record: record_in_family("u4", "famC"),
+                        refresh_ttl: 60,
+                        grace_ttl: 30,
+                    },
+                )
+                .await,
             Ok(RotateOutcome::Invalid)
         ));
     }
@@ -1287,6 +1878,12 @@ mod tests {
             Err(AuthError::OtpExpired)
         ));
         assert!(store.put(purpose, "id", "123456", 600).await.is_ok());
+        // `peek_otp` is how the adapter suites drive a verification flow end to end, and it
+        // is only ever read back through itself there — so it is pinned here, in the crate
+        // that owns it, where the mutation gate can see it.
+        assert_eq!(store.peek_otp(purpose, "id"), Some("123456".to_owned()));
+        assert_eq!(store.peek_otp(purpose, "absent"), None);
+        assert_eq!(store.peek_otp(OtpPurpose::PasswordReset, "id"), None);
         // A wrong code bumps attempts; the right code consumes.
         assert!(matches!(
             store.verify(purpose, "id", "000000", 5).await,
@@ -1298,6 +1895,7 @@ mod tests {
             store.verify(purpose, "id", "123456", 5).await,
             Err(AuthError::OtpExpired)
         ));
+        assert_eq!(store.peek_otp(purpose, "id"), None);
         // Max-attempts path: cap at 1, one wrong guess exhausts it.
         assert!(store.put(purpose, "max", "123456", 600).await.is_ok());
         assert!(matches!(
@@ -1342,6 +1940,7 @@ mod tests {
             user_id: "u1".to_owned(),
             email: "u@example.com".to_owned(),
             tenant_id: "t1".to_owned(),
+            password_fingerprint: String::new(),
         };
         assert!(store.put_token("tok", &context, 600).await.is_ok());
         assert!(matches!(
@@ -1371,6 +1970,24 @@ mod tests {
             Ok(Some(c)) if c.email == "u@example.com"
         ));
         assert!(matches!(store.consume_verified("vtok").await, Ok(None)));
+
+        // Two live tokens do not collide: the key is derived from the token, so consuming one
+        // leaves the other intact. A double that keyed everything the same way would round-trip
+        // a single token perfectly and quietly lose the second.
+        let other = ResetContext {
+            user_id: "u2".to_owned(),
+            ..context.clone()
+        };
+        assert!(store.put_token("first", &context, 600).await.is_ok());
+        assert!(store.put_token("second", &other, 600).await.is_ok());
+        assert!(matches!(
+            store.consume_token("first").await,
+            Ok(Some(c)) if c.user_id == "u1"
+        ));
+        assert!(matches!(
+            store.consume_token("second").await,
+            Ok(Some(c)) if c.user_id == "u2"
+        ));
     }
 
     #[tokio::test]
@@ -1382,6 +1999,7 @@ mod tests {
             role: "MEMBER".to_owned(),
             tenant_id: "t1".to_owned(),
             inviter_user_id: "owner".to_owned(),
+            created_at: OffsetDateTime::UNIX_EPOCH,
         };
         assert!(
             store
@@ -1400,6 +2018,113 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn invitation_index_is_keyed_by_tenant_and_address() {
+        // The double has to behave like the Redis store it stands in for, because a consumer
+        // testing their own withdrawal flow against it is relying on exactly that. An index
+        // keyed by anything less than (tenant, address) would let one tenant's withdrawal
+        // reach another's invitation, and the double would report the flow as correct.
+        let store = InMemoryStores::new();
+        assert!(
+            store
+                .put_invitation_index("t1", "invitee@example.com", "hash-1", 600)
+                .await
+                .is_ok()
+        );
+        assert!(
+            store
+                .put_invitation_index("t2", "invitee@example.com", "hash-2", 600)
+                .await
+                .is_ok()
+        );
+
+        // Same address, different tenants: two entries, not one overwriting the other.
+        assert!(matches!(
+            store.read_invitation_index("t1", "invitee@example.com").await,
+            Ok(Some(h)) if h == "hash-1"
+        ));
+        assert!(matches!(
+            store.read_invitation_index("t2", "invitee@example.com").await,
+            Ok(Some(h)) if h == "hash-2"
+        ));
+        // …and a different address in a tenant that has one names nothing.
+        assert!(matches!(
+            store.read_invitation_index("t1", "other@example.com").await,
+            Ok(None)
+        ));
+
+        // Reading leaves the entry; taking removes it, exactly once.
+        assert!(matches!(
+            store
+                .read_invitation_index("t1", "invitee@example.com")
+                .await,
+            Ok(Some(_))
+        ));
+        assert!(matches!(
+            store.take_invitation_index("t1", "invitee@example.com").await,
+            Ok(Some(h)) if h == "hash-1"
+        ));
+        assert!(matches!(
+            store
+                .take_invitation_index("t1", "invitee@example.com")
+                .await,
+            Ok(None)
+        ));
+        // …and taking one tenant's entry left the other's alone.
+        assert!(matches!(
+            store
+                .read_invitation_index("t2", "invitee@example.com")
+                .await,
+            Ok(Some(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn an_invitation_is_readable_and_deletable_by_its_stored_hash() {
+        // The revocation path reaches the record through the index rather than through a raw
+        // token, so the double needs the by-hash pair the withdrawal actually calls.
+        let store = InMemoryStores::new();
+        let invitation = StoredInvitation {
+            email: "invitee@example.com".to_owned(),
+            role: "MEMBER".to_owned(),
+            tenant_id: "t1".to_owned(),
+            inviter_user_id: "owner".to_owned(),
+            created_at: OffsetDateTime::UNIX_EPOCH,
+        };
+        assert!(
+            store
+                .put_invitation("inv-tok", &invitation, 600)
+                .await
+                .is_ok()
+        );
+        let hash = token_key("inv-tok");
+
+        assert!(matches!(
+            store.read_invitation_by_hash(&hash).await,
+            Ok(Some(i)) if i.role == "MEMBER"
+        ));
+        assert!(matches!(
+            store.read_invitation_by_hash("never-stored").await,
+            Ok(None)
+        ));
+
+        // The delete reports whether THIS call removed it, so a withdrawal cannot report
+        // success over an invitation that was already accepted.
+        assert!(matches!(
+            store.delete_invitation_by_hash(&hash).await,
+            Ok(true)
+        ));
+        assert!(matches!(
+            store.delete_invitation_by_hash(&hash).await,
+            Ok(false)
+        ));
+        // …and the accept path no longer finds it either.
+        assert!(matches!(
+            store.consume_invitation("inv-tok").await,
+            Ok(None)
+        ));
+    }
+
+    #[tokio::test]
     async fn ws_ticket_store_is_single_use() {
         let store = InMemoryStores::new();
         let snapshot = WsTicketSnapshot {
@@ -1411,11 +2136,47 @@ mod tests {
             mfa_verified: false,
         };
         let ticket = store.mint(&snapshot, 30).await;
-        assert!(matches!(&ticket, Ok(t) if t.starts_with("wst-")));
+        // Same shape the real store mints — 64 lower-case hex — because the engine
+        // shape-checks a presented ticket before hashing it, and a double whose output the
+        // engine would refuse cannot exercise the path it stands in for.
+        assert!(
+            matches!(&ticket, Ok(t) if t.len() == 64 && t.bytes().all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())),
+            "{ticket:?}"
+        );
         let Ok(ticket) = ticket else { return };
         assert!(matches!(store.redeem(&ticket).await, Ok(Some(_))));
         // A second redeem of the same ticket finds nothing (single-use).
         assert!(matches!(store.redeem(&ticket).await, Ok(None)));
+    }
+
+    #[cfg(feature = "mfa")]
+    #[tokio::test]
+    async fn mfa_store_reproduces_set_nx_and_getdel() {
+        // The double stands in for `SET NX` and `GETDEL`, and the enrolment gate is built on
+        // exactly those two: the first writer wins the setup slot, and the completion reads it
+        // away so only one caller can finish. A double that swallowed the value or always
+        // reported "already there" would make that gate untestable.
+        use crate::traits::MfaStore;
+        let store = InMemoryStores::new();
+        assert!(matches!(store.get_setup("uh").await, Ok(None)));
+        assert!(matches!(
+            store.put_setup_nx("uh", "enc-secret", 300).await,
+            Ok(true)
+        ));
+        assert!(matches!(store.get_setup("uh").await, Ok(Some(v)) if v == "enc-secret"));
+        // Second writer loses and does not overwrite.
+        assert!(matches!(
+            store.put_setup_nx("uh", "other", 300).await,
+            Ok(false)
+        ));
+        assert!(matches!(store.get_setup("uh").await, Ok(Some(v)) if v == "enc-secret"));
+        // GETDEL: the value comes back once, and the slot is free again.
+        assert!(matches!(store.take_setup("uh").await, Ok(Some(v)) if v == "enc-secret"));
+        assert!(matches!(store.take_setup("uh").await, Ok(None)));
+        assert!(matches!(
+            store.put_setup_nx("uh", "third", 300).await,
+            Ok(true)
+        ));
     }
 
     #[cfg(feature = "oauth")]

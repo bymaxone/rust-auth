@@ -1,6 +1,6 @@
 //! The `invitations` route group (§8.2.8), gated behind the `invitations` feature: create
 //! (authenticated; `tenant_id` derived from the inviter's claims, **never** the body) and
-//! accept (public, 201).
+//! accept (public, 201), and revoke (authenticated; withdraws a pending invitation).
 
 use axum::Router;
 use axum::extract::State;
@@ -11,10 +11,10 @@ use http::StatusCode;
 use tower_cookies::Cookies;
 
 use crate::delivery::TokenDelivery;
-use crate::dto::{AcceptInvitationDto, CreateInvitationDto};
+use crate::dto::{AcceptInvitationDto, CreateInvitationDto, RevokeInvitationDto};
 use crate::extractors::AuthUser;
 use crate::response::error_response;
-use crate::routes::RequestMeta;
+use crate::routes::{CookieDomains, RequestMeta};
 use crate::state::{AuthState, AxumAuthConfig, ClientIpSource};
 use crate::validation::ValidatedJson;
 use bymax_auth_types::AuthResult;
@@ -30,6 +30,10 @@ pub(crate) fn routes(config: &AxumAuthConfig, ip_source: ClientIpSource) -> Rout
         .route(
             "/invitations/accept",
             crate::router::throttled(post(accept), limits.invitation_accept, ip_source),
+        )
+        .route(
+            "/invitations/revoke",
+            crate::router::throttled(post(revoke), limits.invitation_revoke, ip_source),
         )
 }
 
@@ -56,11 +60,36 @@ async fn create(
     }
 }
 
+/// `POST /auth/invitations/revoke` (204). Requires [`AuthUser`]. The `tenant_id` comes from
+/// the caller's claims — never the body — so a request cannot withdraw another tenant's
+/// invitations.
+///
+/// Answers 204 whether or not anything was pending, and whether or not the caller out-ranked
+/// what was pending: reporting either difference would turn the endpoint into an oracle for
+/// which addresses have invitations, and at what authority. It still refuses out loud for
+/// facts about the CALLER alone — another tenant, or an account not in good standing — which
+/// describe nobody else.
+async fn revoke(
+    State(state): State<AuthState>,
+    user: AuthUser,
+    ValidatedJson(dto): ValidatedJson<RevokeInvitationDto>,
+) -> Response {
+    match state
+        .engine()
+        .revoke_invitation(&user.0.sub, &dto.email, &user.0.tenant_id)
+        .await
+    {
+        Ok(_) => StatusCode::NO_CONTENT.into_response(),
+        Err(error) => error_response(&error),
+    }
+}
+
 /// `POST /auth/invitations/accept` (201). Public. Consumes the single-use token, creates the
 /// verified user, and issues a full session.
 async fn accept(
     State(state): State<AuthState>,
     cookies: Cookies,
+    CookieDomains(domains): CookieDomains,
     RequestMeta(ctx): RequestMeta,
     ValidatedJson(dto): ValidatedJson<AcceptInvitationDto>,
 ) -> Response {
@@ -79,12 +108,21 @@ async fn accept(
         )
         .await
     {
-        Ok(result) => deliver_accept(&state, &cookies, &result),
+        Ok(result) => deliver_accept(&state, &cookies, &domains, &result),
         Err(error) => error_response(&error),
     }
 }
 
 /// Deliver a successful invitation acceptance (201) per the configured mode.
-fn deliver_accept(state: &AuthState, cookies: &Cookies, result: &AuthResult) -> Response {
-    TokenDelivery::new(state.config()).deliver_auth(cookies, result, StatusCode::CREATED)
+fn deliver_accept(
+    state: &AuthState,
+    cookies: &Cookies,
+    domains: &[String],
+    result: &AuthResult,
+) -> Response {
+    TokenDelivery::with_domains(state.config(), domains).deliver_auth(
+        cookies,
+        result,
+        StatusCode::CREATED,
+    )
 }

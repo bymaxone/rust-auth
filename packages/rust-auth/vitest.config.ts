@@ -19,18 +19,44 @@ export default defineConfig({
     alias: [
       {
         find: "server-only",
-        replacement: fileURLToPath(new URL("./tests/server-only-stub.ts", import.meta.url)),
+        replacement: fileURLToPath(
+          new URL("./tests/server-only-stub.ts", import.meta.url),
+        ),
       },
       {
         find: /^.*bymax_auth_wasm\.js$/,
-        replacement: fileURLToPath(new URL("./tests/wasm-node-glue.ts", import.meta.url)),
+        replacement: fileURLToPath(
+          new URL("./tests/wasm-node-glue.ts", import.meta.url),
+        ),
       },
     ],
   },
   test: {
     environment: "jsdom",
-    include: ["src/**/*.test.ts", "src/**/*.test.tsx", "tests/**/*.test.ts", "tests/**/*.test.tsx"],
+    include: [
+      "src/**/*.test.ts",
+      "src/**/*.test.tsx",
+      "tests/**/*.test.ts",
+      "tests/**/*.test.tsx",
+    ],
     maxWorkers: "50%",
     minWorkers: 1,
+    /**
+     * A ratchet, not the target. The Rust crates hold 100% lines and functions; this layer is
+     * the laggard, and until it catches up the thresholds are pinned just under what the suite
+     * currently reaches so coverage can only go up. Raise these numbers with the suite — never
+     * lower them to make a change pass.
+     */
+    coverage: {
+      provider: "v8",
+      include: ["src/**"],
+      reporter: ["text-summary", "html"],
+      thresholds: {
+        statements: 86,
+        branches: 78,
+        functions: 90,
+        lines: 88,
+      },
+    },
   },
 });

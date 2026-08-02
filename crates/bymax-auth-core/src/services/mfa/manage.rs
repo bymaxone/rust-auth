@@ -29,13 +29,20 @@ impl MfaService {
         ctx: MfaContext,
     ) -> Result<(), AuthError> {
         let view = self.fetch_user_mfa(user_id, ctx).await?;
-        self.reauth_gate(user_id, code, &view).await?;
-        // The TOTP code verified; clear MFA, revoke sessions, and notify.
-        self.persist_mfa(user_id, ctx, false, None, None).await?;
-        // Revoke the user's OTHER refresh sessions; the current session continues, so the token
-        // epoch is not bumped here (see the enable path for the rationale).
+        self.reauth_gate(ctx, user_id, code, &view).await?;
+        // The TOTP code verified; clear MFA, revoke sessions, and notify. Serialized against
+        // every other MFA transition so a challenge that read the record a moment earlier
+        // cannot splice `mfa_enabled: true` and the old secret back on top of this.
+        self.transition_mfa_record(user_id, ctx, |_| Some((false, None, None)))
+            .await?;
+        // Revoke every refresh session AND advance the token epoch: an auth-state change
+        // revokes everything issued under the previous state, in both directions — the same
+        // rule the password-reset flow applies (see the enable path for the full rationale).
         self.session_store
             .revoke_all(session_kind(ctx), user_id)
+            .await?;
+        self.session_store
+            .bump_epoch(session_kind(ctx), user_id)
             .await?;
         self.notify_disabled(&view, user_id, ip, user_agent);
         Ok(())
@@ -61,7 +68,7 @@ impl MfaService {
         ctx: MfaContext,
     ) -> Result<Vec<String>, AuthError> {
         let view = self.fetch_user_mfa(user_id, ctx).await?;
-        self.reauth_gate(user_id, totp_code, &view).await?;
+        self.reauth_gate(ctx, user_id, totp_code, &view).await?;
         // Generate a fresh set with the same entropy/format as setup; persist only the digests.
         let plain_codes: Vec<String> = (0..self.recovery_code_count)
             .map(|_| generate_recovery_code())
@@ -71,9 +78,27 @@ impl MfaService {
             .map(|code| self.hash_recovery_code(code))
             .collect();
         // Preserve the existing encrypted secret and atomically replace the recovery codes.
-        let encrypted_secret = view.mfa_secret.clone().ok_or(AuthError::TokenInvalid)?;
-        self.persist_mfa(user_id, ctx, true, Some(encrypted_secret), Some(hashed))
+        //
+        // Serialized: the promise that the prior set is replaced wholesale, so an old code can
+        // never coexist with the new one, held only until a challenge that had read the old
+        // list spliced it back on top of this write. The secret is taken from the record as it
+        // stands INSIDE the lock rather than the copy read above, for the same reason.
+        let replaced = self
+            .transition_mfa_record(user_id, ctx, |current| {
+                // MFA was disabled while the new codes were being derived. Writing them would
+                // re-enable it with the pre-disable secret, so the transition is abandoned.
+                if !current.mfa_enabled {
+                    return None;
+                }
+                current
+                    .mfa_secret
+                    .clone()
+                    .map(|secret| (true, Some(secret), Some(hashed)))
+            })
             .await?;
+        if !replaced {
+            return Err(AuthError::MfaNotEnabled);
+        }
         // Sessions are deliberately NOT revoked here (factor unchanged).
         self.notify_regenerated(&view, user_id, ip, user_agent);
         Ok(plain_codes)
@@ -91,6 +116,7 @@ impl MfaService {
     /// [`AuthError::TokenInvalid`], [`AuthError::MfaInvalidCode`], or a store [`AuthError`].
     async fn reauth_gate(
         &self,
+        ctx: MfaContext,
         user_id: &str,
         code: &str,
         view: &MfaUserView,
@@ -98,19 +124,23 @@ impl MfaService {
         if !view.mfa_enabled {
             return Err(AuthError::MfaNotEnabled);
         }
-        let bf_id = self.disable_bf_id(user_id);
-        self.assert_not_locked(&bf_id).await?;
+        let bf_id = self.disable_bf_id(ctx, user_id);
+        self.assert_not_locked("disable", user_id, &bf_id).await?;
         // An enabled account with no stored secret is an inconsistency, not a user error.
         let encrypted = view.mfa_secret.clone().ok_or(AuthError::TokenInvalid)?;
-        let raw_secret = self.decrypt(&encrypted).ok_or(AuthError::TokenInvalid)?;
+        let raw_secret = self
+            .decrypt_secret(&encrypted)
+            .ok_or(AuthError::TokenInvalid)?;
         if !self
-            .verify_totp_with_anti_replay(user_id, &raw_secret, code)
+            .verify_totp_with_anti_replay(ctx, user_id, &raw_secret, code)
             .await?
         {
+            tracing::warn!(%user_id, "mfa disable: invalid code");
             self.brute_force.record_failure(&bf_id).await?;
             return Err(AuthError::MfaInvalidCode);
         }
         self.brute_force.reset(&bf_id).await?;
+        tracing::info!(%user_id, "mfa: disabled");
         Ok(())
     }
 

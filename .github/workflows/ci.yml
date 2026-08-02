@@ -37,8 +37,10 @@ jobs:
       run-msrv: true
       msrv-version: '1.90'
       run-mutation: true
-      mutation-command: cargo mutants --all-features --in-place
-      # Match mutants.toml examine_globs (logic crates only; bindings/** is
+      # No --all-features here: .cargo/mutants.toml already carries it in
+      # additional_cargo_args, and cargo rejects the flag twice.
+      mutation-command: cargo mutants --in-place
+      # Match .cargo/mutants.toml examine_globs (logic crates only; bindings/** is
       # excluded there), so a bindings-only change never triggers the gate for
       # code cargo-mutants would not mutate.
       mutation-source-globs: '^(crates/)'
@@ -362,9 +364,12 @@ jobs:
       - name: Validate the TypeDoc API surface renders
         working-directory: packages/rust-auth
         run: npx typedoc --emit none
-      - name: Run the Vitest suite
+      - name: Run the Vitest suite under the coverage ratchet
         working-directory: packages/rust-auth
-        run: npm test
+        # Thresholds live in vitest.config.ts and are pinned just under what the suite
+        # currently reaches, so this layer's coverage can only go up. The Rust crates are
+        # gated at 100% separately by the reusable workflow above.
+        run: npm run test:cov
 
   # ─────────────────────────────────────────────────────────────────────────────
   # Examples — the official examples form their OWN Cargo workspace (and their own

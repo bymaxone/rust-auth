@@ -24,7 +24,7 @@ use async_trait::async_trait;
 use axum::Router;
 use axum::body::Body;
 use axum::extract::ConnectInfo;
-use bymax_auth_axum::{AuthRouter, AxumAuthConfig};
+use bymax_auth_axum::{AuthRouter, AxumAuthConfig, ClientIpSource};
 use bymax_auth_core::config::MfaConfig;
 use bymax_auth_core::testing::{
     InMemoryPlatformUserRepository, InMemoryUserRepository, MockOAuthProvider,
@@ -125,6 +125,7 @@ fn build_engine(
     config.controllers.mfa = true;
     config.platform.enabled = true;
     config.mfa = Some(MfaConfig {
+        previous_encryption_keys: Vec::new(),
         encryption_key: SecretString::from(mfa_key()),
         issuer: "Bymax".to_owned(),
         recovery_code_count: 8,
@@ -146,12 +147,20 @@ fn build_engine(
 }
 
 /// Seed an active dashboard user; returns its id.
+/// The id of an account created through the HTTP route, looked up by address.
+async fn user_id_of(users: &InMemoryUserRepository, email: &str) -> String {
+    match users.find_by_email(email, TENANT).await {
+        Ok(Some(user)) => user.id,
+        _ => String::new(),
+    }
+}
+
 async fn seed_user(users: &InMemoryUserRepository, email: &str, role: &str) -> String {
     let created = users
         .create(CreateUserData {
             email: email.to_owned(),
             name: "User".to_owned(),
-            password_hash: Some(hash_password("password123")),
+            password_hash: Some(hash_password("glidingwalnut42")),
             role: Some(role.to_owned()),
             status: Some("ACTIVE".to_owned()),
             tenant_id: TENANT.to_owned(),
@@ -186,6 +195,15 @@ impl Resp {
             .map(|(_, v)| v.to_owned())
             .filter(|v| !v.is_empty())
             .unwrap_or_default()
+    }
+    /// Whether the response emitted no `Set-Cookie` at all — the platform contract, which is
+    /// always bearer and must never plant a cookie.
+    fn sets_no_cookies(&self) -> bool {
+        self.headers
+            .get_all(header::SET_COOKIE)
+            .iter()
+            .next()
+            .is_none()
     }
 }
 
@@ -240,6 +258,53 @@ async fn call(
     }
 }
 
+/// Drive a request whose credential travels in the `Authorization: Bearer` header — the only
+/// channel a platform access token is ever accepted on.
+async fn bearer_call(
+    app: &Router,
+    method: Method,
+    path: &str,
+    body: Option<serde_json::Value>,
+    token: &str,
+) -> Resp {
+    let body = match body {
+        Some(value) => Body::from(value.to_string()),
+        None => Body::empty(),
+    };
+    let mut builder = Request::builder()
+        .method(method)
+        .uri(path)
+        .header(header::CONTENT_TYPE, "application/json");
+    if let Ok(value) = HeaderValue::from_str(&format!("Bearer {token}")) {
+        builder = builder.header(header::AUTHORIZATION, value);
+    }
+    let mut request = match builder.body(body) {
+        Ok(request) => request,
+        Err(_) => return error_resp(),
+    };
+    if let Ok(addr) = PEER.parse::<SocketAddr>() {
+        request.extensions_mut().insert(ConnectInfo(addr));
+    }
+    match app.clone().oneshot(request).await {
+        Ok(response) => {
+            let status = response.status();
+            let headers = response.headers().clone();
+            let body = response
+                .into_body()
+                .collect()
+                .await
+                .map(|c| c.to_bytes().to_vec())
+                .unwrap_or_default();
+            Resp {
+                status,
+                headers,
+                body,
+            }
+        }
+        Err(_) => error_resp(),
+    }
+}
+
 fn error_resp() -> Resp {
     Resp {
         status: StatusCode::INTERNAL_SERVER_ERROR,
@@ -263,7 +328,11 @@ async fn full_router_against_real_redis() {
         "engine/router setup must succeed once the Redis container is running"
     );
     let Some((engine, users, admins)) = built else { return };
-    let app = AuthRouter::from_engine(engine.clone(), AxumAuthConfig::default()).into_router();
+    let app = AuthRouter::from_engine(
+        engine.clone(),
+        AxumAuthConfig::new(ClientIpSource::PeerAddr),
+    )
+    .into_router();
 
     // ---- register → login → refresh → logout → me, all over real Redis -----------------
     let reg = call(
@@ -271,7 +340,7 @@ async fn full_router_against_real_redis() {
         Method::POST,
         "/auth/register",
         Some(serde_json::json!({
-            "email": "r@e.com", "password": "password123", "name": "Ray", "tenantId": TENANT
+            "email": "r@e.com", "password": "glidingwalnut42", "name": "Ray", "tenantId": TENANT
         })),
         &[],
     )
@@ -290,8 +359,36 @@ async fn full_router_against_real_redis() {
     )
     .await;
     assert_eq!(me.status, StatusCode::OK);
-    assert_eq!(me.json()["user"]["email"], "r@e.com");
+    // The safe user is the top-level body — no `{ user: … }` wrapper (nest-auth parity).
+    assert_eq!(me.json()["email"], "r@e.com");
 
+    // Rotation is refused while the address is unproven. `register` issues a full session
+    // deliberately — a consumer needs one to render the "check your inbox" screen — and the
+    // verification requirement has to survive rotation, or that window is unbounded: the gate
+    // used to live only on `login`, a door the caller never has to open again once register
+    // handed them a refresh token. This assertion is the reason the next lines verify first.
+    let unverified = call(
+        &app,
+        Method::POST,
+        "/auth/refresh",
+        None,
+        &[("refresh_token", &refresh)],
+    )
+    .await;
+    assert_eq!(unverified.status, StatusCode::FORBIDDEN);
+    assert_eq!(
+        unverified.json()["error"]["code"],
+        "auth.email_not_verified"
+    );
+
+    // Prove the address (the OTP round trip has its own tests; this one is about the router
+    // against real Redis), then rotate.
+    assert!(
+        users
+            .update_email_verified(&user_id_of(&users, "r@e.com").await, true)
+            .await
+            .is_ok()
+    );
     let rotated = call(
         &app,
         Method::POST,
@@ -303,6 +400,8 @@ async fn full_router_against_real_redis() {
     assert_eq!(rotated.status, StatusCode::OK);
     let new_refresh = rotated.cookie_value("refresh_token");
     assert!(!new_refresh.is_empty());
+    // A rotation echoes the account, so a client never needs a follow-up `me` call.
+    assert_eq!(rotated.json()["user"]["email"], "r@e.com");
 
     // ---- sessions over real Redis ------------------------------------------------------
     let list = call(
@@ -314,7 +413,8 @@ async fn full_router_against_real_redis() {
     )
     .await;
     assert_eq!(list.status, StatusCode::OK);
-    assert!(list.json()["sessions"].is_array());
+    // The session list is the bare array, as nest-auth's `SessionController` returns it.
+    assert!(list.json().is_array());
 
     // ---- WS ticket mint + single-use redeem against real Redis -------------------------
     let mint = call(
@@ -359,7 +459,9 @@ async fn full_router_against_real_redis() {
         Method::GET,
         &format!("/auth/oauth/google/callback?code=abc&state={state}"),
         None,
-        &[],
+        // The browser replays the `oauth_state` cookie planted on initiate; the callback
+        // refuses without it (RFC 6749 §10.12).
+        &[("oauth_state", state.as_str())],
     )
     .await;
     assert_eq!(callback.status, StatusCode::OK);
@@ -390,16 +492,35 @@ async fn full_router_against_real_redis() {
     )
     .await;
     assert_eq!(plogin.status, StatusCode::OK);
-    let padmin_access = plogin.cookie_value("access_token");
-    let pme = call(
+    // Platform delivery is always bearer: the tokens come back in the body under `admin`, and
+    // no cookie is planted even though this engine runs in `cookie` mode.
+    assert!(plogin.sets_no_cookies());
+    assert_eq!(plogin.json()["admin"]["email"], "boss@e.com");
+    let padmin_access = plogin.json()["accessToken"]
+        .as_str()
+        .unwrap_or("")
+        .to_owned();
+    let padmin_refresh = plogin.json()["refreshToken"]
+        .as_str()
+        .unwrap_or("")
+        .to_owned();
+    let pme = bearer_call(&app, Method::GET, "/auth/platform/me", None, &padmin_access).await;
+    assert_eq!(pme.status, StatusCode::OK);
+    // `platform/me` returns the admin as the top-level body, no wrapper.
+    assert_eq!(pme.json()["email"], "boss@e.com");
+
+    // A platform refresh over real Redis rotates the pair from the BODY and echoes the admin.
+    let protated = call(
         &app,
-        Method::GET,
-        "/auth/platform/me",
-        None,
-        &[("access_token", &padmin_access)],
+        Method::POST,
+        "/auth/platform/refresh",
+        Some(serde_json::json!({ "refreshToken": padmin_refresh })),
+        &[],
     )
     .await;
-    assert_eq!(pme.status, StatusCode::OK);
+    assert_eq!(protated.status, StatusCode::OK);
+    assert_eq!(protated.json()["admin"]["email"], "boss@e.com");
+    assert!(protated.json()["accessToken"].is_string());
 
     // ---- invitations over real Redis ---------------------------------------------------
     seed_user(&users, "inviter@e.com", "ADMIN").await;
@@ -408,7 +529,7 @@ async fn full_router_against_real_redis() {
         Method::POST,
         "/auth/login",
         Some(serde_json::json!({
-            "email": "inviter@e.com", "password": "password123", "tenantId": TENANT
+            "email": "inviter@e.com", "password": "glidingwalnut42", "tenantId": TENANT
         })),
         &[],
     )
@@ -424,6 +545,107 @@ async fn full_router_against_real_redis() {
     .await;
     assert_eq!(create.status, StatusCode::NO_CONTENT);
 
+    // Re-inviting the same address supersedes the first invitation through the invitee index,
+    // then the whole pair is withdrawn — the `invidx:` keyspace end to end over real Redis,
+    // which is the only place its SET/GET/GETDEL/DEL round-trip is exercised for real.
+    let reinvite = call(
+        &app,
+        Method::POST,
+        "/auth/invitations",
+        Some(serde_json::json!({ "email": "invitee@e.com", "role": "USER" })),
+        &[("access_token", &inviter_access)],
+    )
+    .await;
+    assert_eq!(reinvite.status, StatusCode::NO_CONTENT);
+    let revoke = call(
+        &app,
+        Method::POST,
+        "/auth/invitations/revoke",
+        Some(serde_json::json!({ "email": "invitee@e.com" })),
+        &[("access_token", &inviter_access)],
+    )
+    .await;
+    assert_eq!(revoke.status, StatusCode::NO_CONTENT);
+    // Idempotent: the second withdrawal finds nothing and answers the same, so the endpoint
+    // never reports whether an address has a pending invitation.
+    let again = call(
+        &app,
+        Method::POST,
+        "/auth/invitations/revoke",
+        Some(serde_json::json!({ "email": "invitee@e.com" })),
+        &[("access_token", &inviter_access)],
+    )
+    .await;
+    assert_eq!(again.status, StatusCode::NO_CONTENT);
+
+    // Withdrawal is authority-checked against the role recorded on the INVITATION, not the one
+    // named in the request — the caller only supplies an address. A USER naming an address that
+    // holds an ADMIN invitation is refused, and the refusal is SILENT: it answers the same 204
+    // an address with nothing pending gets. Reporting it would have told any member that a
+    // pending invitation exists for that address and roughly at what authority, which is the
+    // disclosure hashing the address into the index exists to prevent. What has to hold end to
+    // end is that the invitation survives — the refusal is silent, not a no-op.
+    let peer = call(
+        &app,
+        Method::POST,
+        "/auth/invitations",
+        Some(serde_json::json!({ "email": "peer@e.com", "role": "ADMIN" })),
+        &[("access_token", &inviter_access)],
+    )
+    .await;
+    assert_eq!(peer.status, StatusCode::NO_CONTENT);
+    let plain_id = seed_user(&users, "plain@e.com", "USER").await;
+    let plogin = call(
+        &app,
+        Method::POST,
+        "/auth/login",
+        Some(serde_json::json!({
+            "email": "plain@e.com", "password": "glidingwalnut42", "tenantId": TENANT
+        })),
+        &[],
+    )
+    .await;
+    let plain_access = plogin.cookie_value("access_token");
+    let denied = call(
+        &app,
+        Method::POST,
+        "/auth/invitations/revoke",
+        Some(serde_json::json!({ "email": "peer@e.com" })),
+        &[("access_token", &plain_access)],
+    )
+    .await;
+    assert_eq!(denied.status, StatusCode::NO_CONTENT);
+    // That the invitation actually survived is asserted in the engine's own tests, where the
+    // index can be read directly; over HTTP the two answers are identical by design, which is
+    // the property this call pins.
+    //
+    // The endpoint does still refuse out loud, for facts about the CALLER alone. A revoker
+    // suspended after signing in is the reachable one here, and it is the only path where this
+    // handler's `Err` arm runs — without it the arm is unexercised over HTTP, and a regression
+    // that turned every refusal into a silent 204 would let a revoked operator keep managing
+    // invitations.
+    assert!(users.update_status(&plain_id, "SUSPENDED").await.is_ok());
+    let suspended = call(
+        &app,
+        Method::POST,
+        "/auth/invitations/revoke",
+        Some(serde_json::json!({ "email": "peer@e.com" })),
+        &[("access_token", &plain_access)],
+    )
+    .await;
+    assert_eq!(suspended.status, StatusCode::FORBIDDEN);
+
+    // The ADMIN who issued it withdraws it for real.
+    let cleanup = call(
+        &app,
+        Method::POST,
+        "/auth/invitations/revoke",
+        Some(serde_json::json!({ "email": "peer@e.com" })),
+        &[("access_token", &inviter_access)],
+    )
+    .await;
+    assert_eq!(cleanup.status, StatusCode::NO_CONTENT);
+
     // ---- MFA enrolment over real Redis (setup → verify-enable with a live TOTP) ---------
     seed_user(&users, "mfa@e.com", "USER").await;
     let mlogin = call(
@@ -431,7 +653,7 @@ async fn full_router_against_real_redis() {
         Method::POST,
         "/auth/login",
         Some(serde_json::json!({
-            "email": "mfa@e.com", "password": "password123", "tenantId": TENANT
+            "email": "mfa@e.com", "password": "glidingwalnut42", "tenantId": TENANT
         })),
         &[],
     )
@@ -441,11 +663,14 @@ async fn full_router_against_real_redis() {
         &app,
         Method::POST,
         "/auth/mfa/setup",
-        None,
+        // Enrolment re-authenticates: the account has a password, so it must be re-proved
+        // before a factor is minted.
+        Some(serde_json::json!({ "password": "glidingwalnut42" })),
         &[("access_token", &mfa_access)],
     )
     .await;
-    assert_eq!(setup.status, StatusCode::OK);
+    // Enrolment answers 201 (Nest's `POST` default on `MfaController.setup`).
+    assert_eq!(setup.status, StatusCode::CREATED);
     let secret = setup.json()["secret"].as_str().unwrap_or("").to_owned();
     let raw = bymax_auth_crypto::totp::decode_secret_base32(&secret).unwrap_or_default();
     let now = std::time::SystemTime::now()

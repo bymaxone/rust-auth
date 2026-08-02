@@ -22,6 +22,8 @@ use bymax_auth_types::{
 };
 use serde::{Deserialize, Serialize};
 
+use bymax_auth_crypto::compare::constant_time_eq;
+
 use crate::RepositoryError;
 use crate::context::{RequestContext, to_safe_user};
 use crate::engine::AuthEngine;
@@ -59,6 +61,24 @@ struct OAuthStatePayload {
     code_verifier: String,
 }
 
+/// What [`AuthEngine::oauth_initiate`] hands back: the provider authorization URL to redirect
+/// to, and the raw `state` the adapter must plant as a cookie on that same response.
+///
+/// The two travel together because they are one decision. A `state` validated against the
+/// store alone proves only that *somebody* started a flow: an attacker can run their own
+/// authorization, hold the resulting `?code=…&state=…` URL without visiting it, and lure the
+/// victim there — the victim's browser then completes the attacker's login. RFC 6749 §10.12
+/// requires the state to be bound to the user agent, and the cookie is the only carrier the
+/// core can offer a transport it knows nothing about. It deliberately derives no `Debug`: the
+/// raw state is a bearer value for the length of the flow and must not reach a log line.
+pub struct OAuthRedirect {
+    /// The provider authorization URL, already carrying the `state` and PKCE challenge.
+    pub authorize_url: String,
+    /// The raw `state`, to be planted as the `oauth_state` cookie. Never stored server-side —
+    /// only its hash is a key.
+    pub state: String,
+}
+
 /// The outcome of [`AuthEngine::oauth_callback`]: either a full authentication or an MFA
 /// challenge. Discriminated like the password-login [`bymax_auth_types::LoginResult`], so the
 /// adapter shapes the response the same way.
@@ -92,7 +112,7 @@ impl AuthEngine {
         &self,
         provider: &str,
         tenant_id: &str,
-    ) -> Result<String, AuthError> {
+    ) -> Result<OAuthRedirect, AuthError> {
         // Resolve the provider first: an unknown provider fails without minting state.
         let provider_impl = self.resolve_oauth_provider(provider)?;
 
@@ -108,7 +128,10 @@ impl AuthEngine {
             .put_state(&state_key(&state), &payload, OAUTH_STATE_TTL_SECS)
             .await?;
 
-        Ok(provider_impl.authorize_url(&state, Some(&code_challenge)))
+        Ok(OAuthRedirect {
+            authorize_url: provider_impl.authorize_url(&state, Some(&code_challenge)),
+            state,
+        })
     }
 
     /// Complete an OAuth callback (§11.3.2): resolve the provider, atomically consume the
@@ -130,6 +153,7 @@ impl AuthEngine {
         provider: &str,
         code: &str,
         state: &str,
+        state_cookie: Option<&str>,
         ctx: &RequestContext,
     ) -> Result<OAuthOutcome, AuthError> {
         // Resolve the provider BEFORE consuming the state, so a misconfigured provider does
@@ -146,6 +170,20 @@ impl AuthEngine {
             return Err(AuthError::OauthFailed);
         }
 
+        // Bind the callback to the browser that started the flow (RFC 6749 §10.12). A `state`
+        // that merely exists in the store proves only that *somebody* started a flow: an
+        // attacker can run their own authorization to the point of holding a valid
+        // `?code=…&state=…` URL, never visit it, and lure the victim there instead — the
+        // victim's browser would then be logged into the attacker's account, and anything they
+        // added afterwards would be the attacker's to read. Only the cookie tells the two
+        // apart, so a missing one is as fatal as a wrong one. Checked before `take_state` so a
+        // lured callback cannot burn a state the legitimate browser is still entitled to spend.
+        let bound = state_cookie
+            .is_some_and(|cookie| constant_time_eq(state.as_bytes(), cookie.as_bytes()));
+        if !bound {
+            return Err(AuthError::OauthFailed);
+        }
+
         // Atomic read-and-delete: existence is the CSRF check, deletion is the replay guard.
         let Some(raw_payload) = self
             .require_oauth_state_store()?
@@ -155,7 +193,7 @@ impl AuthEngine {
             return Err(AuthError::OauthFailed);
         };
         let Ok(payload) = serde_json::from_str::<OAuthStatePayload>(&raw_payload) else {
-            // A malformed/legacy payload is treated as a failed state, not an internal error.
+            // A malformed payload is treated as a failed state, not an internal error.
             return Err(AuthError::OauthFailed);
         };
         let tenant_id = payload.tenant_id;
@@ -273,7 +311,10 @@ impl AuthEngine {
                     role: None,
                     status: None,
                     tenant_id: tenant_id.to_owned(),
-                    email_verified: Some(true),
+                    // What the provider actually asserted, not a convenient constant. An
+                    // account created from an unverified address belongs to whoever controls
+                    // the OAuth account, not to whoever controls the mailbox.
+                    email_verified: Some(profile.email_verified),
                     oauth_provider: provider_name.to_owned(),
                     oauth_provider_id: profile.provider_id.clone(),
                 };
@@ -317,6 +358,22 @@ impl AuthEngine {
         ctx: &RequestContext,
         hook_ctx: HookContext,
     ) -> Result<OAuthOutcome, AuthError> {
+        // Status gate. Every credential flow in this engine runs it — password login, the MFA
+        // challenge, both password-reset steps, the platform login — and OAuth was the one
+        // that did not, so a BANNED or SUSPENDED account holding a linked provider identity
+        // walked straight back in. Ban is the primary account kill switch; a flow that
+        // ignores it makes it advisory. Run before the MFA branch so a blocked account cannot
+        // even obtain a temp token. `nest-auth` gates the same point.
+        self.assert_user_not_blocked(&user.status)?;
+
+        // Email-verification gate, on the same footing as password login: when a deployment
+        // requires a verified address, an OAuth identity does not substitute for one. The
+        // create path records what the provider actually asserted, so an unverified provider
+        // profile stays unverified here rather than being promoted by the act of signing in.
+        if self.config().config().email_verification.required && !user.email_verified {
+            return Err(AuthError::EmailNotVerified);
+        }
+
         if user.mfa_enabled {
             let mfa_temp_token = self
                 .tokens()
@@ -710,10 +767,10 @@ mod tests {
     /// (the recording transport ignores it); the `state` is recovered from the authorize URL.
     async fn run_flow(h: &OAuthHarness) -> Result<OAuthOutcome, AuthError> {
         let url = h.engine.oauth_initiate("google", "t1").await;
-        let Ok(url) = url else { return Err(AuthError::OauthFailed) };
+        let Ok(url) = url.map(|r| r.authorize_url) else { return Err(AuthError::OauthFailed) };
         let state = extract_query_param(&url, "state").unwrap_or_default();
         h.engine
-            .oauth_callback("google", "auth-code", &state, &ctx())
+            .oauth_callback("google", "auth-code", &state, Some(&state), &ctx())
             .await
     }
 
@@ -734,11 +791,20 @@ mod tests {
         let hooks: Arc<dyn AuthHooks> = Arc::new(DecisionHook(OAuthLoginResult::Create));
         let Some(h) = harness(hooks, Arc::new(RoutingHttpClient::new()), false) else { return };
         let url = h.engine.oauth_initiate("google", "t1").await;
-        assert!(matches!(&url, Ok(u) if u.starts_with("https://accounts.google.com/")));
-        let Ok(url) = url else { return };
+        assert!(
+            matches!(&url, Ok(r) if r.authorize_url.starts_with("https://accounts.google.com/"))
+        );
+        let Ok(url) = url.map(|r| r.authorize_url) else { return };
         assert!(url.contains("code_challenge_method=S256"));
         let state = extract_query_param(&url, "state").unwrap_or_default();
         assert_eq!(state.len(), 64, "state is 64 hex chars");
+        // The record is bound to *this* state and to nothing else — that binding is the CSRF
+        // protection. Checked before the real read, because a key that ignored the state
+        // would let this lookup consume the record and then read as a clean hit below.
+        assert!(matches!(
+            h.stores.take_state(&state_key("another-state")).await,
+            Ok(None)
+        ));
         // The os: record exists under sha256(state).
         assert!(matches!(
             h.stores.take_state(&state_key(&state)).await,
@@ -788,12 +854,12 @@ mod tests {
         let hooks: Arc<dyn AuthHooks> = Arc::new(DecisionHook(OAuthLoginResult::Create));
         let Some(h) = harness(hooks, Arc::new(RoutingHttpClient::new()), false) else { return };
         let url = h.engine.oauth_initiate("google", "t1").await;
-        let Ok(url) = url else { return };
+        let Ok(url) = url.map(|r| r.authorize_url) else { return };
         let state = extract_query_param(&url, "state").unwrap_or_default();
         let challenge = extract_query_param(&url, "code_challenge").unwrap_or_default();
         let done = h
             .engine
-            .oauth_callback("google", "auth-code", &state, &ctx())
+            .oauth_callback("google", "auth-code", &state, Some(&state), &ctx())
             .await;
         assert!(done.is_ok());
         let Some(exchange) = h.http.exchange_body() else { return };
@@ -895,26 +961,89 @@ mod tests {
         // Forged / missing state.
         assert!(matches!(
             h.engine
-                .oauth_callback("google", "code", &"f".repeat(64), &ctx())
+                .oauth_callback(
+                    "google",
+                    "code",
+                    &"f".repeat(64),
+                    Some(&"f".repeat(64)),
+                    &ctx()
+                )
                 .await,
             Err(AuthError::OauthFailed)
         ));
         // Issue a real state, consume it once, then replay it.
         let url = h.engine.oauth_initiate("google", "t1").await;
-        let Ok(url) = url else { return };
+        let Ok(url) = url.map(|r| r.authorize_url) else { return };
         let state = extract_query_param(&url, "state").unwrap_or_default();
         assert!(
             h.engine
-                .oauth_callback("google", "code", &state, &ctx())
+                .oauth_callback("google", "code", &state, Some(&state), &ctx())
                 .await
                 .is_ok()
         );
         assert!(matches!(
             h.engine
-                .oauth_callback("google", "code", &state, &ctx())
+                .oauth_callback("google", "code", &state, Some(&state), &ctx())
                 .await,
             Err(AuthError::OauthFailed)
         ));
+    }
+
+    #[tokio::test]
+    async fn callback_requires_the_state_cookie_and_does_not_burn_the_state_without_it() {
+        // The browser binding RFC 6749 §10.12 requires. A `state` that merely exists in the
+        // store proves only that *somebody* started a flow: an attacker can run their own
+        // authorization to the point of holding a valid `?code=…&state=…` URL, never visit it,
+        // and lure the victim there — the victim's browser would then be logged into the
+        // attacker's account. The cookie is what tells the two apart, so a missing one and a
+        // mismatched one are both fatal.
+        let hooks: Arc<dyn AuthHooks> = Arc::new(DecisionHook(OAuthLoginResult::Create));
+        let Some(h) = harness(hooks, Arc::new(RoutingHttpClient::new()), false) else { return };
+        let url = h.engine.oauth_initiate("google", "t1").await;
+        let Ok(url) = url.map(|r| r.authorize_url) else { return };
+        let state = extract_query_param(&url, "state").unwrap_or_default();
+
+        // No cookie at all — the lured-victim request.
+        assert!(matches!(
+            h.engine
+                .oauth_callback("google", "code", &state, None, &ctx())
+                .await,
+            Err(AuthError::OauthFailed)
+        ));
+        // A cookie from some other flow, and an empty one — neither is "close enough".
+        for cookie in ["b".repeat(64), String::new()] {
+            assert!(matches!(
+                h.engine
+                    .oauth_callback("google", "code", &state, Some(&cookie), &ctx())
+                    .await,
+                Err(AuthError::OauthFailed)
+            ));
+        }
+
+        // The state survived all three refusals: it is still spendable by the browser that
+        // owns it. A check placed after `take_state` would have burned it, turning the lure
+        // into a denial of service against a login the victim never asked to start.
+        assert!(
+            h.engine
+                .oauth_callback("google", "code", &state, Some(&state), &ctx())
+                .await
+                .is_ok()
+        );
+    }
+
+    #[tokio::test]
+    async fn initiate_returns_the_state_it_put_in_the_authorize_url() {
+        // The adapter plants `redirect.state` as the cookie and the callback compares it to
+        // the `state` query parameter the provider echoes back — which only works if the two
+        // are the same value. A struct that returned a *fresh* state would leave every
+        // callback unsatisfiable, and no other test would notice.
+        let hooks: Arc<dyn AuthHooks> = Arc::new(DecisionHook(OAuthLoginResult::Create));
+        let Some(h) = harness(hooks, Arc::new(RoutingHttpClient::new()), false) else { return };
+        let Ok(redirect) = h.engine.oauth_initiate("google", "t1").await else { return };
+        assert_eq!(
+            extract_query_param(&redirect.authorize_url, "state").as_deref(),
+            Some(redirect.state.as_str())
+        );
     }
 
     #[tokio::test]
@@ -947,7 +1076,9 @@ mod tests {
             "g".repeat(64),
         ] {
             assert!(matches!(
-                engine.oauth_callback("google", "code", &bad, &ctx()).await,
+                engine
+                    .oauth_callback("google", "code", &bad, Some(&bad), &ctx())
+                    .await,
                 Err(AuthError::OauthFailed)
             ));
         }
@@ -975,7 +1106,7 @@ mod tests {
         );
         assert!(matches!(
             h.engine
-                .oauth_callback("google", "code", &state, &ctx())
+                .oauth_callback("google", "code", &state, Some(&state), &ctx())
                 .await,
             Err(AuthError::OauthFailed)
         ));
@@ -988,7 +1119,13 @@ mod tests {
         let Some(h) = harness(hooks, Arc::new(RoutingHttpClient::new()), false) else { return };
         assert!(matches!(
             h.engine
-                .oauth_callback("github", "code", &"a".repeat(64), &ctx())
+                .oauth_callback(
+                    "github",
+                    "code",
+                    &"a".repeat(64),
+                    Some(&"a".repeat(64)),
+                    &ctx()
+                )
                 .await,
             Err(AuthError::OauthFailed)
         ));
@@ -1221,6 +1358,153 @@ mod tests {
         ));
     }
 
+    #[tokio::test]
+    async fn a_provider_that_did_not_verify_the_email_creates_an_unverified_account() {
+        // The account created from an unverified address belongs to whoever controls the OAuth
+        // account, not to whoever controls the mailbox. Marking it verified would make the
+        // consumer's "this email is proven" invariant false from the first login — which is how
+        // an account is taken over by registering with someone else's address at a provider
+        // that does not check. The bundled Google provider refuses such a profile outright, so
+        // this is driven through a provider that reports the address as unverified.
+        let users = Arc::new(InMemoryUserRepository::new());
+        let stores = Arc::new(InMemoryStores::new());
+        let mut cfg = base_config();
+        cfg.controllers.oauth = true;
+        // Verification is not REQUIRED here, so the sign-in completes and the stored record is
+        // observable. The sibling test below covers the required case.
+        cfg.email_verification.required = false;
+        let engine = AuthEngine::builder()
+            .config(cfg)
+            .environment(Environment::Test)
+            .user_repository(users.clone())
+            .redis_stores(stores.clone())
+            .hooks(Arc::new(DecisionHook(OAuthLoginResult::Create)))
+            .oauth_provider(Arc::new(crate::testing::MockOAuthProvider::unverified(
+                "google",
+            )))
+            .oauth_state_store(stores.clone())
+            .build();
+        let Ok(engine) = engine else { return };
+
+        let url = engine.oauth_initiate("google", "t1").await;
+        let Ok(url) = url.map(|r| r.authorize_url) else { return };
+        let state = extract_query_param(&url, "state").unwrap_or_default();
+        let outcome = engine
+            .oauth_callback("google", "auth-code", &state, Some(&state), &ctx())
+            .await;
+
+        assert!(matches!(&outcome, Ok(OAuthOutcome::Authenticated(_))));
+        let stored = users.find_by_email("mock@example.com", "t1").await;
+        assert!(
+            matches!(stored, Ok(Some(ref user)) if !user.email_verified),
+            "an unverified provider email must not create a verified account"
+        );
+    }
+
+    #[tokio::test]
+    async fn oauth_refuses_an_unverified_address_when_verification_is_required() {
+        // An OAuth identity is not a substitute for a proven mailbox. When a deployment
+        // requires verification, signing in through a provider that reports the address as
+        // unverified must fail exactly as password login fails — otherwise the act of signing
+        // in promotes the address and the deployment's "this email is proven" invariant is
+        // false for every OAuth account.
+        let users = Arc::new(InMemoryUserRepository::new());
+        let stores = Arc::new(InMemoryStores::new());
+        let mut cfg = base_config();
+        cfg.controllers.oauth = true;
+        cfg.email_verification.required = true;
+        let engine = AuthEngine::builder()
+            .config(cfg)
+            .environment(Environment::Test)
+            .user_repository(users.clone())
+            .redis_stores(stores.clone())
+            .hooks(Arc::new(DecisionHook(OAuthLoginResult::Create)))
+            .oauth_provider(Arc::new(crate::testing::MockOAuthProvider::unverified(
+                "google",
+            )))
+            .oauth_state_store(stores.clone())
+            .build();
+        let Ok(engine) = engine else { return };
+
+        let url = engine.oauth_initiate("google", "t1").await;
+        let Ok(url) = url.map(|r| r.authorize_url) else { return };
+        let state = extract_query_param(&url, "state").unwrap_or_default();
+        let outcome = engine
+            .oauth_callback("google", "auth-code", &state, Some(&state), &ctx())
+            .await;
+
+        assert!(
+            matches!(outcome, Err(AuthError::EmailNotVerified)),
+            "expected EmailNotVerified, got {outcome:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn oauth_honours_the_status_and_email_verification_gates() {
+        // Every credential flow gates on account status — password login, the MFA challenge,
+        // both reset steps, the platform login — and OAuth was the one that did not, so a
+        // BANNED account holding a linked provider identity walked straight back in. Ban is
+        // the primary account kill switch; a flow that ignores it makes it advisory.
+        let users = Arc::new(InMemoryUserRepository::new());
+        let stores = Arc::new(InMemoryStores::new());
+        let mut cfg = base_config();
+        cfg.controllers.oauth = true;
+        let engine = AuthEngine::builder()
+            .config(cfg)
+            .environment(Environment::Test)
+            .user_repository(users.clone())
+            .redis_stores(stores.clone())
+            .hooks(Arc::new(DecisionHook(OAuthLoginResult::Create)))
+            .oauth_provider(Arc::new(crate::testing::MockOAuthProvider::new("google")))
+            .oauth_state_store(stores.clone())
+            .build();
+        let Ok(engine) = engine else { return };
+
+        // First sign-in creates the account and succeeds.
+        let url = engine.oauth_initiate("google", "t1").await;
+        let Ok(url) = url.map(|r| r.authorize_url) else { return };
+        let state = extract_query_param(&url, "state").unwrap_or_default();
+        assert!(matches!(
+            engine
+                .oauth_callback("google", "auth-code", &state, Some(&state), &ctx())
+                .await,
+            Ok(OAuthOutcome::Authenticated(_))
+        ));
+
+        // Ban the account, then sign in again through the same provider identity.
+        let found = users.find_by_email("mock@example.com", "t1").await;
+        let Ok(Some(user)) = found else { return };
+        assert!(
+            crate::traits::UserRepository::update_status(users.as_ref(), &user.id, "BANNED")
+                .await
+                .is_ok()
+        );
+
+        let mut linking_cfg = base_config();
+        linking_cfg.controllers.oauth = true;
+        let linking = AuthEngine::builder()
+            .config(linking_cfg)
+            .environment(Environment::Test)
+            .user_repository(users.clone())
+            .redis_stores(stores.clone())
+            .hooks(Arc::new(DecisionHook(OAuthLoginResult::Link)))
+            .oauth_provider(Arc::new(crate::testing::MockOAuthProvider::new("google")))
+            .oauth_state_store(stores.clone())
+            .build();
+        let Ok(linking) = linking else { return };
+
+        let url = linking.oauth_initiate("google", "t1").await;
+        let Ok(url) = url.map(|r| r.authorize_url) else { return };
+        let state = extract_query_param(&url, "state").unwrap_or_default();
+        let banned = linking
+            .oauth_callback("google", "auth-code", &state, Some(&state), &ctx())
+            .await;
+        assert!(
+            matches!(banned, Err(AuthError::AccountBanned)),
+            "a banned account must not complete an OAuth sign-in, got {banned:?}"
+        );
+    }
+
     #[test]
     fn name_or_local_part_prefers_the_profile_name() {
         // The profile name wins when present; otherwise the email local-part is used.
@@ -1228,6 +1512,7 @@ mod tests {
             provider: "google".to_owned(),
             provider_id: "1".to_owned(),
             email: "x@example.com".to_owned(),
+            email_verified: true,
             name: Some("Real Name".to_owned()),
             avatar: None,
         };

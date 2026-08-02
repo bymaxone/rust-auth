@@ -30,6 +30,7 @@ mod response;
 mod router;
 mod routes;
 mod state;
+mod trusted_origin;
 mod validation;
 
 #[cfg(feature = "websocket")]
@@ -39,10 +40,11 @@ mod ws;
 mod test_support;
 
 pub use dto::{
-    AcceptInvitationDto, CreateInvitationDto, ForgotPasswordDto, LoginDto, MfaChallengeDto,
-    MfaDisableDto, MfaRegenerateRecoveryCodesDto, MfaVerifyDto, OAuthCallbackQuery,
-    OAuthInitiateQuery, PlatformLoginDto, RefreshDto, RegisterDto, ResendOtpDto,
-    ResendVerificationDto, ResetPasswordDto, VerifyEmailDto, VerifyOtpDto,
+    AcceptInvitationDto, ChangePasswordDto, CreateInvitationDto, ForgotPasswordDto, LoginDto,
+    MfaChallengeDto, MfaDisableDto, MfaRegenerateRecoveryCodesDto, MfaSetupDto, MfaVerifyDto,
+    OAuthCallbackQuery, OAuthInitiateQuery, PlatformLoginDto, RefreshDto, RegisterDto,
+    ResendOtpDto, ResendVerificationDto, ResetPasswordDto, RevokeInvitationDto, VerifyEmailDto,
+    VerifyOtpDto,
 };
 pub use extractors::{
     AdminRole, AuthUser, CurrentUser, MfaSatisfied, OptionalAuthUser, RequireRole, Role,

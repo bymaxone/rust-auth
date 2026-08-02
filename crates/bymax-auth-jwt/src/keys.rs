@@ -60,7 +60,7 @@ impl fmt::Debug for HsKey {
 /// Policy for [`crate::verify`]. The algorithm is **not** a field — HS256 is pinned
 /// internally and is never selected from the token.
 #[derive(Clone, Copy, Debug)]
-pub struct VerifyOptions {
+pub struct VerifyOptions<'a> {
     /// Clock-skew tolerance, in seconds. The native server runs with `0` (its clock is
     /// authoritative); the edge accepts a small value because edge nodes may drift.
     pub leeway_secs: u64,
@@ -73,16 +73,38 @@ pub struct VerifyOptions {
     /// edge build has no system clock and MUST set `Some(now)` (e.g. from the JS clock);
     /// leaving it `None` there would read an unavailable clock.
     pub now_unix: Option<i64>,
+    /// The issuer the token must name. `None` skips the check.
+    ///
+    /// Set this wherever the deployment configures `jwt.issuer`. Verification lives here,
+    /// not only in the engine, because the edge is a verifier too: a Worker validating a
+    /// session cookie sees the same tokens the native server does, and without this it would
+    /// accept one minted by a different issuer that the engine itself refuses.
+    ///
+    /// A token carrying NO `iss` is refused as firmly as one carrying the wrong value —
+    /// otherwise omitting the claim is a way to opt out of the check.
+    pub expected_iss: Option<&'a str>,
+    /// The audience the token must name. `None` skips the check.
+    ///
+    /// With HS256 the verifier can also sign, so audience binding is what stops a token
+    /// minted for one service being replayed at another that trusts the same secret. Same
+    /// absent-is-refused rule as [`Self::expected_iss`].
+    pub expected_aud: Option<&'a str>,
 }
 
-impl Default for VerifyOptions {
-    /// Server defaults: zero leeway, both temporal checks on, system clock.
+impl Default for VerifyOptions<'_> {
+    /// Server defaults: zero leeway, both temporal checks on, system clock, no binding.
+    ///
+    /// The binding defaults to unchecked because it is optional configuration — most
+    /// deployments run without `jwt.issuer`/`jwt.audience`. A deployment that sets either
+    /// MUST fill the matching field in, on every verifier it runs, including the edge.
     fn default() -> Self {
         Self {
             leeway_secs: 0,
             validate_exp: true,
             validate_iat: true,
             now_unix: None,
+            expected_iss: None,
+            expected_aud: None,
         }
     }
 }
@@ -104,9 +126,19 @@ pub trait JwtClaims: sealed::Sealed {
     fn exp(&self) -> i64;
     /// Issued-at, in Unix seconds.
     fn iat(&self) -> i64;
+    /// The `iss` claim, when the token carries one.
+    fn iss(&self) -> Option<&str>;
+    /// The `aud` claim, when the token carries one.
+    fn aud(&self) -> Option<&str>;
 }
 
 impl JwtClaims for DashboardClaims {
+    fn iss(&self) -> Option<&str> {
+        self.iss.as_deref()
+    }
+    fn aud(&self) -> Option<&str> {
+        self.aud.as_deref()
+    }
     fn exp(&self) -> i64 {
         self.exp
     }
@@ -116,6 +148,12 @@ impl JwtClaims for DashboardClaims {
 }
 
 impl JwtClaims for PlatformClaims {
+    fn iss(&self) -> Option<&str> {
+        self.iss.as_deref()
+    }
+    fn aud(&self) -> Option<&str> {
+        self.aud.as_deref()
+    }
     fn exp(&self) -> i64 {
         self.exp
     }
@@ -125,6 +163,12 @@ impl JwtClaims for PlatformClaims {
 }
 
 impl JwtClaims for MfaTempClaims {
+    fn iss(&self) -> Option<&str> {
+        self.iss.as_deref()
+    }
+    fn aud(&self) -> Option<&str> {
+        self.aud.as_deref()
+    }
     fn exp(&self) -> i64 {
         self.exp
     }
@@ -263,6 +307,8 @@ mod tests {
         // The sealed trait surfaces exp/iat for the temporal check; confirm each claim
         // type forwards its own fields.
         let dashboard = DashboardClaims {
+            iss: None,
+            aud: None,
             sub: "u".to_owned(),
             jti: "j".to_owned(),
             tenant_id: "t".to_owned(),
@@ -279,6 +325,8 @@ mod tests {
         assert_eq!(JwtClaims::exp(&dashboard), 20);
 
         let platform = PlatformClaims {
+            iss: None,
+            aud: None,
             sub: "u".to_owned(),
             jti: "j".to_owned(),
             role: "r".to_owned(),
@@ -293,14 +341,55 @@ mod tests {
         assert_eq!(JwtClaims::exp(&platform), 21);
 
         let mfa = MfaTempClaims {
+            iss: None,
+            aud: None,
             sub: "u".to_owned(),
             jti: "j".to_owned(),
             token_type: bymax_auth_types::MfaTempType::MfaChallenge,
             context: bymax_auth_types::MfaContext::Dashboard,
+            epoch: 0,
             iat: 12,
             exp: 22,
         };
         assert_eq!(JwtClaims::iat(&mfa), 12);
         assert_eq!(JwtClaims::exp(&mfa), 22);
+
+        // …and the binding accessors, on all three. They are what the engine's issuer/audience
+        // check reads, and that check lives in another crate — so without asserting them here
+        // this crate ships three pairs of accessors its own suite never calls. An accessor that
+        // answered `None` for a stamped token, or a constant for any token, would disarm the
+        // binding wherever it is configured: the verifier would compare the wrong value and
+        // either accept everything or reject everything.
+        assert_eq!(JwtClaims::iss(&dashboard), None);
+        assert_eq!(JwtClaims::aud(&dashboard), None);
+        assert_eq!(JwtClaims::iss(&platform), None);
+        assert_eq!(JwtClaims::aud(&platform), None);
+        assert_eq!(JwtClaims::iss(&mfa), None);
+        assert_eq!(JwtClaims::aud(&mfa), None);
+
+        // A stamped claim forwards its own value rather than a constant.
+        let stamped_dashboard = DashboardClaims {
+            iss: Some("bymax".to_owned()),
+            aud: Some("dashboard".to_owned()),
+            ..dashboard
+        };
+        assert_eq!(JwtClaims::iss(&stamped_dashboard), Some("bymax"));
+        assert_eq!(JwtClaims::aud(&stamped_dashboard), Some("dashboard"));
+
+        let stamped_platform = PlatformClaims {
+            iss: Some("bymax".to_owned()),
+            aud: Some("platform".to_owned()),
+            ..platform
+        };
+        assert_eq!(JwtClaims::iss(&stamped_platform), Some("bymax"));
+        assert_eq!(JwtClaims::aud(&stamped_platform), Some("platform"));
+
+        let stamped_mfa = MfaTempClaims {
+            iss: Some("bymax".to_owned()),
+            aud: Some("challenge".to_owned()),
+            ..mfa
+        };
+        assert_eq!(JwtClaims::iss(&stamped_mfa), Some("bymax"));
+        assert_eq!(JwtClaims::aud(&stamped_mfa), Some("challenge"));
     }
 }

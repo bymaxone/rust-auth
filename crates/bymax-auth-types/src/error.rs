@@ -55,12 +55,6 @@ pub enum AuthErrorCode {
     /// Refresh token absent from the store and outside the grace window.
     #[serde(rename = "auth.refresh_token_invalid")]
     RefreshTokenInvalid,
-    /// Session backing a refresh token no longer exists.
-    #[serde(rename = "auth.session_expired")]
-    SessionExpired,
-    /// Concurrent-session cap reached (informational).
-    #[serde(rename = "auth.session_limit_reached")]
-    SessionLimitReached,
     /// Revoke targeted a session not owned by the caller (anti-IDOR).
     #[serde(rename = "auth.session_not_found")]
     SessionNotFound,
@@ -76,6 +70,11 @@ pub enum AuthErrorCode {
     /// Login when email verification is required and the email is unverified.
     #[serde(rename = "auth.email_not_verified")]
     EmailNotVerified,
+    /// Address-change token unknown, expired, already used, or no longer bound to the
+    /// password it was minted against. One code for all four: the holder of a bad link learns
+    /// only that it does not work, which is all they can act on.
+    #[serde(rename = "auth.email_change_token_invalid")]
+    EmailChangeTokenInvalid,
 
     // MFA
     /// Endpoint demands verified MFA but the JWT lacks `mfaVerified: true`.
@@ -96,21 +95,27 @@ pub enum AuthErrorCode {
     /// MFA-temp JWT expired, malformed, or already consumed.
     #[serde(rename = "auth.mfa_temp_token_invalid")]
     MfaTempTokenInvalid,
-    /// Submitted recovery code matches no stored hash.
-    #[serde(rename = "auth.recovery_code_invalid")]
-    RecoveryCodeInvalid,
+    /// Another MFA state change for the same account is already in flight.
+    ///
+    /// Every MFA transition is a read-modify-write over one repository record carrying
+    /// `mfa_enabled`, the secret and the recovery codes together, and the write replaces all
+    /// three wholesale. Interleaved, two of them silently undo each other: a challenge that
+    /// read the codes before a `regenerate` and splices after it restores the whole old set the
+    /// user had just replaced, and a challenge that splices after a `disable` completes puts
+    /// `mfa_enabled` back with the pre-disable secret. Refusing the second caller is how the
+    /// library serializes them. Retryable.
+    #[serde(rename = "auth.mfa_state_conflict")]
+    MfaStateConflict,
 
     // Password
-    /// New password fails the minimum policy.
-    #[serde(rename = "auth.password_too_weak")]
-    PasswordTooWeak,
+    /// The password appears in a known-breach corpus, or on the offline common-password
+    /// screen. It may satisfy every length and complexity rule and still be one an attacker
+    /// tries first, which is why the policy checks live in the request DTO and this does not.
+    #[serde(rename = "auth.password_compromised")]
+    PasswordCompromised,
     /// Reset token absent from the store.
     #[serde(rename = "auth.password_reset_token_invalid")]
     PasswordResetTokenInvalid,
-    /// Defined for completeness; the reset flow consumes tokens with `GETDEL`, so this
-    /// is unreachable by design (expired and missing both map to the invalid code).
-    #[serde(rename = "auth.password_reset_token_expired")]
-    PasswordResetTokenExpired,
 
     // OTP
     /// OTP code mismatch.
@@ -130,6 +135,10 @@ pub enum AuthErrorCode {
     /// Generic access-denied fallback.
     #[serde(rename = "auth.forbidden")]
     Forbidden,
+    /// A state-changing request carrying the session cookie came from an origin the
+    /// deployment does not trust.
+    #[serde(rename = "auth.untrusted_origin")]
+    UntrustedOrigin,
 
     // Invitations
     /// Invitation token absent from the store — invalid or expired.
@@ -178,11 +187,9 @@ impl AuthErrorCode {
             | Self::TokenRevoked
             | Self::TokenInvalid
             | Self::RefreshTokenInvalid
-            | Self::SessionExpired
             | Self::TokenMissing
             | Self::MfaInvalidCode
             | Self::MfaTempTokenInvalid
-            | Self::RecoveryCodeInvalid
             | Self::OtpInvalid
             | Self::OtpExpired
             | Self::OauthFailed
@@ -194,18 +201,19 @@ impl AuthErrorCode {
             | Self::EmailNotVerified
             | Self::MfaRequired
             | Self::InsufficientRole
-            | Self::Forbidden => 403,
+            | Self::Forbidden
+            | Self::UntrustedOrigin => 403,
             Self::SessionNotFound => 404,
             Self::EmailAlreadyExists
-            | Self::SessionLimitReached
             | Self::MfaAlreadyEnabled
+            | Self::MfaStateConflict
             | Self::OauthEmailMismatch => 409,
             Self::MfaNotEnabled
             | Self::MfaSetupRequired
-            | Self::PasswordTooWeak
+            | Self::PasswordCompromised
             | Self::PasswordResetTokenInvalid
-            | Self::PasswordResetTokenExpired
             | Self::InvalidInvitationToken
+            | Self::EmailChangeTokenInvalid
             | Self::Validation => 400,
             Self::AccountLocked | Self::OtpMaxAttempts | Self::TooManyRequests => 429,
             Self::Internal => 500,
@@ -228,27 +236,28 @@ impl AuthErrorCode {
             Self::TokenRevoked => "Token revoked",
             Self::TokenInvalid => "Invalid token",
             Self::RefreshTokenInvalid => "Invalid or expired refresh token",
-            Self::SessionExpired => "Session expired",
-            Self::SessionLimitReached => "Session limit reached",
             Self::SessionNotFound => "Session not found",
             Self::TokenMissing => "Token missing",
             Self::EmailAlreadyExists => "Email already registered",
             Self::EmailNotVerified => "Email not verified",
+            Self::EmailChangeTokenInvalid => "Invalid or expired email change link",
             Self::MfaRequired => "Two-factor authentication required",
             Self::MfaInvalidCode => "Invalid MFA code",
             Self::MfaAlreadyEnabled => "MFA is already enabled",
             Self::MfaNotEnabled => "MFA is not enabled",
             Self::MfaSetupRequired => "MFA setup required",
             Self::MfaTempTokenInvalid => "Invalid or expired temporary MFA token",
-            Self::RecoveryCodeInvalid => "Invalid recovery code",
-            Self::PasswordTooWeak => "Password too weak",
+            Self::MfaStateConflict => "Another MFA change is in progress. Please try again.",
+            Self::PasswordCompromised => {
+                "This password has appeared in a data breach. Please choose a different one."
+            }
             Self::PasswordResetTokenInvalid => "Invalid password reset token",
-            Self::PasswordResetTokenExpired => "Expired password reset token",
             Self::OtpInvalid => "Invalid OTP code",
             Self::OtpExpired => "Expired OTP code",
             Self::OtpMaxAttempts => "Maximum number of attempts exceeded",
             Self::InsufficientRole => "Insufficient permission",
             Self::Forbidden => "Access denied",
+            Self::UntrustedOrigin => "Request origin not allowed",
             Self::InvalidInvitationToken => "Invalid or expired invitation token",
             Self::OauthFailed => "OAuth authentication failed",
             Self::OauthEmailMismatch => "OAuth email does not match",
@@ -260,25 +269,31 @@ impl AuthErrorCode {
     }
 
     /// Whether this code is internal-only and MUST be remapped before reaching a
-    /// client. True for the three token sentinels (`TokenExpired`, `TokenRevoked`,
-    /// `TokenMissing`); see [`AuthErrorCode::to_wire`].
+    /// client — that is, whether [`AuthErrorCode::to_wire`] moves it.
     #[must_use]
     pub fn is_internal_only(self) -> bool {
-        matches!(
-            self,
-            Self::TokenExpired | Self::TokenRevoked | Self::TokenMissing
-        )
+        self.to_wire() != self
     }
 
-    /// The code as it is allowed to appear on the wire: the internal-only token
-    /// sentinels collapse to [`AuthErrorCode::TokenInvalid`]; every other code maps to
-    /// itself.
+    /// The code as it is allowed to appear on the wire. Two families collapse; every other
+    /// code maps to itself.
+    ///
+    /// The three token sentinels become [`AuthErrorCode::TokenInvalid`]: a caller must not be
+    /// able to tell "this token was valid until it was revoked" from "this was never a token".
+    ///
+    /// The two OTP sentinels become [`AuthErrorCode::OtpInvalid`], and this one is load-bearing
+    /// for the anti-enumeration in front of them. `forgot_password` deliberately answers the
+    /// same whether or not the address exists — but it only writes an OTP record when it does,
+    /// so a caller could ask for a reset and then submit one wrong code: `OtpExpired` meant "no
+    /// record was ever written, that address has no account" and `OtpInvalid` meant "there is
+    /// one". `OtpMaxAttempts` said the same thing more slowly, since only a record that exists
+    /// can reach a ceiling. One extra request turned a uniform answer into a definitive one.
     #[must_use]
     pub fn to_wire(self) -> Self {
-        if self.is_internal_only() {
-            Self::TokenInvalid
-        } else {
-            self
+        match self {
+            Self::TokenExpired | Self::TokenRevoked | Self::TokenMissing => Self::TokenInvalid,
+            Self::OtpExpired | Self::OtpMaxAttempts => Self::OtpInvalid,
+            other => other,
         }
     }
 }
@@ -317,9 +332,13 @@ pub struct AuthErrorBody {
     /// The client-facing message for `code`.
     pub message: String,
     /// Optional structured data (e.g. `{ "retryAfterSeconds": 300 }` or the per-field
-    /// validation errors); the field is omitted from the JSON entirely (not `null`)
-    /// when the variant carries none.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    /// validation errors).
+    ///
+    /// Serialized as `null` when the variant carries none — **present, not omitted**. That is
+    /// the shared contract (`conformance/wire-contract.json`, `errorEnvelope`) and what
+    /// nest-auth emits, and one client library reads both backends: `undefined` and `null` are
+    /// not the same value to it, and a key that is sometimes absent forces every reader to
+    /// handle two shapes for one meaning.
     pub details: Option<serde_json::Value>,
 }
 
@@ -375,12 +394,6 @@ pub enum AuthError {
     /// Refresh token absent and outside the grace window.
     #[error("refresh token invalid")]
     RefreshTokenInvalid,
-    /// Session backing a refresh token no longer exists.
-    #[error("session expired")]
-    SessionExpired,
-    /// Concurrent-session cap reached.
-    #[error("session limit reached")]
-    SessionLimitReached,
     /// Revoke targeted a session not owned by the caller.
     #[error("session not found")]
     SessionNotFound,
@@ -395,6 +408,9 @@ pub enum AuthError {
     /// Email not verified while verification is required.
     #[error("email not verified")]
     EmailNotVerified,
+    /// Address-change token invalid, expired, spent, or no longer bound.
+    #[error("invalid email change token")]
+    EmailChangeTokenInvalid,
 
     // MFA
     /// Verified MFA required but absent from the JWT.
@@ -415,20 +431,17 @@ pub enum AuthError {
     /// MFA-temp token expired, malformed, or already consumed.
     #[error("mfa temp token invalid")]
     MfaTempTokenInvalid,
-    /// Submitted recovery code matches no stored hash.
-    #[error("recovery code invalid")]
-    RecoveryCodeInvalid,
+    /// Another MFA state change for the same account is already in flight; retryable.
+    #[error("mfa state conflict")]
+    MfaStateConflict,
 
     // Password
-    /// New password fails the minimum policy.
-    #[error("password too weak")]
-    PasswordTooWeak,
+    /// The password appears in a known-breach corpus.
+    #[error("password compromised")]
+    PasswordCompromised,
     /// Reset token absent from the store.
     #[error("password reset token invalid")]
     PasswordResetTokenInvalid,
-    /// Reset token expired (unreachable by design; see [`AuthErrorCode`]).
-    #[error("password reset token expired")]
-    PasswordResetTokenExpired,
 
     // OTP
     /// OTP code mismatch.
@@ -448,6 +461,9 @@ pub enum AuthError {
     /// Generic access-denied fallback.
     #[error("forbidden")]
     Forbidden,
+    /// A state-changing request carrying the session cookie came from an untrusted origin.
+    #[error("untrusted origin")]
+    UntrustedOrigin,
 
     // Invitations
     /// Invitation token absent — invalid or expired.
@@ -502,27 +518,26 @@ impl AuthError {
             Self::TokenRevoked => AuthErrorCode::TokenRevoked,
             Self::TokenInvalid => AuthErrorCode::TokenInvalid,
             Self::RefreshTokenInvalid => AuthErrorCode::RefreshTokenInvalid,
-            Self::SessionExpired => AuthErrorCode::SessionExpired,
-            Self::SessionLimitReached => AuthErrorCode::SessionLimitReached,
             Self::SessionNotFound => AuthErrorCode::SessionNotFound,
             Self::TokenMissing => AuthErrorCode::TokenMissing,
             Self::EmailAlreadyExists => AuthErrorCode::EmailAlreadyExists,
             Self::EmailNotVerified => AuthErrorCode::EmailNotVerified,
+            Self::EmailChangeTokenInvalid => AuthErrorCode::EmailChangeTokenInvalid,
             Self::MfaRequired => AuthErrorCode::MfaRequired,
             Self::MfaInvalidCode => AuthErrorCode::MfaInvalidCode,
             Self::MfaAlreadyEnabled => AuthErrorCode::MfaAlreadyEnabled,
             Self::MfaNotEnabled => AuthErrorCode::MfaNotEnabled,
             Self::MfaSetupRequired => AuthErrorCode::MfaSetupRequired,
             Self::MfaTempTokenInvalid => AuthErrorCode::MfaTempTokenInvalid,
-            Self::RecoveryCodeInvalid => AuthErrorCode::RecoveryCodeInvalid,
-            Self::PasswordTooWeak => AuthErrorCode::PasswordTooWeak,
+            Self::MfaStateConflict => AuthErrorCode::MfaStateConflict,
+            Self::PasswordCompromised => AuthErrorCode::PasswordCompromised,
             Self::PasswordResetTokenInvalid => AuthErrorCode::PasswordResetTokenInvalid,
-            Self::PasswordResetTokenExpired => AuthErrorCode::PasswordResetTokenExpired,
             Self::OtpInvalid => AuthErrorCode::OtpInvalid,
             Self::OtpExpired => AuthErrorCode::OtpExpired,
             Self::OtpMaxAttempts => AuthErrorCode::OtpMaxAttempts,
             Self::InsufficientRole => AuthErrorCode::InsufficientRole,
             Self::Forbidden => AuthErrorCode::Forbidden,
+            Self::UntrustedOrigin => AuthErrorCode::UntrustedOrigin,
             Self::InvalidInvitationToken => AuthErrorCode::InvalidInvitationToken,
             Self::OauthFailed => AuthErrorCode::OauthFailed,
             Self::OauthEmailMismatch => AuthErrorCode::OauthEmailMismatch,
@@ -536,7 +551,11 @@ impl AuthError {
     /// The HTTP status for this error (from its code).
     #[must_use]
     pub fn http_status(&self) -> u16 {
-        self.code().http_status()
+        // The WIRE code decides the status, because the status is part of the answer. Reading
+        // it from the internal code would have re-opened by status exactly what `to_wire`
+        // closes by code: `OtpMaxAttempts` carries 429 and `OtpInvalid` 401, so a caller could
+        // still tell a record that exists from one that never did.
+        self.code().to_wire().http_status()
     }
 
     /// The English default client message for this error (from its **wire** code, so
@@ -596,5 +615,87 @@ impl AuthError {
                 details: self.details(),
             },
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_error_envelope_matches_the_shared_wire_contract() {
+        // `conformance/wire-contract.json` is held byte-identical by nest-auth, and one client
+        // library decodes both backends. The section is asserted against a REAL serialized
+        // error, not against the struct definition: the shape a reader sees is the JSON, and
+        // `skip_serializing_if` on a field is invisible in the type.
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../conformance/wire-contract.json"
+        );
+        let raw = std::fs::read_to_string(path).unwrap_or_default();
+        let root: serde_json::Value = serde_json::from_str(&raw).unwrap_or(serde_json::Value::Null);
+        let shape = root
+            .get("errorEnvelope")
+            .and_then(|e| e.get("shape"))
+            .and_then(|s| s.get("error"))
+            .cloned()
+            .unwrap_or(serde_json::Value::Null);
+        assert!(
+            shape.is_object(),
+            "the wire contract declared no `errorEnvelope.shape.error` — it did not load"
+        );
+        assert_eq!(
+            shape.get("code").and_then(serde_json::Value::as_str),
+            Some("string")
+        );
+        assert_eq!(
+            shape.get("message").and_then(serde_json::Value::as_str),
+            Some("string")
+        );
+        // `object|null`, not `object?`: the key is always there.
+        assert_eq!(
+            shape.get("details").and_then(serde_json::Value::as_str),
+            Some("object|null")
+        );
+
+        // An error carrying no details still emits the key, as null. Omitting it is the
+        // divergence this test exists for: `undefined` and `null` are different values to the
+        // shared client, and a key that is sometimes absent makes every reader handle two
+        // shapes for one meaning.
+        let envelope = AuthError::InvalidCredentials.to_envelope();
+        let json: serde_json::Value =
+            serde_json::to_value(&envelope).unwrap_or(serde_json::Value::Null);
+        let body = json
+            .get("error")
+            .cloned()
+            .unwrap_or(serde_json::Value::Null);
+        assert!(body.is_object(), "the envelope has no `error` object");
+        for field in ["code", "message", "details"] {
+            assert!(
+                body.get(field).is_some(),
+                "`error.{field}` is named in the wire contract but absent from the JSON"
+            );
+        }
+        assert_eq!(body.get("details"), Some(&serde_json::Value::Null));
+        assert!(body.get("code").is_some_and(serde_json::Value::is_string));
+        assert!(
+            body.get("message")
+                .is_some_and(serde_json::Value::is_string)
+        );
+
+        // …and an error that DOES carry details puts an object there, so the `object|null`
+        // union is pinned in both directions.
+        let envelope = AuthError::AccountLocked {
+            retry_after_seconds: Some(300),
+        }
+        .to_envelope();
+        let json: serde_json::Value =
+            serde_json::to_value(&envelope).unwrap_or(serde_json::Value::Null);
+        let details = json
+            .get("error")
+            .and_then(|error| error.get("details"))
+            .cloned()
+            .unwrap_or(serde_json::Value::Null);
+        assert!(details.is_object(), "structured details are not an object");
     }
 }

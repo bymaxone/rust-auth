@@ -13,15 +13,17 @@ use axum::Router;
 use axum::extract::State;
 use axum::response::{IntoResponse, Response};
 use axum::routing::post;
-use bymax_auth_types::MfaContext;
+use bymax_auth_types::{AuthError, MfaContext};
 use http::StatusCode;
 use serde_json::json;
 
 use crate::delivery::TokenDelivery;
-use crate::dto::{MfaChallengeDto, MfaDisableDto, MfaRegenerateRecoveryCodesDto, MfaVerifyDto};
+use crate::dto::{
+    MfaChallengeDto, MfaDisableDto, MfaRegenerateRecoveryCodesDto, MfaSetupDto, MfaVerifyDto,
+};
 use crate::extractors::AuthUser;
 use crate::response::error_response;
-use crate::routes::RequestMeta;
+use crate::routes::{CookieDomains, RequestMeta};
 use crate::state::{AuthState, AxumAuthConfig, ClientIpSource};
 use crate::validation::ValidatedJson;
 
@@ -54,15 +56,26 @@ pub(crate) fn routes(config: &AxumAuthConfig, ip_source: ClientIpSource) -> Rout
     )
 }
 
-/// `POST /auth/mfa/setup` (200). Requires [`AuthUser`], not `MfaSatisfied` (enrolment).
-async fn setup(State(state): State<AuthState>, user: AuthUser) -> Response {
+/// `POST /auth/mfa/setup` (201). Requires [`AuthUser`], not `MfaSatisfied` (enrolment).
+///
+/// 201 Created, not 200: nest-auth's `MfaController.setup` carries no `@HttpCode`, so it uses
+/// Nest's `POST` default of 201, and enrolment does create the pending setup record.
+async fn setup(
+    State(state): State<AuthState>,
+    user: AuthUser,
+    body: axum::body::Bytes,
+) -> Response {
+    // The body carries the account password. It is optional on the wire — an OAuth-only
+    // account has none — so an absent or unparseable body degrades to "no password supplied"
+    // and the engine decides, rather than 400-ing before it can.
+    let dto: MfaSetupDto = serde_json::from_slice(&body).unwrap_or_default();
     match state
         .engine()
-        .mfa_setup(&user.0.sub, MfaContext::Dashboard)
+        .mfa_setup(&user.0.sub, MfaContext::Dashboard, dto.password.as_deref())
         .await
     {
         Ok(result) => (
-            StatusCode::OK,
+            StatusCode::CREATED,
             Json(json!({
                 "secret": result.secret,
                 "qrCodeUri": result.qr_code_uri,
@@ -99,22 +112,61 @@ async fn verify_enable(
 
 /// `POST /auth/mfa/challenge` (200). Public — the post-login exchange. Returns a full
 /// dashboard session on success.
+///
+/// The temp token comes from `mfaTempToken` in the body **or**, when the body omits it, from
+/// the HttpOnly `mfa_temp_token` cookie the OAuth callback planted (see
+/// [`crate::routes::oauth`]). The body wins when both are present — that is the historical
+/// contract of the password-login path. Without this fallback the browser OAuth + MFA flow
+/// could never complete: the callback 302s to the configured MFA page, which has no way to
+/// read the HttpOnly cookie it would have to echo back.
+///
+/// When the cookie supplied the token it is cleared per nest-auth's policy (documented on
+/// [`TokenDelivery::clear_mfa_temp_cookie`]): on success and on an invalid temp token, but not
+/// on a wrong code, so the user can retry inside the token's 5-minute lifetime.
 async fn challenge(
     State(state): State<AuthState>,
     cookies: tower_cookies::Cookies,
+    CookieDomains(domains): CookieDomains,
     RequestMeta(ctx): RequestMeta,
     ValidatedJson(dto): ValidatedJson<MfaChallengeDto>,
 ) -> Response {
+    let delivery = TokenDelivery::with_domains(state.config(), &domains);
+    let cookie_token = mfa_temp_cookie(&cookies);
+    // Neither channel carried a token: that is an invalid temp token (nest-auth throws
+    // `MFA_TEMP_TOKEN_INVALID` here), never a generic field-validation 400.
+    let Some(temp_token) = dto.mfa_temp_token.as_deref().or(cookie_token.as_deref()) else {
+        return error_response(&AuthError::MfaTempTokenInvalid);
+    };
+
     match state
         .engine()
-        .dashboard_mfa_challenge(&dto.mfa_temp_token, &dto.code, &ctx.ip, &ctx.user_agent)
+        .dashboard_mfa_challenge(temp_token, &dto.code, &ctx.ip, &ctx.user_agent)
         .await
     {
         Ok(auth) => {
-            TokenDelivery::new(state.config()).deliver_auth(&cookies, &auth, StatusCode::OK)
+            if cookie_token.is_some() {
+                delivery.clear_mfa_temp_cookie(&cookies);
+            }
+            delivery.deliver_auth(&cookies, &auth, StatusCode::OK)
         }
-        Err(error) => error_response(&error),
+        Err(error) => {
+            // A dead token can never be retried under the same cookie, so drop it; any other
+            // failure (wrong code, lockout, store hiccup) leaves the cookie in place.
+            if cookie_token.is_some() && matches!(error, AuthError::MfaTempTokenInvalid) {
+                delivery.clear_mfa_temp_cookie(&cookies);
+            }
+            error_response(&error)
+        }
     }
+}
+
+/// Read the `mfa_temp_token` cookie, treating an empty value as absent so an already-cleared
+/// cookie never masquerades as a supplied token.
+fn mfa_temp_cookie(cookies: &tower_cookies::Cookies) -> Option<String> {
+    cookies
+        .get(bymax_auth_types::constants::MFA_TEMP_COOKIE_NAME)
+        .map(|cookie| cookie.value().to_owned())
+        .filter(|value| !value.is_empty())
 }
 
 /// `POST /auth/mfa/disable` (204). Requires [`AuthUser`] + a valid TOTP (strong re-auth).

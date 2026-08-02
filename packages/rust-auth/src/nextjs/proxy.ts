@@ -47,6 +47,13 @@ const DEFAULT_LOGIN_PATH = "/login";
 /** The default ceiling on redirect bounces before the proxy stops trying to recover. */
 const DEFAULT_MAX_REDIRECTS = 3;
 
+/**
+ * The `Cache-Control` value on every refusal the proxy emits for a background request. It
+ * stops a CDN or the client router cache from storing the 401 and replaying it to a later,
+ * genuinely authenticated visitor.
+ */
+const NO_STORE_CACHE_CONTROL = "no-store, no-cache";
+
 /** A single RBAC rule: the roles permitted under a path prefix. */
 export interface AuthProxyRoleRule {
   /** The path prefix this rule guards (e.g. `/admin`). */
@@ -65,6 +72,18 @@ export interface AuthProxyConfig {
    * verify a token's signature and must not admit one it cannot prove genuine.
    */
   accessTokenSecret?: string | null;
+
+  /**
+   * The `iss` the backend stamps on its tokens, when `jwt.issuer` is configured there.
+   *
+   * The backend refuses any token that does not carry it. Leaving this unset here means the
+   * proxy accepts one minted for a different issuer that trusts the same secret — with HS256
+   * the verifier can also sign, so that is a real party, not a hypothetical one.
+   */
+  expectedIssuer?: string | null;
+
+  /** The `aud` the backend stamps, when `jwt.audience` is configured. See {@link expectedIssuer}. */
+  expectedAudience?: string | null;
   /** Path prefixes that bypass auth entirely (e.g. `/_next`, `/public`). */
   publicPaths?: readonly string[];
   /** RBAC rules applied to the first matching `pathPrefix`. */
@@ -85,6 +104,8 @@ export interface ResolvedAuthProxyConfig {
   loginPath: string;
   /** The resolved HS256 secret, or `null` to fail closed (no request is authenticated). */
   accessTokenSecret: string | null;
+  expectedIssuer: string | null;
+  expectedAudience: string | null;
   /** The resolved public path-prefix list. */
   publicPaths: readonly string[];
   /** The resolved RBAC rules. */
@@ -115,6 +136,8 @@ function resolveConfig(config: AuthProxyConfig): ResolvedAuthProxyConfig {
   return {
     loginPath: config.loginPath ?? DEFAULT_LOGIN_PATH,
     accessTokenSecret: config.accessTokenSecret ?? null,
+    expectedIssuer: config.expectedIssuer ?? null,
+    expectedAudience: config.expectedAudience ?? null,
     publicPaths: config.publicPaths ?? [],
     roleRules: config.roleRules ?? [],
     blockedStatuses: config.blockedStatuses ?? [],
@@ -136,7 +159,12 @@ export function createAuthProxy(config: AuthProxyConfig): AuthProxyInstance {
   const proxy = async (request: NextRequest): Promise<NextResponse> => {
     const { pathname } = request.nextUrl;
     if (isPublicPath(pathname, resolved.publicPaths)) {
-      return NextResponse.next();
+      // A public path still has to have the caller's `x-user-*` stripped: they are forgeable
+      // by anyone and the page behind a public route renders with whatever it is handed. This
+      // arm used to forward them verbatim, so the headers were spoofable with no token at all.
+      const headers = new Headers(request.headers);
+      stripUserHeaders(headers);
+      return NextResponse.next({ request: { headers } });
     }
 
     const token = request.cookies.get(AUTH_ACCESS_COOKIE_NAME)?.value;
@@ -146,13 +174,21 @@ export function createAuthProxy(config: AuthProxyConfig): AuthProxyInstance {
     // structurally valid (even forged) token, so a missing secret is unauthenticated.
     const decoded: DecodedToken =
       token !== undefined && typeof secret === "string" && secret.length > 0
-        ? await verifyJwtToken(token, secret)
-        : { isValid: false };
+        ? await verifyJwtToken(token, secret, {
+            issuer: resolved.expectedIssuer,
+            audience: resolved.expectedAudience,
+          })
+        : { isValid: false, signatureVerified: false };
 
-    // Reject an invalid, expired, or non-access token. Admitting a non-access type — notably
-    // the MFA-temp `mfa_challenge` issued before the second factor clears — would let a
-    // half-authenticated session reach a protected route, so only an access token is admitted.
-    if (!decoded.isValid || isTokenExpired(decoded) || !isAccessToken(decoded)) {
+    // Reject an unverified, expired, or non-access token. `signatureVerified` rather than
+    // `isValid`: the latter is `true` for any structurally decodable, unexpired token, which is
+    // exactly what `decodeJwtToken` produces without checking a signature at all. Reading it
+    // here would therefore admit a forged token to anyone who could route one through a
+    // decode. `verifyJwtToken` itself now fails closed on a missing secret, so this is the
+    // second lock on the same door — and the one that survives a refactor of the first. Admitting a non-access type —
+    // notably the MFA-temp `mfa_challenge` issued before the second factor clears — would let
+    // a half-authenticated session reach a protected route, so only an access token is admitted.
+    if (!decoded.signatureVerified || isTokenExpired(decoded) || !isAccessToken(decoded)) {
       return handleUnauthenticated(request, resolved);
     }
 
@@ -184,10 +220,14 @@ function handleUnauthenticated(
   request: NextRequest,
   config: ResolvedAuthProxyConfig,
 ): NextResponse {
-  // A background (RSC/prefetch) request must never be redirected — that would poison the
-  // router cache with a login document. Let it through unauthenticated instead.
+  // A background (RSC/prefetch/state-tree) request must never be redirected — that would
+  // poison the router cache with a login document. It must never be let through either: the
+  // headers that mark a request as background are client-forgeable, so `NextResponse.next()`
+  // here would let anyone bypass this gate by sending `RSC: 1` and have the protected page's
+  // server components render for an unauthenticated caller. Refuse with a bare 401 instead;
+  // the client router falls back to a full navigation, where a redirect is appropriate.
   if (isBackgroundRequest(request)) {
-    return NextResponse.next();
+    return backgroundUnauthorized();
   }
 
   const bounces = redirectCount(request);
@@ -197,43 +237,167 @@ function handleUnauthenticated(
   // A live `has_session` signal plus headroom under the bounce ceiling means a silent refresh
   // is worth attempting before falling back to the sign-in redirect.
   if (hasSession && bounces < config.maxRedirects) {
-    const url = new URL(config.silentRefreshPath, request.nextUrl.origin);
-    url.searchParams.set("redirectTo", request.nextUrl.pathname + request.nextUrl.search);
-    url.searchParams.set(REDIRECT_COUNT_PARAM, String(bounces + 1));
-    return NextResponse.redirect(url);
+    return redirectToPath(request, config.silentRefreshPath, {
+      redirectTo: request.nextUrl.pathname + request.nextUrl.search,
+      [REDIRECT_COUNT_PARAM]: String(bounces + 1),
+    });
   }
 
   return redirectToLogin(request, config.loginPath, "expired");
 }
 
-/** Build a sign-in redirect carrying a `reason` and a same-origin `redirectTo`; never a token. */
+/** Control characters that must never reach a header value: a raw CR or LF splits the response. */
+// eslint-disable-next-line no-control-regex -- matching control characters is the point
+const FORBIDDEN_IN_PATH = /[\u0000-\u001f\u007f]/;
+
+/**
+ * Reduce `path` to something that can only ever name a location on this origin.
+ *
+ * Not naming an origin is necessary and not sufficient. `//attacker.example` carries no
+ * scheme, satisfies `startsWith('/')`, and is read by every browser as an authority — as is
+ * its backslash spelling, which browsers normalise to the same thing. Resolving it against the
+ * placeholder base and taking `pathname` does keep the redirect same-origin, but it does so by
+ * silently substituting a different destination for the caller's: `//attacker.example/login`
+ * becomes `/login`, and nothing anywhere reports that the input was rejected.
+ *
+ * A refused path falls back to `/` rather than throwing. This runs in middleware, where a throw
+ * is a 500 on a request that was otherwise fine.
+ *
+ * @param path - The intended same-origin path.
+ * @returns `path` when it can only name this origin, `/` otherwise.
+ */
+function toSameOriginPath(path: string): string {
+  if (!path.startsWith("/")) return "/";
+  if (path.startsWith("//") || path.startsWith("/\\")) return "/";
+  if (FORBIDDEN_IN_PATH.test(path)) return "/";
+  return path;
+}
+
+/**
+ * Build a redirect to a same-origin `path`.
+ *
+ * The `Location` must be absolute, and that is not a stylistic choice: Next parses the header
+ * this middleware sets by handing it straight to `new NextURL(location, ...)`, with no base to
+ * resolve against. A relative `Location` — which RFC 7231 §7.1.2 permits and every browser
+ * resolves — throws `ERR_INVALID_URL` there, before the response is ever sent. Every
+ * unauthenticated request would 500.
+ *
+ * Naming `request.nextUrl.origin`, which Next derives from the `Host` header, does not hand a
+ * self-hosted deployment answering on any host an open redirect. Next compares the two hosts
+ * immediately afterwards and, when they match, rewrites `Location` to a path — and they always
+ * match here, because both sides come from this same request. A forged `Host` therefore never
+ * reaches the browser: it is stripped, and the browser resolves the path against the URL it
+ * actually requested.
+ *
+ * What that normalisation does NOT cover is a `Location` on a genuinely different origin, which
+ * Next leaves absolute and the browser follows. That is the case {@link toSameOriginPath} exists
+ * to refuse, and it is why the path is validated here rather than trusted.
+ *
+ * @param request - The request being answered; its origin is the only one this may name.
+ * @param path - A same-origin path beginning with `/`, optionally carrying a query string.
+ * @param params - Query parameters to set on it.
+ * @returns A 307 response whose `Location` is absolute and on this request's own origin.
+ */
+function redirectToPath(
+  request: NextRequest,
+  path: string,
+  params: Record<string, string> = {},
+): NextResponse {
+  const url = new URL(toSameOriginPath(path), request.nextUrl.origin);
+  for (const [key, value] of Object.entries(params)) {
+    url.searchParams.set(key, value);
+  }
+  return new NextResponse(null, {
+    status: 307,
+    // The fragment rides along. It never reaches the server, so nothing here can act on it —
+    // but it is where the browser lands, and a deployment using hash routing, or a configured
+    // `loginPath` carrying an anchor, would otherwise be redirected somewhere else silently.
+    headers: { location: url.toString() },
+  });
+}
+
+/**
+ * The refusal returned to an unauthenticated background request: a bare 401 that is never
+ * cached. Returning `NextResponse.next()` here would turn the forgeable `RSC` /
+ * `Next-Router-Prefetch` / `Next-Router-State-Tree` headers into an auth bypass.
+ */
+function backgroundUnauthorized(): NextResponse {
+  return new NextResponse(null, {
+    status: 401,
+    headers: { "Cache-Control": NO_STORE_CACHE_CONTROL },
+  });
+}
+
+/**
+ * The same refusal for a background request that authenticated but is not allowed through —
+ * a blocked account, or a role the route does not admit.
+ *
+ * 403 rather than 401 because the caller's credential is genuine and re-authenticating will
+ * not help: a 401 invites the client to refresh a token that is already valid, and for a
+ * blocked account that loop never terminates.
+ */
+function backgroundForbidden(): NextResponse {
+  return new NextResponse(null, {
+    status: 403,
+    headers: { "Cache-Control": NO_STORE_CACHE_CONTROL },
+  });
+}
+
+/**
+ * Build a sign-in redirect carrying a `reason` and a same-origin `redirectTo`; never a token.
+ *
+ * A background request is refused with a status instead. Both halves of that matter. It must
+ * not be let through — the headers marking a request as background are client-forgeable, so
+ * `NextResponse.next()` would make a forged `RSC: 1` render the guarded page — and it must not
+ * be REDIRECTED either, which is the half this used to get wrong: the client router caches the
+ * response against the route it asked for, so answering a prefetch of `/admin` with a redirect
+ * to `/login` puts a login document in the cache for `/admin`, and the next genuine navigation
+ * there renders it. `handleUnauthenticated` already refused for exactly that reason; a request
+ * that authenticated and then failed the status or RBAC gate poisons the same cache the same
+ * way.
+ */
 function redirectToLogin(
   request: NextRequest,
   loginPath: string,
   reason: string,
 ): NextResponse {
   if (isBackgroundRequest(request)) {
-    return NextResponse.next();
+    return backgroundForbidden();
   }
-  const url = new URL(loginPath, request.nextUrl.origin);
-  url.searchParams.set("reason", reason);
-  url.searchParams.set(
-    "redirectTo",
-    resolveSafeDestination(
+  return redirectToPath(request, loginPath, {
+    reason,
+    redirectTo: resolveSafeDestination(
       request.nextUrl.pathname + request.nextUrl.search,
       request.nextUrl.origin,
       loginPath,
     ),
-  );
-  return NextResponse.redirect(url);
+  });
 }
 
-/** Forward the request with UI-only `x-user-*` headers (advisory; never authoritative). */
+/**
+ * Forward the request with UI-only `x-user-*` headers (advisory; never authoritative).
+ *
+ * Every one of them is DELETED from the caller's copy first, then set only from the verified
+ * token. The `tenantId` and `status` sets are conditional, and a request that reaches here
+ * always carries both claims — the proxy refuses a token missing either — so this is
+ * defence-in-depth rather than a hole being closed: it removes the asymmetry where two of the
+ * four headers were authoritative and two depended on a claim being present, which is not a
+ * distinction a consumer reading them could see. The public-path arm below is the case that
+ * WAS reachable: it forwarded the caller's headers verbatim, with no token involved at all.
+ */
+function stripUserHeaders(headers: Headers): void {
+  headers.delete("x-user-id");
+  headers.delete("x-user-role");
+  headers.delete("x-user-tenant-id");
+  headers.delete("x-user-status");
+}
+
 function forwardWithUserHeaders(
   request: NextRequest,
   user: { id: string; role: string; tenantId: string | undefined; status: string | undefined },
 ): NextResponse {
   const headers = new Headers(request.headers);
+  stripUserHeaders(headers);
   headers.set("x-user-id", user.id);
   headers.set("x-user-role", user.role);
   if (user.tenantId !== undefined) headers.set("x-user-tenant-id", user.tenantId);
@@ -243,7 +407,12 @@ function forwardWithUserHeaders(
 
 /** Whether a pathname is matched by any configured public prefix. */
 function isPublicPath(pathname: string, publicPaths: readonly string[]): boolean {
-  return publicPaths.some((prefix) => pathname === prefix || pathname.startsWith(prefix));
+  // The prefix must end at a segment boundary. A bare `startsWith` made `/login` exempt
+  // `/loginhistory` too, and the direction of that mistake is fail-open: a route the operator
+  // meant to protect becomes public because its name happens to start with a public one.
+  return publicPaths.some(
+    (prefix) => pathname === prefix || pathname.startsWith(prefix.endsWith("/") ? prefix : `${prefix}/`),
+  );
 }
 
 /**
@@ -377,16 +546,25 @@ export function parseSetCookieHeader(raw: string): ParsedSetCookie {
 }
 
 /**
- * Whether a request is a framework background fetch (an RSC payload or a prefetch) that must
- * not be redirected, since redirecting it would corrupt the client router cache.
+ * Whether a request is a framework background fetch (an RSC payload, a router state-tree
+ * fetch, or a prefetch) that must not be redirected, since redirecting it would corrupt the
+ * client router cache.
+ *
+ * Every signal read here is a plain request header and therefore client-forgeable, so a
+ * `true` result is only ever a hint about response SHAPE (401 instead of a redirect) — never
+ * a reason to admit a request. Callers must still refuse an unauthenticated caller.
  *
  * @param request - The incoming request.
- * @returns `true` for RSC/prefetch background requests.
+ * @returns `true` for RSC/state-tree/prefetch background requests.
  */
 export function isBackgroundRequest(request: NextRequest): boolean {
   const headers = request.headers;
   if (headers.get("RSC") === "1") return true;
   if (headers.get("Next-Router-Prefetch") === "1") return true;
+  // The router state-tree header carries a serialised tree, not a flag, so any non-empty
+  // value marks the request as a partial-render fetch.
+  const stateTree = headers.get("Next-Router-State-Tree");
+  if (stateTree !== null && stateTree.length > 0) return true;
   const purpose = headers.get("Purpose") ?? headers.get("X-Purpose") ?? headers.get("X-Moz");
   if (purpose === "prefetch") return true;
   const secPurpose = headers.get("Sec-Purpose");

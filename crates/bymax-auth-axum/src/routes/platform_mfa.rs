@@ -42,15 +42,24 @@ pub(crate) fn routes(config: &AxumAuthConfig, ip_source: ClientIpSource) -> Rout
         )
 }
 
-/// `POST /auth/platform/mfa/setup` (200). Requires [`PlatformUser`].
-async fn setup(State(state): State<AuthState>, user: PlatformUser) -> Response {
+/// `POST /auth/platform/mfa/setup` (201). Requires [`PlatformUser`]. 201 for the same reason
+/// the dashboard enrolment is 201 — the shared nest-auth `MfaController.setup` has no
+/// `@HttpCode`, so it answers with Nest's `POST` default.
+async fn setup(
+    State(state): State<AuthState>,
+    user: PlatformUser,
+    body: axum::body::Bytes,
+) -> Response {
+    // See the dashboard route: the password body is optional on the wire and the engine is
+    // what decides whether this account needs one.
+    let dto: crate::dto::MfaSetupDto = serde_json::from_slice(&body).unwrap_or_default();
     match state
         .engine()
-        .mfa_setup(&user.0.sub, MfaContext::Platform)
+        .mfa_setup(&user.0.sub, MfaContext::Platform, dto.password.as_deref())
         .await
     {
         Ok(result) => (
-            StatusCode::OK,
+            StatusCode::CREATED,
             Json(json!({
                 "secret": result.secret,
                 "qrCodeUri": result.qr_code_uri,

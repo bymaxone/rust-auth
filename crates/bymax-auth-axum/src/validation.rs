@@ -159,7 +159,7 @@ mod tests {
         let ok = deserialize_query::<OAuthCallbackQuery>(
             "code=abc&state=xyz&authuser=0&delegatedClientId=foo&unexpected=1",
         );
-        assert!(matches!(ok, Ok(q) if q.code == "abc" && q.state == "xyz"));
+        assert!(matches!(ok, Ok(q) if q.code.as_deref() == Some("abc") && q.state == "xyz"));
     }
 
     #[test]

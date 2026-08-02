@@ -64,19 +64,157 @@ pub struct SessionRecord {
     /// Session creation time.
     #[serde(with = "time::serde::rfc3339")]
     pub created_at: OffsetDateTime,
+    /// Whether MFA was enabled on the account when the session was created.
+    ///
+    /// Persisted so a rotation can propagate it into the rotated access claims. Without
+    /// it every rotation would mint `mfa_enabled: false`, and since the MFA gate only
+    /// refuses a token whose claims say `mfa_enabled && !mfa_verified`, one routine
+    /// refresh would silently disable second-factor enforcement for an enrolled account.
+    ///
+    /// `mfa_verified` is deliberately NOT stored: it must stay `false` in a rotated token
+    /// so clearing the second factor always goes back through the MFA challenge.
+    ///
+    /// Required on the wire, deliberately. Defaulting a missing value to `false` would turn a
+    /// truncated or corrupt record into a silent second-factor bypass — the gate only refuses a
+    /// token whose claims say `mfa_enabled && !mfa_verified`, so an absent field reads as "this
+    /// account has no second factor" and the rotated token clears every MFA-gated route. A
+    /// record that cannot be read is treated as no session at all, which costs the holder a
+    /// login and costs an attacker the bypass.
+    pub mfa_enabled: bool,
     /// The refresh-token **family** (login lineage) this session belongs to. Minted at login
     /// and inherited unchanged across every rotation, so all descendants of one login share it.
     /// It is the unit of reuse-detection revocation: presenting an already-consumed refresh
-    /// token (post-grace) revokes the whole family (section 12.5.2). Empty on a legacy record
-    /// written before families existed — such a record simply carries no family and is never a
-    /// reuse-revocation target; it is omitted from the wire when empty for byte-parity.
+    /// token (post-grace) revokes the whole family (section 12.5.2). Empty only on the
+    /// placeholder a replayed token produces, which is never stored — such a record carries no
+    /// family and is never a reuse-revocation target; it is omitted from the wire when empty
+    /// for byte-parity.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub family_id: String,
+    /// When the **family** was born — the moment of the login this session descends from.
+    ///
+    /// Distinct from [`SessionRecord::created_at`], which is this session's own creation and is
+    /// reset on every rotation. Carried unchanged through the lineage so the absolute-lifetime
+    /// cap has something to measure: without it, a client rotating every fifteen minutes renews
+    /// its lifetime forever and a session established once never has to be established again.
+    ///
+    /// Serialized as an ISO-8601 string alongside `family_id`, and omitted with it on a
+    /// family-less record — such a session is simply not capped.
+    #[serde(
+        default,
+        with = "optional_rfc3339",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub family_created_at: Option<OffsetDateTime>,
 }
 
+/// Serde adapter for an optional RFC 3339 instant, so a record with no family birth time
+/// round-trips as `None` rather than failing the whole record.
+pub mod optional_rfc3339 {
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+    use time::OffsetDateTime;
+    use time::format_description::well_known::Rfc3339;
+
+    /// Write the instant as an RFC 3339 string, or nothing when absent.
+    ///
+    /// # Errors
+    ///
+    /// Propagates whatever the serializer reports, or a formatting failure.
+    pub fn serialize<S>(value: &Option<OffsetDateTime>, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        match value {
+            Some(instant) => instant
+                .format(&Rfc3339)
+                .map_err(serde::ser::Error::custom)?
+                .serialize(serializer),
+            None => serializer.serialize_none(),
+        }
+    }
+
+    /// Read an RFC 3339 string back, treating an absent field as `None`.
+    ///
+    /// # Errors
+    ///
+    /// Returns a deserialization error when the field is present but not RFC 3339.
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<Option<OffsetDateTime>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let raw = Option::<String>::deserialize(deserializer)?;
+        raw.map(|value| OffsetDateTime::parse(&value, &Rfc3339).map_err(serde::de::Error::custom))
+            .transpose()
+    }
+}
+
+/// Serde adapter carrying an [`OffsetDateTime`] as a **Unix-millisecond number**.
+///
+/// This is the encoding nest-auth uses for the `sd:`/`psd:` per-session detail record: it
+/// writes `createdAt`/`lastActivityAt` with `Date.now()` and re-reads them under a
+/// `typeof === 'number'` guard, so an RFC 3339 string in those fields makes the record
+/// unreadable — and, because a member whose detail fails to parse is treated as stale, it
+/// makes the session disappear from the other backend's listing. Both backends must therefore
+/// agree on the numeric form for the shared-Redis promise to hold.
+///
+/// Note this is deliberately **not** how [`SessionRecord::created_at`] is encoded: nest-auth
+/// writes that one as an ISO-8601 string (`new Date().toISOString()`), so `rt:`/`prt:` records
+/// keep the RFC 3339 adapter.
+pub mod unix_millis {
+    use serde::{Deserialize, Deserializer, Serializer};
+    use time::OffsetDateTime;
+
+    /// Nanoseconds in one millisecond — the scale factor between `time`'s native
+    /// `unix_timestamp_nanos` and the millisecond wire form.
+    const NANOS_PER_MILLI: i128 = 1_000_000;
+
+    /// Write the instant as a Unix-millisecond `i64`, saturating at the `i64` bounds. The
+    /// clamp preserves the sign, so a pre-epoch instant stays negative instead of flipping to
+    /// `i64::MAX` on overflow.
+    ///
+    /// # Errors
+    ///
+    /// Propagates whatever the serializer reports while emitting the number.
+    pub fn serialize<S>(value: &OffsetDateTime, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let millis = (value.unix_timestamp_nanos() / NANOS_PER_MILLI)
+            .clamp(i128::from(i64::MIN), i128::from(i64::MAX)) as i64;
+        serializer.serialize_i64(millis)
+    }
+
+    /// Read a Unix-millisecond number back into an instant.
+    ///
+    /// # Errors
+    ///
+    /// Returns a deserialization error when the field is not an integer, or when the
+    /// millisecond count is outside the range `OffsetDateTime` can represent.
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<OffsetDateTime, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let millis = i64::deserialize(deserializer)?;
+        OffsetDateTime::from_unix_timestamp_nanos(i128::from(millis) * NANOS_PER_MILLI)
+            .map_err(serde::de::Error::custom)
+    }
+}
+
+/// How long a [`SessionStore`] must keep a bumped token epoch readable, in seconds (30 days).
+///
+/// The epoch record is what makes an already-issued access token verifiable as stale. If it can
+/// lapse while a pre-bump token is still inside its own `exp` window, [`SessionStore::current_epoch`]
+/// falls back to `0`, the `token.epoch < stored` test stops firing, and a token revoked by a
+/// password reset becomes valid again — a fail-open. Startup validation therefore rejects an
+/// `jwt.access_expires_in` longer than this bound, which lets a store safely expire the record
+/// rather than retaining it forever.
+pub const TOKEN_EPOCH_RETENTION_SECS: u64 = 30 * 24 * 60 * 60;
+
 /// One session's display detail, returned by [`SessionStore::list_sessions`]. The
-/// `session_hash` is the `sess:`-set member (a SHA-256 hex of the refresh token), never
-/// the raw token.
+/// `session_hash` is the bare SHA-256 hex of the refresh token (the `sess:`-set member is that
+/// hash under its `rt:`/`prt:` prefix), never the raw token.
+///
+/// The two timestamps are Unix-millisecond numbers on the wire — the encoding nest-auth writes
+/// for `sd:`/`psd:` (see [`unix_millis`]).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SessionDetail {
@@ -86,11 +224,11 @@ pub struct SessionDetail {
     pub device: String,
     /// Originating IP.
     pub ip: String,
-    /// Session creation time.
-    #[serde(with = "time::serde::rfc3339")]
+    /// Session creation time, as Unix milliseconds on the wire.
+    #[serde(with = "unix_millis")]
     pub created_at: OffsetDateTime,
-    /// Last observed activity time.
-    #[serde(with = "time::serde::rfc3339")]
+    /// Last observed activity time, as Unix milliseconds on the wire.
+    #[serde(with = "unix_millis")]
     pub last_activity_at: OffsetDateTime,
 }
 
@@ -171,16 +309,6 @@ pub struct WsTicketSnapshot {
     pub mfa_verified: bool,
 }
 
-/// How long a [`SessionStore`] must keep a bumped token epoch readable, in seconds (30 days).
-///
-/// The epoch record is what makes an already-issued access token verifiable as stale. If it can
-/// lapse while a pre-bump token is still inside its own `exp` window, [`SessionStore::current_epoch`]
-/// falls back to `0`, the `token.epoch < stored` test stops firing, and a token revoked by a
-/// password reset becomes valid again — a fail-open. Startup validation therefore rejects an
-/// `jwt.access_expires_in` longer than this bound, which lets a store safely expire the record
-/// rather than retaining it forever.
-pub const TOKEN_EPOCH_RETENTION_SECS: u64 = 30 * 24 * 60 * 60;
-
 /// Refresh-session lifecycle plus access-JWT revocation. Backs the `rt`/`prt`, `rp`/`prp`,
 /// `sess`/`psess`, `sd`/`psd`, and `rv` keyspaces.
 ///
@@ -222,6 +350,26 @@ pub trait SessionStore: Send + Sync {
         user_id: &str,
     ) -> Result<Vec<SessionDetail>, AuthError>;
 
+    /// Write the session a **grace recovery** produced, atomically with the check that the
+    /// account has not been swept out from under it. Returns `false` when a revoke-all (or a
+    /// family revocation) had already run, in which case the caller must refuse the rotation.
+    ///
+    /// [`SessionStore::create_session`] is the ordinary issuance path and is a plain write.
+    /// The grace arm cannot use it: the rotation script returns the recovered record and the
+    /// write lands several awaits later, so a `revoke_all` arriving in between swept an index
+    /// the session was not yet in — and the session survived a revocation the user was told had
+    /// happened, with an access token signed afterwards under the *post-bump* epoch. An
+    /// attacker holding a stolen token gets one grace-eligible token per rotation, so they can
+    /// keep a stream of these in flight for exactly as long as the victim's password reset
+    /// takes.
+    async fn create_recovered_session(
+        &self,
+        kind: SessionKind,
+        token_hash: &str,
+        detail: &SessionRecord,
+        ttl_secs: u64,
+    ) -> Result<bool, AuthError>;
+
     /// Ownership-checked single revoke. Returns [`AuthError::SessionNotFound`] when the
     /// hash is not owned by the user.
     async fn revoke_session(
@@ -242,6 +390,28 @@ pub trait SessionStore: Send + Sync {
         session_hash: &str,
     ) -> Result<(), AuthError>;
 
+    /// Delete **every** rotation grace pointer the user's session index names, removing each
+    /// from the index as it goes. Idempotent: a user with no pointers is a no-op.
+    ///
+    /// [`SessionStore::delete_grace_pointer`] serves logout, which knows the one hash it was
+    /// handed. `revoke_all_except_current` does not: it sources its victims from
+    /// [`SessionStore::list_sessions`], which filters `rp:`/`prp:` members out by construction,
+    /// and [`SessionStore::revoke_session`] touches only the primary refresh keys. So a grace
+    /// pointer survived that call entirely.
+    ///
+    /// For a session that call *revoked* that is harmless — the grace branch requires the
+    /// successor's `rt:` key and it is gone. The gap is the session deliberately **kept**: its
+    /// predecessor's pointer names a hash that is still alive, so whoever holds that
+    /// predecessor token can take the grace branch and mint a brand-new full-lifetime session
+    /// for the rest of the window — after the user asked to sign out their other devices. The
+    /// epoch bump does not close it, because a recovered session signs its access token from
+    /// the current epoch.
+    ///
+    /// "Sign out my other devices" is a statement about right now, so no credential minted
+    /// before that moment may still produce a session.
+    async fn sweep_grace_pointers(&self, kind: SessionKind, user_id: &str)
+    -> Result<(), AuthError>;
+
     /// Revoke every session for a user in one transaction.
     async fn revoke_all(&self, kind: SessionKind, user_id: &str) -> Result<(), AuthError>;
 
@@ -249,7 +419,17 @@ pub trait SessionStore: Send + Sync {
     /// each descendant's refresh/detail keys and clearing the family index. Called on
     /// reuse-detection ([`RotateOutcome::Reused`]) to lock out a stolen token's whole chain.
     /// Idempotent: an unknown or already-cleared family is a no-op.
-    async fn revoke_family(&self, kind: SessionKind, family_id: &str) -> Result<(), AuthError>;
+    ///
+    /// Returns the id of the account the family belonged to, or `None` when no member record
+    /// was readable. The owner is reported because the reuse-detection caller cannot obtain it
+    /// any other way: the replayed token's own `rt:` key was deleted when it was rotated, so
+    /// the family index is the only surviving link between that token and an account — and an
+    /// implementation already has to read a member to find the session index it prunes.
+    async fn revoke_family(
+        &self,
+        kind: SessionKind,
+        family_id: &str,
+    ) -> Result<Option<String>, AuthError>;
 
     /// Add a JTI (preferred) or full-JWT hash to the access-token blacklist for its
     /// remaining lifetime.
@@ -273,10 +453,6 @@ pub trait SessionStore: Send + Sync {
     /// outstanding access token for that user at once (a password reset or a sign-out-everywhere).
     /// Idempotent in effect: each call advances the generation, and only tokens stamped at or
     /// above the new value remain valid.
-    ///
-    /// An implementation that expires the stored epoch must retain it for at least
-    /// [`TOKEN_EPOCH_RETENTION_SECS`]; startup validation rejects an access-token lifetime longer
-    /// than that, so a bump can never lapse while a pre-bump token is still presentable.
     async fn bump_epoch(&self, kind: SessionKind, user_id: &str) -> Result<u64, AuthError>;
 }
 
@@ -360,7 +536,7 @@ pub trait WsTicketStore: Send + Sync {
 }
 
 /// The identity bound to a password-reset proof (a link token or the OTP-flow verified
-/// token). Stored under `pr:`/`prv:` keyed by `sha256(token)` — the raw token is never a
+/// token). Stored under `pw_reset:`/`pw_vtok:` keyed by `sha256(token)` — the raw token is never a
 /// key — and read back on consume so the reset can re-bind the proof to the same account.
 /// JSON is camelCase for parity with nest-auth payloads already in Redis.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -372,6 +548,44 @@ pub struct ResetContext {
     pub email: String,
     /// The tenant scope the reset proof was issued for (re-checked on consume).
     pub tenant_id: String,
+    /// A digest of the password hash this proof was issued against, binding it to that password.
+    ///
+    /// Several reset tokens can be alive at once — a 60-second send cooldown against a
+    /// 600-second TTL allows up to ten — and completing one used to leave the rest valid. That
+    /// is the wrong end state precisely when it matters: a victim who resets *because* an
+    /// attacker read a link from their mailbox had not closed the link the attacker read. The
+    /// binding makes the first completed rotation invalidate all of them, with no per-user
+    /// index to keep in step.
+    ///
+    /// Empty when the account had no password at issue time. **Absent** on a record written by
+    /// an older build, or by a sibling that has not taken this change, which `serde` reads as
+    /// empty — accepted as "no binding" so a rolling deploy does not break resets in flight.
+    #[serde(default)]
+    pub password_fingerprint: String,
+}
+
+/// The trusted metadata stored for a pending address change under `ec:{sha256(token)}`.
+///
+/// Held byte-compatible with nest-auth: the two backends share this keyspace, so a change
+/// requested through one is confirmable through the other.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EmailChangeContext {
+    /// The account the change belongs to.
+    pub user_id: String,
+    /// The address being moved to, stored already normalized (trimmed, lowercased) because
+    /// the uniqueness re-check at confirm time compares it the same way login does.
+    pub new_email: String,
+    /// The tenant the account belongs to, for that re-check.
+    pub tenant_id: String,
+    /// Digest of the password hash in force when the token was minted.
+    ///
+    /// Binds the token to that password exactly as [`ResetContext`] does: an attacker who
+    /// plants a change request and waits loses it the moment the victim changes their
+    /// password. An ABSENT field is read as "no binding" and accepted, so a rolling deploy
+    /// does not break the changes already in flight.
+    #[serde(default)]
+    pub password_fingerprint: String,
 }
 
 /// The trusted metadata stored for a pending invitation under `inv:` keyed by
@@ -390,10 +604,21 @@ pub struct StoredInvitation {
     pub tenant_id: String,
     /// The user id of the inviter (for audit / the accepted hook).
     pub inviter_user_id: String,
+    /// When the invitation was issued, as an RFC 3339 string on the wire.
+    ///
+    /// Mandatory for cross-backend parity: nest-auth writes `createdAt` (an
+    /// ISO-8601 string from `new Date().toISOString()`) and its `isStoredInvitation` guard
+    /// **rejects** a record without it. Because acceptance consumes the record with a
+    /// single-use `GETDEL`, a nest-auth backend reading an invitation that lacks the field
+    /// fails validation *after* the token is already gone — destroying the invitation
+    /// instead of accepting it. Encoded as RFC 3339 (not Unix millis like `sd:`) because
+    /// that is what nest-auth stores here.
+    #[serde(with = "time::serde::rfc3339")]
+    pub created_at: OffsetDateTime,
 }
 
-/// Single-use password-reset proof storage: the link token (`pr:`) and the OTP-flow
-/// verified token (`prv:`). Both store a [`ResetContext`] keyed by `sha256(token)` and are
+/// Single-use password-reset proof storage: the link token (`pw_reset:`) and the OTP-flow
+/// verified token (`pw_vtok:`). Both store a [`ResetContext`] keyed by `sha256(token)` and are
 /// consumed atomically with `getdel`, so a proof is valid exactly once. The OTP records
 /// themselves are owned by [`OtpStore`] — this store backs only the two opaque-token
 /// keyspaces.
@@ -404,7 +629,7 @@ pub struct StoredInvitation {
 /// proof is the non-error `Ok(None)`, not an error.
 #[async_trait]
 pub trait PasswordResetStore: Send + Sync {
-    /// Store a reset-link-token context under `pr:{sha256(token)}` with a TTL.
+    /// Store a reset-link-token context under `pw_reset:{sha256(token)}` with a TTL.
     async fn put_token(
         &self,
         token: &str,
@@ -420,7 +645,7 @@ pub trait PasswordResetStore: Send + Sync {
     /// undeliverable email so an unusable token does not linger in a Redis snapshot.
     async fn delete_token(&self, token: &str) -> Result<(), AuthError>;
 
-    /// Store an OTP-flow verified-token context under `prv:{sha256(token)}` with a TTL.
+    /// Store an OTP-flow verified-token context under `pw_vtok:{sha256(token)}` with a TTL.
     async fn put_verified(
         &self,
         token: &str,
@@ -431,6 +656,25 @@ pub trait PasswordResetStore: Send + Sync {
     /// Atomically consume (`getdel`) a verified-token context. `None` when the token is
     /// unknown, expired, or already consumed.
     async fn consume_verified(&self, token: &str) -> Result<Option<ResetContext>, AuthError>;
+
+    /// Store a pending address change under `ec:{sha256(token)}` with a TTL.
+    ///
+    /// Lives on this trait rather than its own because it is the same thing: a single-use
+    /// opaque token, mailed to a mailbox, keyed by its hash and consumed exactly once. A
+    /// separate trait would duplicate the seam without separating any concern.
+    async fn put_email_change(
+        &self,
+        token: &str,
+        context: &EmailChangeContext,
+        ttl_secs: u64,
+    ) -> Result<(), AuthError>;
+
+    /// Atomically consume (`getdel`) a pending address change. `None` when the token is
+    /// unknown, expired, or already consumed.
+    async fn consume_email_change(
+        &self,
+        token: &str,
+    ) -> Result<Option<EmailChangeContext>, AuthError>;
 }
 
 /// Single-use invitation storage. A [`StoredInvitation`] is held under `inv:{sha256(token)}`
@@ -454,6 +698,52 @@ pub trait InvitationStore: Send + Sync {
     /// Atomically consume (`getdel`) an invitation. `None` when the token is unknown,
     /// expired, or already consumed.
     async fn consume_invitation(&self, token: &str) -> Result<Option<StoredInvitation>, AuthError>;
+
+    /// Point the invitee index (`invidx:{tenantId}:{invitee_hash}`) at a pending invitation's
+    /// token hash, with the invitation's own TTL so the pair expires together.
+    ///
+    /// The index is what makes an invitation manageable at all: the record is keyed by the
+    /// hash of a token only the invitee's mailbox ever held, so without it nobody on the
+    /// issuing side can name a pending invitation, let alone withdraw one.
+    ///
+    /// `invitee_hash` arrives already derived — `hmac_sha256(email)`, hex — and goes into the
+    /// key verbatim. Implementations must NOT hash it again: the keyspace is shared
+    /// byte-for-byte with nest-auth. It is an HMAC rather than a plain digest because an
+    /// address is low-entropy, and a dump of the keyspace must not enumerate who a tenant has
+    /// been inviting.
+    async fn put_invitation_index(
+        &self,
+        tenant_id: &str,
+        invitee_hash: &str,
+        token_hash: &str,
+        ttl_secs: u64,
+    ) -> Result<(), AuthError>;
+
+    /// Read the token hash the invitee index points at, leaving the entry in place.
+    /// `invitee_hash` is the derived identifier — see [`Self::put_invitation_index`].
+    async fn read_invitation_index(
+        &self,
+        tenant_id: &str,
+        invitee_hash: &str,
+    ) -> Result<Option<String>, AuthError>;
+
+    /// Atomically take (`getdel`) the invitee index entry.
+    /// `invitee_hash` is the derived identifier — see [`Self::put_invitation_index`].
+    async fn take_invitation_index(
+        &self,
+        tenant_id: &str,
+        invitee_hash: &str,
+    ) -> Result<Option<String>, AuthError>;
+
+    /// Read an invitation by its stored token **hash**, without consuming it — the revocation
+    /// path, which reaches the record through the index rather than through a raw token.
+    async fn read_invitation_by_hash(
+        &self,
+        token_hash: &str,
+    ) -> Result<Option<StoredInvitation>, AuthError>;
+
+    /// Delete an invitation by its stored token **hash**. `true` when a record was removed.
+    async fn delete_invitation_by_hash(&self, token_hash: &str) -> Result<bool, AuthError>;
 }
 
 /// The MFA storage seam: the AES-protected pending-setup record, the short-lived MFA
@@ -503,14 +793,78 @@ pub trait MfaStore: Send + Sync {
     /// mistyped code leaves the token alive for a retry (§7.3.5). `None` when absent/expired.
     async fn get_temp(&self, jti_hash: &str) -> Result<Option<String>, AuthError>;
 
-    /// Delete the MFA temp-token marker at `mfa:{jti_hash}`. Idempotent.
-    async fn del_temp(&self, jti_hash: &str) -> Result<(), AuthError>;
+    /// Delete the MFA temp-token marker at `mfa:{jti_hash}`, reporting whether **this** call
+    /// was the one that removed it.
+    ///
+    /// The boolean is what makes the recovery-code path single-use. That path has no `tu:`
+    /// marker to fuse against (unlike TOTP, see [`MfaStore::challenge_consume`]), so it
+    /// consumes the temp token standalone — and when the delete reported nothing, two
+    /// concurrent challenges carrying the same temp token and the same recovery code both saw
+    /// the marker, both "consumed" it, and both issued a full session. Gating success on the
+    /// deletion gives that path the same exactly-once property the fused TOTP step has.
+    ///
+    /// Idempotent: a second call for the same `jti_hash` returns `false` rather than erroring.
+    async fn del_temp(&self, jti_hash: &str) -> Result<bool, AuthError>;
 
     /// Set the standalone anti-replay marker `tu:{replay_id} = "1"` with `NX EX ttl`.
     /// Returns `true` when the marker was newly created (the code had not been seen) and
     /// `false` when it already existed (a replay). Used by `verify_and_enable` / `disable` /
     /// `regenerate_recovery_codes`, which have no temp token to consume.
     async fn mark_totp_used(&self, replay_id: &str, ttl: u64) -> Result<bool, AuthError>;
+
+    /// Claim a recovery code for exactly one challenge: `rcu:{claim_id} = "1"` with `NX EX
+    /// ttl`. Returns `true` when this caller created the marker.
+    ///
+    /// Consuming a recovery code is a read-modify-write against the CONSUMER's user
+    /// repository — read the array, remove one entry, write the rest back. Two challenges
+    /// landing together both read the array containing the code, both match it, and both
+    /// write, so one code mints two sessions: the one property a recovery code has. The
+    /// engine cannot make that repository atomic, since its atomicity is the consumer's to
+    /// define. It can be atomic here, in the store it owns.
+    async fn claim_recovery_code(&self, claim_id: &str, ttl: u64) -> Result<bool, AuthError>;
+
+    /// Take the per-account MFA transition lock: `mfalock:{lock_id} = token` with `NX EX ttl`.
+    /// Returns `true` when this caller created it and therefore holds the lock.
+    ///
+    /// `token` is a per-call nonce, and it is what makes the release safe. A fixed value would
+    /// not: the TTL is short, the transition calls into the consumer's repository twice, and a
+    /// run that overruns has already lost the lock by the time it releases. Releasing it
+    /// unconditionally then removes whichever transition holds it *now*, and a third caller
+    /// enters beside the second — the serialization undone precisely under the load that makes
+    /// concurrent transitions likely. See [`MfaStore::release_mfa_lock`].
+    ///
+    /// Every MFA transition rewrites a single repository record carrying `mfa_enabled`, the
+    /// encrypted secret and the recovery-code digests **together**, and `update_mfa` replaces
+    /// all three wholesale — the repository is the consumer's and offers no compare-and-set, so
+    /// the engine cannot add one. Read-modify-write over that with no serialization is
+    /// last-write-wins, and three things fell out of it: two challenges spending *different*
+    /// recovery codes each wrote the full list minus their own, resurrecting the loser's code;
+    /// a challenge that read the list before `regenerate_recovery_codes` and spliced after it
+    /// restored the whole replaced set, unspending codes the user rotated because they leaked;
+    /// and a challenge that spliced after `disable` completed wrote `mfa_enabled: true` back
+    /// with the pre-disable secret.
+    ///
+    /// [`MfaStore::claim_recovery_code`] covers none of them — it is keyed on the code, so it
+    /// serializes two attempts at the *same* code and nothing else.
+    async fn acquire_mfa_lock(
+        &self,
+        lock_id: &str,
+        token: &str,
+        ttl: u64,
+    ) -> Result<bool, AuthError>;
+
+    /// Release the per-account MFA transition lock, **only** while it still holds `token`.
+    ///
+    /// A compare-and-delete, not a `DEL`. Reading the value and then deleting it as two
+    /// operations does not express this either: the key can expire and be retaken between the
+    /// two, which is the exact interleaving the token exists to catch. An implementation must
+    /// make the comparison and the delete atomic.
+    ///
+    /// Idempotent: a lock already expired or already retaken deletes nothing and is still a
+    /// success, because the caller's only obligation is that its own lock not outlive its
+    /// transition. Called in the transition's cleanup path so an ordinary failure does not
+    /// leave the account unchangeable for the lock's whole TTL.
+    async fn release_mfa_lock(&self, lock_id: &str, token: &str) -> Result<(), AuthError>;
 
     /// The **fused** challenge step (§7.5.6): set `tu:{replay_id}` `NX EX ttl` and, *iff* that
     /// marker was newly created, delete the temp token `mfa:{jti_hash}` — in one atomic Lua
@@ -571,8 +925,58 @@ mod tests {
             device: "Chrome on macOS".into(),
             ip: "203.0.113.4".into(),
             created_at: OffsetDateTime::UNIX_EPOCH,
+            mfa_enabled: false,
             family_id: "fam-1".into(),
+            family_created_at: Some(OffsetDateTime::UNIX_EPOCH),
         }
+    }
+
+    #[test]
+    fn the_epoch_retention_window_is_thirty_days_to_the_second() {
+        // Pinned to the literal, never recomputed from the same expression the constant uses.
+        // Every other test of this bound reads it back through the constant — the startup rule
+        // is checked with `TOKEN_EPOCH_RETENTION_SECS + 1` and `== TOKEN_EPOCH_RETENTION_SECS` —
+        // so a typo in the arithmetic would round-trip perfectly and the validation would go on
+        // "passing" while enforcing a ceiling nobody chose. This is the only assertion that can
+        // see that, and the number is a contract: nest-auth's `TOKEN_EPOCH_RETENTION_SECONDS`
+        // and the 30 days both READMEs promise have to be the same value.
+        assert_eq!(TOKEN_EPOCH_RETENTION_SECS, 2_592_000);
+    }
+
+    #[test]
+    fn the_optional_birth_time_adapter_round_trips_both_arms() {
+        // On a `SessionRecord` the field is skipped when absent, so the `None` arm of the
+        // serializer is unreachable there. It is still the adapter's contract, and a caller
+        // that uses it without `skip_serializing_if` must get `null` rather than a panic —
+        // this pins both directions independently of how the record happens to use it.
+        #[derive(Serialize, Deserialize, PartialEq, Eq, Debug)]
+        struct Wrapper {
+            #[serde(with = "optional_rfc3339")]
+            at: Option<OffsetDateTime>,
+        }
+
+        let absent = Wrapper { at: None };
+        let json = serde_json::to_string(&absent).unwrap_or_default();
+        assert_eq!(json, r#"{"at":null}"#);
+        assert!(matches!(
+            serde_json::from_str::<Wrapper>(&json),
+            Ok(back) if back == absent
+        ));
+
+        let present = Wrapper {
+            at: Some(OffsetDateTime::UNIX_EPOCH),
+        };
+        let json = serde_json::to_string(&present).unwrap_or_default();
+        assert_eq!(json, r#"{"at":"1970-01-01T00:00:00Z"}"#);
+        assert!(matches!(
+            serde_json::from_str::<Wrapper>(&json),
+            Ok(back) if back == present
+        ));
+
+        // A present-but-malformed value is an error, not a silent `None`: a record whose birth
+        // time cannot be read is a record whose cap cannot be judged, and quietly dropping it
+        // would uncap the session.
+        assert!(serde_json::from_str::<Wrapper>(r#"{"at":"not-a-date"}"#).is_err());
     }
 
     #[test]
@@ -580,6 +984,18 @@ mod tests {
         // The purpose segment is part of the Redis key contract shared with nest-auth.
         assert_eq!(OtpPurpose::PasswordReset.as_str(), "password_reset");
         assert_eq!(OtpPurpose::EmailVerification.as_str(), "email_verification");
+    }
+    #[test]
+    fn a_record_without_the_mfa_flag_is_refused_rather_than_defaulted() {
+        // Defaulting a missing `mfaEnabled` to `false` would turn a truncated or corrupt record
+        // into a silent second-factor bypass: the gate refuses only a token whose claims say
+        // `mfaEnabled && !mfaVerified`, so an absent field reads as "no second factor here" and
+        // the rotated token clears every MFA-gated route. Refusing the record costs the holder
+        // a login; defaulting it costs the account.
+        let without_flag = r#"{"userId":"u1","tenantId":"t1","role":"MEMBER","device":"Chrome",
+            "ip":"1.2.3.4","createdAt":"1970-01-01T00:00:00Z"}"#;
+        let parsed: Result<SessionRecord, _> = serde_json::from_str(without_flag);
+        assert!(parsed.is_err());
     }
 
     #[test]
@@ -608,16 +1024,21 @@ mod tests {
         };
         assert!(!serde_json::to_string(&platform)?.contains("tenantId"));
 
-        // An empty family id (a legacy record) is omitted from the wire for byte-parity, and a
+        // The MFA flag is always emitted (nest-auth writes it unconditionally), so the two
+        // implementations produce the same key set for the same session.
+        assert!(json.contains("\"mfaEnabled\":false"));
+
+        // An empty family id is omitted from the wire for byte-parity, and a
         // record with no `familyId` key deserializes back to an empty family.
-        let legacy = SessionRecord {
+        let familyless = SessionRecord {
             family_id: String::new(),
+            family_created_at: Some(OffsetDateTime::UNIX_EPOCH),
             ..session_record()
         };
-        let legacy_json = serde_json::to_string(&legacy)?;
-        assert!(!legacy_json.contains("familyId"));
-        let legacy_back: SessionRecord = serde_json::from_str(&legacy_json)?;
-        assert_eq!(legacy_back.family_id, "");
+        let familyless_json = serde_json::to_string(&familyless)?;
+        assert!(!familyless_json.contains("familyId"));
+        let familyless_back: SessionRecord = serde_json::from_str(&familyless_json)?;
+        assert_eq!(familyless_back.family_id, "");
 
         // Round-trip parity for the full record.
         let back: SessionRecord = serde_json::from_str(&json)?;
@@ -642,6 +1063,89 @@ mod tests {
         let back: SessionDetail = serde_json::from_str(&json)?;
         assert_eq!(back, detail);
         Ok(())
+    }
+
+    #[test]
+    fn session_detail_timestamps_are_unix_millisecond_numbers() -> serde_json::Result<()> {
+        // Parity gate for the `sd:`/`psd:` record: nest-auth writes `createdAt`/`lastActivityAt`
+        // as `Date.now()` NUMBERS and drops any detail record whose fields are not numbers, so an
+        // RFC 3339 string here would make every rust-written session invisible to nest-auth (and
+        // vice versa). Pin the numeric encoding in both directions.
+        let detail = SessionDetail {
+            session_hash: "abc123".into(),
+            device: "Firefox".into(),
+            ip: "198.51.100.7".into(),
+            created_at: OffsetDateTime::from_unix_timestamp(1_700_000_000)
+                .unwrap_or(OffsetDateTime::UNIX_EPOCH),
+            last_activity_at: OffsetDateTime::from_unix_timestamp(1_700_000_060)
+                .unwrap_or(OffsetDateTime::UNIX_EPOCH),
+        };
+        // Anchored to the shared contract, which declares this record's timestamps numeric while
+        // declaring the refresh session's ISO-8601: the two disagree deliberately, and reading the
+        // declaration here is what stops a well-meaning "make the encodings uniform" change from
+        // passing both suites while splitting the keyspace.
+        assert_eq!(
+            contract_section("sessionDetail")
+                .get("createdAt")
+                .and_then(serde_json::Value::as_str),
+            Some("unix-milliseconds-number")
+        );
+        assert_eq!(
+            contract_section("sessionDetail")
+                .get("lastActivityAt")
+                .and_then(serde_json::Value::as_str),
+            Some("unix-milliseconds-number")
+        );
+        let json = serde_json::to_string(&detail)?;
+        for field in contract_fields("sessionDetail") {
+            assert!(
+                json.contains(&format!("\"{field}\":")),
+                "sessionDetail field `{field}` is named in the wire contract but absent from the record"
+            );
+        }
+        assert!(json.contains("\"createdAt\":1700000000000"));
+        assert!(json.contains("\"lastActivityAt\":1700000060000"));
+        // No quotes around the values — a stringly-typed timestamp is exactly the divergence.
+        assert!(!json.contains("\"createdAt\":\""));
+
+        // A nest-auth-written record (numbers, sub-second precision) reads back exactly.
+        // Asserted on the `Result` rather than unwrapped with `?`: the literal always parses,
+        // so the `?` operator's error arm would sit on its own line as dead, uncovered code.
+        let from_nest: serde_json::Result<SessionDetail> = serde_json::from_str(
+            r#"{"sessionHash":"abc123","device":"Firefox","ip":"198.51.100.7","createdAt":1700000000123,"lastActivityAt":1700000060456}"#,
+        );
+        assert!(matches!(
+            from_nest,
+            Ok(ref detail)
+                if detail.created_at.unix_timestamp_nanos() / 1_000_000 == 1_700_000_000_123
+                    && detail.last_activity_at.unix_timestamp_nanos() / 1_000_000
+                        == 1_700_000_060_456
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn unix_millis_preserves_pre_epoch_instants_and_rejects_non_numbers() {
+        // The clamp in `unix_millis::serialize` must keep a pre-epoch instant NEGATIVE rather
+        // than saturating it to `i64::MAX`, and the reader must refuse a stringly-typed
+        // timestamp instead of silently defaulting — an RFC 3339 `sd:` record has to fail
+        // loudly (and be swept as stale) rather than decode to a bogus time.
+        let detail = SessionDetail {
+            session_hash: "abc123".into(),
+            device: "Firefox".into(),
+            ip: "198.51.100.7".into(),
+            created_at: OffsetDateTime::from_unix_timestamp(-1_000)
+                .unwrap_or(OffsetDateTime::UNIX_EPOCH),
+            last_activity_at: OffsetDateTime::UNIX_EPOCH,
+        };
+        let json = serde_json::to_string(&detail).unwrap_or_default();
+        assert!(json.contains("\"createdAt\":-1000000"));
+        assert!(json.contains("\"lastActivityAt\":0"));
+
+        let rfc3339: Result<SessionDetail, _> = serde_json::from_str(
+            r#"{"sessionHash":"abc123","device":"Firefox","ip":"198.51.100.7","createdAt":"1970-01-01T00:00:00Z","lastActivityAt":0}"#,
+        );
+        assert!(rfc3339.is_err());
     }
 
     #[test]
@@ -703,12 +1207,13 @@ mod tests {
 
     #[test]
     fn reset_context_round_trips_camel_case() -> serde_json::Result<()> {
-        // The `pr:`/`prv:` value is camelCase and round-trips every field so the consume
+        // The `pw_reset:`/`pw_vtok:` value is camelCase and round-trips every field so the consume
         // path can re-bind the proof to the same account.
         let context = ResetContext {
             user_id: "u1".into(),
             email: "user@example.com".into(),
             tenant_id: "t1".into(),
+            password_fingerprint: String::new(),
         };
         let json = serde_json::to_string(&context)?;
         assert!(json.contains("\"userId\":\"u1\""));
@@ -726,12 +1231,220 @@ mod tests {
             role: "MEMBER".into(),
             tenant_id: "t1".into(),
             inviter_user_id: "owner-1".into(),
+            created_at: OffsetDateTime::UNIX_EPOCH,
         };
         let json = serde_json::to_string(&invitation)?;
         assert!(json.contains("\"tenantId\":\"t1\""));
         assert!(json.contains("\"inviterUserId\":\"owner-1\""));
         let back: StoredInvitation = serde_json::from_str(&json)?;
         assert_eq!(back, invitation);
+        Ok(())
+    }
+
+    #[test]
+    fn stored_invitation_carries_created_at_and_reads_a_nest_written_record()
+    -> serde_json::Result<()> {
+        // Parity gate for the `inv:` value. nest-auth's `isStoredInvitation` requires a STRING
+        // `createdAt`; omitting it made a nest-auth accept of a rust-written invitation fail
+        // validation *after* the single-use `GETDEL` had already removed the token — destroying
+        // the invitation. Assert the field is emitted as a string and that a record written by
+        // nest-auth (ISO-8601 with a `Z` offset) deserializes.
+        let invitation = StoredInvitation {
+            email: "invitee@example.com".into(),
+            role: "MEMBER".into(),
+            tenant_id: "t1".into(),
+            inviter_user_id: "owner-1".into(),
+            created_at: OffsetDateTime::from_unix_timestamp(1_700_000_000)
+                .unwrap_or(OffsetDateTime::UNIX_EPOCH),
+        };
+        let json = serde_json::to_string(&invitation)?;
+        assert!(json.contains("\"createdAt\":\"2023-11-14T22:13:20"));
+
+        // Same idiom as above: assert on the `Result` so the `?` error arm is not left as an
+        // uncovered line the 100% gate then trips over.
+        let from_nest: serde_json::Result<StoredInvitation> = serde_json::from_str(
+            r#"{"email":"invitee@example.com","role":"MEMBER","tenantId":"t1","inviterUserId":"owner-1","createdAt":"2023-11-14T22:13:20.000Z"}"#,
+        );
+        assert!(matches!(
+            from_nest,
+            Ok(ref stored)
+                if stored.created_at == invitation.created_at && stored.inviter_user_id == "owner-1"
+        ));
+        Ok(())
+    }
+
+    /// Read a section of the shared cross-implementation wire contract.
+    ///
+    /// The file at `conformance/wire-contract.json` is held byte-identical by nest-auth, which
+    /// can back the same deployment over the same Redis. Reading it here rather than repeating
+    /// its values means a field rename or an encoding change on either side turns that side red
+    /// immediately, instead of surfacing later as a record the sibling backend cannot parse.
+    fn contract_section(section: &str) -> serde_json::Value {
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../conformance/wire-contract.json"
+        );
+        let raw = std::fs::read_to_string(path).unwrap_or_default();
+        let root: serde_json::Value = serde_json::from_str(&raw).unwrap_or(serde_json::Value::Null);
+        root.get("recordEncodings")
+            .and_then(|r| r.get(section))
+            .cloned()
+            .unwrap_or(serde_json::Value::Null)
+    }
+
+    /// The field names the contract declares for one record, in declaration order.
+    ///
+    /// Panics on an empty list. A contract that failed to load reads as "no fields to check",
+    /// which would make every assertion below pass over nothing — the one failure mode a
+    /// conformance test cannot afford, since it looks identical to conformance.
+    fn contract_fields(section: &str) -> Vec<String> {
+        let fields: Vec<String> = contract_section(section)
+            .get("fields")
+            .and_then(serde_json::Value::as_array)
+            .map(|fields| {
+                fields
+                    .iter()
+                    .filter_map(serde_json::Value::as_str)
+                    .map(str::to_owned)
+                    .collect()
+            })
+            .unwrap_or_default();
+        assert!(
+            !fields.is_empty(),
+            "the wire contract declared no fields for `{section}` — it did not load"
+        );
+        fields
+    }
+
+    #[test]
+    fn the_refresh_session_record_matches_the_shared_wire_contract() -> serde_json::Result<()> {
+        // Every field the contract names must be on the wire, spelled the way the contract spells
+        // it. A record the sibling backend cannot read is not a parse error there — the reader
+        // evicts what it cannot parse, so a drifted field name silently logs the user out.
+        let json: serde_json::Value = serde_json::to_value(session_record())?;
+        for field in contract_fields("refreshSession") {
+            assert!(
+                json.get(&field).is_some(),
+                "refreshSession field `{field}` is named in the wire contract but absent from the record"
+            );
+        }
+
+        // `createdAt` is an ISO-8601 string here, unlike the session DETAIL below. The split is
+        // the trap the contract exists to pin: the two records disagree on purpose.
+        assert_eq!(
+            contract_section("refreshSession")
+                .get("createdAt")
+                .and_then(serde_json::Value::as_str),
+            Some("iso8601-string")
+        );
+        assert_eq!(
+            json.get("createdAt").and_then(serde_json::Value::as_str),
+            Some("1970-01-01T00:00:00Z")
+        );
+        assert_eq!(
+            json.get("familyCreatedAt")
+                .and_then(serde_json::Value::as_str),
+            Some("1970-01-01T00:00:00Z")
+        );
+
+        // `mfaEnabled` must survive a rotation: the MFA gate refuses only a token whose claims
+        // say `mfaEnabled && !mfaVerified`, so a record that drops it turns one routine refresh
+        // into a silent second-factor bypass.
+        assert_eq!(
+            json.get("mfaEnabled"),
+            Some(&serde_json::Value::Bool(false))
+        );
+
+        // An empty family is omitted from the wire entirely, never written as `""` — nest-auth
+        // omits it the same way, and a record differing by that one key is not byte-identical.
+        let familyless = SessionRecord {
+            family_id: String::new(),
+            family_created_at: None,
+            ..session_record()
+        };
+        let familyless_json: serde_json::Value = serde_json::to_value(familyless)?;
+        assert!(familyless_json.get("familyId").is_none());
+        assert!(familyless_json.get("familyCreatedAt").is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn the_ws_ticket_snapshot_matches_the_shared_wire_contract() -> serde_json::Result<()> {
+        // A ticket minted by one backend is redeemed by whichever one receives the upgrade, so
+        // the snapshot's field names are a contract, not an internal detail. It is a snapshot
+        // and not a token by design: no `jti` to revoke, no signature to re-verify, nothing the
+        // holder could present back to the REST surface.
+        let snapshot = WsTicketSnapshot {
+            sub: "u1".into(),
+            tenant_id: Some("t1".into()),
+            role: "MEMBER".into(),
+            status: "ACTIVE".into(),
+            mfa_enabled: true,
+            mfa_verified: true,
+        };
+        let json: serde_json::Value = serde_json::to_value(&snapshot)?;
+        for field in contract_fields("wsTicket") {
+            assert!(
+                json.get(&field).is_some(),
+                "wsTicket field `{field}` is named in the wire contract but absent from the record"
+            );
+        }
+        assert_eq!(
+            contract_section("wsTicket")
+                .get("key")
+                .and_then(serde_json::Value::as_str),
+            Some("wst:{sha256(ticket)}")
+        );
+
+        // A ticket with no tenant scope omits the field entirely rather than writing null —
+        // nest-auth omits it the same way, and a record differing by that one key is not
+        // byte-identical.
+        let platform = WsTicketSnapshot {
+            tenant_id: None,
+            ..snapshot
+        };
+        let json: serde_json::Value = serde_json::to_value(platform)?;
+        assert!(json.get("tenantId").is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn the_invitation_and_reset_context_records_match_the_shared_wire_contract()
+    -> serde_json::Result<()> {
+        // An invitation is consumed with a single-use GETDEL, so a record the reader rejects is
+        // destroyed rather than retried: a missing field loses the invitation outright.
+        let invitation = StoredInvitation {
+            email: "invitee@example.com".into(),
+            role: "MEMBER".into(),
+            tenant_id: "t1".into(),
+            inviter_user_id: "owner-1".into(),
+            created_at: OffsetDateTime::UNIX_EPOCH,
+        };
+        let json: serde_json::Value = serde_json::to_value(invitation)?;
+        for field in contract_fields("invitation") {
+            assert!(
+                json.get(&field).is_some(),
+                "invitation field `{field}` is named in the wire contract but absent from the record"
+            );
+        }
+        assert_eq!(
+            json.get("createdAt").and_then(serde_json::Value::as_str),
+            Some("1970-01-01T00:00:00Z")
+        );
+
+        let context = ResetContext {
+            user_id: "u1".into(),
+            email: "u1@example.com".into(),
+            tenant_id: "t1".into(),
+            password_fingerprint: String::new(),
+        };
+        let json: serde_json::Value = serde_json::to_value(context)?;
+        for field in contract_fields("passwordResetContext") {
+            assert!(
+                json.get(&field).is_some(),
+                "passwordResetContext field `{field}` is named in the wire contract but absent from the record"
+            );
+        }
         Ok(())
     }
 }

@@ -152,10 +152,16 @@ impl SessionService {
             // Ownership-checked revoke; a SessionNotFound (a concurrent logout already removed
             // it) or any other store error is swallowed — the new session is already committed,
             // so eviction must never fail the operation that scheduled it.
-            let _ = self
+            if let Err(error) = self
                 .store
                 .revoke_session(SessionKind::Dashboard, user_id, &victim.session_hash)
-                .await;
+                .await
+                && !matches!(error, AuthError::SessionNotFound)
+            {
+                // Swallowed, but visible: a store that keeps refusing the eviction is a cap
+                // that is not being enforced, which reads as "no error" on every response.
+                tracing::warn!(%error, %user_id, "sessions: eviction of an over-cap session failed");
+            }
             self.fire_session_evicted(user_id, &victim.session_hash, ctx)
                 .await;
         }
@@ -222,6 +228,18 @@ impl SessionService {
     /// action). A `SessionNotFound` for a victim (a concurrent logout already removed it) is
     /// swallowed; any other store error is propagated.
     ///
+    /// The user's token epoch is advanced as part of this, which is what makes the revocation
+    /// take effect *now* rather than whenever each device's access token happens to expire.
+    /// Deleting a refresh session stops that device rotating, but its already-issued access
+    /// token is stateless and keeps verifying for the rest of its lifetime — up to
+    /// `jwt.access_expires_in` of continued access on a device the user just told the system to
+    /// sign out. Someone who does this because they think a device is compromised means now.
+    ///
+    /// The caller's own access token is invalidated too — the epoch is per user, not per
+    /// session — but the caller is the one party who can recover instantly: their refresh
+    /// session is deliberately preserved, so the next request refreshes and continues. The
+    /// revoked devices cannot, having lost the refresh token that would let them.
+    ///
     /// # Errors
     ///
     /// Returns [`AuthError::SessionNotFound`] when `current_hash` is malformed, or a store
@@ -252,6 +270,22 @@ impl SessionService {
                 Err(other) => return Err(other),
             }
         }
+        // Every rotation grace pointer the account holds goes too. `list_sessions` filters
+        // `rp:` members out by construction and `revoke_session` touches only the primary
+        // refresh keys, so a pointer survived both — including the one naming the session this
+        // call deliberately KEEPS, which anyone holding its predecessor token could still
+        // recover through the grace window into a brand-new full-lifetime session. The epoch
+        // bump below does not close that: a recovered session signs from the current epoch.
+        self.store
+            .sweep_grace_pointers(SessionKind::Dashboard, user_id)
+            .await?;
+
+        // Last, and only once every victim is gone: a failure above leaves the epoch untouched
+        // rather than signing the caller out of a device the loop never got to revoke.
+        self.store
+            .bump_epoch(SessionKind::Dashboard, user_id)
+            .await?;
+        tracing::info!(%user_id, "sessions: revoked all other devices, token epoch advanced");
         Ok(())
     }
 
@@ -308,15 +342,20 @@ impl SessionService {
             session_hash: short_hash(new_hash),
         };
         // Errors are swallowed: a slow or failing notification must never affect the session.
-        let _ = self.hooks.on_new_session(&safe, &session, ctx).await;
+        if let Err(error) = self.hooks.on_new_session(&safe, &session, ctx).await {
+            tracing::error!(%error, "sessions: on_new_session hook returned an error (ignored)");
+        }
     }
 
     /// Fire the fire-and-forget session-evicted hook with the short (eight-char) evicted hash.
     async fn fire_session_evicted(&self, user_id: &str, evicted_hash: &str, ctx: &HookContext) {
-        let _ = self
+        if let Err(error) = self
             .hooks
             .on_session_evicted(user_id, &short_hash(evicted_hash), ctx)
-            .await;
+            .await
+        {
+            tracing::error!(%error, "sessions: on_session_evicted hook returned an error (ignored)");
+        }
     }
 }
 
@@ -440,7 +479,7 @@ mod tests {
     use crate::config::resolvers::MaxSessionsResolver;
     use crate::config::{AuthConfig, EvictionStrategy};
     use crate::testing::{InMemoryStores, InMemoryUserRepository};
-    use crate::traits::NoOpAuthHooks;
+    use crate::traits::{NoOpAuthHooks, RotateOutcome};
     use bymax_auth_types::{AuthUser, CreateUserData};
     use std::collections::BTreeMap;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -479,6 +518,35 @@ mod tests {
         }
     }
 
+    /// A hook spy whose notifications both fail, so the swallow-and-report path is observable.
+    /// A host's hook is arbitrary code — a webhook, an audit write — and the library must not
+    /// let its failure reach the session it was merely notifying about.
+    struct ErroringHooks;
+
+    #[async_trait::async_trait]
+    impl AuthHooks for ErroringHooks {
+        async fn on_new_session(
+            &self,
+            _user: &bymax_auth_types::SafeAuthUser,
+            _session: &crate::traits::email::SessionInfo,
+            _ctx: &HookContext,
+        ) -> Result<(), crate::traits::HookError> {
+            Err(crate::traits::HookError::Rejected(
+                "new-session sink unavailable".to_owned(),
+            ))
+        }
+        async fn on_session_evicted(
+            &self,
+            _user_id: &str,
+            _evicted_session_hash: &str,
+            _ctx: &HookContext,
+        ) -> Result<(), crate::traits::HookError> {
+            Err(crate::traits::HookError::Rejected(
+                "eviction sink unavailable".to_owned(),
+            ))
+        }
+    }
+
     /// A resolver that pins the cap to one, to exercise the resolver-override path.
     struct CapOf(u32);
 
@@ -502,7 +570,9 @@ mod tests {
             device: "Chrome on macOS".to_owned(),
             ip: "203.0.113.4".to_owned(),
             created_at: created,
+            mfa_enabled: false,
             family_id: "fam-test".to_owned(),
+            family_created_at: Some(OffsetDateTime::UNIX_EPOCH),
         }
     }
 
@@ -842,6 +912,101 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn revoke_all_except_current_sweeps_the_kept_session_grace_pointer() {
+        // `list_sessions` filters `rp:` members out by construction and `revoke_session`
+        // touches only the primary refresh keys, so a grace pointer used to survive this call
+        // entirely. For a revoked session that is harmless — the grace branch needs the
+        // successor's `rt:` key and it is gone. The gap is the session deliberately KEPT: its
+        // predecessor's pointer names a hash that is still alive, so whoever holds that
+        // predecessor token could take the grace branch and mint a brand-new full-lifetime
+        // session for the rest of the window, right after the user asked to sign out their
+        // other devices. The epoch bump does not close it: a recovered session signs its
+        // access token from the current epoch.
+        let store = Arc::new(InMemoryStores::new());
+        let users = Arc::new(InMemoryUserRepository::new());
+        let uid = seed_user(&users, "grace-sweep").await;
+        let base = OffsetDateTime::UNIX_EPOCH;
+        let predecessor = hash("7777");
+        let kept = hash("8888");
+
+        assert!(
+            store
+                .create_session(
+                    SessionKind::Dashboard,
+                    &predecessor,
+                    &record(&uid, base),
+                    3600
+                )
+                .await
+                .is_ok()
+        );
+        // Rotating predecessor -> kept plants the grace pointer at the predecessor's hash.
+        let rotated = store
+            .rotate(
+                SessionKind::Dashboard,
+                &SessionRotation {
+                    old_hash: predecessor.clone(),
+                    new_hash: kept.clone(),
+                    new_raw: "new-raw-token".to_owned(),
+                    new_record: record(&uid, base),
+                    refresh_ttl: 3600,
+                    grace_ttl: 30,
+                },
+            )
+            .await;
+        assert!(
+            matches!(rotated, Ok(RotateOutcome::Rotated(_))),
+            "{rotated:?}"
+        );
+
+        // The pointer is live: presenting the predecessor again recovers through the grace arm.
+        let recovers = store
+            .rotate(
+                SessionKind::Dashboard,
+                &SessionRotation {
+                    old_hash: predecessor.clone(),
+                    new_hash: hash("9999"),
+                    new_raw: "another-raw-token".to_owned(),
+                    new_record: record(&uid, base),
+                    refresh_ttl: 3600,
+                    grace_ttl: 30,
+                },
+            )
+            .await;
+        assert!(
+            matches!(recovers, Ok(RotateOutcome::Grace(_))),
+            "{recovers:?}"
+        );
+
+        let svc = service(
+            store.clone(),
+            users,
+            Arc::new(NoOpAuthHooks),
+            config(5, None),
+        );
+        assert!(svc.revoke_all_except_current(&uid, &kept).await.is_ok());
+
+        // After the sweep the predecessor no longer recovers anything.
+        let after = store
+            .rotate(
+                SessionKind::Dashboard,
+                &SessionRotation {
+                    old_hash: predecessor,
+                    new_hash: hash("aaaa"),
+                    new_raw: "third-raw-token".to_owned(),
+                    new_record: record(&uid, base),
+                    refresh_ttl: 3600,
+                    grace_ttl: 30,
+                },
+            )
+            .await;
+        assert!(
+            !matches!(after, Ok(RotateOutcome::Grace(_))),
+            "the kept session's grace pointer survived the revocation: {after:?}"
+        );
+    }
+
+    #[tokio::test]
     async fn rotate_session_moves_the_detail_and_is_a_noop_for_equal_hashes() {
         // Rotating old -> new moves the detail to the new hash; rotating a hash to itself is
         // an early no-op; a malformed hash is rejected.
@@ -944,6 +1109,28 @@ mod tests {
     }
 
     #[test]
+    fn normalize_session_metadata_pairs_the_device_with_the_bounded_ip() {
+        // The pair is what reaches the store and the hook payloads. Both halves are exercised
+        // on their own elsewhere, but nothing asserted that the composition carries them — so
+        // returning two empty strings, and losing every device label and IP on record, was
+        // invisible. Asserted with a literal on each side, in order.
+        let (device, ip) = normalize_session_metadata(
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15) Chrome/120.0 Safari/537.36",
+            "203.0.113.9",
+        );
+        assert_eq!(device, "Chrome on macOS");
+        assert_eq!(ip, "203.0.113.9");
+
+        // An over-long IP is bounded on the way through, and the two halves are not swapped.
+        let (device, ip) = normalize_session_metadata(
+            "Mozilla/5.0 (Windows NT 10.0) Gecko/20100101 Firefox/121.0",
+            &"2001:db8:".repeat(20),
+        );
+        assert_eq!(device, "Firefox on Windows");
+        assert_eq!(ip.len(), MAX_IP_LENGTH);
+    }
+
+    #[test]
     fn parse_user_agent_resolves_browser_and_os_precedence() {
         // Edge and Opera win over the Chrome token they also carry; Chrome over Safari; Safari
         // requires a Version/ token; mobile OS wins over the embedded desktop token.
@@ -983,6 +1170,37 @@ mod tests {
         assert_eq!(
             parse_user_agent("some-internal-tool/1.0"),
             "Unknown Browser on Unknown OS"
+        );
+        // Safari needs *both* its token and a `Version/`: either alone is not Safari. Every
+        // agent above carries both, so nothing distinguished the pair from an either-or.
+        assert_eq!(
+            parse_user_agent("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/605.1 Safari/605.1"),
+            "Unknown Browser on Linux"
+        );
+        assert_eq!(
+            parse_user_agent("SomeClient/1.0 (X11; Linux x86_64) Version/17.0"),
+            "Unknown Browser on Linux"
+        );
+        // Each Apple token stands on its own — an iPad and a bare `iOS` agent are iOS even
+        // though neither says `iPhone`.
+        assert_eq!(
+            parse_user_agent(
+                "Mozilla/5.0 (iPad; CPU OS 17_0 like Mac OS X) Version/17.0 Safari/605.1.15"
+            ),
+            "Safari on iOS"
+        );
+        assert_eq!(
+            parse_user_agent("MyApp/1.0 (iOS 17.0)"),
+            "Unknown Browser on iOS"
+        );
+        // And so does each macOS token: the desktop agents above happen to carry both.
+        assert_eq!(
+            parse_user_agent("Mozilla/5.0 (Macintosh; Intel) Firefox/121.0"),
+            "Firefox on macOS"
+        );
+        assert_eq!(
+            parse_user_agent("Mozilla/5.0 (Mac OS X 10_15) Firefox/121.0"),
+            "Firefox on macOS"
         );
     }
 
@@ -1072,6 +1290,22 @@ mod tests {
         ) -> Result<(), AuthError> {
             Ok(())
         }
+        async fn create_recovered_session(
+            &self,
+            _kind: SessionKind,
+            _token_hash: &str,
+            _detail: &SessionRecord,
+            _ttl_secs: u64,
+        ) -> Result<bool, AuthError> {
+            Ok(true)
+        }
+        async fn sweep_grace_pointers(
+            &self,
+            _kind: SessionKind,
+            _user_id: &str,
+        ) -> Result<(), AuthError> {
+            Ok(())
+        }
         async fn revoke_all(&self, _kind: SessionKind, _user_id: &str) -> Result<(), AuthError> {
             Ok(())
         }
@@ -1079,8 +1313,8 @@ mod tests {
             &self,
             _kind: SessionKind,
             _family_id: &str,
-        ) -> Result<(), AuthError> {
-            Ok(())
+        ) -> Result<Option<String>, AuthError> {
+            Ok(None)
         }
         async fn blacklist_access(
             &self,
@@ -1102,6 +1336,79 @@ mod tests {
         async fn bump_epoch(&self, _kind: SessionKind, _user_id: &str) -> Result<u64, AuthError> {
             Ok(1)
         }
+    }
+
+    /// The sweep has to run over a pointer that is actually there.
+    ///
+    /// The existing coverage rotates, recovers THROUGH the grace arm (consuming the pointer),
+    /// and only then revokes — so the sweep ran over an empty set and the filter it applies was
+    /// never exercised. Here the pointer is left untouched, which is the ordinary state of an
+    /// account that rotated recently: whoever holds the predecessor token can still recover
+    /// with it until the window closes, and "log out everywhere" has to take that away.
+    #[tokio::test]
+    async fn revoking_other_devices_sweeps_a_grace_pointer_that_was_never_used() {
+        let store = Arc::new(InMemoryStores::new());
+        let users = Arc::new(InMemoryUserRepository::new());
+        let uid = seed_user(&users, "unused-grace").await;
+        let base = OffsetDateTime::UNIX_EPOCH;
+        let predecessor = hash("1111");
+        let kept = hash("2222");
+
+        assert!(
+            store
+                .create_session(
+                    SessionKind::Dashboard,
+                    &predecessor,
+                    &record(&uid, base),
+                    3600
+                )
+                .await
+                .is_ok()
+        );
+        let rotated = store
+            .rotate(
+                SessionKind::Dashboard,
+                &SessionRotation {
+                    old_hash: predecessor.clone(),
+                    new_hash: kept.clone(),
+                    new_raw: "raw".to_owned(),
+                    new_record: record(&uid, base),
+                    refresh_ttl: 3600,
+                    grace_ttl: 30,
+                },
+            )
+            .await;
+        assert!(
+            matches!(rotated, Ok(RotateOutcome::Rotated(_))),
+            "{rotated:?}"
+        );
+
+        let svc = service(
+            store.clone(),
+            users,
+            Arc::new(NoOpAuthHooks),
+            config(5, None),
+        );
+        assert!(svc.revoke_all_except_current(&uid, &kept).await.is_ok());
+
+        // The untouched pointer is gone: the predecessor recovers nothing.
+        let after = store
+            .rotate(
+                SessionKind::Dashboard,
+                &SessionRotation {
+                    old_hash: predecessor,
+                    new_hash: hash("3333"),
+                    new_raw: "raw2".to_owned(),
+                    new_record: record(&uid, base),
+                    refresh_ttl: 3600,
+                    grace_ttl: 30,
+                },
+            )
+            .await;
+        assert!(
+            !matches!(after, Ok(RotateOutcome::Grace(_))),
+            "an unused grace pointer survived the revocation: {after:?}"
+        );
     }
 
     #[tokio::test]
@@ -1151,6 +1458,19 @@ mod tests {
                 .await
                 .is_ok()
         );
+        assert!(
+            store
+                .sweep_grace_pointers(SessionKind::Dashboard, "u1")
+                .await
+                .is_ok()
+        );
+        let recovered = record("u1", OffsetDateTime::UNIX_EPOCH);
+        assert!(matches!(
+            store
+                .create_recovered_session(SessionKind::Dashboard, "h", &recovered, 60)
+                .await,
+            Ok(true)
+        ));
         assert!(store.revoke_all(SessionKind::Dashboard, "u1").await.is_ok());
         assert!(
             store
@@ -1167,6 +1487,227 @@ mod tests {
         assert!(matches!(
             store.bump_epoch(SessionKind::Dashboard, "u1").await,
             Ok(1)
+        ));
+    }
+
+    #[tokio::test]
+    async fn eviction_survives_a_failing_store_and_failing_hooks() {
+        // Two independent swallow paths meet here: the store refuses the eviction, and both
+        // notifications error. Neither may fail `after_session_created` — the new session is
+        // already committed, and a host's hook is arbitrary code. What must NOT happen is
+        // silence: a cap that stops being enforced, or an audit sink that stops receiving, is
+        // invisible in the response and only reachable through the log.
+        let store = Arc::new(InMemoryStores::new());
+        let users = Arc::new(InMemoryUserRepository::new());
+        let uid = seed_user(&users, "swallow").await;
+
+        let old = hash("dddd");
+        let new = hash("eeee");
+        let base = OffsetDateTime::UNIX_EPOCH;
+        assert!(
+            store
+                .create_session(SessionKind::Dashboard, &old, &record(&uid, base), 3600)
+                .await
+                .is_ok()
+        );
+        let new_record = record(&uid, base + time::Duration::seconds(1));
+        assert!(
+            store
+                .create_session(SessionKind::Dashboard, &new, &new_record, 3600)
+                .await
+                .is_ok()
+        );
+
+        // One armed failure for the single over-cap revoke this drives.
+        store.fail_next_cleanup_writes(1);
+        let svc = service(
+            store.clone(),
+            users,
+            Arc::new(ErroringHooks),
+            config(1, None),
+        );
+        assert!(
+            svc.after_session_created(&new_record, &new, &ctx())
+                .await
+                .is_ok()
+        );
+
+        // The refused eviction left the over-cap session in place — the outcome the warning
+        // exists to make visible.
+        assert!(matches!(svc.list_sessions(&uid, Some(&new)).await, Ok(v) if v.len() == 2));
+    }
+
+    #[tokio::test]
+    async fn a_refused_eviction_reports_only_a_real_store_failure() {
+        // The warning is the whole body of its branch, so the condition guarding it — "report
+        // everything EXCEPT SessionNotFound" — has no other observable effect. Asserting the
+        // outcome of the eviction cannot distinguish an inverted condition from a correct one:
+        // the session stays either way. So the log itself is the assertion surface, both for
+        // what it must say and for what it must stay quiet about.
+        let users = Arc::new(InMemoryUserRepository::new());
+        let uid = seed_user(&users, "reported").await;
+        let base = OffsetDateTime::UNIX_EPOCH;
+        let old = hash("1111");
+        let new = hash("2222");
+
+        // A backend failure IS reported.
+        let store = Arc::new(InMemoryStores::new());
+        assert!(
+            store
+                .create_session(SessionKind::Dashboard, &old, &record(&uid, base), 3600)
+                .await
+                .is_ok()
+        );
+        let new_record = record(&uid, base + time::Duration::seconds(1));
+        assert!(
+            store
+                .create_session(SessionKind::Dashboard, &new, &new_record, 3600)
+                .await
+                .is_ok()
+        );
+        store.fail_next_cleanup_writes(1);
+        let svc = service(
+            store.clone(),
+            users.clone(),
+            Arc::new(CountingHooks::default()),
+            config(1, None),
+        );
+        let (events, guard) = crate::log_capture::capture_events();
+        assert!(
+            svc.after_session_created(&new_record, &new, &ctx())
+                .await
+                .is_ok()
+        );
+        drop(guard);
+        assert!(events.contains_at(
+            tracing::Level::WARN,
+            "sessions: eviction of an over-cap session failed"
+        ));
+        assert!(events.contains(&format!("user_id={uid}")));
+
+        // A `SessionNotFound` is NOT: it is what a concurrent logout leaves behind, and an
+        // operator watching for a cap that stopped being enforced must not have to sift it out
+        // of one line per ordinary race.
+        let store = Arc::new(InMemoryStores::new());
+        assert!(
+            store
+                .create_session(SessionKind::Dashboard, &old, &record(&uid, base), 3600)
+                .await
+                .is_ok()
+        );
+        assert!(
+            store
+                .create_session(SessionKind::Dashboard, &new, &new_record, 3600)
+                .await
+                .is_ok()
+        );
+        // Revoke the victim out from under the cap, so the eviction finds it already gone.
+        assert!(
+            store
+                .revoke_session(SessionKind::Dashboard, &uid, &old)
+                .await
+                .is_ok()
+        );
+        let svc = service(
+            store.clone(),
+            users,
+            Arc::new(CountingHooks::default()),
+            config(1, None),
+        );
+        let (events, guard) = crate::log_capture::capture_events();
+        assert!(
+            svc.after_session_created(&new_record, &new, &ctx())
+                .await
+                .is_ok()
+        );
+        drop(guard);
+        assert!(!events.contains("sessions: eviction of an over-cap session failed"));
+    }
+
+    #[tokio::test]
+    async fn revoking_other_devices_advances_the_token_epoch() {
+        // Deleting a refresh session stops that device ROTATING; its already-issued access token
+        // is stateless and keeps verifying for the rest of its lifetime. A user signing out a
+        // device they believe is compromised means now, so the epoch advances and every
+        // outstanding access token for the account stops verifying at once.
+        let store = Arc::new(InMemoryStores::new());
+        let users = Arc::new(InMemoryUserRepository::new());
+        let uid = seed_user(&users, "everywhere").await;
+        let base = OffsetDateTime::UNIX_EPOCH;
+        let current = hash("cccc");
+        let other = hash("dddd");
+        for (h, at) in [
+            (&current, base),
+            (&other, base + time::Duration::seconds(1)),
+        ] {
+            assert!(
+                store
+                    .create_session(SessionKind::Dashboard, h, &record(&uid, at), 3600)
+                    .await
+                    .is_ok()
+            );
+        }
+
+        let svc = service(
+            store.clone(),
+            users,
+            Arc::new(CountingHooks::default()),
+            config(5, None),
+        );
+        assert!(matches!(
+            store.current_epoch(SessionKind::Dashboard, &uid).await,
+            Ok(0)
+        ));
+
+        assert!(svc.revoke_all_except_current(&uid, &current).await.is_ok());
+
+        // The other device is gone, the caller's session survives — and every access token for
+        // the account, the caller's included, is now stale. The caller is the only party that
+        // can recover: their refresh session is the one still standing.
+        assert!(matches!(
+            store.current_epoch(SessionKind::Dashboard, &uid).await,
+            Ok(epoch) if epoch > 0
+        ));
+        assert!(matches!(svc.list_sessions(&uid, Some(&current)).await, Ok(v) if v.len() == 1));
+    }
+
+    #[tokio::test]
+    async fn a_failed_revocation_leaves_the_epoch_untouched() {
+        // Bumping after a partial failure would be the worst of both outcomes: the caller signed
+        // out of a device the loop never managed to revoke, and no trace that it failed.
+        let store = Arc::new(InMemoryStores::new());
+        let users = Arc::new(InMemoryUserRepository::new());
+        let uid = seed_user(&users, "partial").await;
+        let base = OffsetDateTime::UNIX_EPOCH;
+        let current = hash("eeee");
+        let other = hash("ffff");
+        for (h, at) in [
+            (&current, base),
+            (&other, base + time::Duration::seconds(1)),
+        ] {
+            assert!(
+                store
+                    .create_session(SessionKind::Dashboard, h, &record(&uid, at), 3600)
+                    .await
+                    .is_ok()
+            );
+        }
+
+        store.fail_next_cleanup_writes(1);
+        let svc = service(
+            store.clone(),
+            users,
+            Arc::new(CountingHooks::default()),
+            config(5, None),
+        );
+
+        assert!(matches!(
+            svc.revoke_all_except_current(&uid, &current).await,
+            Err(AuthError::Internal(_))
+        ));
+        assert!(matches!(
+            store.current_epoch(SessionKind::Dashboard, &uid).await,
+            Ok(0)
         ));
     }
 }

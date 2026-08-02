@@ -46,7 +46,79 @@ pub struct HookContext {
     pub sanitized_headers: BTreeMap<String, String>,
 }
 
+/// Why an authentication attempt was refused, as reported to [`AuthHooks::on_login_failed`].
+///
+/// Kept separate from `AuthError` on purpose: the error is what the *caller* is told, and it
+/// is deliberately uniform across the credential paths. This is what the *deployment* is
+/// told, and it is allowed to be specific.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LoginFailureReason {
+    /// Unknown address, an account with no local password, or a wrong password. One variant
+    /// for all three, because distinguishing them is exactly what anti-enumeration forbids
+    /// the response from doing — and the hook already carries `user_id` for the accounts
+    /// that resolved.
+    InvalidCredentials,
+    /// The account exists but its status forbids signing in.
+    AccountBlocked,
+    /// Verification is required and still pending.
+    EmailNotVerified,
+    /// The identifier was already locked out when the attempt arrived, so no credential was
+    /// even checked.
+    LockedOut,
+}
+
+impl LoginFailureReason {
+    /// The stable machine-readable spelling, for a consumer writing the reason into a log
+    /// line or an event payload. Guaranteed not to change with a phrasing edit.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::InvalidCredentials => "invalid_credentials",
+            Self::AccountBlocked => "account_blocked",
+            Self::EmailNotVerified => "email_not_verified",
+            Self::LockedOut => "locked_out",
+        }
+    }
+}
+
+impl std::fmt::Display for LoginFailureReason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// The payload of a refused authentication attempt.
+#[derive(Clone, Copy, Debug)]
+pub struct LoginFailure<'a> {
+    /// The normalized address the attempt was made against.
+    pub email: &'a str,
+    /// The tenant the attempt was resolved into.
+    pub tenant_id: &'a str,
+    /// The account the address resolved to, absent when it resolved to nothing.
+    pub user_id: Option<&'a str>,
+    /// Why it was refused.
+    pub reason: LoginFailureReason,
+}
+
 impl HookContext {
+    /// A context for an event that has no request behind it.
+    ///
+    /// Refresh-token reuse is detected inside the rotation, which carries no
+    /// [`RequestContext`]: the fields that would come from one are absent rather than
+    /// invented, so a consumer reading an empty `ip` knows it was never observed instead of
+    /// trusting a placeholder that looks like an address.
+    #[must_use]
+    pub fn detached(user_id: &str) -> Self {
+        Self {
+            user_id: Some(user_id.to_owned()),
+            email: None,
+            tenant_id: None,
+            ip: String::new(),
+            user_agent: String::new(),
+            sanitized_headers: BTreeMap::new(),
+        }
+    }
+
     /// Build a hook context from a [`RequestContext`] plus the identity fields known at
     /// the call site. The sanitized headers are copied across from the request context.
     #[must_use]
@@ -279,6 +351,57 @@ pub trait AuthHooks: Send + Sync {
         Ok(())
     }
 
+    /// Called when an authentication attempt is refused, whatever the reason.
+    ///
+    /// The single seam for the failure side of authentication. `user_id` is present only
+    /// when the address resolved to an account, which is what lets a consumer tell "someone
+    /// is guessing at this account" from "someone is spraying addresses" — a distinction the
+    /// uniform [`AuthError::InvalidCredentials`] response deliberately hides from the
+    /// caller, but not from the deployment defending itself.
+    ///
+    /// [`AuthError::InvalidCredentials`]: bymax_auth_types::AuthError::InvalidCredentials
+    async fn on_login_failed(
+        &self,
+        failure: &LoginFailure<'_>,
+        ctx: &HookContext,
+    ) -> Result<(), HookError> {
+        let _ = (failure, ctx);
+        Ok(())
+    }
+
+    /// Called on the attempt that **crosses** the brute-force threshold, not the next one.
+    ///
+    /// An attacker who trips the lock and walks away would otherwise never produce the
+    /// event, and the account would sit locked with nothing having announced it.
+    /// `retry_after_seconds` is the remaining window at the moment of the lockout.
+    async fn on_lockout(
+        &self,
+        email: &str,
+        tenant_id: &str,
+        retry_after_seconds: u64,
+        ctx: &HookContext,
+    ) -> Result<(), HookError> {
+        let _ = (email, tenant_id, retry_after_seconds, ctx);
+        Ok(())
+    }
+
+    /// Called when a refresh token already exchanged is presented again after its grace
+    /// window closed.
+    ///
+    /// The strongest evidence of compromise the library produces: one of that token's two
+    /// holders is not the owner. The engine has already revoked the whole family by the time
+    /// this fires — the hook is for the consumer's own response (alert, forced re-verify,
+    /// support ticket), not for the decision.
+    async fn on_refresh_token_reuse_detected(
+        &self,
+        user_id: &str,
+        family_id: &str,
+        ctx: &HookContext,
+    ) -> Result<(), HookError> {
+        let _ = (user_id, family_id, ctx);
+        Ok(())
+    }
+
     /// Called when the session manager evicts a session to make room for a new one (FIFO).
     /// `evicted_session_hash` is the stored hash, never the raw token.
     async fn on_session_evicted(
@@ -342,6 +465,7 @@ mod tests {
             provider: "google".into(),
             provider_id: "google-1".into(),
             email: "e@x.io".into(),
+            email_verified: true,
             name: Some("E".into()),
             avatar: None,
         }

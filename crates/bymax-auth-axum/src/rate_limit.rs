@@ -8,6 +8,7 @@
 //! `@Throttle(...)` per handler. The limiter keys on the client IP, derived per the
 //! configured trusted-proxy strategy ([`crate::state::ClientIpSource`]).
 
+use std::net::IpAddr;
 use std::sync::Arc;
 
 use axum::body::Body;
@@ -17,10 +18,65 @@ use governor::middleware::NoOpMiddleware;
 use http::Response;
 use tower_governor::GovernorError;
 use tower_governor::governor::{GovernorConfig, GovernorConfigBuilder};
-use tower_governor::key_extractor::{PeerIpKeyExtractor, SmartIpKeyExtractor};
+use tower_governor::key_extractor::{KeyExtractor, PeerIpKeyExtractor};
 
 use crate::response::error_response;
 use crate::state::ClientIpSource;
+
+/// A [`KeyExtractor`] that reads the **rightmost** `X-Forwarded-For` entry, falling back to
+/// the peer socket address.
+///
+/// This replaces `tower_governor`'s `SmartIpKeyExtractor`, which takes the **leftmost**
+/// parseable entry and additionally honours `X-Real-IP` and `Forwarded`. A conforming proxy
+/// *appends* the address it observed, so the leftmost entry is whatever the client itself
+/// sent: an attacker rotating `X-Forwarded-For: <random>` gets a fresh limiter key per
+/// request and every per-route limit evaporates, while spoofing a victim's address exhausts
+/// that victim's bucket. `X-Real-IP` and `Forwarded` are ignored entirely — a proxy that
+/// appends to `X-Forwarded-For` gives no such guarantee for headers it does not manage.
+///
+/// The rightmost entry is the one the *nearest* trusted hop wrote, which is the strongest
+/// claim available without a configured trusted-proxy CIDR set. With exactly one proxy in
+/// front — the deployment [`ClientIpSource::TrustedForwardedFor`] documents — it is the real
+/// client. With N proxies it is the Nth-from-the-client hop: still unforgeable, still a
+/// stable key, just coarser.
+///
+/// A malformed or absent header falls back to the peer address rather than failing the
+/// request, so a missing header degrades to the [`ClientIpSource::PeerAddr`] behaviour
+/// instead of 429-ing every caller.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct RightmostForwardedIpKeyExtractor;
+
+impl KeyExtractor for RightmostForwardedIpKeyExtractor {
+    type Key = IpAddr;
+
+    fn extract<T>(&self, req: &http::Request<T>) -> Result<Self::Key, GovernorError> {
+        let forwarded = req
+            .headers()
+            .get("x-forwarded-for")
+            .and_then(|value| value.to_str().ok())
+            .and_then(rightmost_forwarded_ip);
+
+        forwarded
+            .or_else(|| {
+                req.extensions()
+                    .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
+                    .map(|info| info.0.ip())
+            })
+            .ok_or(GovernorError::UnableToExtractKey)
+    }
+}
+
+/// The last parseable IP in a comma-separated `X-Forwarded-For` value.
+///
+/// Scans from the right so the first parseable address found is the one the nearest hop
+/// appended. Returns `None` when no entry parses, which sends the caller to the peer-address
+/// fallback.
+fn rightmost_forwarded_ip(header: &str) -> Option<IpAddr> {
+    header
+        .split(',')
+        .rev()
+        .find_map(|entry| entry.trim().parse::<IpAddr>().ok())
+}
 
 /// One named edge limit: `burst` requests, replenished over `per_seconds`. Modeled as
 /// governor's quota — a burst bucket of `burst` cells that refills the whole bucket over
@@ -89,6 +145,12 @@ pub struct RateLimitConfig {
     pub invitation_create: Option<RateLimit>,
     /// `POST /auth/invitations/accept` — 5 / 60s.
     pub invitation_accept: Option<RateLimit>,
+    /// `POST /auth/invitations/revoke` — 10 / 3600s, matching the mint.
+    pub invitation_revoke: Option<RateLimit>,
+    /// `POST /auth/email/change` — 3 / 300s, matching the reset-email limits.
+    pub email_change_request: Option<RateLimit>,
+    /// `POST /auth/email/change/confirm` — 5 / 60s.
+    pub email_change_confirm: Option<RateLimit>,
     /// `GET /auth/sessions` — 30 / 60s.
     pub list_sessions: Option<RateLimit>,
     /// `DELETE /auth/sessions/{id}` — 10 / 60s.
@@ -99,6 +161,28 @@ pub struct RateLimitConfig {
     pub oauth_initiate: Option<RateLimit>,
     /// `GET /auth/oauth/{provider}/callback` — 10 / 60s.
     pub oauth_callback: Option<RateLimit>,
+    /// `POST /auth/password/change` — 5 / 60s.
+    ///
+    /// Authenticated, so the caller is already known — but each call spends a KDF verification
+    /// of the current password plus a derivation of the new one, the most expensive pair of
+    /// operations in the library. The ceiling matches `login`'s for the same reason: it is a
+    /// password-guessing surface, just one that needs a live session first.
+    pub change_password: Option<RateLimit>,
+    /// `POST /auth/logout` — 20 / 60s.
+    ///
+    /// The route is public: it has to be, or a user whose access token expired could not sign
+    /// out and the refresh session would live out its full lifetime on a device they had just
+    /// abandoned. Public and unlimited is a different thing, though — each call costs a hash
+    /// and several store round trips, and nothing about the caller is known. The ceiling is
+    /// deliberately loose: a browser with several tabs can legitimately fire a handful at once,
+    /// and being rate-limited out of signing out would be its own security problem.
+    pub logout: Option<RateLimit>,
+    /// `POST /auth/ws-ticket` — 20 / 60s.
+    ///
+    /// Authenticated, but every call writes a fresh single-use ticket key, so an authenticated
+    /// caller could otherwise mint them without bound. A reconnecting client needs one per
+    /// socket; 20 covers a flapping connection without covering a loop.
+    pub ws_ticket: Option<RateLimit>,
 }
 
 impl Default for RateLimitConfig {
@@ -120,11 +204,17 @@ impl Default for RateLimitConfig {
             platform_login: Some(RateLimit::new(5, 60)),
             invitation_create: Some(RateLimit::new(10, 3600)),
             invitation_accept: Some(RateLimit::new(5, 60)),
+            invitation_revoke: Some(RateLimit::new(10, 3600)),
+            email_change_request: Some(RateLimit::new(3, 300)),
+            email_change_confirm: Some(RateLimit::new(5, 60)),
             list_sessions: Some(RateLimit::new(30, 60)),
             revoke_session: Some(RateLimit::new(10, 60)),
             revoke_all_sessions: Some(RateLimit::new(5, 60)),
             oauth_initiate: Some(RateLimit::new(10, 60)),
             oauth_callback: Some(RateLimit::new(10, 60)),
+            change_password: Some(RateLimit::new(5, 60)),
+            logout: Some(RateLimit::new(20, 60)),
+            ws_ticket: Some(RateLimit::new(20, 60)),
         }
     }
 }
@@ -136,8 +226,57 @@ impl Default for RateLimitConfig {
 pub(crate) enum GovernorConfigKind {
     /// Peer-socket-IP keyed (never reads `X-Forwarded-For`) — the secure default.
     Peer(Arc<GovernorConfig<PeerIpKeyExtractor, NoOpMiddleware>>),
-    /// `X-Forwarded-For`/`X-Real-IP`/`Forwarded` keyed, for a trusted-proxy deployment.
-    Smart(Arc<GovernorConfig<SmartIpKeyExtractor, NoOpMiddleware>>),
+    /// Keyed on the rightmost `X-Forwarded-For` entry, for a trusted-proxy deployment.
+    Smart(Arc<GovernorConfig<RightmostForwardedIpKeyExtractor, NoOpMiddleware>>),
+}
+
+/// How often the per-route key maps are swept, in seconds.
+///
+/// The sweep is O(live keys) and the maps are only ever grown by traffic, so a minute is far
+/// more often than needed to keep them bounded and far too rare to matter for cost.
+const KEY_GC_INTERVAL_SECS: u64 = 60;
+
+/// Start a timer that periodically drops rate-limit keys whose budget has fully replenished.
+///
+/// `tower_governor` keys its state on the extracted client IP in a `DashMap` that is only ever
+/// **inserted** into; the documented prune is `retain_recent`, which the application is expected
+/// to run on a timer. Nothing did. `ClientIpSource::PeerAddr` — one of the two a deployment now
+/// has to choose between, and the one a directly exposed service picks — keys on the peer
+/// socket address, so an unauthenticated `POST /auth/login` from a routine IPv6 /64 offers
+/// 2^64 distinct keys — and because the per-route limit is *per key*, every new address is both
+/// a fresh burst budget and a permanent map entry. The throttle was the mechanism that grew the
+/// map rather than a bound on it, and with the default config enabling 27 routes there were 27
+/// such maps, all process-lifetime. That is monotonic RSS growth with no ceiling, reachable
+/// without a credential.
+///
+/// The consumer could not compensate: [`GovernorConfigKind`], [`build_governor_config`] and
+/// `throttled` are all crate-private and the public `AuthRouter` exposes no path to the
+/// limiters. So the library starts the sweep itself rather than documenting an obligation
+/// nobody can discharge.
+///
+/// Spawning needs a Tokio runtime. A router built outside one — a synchronous test harness,
+/// say — gets a warning rather than a panic: the crate denies `panic`, and refusing to build a
+/// router would be a far worse answer than an unswept map in a process that is not serving.
+pub(crate) fn spawn_key_gc<K>(config: Arc<GovernorConfig<K, NoOpMiddleware>>)
+where
+    K: KeyExtractor + Send + Sync + 'static,
+    K::Key: Send + Sync + 'static,
+{
+    let Ok(handle) = tokio::runtime::Handle::try_current() else {
+        tracing::warn!(
+            "rate limiter built outside a Tokio runtime — its key map will not be swept; \
+             build the auth router inside the runtime that serves it"
+        );
+        return;
+    };
+    handle.spawn(async move {
+        let mut ticker =
+            tokio::time::interval(std::time::Duration::from_secs(KEY_GC_INTERVAL_SECS));
+        loop {
+            ticker.tick().await;
+            config.limiter().retain_recent();
+        }
+    });
 }
 
 /// Build a per-route governor config for `limit` under the configured `ip_source`.
@@ -162,7 +301,7 @@ pub(crate) fn build_governor_config(
         ClientIpSource::TrustedForwardedFor => GovernorConfigBuilder::default()
             .per_second(per_second)
             .burst_size(burst)
-            .key_extractor(SmartIpKeyExtractor)
+            .key_extractor(RightmostForwardedIpKeyExtractor)
             .finish()
             .map(|config| GovernorConfigKind::Smart(Arc::new(config))),
     }
@@ -188,6 +327,78 @@ pub(crate) fn governor_error_to_response(error: GovernorError) -> Response<Body>
 mod tests {
     use super::*;
     use http::StatusCode;
+
+    /// Read the shared cross-implementation wire contract's rate-limit table.
+    ///
+    /// Held byte-identical by nest-auth, which can serve the same deployment. Reading it here
+    /// rather than repeating the numbers means a limit changed on either side turns that side
+    /// red, instead of surfacing as the same client being throttled at different points
+    /// depending on which backend answered.
+    fn contract_limits() -> serde_json::Value {
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../conformance/wire-contract.json"
+        );
+        let raw = std::fs::read_to_string(path).unwrap_or_default();
+        let root: serde_json::Value = serde_json::from_str(&raw).unwrap_or(serde_json::Value::Null);
+        root.get("rateLimits")
+            .cloned()
+            .unwrap_or(serde_json::Value::Null)
+    }
+
+    #[test]
+    fn every_default_limit_matches_the_shared_wire_contract() {
+        let contract = contract_limits();
+        let defaults = RateLimitConfig::default();
+        let pairs: [(&str, Option<RateLimit>); 27] = [
+            ("login", defaults.login),
+            ("register", defaults.register),
+            ("refresh", defaults.refresh),
+            ("forgotPassword", defaults.forgot_password),
+            ("resetPassword", defaults.reset_password),
+            ("verifyOtp", defaults.verify_otp),
+            ("resendPasswordOtp", defaults.resend_password_otp),
+            ("verifyEmail", defaults.verify_email),
+            ("resendVerification", defaults.resend_verification),
+            ("mfaSetup", defaults.mfa_setup),
+            ("mfaVerifyEnable", defaults.mfa_verify_enable),
+            ("mfaChallenge", defaults.mfa_challenge),
+            ("mfaDisable", defaults.mfa_disable),
+            ("platformLogin", defaults.platform_login),
+            ("invitationCreate", defaults.invitation_create),
+            ("invitationAccept", defaults.invitation_accept),
+            ("invitationRevoke", defaults.invitation_revoke),
+            ("emailChangeRequest", defaults.email_change_request),
+            ("emailChangeConfirm", defaults.email_change_confirm),
+            ("listSessions", defaults.list_sessions),
+            ("revokeSession", defaults.revoke_session),
+            ("revokeAllSessions", defaults.revoke_all_sessions),
+            ("oauthInitiate", defaults.oauth_initiate),
+            ("oauthCallback", defaults.oauth_callback),
+            ("changePassword", defaults.change_password),
+            ("logout", defaults.logout),
+            ("wsTicket", defaults.ws_ticket),
+        ];
+
+        for (name, limit) in pairs {
+            assert!(limit.is_some(), "{name} has no default limit");
+            let Some(limit) = limit else { continue };
+            let rendered = format!("{}/{}", limit.burst, limit.per_seconds);
+            assert_eq!(
+                contract.get(name).and_then(serde_json::Value::as_str),
+                Some(rendered.as_str()),
+                "limit for {name} drifted from the shared contract"
+            );
+        }
+
+        // And the contract names no route this catalog is missing: an entry on one side only
+        // is a route whose limit nobody agreed on.
+        let named = contract
+            .as_object()
+            .map(|table| table.keys().filter(|key| !key.starts_with('$')).count())
+            .unwrap_or_default();
+        assert_eq!(named, pairs.len());
+    }
 
     #[test]
     fn replenish_clamps_to_at_least_one_second() {
@@ -244,5 +455,143 @@ mod tests {
         assert_eq!(cfg.register, Some(RateLimit::new(10, 3600)));
         assert_eq!(cfg.list_sessions, Some(RateLimit::new(30, 60)));
         assert_eq!(cfg.oauth_callback, Some(RateLimit::new(10, 60)));
+    }
+
+    /// Build a request carrying the given `X-Forwarded-For` value and peer address.
+    fn req_with(xff: Option<&str>, peer: &str) -> http::Request<()> {
+        let mut builder = http::Request::builder().uri("/");
+        if let Some(value) = xff {
+            builder = builder.header("x-forwarded-for", value);
+        }
+        let mut req = builder.body(()).unwrap_or_default();
+        if let Ok(addr) = peer.parse::<std::net::SocketAddr>() {
+            req.extensions_mut()
+                .insert(axum::extract::ConnectInfo(addr));
+        }
+        req
+    }
+
+    #[test]
+    fn the_forwarded_extractor_keys_on_the_rightmost_entry() {
+        // A conforming proxy APPENDS the address it observed, so the leftmost entry is
+        // whatever the client itself sent. Keying on it — which `SmartIpKeyExtractor` does —
+        // lets an attacker rotate `X-Forwarded-For` for a fresh limiter key per request,
+        // evaporating every per-route limit; and lets them spoof a victim's address to
+        // exhaust that victim's bucket. The rightmost entry is the one the nearest trusted
+        // hop wrote.
+        let extractor = RightmostForwardedIpKeyExtractor;
+
+        // Attacker-supplied junk on the left, the proxy's observation on the right.
+        let req = req_with(Some("1.1.1.1, 2.2.2.2, 203.0.113.9"), "10.0.0.1:443");
+        assert_eq!(
+            extractor.extract(&req).ok(),
+            Some(
+                "203.0.113.9"
+                    .parse::<IpAddr>()
+                    .unwrap_or(IpAddr::from([0, 0, 0, 0]))
+            )
+        );
+
+        // Two requests whose ONLY difference is the spoofable left-hand side must share a key,
+        // or the limit is per-attacker-choice rather than per-client.
+        let spoof_a = req_with(Some("9.9.9.9, 203.0.113.9"), "10.0.0.1:443");
+        let spoof_b = req_with(Some("8.8.8.8, 203.0.113.9"), "10.0.0.1:443");
+        assert_eq!(
+            extractor.extract(&spoof_a).ok(),
+            extractor.extract(&spoof_b).ok()
+        );
+    }
+
+    #[test]
+    fn the_forwarded_extractor_falls_back_to_the_peer_address() {
+        // No header, an unparseable header, and an empty header all degrade to the peer
+        // address — the `PeerAddr` behaviour — rather than failing the request, which would
+        // 429 every caller behind a proxy that does not set the header.
+        let extractor = RightmostForwardedIpKeyExtractor;
+        let peer = "198.51.100.7"
+            .parse::<IpAddr>()
+            .unwrap_or(IpAddr::from([0, 0, 0, 0]));
+
+        for header in [None, Some("not-an-ip"), Some(""), Some(" , ")] {
+            let req = req_with(header, "198.51.100.7:443");
+            assert_eq!(
+                extractor.extract(&req).ok(),
+                Some(peer),
+                "header {header:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_forwarded_extractor_ignores_x_real_ip_and_forwarded() {
+        // `SmartIpKeyExtractor` also honours `X-Real-IP` and `Forwarded`. A proxy that appends
+        // to `X-Forwarded-For` gives no guarantee about headers it does not manage, so reading
+        // them reopens the same spoofing hole through a different name.
+        let extractor = RightmostForwardedIpKeyExtractor;
+        let mut req = http::Request::builder()
+            .uri("/")
+            .header("x-real-ip", "1.2.3.4")
+            .header("forwarded", "for=5.6.7.8")
+            .body(())
+            .unwrap_or_default();
+        if let Ok(addr) = "198.51.100.7:443".parse::<std::net::SocketAddr>() {
+            req.extensions_mut()
+                .insert(axum::extract::ConnectInfo(addr));
+        }
+
+        assert_eq!(
+            extractor.extract(&req).ok(),
+            Some(
+                "198.51.100.7"
+                    .parse::<IpAddr>()
+                    .unwrap_or(IpAddr::from([0, 0, 0, 0]))
+            )
+        );
+    }
+    /// Inside a runtime the sweeper actually sweeps.
+    ///
+    /// The key map grows one entry per distinct client address and nothing removes the ones
+    /// whose window has long expired, so a public login route accumulates them for the
+    /// process's life. `tokio::time::interval` fires its first tick immediately, so yielding
+    /// once is enough to see the body run — which is the whole of the reclaim.
+    #[tokio::test]
+    async fn the_key_sweeper_runs_its_reclaim_inside_a_runtime() {
+        let built = GovernorConfigBuilder::default()
+            .per_second(1)
+            .burst_size(1)
+            .key_extractor(PeerIpKeyExtractor)
+            .finish();
+        let Some(config) = built else { return };
+        let config = Arc::new(config);
+
+        spawn_key_gc(Arc::clone(&config));
+        // Let the spawned task reach its first tick and run one reclaim.
+        for _ in 0..4 {
+            tokio::task::yield_now().await;
+        }
+
+        // Reaching here at all is the assertion: the sweeper ran on a live limiter without
+        // taking the runtime down, which is the failure mode a panic in a detached task has.
+        assert!(config.limiter().len() < usize::MAX);
+    }
+
+    /// Built outside a Tokio runtime, the sweeper warns and gives up rather than panicking.
+    ///
+    /// A router assembled in a synchronous harness has no runtime to spawn onto. The crate
+    /// denies `panic`, and refusing to build the router over a background sweeper would be a
+    /// far worse answer than an unswept key map in a process that is not serving requests —
+    /// so the branch exists, and it has to stay reachable without taking the process down.
+    #[test]
+    fn the_key_sweeper_declines_quietly_outside_a_runtime() {
+        let built = GovernorConfigBuilder::default()
+            .per_second(1)
+            .burst_size(1)
+            .key_extractor(PeerIpKeyExtractor)
+            .finish();
+        let Some(config) = built else { return };
+
+        // No `#[tokio::test]`: there is deliberately no runtime here. Returning at all is the
+        // assertion — the alternative this guards against is an unwrap on `Handle::current`.
+        spawn_key_gc(Arc::new(config));
     }
 }

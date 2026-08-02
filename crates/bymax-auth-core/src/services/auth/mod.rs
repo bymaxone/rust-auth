@@ -7,6 +7,7 @@
 //! (tenant resolution, the status gate, hook context, and fire-and-forget dispatch).
 
 pub(crate) mod detached;
+mod email_change;
 mod email_verification;
 mod invitation;
 mod login;
@@ -194,6 +195,38 @@ impl AuthEngine {
     /// same value keys the brute-force counter and the OTP record (§7.1.2 / §7.1.6 / §7.7);
     /// HMAC blocks dictionary reversal of the low-entropy email and the output is pure hex,
     /// so it never carries PII into a store key.
+    /// The brute-force counter key for a dashboard account.
+    ///
+    /// The identity PLANE is part of the preimage, not just the tenant. Without it a tenant
+    /// whose id is literally `platform` produced a byte-identical identifier to the platform
+    /// plane's own `platform:{email}` — so five unauthenticated dashboard logins against an
+    /// operator's address locked that operator out of the console, repeatably, without the
+    /// platform surface ever being touched. The reverse held too: a successful dashboard login
+    /// in that tenant cleared the operator's lockout mid-attack. The MFA counters already
+    /// carry their plane for exactly this reason.
+    ///
+    /// Deliberately NOT [`Self::hashed_identifier`]: that value also keys the OTP records,
+    /// whose keyspace is shared byte-for-byte with nest-auth and is already purpose-scoped
+    /// (`otp:{purpose}:`), so it cannot collide and must not move.
+    pub(crate) fn lockout_identifier(&self, tenant_id: &str, email: &str) -> String {
+        let input = format!("dashboard:{tenant_id}:{email}");
+        to_hex(&hmac_sha256(self.config().hmac_key(), input.as_bytes()))
+    }
+
+    /// The invitee-index identifier for an address: `hmac_sha256(email)`, hex.
+    ///
+    /// The index used to key on a bare `sha256(email)`, which is reversible by dictionary — an
+    /// address carries far too little entropy for a plain digest to hide it, and this is the
+    /// one handle an operator (or anyone reading a keyspace dump) has on who a tenant has been
+    /// inviting. Every other identifier in both libraries is an HMAC for exactly that reason;
+    /// this one was the exception. The tenant is not in the preimage because it is already a
+    /// literal segment of the key.
+    ///
+    /// Shared byte-for-byte with nest-auth and pinned by `conformance/wire-contract.json`.
+    pub(crate) fn invitee_identifier(&self, email: &str) -> String {
+        to_hex(&hmac_sha256(self.config().hmac_key(), email.as_bytes()))
+    }
+
     pub(crate) fn hashed_identifier(&self, tenant_id: &str, email: &str) -> String {
         let input = format!("{tenant_id}:{email}");
         to_hex(&hmac_sha256(self.config().hmac_key(), input.as_bytes()))
@@ -235,15 +268,39 @@ impl AuthEngine {
             device,
             ip: stored_ip,
             created_at: now_offset(),
+            mfa_enabled: result.user.mfa_enabled,
             // The family id is server-internal to the reuse-detection store and is not part of
             // the new-session hook / eviction projection (which keys on the session hash), so
             // this display record leaves it empty.
             family_id: String::new(),
+            family_created_at: None,
         };
         self.sessions()
             .after_session_created(&record, &new_hash, hook_ctx)
             .await
     }
+}
+
+/// Returns `user` only when it belongs to `tenant_id`, and `None` otherwise.
+///
+/// [`crate::traits::UserRepository::find_by_email`] takes a `tenant_id` and its contract says
+/// to scope by it — but the repository is the host's and a trait can only ask. A single-tenant
+/// host writing `find_by_email(email)` that ignores its second argument is the shape nobody
+/// notices, and under one every distinct `tenantId` in a request body resolves the same account
+/// while deriving a *different* HMAC-keyed identifier. That turns the brute-force lockout and
+/// the resend cooldown — both keyed on `hmac(tenant:email)` — into per-value budgets an
+/// attacker refills by rotating a field they control, so the five-attempt ceiling and the
+/// sixty-second cooldown never engage.
+///
+/// Collapsing a cross-tenant answer to `None` puts those callers on the path they already have
+/// for "no such account": the same generic error, the same sentinel-KDF timing, the same silent
+/// `Ok`. Nothing new is disclosed, and the account in tenant A stops being reachable through a
+/// request naming tenant B whatever the repository returns.
+pub(crate) fn tenant_scoped(
+    user: Option<bymax_auth_types::AuthUser>,
+    tenant_id: &str,
+) -> Option<bymax_auth_types::AuthUser> {
+    user.filter(|candidate| candidate.tenant_id == tenant_id)
 }
 
 /// Shared fixtures for the flow integration tests: a valid base config, a crypto-parameter
@@ -275,7 +332,7 @@ pub(crate) mod test_support {
     }
 
     /// The crypto parameters for the compiled hasher, used to seed stored password hashes.
-    fn crypto_params() -> PasswordParams {
+    pub(crate) fn crypto_params() -> PasswordParams {
         #[cfg(not(feature = "scrypt"))]
         {
             PasswordParams {
@@ -368,6 +425,42 @@ pub(crate) mod test_support {
 
     /// Build a harness from `cfg` and optional hooks. Returns `None` if the (always valid)
     /// fixture config somehow fails to assemble, so callers stay panic-free with `let-else`.
+    /// Wait for a detached rehash to land, polling until the stored hash differs from
+    /// `previous` or the deadline passes.
+    ///
+    /// Polling rather than sleeping a fixed span: the rehash is one password derivation at the
+    /// configured cost, and how long that takes depends on the machine. A fixed wait tuned on a
+    /// developer's laptop becomes a test that fails on a slower CI runner and reports nothing
+    /// about the code — which is exactly what raising the default cost factor turned this into.
+    ///
+    /// Returns `false` if the deadline passes with the hash unchanged, so the caller asserts
+    /// rather than hangs.
+    /// Polls to a deadline of `attempts` × 100 ms. Callers pass a generous count; the
+    /// give-up path is reachable — and therefore testable — by passing a small one.
+    pub(crate) async fn await_rehash_within(
+        harness: &Harness,
+        user_id: &str,
+        previous: &str,
+        attempts: u32,
+    ) -> bool {
+        for _ in 0..attempts {
+            if let Ok(Some(user)) = harness.users.find_by_id(user_id, None).await
+                && user.password_hash.as_deref().unwrap_or_default() != previous
+            {
+                return true;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+        false
+    }
+
+    /// Wait for a detached rehash with a generous deadline — four seconds, far longer than a
+    /// derivation takes even on a slow shared runner, and the loop exits the moment the value
+    /// changes.
+    pub(crate) async fn await_rehash(harness: &Harness, user_id: &str, previous: &str) -> bool {
+        await_rehash_within(harness, user_id, previous, 40).await
+    }
+
     pub(crate) fn harness(cfg: AuthConfig, hooks: Option<Arc<dyn AuthHooks>>) -> Option<Harness> {
         let users = Arc::new(InMemoryUserRepository::new());
         let stores = Arc::new(InMemoryStores::new());
@@ -406,6 +499,41 @@ mod tests {
                 Some(host) => Ok(host.to_owned()),
             }
         }
+    }
+
+    #[tokio::test]
+    async fn every_identifier_preimage_matches_the_shared_wire_contract() {
+        // These decide which records the two backends share. The `dashboard:` segment is what
+        // keeps a tenant whose id is literally `platform` out of the platform lockout counter;
+        // the OTP preimage stays bare because its keyspace is already purpose-scoped; the
+        // invitee index is an HMAC rather than a plain digest because an address carries far
+        // too little entropy for SHA-256 to hide it. Any of them drifting on one side alone
+        // splits a keyspace the two implementations are supposed to share.
+        let Some(h) = test_support::harness(test_support::base_config(), None) else { return };
+        let key = h.engine.config().hmac_key();
+        let expect_preimage = |name: &str, actual: &str| {
+            let template = crate::services::contract_preimage(name)
+                .replace("{tenantId}", "t1")
+                .replace("{email}", "user@example.com");
+            assert_eq!(
+                to_hex(&hmac_sha256(key, template.as_bytes())),
+                actual,
+                "the {name} preimage drifted from the shared contract"
+            );
+        };
+
+        expect_preimage(
+            "dashboard",
+            &h.engine.lockout_identifier("t1", "user@example.com"),
+        );
+        expect_preimage(
+            "otpRecord",
+            &h.engine.hashed_identifier("t1", "user@example.com"),
+        );
+        expect_preimage(
+            "inviteeIndex",
+            &h.engine.invitee_identifier("user@example.com"),
+        );
     }
 
     #[test]
@@ -491,6 +619,66 @@ mod tests {
         let empty_ctx = RequestContext::new("1.2.3.4", "ua", BTreeMap::new());
         assert!(matches!(
             h.engine.resolve_tenant("body-tenant", &empty_ctx).await,
+            Err(AuthError::Forbidden)
+        ));
+    }
+
+    #[tokio::test]
+    async fn every_tenant_scoped_flow_honours_the_resolver() {
+        // The option documents itself as ignoring the body's tenant when a resolver is
+        // configured, "to prevent tenant spoofing". Only `login` and `register` honoured it:
+        // password reset (all four steps) and email verification (both) read the body value
+        // verbatim, so a caller on one tenant could drive reset/verification mail at accounts
+        // in another — and a reset started under the RESOLVED tenant could never be completed,
+        // because the stored context and the confirm step disagreed about which tenant it
+        // belonged to.
+        //
+        // The check is indirect but exact: the resolver refuses when no `host` header is
+        // present, so a flow that consults it fails with `Forbidden` on an empty context and a
+        // flow that ignores it does not. Every one of these used to be silently fine.
+        let mut cfg = test_support::base_config();
+        cfg.tenant_id_resolver = Some(Arc::new(HostTenantResolver));
+        let Some(h) = test_support::harness(cfg, None) else { return };
+        let empty = RequestContext::new("1.2.3.4", "ua", BTreeMap::new());
+
+        let forgot = crate::services::auth::ForgotPasswordInput {
+            email: "x@example.com".to_owned(),
+            tenant_id: "body-tenant".to_owned(),
+        };
+        assert!(matches!(
+            h.engine.initiate_reset(forgot, &empty).await,
+            Err(AuthError::Forbidden)
+        ));
+
+        let verify_otp = crate::services::auth::VerifyResetOtpInput {
+            email: "x@example.com".to_owned(),
+            tenant_id: "body-tenant".to_owned(),
+            otp: "123456".to_owned(),
+        };
+        assert!(matches!(
+            h.engine.verify_reset_otp(verify_otp, &empty).await,
+            Err(AuthError::Forbidden)
+        ));
+
+        let resend = crate::services::auth::ResendResetOtpInput {
+            email: "x@example.com".to_owned(),
+            tenant_id: "body-tenant".to_owned(),
+        };
+        assert!(matches!(
+            h.engine.resend_reset_otp(resend, &empty).await,
+            Err(AuthError::Forbidden)
+        ));
+
+        assert!(matches!(
+            h.engine
+                .verify_email("body-tenant", "x@example.com", "123456", &empty)
+                .await,
+            Err(AuthError::Forbidden)
+        ));
+        assert!(matches!(
+            h.engine
+                .resend_verification_email("body-tenant", "x@example.com", &empty)
+                .await,
             Err(AuthError::Forbidden)
         ));
     }

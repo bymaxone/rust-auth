@@ -68,7 +68,7 @@ fn shared_dir() -> PathBuf {
 }
 
 /// Every catalog code, in a fixed order, so the generated map is deterministic.
-fn all_error_codes() -> [AuthErrorCode; 38] {
+fn all_error_codes() -> [AuthErrorCode; 37] {
     use AuthErrorCode::*;
     [
         InvalidCredentials,
@@ -81,27 +81,26 @@ fn all_error_codes() -> [AuthErrorCode; 38] {
         TokenRevoked,
         TokenInvalid,
         RefreshTokenInvalid,
-        SessionExpired,
-        SessionLimitReached,
         SessionNotFound,
         TokenMissing,
         EmailAlreadyExists,
         EmailNotVerified,
+        EmailChangeTokenInvalid,
         MfaRequired,
         MfaInvalidCode,
         MfaAlreadyEnabled,
         MfaNotEnabled,
         MfaSetupRequired,
         MfaTempTokenInvalid,
-        RecoveryCodeInvalid,
-        PasswordTooWeak,
+        MfaStateConflict,
+        PasswordCompromised,
         PasswordResetTokenInvalid,
-        PasswordResetTokenExpired,
         OtpInvalid,
         OtpExpired,
         OtpMaxAttempts,
         InsufficientRole,
         Forbidden,
+        UntrustedOrigin,
         InvalidInvitationToken,
         OauthFailed,
         OauthEmailMismatch,
@@ -216,10 +215,41 @@ fn append_error_code_map() {
         body.push_str(&format!("  {}: {:?},\n", code_key(&wire), wire));
     }
     body.push_str("} as const;\n");
+    assert_map_covers_union(&union, &body);
     let result = fs::write(&path, format!("{}{}", union.trim_end(), body));
     assert!(
         result.is_ok(),
         "failed to append AUTH_ERROR_CODES: {result:?}"
+    );
+}
+
+/// Refuse to write a map that does not cover the union above it.
+///
+/// The union is produced by `ts-rs` from the enum itself; the map is built from
+/// [`all_error_codes`], a list maintained by hand. Nothing tied the two together, and the
+/// list fell three variants behind — `auth.email_change_token_invalid`,
+/// `auth.password_compromised` and `auth.untrusted_origin` shipped in the exported type and
+/// not in the exported constant. A TypeScript consumer reading
+/// `AUTH_ERROR_CODES.PASSWORD_COMPROMISED` got `undefined`, while the same expression against
+/// nest-auth returned the code — a parity break in a published artifact, and one the type
+/// checker cannot see because the union is still correct.
+///
+/// Both strings come from the file being generated, so this compares what actually ships
+/// rather than what the generator meant to ship.
+fn assert_map_covers_union(union_src: &str, map_src: &str) {
+    let wire_codes = |src: &str| -> Vec<String> {
+        src.split('"')
+            .filter(|part| part.starts_with("auth."))
+            .map(str::to_owned)
+            .collect()
+    };
+    let declared = wire_codes(union_src);
+    let mapped = wire_codes(map_src);
+    let missing: Vec<&String> = declared.iter().filter(|c| !mapped.contains(c)).collect();
+    assert!(
+        missing.is_empty(),
+        "AUTH_ERROR_CODES is missing codes the AuthErrorCode union declares: {missing:?} \
+         — add them to `all_error_codes`"
     );
 }
 

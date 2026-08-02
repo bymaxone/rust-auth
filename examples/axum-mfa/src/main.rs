@@ -18,7 +18,7 @@ use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-use bymax_auth_axum::{AxumAuthConfig, auth_router};
+use bymax_auth_axum::{AxumAuthConfig, ClientIpSource, auth_router};
 use bymax_auth_core::config::MfaConfig;
 use bymax_auth_core::testing::{InMemoryStores, InMemoryUserRepository};
 use bymax_auth_core::{AuthConfig, AuthEngine, Environment};
@@ -40,7 +40,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .init();
 
     let engine = build_engine()?;
-    let router = auth_router(engine, AxumAuthConfig::default());
+    let router = auth_router(engine, AxumAuthConfig::new(ClientIpSource::PeerAddr));
 
     let bind = std::env::var("BIND_ADDR").unwrap_or_else(|_| DEFAULT_BIND_ADDR.to_owned());
     let listener = tokio::net::TcpListener::bind(&bind).await?;
@@ -73,6 +73,10 @@ fn build_engine() -> Result<AuthEngine, Box<dyn std::error::Error>> {
     config.controllers.mfa = true;
     config.mfa = Some(MfaConfig {
         encryption_key: SecretString::from(EXAMPLE_MFA_KEY_B64.to_owned()),
+        // No rotation in progress. A key retired by a rotation of `encryption_key` goes here,
+        // accepted for decryption only, so stored TOTP secrets keep opening while the
+        // rotation drains.
+        previous_encryption_keys: Vec::new(),
         issuer: "bymax-auth example".to_owned(),
         recovery_code_count: 8,
         totp_window: 1,

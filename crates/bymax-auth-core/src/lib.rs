@@ -31,9 +31,15 @@ pub mod config;
 pub mod context;
 pub mod engine;
 mod error;
+/// Test-only capture of the crate's own `tracing` events, so a security event that is a branch's
+/// only observable effect can be asserted rather than assumed. Never compiled into a release.
+#[cfg(test)]
+mod log_capture;
+mod normalize;
 #[cfg(feature = "oauth")]
 pub mod providers;
 pub mod services;
+mod status_gate;
 pub mod traits;
 
 #[cfg(any(test, feature = "testing"))]
@@ -45,6 +51,8 @@ pub use config::{AuthConfig, Environment};
 pub use engine::{AuthEngine, AuthEngineBuilder};
 #[doc(inline)]
 pub use error::{ConfigError, RepositoryError};
+#[doc(inline)]
+pub use normalize::{mask_email, normalize_email};
 #[cfg(feature = "oauth")]
 #[doc(inline)]
 pub use providers::GoogleOAuthProvider;
@@ -56,7 +64,7 @@ pub use providers::ReqwestHttpClient;
 pub use services::mfa::{LoginResultMfa, MfaService, MfaSetupResult};
 #[cfg(feature = "oauth")]
 #[doc(inline)]
-pub use services::oauth::OAuthOutcome;
+pub use services::oauth::{OAuthOutcome, OAuthRedirect};
 #[cfg(feature = "platform")]
 #[doc(inline)]
 pub use services::platform::PlatformAuthService;

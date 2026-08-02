@@ -1,0 +1,125 @@
+# cargo-mutants configuration — the PRE-RELEASE mutation gate.
+#
+# THE PATH IS PART OF THE CONTRACT: cargo-mutants reads `.cargo/mutants.toml` and nothing
+# else (any other location needs `--config <FILE>` on every invocation). At the repository
+# root this file is silently ignored — no warning, no error — and the sweep then mutates
+# `bindings/`, `examples/` and `fuzz/` while every exclusion below goes unapplied. Verify
+# with `cargo mutants --list --all-features`: every line must start with `crates/`.
+#
+# Mutation testing is the slow, high-signal gate that runs automatically post-merge
+# on `main` (and on demand) via the shared reusable (bymaxone/.github → rust-ci.yml),
+# never on every PR. The agreed floor is a
+# near-100% caught-mutant score across the logic crates: a release is blocked when
+# the score drops below it, and any surviving mutant must be either killed by a new
+# test or explicitly recorded here as a documented equivalent mutant with a reason.
+#
+# `examine_globs` scopes mutation to the crates that carry real logic; pure-data and
+# generated surfaces are not mutated (a mutated `Debug` derive or a config-default
+# constant is noise, not signal). Build artefacts, examples, and the fuzz harness are
+# never mutated.
+
+examine_globs = [
+    "crates/bymax-auth-core/**",
+    "crates/bymax-auth-jwt/**",
+    "crates/bymax-auth-crypto/**",
+    "crates/bymax-auth-redis/**",
+    "crates/bymax-auth-axum/**",
+    "crates/bymax-auth-client/**",
+]
+
+exclude_globs = [
+    "**/tests/**",
+    "examples/**",
+    "fuzz/**",
+    "bindings/**",
+]
+
+# Build the mutants with every feature so the suite that the catch-rate is measured
+# against exercises the same paths the mutated code lives on. This is the only place the
+# flag belongs: cargo refuses `--all-features` twice, so passing it on the command line as
+# well ("cargo mutants --all-features") fails the baseline build before any mutant runs.
+additional_cargo_args = ["--all-features"]
+
+# Documented equivalent mutants: mutants no test can kill because the change is
+# behaviour-preserving. Each entry names the reason it is equivalent, and the pattern is
+# kept narrow enough that other mutants of the same function are still generated — a
+# blanket `#[mutants::skip]` on the function would hide the killable ones alongside it.
+#
+# 1. `replace | with ^ in new_uuid_v4` — the version and variant bits are set on a byte
+#    whose target bits were just cleared (`b[6] & 0x0f`, `b[8] & 0x3f`), so XOR and OR
+#    write the same byte. The neighbouring `&` mutants are NOT equivalent and are killed
+#    by drawing the UUID repeatedly in the layout test.
+# 2. `replace AuthEngine::builder -> AuthEngineBuilder with Default::default()` — the
+#    `Default` impl for the builder calls `Self::new()`, which is the body being replaced.
+# 3. `delete match arm "inactive" in assert_not_blocked` — the wildcard arm returns
+#    `AccountInactive`, the same error the deleted arm returns, so a host-defined status
+#    and `"inactive"` are indistinguishable by design.
+# 4. `replace == with != in validate_password` (the `active_algorithm == Scrypt` arm) — that
+#    arm lives behind `#[cfg(not(feature = "scrypt"))]`, and the gate builds with
+#    `--all-features`, so the mutated line is never compiled into the suite it is measured
+#    against. It is covered by the `not(feature = "scrypt")` test in the same module, which a
+#    default-feature run exercises.
+# 5. `builder.rs:212` `redis_stores` — the `cfg(not(feature = "mfa"))` twin of the method at
+#    line 237, and only one of the two is compiled. Same reason as 4, but the two twins share
+#    a mutant name, so this entry is anchored to the line: excluding by name alone would also
+#    drop the compiled twin's mutant, which the suite does kill. If `builder.rs` shifts, the
+#    anchor stops matching and the mutant reappears as a survivor — a loud failure, not a
+#    silent one. Re-anchor it then.
+# 6. `token_manager.rs:632` `issue_mfa_temp_token` — the `cfg(not(feature = "mfa"))` twin of
+#    the method below it, anchored for the same reason as 5. Re-anchored from 618 on 2026-07-28
+#    when security logging pushed the method down: the sweep reported both of its mutants as
+#    survivors, which is the loud failure this anchoring was chosen for. Confirm with
+#    `cargo mutants --list --all-features | grep issue_mfa_temp_token` — exactly one line must
+#    remain, and it is the `cfg(feature = "mfa")` twin the suite kills.
+# 7. The seven `NoOpEmailProvider` sends — the provider's whole job is to do nothing, and each
+#    body is one `tracing::debug!` line followed by `Ok(())`. Replacing a body with `Ok(())`
+#    removes only that debug line, which no assertion reaches without installing a `tracing`
+#    subscriber in-process: a dev-dependency and ~60 lines of `Subscriber` boilerplate for a
+#    log line that carries no security signal. The mutants of any *real* provider a host wires
+#    are untouched by this pattern.
+# 8. The `AuthHooks` default notification bodies — each is literally `let _ = (args); Ok(())`,
+#    where the binding exists only to tell the compiler the arguments are deliberately unused.
+#    Replacing such a body with `Ok(())` is the same program. This is equivalence, not an
+#    untestable effect. The pattern matches the trait defaults only: an implementation's
+#    mutants are named `<impl AuthHooks for X>::…` and are still generated — which is what
+#    catches a real hook that stops firing (see the platform after-logout spy).
+# 9. The two `index < codes.len()` bounds guards before splicing a used recovery code out —
+#    the index is returned by a search over the very vector being spliced, and the vector is
+#    cloned from the same `AuthUser` value, so the guard can never be false and `<=` reaches
+#    the identical `remove`. It stays in the source as insurance against a future refactor
+#    deriving the index elsewhere: a panic here would be a denial of service on the MFA
+#    challenge path. Each function contains exactly one `<`, so the patterns are precise.
+# 10. `replace | with ^ in hotp` — the dynamic-truncation assembly ORs four byte lanes that
+#     were shifted into disjoint bit ranges (`<< 24`, `<< 16`, `<< 8`, none), so no two
+#     operands share a set bit and XOR produces the identical word. The `| with &` mutants of
+#     the same expression are NOT equivalent and the RFC 4226 vectors kill them.
+# 11. `replace is_legacy -> bool with false` — its only caller is `needs_rehash`, where it is
+#     a fast path: a legacy `scrypt:hex:hex` string can never parse as a current PHC, so the
+#     fallback it short-circuits answers `true` for exactly the same inputs. The `with true`
+#     mutant of the same function is NOT equivalent (it would flag every current hash as
+#     stale) and is killed.
+# 12. `replace | with ^ in decode_hex` — same shape as 1 and 10: `(hi << 4) | lo` combines a
+#     high nibble with a value `hex_nibble` bounds to 0..=15, so the two never share a set bit
+#     and XOR writes the identical byte.
+# 13. `EmailProvider::send_email_changed_notification` default body — the same shape as 8: it is
+#     literally `let _ = (args); Ok(())`, where the binding exists only to tell the compiler the
+#     arguments are deliberately unused. Replacing it with `Ok(())` is the same program. The
+#     pattern matches the TRAIT default only; a real provider's implementation is still mutated,
+#     which is what catches a notice that stops firing. The verification sender next to it is
+#     deliberately NOT defaulted, so it generates no such mutant.
+exclude_re = [
+    'replace \| with \^ in new_uuid_v4',
+    'replace AuthEngine::builder -> AuthEngineBuilder with Default::default\(\)',
+    'delete match arm "inactive" in assert_not_blocked',
+    'replace == with != in validate_password',
+    'builder\.rs:212:9: replace AuthEngineBuilder::redis_stores',
+    'token_manager\.rs:632:9: replace TokenManagerService::issue_mfa_temp_token',
+    'replace <impl EmailProvider for NoOpEmailProvider>::\w+ -> Result<\(\), EmailError> with Ok\(\(\)\)',
+    'replace AuthHooks::\w+ -> Result<\(\), HookError> with Ok\(\(\)\)',
+    'replace < with <= in MfaService::challenge_platform',
+    'replace < with <= in MfaService::splice_recovery_code',
+    'replace \| with \^ in hotp',
+    'replace is_legacy -> bool with false',
+    'replace \| with \^ in decode_hex',
+    'replace EmailProvider::send_email_changed_notification -> Result<\(\), EmailError> with Ok\(\(\)\)',
+]

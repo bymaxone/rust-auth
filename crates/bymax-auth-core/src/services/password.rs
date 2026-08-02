@@ -9,14 +9,20 @@
 //! blocking pool (§7.2). Construction is the one exception: the sentinel is computed once,
 //! synchronously, while the engine is still being assembled.
 
+use std::sync::Arc;
+
 use bymax_auth_crypto::CryptoError;
 use bymax_auth_crypto::password::{PasswordParams, hash, needs_rehash, verify};
 use bymax_auth_types::AuthError;
+use tokio::sync::Semaphore;
 use tokio::task::JoinError;
 
 use crate::ConfigError;
 use crate::config::PasswordConfig;
 use crate::services::internal_error;
+#[cfg(test)]
+use crate::traits::breach::AllowAllBreachChecker;
+use crate::traits::breach::PasswordBreachChecker;
 
 /// A fixed, non-secret plaintext hashed once at startup into the [`PasswordService`]
 /// sentinel. Its only purpose is to give the absent-user login path a real PHC string to
@@ -42,6 +48,32 @@ pub struct PasswordService {
     params: PasswordParams,
     rehash_on_verify: bool,
     sentinel: String,
+    breach_checker: Arc<dyn PasswordBreachChecker>,
+    /// Bounds how many memory-hard derivations run at once. See [`kdf_permit_count`].
+    kdf_permits: Arc<Semaphore>,
+}
+
+/// How many KDF derivations may run concurrently: one per available core, never fewer than two.
+///
+/// `spawn_blocking` alone bounds nothing useful here. Tokio's blocking pool defaults to 512
+/// threads, and every one of these tasks holds the KDF's working memory for its whole run —
+/// ~16 MiB for scrypt at the default cost, ~19 MiB for Argon2id. Unbounded, a few hundred
+/// concurrent logins reach several gigabytes of resident memory, and login is a route an
+/// unauthenticated caller can drive: the derivation runs before the password is known to be
+/// right, and the absent-user path deliberately runs one too. The per-IP limiter does not help
+/// against a distributed caller, and the per-account lockout does not fire on distinct
+/// addresses.
+///
+/// One per core is the useful ceiling rather than a compromise: the work is CPU- and
+/// memory-bound, so admitting more than that adds memory pressure without adding throughput.
+/// Past the ceiling requests queue, which is the behaviour to want under load. The wait is
+/// identical for a real and an absent account, so the timing-uniformity property the sentinel
+/// exists for survives the queue.
+///
+/// nest-auth reaches the same bound by construction: Node's `crypto.scrypt` runs on the libuv
+/// thread pool, which is four threads by default.
+fn kdf_permit_count() -> usize {
+    std::thread::available_parallelism().map_or(2, |n| n.get().max(2))
 }
 
 impl PasswordService {
@@ -53,7 +85,10 @@ impl PasswordService {
     /// Returns [`ConfigError::SentinelHashFailed`] if the KDF rejects the (already
     /// validated) parameters while hashing the sentinel — effectively unreachable once
     /// startup validation has accepted the configuration.
-    pub(crate) fn new(config: &PasswordConfig) -> Result<Self, ConfigError> {
+    pub(crate) fn new(
+        config: &PasswordConfig,
+        breach_checker: Arc<dyn PasswordBreachChecker>,
+    ) -> Result<Self, ConfigError> {
         let params = to_crypto_params(config);
         let sentinel =
             hash(SENTINEL_PLAINTEXT, &params).map_err(|_| ConfigError::SentinelHashFailed)?;
@@ -61,7 +96,45 @@ impl PasswordService {
             params,
             rehash_on_verify: config.rehash_on_verify,
             sentinel,
+            breach_checker,
+            kdf_permits: Arc::new(Semaphore::new(kdf_permit_count())),
         })
+    }
+
+    /// Take one of the KDF's concurrency permits, held for the whole derivation.
+    ///
+    /// # Errors
+    ///
+    /// Returns a generic [`AuthError::Internal`] if the semaphore has been closed, which this
+    /// crate never does — it is owned by the service and lives as long as it.
+    async fn acquire_kdf_permit(&self) -> Result<tokio::sync::OwnedSemaphorePermit, AuthError> {
+        // `let-else` rather than `map_err`: a closure is a function of its own to the coverage
+        // instrumentation, and this one runs only if the semaphore is closed — which this crate
+        // never does, since it owns it and it lives as long as the service. A branch nothing can
+        // reach is a branch; a function nothing can reach fails a 100% function gate.
+        let Ok(permit) = Arc::clone(&self.kdf_permits).acquire_owned().await else {
+            return Err(internal_error("kdf concurrency limiter closed"));
+        };
+        Ok(permit)
+    }
+
+    /// Reject a password that appears in a known-breach corpus.
+    ///
+    /// Called wherever a password is being *set* — registration, reset, invitation acceptance —
+    /// and never on login: refusing a breached password someone already has would lock them out
+    /// of the account they need to get into in order to change it.
+    ///
+    /// The checker fails open by contract, so an unreachable corpus admits the password rather
+    /// than blocking the credential path.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AuthError::PasswordCompromised`] when the corpus knows the password.
+    pub(crate) async fn assert_not_compromised(&self, password: &str) -> Result<(), AuthError> {
+        if self.breach_checker.is_breached(password).await {
+            return Err(AuthError::PasswordCompromised);
+        }
+        Ok(())
     }
 
     /// Whether rehash-on-verify is enabled, so the caller upgrades a stale-but-valid hash.
@@ -79,6 +152,7 @@ impl PasswordService {
     pub async fn hash(&self, password: &str) -> Result<String, AuthError> {
         let params = self.params;
         let password = password.to_owned();
+        let _permit = self.acquire_kdf_permit().await?;
         let joined = tokio::task::spawn_blocking(move || hash(password.as_bytes(), &params)).await;
         flatten_hash(joined)
     }
@@ -95,6 +169,7 @@ impl PasswordService {
         let params = self.params;
         let password = password.to_owned();
         let phc = phc.to_owned();
+        let _permit = self.acquire_kdf_permit().await?;
         let joined = tokio::task::spawn_blocking(move || {
             // The crypto verifier never returns `Err`; collapse the `Result` to a bool so a
             // malformed stored hash is an authentication failure, not an error path.
@@ -196,7 +271,74 @@ mod tests {
     /// somehow failed (unreachable for the fixture), so callers stay panic-free with
     /// `let-else`.
     fn service() -> Option<PasswordService> {
-        PasswordService::new(&config()).ok()
+        PasswordService::new(&config(), Arc::new(AllowAllBreachChecker)).ok()
+    }
+
+    #[test]
+    fn the_kdf_admits_one_derivation_per_core_and_never_fewer_than_two() {
+        // `spawn_blocking` bounds nothing useful on its own: Tokio's blocking pool defaults to
+        // 512 threads, and each of these tasks holds ~16-19 MiB of KDF working memory for its
+        // whole run. Unbounded, a few hundred concurrent logins reach gigabytes of resident
+        // memory — and login is a route an unauthenticated caller drives, because the
+        // derivation runs before the password is known to be right and the absent-user path
+        // deliberately runs one too.
+        let expected = std::thread::available_parallelism().map_or(2, |n| n.get().max(2));
+        assert_eq!(kdf_permit_count(), expected);
+        assert!(
+            kdf_permit_count() >= 2,
+            "a single permit would serialize login"
+        );
+        assert!(
+            kdf_permit_count() < 512,
+            "the point is to be below the blocking pool's default"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_closed_limiter_refuses_rather_than_deriving_unbounded() {
+        // The semaphore is owned by the service and lives as long as it, so nothing in this
+        // crate closes it — but "nothing closes it" is a property of today's code, not of the
+        // type. Closing it here proves the refusal is a refusal: the derivation does not fall
+        // through to running unbounded, which is the one outcome the limiter exists to prevent.
+        let Some(svc) = service() else { return };
+        svc.kdf_permits.close();
+
+        assert!(matches!(
+            svc.hash("correct horse battery staple").await,
+            Err(AuthError::Internal(_))
+        ));
+        assert!(matches!(
+            svc.verify("correct horse battery staple", "$scrypt$x")
+                .await,
+            Err(AuthError::Internal(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn the_kdf_limiter_admits_no_more_than_its_permits_at_once() {
+        // The permit is held for the whole derivation, not merely taken and dropped. Draining
+        // the semaphore and watching a hash fail to make progress is what proves it: without
+        // the acquire, the hash would complete while every permit is held elsewhere.
+        let Some(svc) = service() else { return };
+        let permits = u32::try_from(kdf_permit_count()).unwrap_or(u32::MAX);
+        let all = Arc::clone(&svc.kdf_permits)
+            .acquire_many_owned(permits)
+            .await;
+        let Ok(held) = all else { return };
+
+        let blocked = tokio::time::timeout(
+            std::time::Duration::from_millis(250),
+            svc.hash("correct horse battery staple"),
+        )
+        .await;
+        assert!(
+            blocked.is_err(),
+            "a derivation ran with no permit available"
+        );
+
+        // Released, it proceeds — the limiter queues work, it does not reject it.
+        drop(held);
+        assert!(svc.hash("correct horse battery staple").await.is_ok());
     }
 
     #[tokio::test]
@@ -216,9 +358,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn verify_reports_needs_rehash_for_a_legacy_or_weaker_hash() {
-        // A fresh hash under the active params does not need rehashing; a legacy
-        // non-PHC value (scrypt builds) always reports stale so it migrates on next login.
+    async fn verify_reports_needs_rehash_for_an_unreadable_or_weaker_hash() {
+        // A fresh hash under the active params does not need rehashing; a value that is not a
+        // PHC string always reports stale so it migrates on the next login.
         let Some(svc) = service() else { return };
         let Ok(phc) = svc.hash("pw").await else { return };
         let outcome = svc.verify("pw", &phc).await;
@@ -232,10 +374,10 @@ mod tests {
 
         #[cfg(feature = "scrypt")]
         {
-            // The legacy `scrypt:salt:hash` corpus is always stale; the password need not
+            // A stored value this library never writes is always stale; the password need not
             // match for `needs_rehash` to fire (it parses the stored form, not the input).
-            let legacy = "scrypt:0011:2233";
-            let stale = svc.verify("anything", legacy).await;
+            let unreadable = "scrypt:0011:2233";
+            let stale = svc.verify("anything", unreadable).await;
             assert!(matches!(
                 stale,
                 Ok(VerifyOutcome {
@@ -258,12 +400,39 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn verify_sentinel_actually_spends_the_kdf_time() {
+        // The sentinel exists only to spend the KDF's time, so the one thing that can prove it
+        // ran is that it costs what a verify costs — an `Ok(())` in its place returns in
+        // microseconds and silently removes the user-enumeration defence.
+        //
+        // Compared against a real verify measured in the same test, as a *lower* bound: a
+        // loaded machine slows both, and can never make the sentinel finish faster than a
+        // quarter of a real verify. The comparison cannot flake in the failing direction.
+        let Some(svc) = service() else { return };
+        let hashed = svc.hash("correct horse battery staple").await;
+        let Ok(phc) = hashed else { return };
+
+        let started = std::time::Instant::now();
+        let _ = svc.verify("correct horse battery staple", &phc).await;
+        let real = started.elapsed();
+
+        let started = std::time::Instant::now();
+        let _ = svc.verify_sentinel("whatever the attacker tried").await;
+        let sentinel = started.elapsed();
+
+        assert!(
+            sentinel * 4 >= real,
+            "sentinel took {sentinel:?} against a real verify's {real:?} — it did no work"
+        );
+    }
+
     #[test]
     fn rehash_on_verify_reflects_the_config_toggle() {
         // The toggle is surfaced so the login flow can gate the fire-and-forget upgrade.
         let mut cfg = config();
         cfg.rehash_on_verify = false;
-        let off = PasswordService::new(&cfg);
+        let off = PasswordService::new(&cfg, Arc::new(AllowAllBreachChecker));
         assert!(matches!(off, Ok(s) if !s.rehash_on_verify()));
         let Some(on) = service() else { return };
         assert!(on.rehash_on_verify());
@@ -281,7 +450,7 @@ mod tests {
             };
             cfg.scrypt.cost_factor = 3; // not a power of two and below the floor
             assert!(matches!(
-                PasswordService::new(&cfg),
+                PasswordService::new(&cfg, Arc::new(AllowAllBreachChecker)),
                 Err(ConfigError::SentinelHashFailed)
             ));
         }

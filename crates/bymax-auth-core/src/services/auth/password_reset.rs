@@ -14,19 +14,29 @@ use std::time::Instant;
 
 use bymax_auth_crypto::mac::{sha256, verify_digest};
 use bymax_auth_crypto::token::generate_secure_token;
+use bymax_auth_jwt::RawRefreshToken;
 use bymax_auth_types::{AuthError, AuthUser, SafeAuthUser};
 
 use crate::config::ResetMethod;
+use crate::context::RequestContext;
 use crate::engine::AuthEngine;
+use crate::normalize::normalize_email;
 use crate::services::auth::detached::run_after_password_reset;
 use crate::services::auth::{map_repository_error, normalize_anti_enum, spawn_guarded};
-use crate::traits::{HookContext, OtpPurpose, ResetContext};
+use crate::services::{is_refresh_token_shape, to_hex};
+use crate::traits::{HookContext, OtpPurpose, ResetContext, SessionKind};
 
 /// The lifetime, in seconds, of the short-lived verified token that bridges a successful
 /// OTP verification to the reset form (§7.8 `VERIFIED_TOKEN_TTL_SECONDS`).
 const VERIFIED_TOKEN_TTL_SECONDS: u64 = 300;
 
-/// The atomic resend cooldown for the OTP method, in seconds (§7.8.4).
+/// Seconds one account must wait between reset sends (§7.8.4), shared by `initiate_reset` and
+/// `resend_reset_otp`.
+///
+/// It is not only about mail volume. Every issuance rewrites the OTP record with `attempts: 0`,
+/// so an entry point that can be called freely converts the 5-attempt ceiling into 5 attempts
+/// *per call*, and a six-digit code stops being a secret. Both doors therefore draw on one
+/// budget under one key.
 const RESEND_COOLDOWN_SECS: u64 = 60;
 
 /// The bytes of entropy in a reset link / verified token before hex-encoding (256-bit).
@@ -112,7 +122,26 @@ impl AuthEngine {
     /// persisting the proof); account state never changes the otherwise-`Ok(())` outcome. The
     /// timing floor is applied before the error is returned, so an infra error stays
     /// latency-indistinguishable from a normal response.
-    pub async fn initiate_reset(&self, input: ForgotPasswordInput) -> Result<(), AuthError> {
+    pub async fn initiate_reset(
+        &self,
+        input: ForgotPasswordInput,
+        ctx: &RequestContext,
+    ) -> Result<(), AuthError> {
+        // Canonicalize first: every key below (the OTP/cooldown identifier, the lookup,
+        // and the reset context written for the confirm step) must derive from one
+        // spelling, or a reset started under one casing cannot be completed under another.
+        //
+        // The tenant goes through the resolver for the same reason `login` and `register` do:
+        // when one is configured it is authoritative and the body value is ignored, which is
+        // the whole anti-spoofing promise. Without it a caller on one tenant could drive
+        // reset mail at accounts in another — and a reset started under the resolved tenant
+        // could never be completed, because the stored context and the confirm step would
+        // disagree about which tenant it belonged to.
+        let tenant_id = self.resolve_tenant(&input.tenant_id, ctx).await?;
+        let input = ForgotPasswordInput {
+            email: normalize_email(&input.email),
+            tenant_id,
+        };
         let started = Instant::now();
         // Run the fallible body, then normalize the elapsed time on EVERY exit — including an
         // infrastructure error — before returning, so a backend failure cannot be told apart
@@ -126,13 +155,32 @@ impl AuthEngine {
     /// the anti-enumeration timing floor to every exit path (success and infra error alike).
     async fn initiate_reset_inner(&self, input: &ForgotPasswordInput) -> Result<(), AuthError> {
         let config = self.config().config();
+
+        // The SAME cooldown `resend_reset_otp` claims, under the same key, so the two entry
+        // points share one budget rather than one throttling itself while the other hands out
+        // fresh sends for free. Two things depended on that: every issuance rewrites the OTP
+        // record with `attempts: 0`, so an untimed initiate turns the 5-attempt ceiling into
+        // 5 attempts *per call* — an unbounded supply of guesses at a six-digit code — and each
+        // call also mails the victim, which is a mail bomb aimed at an address the caller merely
+        // has to know. A cooldown hit is a silent success, and the caller's anti-enumeration
+        // floor still applies, so the throttle does not itself answer whether the account exists.
+        let identifier = self.hashed_identifier(&input.tenant_id, &input.email);
+        if !self
+            .otp()
+            .try_begin_resend(OtpPurpose::PasswordReset, &identifier, RESEND_COOLDOWN_SECS)
+            .await?
+        {
+            return Ok(());
+        }
+
         // Look up the account; an unknown email or a blocked account takes no visible branch.
-        if let Some(user) = self
-            .user_repository()
-            .find_by_email(&input.email, &input.tenant_id)
-            .await
-            .map_err(map_repository_error)?
-            && self.assert_user_not_blocked(&user.status).is_ok()
+        if let Some(user) = crate::services::auth::tenant_scoped(
+            self.user_repository()
+                .find_by_email(&input.email, &input.tenant_id)
+                .await
+                .map_err(map_repository_error)?,
+            &input.tenant_id,
+        ) && self.assert_user_not_blocked(&user.status).is_ok()
         {
             // Dispatch by configured method. Both paths are best-effort: a store or send
             // failure is logged and dropped so the uniform response is never perturbed.
@@ -160,7 +208,24 @@ impl AuthEngine {
     /// wrong proof for the method, or an invalid/consumed proof is presented; an OTP error
     /// ([`AuthError::OtpInvalid`]/[`AuthError::OtpExpired`]/[`AuthError::OtpMaxAttempts`]) for a
     /// failed OTP; or a hashing/store [`AuthError`].
-    pub async fn reset_password(&self, input: ResetPasswordInput) -> Result<(), AuthError> {
+    pub async fn reset_password(
+        &self,
+        input: ResetPasswordInput,
+        ctx: &RequestContext,
+    ) -> Result<(), AuthError> {
+        // Canonicalize first: every key below (the OTP/cooldown identifier, the lookup,
+        // and the reset context written for the confirm step) must derive from one
+        // spelling, or a reset started under one casing cannot be completed under another.
+        // The tenant goes through the resolver, exactly as `login` and `register` do: when one
+        // is configured it is authoritative and the body value is ignored. That is the
+        // anti-spoofing promise, and it also keeps this step reading the same tenant the
+        // initiate step wrote under.
+        let tenant_id = self.resolve_tenant(&input.tenant_id, ctx).await?;
+        let input = ResetPasswordInput {
+            email: normalize_email(&input.email),
+            tenant_id,
+            ..input
+        };
         // Classify the proofs: exactly one of token / otp / verified_token must be present.
         let proof = match (
             input.token.as_deref(),
@@ -174,21 +239,46 @@ impl AuthEngine {
             _ => return Err(AuthError::PasswordResetTokenInvalid),
         };
 
-        match (self.config().config().password_reset.method, proof) {
+        // Pair the proof with the configured method first: a request that names the wrong kind
+        // of proof for this deployment is malformed, and nothing below should run for it.
+        enum Dispatch<'a> {
+            Stored(&'a str, ProofKind),
+            Otp(&'a str),
+        }
+        let dispatch = match (self.config().config().password_reset.method, proof) {
             // The token method accepts only a reset link token.
-            (ResetMethod::Token, Proof::Token(token)) => {
-                self.reset_with_stored_proof(token, &input, ProofKind::Token)
-                    .await
-            }
+            (ResetMethod::Token, Proof::Token(token)) => Dispatch::Stored(token, ProofKind::Token),
             // The OTP method accepts a direct OTP or the verified-token bridge.
-            (ResetMethod::Otp, Proof::Otp(otp)) => self.reset_with_otp(otp, &input).await,
+            (ResetMethod::Otp, Proof::Otp(otp)) => Dispatch::Otp(otp),
             (ResetMethod::Otp, Proof::Verified(verified)) => {
-                self.reset_with_stored_proof(verified, &input, ProofKind::Verified)
-                    .await
+                Dispatch::Stored(verified, ProofKind::Verified)
             }
             // Any other method/proof pairing is an explicit mismatch (e.g. a token submitted to
             // the OTP method, or an OTP/verified token submitted to the token method).
-            _ => Err(AuthError::PasswordResetTokenInvalid),
+            _ => return Err(AuthError::PasswordResetTokenInvalid),
+        };
+
+        // The new password is judged BEFORE any proof is spent.
+        //
+        // Every proof below is single-use and consumed atomically — `getdel` for the two token
+        // shapes, the verify script for the OTP — so a screen rejection that arrived after the
+        // consumption burned the proof: the caller was told their password was unacceptable
+        // and, in the same breath, that the only credential they had to fix it was gone. The
+        // whole mail round trip had to be repeated for a mistake the request itself carried.
+        //
+        // Judging first means a caller holding no valid proof can drive the screen, which for
+        // the bundled HIBP checker is an outbound range query. That is the same exposure
+        // `register` already carries on the same screen, and this route is rate-limited — the
+        // burned proof was the larger of the two costs by a wide margin.
+        self.passwords()
+            .assert_not_compromised(&input.new_password)
+            .await?;
+
+        match dispatch {
+            Dispatch::Stored(token, kind) => {
+                self.reset_with_stored_proof(token, &input, kind).await
+            }
+            Dispatch::Otp(otp) => self.reset_with_otp(otp, &input).await,
         }
     }
 
@@ -217,6 +307,7 @@ impl AuthEngine {
         {
             return Err(AuthError::PasswordResetTokenInvalid);
         }
+        self.assert_proof_still_bound(&context).await?;
         self.apply_password_reset(&context, &input.new_password)
             .await
     }
@@ -229,16 +320,19 @@ impl AuthEngine {
         self.otp()
             .verify(OtpPurpose::PasswordReset, &identifier, otp)
             .await?;
-        let user = self
-            .user_repository()
-            .find_by_email(&input.email, &input.tenant_id)
-            .await
-            .map_err(map_repository_error)?
-            .ok_or(AuthError::PasswordResetTokenInvalid)?;
+        let user = crate::services::auth::tenant_scoped(
+            self.user_repository()
+                .find_by_email(&input.email, &input.tenant_id)
+                .await
+                .map_err(map_repository_error)?,
+            &input.tenant_id,
+        )
+        .ok_or(AuthError::PasswordResetTokenInvalid)?;
         let context = ResetContext {
             user_id: user.id.clone(),
             email: input.email.clone(),
             tenant_id: input.tenant_id.clone(),
+            password_fingerprint: password_fingerprint(&user),
         };
         self.apply_password_reset(&context, &input.new_password)
             .await
@@ -252,23 +346,43 @@ impl AuthEngine {
     ///
     /// Returns the OTP error on a failed verify, [`AuthError::PasswordResetTokenInvalid`] for a
     /// vanished account, or a store [`AuthError`].
-    pub async fn verify_reset_otp(&self, input: VerifyResetOtpInput) -> Result<String, AuthError> {
+    pub async fn verify_reset_otp(
+        &self,
+        input: VerifyResetOtpInput,
+        ctx: &RequestContext,
+    ) -> Result<String, AuthError> {
+        // Canonicalize first: every key below (the OTP/cooldown identifier, the lookup,
+        // and the reset context written for the confirm step) must derive from one
+        // spelling, or a reset started under one casing cannot be completed under another.
+        // The tenant goes through the resolver, exactly as `login` and `register` do: when one
+        // is configured it is authoritative and the body value is ignored. That is the
+        // anti-spoofing promise, and it also keeps this step reading the same tenant the
+        // initiate step wrote under.
+        let tenant_id = self.resolve_tenant(&input.tenant_id, ctx).await?;
+        let input = VerifyResetOtpInput {
+            email: normalize_email(&input.email),
+            tenant_id,
+            ..input
+        };
         let identifier = self.hashed_identifier(&input.tenant_id, &input.email);
         self.otp()
             .verify(OtpPurpose::PasswordReset, &identifier, &input.otp)
             .await?;
-        let user = self
-            .user_repository()
-            .find_by_email(&input.email, &input.tenant_id)
-            .await
-            .map_err(map_repository_error)?
-            .ok_or(AuthError::PasswordResetTokenInvalid)?;
+        let user = crate::services::auth::tenant_scoped(
+            self.user_repository()
+                .find_by_email(&input.email, &input.tenant_id)
+                .await
+                .map_err(map_repository_error)?,
+            &input.tenant_id,
+        )
+        .ok_or(AuthError::PasswordResetTokenInvalid)?;
 
         let store = self
             .password_reset_store()
             .ok_or(AuthError::PasswordResetTokenInvalid)?;
         let raw = generate_secure_token(RESET_TOKEN_BYTES);
         let context = ResetContext {
+            password_fingerprint: password_fingerprint(&user),
             user_id: user.id,
             email: input.email,
             tenant_id: input.tenant_id,
@@ -292,7 +406,23 @@ impl AuthEngine {
     /// account lookup); account state never changes the otherwise-`Ok(())` outcome. The timing
     /// floor is applied before the error is returned, so an infra error stays
     /// latency-indistinguishable from a normal response.
-    pub async fn resend_reset_otp(&self, input: ResendResetOtpInput) -> Result<(), AuthError> {
+    pub async fn resend_reset_otp(
+        &self,
+        input: ResendResetOtpInput,
+        ctx: &RequestContext,
+    ) -> Result<(), AuthError> {
+        // Canonicalize first: every key below (the OTP/cooldown identifier, the lookup,
+        // and the reset context written for the confirm step) must derive from one
+        // spelling, or a reset started under one casing cannot be completed under another.
+        // The tenant goes through the resolver, exactly as `login` and `register` do: when one
+        // is configured it is authoritative and the body value is ignored. That is the
+        // anti-spoofing promise, and it also keeps this step reading the same tenant the
+        // initiate step wrote under.
+        let tenant_id = self.resolve_tenant(&input.tenant_id, ctx).await?;
+        let input = ResendResetOtpInput {
+            email: normalize_email(&input.email),
+            tenant_id,
+        };
         let started = Instant::now();
         // Run the fallible body, then normalize the elapsed time on EVERY exit — the cooldown
         // short-circuit, the success path, and any infrastructure error — so a backend failure
@@ -316,12 +446,13 @@ impl AuthEngine {
             return Ok(());
         }
 
-        if let Some(user) = self
-            .user_repository()
-            .find_by_email(&input.email, &input.tenant_id)
-            .await
-            .map_err(map_repository_error)?
-            && self.assert_user_not_blocked(&user.status).is_ok()
+        if let Some(user) = crate::services::auth::tenant_scoped(
+            self.user_repository()
+                .find_by_email(&input.email, &input.tenant_id)
+                .await
+                .map_err(map_repository_error)?,
+            &input.tenant_id,
+        ) && self.assert_user_not_blocked(&user.status).is_ok()
         {
             // Best-effort: a store/dispatch failure must not change the uniform response.
             let _ = self.send_reset_otp(&input.tenant_id, &input.email).await;
@@ -358,7 +489,7 @@ impl AuthEngine {
         tenant_id: &str,
     ) -> Result<(), AuthError> {
         let Some(store) = self.password_reset_store() else {
-            // A misconfiguration: the token method is selected but no `pr:` store is wired.
+            // A misconfiguration: the token method is selected but no `pw_reset:` store is wired.
             // Surfaced to the caller (which swallows it on the anti-enumerating path) and
             // logged so a deployment running the token method without its store is observable.
             tracing::warn!("password reset token method selected but no PasswordResetStore wired");
@@ -372,6 +503,7 @@ impl AuthEngine {
             user_id: user.id.clone(),
             email: email.to_owned(),
             tenant_id: tenant_id.to_owned(),
+            password_fingerprint: password_fingerprint(user),
         };
         store.put_token(&raw, &context, ttl).await?;
 
@@ -382,13 +514,160 @@ impl AuthEngine {
             .await
             .is_err()
         {
-            let _ = store.delete_token(&raw).await;
+            // The caller must not learn that the address exists, so the failure is swallowed on
+            // the response path — which makes the log the only place an operator can see that
+            // reset links are not reaching anyone.
+            tracing::error!(user_id = %user.id, "password reset: token delivery failed");
+            if let Err(error) = store.delete_token(&raw).await {
+                // The rollback is what keeps an undeliverable token from lingering in a Redis
+                // snapshot for its whole TTL.
+                tracing::error!(%error, "password reset: rollback of the stored token failed");
+            }
         }
         Ok(())
     }
 
     /// Apply the verified reset: hash the new password, persist it, then revoke every session.
     ///
+    /// Change the password of an already-authenticated account, proving identity with the
+    /// current password rather than an emailed token.
+    ///
+    /// This is the flow ASVS v5 §6.2.2 and §6.2.3 require at Level 1 — "users can change their
+    /// password", and "password change functionality requires the user's current and new
+    /// password" — and it was the one credential operation this library did not own. Without
+    /// it a host either sends users through the *unauthenticated* recovery flow to rotate a
+    /// password they already know, or hand-rolls hashing against `bymax-auth-crypto` with
+    /// duplicated parameters and no guarantee that the sessions are revoked afterwards.
+    ///
+    /// The current password is what makes it safe. A session alone is not proof of identity: a
+    /// token lifted by XSS or from a shared machine would otherwise be enough to rotate the
+    /// credential, lock the real owner out of an account they still know the password to, and
+    /// keep the attacker in.
+    ///
+    /// Every other session ends on success (ASVS v5 §7.4.3) and the token epoch is bumped, so
+    /// already-issued access tokens die with them. The caller's own refresh session survives
+    /// when `current_refresh` identifies it, so the device that made the change stays signed in
+    /// and silently re-mints its access token on the next rotation. When it cannot be
+    /// identified, every session goes, this one included: a change that leaves an unknown
+    /// session alive is the failure the control exists to prevent.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AuthError::InvalidCredentials`] when the current password does not match, the
+    /// account is gone, or it has no local password (an OAuth-only account has nothing to
+    /// change — its credential belongs to the provider); [`AuthError::PasswordCompromised`]
+    /// when the screen refuses the new password; or a repository/store [`AuthError`].
+    pub async fn change_password(
+        &self,
+        user_id: &str,
+        current_password: &str,
+        new_password: &str,
+        current_refresh: Option<&str>,
+    ) -> Result<(), AuthError> {
+        let user = self
+            .user_repository()
+            .find_by_id(user_id, None)
+            .await
+            .map_err(map_repository_error)?;
+        // A verified token whose subject is gone, and an account with no local password, answer
+        // identically: the caller cannot prove a credential this account does not have.
+        let Some(phc) = user.and_then(|user| user.password_hash) else {
+            return Err(AuthError::InvalidCredentials);
+        };
+
+        if !self
+            .passwords()
+            .verify(current_password, &phc)
+            .await?
+            .matched
+        {
+            tracing::warn!(user_id = %user_id, "password change: current password rejected");
+            return Err(AuthError::InvalidCredentials);
+        }
+
+        self.passwords()
+            .assert_not_compromised(new_password)
+            .await?;
+        let new_hash = self.passwords().hash(new_password).await?;
+        self.user_repository()
+            .update_password(user_id, &new_hash)
+            .await
+            .map_err(map_repository_error)?;
+
+        // Sessions go only after the password is durably written, for the same reason the reset
+        // flow orders it that way: a crash between the two leaves stale refresh tokens alive
+        // until their TTL, but the old password is already dead.
+        match current_refresh.filter(|raw| is_refresh_token_shape(raw)) {
+            Some(raw) => {
+                let hash = RawRefreshToken::from_raw(raw.to_owned()).redis_hash();
+                self.sessions()
+                    .revoke_all_except_current(user_id, &hash)
+                    .await?;
+            }
+            None => {
+                self.session_store()
+                    .revoke_all(SessionKind::Dashboard, user_id)
+                    .await?;
+                self.session_store()
+                    .bump_epoch(SessionKind::Dashboard, user_id)
+                    .await?;
+            }
+        }
+
+        tracing::info!(user_id = %user_id, "password change: completed, other sessions revoked");
+        self.notify_password_changed(user_id).await;
+        Ok(())
+    }
+
+    /// Send the "your password changed" notice, detached and best-effort.
+    ///
+    /// NIST SP 800-63B §4.6 asks for a notification through a channel independent of the
+    /// transaction that bound the new credential. Never awaited and never allowed to fail the
+    /// operation: a delivery problem must not undo a password that is already written, nor
+    /// answer differently to the caller.
+    async fn notify_password_changed(&self, user_id: &str) {
+        let Ok(Some(user)) = self.user_repository().find_by_id(user_id, None).await else {
+            return;
+        };
+        spawn_guarded(run_send_password_changed(
+            self.email_provider().clone(),
+            user.email,
+        ));
+    }
+
+    /// Refuse a reset proof whose binding no longer matches the account's current password.
+    ///
+    /// Several proofs can be alive at once, and completing one used to leave the rest valid —
+    /// the wrong end state precisely when it matters, since a victim resetting *because* an
+    /// attacker read a link from their mailbox had not closed the link the attacker read. The
+    /// binding makes the first completed rotation, reset or authenticated change, invalidate
+    /// all of them.
+    ///
+    /// An empty stored fingerprint means the proof predates the binding (a rolling deploy, or a
+    /// sibling implementation that has not taken this change) and is accepted: refusing those
+    /// would break every reset in flight for a window this narrow.
+    async fn assert_proof_still_bound(&self, context: &ResetContext) -> Result<(), AuthError> {
+        if context.password_fingerprint.is_empty() {
+            return Ok(());
+        }
+        let current = self
+            .user_repository()
+            .find_by_id(&context.user_id, None)
+            .await
+            .map_err(map_repository_error)?
+            .map(|user| password_fingerprint(&user))
+            .unwrap_or_default();
+
+        if current == context.password_fingerprint {
+            return Ok(());
+        }
+        tracing::warn!(
+            user_id = %context.user_id,
+            "password reset: refusing a proof issued against a password that has since changed"
+        );
+        Err(AuthError::PasswordResetTokenInvalid)
+    }
+
     /// **Operation order is security-critical:** the password is updated **before** sessions
     /// are invalidated. A crash between the two leaves stale refresh tokens alive only until
     /// their TTL — but the old password is already dead, so a stolen password cannot mint new
@@ -400,6 +679,8 @@ impl AuthEngine {
         context: &ResetContext,
         new_password: &str,
     ) -> Result<(), AuthError> {
+        // The breach screen ran in `reset_password`, before the proof was spent — see the note
+        // there.
         let new_hash = self.passwords().hash(new_password).await?;
         self.user_repository()
             .update_password(&context.user_id, &new_hash)
@@ -417,6 +698,14 @@ impl AuthEngine {
         self.session_store()
             .bump_epoch(crate::traits::SessionKind::Dashboard, &context.user_id)
             .await?;
+        // A completed reset is the event an operator correlates an account takeover against:
+        // it revokes every session the account had and invalidates its outstanding access
+        // tokens, so it belongs in the audit trail even when nothing failed.
+        tracing::info!(user_id = %context.user_id, "password reset: completed, all sessions revoked");
+
+        // A reset needs the notice at least as much as a change does: the classic takeover
+        // completes one from a compromised mailbox and deletes the mail.
+        self.notify_password_changed(&context.user_id).await;
 
         let hook_ctx = reset_context_hooks(context);
         let safe = self.project_user_for_hook(context).await;
@@ -448,20 +737,20 @@ impl AuthEngine {
 /// The single reset proof carried by a request, classified from the mutually-exclusive
 /// `token` / `otp` / `verified_token` fields.
 enum Proof<'a> {
-    /// A reset link token (`pr:`).
+    /// A reset link token (`pw_reset:`).
     Token(&'a str),
     /// A direct OTP.
     Otp(&'a str),
-    /// An OTP-flow verified token (`prv:`).
+    /// An OTP-flow verified token (`pw_vtok:`).
     Verified(&'a str),
 }
 
 /// Which opaque-token keyspace a stored reset proof lives in.
 #[derive(Clone, Copy)]
 enum ProofKind {
-    /// The reset link token (`pr:`).
+    /// The reset link token (`pw_reset:`).
     Token,
-    /// The OTP-flow verified token (`prv:`).
+    /// The OTP-flow verified token (`pw_vtok:`).
     Verified,
 }
 
@@ -484,14 +773,38 @@ fn reset_context_hooks(context: &ResetContext) -> HookContext {
     }
 }
 
+/// A digest of the account's current password hash, binding a reset proof to that password.
+///
+/// The hash itself never leaves the repository — only this digest goes into the store, so a
+/// leaked snapshot of the reset keyspace reveals nothing about the credential. An account with
+/// no local password yields the empty string, which is a value like any other: a proof minted
+/// then is invalidated as soon as one is set.
+pub(super) fn password_fingerprint(user: &AuthUser) -> String {
+    match user.password_hash.as_deref() {
+        Some(phc) => to_hex(&sha256(phc.as_bytes())),
+        None => String::new(),
+    }
+}
+
+/// Send the "password changed" email (a named future so the detached spawn owns its data).
+async fn run_send_password_changed(
+    email: std::sync::Arc<dyn crate::traits::EmailProvider>,
+    recipient: String,
+) -> Result<(), crate::traits::EmailError> {
+    email.send_password_changed(&recipient, None).await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::services::auth::test_support::{Harness, SeedUser, base_config, harness};
+    use crate::services::auth::LoginInput;
+    use crate::services::auth::test_support::{Harness, SeedUser, base_config, ctx, harness};
     use crate::traits::{
         EmailProvider, OtpStore, PasswordResetStore, SessionKind, SessionStore, UserRepository,
     };
+    use bymax_auth_types::{AuthResult, CreateUserData, LoginResult};
     use std::time::Duration;
+    use time::OffsetDateTime;
 
     fn token_harness() -> Option<Harness> {
         let mut cfg = base_config();
@@ -541,7 +854,9 @@ mod tests {
             device: "Chrome".to_owned(),
             ip: "1.2.3.4".to_owned(),
             created_at: time::OffsetDateTime::UNIX_EPOCH,
+            mfa_enabled: false,
             family_id: "fam-test".to_owned(),
+            family_created_at: Some(time::OffsetDateTime::UNIX_EPOCH),
         };
         assert!(
             h.stores
@@ -554,7 +869,7 @@ mod tests {
         // drive send_reset_token directly to learn the raw token is single-use end to end.
         assert!(
             h.engine
-                .initiate_reset(forgot("reset@example.com"))
+                .initiate_reset(forgot("reset@example.com"), &ctx())
                 .await
                 .is_ok()
         );
@@ -569,6 +884,7 @@ mod tests {
                         user_id: user.id.clone(),
                         email: "reset@example.com".to_owned(),
                         tenant_id: "t1".to_owned(),
+                        password_fingerprint: String::new(),
                     },
                     600
                 )
@@ -578,12 +894,12 @@ mod tests {
         let reset = ResetPasswordInput {
             email: "reset@example.com".to_owned(),
             tenant_id: "t1".to_owned(),
-            new_password: "brand-new-pw".to_owned(),
+            new_password: "brandnewwalnut42".to_owned(),
             token: Some(known.clone()),
             otp: None,
             verified_token: None,
         };
-        assert!(h.engine.reset_password(reset).await.is_ok());
+        assert!(h.engine.reset_password(reset, &ctx()).await.is_ok());
 
         // The password changed and the session was revoked.
         let after = stored_hash(&h, &id).await;
@@ -596,13 +912,13 @@ mod tests {
         let replay = ResetPasswordInput {
             email: "reset@example.com".to_owned(),
             tenant_id: "t1".to_owned(),
-            new_password: "another-pw".to_owned(),
+            new_password: "anotherwalnut42".to_owned(),
             token: Some(known),
             otp: None,
             verified_token: None,
         };
         assert!(matches!(
-            h.engine.reset_password(replay).await,
+            h.engine.reset_password(replay, &ctx()).await,
             Err(AuthError::PasswordResetTokenInvalid)
         ));
     }
@@ -628,6 +944,7 @@ mod tests {
                         user_id: id.clone(),
                         email: "epoch@example.com".to_owned(),
                         tenant_id: "t1".to_owned(),
+                        password_fingerprint: String::new(),
                     },
                     600,
                 )
@@ -637,17 +954,68 @@ mod tests {
         let reset = ResetPasswordInput {
             email: "epoch@example.com".to_owned(),
             tenant_id: "t1".to_owned(),
-            new_password: "brand-new-pw".to_owned(),
+            new_password: "brandnewwalnut42".to_owned(),
             token: Some(known),
             otp: None,
             verified_token: None,
         };
-        assert!(h.engine.reset_password(reset).await.is_ok());
+        assert!(h.engine.reset_password(reset, &ctx()).await.is_ok());
         // The reset advanced the epoch: any token stamped at 0 is now below the current value.
         assert!(matches!(
             h.stores.current_epoch(SessionKind::Dashboard, &id).await,
             Ok(1)
         ));
+    }
+
+    #[tokio::test]
+    async fn a_rejected_new_password_leaves_the_reset_token_unspent() {
+        // The proof is single-use and consumed atomically, so a screen rejection that arrived
+        // after the consumption told the caller their password was unacceptable and, in the
+        // same breath, that the only credential they had to fix it was gone — the whole mail
+        // round trip repeated for a mistake the request itself carried.
+        let Some(h) = token_harness() else { return };
+        let id = h.seed(SeedUser::active("spend@example.com", "pw")).await;
+        let known = "c".repeat(64);
+        assert!(
+            h.stores
+                .put_token(
+                    &known,
+                    &ResetContext {
+                        user_id: id,
+                        email: "spend@example.com".to_owned(),
+                        tenant_id: "t1".to_owned(),
+                        password_fingerprint: String::new(),
+                    },
+                    600
+                )
+                .await
+                .is_ok()
+        );
+
+        // `password1` is exactly what the default screen exists to refuse.
+        let refused = ResetPasswordInput {
+            email: "spend@example.com".to_owned(),
+            tenant_id: "t1".to_owned(),
+            new_password: "password1".to_owned(),
+            token: Some(known.clone()),
+            otp: None,
+            verified_token: None,
+        };
+        assert!(matches!(
+            h.engine.reset_password(refused, &ctx()).await,
+            Err(AuthError::PasswordCompromised)
+        ));
+
+        // The same token still works, which is the whole point.
+        let retried = ResetPasswordInput {
+            email: "spend@example.com".to_owned(),
+            tenant_id: "t1".to_owned(),
+            new_password: "glidingwalnut42".to_owned(),
+            token: Some(known),
+            otp: None,
+            verified_token: None,
+        };
+        assert!(h.engine.reset_password(retried, &ctx()).await.is_ok());
     }
 
     #[tokio::test]
@@ -664,6 +1032,7 @@ mod tests {
                         user_id: id,
                         email: "bind@example.com".to_owned(),
                         tenant_id: "t1".to_owned(),
+                        password_fingerprint: String::new(),
                     },
                     600
                 )
@@ -674,13 +1043,13 @@ mod tests {
         let reset = ResetPasswordInput {
             email: "attacker@example.com".to_owned(),
             tenant_id: "t1".to_owned(),
-            new_password: "x".to_owned(),
+            new_password: "glidingwalnut42".to_owned(),
             token: Some(known),
             otp: None,
             verified_token: None,
         };
         assert!(matches!(
-            h.engine.reset_password(reset).await,
+            h.engine.reset_password(reset, &ctx()).await,
             Err(AuthError::PasswordResetTokenInvalid)
         ));
     }
@@ -696,7 +1065,7 @@ mod tests {
         // Direct OTP path: send, read the code from the in-memory store, reset.
         assert!(
             h.engine
-                .initiate_reset(forgot("otp@example.com"))
+                .initiate_reset(forgot("otp@example.com"), &ctx())
                 .await
                 .is_ok()
         );
@@ -704,54 +1073,205 @@ mod tests {
         let reset = ResetPasswordInput {
             email: "otp@example.com".to_owned(),
             tenant_id: "t1".to_owned(),
-            new_password: "new-via-otp".to_owned(),
+            new_password: "walnutviaotp42".to_owned(),
             token: None,
             otp: Some(code.clone()),
             verified_token: None,
         };
-        assert!(h.engine.reset_password(reset).await.is_ok());
+        assert!(h.engine.reset_password(reset, &ctx()).await.is_ok());
 
         // Verified-token bridge: re-send an OTP, verify it for a token, reset with the token.
+        // The earlier initiate claimed the resend cooldown — that gate is what stops a caller
+        // re-minting an OTP (and a fresh `attempts: 0`) at will — so release it explicitly
+        // rather than silently getting no second code and skipping the rest of this test.
+        assert!(
+            h.stores
+                .expire_resend_cooldown(OtpPurpose::PasswordReset, &identifier)
+        );
         assert!(
             h.engine
-                .initiate_reset(forgot("otp@example.com"))
+                .initiate_reset(forgot("otp@example.com"), &ctx())
                 .await
                 .is_ok()
         );
         let Some(code2) = h.stores.peek_otp(OtpPurpose::PasswordReset, &identifier) else { return };
         let verified = h
             .engine
-            .verify_reset_otp(VerifyResetOtpInput {
-                email: "otp@example.com".to_owned(),
-                tenant_id: "t1".to_owned(),
-                otp: code2,
-            })
+            .verify_reset_otp(
+                VerifyResetOtpInput {
+                    email: "otp@example.com".to_owned(),
+                    tenant_id: "t1".to_owned(),
+                    otp: code2,
+                },
+                &ctx(),
+            )
             .await;
         assert!(verified.is_ok());
         let Ok(verified_token) = verified else { return };
         let reset2 = ResetPasswordInput {
             email: "otp@example.com".to_owned(),
             tenant_id: "t1".to_owned(),
-            new_password: "new-via-verified".to_owned(),
+            new_password: "walnutviaverified42".to_owned(),
             token: None,
             otp: None,
             verified_token: Some(verified_token.clone()),
         };
-        assert!(h.engine.reset_password(reset2).await.is_ok());
+        assert!(h.engine.reset_password(reset2, &ctx()).await.is_ok());
         let _ = id;
         // The verified token is single-use.
         let replay = ResetPasswordInput {
             email: "otp@example.com".to_owned(),
             tenant_id: "t1".to_owned(),
-            new_password: "x".to_owned(),
+            new_password: "glidingwalnut42".to_owned(),
             token: None,
             otp: None,
             verified_token: Some(verified_token),
         };
         assert!(matches!(
-            h.engine.reset_password(replay).await,
+            h.engine.reset_password(replay, &ctx()).await,
             Err(AuthError::PasswordResetTokenInvalid)
         ));
+    }
+
+    #[tokio::test]
+    async fn initiate_shares_the_resend_cooldown_so_the_otp_attempt_ceiling_cannot_be_reset() {
+        // `resend_reset_otp` was throttled and `initiate_reset` was not, which made the
+        // throttle decorative: the caller just used the other door. It also made the OTP's
+        // 5-attempt ceiling per-issuance rather than per-account, because every issuance
+        // rewrites the record with `attempts: 0` — so an attacker who knows an address could
+        // loop "initiate, guess five times" at a six-digit code forever, and mail the victim
+        // once per lap while doing it.
+        let Some(h) = otp_harness() else { return };
+        let _ = h
+            .seed(SeedUser::active("throttled@example.com", "old"))
+            .await;
+        let identifier = h.engine.hashed_identifier("t1", "throttled@example.com");
+
+        assert!(
+            h.engine
+                .initiate_reset(forgot("throttled@example.com"), &ctx())
+                .await
+                .is_ok()
+        );
+        let first = h
+            .stores
+            .peek_otp(OtpPurpose::PasswordReset, &identifier)
+            .unwrap_or_default();
+        assert!(!first.is_empty(), "the first initiate mints an OTP");
+
+        // Burn four of the five attempts, then try to buy five more with a second initiate.
+        for _ in 0..4 {
+            let _ = h
+                .engine
+                .verify_reset_otp(
+                    VerifyResetOtpInput {
+                        email: "throttled@example.com".to_owned(),
+                        tenant_id: "t1".to_owned(),
+                        otp: "000000".to_owned(),
+                    },
+                    &ctx(),
+                )
+                .await;
+        }
+
+        assert!(
+            h.engine
+                .initiate_reset(forgot("throttled@example.com"), &ctx())
+                .await
+                .is_ok(),
+            "a throttled initiate is still a silent success — it must not answer whether the account exists"
+        );
+        // The stored code is untouched, which means its attempt counter is too: the second
+        // call bought nothing.
+        assert_eq!(
+            h.stores.peek_otp(OtpPurpose::PasswordReset, &identifier),
+            Some(first),
+            "the cooldown must stop a second issuance from resetting the attempt counter"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_reset_started_in_one_casing_completes_in_another() {
+        // Both entry points canonicalize the address before anything derives a key from it.
+        // Without that, the OTP identifier written by `initiate_reset` and the one read by
+        // `reset_password` disagree whenever the user types their address differently — and
+        // every test above happens to use one spelling throughout, so nothing noticed.
+        let Some(h) = otp_harness() else { return };
+        let id = h.seed(SeedUser::active("case@example.com", "old")).await;
+        let before = stored_hash(&h, &id).await;
+        // Started with the address shouted.
+        assert!(
+            h.engine
+                .initiate_reset(forgot("CASE@Example.COM"), &ctx())
+                .await
+                .is_ok()
+        );
+        // The OTP is filed under the canonical spelling, whatever was typed.
+        let identifier = h.engine.hashed_identifier("t1", "case@example.com");
+        let code = h
+            .stores
+            .peek_otp(OtpPurpose::PasswordReset, &identifier)
+            .unwrap_or_default();
+        assert!(
+            !code.is_empty(),
+            "no reset OTP was minted under the canonical spelling"
+        );
+        // And completed with yet another spelling.
+        let reset = ResetPasswordInput {
+            email: "Case@Example.com".to_owned(),
+            tenant_id: "t1".to_owned(),
+            new_password: "walnutaftercasechange42".to_owned(),
+            token: None,
+            otp: Some(code),
+            verified_token: None,
+        };
+        assert!(h.engine.reset_password(reset, &ctx()).await.is_ok());
+        // The password really changed: the stored hash is not the seeded one.
+        let after = stored_hash(&h, &id).await;
+        assert!(after.is_some() && after != before);
+
+        // The verified-token bridge canonicalizes too, so the OTP minted under one spelling
+        // verifies under another and the token it returns completes the reset. The first
+        // initiate above claimed the resend cooldown — which is the point of that gate — so
+        // release it explicitly rather than silently getting no second OTP.
+        assert!(
+            h.stores
+                .expire_resend_cooldown(OtpPurpose::PasswordReset, &identifier)
+        );
+        assert!(
+            h.engine
+                .initiate_reset(forgot("case@example.com"), &ctx())
+                .await
+                .is_ok()
+        );
+        let second = h
+            .stores
+            .peek_otp(OtpPurpose::PasswordReset, &identifier)
+            .unwrap_or_default();
+        assert!(!second.is_empty());
+        let verified = h
+            .engine
+            .verify_reset_otp(
+                VerifyResetOtpInput {
+                    email: "cAsE@eXaMpLe.CoM".to_owned(),
+                    tenant_id: "t1".to_owned(),
+                    otp: second,
+                },
+                &ctx(),
+            )
+            .await;
+        assert!(verified.is_ok(), "the OTP must verify under any spelling");
+        let Ok(verified_token) = verified else { return };
+        let bridged = ResetPasswordInput {
+            email: "CASE@example.com".to_owned(),
+            tenant_id: "t1".to_owned(),
+            new_password: "walnutagain42".to_owned(),
+            token: None,
+            otp: None,
+            verified_token: Some(verified_token),
+        };
+        assert!(h.engine.reset_password(bridged, &ctx()).await.is_ok());
+        assert!(stored_hash(&h, &id).await != after);
     }
 
     #[tokio::test]
@@ -767,7 +1287,7 @@ mod tests {
             verified_token: None,
         };
         assert!(matches!(
-            h.engine.reset_password(none).await,
+            h.engine.reset_password(none, &ctx()).await,
             Err(AuthError::PasswordResetTokenInvalid)
         ));
         let two = ResetPasswordInput {
@@ -779,7 +1299,7 @@ mod tests {
             verified_token: Some("v".to_owned()),
         };
         assert!(matches!(
-            h.engine.reset_password(two).await,
+            h.engine.reset_password(two, &ctx()).await,
             Err(AuthError::PasswordResetTokenInvalid)
         ));
         // A token to the OTP method is an explicit mismatch.
@@ -792,7 +1312,7 @@ mod tests {
             verified_token: None,
         };
         assert!(matches!(
-            h.engine.reset_password(mismatch).await,
+            h.engine.reset_password(mismatch, &ctx()).await,
             Err(AuthError::PasswordResetTokenInvalid)
         ));
 
@@ -807,7 +1327,7 @@ mod tests {
             verified_token: None,
         };
         assert!(matches!(
-            ht.engine.reset_password(otp_to_token).await,
+            ht.engine.reset_password(otp_to_token, &ctx()).await,
             Err(AuthError::PasswordResetTokenInvalid)
         ));
     }
@@ -835,17 +1355,20 @@ mod tests {
             "absent@example.com",
         ] {
             let started = Instant::now();
-            assert!(h.engine.initiate_reset(forgot(email)).await.is_ok());
+            assert!(h.engine.initiate_reset(forgot(email), &ctx()).await.is_ok());
             assert!(started.elapsed() >= Duration::from_millis(300));
         }
 
         let started = Instant::now();
         assert!(
             h.engine
-                .resend_reset_otp(ResendResetOtpInput {
-                    email: "present@example.com".to_owned(),
-                    tenant_id: "t1".to_owned(),
-                })
+                .resend_reset_otp(
+                    ResendResetOtpInput {
+                        email: "present@example.com".to_owned(),
+                        tenant_id: "t1".to_owned(),
+                    },
+                    &ctx()
+                )
                 .await
                 .is_ok()
         );
@@ -853,22 +1376,59 @@ mod tests {
         // A second resend within the cooldown is the silent-success branch.
         assert!(
             h.engine
-                .resend_reset_otp(ResendResetOtpInput {
-                    email: "present@example.com".to_owned(),
-                    tenant_id: "t1".to_owned(),
-                })
+                .resend_reset_otp(
+                    ResendResetOtpInput {
+                        email: "present@example.com".to_owned(),
+                        tenant_id: "t1".to_owned(),
+                    },
+                    &ctx()
+                )
                 .await
                 .is_ok()
         );
         // An absent account is indistinguishable on resend.
         assert!(
             h.engine
-                .resend_reset_otp(ResendResetOtpInput {
-                    email: "ghost@example.com".to_owned(),
-                    tenant_id: "t1".to_owned(),
-                })
+                .resend_reset_otp(
+                    ResendResetOtpInput {
+                        email: "ghost@example.com".to_owned(),
+                        tenant_id: "t1".to_owned(),
+                    },
+                    &ctx()
+                )
                 .await
                 .is_ok()
+        );
+
+        // Resend canonicalizes its address like the other two entry points: a code requested
+        // under one spelling is filed where the confirm step will look for it. Every branch
+        // here answers `Ok(())`, so only the OTP record shows which one ran — and it has to be
+        // an account with no code on file yet, or an earlier `initiate` would have left one
+        // under that identifier and the assertion would hold either way.
+        let _ = h.seed(SeedUser::active("shout@example.com", "pw")).await;
+        let identifier = h.engine.hashed_identifier("t1", "shout@example.com");
+        assert!(
+            h.stores
+                .peek_otp(OtpPurpose::PasswordReset, &identifier)
+                .is_none()
+        );
+        assert!(
+            h.engine
+                .resend_reset_otp(
+                    ResendResetOtpInput {
+                        email: "SHOUT@Example.com".to_owned(),
+                        tenant_id: "t1".to_owned(),
+                    },
+                    &ctx()
+                )
+                .await
+                .is_ok()
+        );
+        assert!(
+            h.stores
+                .peek_otp(OtpPurpose::PasswordReset, &identifier)
+                .is_some(),
+            "the resent code must be filed under the canonical spelling"
         );
     }
 
@@ -880,17 +1440,20 @@ mod tests {
         let _ = h.seed(SeedUser::active("vrf@example.com", "pw")).await;
         assert!(
             h.engine
-                .initiate_reset(forgot("vrf@example.com"))
+                .initiate_reset(forgot("vrf@example.com"), &ctx())
                 .await
                 .is_ok()
         );
         assert!(matches!(
             h.engine
-                .verify_reset_otp(VerifyResetOtpInput {
-                    email: "vrf@example.com".to_owned(),
-                    tenant_id: "t1".to_owned(),
-                    otp: "000000".to_owned(),
-                })
+                .verify_reset_otp(
+                    VerifyResetOtpInput {
+                        email: "vrf@example.com".to_owned(),
+                        tenant_id: "t1".to_owned(),
+                        otp: "000000".to_owned(),
+                    },
+                    &ctx()
+                )
                 .await,
             Err(AuthError::OtpInvalid)
         ));
@@ -905,11 +1468,14 @@ mod tests {
         );
         assert!(matches!(
             h.engine
-                .verify_reset_otp(VerifyResetOtpInput {
-                    email: "ghost@example.com".to_owned(),
-                    tenant_id: "t1".to_owned(),
-                    otp: "111111".to_owned(),
-                })
+                .verify_reset_otp(
+                    VerifyResetOtpInput {
+                        email: "ghost@example.com".to_owned(),
+                        tenant_id: "t1".to_owned(),
+                        otp: "111111".to_owned(),
+                    },
+                    &ctx()
+                )
                 .await,
             Err(AuthError::PasswordResetTokenInvalid)
         ));
@@ -945,10 +1511,58 @@ mod tests {
 
     /// An email provider whose reset-token send always fails, to drive the delete-on-failure
     /// cleanup of an undeliverable reset token.
+    #[tokio::test]
+    async fn the_failing_lookup_repo_still_answers_the_mutators() {
+        // The double exists to fail ONE read. Its mutators are what make it a valid
+        // `UserRepository`, and `update_email` is the one the trait grew last — a method
+        // nothing calls is a method nothing proves, including that it does not accidentally
+        // fail a flow that shares the double.
+        use crate::traits::UserRepository as _;
+
+        assert!(
+            FailingLookupRepo
+                .update_email("u1", "new@example.com")
+                .await
+                .is_ok()
+        );
+    }
+
+    #[tokio::test]
+    async fn the_reset_doubles_answer_every_send_the_trait_declares() {
+        // These doubles exist to fail (or capture) ONE send. Their remaining methods are what
+        // make them valid `EmailProvider`s at all, and a method nothing calls is a method
+        // nothing proves — including that it does not accidentally fail the flows that share
+        // the double. The address-change send is the one the trait grew last.
+        use crate::traits::EmailProvider as _;
+
+        assert!(
+            FailingResetEmail
+                .send_email_change_verification("new@example.com", "t", None)
+                .await
+                .is_ok()
+        );
+        let capturing = CapturingResetEmail::default();
+        assert!(
+            capturing
+                .send_email_change_verification("new@example.com", "t", None)
+                .await
+                .is_ok()
+        );
+    }
+
     struct FailingResetEmail;
 
     #[async_trait::async_trait]
     impl crate::traits::EmailProvider for FailingResetEmail {
+        async fn send_email_change_verification(
+            &self,
+            _new_email: &str,
+            _token: &str,
+            _locale: Option<&str>,
+        ) -> Result<(), crate::traits::EmailError> {
+            Ok(())
+        }
+
         async fn send_password_reset_token(
             &self,
             _email: &str,
@@ -1005,9 +1619,241 @@ mod tests {
         }
     }
 
+    /// An email provider that keeps the reset token it was asked to deliver, so a test can
+    /// drive the flow with the token a real recipient would have received.
+    #[derive(Default)]
+    struct CapturingResetEmail {
+        token: std::sync::Mutex<Option<String>>,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::traits::EmailProvider for CapturingResetEmail {
+        async fn send_email_change_verification(
+            &self,
+            _new_email: &str,
+            _token: &str,
+            _locale: Option<&str>,
+        ) -> Result<(), crate::traits::EmailError> {
+            Ok(())
+        }
+
+        async fn send_password_reset_token(
+            &self,
+            _email: &str,
+            token: &str,
+            _locale: Option<&str>,
+        ) -> Result<(), crate::traits::EmailError> {
+            if let Ok(mut slot) = self.token.lock() {
+                *slot = Some(token.to_owned());
+            }
+            Ok(())
+        }
+        async fn send_password_reset_otp(
+            &self,
+            _email: &str,
+            _otp: &str,
+            _locale: Option<&str>,
+        ) -> Result<(), crate::traits::EmailError> {
+            Ok(())
+        }
+        async fn send_email_verification_otp(
+            &self,
+            _email: &str,
+            _otp: &str,
+            _locale: Option<&str>,
+        ) -> Result<(), crate::traits::EmailError> {
+            Ok(())
+        }
+        async fn send_mfa_enabled(
+            &self,
+            _email: &str,
+            _locale: Option<&str>,
+        ) -> Result<(), crate::traits::EmailError> {
+            Ok(())
+        }
+        async fn send_mfa_disabled(
+            &self,
+            _email: &str,
+            _locale: Option<&str>,
+        ) -> Result<(), crate::traits::EmailError> {
+            Ok(())
+        }
+        async fn send_new_session_alert(
+            &self,
+            _email: &str,
+            _session: &crate::traits::SessionInfo,
+            _locale: Option<&str>,
+        ) -> Result<(), crate::traits::EmailError> {
+            Ok(())
+        }
+        async fn send_invitation(
+            &self,
+            _email: &str,
+            _invite: &crate::traits::InviteData,
+            _locale: Option<&str>,
+        ) -> Result<(), crate::traits::EmailError> {
+            Ok(())
+        }
+    }
+
+    /// A hook spy recording the subject of every `after_password_reset` notification.
+    #[derive(Default)]
+    struct ResetHookSpy {
+        subjects: std::sync::Mutex<Vec<String>>,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::traits::AuthHooks for ResetHookSpy {
+        async fn after_password_reset(
+            &self,
+            user: &SafeAuthUser,
+            _ctx: &crate::traits::HookContext,
+        ) -> Result<(), crate::traits::HookError> {
+            if let Ok(mut subjects) = self.subjects.lock() {
+                subjects.push(user.id.clone());
+            }
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn a_completed_reset_notifies_the_hook_with_its_subject() {
+        // The projection feeding the hook can fail open — the reset has already succeeded by
+        // then, so the notification is simply skipped and nothing in the result says so. A
+        // deployment wires this to send the "your password changed" mail, which is the one
+        // signal a victim of an account takeover gets.
+        let spy = std::sync::Arc::new(ResetHookSpy::default());
+        let hooks: std::sync::Arc<dyn crate::traits::AuthHooks> = spy.clone();
+        let mut cfg = base_config();
+        cfg.password_reset.method = ResetMethod::Otp;
+        let Some(h) = harness(cfg, Some(hooks)) else { return };
+        let id = h.seed(SeedUser::active("hooked@example.com", "old")).await;
+        let identifier = h.engine.hashed_identifier("t1", "hooked@example.com");
+        assert!(
+            h.engine
+                .initiate_reset(forgot("hooked@example.com"), &ctx())
+                .await
+                .is_ok()
+        );
+        let code = h
+            .stores
+            .peek_otp(OtpPurpose::PasswordReset, &identifier)
+            .unwrap_or_default();
+        assert!(!code.is_empty());
+        let reset = ResetPasswordInput {
+            email: "hooked@example.com".to_owned(),
+            tenant_id: "t1".to_owned(),
+            new_password: "brand-new".to_owned(),
+            token: None,
+            otp: Some(code),
+            verified_token: None,
+        };
+        assert!(h.engine.reset_password(reset, &ctx()).await.is_ok());
+        // Long enough for the detached notification to have run.
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        let seen = spy.subjects.lock().map(|s| s.clone()).unwrap_or_default();
+        assert_eq!(seen, vec![id]);
+    }
+
+    #[tokio::test]
+    async fn the_emailed_reset_token_is_the_one_that_works() {
+        // Driven with the token a real recipient receives, rather than one the test plants
+        // itself: that is the only version of this flow where the store write and the mail
+        // are both load-bearing. With a planted token, an \`initiate_reset\` that quietly
+        // stored and sent nothing would still pass.
+        let mut cfg = base_config();
+        cfg.password_reset.method = ResetMethod::Token;
+        let mailer = std::sync::Arc::new(CapturingResetEmail::default());
+        let users = std::sync::Arc::new(crate::testing::InMemoryUserRepository::new());
+        let stores = std::sync::Arc::new(crate::testing::InMemoryStores::new());
+        let built = AuthEngine::builder()
+            .config(cfg)
+            .environment(crate::config::Environment::Test)
+            .user_repository(users.clone())
+            .redis_stores(stores)
+            .email_provider(mailer.clone())
+            .build();
+        let Ok(engine) = built else { return };
+        let created = users
+            .create(bymax_auth_types::CreateUserData {
+                email: "mailed@example.com".to_owned(),
+                name: "M".to_owned(),
+                password_hash: Some("$scrypt$x".to_owned()),
+                role: Some("USER".to_owned()),
+                status: Some("ACTIVE".to_owned()),
+                tenant_id: "t1".to_owned(),
+                email_verified: Some(true),
+            })
+            .await;
+        let Ok(user) = created else { return };
+
+        assert!(
+            engine
+                .initiate_reset(forgot("mailed@example.com"), &ctx())
+                .await
+                .is_ok()
+        );
+        let token = mailer.token.lock().ok().and_then(|t| t.clone());
+        let token = token.unwrap_or_default();
+        assert!(!token.is_empty(), "no reset token reached the recipient");
+
+        let reset = ResetPasswordInput {
+            email: "mailed@example.com".to_owned(),
+            tenant_id: "t1".to_owned(),
+            new_password: "the-new-one".to_owned(),
+            token: Some(token),
+            otp: None,
+            verified_token: None,
+        };
+        assert!(engine.reset_password(reset, &ctx()).await.is_ok());
+        let after = users
+            .find_by_id(&user.id, None)
+            .await
+            .ok()
+            .flatten()
+            .and_then(|u| u.password_hash);
+        assert!(after.is_some() && after != Some("$scrypt$x".to_owned()));
+
+        // Exercise the rest of the capturing double's surface so the object-safe impl is
+        // fully covered; only the reset-token send is load-bearing above.
+        let provider = CapturingResetEmail::default();
+        assert!(
+            provider
+                .send_password_reset_otp("e", "o", None)
+                .await
+                .is_ok()
+        );
+        assert!(
+            provider
+                .send_email_verification_otp("e", "o", None)
+                .await
+                .is_ok()
+        );
+        assert!(provider.send_mfa_enabled("e", None).await.is_ok());
+        assert!(provider.send_mfa_disabled("e", None).await.is_ok());
+        let session = crate::traits::SessionInfo {
+            device: "d".to_owned(),
+            ip: "i".to_owned(),
+            session_hash: "h".to_owned(),
+        };
+        assert!(
+            provider
+                .send_new_session_alert("e", &session, None)
+                .await
+                .is_ok()
+        );
+        let invite = crate::traits::InviteData {
+            inviter_name: "n".to_owned(),
+            tenant_name: "t".to_owned(),
+            invite_token: "tok".to_owned(),
+            expires_at: time::OffsetDateTime::UNIX_EPOCH,
+        };
+        assert!(provider.send_invitation("e", &invite, None).await.is_ok());
+    }
+
     #[tokio::test]
     async fn token_send_failure_deletes_the_unusable_token() {
-        // On an undeliverable reset email the stored `pr:` token is deleted so it cannot
+        // On an undeliverable reset email the stored `pw_reset:` token is deleted so it cannot
         // linger; a subsequent reset with that token is therefore invalid.
         let mut cfg = base_config();
         cfg.password_reset.method = ResetMethod::Token;
@@ -1038,7 +1884,25 @@ mod tests {
         // initiate_reset drives send_reset_token, whose send fails and triggers the cleanup.
         assert!(
             engine
-                .initiate_reset(forgot("fail@example.com"))
+                .initiate_reset(forgot("fail@example.com"), &ctx())
+                .await
+                .is_ok()
+        );
+
+        // …and again with the rollback itself refused. The caller still sees the same
+        // anti-enumerating success — it must not learn that the address exists, let alone that
+        // the store is down — so the log is the only place a token now stranded in Redis for
+        // its whole TTL can surface at all. The first initiate claimed the resend cooldown, so
+        // release it: otherwise this second call returns before reaching the send at all, and
+        // the rollback branch under test never runs.
+        assert!(stores.expire_resend_cooldown(
+            OtpPurpose::PasswordReset,
+            &engine.hashed_identifier("t1", "fail@example.com")
+        ));
+        stores.fail_next_cleanup_writes(1);
+        assert!(
+            engine
+                .initiate_reset(forgot("fail@example.com"), &ctx())
                 .await
                 .is_ok()
         );
@@ -1088,14 +1952,17 @@ mod tests {
         // invalid, proving the flow did not leave a usable proof behind.
         assert!(matches!(
             engine
-                .reset_password(ResetPasswordInput {
-                    email: "fail@example.com".to_owned(),
-                    tenant_id: "t1".to_owned(),
-                    new_password: "x".to_owned(),
-                    token: Some("a".repeat(64)),
-                    otp: None,
-                    verified_token: None,
-                })
+                .reset_password(
+                    ResetPasswordInput {
+                        email: "fail@example.com".to_owned(),
+                        tenant_id: "t1".to_owned(),
+                        new_password: "glidingwalnut42".to_owned(),
+                        token: Some("a".repeat(64)),
+                        otp: None,
+                        verified_token: None,
+                    },
+                    &ctx()
+                )
                 .await,
             Err(AuthError::PasswordResetTokenInvalid)
         ));
@@ -1135,7 +2002,7 @@ mod tests {
         );
         assert!(
             engine
-                .initiate_reset(forgot("nostore@example.com"))
+                .initiate_reset(forgot("nostore@example.com"), &ctx())
                 .await
                 .is_ok()
         );
@@ -1147,6 +2014,14 @@ mod tests {
 
     #[async_trait::async_trait]
     impl UserRepository for FailingLookupRepo {
+        async fn update_email(
+            &self,
+            _id: &str,
+            _email: &str,
+        ) -> Result<(), crate::RepositoryError> {
+            Ok(())
+        }
+
         async fn find_by_id(
             &self,
             _id: &str,
@@ -1239,7 +2114,9 @@ mod tests {
         let Ok(engine) = built else { return };
 
         let started = Instant::now();
-        let initiate = engine.initiate_reset(forgot("err@example.com")).await;
+        let initiate = engine
+            .initiate_reset(forgot("err@example.com"), &ctx())
+            .await;
         assert!(matches!(initiate, Err(AuthError::Internal(_))));
         assert!(started.elapsed() >= Duration::from_millis(300));
 
@@ -1247,10 +2124,13 @@ mod tests {
         // backend error surfaces only after the timing floor.
         let started = Instant::now();
         let resend = engine
-            .resend_reset_otp(ResendResetOtpInput {
-                email: "err2@example.com".to_owned(),
-                tenant_id: "t1".to_owned(),
-            })
+            .resend_reset_otp(
+                ResendResetOtpInput {
+                    email: "err2@example.com".to_owned(),
+                    tenant_id: "t1".to_owned(),
+                },
+                &ctx(),
+            )
             .await;
         assert!(matches!(resend, Err(AuthError::Internal(_))));
         assert!(started.elapsed() >= Duration::from_millis(300));
@@ -1313,6 +2193,223 @@ mod tests {
         }
     }
 
+    /// Log in and return the session, or `None` — so a caller's `let-else` fits on one line.
+    /// (Coverage is per line: a `return` on its own line inside a multi-line `let-else` is
+    /// never executed, and reads as a gap rather than as the panic-free idiom it is.)
+    async fn login_ok(h: &Harness, email: &str, password: &str) -> Option<AuthResult> {
+        let input = LoginInput {
+            email: email.to_owned(),
+            password: password.to_owned(),
+            tenant_id: "t1".to_owned(),
+        };
+        let result = h.engine.login(input, &ctx()).await;
+        let Ok(LoginResult::Success(auth)) = result else { return None };
+        Some(*auth)
+    }
+
+    /// An account with no local password fingerprints as the empty string, which the consume
+    /// path reads as "no binding". That is the right reading: there was no password to bind to,
+    /// and a proof minted then is invalidated the moment one is set — because the fingerprint
+    /// computed at consume time will no longer be empty.
+    #[test]
+    fn a_passwordless_account_fingerprints_as_empty() {
+        let mut user = AuthUser {
+            id: "u1".into(),
+            email: "user@example.com".into(),
+            name: "User".into(),
+            password_hash: None,
+            role: "MEMBER".into(),
+            status: "ACTIVE".into(),
+            tenant_id: "t1".into(),
+            email_verified: true,
+            mfa_enabled: false,
+            mfa_secret: None,
+            mfa_recovery_codes: None,
+            oauth_provider: Some("google".into()),
+            oauth_provider_id: Some("google-123".into()),
+            last_login_at: None,
+            created_at: OffsetDateTime::UNIX_EPOCH,
+        };
+        assert_eq!(password_fingerprint(&user), "");
+
+        user.password_hash = Some("$scrypt$abc".to_owned());
+        assert_ne!(password_fingerprint(&user), "");
+    }
+
+    #[tokio::test]
+    async fn a_completed_reset_invalidates_the_tokens_issued_beside_it() {
+        // Each `forgot-password` writes its own key, so several proofs can be alive at once, and
+        // completing one used to leave the rest valid. That is the wrong end state exactly when
+        // it matters: a victim who resets BECAUSE an attacker read a link from their mailbox had
+        // not closed the link the attacker read, and the attacker could set the password again
+        // for the rest of the TTL.
+        let Some(h) = token_harness() else { return };
+        let id = h
+            .seed(SeedUser::active("siblings@example.com", "oldsecret77"))
+            .await;
+        let Some(store) = h.engine.password_reset_store() else { return };
+
+        // Two proofs, both bound to the password in force now.
+        let Ok(Some(user)) = h.users.find_by_id(&id, None).await else { return };
+        let context = ResetContext {
+            user_id: id.clone(),
+            email: "siblings@example.com".to_owned(),
+            tenant_id: "t1".to_owned(),
+            password_fingerprint: password_fingerprint(&user),
+        };
+        let first = "1".repeat(64);
+        let second = "2".repeat(64);
+        assert!(store.put_token(&first, &context, 600).await.is_ok());
+        assert!(store.put_token(&second, &context, 600).await.is_ok());
+
+        // The victim completes the reset with the second link.
+        let input = |token: &str, password: &str| ResetPasswordInput {
+            email: "siblings@example.com".to_owned(),
+            tenant_id: "t1".to_owned(),
+            new_password: password.to_owned(),
+            token: Some(token.to_owned()),
+            otp: None,
+            verified_token: None,
+        };
+        assert!(
+            h.engine
+                .reset_password(input(&second, "victimchosen456"), &ctx())
+                .await
+                .is_ok()
+        );
+
+        // The first link — the one the attacker read — no longer works.
+        assert!(matches!(
+            h.engine
+                .reset_password(input(&first, "attackerchosen789"), &ctx())
+                .await,
+            Err(AuthError::PasswordResetTokenInvalid)
+        ));
+
+        // …and the victim's password is the one that stands.
+        assert!(
+            login_ok(&h, "siblings@example.com", "victimchosen456")
+                .await
+                .is_some()
+        );
+    }
+
+    #[tokio::test]
+    async fn change_password_requires_the_current_one_and_rotates() {
+        // ASVS v5 §6.2.2 and §6.2.3 at Level 1: users can change their password, and the change
+        // takes both the current and the new one. The current password is what makes it safe —
+        // a session alone is not proof of identity, so a token lifted by XSS or from a shared
+        // machine must not be enough to rotate the credential and lock the owner out.
+        let Some(h) = token_harness() else { return };
+        let id = h
+            .seed(SeedUser::active("changer@example.com", "oldsecret77"))
+            .await;
+
+        // A wrong current password writes nothing.
+        let refused = h
+            .engine
+            .change_password(&id, "not-the-password", "glidingwalnut42", None)
+            .await;
+        assert!(matches!(refused, Err(AuthError::InvalidCredentials)));
+
+        // The right one rotates it, and the new password is what logs in afterwards.
+        assert!(
+            h.engine
+                .change_password(&id, "oldsecret77", "glidingwalnut42", None)
+                .await
+                .is_ok()
+        );
+        assert!(
+            login_ok(&h, "changer@example.com", "glidingwalnut42")
+                .await
+                .is_some()
+        );
+    }
+
+    #[tokio::test]
+    async fn change_password_spares_the_caller_session_when_it_is_identified() {
+        // ASVS v5 §7.4.3: the other sessions end. The caller's own survives, so the device that
+        // made the change is not signed out by making it — it silently re-mints its access
+        // token on the next rotation instead.
+        let Some(h) = token_harness() else { return };
+        let id = h
+            .seed(SeedUser::active("keeper@example.com", "oldsecret77"))
+            .await;
+        let Some(mine) = login_ok(&h, "keeper@example.com", "oldsecret77").await else { return };
+        let Some(other) = login_ok(&h, "keeper@example.com", "oldsecret77").await else { return };
+
+        assert!(
+            h.engine
+                .change_password(
+                    &id,
+                    "oldsecret77",
+                    "glidingwalnut42",
+                    Some(&mine.refresh_token)
+                )
+                .await
+                .is_ok()
+        );
+
+        // The other device is gone…
+        assert!(
+            h.engine
+                .refresh(&other.refresh_token, "1.2.3.4", "agent")
+                .await
+                .is_err()
+        );
+        // …and the caller's own still rotates.
+        assert!(
+            h.engine
+                .refresh(&mine.refresh_token, "1.2.3.4", "agent")
+                .await
+                .is_ok()
+        );
+    }
+
+    #[tokio::test]
+    async fn change_password_refuses_an_account_with_no_local_password() {
+        // An account provisioned purely through OAuth has nothing to prove and nothing to
+        // change — its credential belongs to the provider. Answering the same
+        // `InvalidCredentials` as a wrong password keeps the two indistinguishable.
+        let Some(h) = token_harness() else { return };
+        let created = h
+            .users
+            .create(CreateUserData {
+                email: "oauth-only@example.com".to_owned(),
+                name: "OAuth Only".to_owned(),
+                password_hash: None,
+                role: None,
+                status: Some("ACTIVE".to_owned()),
+                tenant_id: "t1".to_owned(),
+                email_verified: Some(true),
+            })
+            .await;
+        let Ok(user) = created else { return };
+
+        let refused = h
+            .engine
+            .change_password(&user.id, "anything", "glidingwalnut42", None)
+            .await;
+        assert!(matches!(refused, Err(AuthError::InvalidCredentials)));
+    }
+
+    #[tokio::test]
+    async fn change_password_refuses_a_new_password_the_screen_rejects() {
+        // The screen runs on the change path as it does on register and reset — otherwise the
+        // one flow a user reaches *because* they were told their password was weak is the one
+        // that lets them pick another weak one.
+        let Some(h) = token_harness() else { return };
+        let id = h
+            .seed(SeedUser::active("weak@example.com", "oldsecret77"))
+            .await;
+
+        let refused = h
+            .engine
+            .change_password(&id, "oldsecret77", "Password123", None)
+            .await;
+        assert!(matches!(refused, Err(AuthError::PasswordCompromised)));
+    }
+
     #[tokio::test]
     async fn apply_reset_skips_the_hook_for_a_vanished_subject() {
         // A reset whose bound context points at a user id that no longer resolves still
@@ -1331,6 +2428,7 @@ mod tests {
                         user_id: "ghost-user-id".to_owned(),
                         email: "vanish@example.com".to_owned(),
                         tenant_id: "t1".to_owned(),
+                        password_fingerprint: String::new(),
                     },
                     600
                 )
@@ -1339,14 +2437,17 @@ mod tests {
         );
         assert!(
             h.engine
-                .reset_password(ResetPasswordInput {
-                    email: "vanish@example.com".to_owned(),
-                    tenant_id: "t1".to_owned(),
-                    new_password: "new".to_owned(),
-                    token: Some(token),
-                    otp: None,
-                    verified_token: None,
-                })
+                .reset_password(
+                    ResetPasswordInput {
+                        email: "vanish@example.com".to_owned(),
+                        tenant_id: "t1".to_owned(),
+                        new_password: "glidingwalnut42".to_owned(),
+                        token: Some(token),
+                        otp: None,
+                        verified_token: None,
+                    },
+                    &ctx()
+                )
                 .await
                 .is_ok()
         );

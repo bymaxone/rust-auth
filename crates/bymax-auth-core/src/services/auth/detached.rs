@@ -148,6 +148,124 @@ mod tests {
         }
     }
 
+    /// A hook spy recording which notification ran, and for whom.
+    #[derive(Default)]
+    struct RecordingHooks {
+        calls: std::sync::Mutex<Vec<String>>,
+    }
+
+    impl RecordingHooks {
+        fn push(&self, call: String) {
+            if let Ok(mut calls) = self.calls.lock() {
+                calls.push(call);
+            }
+        }
+
+        fn seen(&self) -> Vec<String> {
+            self.calls.lock().map(|c| c.clone()).unwrap_or_default()
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl AuthHooks for RecordingHooks {
+        async fn after_register(
+            &self,
+            user: &SafeAuthUser,
+            _ctx: &HookContext,
+        ) -> Result<(), HookError> {
+            self.push(format!("register:{}", user.id));
+            Ok(())
+        }
+        async fn after_login(
+            &self,
+            user: &SafeAuthUser,
+            _ctx: &HookContext,
+        ) -> Result<(), HookError> {
+            self.push(format!("login:{}", user.id));
+            Ok(())
+        }
+        async fn after_logout(&self, user_id: &str, _ctx: &HookContext) -> Result<(), HookError> {
+            self.push(format!("logout:{user_id}"));
+            Ok(())
+        }
+        async fn after_email_verified(
+            &self,
+            user: &SafeAuthUser,
+            _ctx: &HookContext,
+        ) -> Result<(), HookError> {
+            self.push(format!("verified:{}", user.id));
+            Ok(())
+        }
+        async fn after_password_reset(
+            &self,
+            user: &SafeAuthUser,
+            _ctx: &HookContext,
+        ) -> Result<(), HookError> {
+            self.push(format!("reset:{}", user.id));
+            Ok(())
+        }
+        async fn after_invitation_accepted(
+            &self,
+            user: &SafeAuthUser,
+            _ctx: &HookContext,
+        ) -> Result<(), HookError> {
+            self.push(format!("invitation:{}", user.id));
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn each_notification_wrapper_invokes_its_own_hook() {
+        // Asserted through a spy rather than by a returned `Ok`: these wrappers exist to be
+        // spawned detached, so their return value is dropped. A wrapper that stopped calling
+        // its hook — or called the wrong one — would still return `Ok(())`, and a deployment
+        // would silently stop sending the mail it wires here.
+        let spy = Arc::new(RecordingHooks::default());
+        let hooks: Arc<dyn AuthHooks> = spy.clone();
+        assert!(
+            run_after_register(hooks.clone(), safe_user("u1"), hook_ctx())
+                .await
+                .is_ok()
+        );
+        assert!(
+            run_after_login(hooks.clone(), safe_user("u2"), hook_ctx())
+                .await
+                .is_ok()
+        );
+        assert!(
+            run_after_logout(hooks.clone(), "u3".to_owned(), hook_ctx())
+                .await
+                .is_ok()
+        );
+        assert!(
+            run_after_email_verified(hooks.clone(), safe_user("u4"), hook_ctx())
+                .await
+                .is_ok()
+        );
+        assert!(
+            run_after_password_reset(hooks.clone(), safe_user("u5"), hook_ctx())
+                .await
+                .is_ok()
+        );
+        assert!(
+            run_after_invitation_accepted(hooks, safe_user("u6"), hook_ctx())
+                .await
+                .is_ok()
+        );
+
+        assert_eq!(
+            spy.seen(),
+            vec![
+                "register:u1",
+                "login:u2",
+                "logout:u3",
+                "verified:u4",
+                "reset:u5",
+                "invitation:u6",
+            ]
+        );
+    }
+
     #[tokio::test]
     async fn notification_hooks_run_against_the_noop_defaults() {
         // The six notification wrappers each invoke their hook and succeed on the NoOp impl.
@@ -182,6 +300,168 @@ mod tests {
                 .await
                 .is_ok()
         );
+    }
+
+    /// An email spy recording which send ran, for whom, and with what payload.
+    #[derive(Default)]
+    struct RecordingEmails {
+        calls: std::sync::Mutex<Vec<String>>,
+    }
+
+    #[async_trait::async_trait]
+    impl EmailProvider for RecordingEmails {
+        async fn send_email_change_verification(
+            &self,
+            _new_email: &str,
+            _token: &str,
+            _locale: Option<&str>,
+        ) -> Result<(), crate::traits::EmailError> {
+            Ok(())
+        }
+
+        async fn send_password_reset_token(
+            &self,
+            email: &str,
+            token: &str,
+            _locale: Option<&str>,
+        ) -> Result<(), EmailError> {
+            if let Ok(mut calls) = self.calls.lock() {
+                calls.push(format!("reset_token:{email}:{token}"));
+            }
+            Ok(())
+        }
+        async fn send_password_reset_otp(
+            &self,
+            email: &str,
+            otp: &str,
+            _locale: Option<&str>,
+        ) -> Result<(), EmailError> {
+            if let Ok(mut calls) = self.calls.lock() {
+                calls.push(format!("reset_otp:{email}:{otp}"));
+            }
+            Ok(())
+        }
+        async fn send_email_verification_otp(
+            &self,
+            email: &str,
+            otp: &str,
+            _locale: Option<&str>,
+        ) -> Result<(), EmailError> {
+            if let Ok(mut calls) = self.calls.lock() {
+                calls.push(format!("verification_otp:{email}:{otp}"));
+            }
+            Ok(())
+        }
+        async fn send_mfa_enabled(
+            &self,
+            _email: &str,
+            _locale: Option<&str>,
+        ) -> Result<(), EmailError> {
+            Ok(())
+        }
+        async fn send_mfa_disabled(
+            &self,
+            _email: &str,
+            _locale: Option<&str>,
+        ) -> Result<(), EmailError> {
+            Ok(())
+        }
+        async fn send_new_session_alert(
+            &self,
+            _email: &str,
+            _session: &crate::traits::email::SessionInfo,
+            _locale: Option<&str>,
+        ) -> Result<(), EmailError> {
+            Ok(())
+        }
+        async fn send_invitation(
+            &self,
+            _email: &str,
+            _invite: &crate::traits::email::InviteData,
+            _locale: Option<&str>,
+        ) -> Result<(), EmailError> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn the_recording_double_answers_the_address_change_send_too() {
+        // The double records the sends the detached tasks make. Its remaining methods are what
+        // make it a valid `EmailProvider`, and a method nothing calls is a method nothing
+        // proves — including that it does not accidentally fail a flow that shares it.
+        let emails = RecordingEmails::default();
+        assert!(
+            emails
+                .send_email_change_verification("new@example.com", "t", None)
+                .await
+                .is_ok()
+        );
+    }
+
+    #[tokio::test]
+    async fn each_email_wrapper_sends_its_own_message() {
+        // The recipient and the payload are the whole content of these wrappers, and both are
+        // dropped by the detached spawn — so a wrapper that sent nothing, or sent the
+        // verification OTP down the password-reset template, still returns `Ok(())`.
+        let spy = Arc::new(RecordingEmails::default());
+        let provider: Arc<dyn EmailProvider> = spy.clone();
+        assert!(
+            run_send_verification_email(
+                provider.clone(),
+                "verify@example.com".to_owned(),
+                "123456".to_owned()
+            )
+            .await
+            .is_ok()
+        );
+        assert!(
+            run_send_reset_otp_email(
+                provider,
+                "reset@example.com".to_owned(),
+                "654321".to_owned()
+            )
+            .await
+            .is_ok()
+        );
+
+        let seen = spy.calls.lock().map(|c| c.clone()).unwrap_or_default();
+        assert_eq!(
+            seen,
+            vec![
+                "verification_otp:verify@example.com:123456",
+                "reset_otp:reset@example.com:654321",
+            ]
+        );
+
+        // Exercise the rest of the double's surface so the object-safe impl is fully covered;
+        // only the two sends above are load-bearing.
+        let direct = RecordingEmails::default();
+        assert!(
+            direct
+                .send_password_reset_token("e", "t", None)
+                .await
+                .is_ok()
+        );
+        assert!(direct.send_mfa_enabled("e", None).await.is_ok());
+        assert!(direct.send_mfa_disabled("e", None).await.is_ok());
+        let session = crate::traits::email::SessionInfo {
+            device: "d".to_owned(),
+            ip: "i".to_owned(),
+            session_hash: "h".to_owned(),
+        };
+        assert!(
+            direct
+                .send_new_session_alert("e", &session, None)
+                .await
+                .is_ok()
+        );
+        let invite = crate::traits::email::InviteData {
+            inviter_name: "n".to_owned(),
+            tenant_name: "t".to_owned(),
+            invite_token: "tok".to_owned(),
+            expires_at: OffsetDateTime::UNIX_EPOCH,
+        };
+        assert!(direct.send_invitation("e", &invite, None).await.is_ok());
     }
 
     #[tokio::test]

@@ -56,6 +56,21 @@ pub enum MfaContext {
     Platform,
 }
 
+impl MfaContext {
+    /// The plane's wire name, matching how this enum serializes.
+    ///
+    /// Used to namespace the MFA store keys and brute-force counters by identity plane. The
+    /// two planes' ids come from different consumer repositories and may collide, so a key
+    /// derived from the id alone is shared between an unrelated user and admin.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Dashboard => "dashboard",
+            Self::Platform => "platform",
+        }
+    }
+}
+
 /// Access token for tenant/dashboard users. The TypeScript counterpart is
 /// `DashboardJwtPayload`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -94,16 +109,31 @@ pub struct DashboardClaims {
     /// sign-out-everywhere). **Server-side** verification rejects the token when its epoch is
     /// below the user's current stored epoch; the edge/WASM verifier carries this claim but does
     /// not consult it (it checks signature, `iat`, and `exp` only), exactly like the jti
-    /// blacklist. Defaults to `0` on a legacy token that predates the field, which is never
-    /// rejected while the stored epoch is also `0` (the mechanism is inert until a bump).
+    /// blacklist. Defaults to `0` when the claim is absent, which is never rejected while the
+    /// stored epoch is also `0` (the mechanism is inert until a bump) and always rejected once
+    /// it is bumped — the fail-closed direction.
     ///
     /// Exported as an optional TS property: the decode-only edge path passes the raw JWT payload
-    /// through untyped, so a legacy token really does arrive without the key (serde's default
-    /// only applies when deserializing into this struct). Rendered via `Option::<f64>` because
+    /// through untyped, so a token really can arrive without the key (serde's default only
+    /// applies when deserializing into this struct). Rendered via `Option::<f64>` because
     /// ts-rs maps 64-bit integers to `bigint`, while `JSON.parse` yields a `number`.
     #[serde(default)]
     #[cfg_attr(feature = "ts-export", ts(as = "Option::<f64>", optional))]
     pub epoch: u64,
+    /// The `iss` claim, present only when the deployment configured `jwt.issuer`.
+    ///
+    /// Absent by default. When the verifier is configured with a value, a token carrying a
+    /// different one — or none at all — is rejected: accepting an unstamped token would give
+    /// an attacker a way to opt out of the check by omitting the claim.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts-export", ts(optional))]
+    pub iss: Option<String>,
+    /// The `aud` claim, with the same semantics as [`Self::iss`]. With HS256 the verifier can
+    /// also sign, so audience binding is what stops a token minted for one service being
+    /// replayed at another that trusts the same secret.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts-export", ts(optional))]
+    pub aud: Option<String>,
 }
 
 /// Access token for platform admins — no `tenantId`. The TypeScript counterpart is
@@ -138,12 +168,26 @@ pub struct PlatformClaims {
     /// The admin's token **epoch** at issuance — the platform-domain analogue of
     /// [`DashboardClaims::epoch`]: a per-admin generation counter the server bumps to invalidate
     /// every outstanding platform access token at once. Enforced by **server-side** verification
-    /// only; the edge/WASM verifier carries it without consulting it. Defaults to `0` on a legacy
-    /// token, and is exported as an optional TS property for the same reason as
+    /// only; the edge/WASM verifier carries it without consulting it. Defaults to `0` when the
+    /// claim is absent, and is exported as an optional TS property for the same reason as
     /// [`DashboardClaims::epoch`].
     #[serde(default)]
     #[cfg_attr(feature = "ts-export", ts(as = "Option::<f64>", optional))]
     pub epoch: u64,
+    /// The `iss` claim, present only when the deployment configured `jwt.issuer`.
+    ///
+    /// Absent by default. When the verifier is configured with a value, a token carrying a
+    /// different one — or none at all — is rejected: accepting an unstamped token would give
+    /// an attacker a way to opt out of the check by omitting the claim.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts-export", ts(optional))]
+    pub iss: Option<String>,
+    /// The `aud` claim, with the same semantics as [`Self::iss`]. With HS256 the verifier can
+    /// also sign, so audience binding is what stops a token minted for one service being
+    /// replayed at another that trusts the same secret.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts-export", ts(optional))]
+    pub aud: Option<String>,
 }
 
 /// Short-lived token bridging the password step and the MFA challenge. The TypeScript
@@ -165,12 +209,35 @@ pub struct MfaTempClaims {
     pub token_type: MfaTempType,
     /// Which identity domain this challenge belongs to.
     pub context: MfaContext,
+    /// The subject's token **epoch** at issuance, in the plane named by [`Self::context`].
+    ///
+    /// The challenge token is a credential like any other — half of one, held by a caller who
+    /// has already proved the password — and it must die with the rest when the account's
+    /// credentials are rotated. Without this claim it did not: a password reset bumps the epoch
+    /// and kills every access token, but nothing touched an outstanding `mfa:` marker, so a
+    /// challenge token minted before the reset stayed redeemable for its whole TTL and
+    /// completing it issued a full session under the *new* epoch. The reset is meant to end
+    /// everything the old credential could still reach.
+    ///
+    /// Defaults to `0` when the claim is absent, so the mechanism stays inert until the first
+    /// bump — the same contract as [`DashboardClaims::epoch`].
+    #[serde(default)]
+    #[cfg_attr(feature = "ts-export", ts(as = "Option::<f64>", optional))]
+    pub epoch: u64,
     /// Issued-at (seconds since the Unix epoch).
     #[cfg_attr(feature = "ts-export", ts(type = "number"))]
     pub iat: i64,
     /// Expiry (seconds since the Unix epoch).
     #[cfg_attr(feature = "ts-export", ts(type = "number"))]
     pub exp: i64,
+    /// The `iss` claim, present only when the deployment configured `jwt.issuer`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts-export", ts(optional))]
+    pub iss: Option<String>,
+    /// The `aud` claim, with the same semantics as [`Self::iss`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts-export", ts(optional))]
+    pub aud: Option<String>,
 }
 
 #[cfg(test)]
@@ -179,6 +246,8 @@ mod tests {
 
     fn dashboard_claims() -> DashboardClaims {
         DashboardClaims {
+            iss: None,
+            aud: None,
             sub: "u_1".to_owned(),
             jti: "jti-1".to_owned(),
             tenant_id: "t_1".to_owned(),
@@ -228,6 +297,8 @@ mod tests {
     fn platform_claims_have_no_tenant_id() {
         // Platform tokens never carry a tenant scope; the field is absent by type.
         let claims = PlatformClaims {
+            iss: None,
+            aud: None,
             sub: "p_1".to_owned(),
             jti: "jti-2".to_owned(),
             role: "super_admin".to_owned(),
@@ -249,16 +320,21 @@ mod tests {
         // The temp token's `type` is `mfa_challenge` and its `context` routes
         // persistence to the dashboard or platform store downstream.
         let claims = MfaTempClaims {
+            iss: None,
+            aud: None,
             sub: "u_1".to_owned(),
             jti: "jti-3".to_owned(),
             token_type: MfaTempType::MfaChallenge,
             context: MfaContext::Platform,
+            epoch: 7,
             iat: 1,
             exp: 2,
         };
         let json = serde_json::to_value(claims).unwrap_or_default();
         assert_eq!(json["type"], "mfa_challenge");
         assert_eq!(json["context"], "platform");
+        // The challenge token carries the epoch so a credential rotation kills it too.
+        assert_eq!(json["epoch"], 7);
     }
 
     #[test]
@@ -296,6 +372,82 @@ mod tests {
         assert_eq!(
             serde_json::from_value::<MfaContext>(serde_json::json!("dashboard")).ok(),
             Some(MfaContext::Dashboard)
+        );
+    }
+
+    #[test]
+    fn the_epoch_claim_matches_the_shared_wire_contract() {
+        // The `accessTokenClaims` section of `conformance/wire-contract.json` — held
+        // byte-identical by nest-auth — is what makes bulk revocation work across both backends:
+        // one side stamps the generation and the other rejects on it. Reading the declaration
+        // rather than repeating it means a rename, a type change, or a flipped comparison on
+        // either side turns that side red instead of quietly un-revoking tokens in production.
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../conformance/wire-contract.json"
+        );
+        let raw = std::fs::read_to_string(path).unwrap_or_default();
+        let root: serde_json::Value = serde_json::from_str(&raw).unwrap_or(serde_json::Value::Null);
+        let epoch = root
+            .get("accessTokenClaims")
+            .and_then(|c| c.get("epoch"))
+            .cloned()
+            .unwrap_or(serde_json::Value::Null);
+        assert!(
+            epoch.is_object(),
+            "the wire contract declared no `accessTokenClaims.epoch` — it did not load"
+        );
+
+        // The claim is spelled exactly as declared, and both planes stamp it.
+        let name = epoch.get("claim").and_then(serde_json::Value::as_str);
+        assert_eq!(name, Some("epoch"));
+        let dashboard = serde_json::to_value(dashboard_claims()).unwrap_or_default();
+        assert_eq!(dashboard.get("epoch"), Some(&serde_json::json!(3)));
+        let platform = serde_json::to_value(PlatformClaims {
+            iss: None,
+            aud: None,
+            sub: "p_1".to_owned(),
+            jti: "jti-2".to_owned(),
+            role: "super_admin".to_owned(),
+            token_type: PlatformType::Platform,
+            mfa_enabled: false,
+            mfa_verified: false,
+            iat: 1,
+            exp: 2,
+            epoch: 7,
+        })
+        .unwrap_or_default();
+        assert_eq!(platform.get("epoch"), Some(&serde_json::json!(7)));
+
+        // A non-negative integer on the wire: `u64` cannot go negative, and the JSON must carry
+        // it as a bare number rather than a string a sibling reader would compare lexically.
+        assert_eq!(
+            epoch.get("type").and_then(serde_json::Value::as_str),
+            Some("non-negative integer")
+        );
+        assert!(
+            dashboard
+                .get("epoch")
+                .is_some_and(serde_json::Value::is_u64)
+        );
+
+        // The two rules a verifier implements. `absentReadsAs` is pinned by the legacy-token test
+        // above; the rejection is strict `<`, so a token stamped AT the current generation still
+        // verifies — an off-by-one here would log every user out on their first bump.
+        assert_eq!(
+            epoch.get("absentReadsAs"),
+            Some(&serde_json::json!(0)),
+            "an absent claim reading as anything but 0 would make the mechanism fire on legacy tokens"
+        );
+        assert_eq!(
+            epoch.get("rejectWhen").and_then(serde_json::Value::as_str),
+            Some("stampedEpoch < storedEpoch")
+        );
+
+        // The stored side of the contract: the key the generation is read back from.
+        assert_eq!(
+            epoch.get("storedUnder").and_then(serde_json::Value::as_str),
+            Some("{ep|pep}:{userId}")
         );
     }
 }

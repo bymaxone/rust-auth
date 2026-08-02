@@ -26,9 +26,10 @@ use std::time::Instant;
 use bymax_auth_jwt::RawRefreshToken;
 use bymax_auth_types::{
     AuthError, AuthPlatformUser, MfaChallengeResult, MfaContext, PlatformLoginResult,
-    SafeAuthPlatformUser,
+    RotatedTokens, SafeAuthPlatformUser,
 };
 
+use crate::normalize::{mask_email, normalize_email};
 use crate::services::auth::{normalize_anti_enum, spawn_guarded};
 use crate::services::brute_force::BruteForceService;
 use crate::services::password::PasswordService;
@@ -51,7 +52,7 @@ pub struct PlatformAuthService {
     hooks: Arc<dyn AuthHooks>,
     /// The engine's derived identifier-hashing key, copied into a zeroizing buffer; it keys the
     /// `platform:{email}` brute-force identifier so no raw email reaches a store key.
-    identifier_key: zeroize::Zeroizing<[u8; 32]>,
+    identifier_key: zeroize::Zeroizing<[u8; 64]>,
     /// Whether this build wires the MFA challenge surface; when `false`, an MFA-enabled admin
     /// cannot complete a login (fail-closed) because there is no challenge flow to route to.
     mfa_enabled_for_build: bool,
@@ -69,7 +70,7 @@ pub(crate) struct PlatformAuthDeps {
     pub(crate) passwords: Arc<PasswordService>,
     pub(crate) brute_force: Arc<BruteForceService>,
     pub(crate) hooks: Arc<dyn AuthHooks>,
-    pub(crate) identifier_key: zeroize::Zeroizing<[u8; 32]>,
+    pub(crate) identifier_key: zeroize::Zeroizing<[u8; 64]>,
     pub(crate) mfa_enabled_for_build: bool,
     pub(crate) blocked_statuses: Vec<String>,
 }
@@ -108,10 +109,17 @@ impl PlatformAuthService {
         ip: &str,
         user_agent: &str,
     ) -> Result<PlatformLoginResult, AuthError> {
+        // Canonicalize before the lockout identifier and the repository lookup are derived, so
+        // rotating the casing cannot mint a fresh failure budget for the same administrator.
+        let email = normalize_email(email);
+        let email = email.as_str();
         let identifier = self.brute_force_identifier(email);
 
         // Brute-force gate first, so an already-locked account never increments again.
-        self.assert_not_locked(&identifier).await?;
+        if let Err(error) = self.assert_not_locked(&identifier).await {
+            tracing::warn!(email = %mask_email(email), "platform login: account locked");
+            return Err(error);
+        }
 
         // The timing floor starts here so the unknown-admin and wrong-password paths are
         // indistinguishable in elapsed time, not just in status/body.
@@ -129,11 +137,13 @@ impl PlatformAuthService {
             return self.record_failure_and_reject(&identifier, started).await;
         };
 
-        // Status gate runs before the KDF so a blocked account never consumes hashing CPU. The
-        // platform domain has NO email-verification gate (admins are provisioned directly) and
-        // NO OAuth path — both are absent by construction.
-        self.assert_not_blocked(&admin.status)?;
-
+        // The password is proved FIRST. The status gate below used to run ahead of the KDF to
+        // spare hashing an account that could never sign in — but it answered with the
+        // administrator's own status, well inside the anti-enumeration floor every other
+        // refusal pays, and without touching the failure counter. That enumerated operator
+        // accounts and read their moderation state on the highest-privilege plane in the
+        // system. The hashing it saved is bounded by the per-IP limiter; the disclosure was
+        // bounded by nothing.
         let outcome = self
             .passwords
             .verify(password, &admin.password_hash)
@@ -141,6 +151,11 @@ impl PlatformAuthService {
         if !outcome.matched {
             return self.record_failure_and_reject(&identifier, started).await;
         }
+
+        // Only now is the account's state described. The platform domain has NO
+        // email-verification gate (admins are provisioned directly) and NO OAuth path — both
+        // are absent by construction.
+        self.assert_not_blocked(&admin.status)?;
 
         // Password proven: clear the failure counter.
         self.brute_force.reset(&identifier).await?;
@@ -168,6 +183,7 @@ impl PlatformAuthService {
                 .tokens
                 .issue_mfa_temp_token(&admin.id, MfaContext::Platform)
                 .await?;
+            tracing::info!(admin_id = %admin.id, "platform login: MFA challenge issued");
             return Ok(PlatformLoginResult::MfaChallenge(MfaChallengeResult {
                 mfa_required: true,
                 mfa_temp_token,
@@ -208,9 +224,61 @@ impl PlatformAuthService {
         ip: &str,
         user_agent: &str,
     ) -> Result<bymax_auth_types::RotatedTokens, AuthError> {
-        self.tokens
+        let rotated = self
+            .tokens
             .reissue_platform_tokens(old_refresh, ip, user_agent)
+            .await?;
+
+        // Re-read the administrator and re-apply the status gate — the backstop the dashboard
+        // plane has carried since ASVS v5 §7.4.2 was applied to it, and which this plane went
+        // without. Rotation works entirely from the stored `prt:` record, so nothing else on
+        // this path ever looks at the account again: a SUSPENDED or BANNED operator kept
+        // renewing access every fifteen minutes for the refresh token's whole lifetime, on the
+        // highest-privilege identity in the system, and the kill switch was advisory exactly
+        // where it mattered most.
+        let claims = self
+            .tokens
+            .verify_platform_access(&rotated.access_token)
+            .await?;
+        let admin = self
+            .repo
+            .find_by_id(&claims.sub)
             .await
+            .map_err(repository_error)?;
+        let Some(admin) = admin else {
+            // The account was deleted while the session outlived it. Clear what is left rather
+            // than leaving the freshly rotated records to be rotated again.
+            self.revoke_all_platform_sessions(&claims.sub).await?;
+            return Err(AuthError::RefreshTokenInvalid);
+        };
+
+        if let Err(error) = self.assert_not_blocked(&admin.status) {
+            // Compensated, not merely refused: the rotation above already minted a live pair,
+            // and leaving it would hand back exactly the access this gate exists to end.
+            self.revoke_all_platform_sessions(&admin.id).await?;
+            return Err(error);
+        }
+
+        // Re-stamp the access token from the administrator just re-read — the same fix the
+        // dashboard plane carries, on the plane where the authority is worth more. Rotation
+        // builds its claims from the `prt:` record written at login, so a demotion from
+        // `super_admin` to `support` had no effect on a live console session: it kept minting
+        // tokens with the old role for the refresh token's whole lifetime, and every role check
+        // reads that claim. `mfa_enabled` is re-stamped for the same reason as on the dashboard
+        // plane — it gates whether a second factor is demanded at all.
+        //
+        // The account was already read a few lines above for the status gate; the authority was
+        // sitting there, unused. Only re-signed when a claim actually differs.
+        if claims.role == admin.role && claims.mfa_enabled == admin.mfa_enabled {
+            return Ok(rotated);
+        }
+        Ok(RotatedTokens {
+            access_token: self
+                .tokens
+                .reissue_platform_access_with_authority(&claims, &admin.role, admin.mfa_enabled)
+                .await?,
+            refresh_token: rotated.refresh_token,
+        })
     }
 
     /// Revoke the current platform session: blacklist the access token's `jti` for its
@@ -221,17 +289,37 @@ impl PlatformAuthService {
     /// # Errors
     ///
     /// The `Result` is reserved for forward compatibility and currently always returns `Ok`.
-    pub async fn logout(
-        &self,
-        access_token: &str,
-        raw_refresh: &str,
-        admin_id: &str,
-    ) -> Result<(), AuthError> {
-        // Blacklist only a token that actually verifies as a PLATFORM token: a forged/expired
-        // token needs no revocation, and a dashboard token can never verify here (the platform
+    pub async fn logout(&self, access_token: &str, raw_refresh: &str) -> Result<String, AuthError> {
+        // The stored session names its owner. Presenting the refresh token proves possession;
+        // the record proves whose it is. The admin id used to come from the route's
+        // `PlatformUser` extractor — which is why the route refused an EXPIRED access token,
+        // so an operator who stepped away for longer than the access lifetime could not sign
+        // out at all and the refresh session of the highest-privilege identity in the system
+        // stayed live on a console they believed they had left. The dashboard plane was fixed
+        // for exactly this; the platform plane kept the old shape.
+        let admin_id = if is_refresh_token_shape(raw_refresh) {
+            let hash = RawRefreshToken::from_raw(raw_refresh.to_owned()).redis_hash();
+            self.session_store
+                .find_session(SessionKind::Platform, &hash)
+                .await?
+                .map(|record| record.user_id)
+                .unwrap_or_default()
+        } else {
+            String::new()
+        };
+        let admin_id = admin_id.as_str();
+
+        // Blacklist only a token that actually verifies as a PLATFORM token: a forged token
+        // needs no revocation, and a dashboard token can never verify here (the platform
         // discriminator rejects it), so a dashboard `jti` can never pollute the platform-session
-        // logout path. Best-effort — a store failure must not block the logout.
-        if let Ok(claims) = self.tokens.verify_platform_access(access_token).await {
+        // logout path. The expiry is waived — an expired token is the normal case at logout —
+        // but the signature is not: the `jti` decides which token gets blacklisted, so reading
+        // it unverified would let a caller revoke one they do not own by naming its id.
+        // Best-effort — a store failure must not block the logout.
+        if let Ok(claims) = self
+            .tokens
+            .verify_platform_access_ignoring_expiry(access_token)
+        {
             let ttl = u64::try_from(claims.exp.saturating_sub(now_unix())).unwrap_or(0);
             let _ = self.tokens.revoke_access(&claims.jti, ttl).await;
         }
@@ -255,18 +343,27 @@ impl PlatformAuthService {
                 .await;
         }
 
-        let hook_ctx = identity_only_context(admin_id);
-        spawn_guarded(run_after_logout(
-            self.hooks.clone(),
-            admin_id.to_owned(),
-            hook_ctx,
-        ));
-        Ok(())
+        // No live session matched the presented token — already signed out, or expired. There
+        // is no identity to hand the hook, and logout stays a success either way: it is
+        // idempotent, and answering an error would tell a caller whether a token was live.
+        if !admin_id.is_empty() {
+            let hook_ctx = identity_only_context(admin_id);
+            spawn_guarded(run_after_logout(
+                self.hooks.clone(),
+                admin_id.to_owned(),
+                hook_ctx,
+            ));
+        }
+        Ok(admin_id.to_owned())
     }
 
     /// Atomically invalidate EVERY platform session for the admin (the "log out everywhere"
     /// action), clearing the `psess:` set and every member's `prt:`/`psd:` keys in one
-    /// transaction over the platform keyspace.
+    /// transaction over the platform keyspace — then advance the admin's token epoch, so
+    /// outstanding platform **access** tokens die with the refresh sessions rather than
+    /// working on to expiry. Bumped after the sweep so a failed sweep leaves the operation
+    /// visibly incomplete instead of reading as done while the sessions live on. The
+    /// dashboard revoke-all bumps its plane's epoch the same way.
     ///
     /// # Errors
     ///
@@ -274,12 +371,16 @@ impl PlatformAuthService {
     pub async fn revoke_all_platform_sessions(&self, admin_id: &str) -> Result<(), AuthError> {
         self.session_store
             .revoke_all(SessionKind::Platform, admin_id)
-            .await
+            .await?;
+        self.session_store
+            .bump_epoch(SessionKind::Platform, admin_id)
+            .await?;
+        Ok(())
     }
 
     /// The hashed brute-force identifier for a platform login: `hmac_sha256("platform:{email}")`
     /// (hex) under the engine's derived key. The `platform:` namespace keeps it disjoint from the
-    /// dashboard `{tenant}:{email}` identifiers and carries no PII into a store key.
+    /// dashboard `dashboard:{tenant}:{email}` identifier and carries no PII into a store key.
     fn brute_force_identifier(&self, email: &str) -> String {
         to_hex(&bymax_auth_crypto::mac::hmac_sha256(
             self.identifier_key.as_ref(),
@@ -302,6 +403,7 @@ impl PlatformAuthService {
             .tokens
             .issue_platform_tokens(&safe, ip, user_agent, false)
             .await?;
+        tracing::info!(%admin_id, "platform login: success");
         spawn_guarded(run_update_platform_last_login(self.repo.clone(), admin_id));
         Ok(PlatformLoginResult::Success(Box::new(result)))
     }
@@ -314,6 +416,7 @@ impl PlatformAuthService {
         identifier: &str,
         started: Instant,
     ) -> Result<T, AuthError> {
+        tracing::warn!("platform login: invalid credentials");
         self.brute_force.record_failure(identifier).await?;
         normalize_anti_enum(started).await;
         Err(AuthError::InvalidCredentials)
@@ -331,23 +434,10 @@ impl PlatformAuthService {
     }
 
     /// Map a platform admin's `status` (case-insensitive) against `blocked_statuses`, returning
-    /// the status-specific 403 when blocked and `Ok(())` otherwise. The mapping mirrors the
-    /// dashboard status gate.
+    /// the status-specific 403 when blocked and `Ok(())` otherwise. Delegates to the shared gate
+    /// so the platform plane can never drift from the dashboard one.
     fn assert_not_blocked(&self, status: &str) -> Result<(), AuthError> {
-        if !self
-            .blocked_statuses
-            .iter()
-            .any(|s| s.eq_ignore_ascii_case(status))
-        {
-            return Ok(());
-        }
-        Err(match status.to_ascii_lowercase().as_str() {
-            "banned" => AuthError::AccountBanned,
-            "inactive" => AuthError::AccountInactive,
-            "suspended" => AuthError::AccountSuspended,
-            "pending" | "pending_approval" => AuthError::PendingApproval,
-            _ => AuthError::AccountInactive,
-        })
+        crate::status_gate::assert_not_blocked(status, &self.blocked_statuses)
     }
 }
 
@@ -449,6 +539,7 @@ mod tests {
         {
             use base64::Engine as _;
             cfg.mfa = Some(crate::config::MfaConfig {
+                previous_encryption_keys: Vec::new(),
                 encryption_key: SecretString::from(
                     base64::engine::general_purpose::STANDARD.encode([5u8; 32]),
                 ),
@@ -517,6 +608,35 @@ mod tests {
     }
 
     #[test]
+    fn the_platform_lockout_preimage_matches_the_shared_wire_contract() {
+        // The `platform:` namespace is what keeps this counter disjoint from the dashboard's.
+        // Without it a tenant whose id is literally `platform` produced a byte-identical
+        // identifier, so five unauthenticated dashboard logins against an operator's address
+        // locked that operator out of the console — and a successful one cleared the lockout
+        // mid-attack. nest-auth writes the same counter into the same Redis, so the preimage is
+        // read from the shared contract rather than repeated here.
+        let Some(h) = harness(platform_config()) else { return };
+        let Some(service) = h.engine.platform_auth() else { return };
+
+        let template = crate::services::contract_preimage("platform")
+            .replace("{email}", "operator@example.com");
+        assert_eq!(
+            service.brute_force_identifier("operator@example.com"),
+            to_hex(&bymax_auth_crypto::mac::hmac_sha256(
+                service.identifier_key.as_ref(),
+                template.as_bytes(),
+            )),
+            "the platform lockout preimage drifted from the shared contract"
+        );
+        // And it is not the dashboard's, for any tenant id — including the one that collided.
+        assert_ne!(
+            service.brute_force_identifier("operator@example.com"),
+            h.engine
+                .lockout_identifier("platform", "operator@example.com"),
+        );
+    }
+
+    #[test]
     fn engine_exposes_no_platform_service_when_the_domain_is_disabled() {
         // With `platform.enabled = false` the engine constructs no platform service, even though
         // the feature is compiled in.
@@ -535,6 +655,23 @@ mod tests {
         assert!(matches!(&built, Ok(engine) if engine.platform_auth().is_none()));
     }
 
+    #[test]
+    fn engine_exposes_the_platform_service_when_the_domain_is_enabled() {
+        // The inverse, built the same way so nothing can skip: every platform test below
+        // recovers the service with `let Some(..) else { return }`, so an engine that stopped
+        // handing it back would quietly skip the whole platform tier rather than fail it.
+        let admins = Arc::new(InMemoryPlatformUserRepository::new());
+        let stores = Arc::new(InMemoryStores::new());
+        let built = AuthEngine::builder()
+            .config(platform_config())
+            .environment(Environment::Test)
+            .user_repository(Arc::new(crate::testing::InMemoryUserRepository::new()))
+            .platform_user_repository(admins)
+            .redis_stores(stores)
+            .build();
+        assert!(matches!(&built, Ok(engine) if engine.platform_auth().is_some()));
+    }
+
     #[tokio::test]
     async fn login_issues_a_platform_session_with_no_tenant() {
         // A correct password for an active admin returns a full platform session; me/refresh
@@ -547,7 +684,7 @@ mod tests {
             .await;
         assert!(matches!(&result, Ok(PlatformLoginResult::Success(_))));
         let Ok(PlatformLoginResult::Success(auth)) = result else { return };
-        assert_eq!(auth.user.email, "ok@admin.io");
+        assert_eq!(auth.admin.email, "ok@admin.io");
         assert!(!auth.access_token.is_empty());
 
         // The platform access token verifies as a platform token and carries no tenant.
@@ -611,11 +748,195 @@ mod tests {
                 retry_after_seconds: Some(_)
             })
         ));
+
+        // The counter is keyed per admin. One shared identifier would let any address lock
+        // every administrator out of the platform by failing its own login five times.
+        let _ = seed_admin(&h.admins, "other@admin.io", "right");
+        assert!(matches!(
+            svc.login("other@admin.io", "right", "1.2.3.4", "agent")
+                .await,
+            Ok(PlatformLoginResult::Success(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn a_deleted_admin_cannot_rotate_and_leaves_nothing_behind() {
+        // The session record outlived the account. Rotation used to work entirely from that
+        // record, so a removed operator kept minting console access for the refresh token's
+        // whole lifetime. The refusal is compensated, not merely returned: the rotation above
+        // already minted a live pair, and leaving it would hand back exactly the access this
+        // gate exists to end.
+        let Some(h) = harness(platform_config()) else { return };
+        let id = seed_admin(&h.admins, "ghost@admin.io", "glidingwalnut42");
+        let signed_in = h
+            .engine
+            .platform_auth()
+            .map(|svc| svc.login("ghost@admin.io", "glidingwalnut42", "1.2.3.4", "a"));
+        let Some(login) = signed_in else { return };
+        let Ok(PlatformLoginResult::Success(auth)) = login.await else { return };
+
+        assert!(h.admins.remove(&id));
+
+        let Some(svc) = h.engine.platform_auth() else { return };
+        let refused = svc.refresh(&auth.refresh_token, "1.2.3.4", "a").await;
+        assert!(matches!(refused, Err(AuthError::RefreshTokenInvalid)));
+
+        // Total compensation: the pair minted a moment ago went with every other one, so a
+        // second attempt has nothing left to rotate.
+        let again = svc.refresh(&auth.refresh_token, "1.2.3.4", "a").await;
+        assert!(matches!(again, Err(AuthError::RefreshTokenInvalid)));
+    }
+
+    #[tokio::test]
+    async fn a_blocked_admin_cannot_rotate_and_loses_every_platform_session() {
+        // Rotation works entirely from the stored `prt:` record, so without this backstop a
+        // SUSPENDED or BANNED operator kept renewing access every fifteen minutes for the
+        // refresh token's whole lifetime — on the highest-privilege identity in the system.
+        let Some(h) = harness(platform_config()) else { return };
+        h.admins.insert(AuthPlatformUser {
+            id: "admin-live".to_owned(),
+            email: "live@admin.io".to_owned(),
+            name: "Admin".to_owned(),
+            password_hash: hash_password("pw"),
+            role: "SUPER_ADMIN".to_owned(),
+            status: "ACTIVE".to_owned(),
+            mfa_enabled: false,
+            mfa_secret: None,
+            mfa_recovery_codes: None,
+            platform_id: None,
+            last_login_at: None,
+            updated_at: OffsetDateTime::UNIX_EPOCH,
+            created_at: OffsetDateTime::UNIX_EPOCH,
+        });
+        let Some(svc) = h.engine.platform_auth() else { return };
+        let signed_in = svc.login("live@admin.io", "pw", "1.2.3.4", "a").await;
+        let Ok(PlatformLoginResult::Success(auth)) = signed_in else { return };
+
+        // While active, the rotation works.
+        let rotated = svc.refresh(&auth.refresh_token, "1.2.3.4", "a").await;
+        assert!(rotated.is_ok(), "an active admin must rotate: {rotated:?}");
+        let Ok(rotated) = rotated else { return };
+
+        // Suspended through the host's admin surface — the record in Redis is untouched.
+        h.admins.insert(AuthPlatformUser {
+            id: "admin-live".to_owned(),
+            email: "live@admin.io".to_owned(),
+            name: "Admin".to_owned(),
+            password_hash: hash_password("pw"),
+            role: "SUPER_ADMIN".to_owned(),
+            status: "SUSPENDED".to_owned(),
+            mfa_enabled: false,
+            mfa_secret: None,
+            mfa_recovery_codes: None,
+            platform_id: None,
+            last_login_at: None,
+            updated_at: OffsetDateTime::UNIX_EPOCH,
+            created_at: OffsetDateTime::UNIX_EPOCH,
+        });
+
+        assert!(matches!(
+            svc.refresh(&rotated.refresh_token, "1.2.3.4", "a").await,
+            Err(AuthError::AccountSuspended)
+        ));
+        // Compensated, not merely refused: the rotation that just ran minted a live pair, and
+        // leaving it would hand back the access the suspension exists to end.
+        assert!(matches!(
+            svc.refresh(&rotated.refresh_token, "1.2.3.4", "a").await,
+            Err(AuthError::RefreshTokenInvalid)
+        ));
+    }
+
+    #[tokio::test]
+    async fn a_demoted_admin_stops_carrying_the_old_role_on_the_very_next_rotation() {
+        // The dashboard plane closed this and the platform plane was left with the identical
+        // hole — on the higher-privilege identity. Rotation builds its claims from the `prt:`
+        // record written at login, so a demotion from SUPER_ADMIN to SUPPORT had no effect on
+        // a live console session: it kept minting SUPER_ADMIN-roled tokens for the refresh
+        // token's whole lifetime, and every role check reads that claim.
+        let Some(h) = harness(platform_config()) else { return };
+        let make = |role: &str, mfa: bool| AuthPlatformUser {
+            id: "admin-demoted".to_owned(),
+            email: "demoted@admin.io".to_owned(),
+            name: "Admin".to_owned(),
+            password_hash: hash_password("pw"),
+            role: role.to_owned(),
+            status: "ACTIVE".to_owned(),
+            mfa_enabled: mfa,
+            mfa_secret: None,
+            mfa_recovery_codes: None,
+            platform_id: None,
+            last_login_at: None,
+            updated_at: OffsetDateTime::UNIX_EPOCH,
+            created_at: OffsetDateTime::UNIX_EPOCH,
+        };
+        h.admins.insert(make("SUPER_ADMIN", false));
+        let Some(svc) = h.engine.platform_auth() else { return };
+        let signed_in = svc.login("demoted@admin.io", "pw", "1.2.3.4", "a").await;
+        let Ok(PlatformLoginResult::Success(auth)) = signed_in else { return };
+
+        // One rotation to put SUPER_ADMIN into this lineage, then the demotion.
+        let promoted = svc.refresh(&auth.refresh_token, "1.2.3.4", "a").await;
+        assert!(
+            promoted.is_ok(),
+            "the first rotation must succeed: {promoted:?}"
+        );
+        let Ok(promoted) = promoted else { return };
+        let before = h
+            .engine
+            .tokens()
+            .verify_platform_access(&promoted.access_token)
+            .await;
+        assert!(before.is_ok(), "the rotated token must verify: {before:?}");
+        let Ok(before) = before else { return };
+        assert_eq!(before.role, "SUPER_ADMIN");
+
+        h.admins.insert(make("SUPPORT", false));
+        let rotated = svc.refresh(&promoted.refresh_token, "1.2.3.4", "a").await;
+        assert!(
+            rotated.is_ok(),
+            "the demoting rotation must succeed: {rotated:?}"
+        );
+        let Ok(rotated) = rotated else { return };
+        let after = h
+            .engine
+            .tokens()
+            .verify_platform_access(&rotated.access_token)
+            .await;
+        assert!(after.is_ok(), "the demoted token must verify: {after:?}");
+        let Ok(after) = after else { return };
+        assert_eq!(
+            after.role, "SUPPORT",
+            "the demotion never reached the token"
+        );
+
+        // The same freeze on the claim that gates the second factor: `MfaSatisfied` refuses a
+        // token only when `mfa_enabled && !mfa_verified`, so a console session created before
+        // the admin enrolled stayed exempt for the refresh token's whole lifetime.
+        h.admins.insert(make("SUPPORT", true));
+        let with_mfa = svc.refresh(&rotated.refresh_token, "1.2.3.4", "a").await;
+        assert!(
+            with_mfa.is_ok(),
+            "the MFA rotation must succeed: {with_mfa:?}"
+        );
+        let Ok(with_mfa) = with_mfa else { return };
+        let claims = h
+            .engine
+            .tokens()
+            .verify_platform_access(&with_mfa.access_token)
+            .await;
+        assert!(
+            claims.is_ok(),
+            "the MFA-stamped token must verify: {claims:?}"
+        );
+        let Ok(claims) = claims else { return };
+        assert!(claims.mfa_enabled, "the MFA flag never reached the token");
     }
 
     #[tokio::test]
     async fn each_blocked_status_maps_to_its_specific_error() {
-        // The status gate runs before the KDF and maps every blocked status to its 403.
+        // Every blocked status maps to its own 403 — for the holder of the password. The gate
+        // runs AFTER the KDF now: answering before it enumerated operator accounts and read
+        // their moderation state, so each call here proves the password first.
         let Some(h) = harness(platform_config()) else { return };
         for (email, status) in [
             ("banned@admin.io", "BANNED"),
@@ -689,17 +1010,97 @@ mod tests {
         ));
     }
 
+    /// A hook spy that records the subject of every `after_logout` notification.
+    #[derive(Default)]
+    struct LogoutSpy {
+        subjects: std::sync::Mutex<Vec<String>>,
+    }
+
+    #[async_trait::async_trait]
+    impl AuthHooks for LogoutSpy {
+        async fn after_logout(
+            &self,
+            user_id: &str,
+            _ctx: &HookContext,
+        ) -> Result<(), crate::traits::HookError> {
+            if let Ok(mut subjects) = self.subjects.lock() {
+                subjects.push(user_id.to_owned());
+            }
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn logout_notifies_the_after_logout_hook_with_the_admin() {
+        // The notification is fire-and-forget, so nothing in the logout's own result reflects
+        // it — a hook that was never invoked looks exactly like one that was. A deployment
+        // wires this to send the "signed out on a new device" mail and to close down its own
+        // sessions, so silently dropping it is a real loss.
+        let spy = Arc::new(LogoutSpy::default());
+        let admins = Arc::new(InMemoryPlatformUserRepository::new());
+        let stores = Arc::new(InMemoryStores::new());
+        let hooks: Arc<dyn AuthHooks> = spy.clone();
+        let built = AuthEngine::builder()
+            .config(platform_config())
+            .environment(Environment::Test)
+            .user_repository(Arc::new(crate::testing::InMemoryUserRepository::new()))
+            .platform_user_repository(admins.clone())
+            .redis_stores(stores)
+            .hooks(hooks)
+            .build();
+        let Ok(engine) = built else { return };
+        let id = seed_admin(&admins, "hooked@admin.io", "pw");
+        let Some(svc) = engine.platform_auth() else { return };
+        let logged = svc.login("hooked@admin.io", "pw", "1.2.3.4", "agent").await;
+        let Ok(PlatformLoginResult::Success(auth)) = logged else { return };
+        assert!(
+            svc.logout(&auth.access_token, &auth.refresh_token)
+                .await
+                .is_ok()
+        );
+        // Long enough for the detached task to have run.
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        let seen = spy.subjects.lock().map(|s| s.clone()).unwrap_or_default();
+        assert_eq!(seen, vec![id]);
+    }
+
+    #[tokio::test]
+    async fn logout_works_without_a_live_access_token() {
+        // The route used to require a live `PlatformUser`, so an operator who stepped away for
+        // longer than the fifteen-minute access lifetime could not sign out at all — and the
+        // refresh session of the highest-privilege identity in the system stayed live on a
+        // console they believed they had left. The refresh token is what authorizes this; the
+        // stored record names its owner.
+        let Some(h) = harness(platform_config()) else { return };
+        let id = seed_admin(&h.admins, "away@admin.io", "pw");
+        let Some(svc) = h.engine.platform_auth() else { return };
+        let logged = svc.login("away@admin.io", "pw", "1.2.3.4", "agent").await;
+        let Ok(PlatformLoginResult::Success(auth)) = logged else { return };
+
+        // No access token at all — the shape a client sends once its bearer token has expired
+        // and it has nothing live to present.
+        let owner = svc.logout("", &auth.refresh_token).await;
+        assert_eq!(owner.ok(), Some(id));
+
+        // The session is gone: the refresh token no longer rotates.
+        assert!(
+            svc.refresh(&auth.refresh_token, "1.2.3.4", "agent")
+                .await
+                .is_err()
+        );
+    }
+
     #[tokio::test]
     async fn logout_blacklists_the_jti_and_revokes_the_session() {
         // After logout the platform access jti is blacklisted (verify rejects it) and the
         // refresh session is gone, so the refresh token no longer rotates.
         let Some(h) = harness(platform_config()) else { return };
-        let id = seed_admin(&h.admins, "out@admin.io", "pw");
+        let _id = seed_admin(&h.admins, "out@admin.io", "pw");
         let Some(svc) = h.engine.platform_auth() else { return };
         let logged = svc.login("out@admin.io", "pw", "1.2.3.4", "agent").await;
         let Ok(PlatformLoginResult::Success(auth)) = logged else { return };
         assert!(
-            svc.logout(&auth.access_token, &auth.refresh_token, &id)
+            svc.logout(&auth.access_token, &auth.refresh_token)
                 .await
                 .is_ok()
         );
@@ -716,11 +1117,7 @@ mod tests {
         ));
         // Logout tolerates a non-shaped refresh token, a garbage access token, and an unknown
         // admin, still succeeding.
-        assert!(
-            svc.logout("not-a-jwt", "unknown-refresh", "nobody")
-                .await
-                .is_ok()
-        );
+        assert!(svc.logout("not-a-jwt", "unknown-refresh").await.is_ok());
     }
 
     #[tokio::test]
@@ -732,7 +1129,7 @@ mod tests {
         // is now caught as a REUSE of a consumed token — the signature of a stolen token — and
         // revokes the whole family, taking the live rotated token down with it.
         let Some(h) = harness(platform_config()) else { return };
-        let id = seed_admin(&h.admins, "grace@admin.io", "pw");
+        let _id = seed_admin(&h.admins, "grace@admin.io", "pw");
         let Some(svc) = h.engine.platform_auth() else { return };
         let logged = svc.login("grace@admin.io", "pw", "1.2.3.4", "agent").await;
         let Ok(PlatformLoginResult::Success(auth)) = logged else { return };
@@ -741,7 +1138,7 @@ mod tests {
         let Ok(rotated) = rotation else { return };
         // Logging out the OLD token cleans its grace pointer.
         assert!(
-            svc.logout(&auth.access_token, &auth.refresh_token, &id)
+            svc.logout(&auth.access_token, &auth.refresh_token)
                 .await
                 .is_ok()
         );
@@ -770,6 +1167,14 @@ mod tests {
         let Ok(PlatformLoginResult::Success(first)) = first_login else { return };
         let second_login = svc.login("all@admin.io", "pw", "5.6.7.8", "agent").await;
         let Ok(PlatformLoginResult::Success(second)) = second_login else { return };
+        // Before the revoke, the first login's ACCESS token verifies.
+        assert!(
+            h.engine
+                .tokens()
+                .verify_platform_access(&first.access_token)
+                .await
+                .is_ok()
+        );
         assert!(svc.revoke_all_platform_sessions(&id).await.is_ok());
         assert!(matches!(
             svc.refresh(&first.refresh_token, "1.2.3.4", "agent").await,
@@ -779,6 +1184,23 @@ mod tests {
             svc.refresh(&second.refresh_token, "5.6.7.8", "agent").await,
             Err(AuthError::RefreshTokenInvalid)
         ));
+        // The outstanding ACCESS tokens die with the refresh sessions: revoke-all bumps the
+        // platform token epoch, and every token stamped below it stops verifying. Without
+        // the bump, "log out everywhere" left every access token working to expiry.
+        assert!(
+            h.engine
+                .tokens()
+                .verify_platform_access(&first.access_token)
+                .await
+                .is_err()
+        );
+        assert!(
+            h.engine
+                .tokens()
+                .verify_platform_access(&second.access_token)
+                .await
+                .is_err()
+        );
     }
 
     #[tokio::test]
@@ -872,6 +1294,28 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_current_hash_is_left_alone_on_login() {
+        // The upgrade needs *both* the toggle and a genuinely stale hash. Either one alone
+        // must not rewrite a current one: a rehash on every login is a write on the hot path
+        // for no gain, and it would leave the toggle disabling nothing.
+        let Some(h) = harness(platform_config()) else { return };
+        let id = seed_admin(&h.admins, "fresh@admin.io", "s3cret-pass");
+        let before = h.admins.find_by_id(&id).await;
+        let Ok(Some(before)) = before else { return };
+        let Some(svc) = h.engine.platform_auth() else { return };
+        assert!(matches!(
+            svc.login("fresh@admin.io", "s3cret-pass", "1.2.3.4", "agent")
+                .await,
+            Ok(PlatformLoginResult::Success(_))
+        ));
+        // Long enough for a spawned rehash to have landed if one had been spawned.
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        let after = h.admins.find_by_id(&id).await;
+        let Ok(Some(after)) = after else { return };
+        assert_eq!(before.password_hash, after.password_hash);
+    }
+
+    #[tokio::test]
     async fn rehash_on_verify_upgrades_a_weaker_admin_hash() {
         // A hash stored under weaker scrypt params is upgraded on a successful login; the
         // detached task replaces the stored hash with a stronger one.
@@ -909,10 +1353,26 @@ mod tests {
             let Some(svc) = h.engine.platform_auth() else { return };
             let result = svc.login("weak@admin.io", "pw", "1.2.3.4", "agent").await;
             assert!(matches!(result, Ok(PlatformLoginResult::Success(_))));
-            tokio::time::sleep(Duration::from_millis(500)).await;
-            let stored = h.admins.find_by_id(&id).await;
-            let Ok(Some(stored)) = stored else { return };
+            // Poll rather than sleep a fixed span: the rehash is one derivation at the
+            // configured cost, and a wait tuned on a laptop fails on a slower runner while
+            // saying nothing about the code.
+            let mut stored = None;
+            for _ in 0..40 {
+                if let Ok(Some(admin)) = h.admins.find_by_id(&id).await
+                    && admin.password_hash != weak_hash
+                {
+                    stored = Some(admin);
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+            // Asserted before the destructure so a rehash that never landed fails loudly here;
+            // the `let-else` below then cannot swallow it into a silent pass.
+            assert!(stored.is_some(), "the stored hash was never upgraded");
+            let Some(stored) = stored else { return };
             assert_ne!(stored.password_hash, weak_hash);
+            // The other fire-and-forget task on this path: the successful login is stamped.
+            assert!(stored.last_login_at.is_some());
         }
     }
 }

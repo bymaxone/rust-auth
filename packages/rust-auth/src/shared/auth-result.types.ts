@@ -47,8 +47,14 @@ mfaTempToken: string, };
 export type PlatformAuthResult = { 
 /**
  * The authenticated admin, with all credential fields removed.
+ *
+ * Named `admin`, not `user`: that is the key the platform login body carries on the wire,
+ * and it is what nest-auth emits. The field used to be `user` and the adapter renamed it
+ * while building the response, which left the TypeScript generated from this struct
+ * describing a key the server never sends — a consumer reading `result.user` got
+ * `undefined` at runtime. One name, in the struct, in the generated type, and on the wire.
  */
-user: AuthPlatformUserClient, 
+admin: AuthPlatformUserClient, 
 /**
  * The signed HS256 platform access JWT.
  */

@@ -35,6 +35,16 @@ fn key_b64() -> String {
     base64::engine::general_purpose::STANDARD.encode([7u8; 32])
 }
 
+/// A real scrypt hash of [`PASSWORD`], for platform admins seeded straight into the
+/// repository. `AuthPlatformUser::password_hash` is a plain `String`, so every admin has one
+/// and enrolment's re-authentication always applies on that plane — a placeholder like
+/// `"$scrypt$x"` makes `setup` refuse, and a test that swallows the refusal with `else
+/// { return }` then passes while exercising nothing.
+fn admin_password_hash() -> String {
+    let params = bymax_auth_crypto::password::PasswordParams::default();
+    bymax_auth_crypto::password::hash(PASSWORD.as_bytes(), &params).unwrap_or_default()
+}
+
 /// A request context for the engine flows.
 fn ctx() -> RequestContext {
     RequestContext::new("203.0.113.4", "agent/1.0", BTreeMap::new())
@@ -46,12 +56,48 @@ struct Harness {
     engine: AuthEngine,
     users: Arc<InMemoryUserRepository>,
     platform: Arc<InMemoryPlatformUserRepository>,
+    /// The same stores the engine holds, so a test can arm the transition-lock window.
+    stores: Arc<InMemoryStores>,
 }
 
 /// Build the harness. `sessions` toggles session tracking; `wire_platform` wires a platform
 /// repository (without enabling the platform domain) so the platform-context routing is
 /// exercised.
 fn build(sessions: bool, wire_platform: bool) -> Option<Harness> {
+    build_with(sessions, wire_platform, None, None)
+}
+
+/// The same harness, with an optional email provider and hooks so the fire-and-forget
+/// notifications the MFA flows emit can be observed.
+fn build_with(
+    sessions: bool,
+    wire_platform: bool,
+    email: Option<Arc<dyn EmailProvider>>,
+    hooks: Option<Arc<dyn AuthHooks>>,
+) -> Option<Harness> {
+    build_full(sessions, wire_platform, email, hooks, Vec::new())
+}
+
+/// The same harness with a retired MFA encryption key configured, so a secret written under
+/// that key still opens through the engine's own flows.
+fn build_rotating(retired_b64: String) -> Option<Harness> {
+    build_full(
+        true,
+        false,
+        None,
+        None,
+        vec![SecretString::from(retired_b64)],
+    )
+}
+
+/// The harness builder every variant above delegates to.
+fn build_full(
+    sessions: bool,
+    wire_platform: bool,
+    email: Option<Arc<dyn EmailProvider>>,
+    hooks: Option<Arc<dyn AuthHooks>>,
+    previous_encryption_keys: Vec<SecretString>,
+) -> Option<Harness> {
     let users = Arc::new(InMemoryUserRepository::new());
     let stores = Arc::new(InMemoryStores::new());
     let platform = Arc::new(InMemoryPlatformUserRepository::new());
@@ -61,6 +107,7 @@ fn build(sessions: bool, wire_platform: bool) -> Option<Harness> {
     config.email_verification.required = false;
     config.sessions.enabled = sessions;
     config.mfa = Some(MfaConfig {
+        previous_encryption_keys,
         encryption_key: SecretString::from(key_b64()),
         issuer: "Bymax One".to_owned(),
         recovery_code_count: 8,
@@ -72,15 +119,22 @@ fn build(sessions: bool, wire_platform: bool) -> Option<Harness> {
         .config(config)
         .environment(Environment::Test)
         .user_repository(users.clone())
-        .redis_stores(stores);
+        .redis_stores(stores.clone());
     if wire_platform {
         builder = builder.platform_user_repository(platform.clone());
+    }
+    if let Some(email) = email {
+        builder = builder.email_provider(email);
+    }
+    if let Some(hooks) = hooks {
+        builder = builder.hooks(hooks);
     }
     let engine = builder.build().ok()?;
     Some(Harness {
         engine,
         users,
         platform,
+        stores,
     })
 }
 
@@ -198,7 +252,7 @@ async fn full_dashboard_lifecycle() {
     };
     let Some(mfa) = h.engine.mfa() else { return };
 
-    let Ok(setup) = mfa.setup(&uid, MfaContext::Dashboard).await else {
+    let Ok(setup) = mfa.setup(&uid, MfaContext::Dashboard, Some(PASSWORD)).await else {
         return;
     };
     assert_eq!(setup.recovery_codes.len(), 8);
@@ -212,7 +266,7 @@ async fn full_dashboard_lifecycle() {
     );
 
     // Idempotent setup returns the same material (fast-path).
-    let Ok(again) = mfa.setup(&uid, MfaContext::Dashboard).await else {
+    let Ok(again) = mfa.setup(&uid, MfaContext::Dashboard, Some(PASSWORD)).await else {
         return;
     };
     assert_eq!(setup.secret, again.secret);
@@ -236,7 +290,7 @@ async fn full_dashboard_lifecycle() {
     );
     // No read path re-exposes the secret: a further setup is rejected, never re-returning it.
     assert!(matches!(
-        mfa.setup(&uid, MfaContext::Dashboard).await,
+        mfa.setup(&uid, MfaContext::Dashboard, Some(PASSWORD)).await,
         Err(AuthError::MfaAlreadyEnabled)
     ));
 
@@ -248,6 +302,14 @@ async fn full_dashboard_lifecycle() {
         mfa.challenge(&temp, &challenge_code, "1.2.3.4", "ua").await,
         Ok(LoginResultMfa::Dashboard(_))
     ));
+    // This harness has session tracking on, and the session the challenge issued has to be
+    // registered under the user — otherwise it is invisible to the session list, to the cap,
+    // and to "sign out everywhere". The returned tokens look identical either way.
+    let listed = h.engine.list_user_sessions(&uid, None).await;
+    assert!(
+        matches!(&listed, Ok(list) if !list.is_empty()),
+        "the challenge's session must be registered: {listed:?}"
+    );
 
     // Challenge via a recovery code; then prove the code is single-use.
     let recovery = setup.recovery_codes[0].clone();
@@ -287,6 +349,267 @@ async fn full_dashboard_lifecycle() {
     assert!(matches!(after, Ok(Some(u)) if !u.mfa_enabled && u.mfa_secret.is_none()));
 }
 
+/// An email + hook spy recording the security alerts the MFA management flows emit.
+#[derive(Default)]
+struct AlertSpy {
+    alerts: Mutex<Vec<String>>,
+}
+
+impl AlertSpy {
+    fn push(&self, alert: String) {
+        if let Ok(mut alerts) = self.alerts.lock() {
+            alerts.push(alert);
+        }
+    }
+
+    fn seen(&self) -> Vec<String> {
+        self.alerts.lock().map(|a| a.clone()).unwrap_or_default()
+    }
+}
+
+#[async_trait]
+impl EmailProvider for AlertSpy {
+    async fn send_email_change_verification(
+        &self,
+        _new_email: &str,
+        _token: &str,
+        _locale: Option<&str>,
+    ) -> Result<(), crate::traits::EmailError> {
+        Ok(())
+    }
+
+    async fn send_password_reset_token(
+        &self,
+        _email: &str,
+        _token: &str,
+        _locale: Option<&str>,
+    ) -> Result<(), crate::traits::EmailError> {
+        Ok(())
+    }
+    async fn send_password_reset_otp(
+        &self,
+        _email: &str,
+        _otp: &str,
+        _locale: Option<&str>,
+    ) -> Result<(), crate::traits::EmailError> {
+        Ok(())
+    }
+    async fn send_email_verification_otp(
+        &self,
+        _email: &str,
+        _otp: &str,
+        _locale: Option<&str>,
+    ) -> Result<(), crate::traits::EmailError> {
+        Ok(())
+    }
+    async fn send_mfa_enabled(
+        &self,
+        email: &str,
+        _locale: Option<&str>,
+    ) -> Result<(), crate::traits::EmailError> {
+        self.push(format!("mail:enabled:{email}"));
+        Ok(())
+    }
+    async fn send_mfa_disabled(
+        &self,
+        email: &str,
+        _locale: Option<&str>,
+    ) -> Result<(), crate::traits::EmailError> {
+        self.push(format!("mail:disabled:{email}"));
+        Ok(())
+    }
+    async fn send_new_session_alert(
+        &self,
+        _email: &str,
+        _session: &crate::traits::SessionInfo,
+        _locale: Option<&str>,
+    ) -> Result<(), crate::traits::EmailError> {
+        Ok(())
+    }
+    async fn send_invitation(
+        &self,
+        _email: &str,
+        _invite: &crate::traits::InviteData,
+        _locale: Option<&str>,
+    ) -> Result<(), crate::traits::EmailError> {
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl AuthHooks for AlertSpy {
+    async fn on_new_session(
+        &self,
+        user: &bymax_auth_types::SafeAuthUser,
+        _session: &crate::traits::SessionInfo,
+        _ctx: &HookContext,
+    ) -> Result<(), crate::traits::HookError> {
+        self.push(format!("hook:new_session:{}", user.id));
+        Ok(())
+    }
+    async fn after_mfa_enabled(
+        &self,
+        user: &bymax_auth_types::SafeAuthUser,
+        _ctx: &HookContext,
+    ) -> Result<(), crate::traits::HookError> {
+        self.push(format!("hook:enabled:{}", user.id));
+        Ok(())
+    }
+    async fn after_mfa_disabled(
+        &self,
+        user: &bymax_auth_types::SafeAuthUser,
+        _ctx: &HookContext,
+    ) -> Result<(), crate::traits::HookError> {
+        self.push(format!("hook:disabled:{}", user.id));
+        Ok(())
+    }
+    async fn after_mfa_recovery_codes_regenerated(
+        &self,
+        user: &bymax_auth_types::SafeAuthUser,
+        _ctx: &HookContext,
+    ) -> Result<(), crate::traits::HookError> {
+        self.push(format!("hook:regenerated:{}", user.id));
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn every_mfa_state_change_alerts_the_account_owner() {
+    // Enabling, regenerating and disabling a second factor are all account-security changes,
+    // and each one's mail and hook are the owner's only warning — turning MFA off is exactly
+    // what an attacker holding the password does. Every notification is fire-and-forget, so
+    // each call returns the same `Ok(())` whether it fired or not.
+    let spy = Arc::new(AlertSpy::default());
+    let email: Arc<dyn EmailProvider> = spy.clone();
+    let hooks: Arc<dyn AuthHooks> = spy.clone();
+    let Some(h) = build_with(false, false, Some(email), Some(hooks)) else {
+        return;
+    };
+    let Some(uid) = register(&h.engine, "alert@example.com").await else {
+        return;
+    };
+    let Some(mfa) = h.engine.mfa() else { return };
+    let Ok(setup) = mfa.setup(&uid, MfaContext::Dashboard, Some(PASSWORD)).await else {
+        return;
+    };
+    let base = now_secs();
+    assert!(
+        mfa.verify_and_enable(
+            &uid,
+            &code_at(&setup.secret, base),
+            "1.2.3.4",
+            "ua",
+            MfaContext::Dashboard
+        )
+        .await
+        .is_ok()
+    );
+    // Regenerating the recovery codes invalidates the old set, which is equally worth
+    // telling the owner about: it is how an attacker locks the real owner out of their own
+    // fallback.
+    assert!(
+        mfa.regenerate_recovery_codes(
+            &uid,
+            &code_at(&setup.secret, base + 30),
+            "1.2.3.4",
+            "ua",
+            MfaContext::Dashboard
+        )
+        .await
+        .is_ok()
+    );
+    assert!(
+        mfa.disable(
+            &uid,
+            &code_at(&setup.secret, base + 60),
+            "1.2.3.4",
+            "ua",
+            MfaContext::Dashboard
+        )
+        .await
+        .is_ok()
+    );
+    // Long enough for the detached notifications to have run.
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let seen = spy.seen();
+    // Enabling is an account-security change too: a second factor appearing on an account
+    // is the owner's cue that either they did it or someone else did.
+    assert!(
+        seen.contains(&"mail:enabled:alert@example.com".to_owned()),
+        "no enabled mail: {seen:?}"
+    );
+    assert!(
+        seen.contains(&format!("hook:enabled:{uid}")),
+        "no enabled hook: {seen:?}"
+    );
+    assert!(
+        seen.contains(&"mail:disabled:alert@example.com".to_owned()),
+        "no disabled mail: {seen:?}"
+    );
+    assert!(
+        seen.contains(&format!("hook:disabled:{uid}")),
+        "no disabled hook: {seen:?}"
+    );
+    assert!(
+        seen.contains(&format!("hook:regenerated:{uid}")),
+        "no regenerated hook: {seen:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_challenge_registers_its_session_with_the_session_service() {
+    // The challenge issues a session like a login does, and with tracking on it must go
+    // through the session service — that is what enforces the per-user cap and fires the
+    // new-session notification. The tokens it returns look identical either way, so the
+    // hook is the observation point.
+    let spy = Arc::new(AlertSpy::default());
+    let hooks: Arc<dyn AuthHooks> = spy.clone();
+    let Some(h) = build_with(true, false, None, Some(hooks)) else {
+        return;
+    };
+    let Some(uid) = register(&h.engine, "tracked@example.com").await else {
+        return;
+    };
+    let Some(mfa) = h.engine.mfa() else { return };
+    let Ok(setup) = mfa.setup(&uid, MfaContext::Dashboard, Some(PASSWORD)).await else {
+        return;
+    };
+    let base = now_secs();
+    assert!(
+        mfa.verify_and_enable(
+            &uid,
+            &code_at(&setup.secret, base),
+            "1.2.3.4",
+            "ua",
+            MfaContext::Dashboard
+        )
+        .await
+        .is_ok()
+    );
+    let Some(temp) = login_temp_token(&h.engine, "tracked@example.com").await else {
+        return;
+    };
+    // Counted, not merely present: the registration at the top of this test already issued a
+    // session and fired this hook once, so an assertion on presence alone would hold with the
+    // challenge's own registration removed entirely.
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let event = format!("hook:new_session:{uid}");
+    let before = spy.seen().iter().filter(|e| **e == event).count();
+    assert!(matches!(
+        mfa.challenge(&temp, &code_at(&setup.secret, base + 30), "1.2.3.4", "ua")
+            .await,
+        Ok(LoginResultMfa::Dashboard(_))
+    ));
+    // The notification is fire-and-forget.
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let after = spy.seen().iter().filter(|e| **e == event).count();
+    assert_eq!(
+        after,
+        before + 1,
+        "the challenge's session never reached the session service"
+    );
+}
+
 #[tokio::test]
 async fn anti_replay_rejects_a_code_already_used_on_enable() {
     // A code spent enabling MFA cannot be replayed on the challenge path (the `tu:` marker
@@ -296,7 +619,7 @@ async fn anti_replay_rejects_a_code_already_used_on_enable() {
         return;
     };
     let Some(mfa) = h.engine.mfa() else { return };
-    let Ok(setup) = mfa.setup(&uid, MfaContext::Dashboard).await else {
+    let Ok(setup) = mfa.setup(&uid, MfaContext::Dashboard, Some(PASSWORD)).await else {
         return;
     };
     let enable_code = code(&setup.secret, 0);
@@ -324,16 +647,16 @@ async fn setup_rejects_already_enabled_and_a_platform_context_without_a_repo() {
     let Some(mfa) = h.engine.mfa() else { return };
     // No platform repository is wired, so a platform context fails fast.
     assert!(matches!(
-        mfa.setup(&uid, MfaContext::Platform).await,
+        mfa.setup(&uid, MfaContext::Platform, Some(PASSWORD)).await,
         Err(AuthError::MfaNotEnabled)
     ));
     // An unknown user is also `MfaNotEnabled`.
     assert!(matches!(
-        mfa.setup("ghost", MfaContext::Dashboard).await,
+        mfa.setup("ghost", MfaContext::Dashboard, None).await,
         Err(AuthError::MfaNotEnabled)
     ));
     // Enable, then a second setup is rejected.
-    let Ok(setup) = mfa.setup(&uid, MfaContext::Dashboard).await else {
+    let Ok(setup) = mfa.setup(&uid, MfaContext::Dashboard, Some(PASSWORD)).await else {
         return;
     };
     assert!(
@@ -348,7 +671,7 @@ async fn setup_rejects_already_enabled_and_a_platform_context_without_a_repo() {
         .is_ok()
     );
     assert!(matches!(
-        mfa.setup(&uid, MfaContext::Dashboard).await,
+        mfa.setup(&uid, MfaContext::Dashboard, Some(PASSWORD)).await,
         Err(AuthError::MfaAlreadyEnabled)
     ));
     assert!(matches!(
@@ -377,7 +700,7 @@ async fn enable_requires_a_pending_record_and_rejects_a_wrong_code() {
             .await,
         Err(AuthError::MfaSetupRequired)
     ));
-    let Ok(setup) = mfa.setup(&uid, MfaContext::Dashboard).await else {
+    let Ok(setup) = mfa.setup(&uid, MfaContext::Dashboard, Some(PASSWORD)).await else {
         return;
     };
     // A wrong code does not enable and does not consume the pending record.
@@ -450,6 +773,35 @@ async fn challenge_rejects_when_mfa_is_not_enabled() {
 }
 
 #[tokio::test]
+async fn challenge_rejects_an_account_blocked_after_the_temp_token_was_issued() {
+    // The temp token outlives the login-time status gate by its whole TTL, so an account
+    // suspended inside that window must not be able to clear the second factor and walk away
+    // with a full session — revoking access cannot depend on how far through the login the
+    // holder had already got. The account here is not even MFA-enrolled, so getting the
+    // status error rather than MfaNotEnabled also pins that the gate runs first, before the
+    // MFA checks and before any key derivation.
+    let Some(h) = build(false, false) else { return };
+    let Some(uid) = register(&h.engine, "blocked-mid-challenge@example.com").await else {
+        return;
+    };
+    let Ok(temp) = h
+        .engine
+        .tokens()
+        .issue_mfa_temp_token(&uid, MfaContext::Dashboard)
+        .await
+    else {
+        return;
+    };
+    assert!(h.users.update_status(&uid, "SUSPENDED").await.is_ok());
+
+    let Some(mfa) = h.engine.mfa() else { return };
+    assert!(matches!(
+        mfa.challenge(&temp, "000000", "1.2.3.4", "ua").await,
+        Err(AuthError::AccountSuspended)
+    ));
+}
+
+#[tokio::test]
 async fn challenge_locks_out_after_repeated_wrong_codes() {
     // A single temp token (verify is non-consuming) absorbs repeated wrong codes; after the
     // fifth failure the sixth attempt is locked out. Non-numeric codes take the recovery path
@@ -459,7 +811,7 @@ async fn challenge_locks_out_after_repeated_wrong_codes() {
         return;
     };
     let Some(mfa) = h.engine.mfa() else { return };
-    let Ok(setup) = mfa.setup(&uid, MfaContext::Dashboard).await else {
+    let Ok(setup) = mfa.setup(&uid, MfaContext::Dashboard, Some(PASSWORD)).await else {
         return;
     };
     assert!(
@@ -486,6 +838,89 @@ async fn challenge_locks_out_after_repeated_wrong_codes() {
         mfa.challenge(&temp, "no-such-code", "1.2.3.4", "ua").await,
         Err(AuthError::AccountLocked { .. })
     ));
+
+    // The counter is per user. A shared one would let anybody lock any account out of MFA by
+    // failing their own challenge five times — a denial of service with no credential needed.
+    let Some(other) = register(&h.engine, "other@example.com").await else {
+        return;
+    };
+    let Ok(other_setup) = mfa.setup(&other, MfaContext::Dashboard, None).await else {
+        return;
+    };
+    let base = now_secs();
+    assert!(
+        mfa.verify_and_enable(
+            &other,
+            &code_at(&other_setup.secret, base),
+            "1.2.3.4",
+            "ua",
+            MfaContext::Dashboard
+        )
+        .await
+        .is_ok()
+    );
+    let Some(other_temp) = login_temp_token(&h.engine, "other@example.com").await else {
+        return;
+    };
+    assert!(
+        mfa.challenge(
+            &other_temp,
+            &code_at(&other_setup.secret, base + 30),
+            "1.2.3.4",
+            "ua"
+        )
+        .await
+        .is_ok()
+    );
+}
+
+#[tokio::test]
+async fn two_users_setting_up_never_share_a_pending_record() {
+    // The pending-setup slot is keyed per user. On one shared key the second caller loses the
+    // SET NX race and is handed the *winner's* record — enrolling their authenticator against
+    // someone else's account, and learning that account's TOTP secret and recovery codes.
+    let Some(h) = build(false, false) else { return };
+    let Some(first) = register(&h.engine, "first@example.com").await else {
+        return;
+    };
+    let Some(second) = register(&h.engine, "second@example.com").await else {
+        return;
+    };
+    let Some(mfa) = h.engine.mfa() else { return };
+
+    let Ok(a) = mfa.setup(&first, MfaContext::Dashboard, None).await else {
+        return;
+    };
+    let Ok(b) = mfa.setup(&second, MfaContext::Dashboard, None).await else {
+        return;
+    };
+    assert_ne!(a.secret, b.secret);
+    assert_ne!(a.recovery_codes, b.recovery_codes);
+
+    // And each enables against their own secret, which a shared slot could not satisfy.
+    let base = now_secs();
+    assert!(
+        mfa.verify_and_enable(
+            &first,
+            &code_at(&a.secret, base),
+            "1.2.3.4",
+            "ua",
+            MfaContext::Dashboard
+        )
+        .await
+        .is_ok()
+    );
+    assert!(
+        mfa.verify_and_enable(
+            &second,
+            &code_at(&b.secret, base),
+            "1.2.3.4",
+            "ua",
+            MfaContext::Dashboard
+        )
+        .await
+        .is_ok()
+    );
 }
 
 #[tokio::test]
@@ -501,7 +936,7 @@ async fn disable_is_totp_only_and_regenerate_keeps_sessions() {
             .await,
         Err(AuthError::MfaNotEnabled)
     ));
-    let Ok(setup) = mfa.setup(&uid, MfaContext::Dashboard).await else {
+    let Ok(setup) = mfa.setup(&uid, MfaContext::Dashboard, Some(PASSWORD)).await else {
         return;
     };
     assert!(
@@ -564,7 +999,7 @@ async fn disable_locks_out_after_repeated_wrong_codes() {
         return;
     };
     let Some(mfa) = h.engine.mfa() else { return };
-    let Ok(setup) = mfa.setup(&uid, MfaContext::Dashboard).await else {
+    let Ok(setup) = mfa.setup(&uid, MfaContext::Dashboard, Some(PASSWORD)).await else {
         return;
     };
     assert!(
@@ -590,18 +1025,52 @@ async fn disable_locks_out_after_repeated_wrong_codes() {
             .await,
         Err(AuthError::AccountLocked { .. })
     ));
+
+    // The management counter is per user, and separate from the challenge one. A shared
+    // counter would let any account freeze every other account's MFA management by failing
+    // its own disable five times.
+    let Some(other) = register(&h.engine, "dislock2@example.com").await else {
+        return;
+    };
+    let Ok(other_setup) = mfa.setup(&other, MfaContext::Dashboard, None).await else {
+        return;
+    };
+    let base = now_secs();
+    assert!(
+        mfa.verify_and_enable(
+            &other,
+            &code_at(&other_setup.secret, base),
+            "1.2.3.4",
+            "ua",
+            MfaContext::Dashboard
+        )
+        .await
+        .is_ok()
+    );
+    assert!(
+        mfa.disable(
+            &other,
+            &code_at(&other_setup.secret, base + 30),
+            "1.2.3.4",
+            "ua",
+            MfaContext::Dashboard
+        )
+        .await
+        .is_ok()
+    );
 }
 
+/// The platform plane's recovery splice abandons for the same reason the dashboard's does —
+/// and it is the plane where a resurrected factor is worth more, since the account it guards
+/// is an operator console.
 #[tokio::test]
-async fn platform_context_routes_to_the_platform_repository() {
-    // With a platform repository wired, the full lifecycle routes to it: setup, enable, the
-    // recovery-codes regenerate, and disable all read and write the platform admin record.
+async fn the_platform_recovery_splice_abandons_when_mfa_vanished_under_the_lock() {
     let Some(h) = build(false, true) else { return };
     let admin = AuthPlatformUser {
-        id: "p1".to_owned(),
-        email: "admin@example.com".to_owned(),
+        id: "p-abandon".to_owned(),
+        email: "abandon@admin.io".to_owned(),
         name: "Admin".to_owned(),
-        password_hash: "$scrypt$x".to_owned(),
+        password_hash: admin_password_hash(),
         role: "SUPER".to_owned(),
         status: "ACTIVE".to_owned(),
         mfa_enabled: false,
@@ -614,7 +1083,72 @@ async fn platform_context_routes_to_the_platform_repository() {
     };
     h.platform.insert(admin);
     let Some(mfa) = h.engine.mfa() else { return };
-    let Ok(setup) = mfa.setup("p1", MfaContext::Platform).await else {
+    let Ok(setup) = mfa
+        .setup("p-abandon", MfaContext::Platform, Some(PASSWORD))
+        .await
+    else {
+        return;
+    };
+    assert!(
+        mfa.verify_and_enable(
+            "p-abandon",
+            &code(&setup.secret, 0),
+            "1.2.3.4",
+            "ua",
+            MfaContext::Platform
+        )
+        .await
+        .is_ok()
+    );
+    let Some(recovery) = setup.recovery_codes.first().cloned() else {
+        return;
+    };
+    let Ok(temp) = h
+        .engine
+        .tokens()
+        .issue_mfa_temp_token("p-abandon", MfaContext::Platform)
+        .await
+    else {
+        return;
+    };
+
+    // The `disable` completes in the window the splice's own lock opens.
+    let gone = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    h.platform.report_mfa_gone_when(gone.clone());
+    h.stores.raise_on_next_mfa_lock(gone);
+
+    let _ = mfa.challenge(&temp, &recovery, "1.2.3.4", "ua").await;
+
+    let after = h.platform.find_by_id("p-abandon").await;
+    assert!(
+        matches!(&after, Ok(Some(a)) if !a.mfa_enabled),
+        "the abandoned platform splice must not have written: {after:?}"
+    );
+}
+
+#[tokio::test]
+async fn platform_context_routes_to_the_platform_repository() {
+    // With a platform repository wired, the full lifecycle routes to it: setup, enable, the
+    // recovery-codes regenerate, and disable all read and write the platform admin record.
+    let Some(h) = build(false, true) else { return };
+    let admin = AuthPlatformUser {
+        id: "p1".to_owned(),
+        email: "admin@example.com".to_owned(),
+        name: "Admin".to_owned(),
+        password_hash: admin_password_hash(),
+        role: "SUPER".to_owned(),
+        status: "ACTIVE".to_owned(),
+        mfa_enabled: false,
+        mfa_secret: None,
+        mfa_recovery_codes: None,
+        platform_id: None,
+        last_login_at: None,
+        updated_at: OffsetDateTime::UNIX_EPOCH,
+        created_at: OffsetDateTime::UNIX_EPOCH,
+    };
+    h.platform.insert(admin);
+    let Some(mfa) = h.engine.mfa() else { return };
+    let Ok(setup) = mfa.setup("p1", MfaContext::Platform, Some(PASSWORD)).await else {
         return;
     };
     assert!(
@@ -670,7 +1204,7 @@ async fn platform_challenge_exchanges_a_temp_token_for_a_full_platform_session()
         id: "p1".to_owned(),
         email: "admin@example.com".to_owned(),
         name: "Admin".to_owned(),
-        password_hash: "$scrypt$x".to_owned(),
+        password_hash: admin_password_hash(),
         role: "SUPER_ADMIN".to_owned(),
         status: "ACTIVE".to_owned(),
         mfa_enabled: false,
@@ -686,7 +1220,7 @@ async fn platform_challenge_exchanges_a_temp_token_for_a_full_platform_session()
 
     // Enable MFA on the platform admin so a challenge has a secret to verify against.
     let base = now_secs();
-    let Ok(setup) = mfa.setup("p1", MfaContext::Platform).await else {
+    let Ok(setup) = mfa.setup("p1", MfaContext::Platform, Some(PASSWORD)).await else {
         return;
     };
     let enable_code = code_at(&setup.secret, base);
@@ -713,7 +1247,7 @@ async fn platform_challenge_exchanges_a_temp_token_for_a_full_platform_session()
     let Ok(LoginResultMfa::Platform(result)) = exchanged else {
         return;
     };
-    assert_eq!(result.user.email, "admin@example.com");
+    assert_eq!(result.admin.email, "admin@example.com");
     // The issued access token verifies as a PLATFORM token carrying mfa_verified, and the
     // serialized claims carry no tenantId.
     let claims = h
@@ -771,7 +1305,7 @@ async fn platform_challenge_rejects_a_wrong_code_and_keeps_the_temp_token_alive(
         id: "p2".to_owned(),
         email: "retry@example.com".to_owned(),
         name: "Admin".to_owned(),
-        password_hash: "$scrypt$x".to_owned(),
+        password_hash: admin_password_hash(),
         role: "SUPER_ADMIN".to_owned(),
         status: "ACTIVE".to_owned(),
         mfa_enabled: false,
@@ -784,7 +1318,7 @@ async fn platform_challenge_rejects_a_wrong_code_and_keeps_the_temp_token_alive(
     });
     let Some(mfa) = h.engine.mfa() else { return };
     let base = now_secs();
-    let Ok(setup) = mfa.setup("p2", MfaContext::Platform).await else {
+    let Ok(setup) = mfa.setup("p2", MfaContext::Platform, Some(PASSWORD)).await else {
         return;
     };
     assert!(
@@ -831,7 +1365,7 @@ async fn platform_challenge_rejects_an_admin_without_enabled_mfa_or_a_secret() {
         id: "p-no".to_owned(),
         email: "noenroll@example.com".to_owned(),
         name: "Admin".to_owned(),
-        password_hash: "$scrypt$x".to_owned(),
+        password_hash: admin_password_hash(),
         role: "SUPER_ADMIN".to_owned(),
         status: "ACTIVE".to_owned(),
         // MFA not enabled and no secret stored.
@@ -881,7 +1415,7 @@ async fn platform_challenge_with_an_undecryptable_secret_is_an_opaque_failure() 
         id: "p-corrupt".to_owned(),
         email: "corrupt@example.com".to_owned(),
         name: "Admin".to_owned(),
-        password_hash: "$scrypt$x".to_owned(),
+        password_hash: admin_password_hash(),
         role: "SUPER_ADMIN".to_owned(),
         status: "ACTIVE".to_owned(),
         mfa_enabled: true,
@@ -914,13 +1448,521 @@ async fn platform_challenge_with_an_undecryptable_secret_is_an_opaque_failure() 
 /// returns a fixed value, so the lost-`SET NX`-race and record-corruption branches of `setup`
 /// — unreachable with a coherent real store — are driven deterministically. The remaining
 /// methods return benign defaults (they are not exercised by these tests).
+#[tokio::test]
+async fn a_transition_is_refused_while_another_one_holds_the_lock() {
+    // Every MFA transition rewrites one repository record carrying `mfa_enabled`, the encrypted
+    // secret and the recovery-code digests TOGETHER, and `update_mfa` replaces all three
+    // wholesale — the repository is the consumer's and offers no compare-and-set. Interleaved,
+    // two transitions silently undo each other: a challenge that read the codes before a
+    // `regenerate` and splices after it restores the whole replaced set, and one that splices
+    // after `disable` completes puts `mfa_enabled` back with the pre-disable secret. Refusing
+    // the second caller is how the engine serializes them, and the refusal is retryable.
+    let users = Arc::new(InMemoryUserRepository::new());
+    let releases = Arc::new(Mutex::new(0usize));
+    let store = Arc::new(ContendedLockMfaStore {
+        inner: Arc::new(InMemoryStores::new()),
+        releases: releases.clone(),
+    });
+    let mfa = service_over(store, users.clone());
+    let Some(uid) = seed_user(&users, "locked@example.com").await else {
+        return;
+    };
+
+    // `setup` writes only the pending record, so it does not contend; `verify_and_enable` is
+    // the first call that rewrites the account, and it is the one refused.
+    let Ok(setup) = mfa.setup(&uid, MfaContext::Dashboard, None).await else {
+        return;
+    };
+    let code = code_at(&setup.secret, now_secs());
+    let refused = mfa
+        .verify_and_enable(&uid, &code, "1.2.3.4", "ua", MfaContext::Dashboard)
+        .await;
+    assert!(
+        matches!(refused, Err(AuthError::MfaStateConflict)),
+        "a contended transition must be refused, got {refused:?}"
+    );
+
+    // The account is untouched — the refusal happens before any write.
+    let after = users.find_by_id(&uid, None).await;
+    assert!(
+        matches!(&after, Ok(Some(u)) if !u.mfa_enabled),
+        "a refused transition must not have written: {after:?}"
+    );
+
+    // And the lock this caller never took is not released either: releasing a lock somebody
+    // else holds would hand them a partner mid-transition.
+    assert_eq!(
+        releases.lock().map(|c| *c).unwrap_or(usize::MAX),
+        0,
+        "a caller that did not take the lock must not release it"
+    );
+}
+
+/// The lock is released by a compare-and-delete against the token the acquiring call wrote, so
+/// a release carrying anybody else's token must leave it standing.
+///
+/// This is what a fixed lock value cost. The TTL is ten seconds and a transition calls into the
+/// consumer's repository twice, so a run that overruns has already lost its lock: releasing
+/// unconditionally would remove whichever transition holds it now, and a third caller would
+/// enter beside the second — the serialization broken precisely under the load that makes
+/// concurrent transitions likely. The in-memory store implements the same rule as the
+/// `release_lock` Lua, and a double that ignored the token could never fail this way.
+#[tokio::test]
+async fn a_lock_is_released_only_by_the_call_that_took_it() {
+    let store = InMemoryStores::new();
+
+    assert!(
+        matches!(
+            store.acquire_mfa_lock("acct", "token-a", 10).await,
+            Ok(true)
+        ),
+        "the first caller must take the lock"
+    );
+    assert!(
+        matches!(
+            store.acquire_mfa_lock("acct", "token-b", 10).await,
+            Ok(false)
+        ),
+        "a held lock must refuse a second caller"
+    );
+
+    // The successor's release names its own token, which is not the one held.
+    assert!(store.release_mfa_lock("acct", "token-b").await.is_ok());
+    assert!(
+        matches!(
+            store.acquire_mfa_lock("acct", "token-c", 10).await,
+            Ok(false)
+        ),
+        "a release carrying a foreign token must leave the lock standing"
+    );
+
+    // The holder's own release does remove it.
+    assert!(store.release_mfa_lock("acct", "token-a").await.is_ok());
+    assert!(
+        matches!(
+            store.acquire_mfa_lock("acct", "token-d", 10).await,
+            Ok(true)
+        ),
+        "the holder's own release must free the lock"
+    );
+}
+
+/// The service must release with the token it acquired with, and that token must be a per-call
+/// nonce — the store's compare-and-delete is only worth anything if the two agree and no two
+/// callers can present the same value.
+#[tokio::test]
+async fn the_transition_releases_with_the_token_it_acquired_with() {
+    let users = Arc::new(InMemoryUserRepository::new());
+    let seen = Arc::new(Mutex::new(Vec::<(String, String)>::new()));
+    let store = Arc::new(RecordingLockMfaStore {
+        inner: Arc::new(InMemoryStores::new()),
+        seen: seen.clone(),
+    });
+    let mfa = service_over(store, users.clone());
+    let Some(uid) = seed_user(&users, "nonce@example.com").await else {
+        return;
+    };
+    let Ok(setup) = mfa.setup(&uid, MfaContext::Dashboard, None).await else {
+        return;
+    };
+    let code = code_at(&setup.secret, now_secs());
+    let enabled = mfa
+        .verify_and_enable(&uid, &code, "1.2.3.4", "ua", MfaContext::Dashboard)
+        .await;
+    assert!(
+        enabled.is_ok(),
+        "the transition should succeed: {enabled:?}"
+    );
+
+    let Ok(calls) = seen.lock() else {
+        return;
+    };
+    let acquired = calls.iter().find(|(kind, _)| kind == "acquire");
+    let released = calls.iter().find(|(kind, _)| kind == "release");
+    assert!(
+        acquired.is_some() && released.is_some(),
+        "the transition must both acquire and release the lock: {calls:?}"
+    );
+    let (Some((_, acquired_token)), Some((_, released_token))) = (acquired, released) else {
+        return;
+    };
+    assert_eq!(
+        acquired_token, released_token,
+        "the release must name the token the acquire wrote"
+    );
+    // 16 CSPRNG bytes, hex-encoded. A fixed value would make every caller's token identical,
+    // which is exactly the state the compare-and-delete cannot detect.
+    assert_eq!(
+        acquired_token.len(),
+        32,
+        "the lock token must be a 128-bit hex nonce, got {acquired_token:?}"
+    );
+    assert!(
+        acquired_token.chars().all(|c| c.is_ascii_hexdigit()),
+        "the lock token must be hex, got {acquired_token:?}"
+    );
+}
+
+/// The recovery-code splice abandons when the account lost MFA under the lock.
+///
+/// A challenge that read the code list before a `disable` completed, and splices after it,
+/// would write `mfa_enabled: true` back with the pre-disable secret — putting the account under
+/// a factor the user removed and may no longer hold. The code still counts as spent (its claim
+/// already stands), so nothing is written and the challenge fails; what must not happen is the
+/// resurrection.
+#[tokio::test]
+async fn the_recovery_splice_abandons_when_mfa_vanished_under_the_lock() {
+    let Some(h) = build_with(true, false, None, None) else {
+        return;
+    };
+    let Some(uid) = register(&h.engine, "splice-abandon@example.com").await else {
+        return;
+    };
+    let Some(mfa) = h.engine.mfa() else { return };
+    let base = now_secs();
+    let Ok(setup) = mfa.setup(&uid, MfaContext::Dashboard, Some(PASSWORD)).await else {
+        return;
+    };
+    let enabled = mfa
+        .verify_and_enable(
+            &uid,
+            &code_at(&setup.secret, base),
+            "1.2.3.4",
+            "ua",
+            MfaContext::Dashboard,
+        )
+        .await;
+    assert!(enabled.is_ok(), "enrolment should succeed: {enabled:?}");
+    let Some(recovery) = setup.recovery_codes.first().cloned() else {
+        return;
+    };
+
+    let Some(temp) = login_temp_token(&h.engine, "splice-abandon@example.com").await else {
+        return;
+    };
+
+    // The `disable` lands exactly in the window: the flag is raised by the transition lock,
+    // so the challenge's own read of the account happened before it and the splice's re-read
+    // inside the lock happens after.
+    let gone = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    h.users.report_mfa_gone_when(gone.clone());
+    h.stores.raise_on_next_mfa_lock(gone);
+
+    // The challenge itself may still answer: the code was genuinely presented and its claim
+    // stands, so it is spent either way. What must not happen is the WRITE — the resurrection
+    // of a factor the user removed, with the secret they removed it to be rid of.
+    let _ = mfa.challenge(&temp, &recovery, "1.2.3.4", "ua").await;
+
+    // The account is left as the `disable` left it — not re-enabled by the loser.
+    let after = h.users.find_by_id(&uid, None).await;
+    assert!(
+        matches!(&after, Ok(Some(u)) if !u.mfa_enabled),
+        "the abandoned splice must not have written: {after:?}"
+    );
+}
+
+/// A `disable` that completes between a transition's first read and its re-read inside the
+/// lock must not be undone by that transition.
+///
+/// This is the interleaving `transition_mfa_record` exists for, and it is the one an in-memory
+/// store cannot produce on its own: the two reads sit either side of `acquire_mfa_lock`, so a
+/// store that turns MFA off *while granting the lock* lands exactly in the window. Every
+/// mutation then sees `mfa_enabled: false` on the record it was handed and abandons — which is
+/// what keeps a challenge or a regenerate from writing `mfa_enabled: true` back with the
+/// pre-disable secret, putting the account under a factor the user removed.
+#[tokio::test]
+async fn a_transition_abandons_when_mfa_is_disabled_under_the_lock() {
+    let users = Arc::new(InMemoryUserRepository::new());
+    let Some(uid) = seed_user(&users, "vanishes@example.com").await else {
+        return;
+    };
+    let store = Arc::new(DisableOnLockMfaStore {
+        inner: Arc::new(InMemoryStores::new()),
+        user_id: uid.clone(),
+        users: users.clone(),
+        armed: Mutex::new(false),
+    });
+    let mfa = service_over(store.clone(), users.clone());
+
+    // Enrol first: the account really does have MFA when the caller starts.
+    let base = now_secs();
+    let Ok(setup) = mfa.setup(&uid, MfaContext::Dashboard, None).await else {
+        return;
+    };
+    let enable_code = code_at(&setup.secret, base);
+    let regen_code = code_at(&setup.secret, base + 60);
+    let enabled = mfa
+        .verify_and_enable(&uid, &enable_code, "1.2.3.4", "ua", MfaContext::Dashboard)
+        .await;
+    assert!(enabled.is_ok(), "enrolment should succeed: {enabled:?}");
+
+    // From here on, the store disables MFA as it hands over the lock — so the re-read inside
+    // the lock reports it off and the mutation abandons rather than writing the codes back.
+    if let Ok(mut armed) = store.armed.lock() {
+        *armed = true;
+    }
+    let regenerated = mfa
+        .regenerate_recovery_codes(&uid, &regen_code, "1.2.3.4", "ua", MfaContext::Dashboard)
+        .await;
+    assert!(
+        matches!(regenerated, Err(AuthError::MfaNotEnabled)),
+        "an abandoned transition must report the factor gone, got {regenerated:?}"
+    );
+
+    // And the account is left as the `disable` left it — not re-enabled by the loser.
+    let after = users.find_by_id(&uid, None).await;
+    assert!(
+        matches!(&after, Ok(Some(u)) if !u.mfa_enabled),
+        "the abandoned transition must not have written: {after:?}"
+    );
+}
+
+/// An MFA store that delegates everything to a real in-memory one, but turns the account's MFA
+/// off at the moment it grants the transition lock — placing a completed `disable` in the one
+/// window `transition_mfa_record` re-reads across.
+struct DisableOnLockMfaStore {
+    inner: Arc<InMemoryStores>,
+    user_id: String,
+    users: Arc<InMemoryUserRepository>,
+    /// Off until the enrolment has completed — otherwise the store would undo the very
+    /// transition that turns MFA on, and the test would never reach the state it is about.
+    armed: Mutex<bool>,
+}
+
+#[async_trait]
+impl MfaStore for DisableOnLockMfaStore {
+    async fn acquire_mfa_lock(&self, id: &str, token: &str, ttl: u64) -> Result<bool, AuthError> {
+        let granted = self.inner.acquire_mfa_lock(id, token, ttl).await?;
+        let armed = self.armed.lock().map(|a| *a).unwrap_or(false);
+        if granted && armed {
+            // The `disable` that completed while this caller was in flight.
+            let _ = self
+                .users
+                .update_mfa(
+                    &self.user_id,
+                    bymax_auth_types::UpdateMfaData {
+                        mfa_enabled: false,
+                        mfa_secret: None,
+                        mfa_recovery_codes: None,
+                    },
+                )
+                .await;
+        }
+        Ok(granted)
+    }
+    async fn release_mfa_lock(&self, id: &str, token: &str) -> Result<(), AuthError> {
+        self.inner.release_mfa_lock(id, token).await
+    }
+    async fn claim_recovery_code(&self, id: &str, ttl: u64) -> Result<bool, AuthError> {
+        self.inner.claim_recovery_code(id, ttl).await
+    }
+    async fn put_setup_nx(&self, k: &str, v: &str, ttl: u64) -> Result<bool, AuthError> {
+        self.inner.put_setup_nx(k, v, ttl).await
+    }
+    async fn get_setup(&self, k: &str) -> Result<Option<String>, AuthError> {
+        self.inner.get_setup(k).await
+    }
+    async fn take_setup(&self, k: &str) -> Result<Option<String>, AuthError> {
+        self.inner.take_setup(k).await
+    }
+    async fn put_temp(&self, j: &str, u: &str, ttl: u64) -> Result<(), AuthError> {
+        self.inner.put_temp(j, u, ttl).await
+    }
+    async fn get_temp(&self, j: &str) -> Result<Option<String>, AuthError> {
+        self.inner.get_temp(j).await
+    }
+    async fn del_temp(&self, j: &str) -> Result<bool, AuthError> {
+        self.inner.del_temp(j).await
+    }
+    async fn mark_totp_used(&self, r: &str, ttl: u64) -> Result<bool, AuthError> {
+        self.inner.mark_totp_used(r, ttl).await
+    }
+    async fn challenge_consume(&self, r: &str, j: &str, ttl: u64) -> Result<bool, AuthError> {
+        self.inner.challenge_consume(r, j, ttl).await
+    }
+}
+
+/// An MFA store that delegates everything to a real in-memory one, recording the lock token
+/// each transition presents so the acquire and the release can be compared.
+struct RecordingLockMfaStore {
+    inner: Arc<InMemoryStores>,
+    seen: Arc<Mutex<Vec<(String, String)>>>,
+}
+
+#[async_trait]
+impl MfaStore for RecordingLockMfaStore {
+    async fn acquire_mfa_lock(&self, id: &str, token: &str, ttl: u64) -> Result<bool, AuthError> {
+        if let Ok(mut seen) = self.seen.lock() {
+            seen.push(("acquire".to_owned(), token.to_owned()));
+        }
+        self.inner.acquire_mfa_lock(id, token, ttl).await
+    }
+    async fn release_mfa_lock(&self, id: &str, token: &str) -> Result<(), AuthError> {
+        if let Ok(mut seen) = self.seen.lock() {
+            seen.push(("release".to_owned(), token.to_owned()));
+        }
+        self.inner.release_mfa_lock(id, token).await
+    }
+    async fn claim_recovery_code(&self, id: &str, ttl: u64) -> Result<bool, AuthError> {
+        self.inner.claim_recovery_code(id, ttl).await
+    }
+    async fn put_setup_nx(&self, k: &str, v: &str, ttl: u64) -> Result<bool, AuthError> {
+        self.inner.put_setup_nx(k, v, ttl).await
+    }
+    async fn get_setup(&self, k: &str) -> Result<Option<String>, AuthError> {
+        self.inner.get_setup(k).await
+    }
+    async fn take_setup(&self, k: &str) -> Result<Option<String>, AuthError> {
+        self.inner.take_setup(k).await
+    }
+    async fn put_temp(&self, j: &str, u: &str, ttl: u64) -> Result<(), AuthError> {
+        self.inner.put_temp(j, u, ttl).await
+    }
+    async fn get_temp(&self, j: &str) -> Result<Option<String>, AuthError> {
+        self.inner.get_temp(j).await
+    }
+    async fn del_temp(&self, j: &str) -> Result<bool, AuthError> {
+        self.inner.del_temp(j).await
+    }
+    async fn mark_totp_used(&self, r: &str, ttl: u64) -> Result<bool, AuthError> {
+        self.inner.mark_totp_used(r, ttl).await
+    }
+    async fn challenge_consume(&self, r: &str, j: &str, ttl: u64) -> Result<bool, AuthError> {
+        self.inner.challenge_consume(r, j, ttl).await
+    }
+}
+
+/// An MFA store that delegates everything to a real in-memory one **except** the transition
+/// lock, which is always already held and whose releases are counted.
+///
+/// A held lock is another interleaving the in-memory store cannot produce on its own: it would
+/// need two challenges genuinely in flight at once. Forcing it is what exercises the refusal,
+/// and counting the releases is what proves a failed transition does not strand the account
+/// for the lock's whole TTL.
+struct ContendedLockMfaStore {
+    inner: Arc<InMemoryStores>,
+    releases: Arc<Mutex<usize>>,
+}
+
+#[async_trait]
+impl MfaStore for ContendedLockMfaStore {
+    async fn acquire_mfa_lock(
+        &self,
+        _id: &str,
+        _token: &str,
+        _ttl: u64,
+    ) -> Result<bool, AuthError> {
+        // Someone else holds it.
+        Ok(false)
+    }
+    async fn release_mfa_lock(&self, _id: &str, _token: &str) -> Result<(), AuthError> {
+        if let Ok(mut count) = self.releases.lock() {
+            *count += 1;
+        }
+        Ok(())
+    }
+    async fn claim_recovery_code(&self, id: &str, ttl: u64) -> Result<bool, AuthError> {
+        self.inner.claim_recovery_code(id, ttl).await
+    }
+    async fn put_setup_nx(&self, k: &str, v: &str, ttl: u64) -> Result<bool, AuthError> {
+        self.inner.put_setup_nx(k, v, ttl).await
+    }
+    async fn get_setup(&self, k: &str) -> Result<Option<String>, AuthError> {
+        self.inner.get_setup(k).await
+    }
+    async fn take_setup(&self, k: &str) -> Result<Option<String>, AuthError> {
+        self.inner.take_setup(k).await
+    }
+    async fn put_temp(&self, j: &str, u: &str, ttl: u64) -> Result<(), AuthError> {
+        self.inner.put_temp(j, u, ttl).await
+    }
+    async fn get_temp(&self, j: &str) -> Result<Option<String>, AuthError> {
+        self.inner.get_temp(j).await
+    }
+    async fn del_temp(&self, j: &str) -> Result<bool, AuthError> {
+        self.inner.del_temp(j).await
+    }
+    async fn mark_totp_used(&self, r: &str, ttl: u64) -> Result<bool, AuthError> {
+        self.inner.mark_totp_used(r, ttl).await
+    }
+    async fn challenge_consume(&self, r: &str, j: &str, ttl: u64) -> Result<bool, AuthError> {
+        self.inner.challenge_consume(r, j, ttl).await
+    }
+}
+
+/// An MFA store that delegates everything to a real in-memory one **except** `del_temp`,
+/// which always reports that someone else won the consume.
+///
+/// This is the interleaving the in-memory repository cannot produce on its own: its
+/// recovery-code splice serialises two concurrent challenges, so the loser fails on the code
+/// rather than on the token. Forcing the lost consume is what exercises the gate that keeps a
+/// single recovery code and a single temp token from minting two sessions.
+struct LosingConsumeMfaStore {
+    inner: Arc<InMemoryStores>,
+}
+
+#[async_trait]
+impl MfaStore for LosingConsumeMfaStore {
+    async fn claim_recovery_code(&self, id: &str, ttl: u64) -> Result<bool, AuthError> {
+        self.inner.claim_recovery_code(id, ttl).await
+    }
+    async fn acquire_mfa_lock(&self, id: &str, token: &str, ttl: u64) -> Result<bool, AuthError> {
+        self.inner.acquire_mfa_lock(id, token, ttl).await
+    }
+    async fn release_mfa_lock(&self, id: &str, token: &str) -> Result<(), AuthError> {
+        self.inner.release_mfa_lock(id, token).await
+    }
+    async fn put_setup_nx(&self, k: &str, v: &str, ttl: u64) -> Result<bool, AuthError> {
+        self.inner.put_setup_nx(k, v, ttl).await
+    }
+    async fn get_setup(&self, k: &str) -> Result<Option<String>, AuthError> {
+        self.inner.get_setup(k).await
+    }
+    async fn take_setup(&self, k: &str) -> Result<Option<String>, AuthError> {
+        self.inner.take_setup(k).await
+    }
+    async fn put_temp(&self, j: &str, u: &str, ttl: u64) -> Result<(), AuthError> {
+        self.inner.put_temp(j, u, ttl).await
+    }
+    async fn get_temp(&self, j: &str) -> Result<Option<String>, AuthError> {
+        self.inner.get_temp(j).await
+    }
+    async fn del_temp(&self, _j: &str) -> Result<bool, AuthError> {
+        Ok(false)
+    }
+    async fn mark_totp_used(&self, r: &str, ttl: u64) -> Result<bool, AuthError> {
+        self.inner.mark_totp_used(r, ttl).await
+    }
+    async fn challenge_consume(&self, r: &str, j: &str, ttl: u64) -> Result<bool, AuthError> {
+        self.inner.challenge_consume(r, j, ttl).await
+    }
+}
+
 struct ScriptedMfaStore {
     get_setup: Mutex<VecDeque<Option<String>>>,
     put_nx: bool,
+    /// What `del_temp` reports. `false` stands in for losing the consume to a concurrent
+    /// challenge — the interleaving the in-memory repository cannot produce, because its
+    /// recovery-code splice serialises the two callers.
+    del_temp_wins: bool,
 }
 
 #[async_trait]
 impl MfaStore for ScriptedMfaStore {
+    async fn claim_recovery_code(&self, _id: &str, _ttl: u64) -> Result<bool, AuthError> {
+        Ok(true)
+    }
+    async fn acquire_mfa_lock(
+        &self,
+        _id: &str,
+        _token: &str,
+        _ttl: u64,
+    ) -> Result<bool, AuthError> {
+        Ok(true)
+    }
+    async fn release_mfa_lock(&self, _id: &str, _token: &str) -> Result<(), AuthError> {
+        Ok(())
+    }
     async fn put_setup_nx(&self, _k: &str, _v: &str, _ttl: u64) -> Result<bool, AuthError> {
         Ok(self.put_nx)
     }
@@ -942,8 +1984,8 @@ impl MfaStore for ScriptedMfaStore {
     async fn get_temp(&self, _j: &str) -> Result<Option<String>, AuthError> {
         Ok(None)
     }
-    async fn del_temp(&self, _j: &str) -> Result<(), AuthError> {
-        Ok(())
+    async fn del_temp(&self, _j: &str) -> Result<bool, AuthError> {
+        Ok(self.del_temp_wins)
     }
     async fn mark_totp_used(&self, _r: &str, _ttl: u64) -> Result<bool, AuthError> {
         Ok(true)
@@ -956,16 +1998,28 @@ impl MfaStore for ScriptedMfaStore {
 /// Build an `MfaService` directly over a custom MFA store and a seeded user, with the other
 /// collaborators backed by fresh in-memory doubles. The AES key is the fixed `[7u8; 32]` the
 /// scripted records are encrypted under.
-fn service_over(store: Arc<dyn MfaStore>, users: Arc<InMemoryUserRepository>) -> MfaService {
+fn service_with_previous_keys(
+    store: Arc<dyn MfaStore>,
+    users: Arc<InMemoryUserRepository>,
+    previous_identifier_keys: Vec<zeroize::Zeroizing<[u8; 64]>>,
+) -> MfaService {
+    let mut deps = service_deps(store, users);
+    deps.previous_identifier_keys = previous_identifier_keys;
+    MfaService::new(deps)
+}
+
+fn service_deps(store: Arc<dyn MfaStore>, users: Arc<InMemoryUserRepository>) -> MfaServiceDeps {
     let inmem = Arc::new(InMemoryStores::new());
     let session_store: Arc<dyn SessionStore> = inmem.clone();
     let brute_force_store: Arc<dyn BruteForceStore> = inmem;
     let tokens = Arc::new(TokenManagerService::new(
         HsKey::from_bytes(b"0123456789abcdef0123456789abcdef"),
+        Vec::new(),
         session_store.clone(),
         Duration::from_secs(900),
         7,
         Duration::from_secs(30),
+        0,
     ));
     let sessions = Arc::new(SessionService::new(
         session_store.clone(),
@@ -975,8 +2029,18 @@ fn service_over(store: Arc<dyn MfaStore>, users: Arc<InMemoryUserRepository>) ->
         3600,
     ));
     let brute_force = Arc::new(BruteForceService::new(brute_force_store, 5, 900));
-    MfaService::new(MfaServiceDeps {
+    // Enrolment re-authenticates against the account password, so the service needs a real
+    // hasher. The scrypt cost is the configured default — these tests hash at most once.
+    let passwords = Arc::new(
+        crate::services::password::PasswordService::new(
+            &crate::config::PasswordConfig::default(),
+            Arc::new(crate::traits::AllowAllBreachChecker),
+        )
+        .unwrap_or_else(|_| unreachable!("the default password config always builds")),
+    );
+    MfaServiceDeps {
         mfa_store: store,
+        passwords,
         user_repo: users,
         platform_repo: None,
         tokens,
@@ -986,12 +2050,19 @@ fn service_over(store: Arc<dyn MfaStore>, users: Arc<InMemoryUserRepository>) ->
         email: Arc::new(NoOpEmailProvider),
         hooks: Arc::new(NoOpAuthHooks),
         encryption_key: zeroize::Zeroizing::new([7u8; 32]),
-        identifier_key: zeroize::Zeroizing::new([9u8; 32]),
+        previous_encryption_keys: Vec::new(),
+        identifier_key: zeroize::Zeroizing::new([9u8; 64]),
+        previous_identifier_keys: Vec::new(),
         issuer: "Bymax One".to_owned(),
         totp_window: 2,
         recovery_code_count: 8,
         sessions_enabled: false,
-    })
+        blocked_statuses: vec!["BANNED".to_owned(), "SUSPENDED".to_owned()],
+    }
+}
+
+fn service_over(store: Arc<dyn MfaStore>, users: Arc<InMemoryUserRepository>) -> MfaService {
+    MfaService::new(service_deps(store, users))
 }
 
 /// Seed a fresh user (not MFA-enabled) and return its id.
@@ -1000,7 +2071,10 @@ async fn seed_user(users: &InMemoryUserRepository, email: &str) -> Option<String
         .create(bymax_auth_types::CreateUserData {
             email: email.to_owned(),
             name: "U".to_owned(),
-            password_hash: Some("$scrypt$x".to_owned()),
+            // No local password: these MFA tests are about MFA mechanics, and enrolment's
+            // password re-auth is a no-op for an OAuth-provisioned account. The re-auth itself
+            // has dedicated tests that seed a real hash.
+            password_hash: None,
             role: Some("USER".to_owned()),
             status: Some("ACTIVE".to_owned()),
             tenant_id: TENANT.to_owned(),
@@ -1023,7 +2097,10 @@ fn record_with(secret_wire: String, plain_wire: String) -> String {
 
 /// A valid encrypted-secret wire (the raw secret `[1u8; 20]` under `[7u8; 32]`).
 fn good_secret_wire() -> String {
-    bymax_auth_crypto::aead::encrypt(&[1u8; 20], &[7u8; 32]).unwrap_or_default()
+    // The at-rest form is the encrypted Base32 TEXT, not the raw bytes — the same shape
+    // nest-auth writes, so the two backends can read one another's `mfaSecret`.
+    let base32 = bymax_auth_crypto::totp::encode_secret_base32(&[1u8; 20]);
+    bymax_auth_crypto::aead::encrypt(base32.as_bytes(), &[7u8; 32]).unwrap_or_default()
 }
 
 /// A valid pending-setup record encrypted under `[7u8; 32]`, carrying `recovery` as the single
@@ -1049,9 +2126,10 @@ async fn setup_returns_the_winner_record_after_a_lost_nx_race() {
             Some(winner_record("WINNER-0000-CODE")),
         ])),
         put_nx: false,
+        del_temp_wins: true,
     });
     let svc = service_over(store, users);
-    let result = svc.setup(&uid, MfaContext::Dashboard).await;
+    let result = svc.setup(&uid, MfaContext::Dashboard, None).await;
     assert!(matches!(&result, Ok(r) if r.recovery_codes == ["WINNER-0000-CODE"]));
 }
 
@@ -1065,10 +2143,11 @@ async fn setup_errors_when_the_record_vanishes_after_a_lost_race() {
     let store = Arc::new(ScriptedMfaStore {
         get_setup: Mutex::new(VecDeque::from([None, None])),
         put_nx: false,
+        del_temp_wins: true,
     });
     let svc = service_over(store, users);
     assert!(matches!(
-        svc.setup(&uid, MfaContext::Dashboard).await,
+        svc.setup(&uid, MfaContext::Dashboard, None).await,
         Err(AuthError::Internal(_))
     ));
 }
@@ -1085,10 +2164,11 @@ async fn setup_fast_path_rejects_a_corrupt_or_undecryptable_record() {
     let garbage = Arc::new(ScriptedMfaStore {
         get_setup: Mutex::new(VecDeque::from([Some("not json".to_owned())])),
         put_nx: false,
+        del_temp_wins: true,
     });
     assert!(matches!(
         service_over(garbage, users.clone())
-            .setup(&uid, MfaContext::Dashboard)
+            .setup(&uid, MfaContext::Dashboard, None)
             .await,
         Err(AuthError::Internal(_))
     ));
@@ -1102,10 +2182,11 @@ async fn setup_fast_path_rejects_a_corrupt_or_undecryptable_record() {
     let undecryptable = Arc::new(ScriptedMfaStore {
         get_setup: Mutex::new(VecDeque::from([Some(bad_cipher)])),
         put_nx: false,
+        del_temp_wins: true,
     });
     assert!(matches!(
         service_over(undecryptable, users.clone())
-            .setup(&uid, MfaContext::Dashboard)
+            .setup(&uid, MfaContext::Dashboard, None)
             .await,
         Err(AuthError::Internal(_))
     ));
@@ -1116,10 +2197,11 @@ async fn setup_fast_path_rejects_a_corrupt_or_undecryptable_record() {
             "bad".to_owned(),
         ))])),
         put_nx: false,
+        del_temp_wins: true,
     });
     assert!(matches!(
         service_over(codes_undecryptable, users.clone())
-            .setup(&uid, MfaContext::Dashboard)
+            .setup(&uid, MfaContext::Dashboard, None)
             .await,
         Err(AuthError::Internal(_))
     ));
@@ -1132,10 +2214,11 @@ async fn setup_fast_path_rejects_a_corrupt_or_undecryptable_record() {
             bad_codes_json,
         ))])),
         put_nx: false,
+        del_temp_wins: true,
     });
     assert!(matches!(
         service_over(codes_undecodable, users)
-            .setup(&uid, MfaContext::Dashboard)
+            .setup(&uid, MfaContext::Dashboard, None)
             .await,
         Err(AuthError::Internal(_))
     ));
@@ -1148,6 +2231,7 @@ async fn scripted_store_default_methods_are_inert() {
     let store = ScriptedMfaStore {
         get_setup: Mutex::new(VecDeque::new()),
         put_nx: true,
+        del_temp_wins: true,
     };
     let store: &dyn MfaStore = &store;
     assert!(store.put_temp("j", "u", 1).await.is_ok());
@@ -1168,6 +2252,7 @@ async fn enable_fails_when_the_completion_gate_is_lost() {
     let store = Arc::new(ScriptedMfaStore {
         get_setup: Mutex::new(VecDeque::from([Some(winner_record("X"))])),
         put_nx: false,
+        del_temp_wins: true,
     });
     let svc = service_over(store, users);
     // `winner_record` encrypts the raw secret `[1u8; 20]`, so a code for those bytes verifies.
@@ -1186,7 +2271,7 @@ async fn challenge_rejects_a_wrong_six_digit_totp_code() {
     let Some(h) = build(false, false) else { return };
     let Some(uid) = register(&h.engine, "wrong-totp@example.com").await else { return };
     let Some(mfa) = h.engine.mfa() else { return };
-    let Ok(setup) = mfa.setup(&uid, MfaContext::Dashboard).await else { return };
+    let Ok(setup) = mfa.setup(&uid, MfaContext::Dashboard, Some(PASSWORD)).await else { return };
     assert!(
         mfa.verify_and_enable(
             &uid,
@@ -1213,7 +2298,7 @@ async fn challenge_succeeds_with_session_tracking_disabled() {
     let Some(h) = build(false, false) else { return };
     let Some(uid) = register(&h.engine, "nosess@example.com").await else { return };
     let Some(mfa) = h.engine.mfa() else { return };
-    let Ok(setup) = mfa.setup(&uid, MfaContext::Dashboard).await else { return };
+    let Ok(setup) = mfa.setup(&uid, MfaContext::Dashboard, Some(PASSWORD)).await else { return };
     assert!(
         mfa.verify_and_enable(
             &uid,
@@ -1240,7 +2325,7 @@ async fn challenge_collapses_an_undecryptable_secret_to_an_opaque_error() {
     let Some(h) = build(false, false) else { return };
     let Some(uid) = register(&h.engine, "decrypt@example.com").await else { return };
     let Some(mfa) = h.engine.mfa() else { return };
-    let Ok(setup) = mfa.setup(&uid, MfaContext::Dashboard).await else { return };
+    let Ok(setup) = mfa.setup(&uid, MfaContext::Dashboard, Some(PASSWORD)).await else { return };
     assert!(
         mfa.verify_and_enable(
             &uid,
@@ -1315,6 +2400,7 @@ fn anti_replay_ttl_is_derived_from_the_window_and_scales() {
     let store: Arc<dyn MfaStore> = Arc::new(ScriptedMfaStore {
         get_setup: Mutex::new(VecDeque::new()),
         put_nx: true,
+        del_temp_wins: true,
     });
     let mut service = service_over(store.clone(), users.clone());
 
@@ -1324,13 +2410,22 @@ fn anti_replay_ttl_is_derived_from_the_window_and_scales() {
     assert_eq!(service.anti_replay_ttl_seconds(), max_window_secs_w2);
     assert!(service.anti_replay_ttl_seconds() >= max_window_secs_w2);
 
-    // It scales with the window: a wider window yields a strictly longer TTL, and a zero
-    // window collapses to a single step (the code is accepted at exactly one step).
-    service.totp_window = 4;
-    assert_eq!(service.anti_replay_ttl_seconds(), (2 * 4 + 1) * 30);
-    assert!(service.anti_replay_ttl_seconds() > max_window_secs_w2);
+    // It scales with the window, and a zero window collapses to a single step (the code is
+    // accepted at exactly one step).
+    service.totp_window = 1;
+    assert_eq!(service.anti_replay_ttl_seconds(), 3 * 30);
+    assert!(service.anti_replay_ttl_seconds() < max_window_secs_w2);
     service.totp_window = 0;
     assert_eq!(service.anti_replay_ttl_seconds(), 30);
+
+    // A window past the verifier's clamp sizes the marker to the window ACTUALLY in force,
+    // not the configured one. `verify` clamps to MAX_VERIFY_WINDOW so an oversized value
+    // cannot become a CPU-amplification vector; deriving the TTL from the unclamped value
+    // would leave the marker's lifetime and the acceptance span disagreeing. Startup
+    // validation refuses anything above the clamp, so this only bites a caller reaching the
+    // service directly.
+    service.totp_window = 40;
+    assert_eq!(service.anti_replay_ttl_seconds(), max_window_secs_w2);
 }
 
 #[tokio::test]
@@ -1351,7 +2446,7 @@ async fn concurrent_distinct_valid_codes_issue_one_session() {
     let secret;
     {
         let Some(mfa) = h.engine.mfa() else { return };
-        let Ok(setup) = mfa.setup(&uid, MfaContext::Dashboard).await else {
+        let Ok(setup) = mfa.setup(&uid, MfaContext::Dashboard, Some(PASSWORD)).await else {
             return;
         };
         if mfa
@@ -1453,4 +2548,896 @@ fn repository_error_maps_both_variants_to_internal() {
         super::repository_error(crate::RepositoryError::Backend("y".into())),
         AuthError::Internal(_)
     ));
+}
+
+/// Read `credentialFormats.{key}` from the shared cross-implementation wire contract.
+///
+/// The file at `conformance/wire-contract.json` is held byte-identical by nest-auth. This section
+/// is the shape of the credentials themselves, so a drift here is not a parse error on the other
+/// side — it is a session that cannot continue, or a TOTP code that never verifies.
+fn contract_credential_formats() -> serde_json::Map<String, serde_json::Value> {
+    let path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../conformance/wire-contract.json"
+    );
+    let raw = std::fs::read_to_string(path).unwrap_or_default();
+    let root: serde_json::Value = serde_json::from_str(&raw).unwrap_or(serde_json::Value::Null);
+    let section = root
+        .get("credentialFormats")
+        .and_then(serde_json::Value::as_object)
+        .cloned()
+        .unwrap_or_default();
+    assert!(
+        !section.is_empty(),
+        "the wire contract declared no `credentialFormats` — it did not load"
+    );
+    section
+}
+
+fn credential_format(key: &str) -> String {
+    let path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../conformance/wire-contract.json"
+    );
+    let raw = std::fs::read_to_string(path).unwrap_or_default();
+    let root: serde_json::Value = serde_json::from_str(&raw).unwrap_or(serde_json::Value::Null);
+    let value = root
+        .get("credentialFormats")
+        .and_then(|c| c.get(key))
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default()
+        .to_owned();
+    assert!(
+        !value.is_empty(),
+        "the wire contract declared no `credentialFormats.{key}` — it did not load"
+    );
+    value
+}
+
+#[test]
+fn the_refresh_token_matches_the_shared_credential_format() {
+    // 64 lowercase hex characters, from 32 CSPRNG bytes. The contract is asserted against a
+    // token this library actually mints, not against the constant that produces it: a shape
+    // read back through its own generator would round-trip any change to either.
+    let declared = credential_format("refreshToken");
+    assert!(declared.contains("64 lowercase hex"));
+    assert!(declared.contains("32 CSPRNG bytes"));
+
+    for _ in 0..32 {
+        let token = bymax_auth_jwt::RawRefreshToken::generate();
+        let raw = token.expose_secret();
+        assert_eq!(raw.len(), 64, "refresh token is not 64 characters: {raw}");
+        assert!(
+            raw.chars()
+                .all(|c| c.is_ascii_digit() || ('a'..='f').contains(&c)),
+            "refresh token is not lowercase hex: {raw}"
+        );
+    }
+
+    // No legacy shape is declared, and none is accepted: the libraries are new, so a parsing
+    // allowance for a corpus that does not exist is a widened input for nothing.
+    assert!(
+        contract_credential_formats()
+            .get("refreshTokenLegacy")
+            .is_none()
+    );
+}
+
+#[tokio::test]
+async fn the_stored_totp_secret_and_recovery_digests_match_the_shared_credential_format() {
+    // The at-rest TOTP secret is AES-GCM over the BASE32 **text**, not over the raw bytes.
+    // Decrypting one form as the other hands the wrong key to HMAC-SHA-1 and every code the
+    // user's authenticator produces is rejected — which is exactly the regression a merge
+    // introduced here once, by calling the raw-bytes decrypt on a base32-text record.
+    let declared = credential_format("totpSecretAtRest");
+    assert!(declared.contains("aes-256-gcm"));
+    assert!(declared.contains("BASE32"));
+
+    let users = Arc::new(InMemoryUserRepository::new());
+    let service = service_over(Arc::new(InMemoryStores::new()), users);
+    let (raw_secret, plain_codes, data) = service
+        .generate_setup_material()
+        .unwrap_or_else(|_| unreachable!("setup material generation cannot fail"));
+
+    // Decrypting the stored form yields the Base32 TEXT, and decoding that text yields the very
+    // bytes the HMAC uses as its key.
+    let decrypted = service
+        .decrypt(&data.encrypted_secret)
+        .unwrap_or_else(|| unreachable!("the record was just encrypted under this key"));
+    let text = String::from_utf8(decrypted).unwrap_or_default();
+    assert!(
+        text.chars()
+            .all(|c| c.is_ascii_uppercase() || ('2'..='7').contains(&c)),
+        "the stored secret is not Base32 text: {text}"
+    );
+    assert_eq!(
+        service.decrypt_secret(&data.encrypted_secret).as_deref(),
+        Some(raw_secret.as_slice()),
+        "the at-rest form does not decode back to the HMAC key"
+    );
+
+    // Recovery codes are stored as a hex HMAC-SHA-256 under the derived identifier key — 64
+    // lowercase hex characters, and never the code itself.
+    let declared = credential_format("recoveryCodeDigest");
+    assert!(declared.contains("hex hmac-sha256"));
+    for (digest, code) in data.hashed_codes.iter().zip(plain_codes.iter()) {
+        assert_eq!(digest.len(), 64, "recovery digest is not 64 hex characters");
+        assert!(
+            digest
+                .chars()
+                .all(|c| c.is_ascii_digit() || ('a'..='f').contains(&c)),
+            "recovery digest is not lowercase hex: {digest}"
+        );
+        assert_ne!(digest, code, "the recovery code was stored in the clear");
+    }
+
+    assert!(
+        contract_credential_formats()
+            .get("recoveryCodeDigestLegacy")
+            .is_none()
+    );
+    assert!(
+        !data
+            .hashed_codes
+            .iter()
+            .any(|digest| digest.starts_with("scrypt:")),
+        "a recovery digest was written as a KDF hash instead of a keyed MAC"
+    );
+}
+
+#[tokio::test]
+async fn a_recovery_code_digested_under_a_retired_key_still_verifies() {
+    // The digest is keyed by an HMAC derived from the signing secret, so a rotation without the
+    // retired key silently invalidates every code a user printed and filed — and they find out
+    // at the moment they most need it, locked out of an account they cannot reach another way.
+    let users = Arc::new(InMemoryUserRepository::new());
+    let retired = zeroize::Zeroizing::new([3u8; 64]);
+
+    // A digest written under the retired key: nothing in the stored set matches the current one.
+    let plain = "ABCD-EF12-3456";
+    let stale_digest = crate::services::to_hex(&bymax_auth_crypto::mac::hmac_sha256(
+        retired.as_ref(),
+        plain.as_bytes(),
+    ));
+
+    // Without the retired key listed, the code does not verify…
+    let strict = service_over(Arc::new(InMemoryStores::new()), users.clone());
+    assert!(
+        super::verify_recovery_code(
+            std::slice::from_ref(&stale_digest),
+            &strict.recovery_code_candidates(plain)
+        )
+        .is_none()
+    );
+
+    // …and with it, it does — at index 0, so the right code is the one consumed.
+    let rotating =
+        service_with_previous_keys(Arc::new(InMemoryStores::new()), users, vec![retired]);
+    assert_eq!(
+        super::verify_recovery_code(
+            &["a".repeat(64), stale_digest],
+            &rotating.recovery_code_candidates(plain)
+        ),
+        Some(1)
+    );
+}
+
+#[tokio::test]
+async fn a_secret_stored_under_a_retired_key_still_opens_and_is_rewritten() {
+    // The ciphertext records no key identifier, so without the retired key a change of
+    // `mfa.encryption_key` makes every stored secret undecryptable — every enrolled user's
+    // authenticator stops matching at once, with no way back.
+    let users = Arc::new(InMemoryUserRepository::new());
+    let retired = zeroize::Zeroizing::new([3u8; 32]);
+
+    // A service that encrypts under the RETIRED key, to produce the stored form.
+    let mut old_deps = service_deps(Arc::new(InMemoryStores::new()), users.clone());
+    old_deps.encryption_key = retired.clone();
+    let old_service = MfaService::new(old_deps);
+    let (raw_secret, _codes, data) = old_service
+        .generate_setup_material()
+        .unwrap_or_else(|_| unreachable!("setup material generation cannot fail"));
+
+    // The current service cannot open it…
+    let strict = service_over(Arc::new(InMemoryStores::new()), users.clone());
+    assert!(strict.decrypt_secret(&data.encrypted_secret).is_none());
+
+    // …and with the retired key listed it opens, and is reported as needing a rewrite.
+    let mut deps = service_deps(Arc::new(InMemoryStores::new()), users.clone());
+    deps.previous_encryption_keys = vec![retired];
+    let rotating = MfaService::new(deps);
+    let opened = rotating.decrypt_secret_with_rotation(&data.encrypted_secret);
+    assert!(matches!(opened, Some((ref secret, true)) if *secret == raw_secret));
+
+    // A record under a key nobody holds is still refused: the retired list widens what opens,
+    // it does not make decryption lenient. Without this the loop's exhausted path is untested
+    // and a rotation could silently accept a tampered record.
+    let mut third_deps = service_deps(Arc::new(InMemoryStores::new()), users);
+    third_deps.encryption_key = zeroize::Zeroizing::new([9u8; 32]);
+    let stranger = MfaService::new(third_deps);
+    let Ok((_, _, foreign)) = stranger.generate_setup_material() else {
+        return;
+    };
+    assert!(
+        rotating
+            .decrypt_secret_with_rotation(&foreign.encrypted_secret)
+            .is_none()
+    );
+
+    // The rewrite produces a record the CURRENT key opens, carrying the same secret.
+    let rewritten = rotating
+        .reencrypt_secret(&raw_secret)
+        .unwrap_or_else(|_| unreachable!("re-encryption cannot fail for a 20-byte secret"));
+    assert!(matches!(
+        rotating.decrypt_secret_with_rotation(&rewritten),
+        Some((ref secret, false)) if *secret == raw_secret
+    ));
+    assert!(strict.decrypt_secret(&rewritten).is_some());
+}
+
+#[tokio::test]
+async fn a_totp_challenge_rewrites_a_secret_stored_under_a_retired_key() {
+    // The rewrite has to happen on the TOTP path too, which persists nothing on its own —
+    // otherwise the rotation never drains for a user who only ever uses their authenticator,
+    // and the retired key has to stay configured forever: a key that still opens every secret.
+    let retired_bytes = [3u8; 32];
+    let retired_b64 = base64::engine::general_purpose::STANDARD.encode(retired_bytes);
+    let Some(h) = build_rotating(retired_b64) else {
+        return;
+    };
+    let Some(uid) = register(&h.engine, "rot@example.com").await else {
+        return;
+    };
+
+    // Enrol out of band, with the secret encrypted under the RETIRED key — the state a
+    // deployment is in the moment it rotates `mfa.encryption_key`.
+    let mut old_deps = service_deps(Arc::new(InMemoryStores::new()), h.users.clone());
+    old_deps.encryption_key = zeroize::Zeroizing::new(retired_bytes);
+    let old_service = MfaService::new(old_deps);
+    let Ok((raw_secret, _codes, data)) = old_service.generate_setup_material() else {
+        return;
+    };
+    let stored_under_retired = data.encrypted_secret.clone();
+    assert!(
+        h.users
+            .update_mfa(
+                &uid,
+                bymax_auth_types::UpdateMfaData {
+                    mfa_enabled: true,
+                    mfa_secret: Some(stored_under_retired.clone()),
+                    mfa_recovery_codes: Some(data.hashed_codes),
+                },
+            )
+            .await
+            .is_ok()
+    );
+
+    // A plain TOTP challenge succeeds — the retired key opened the secret.
+    let Some(mfa) = h.engine.mfa() else { return };
+    let Some(temp) = login_temp_token(&h.engine, "rot@example.com").await else {
+        return;
+    };
+    assert!(matches!(
+        mfa.challenge(&temp, &raw_code(&raw_secret, now_secs()), "1.2.3.4", "ua")
+            .await,
+        Ok(LoginResultMfa::Dashboard(_))
+    ));
+
+    // …and it was rewritten in place: the stored record changed, and a service holding ONLY
+    // the current key now opens it. Without the rewrite the retired key could never be dropped.
+    let Ok(Some(after)) = h.users.find_by_id(&uid, None).await else {
+        return;
+    };
+    let rewritten = after.mfa_secret.unwrap_or_default();
+    assert_ne!(rewritten, stored_under_retired);
+    let strict = service_over(Arc::new(InMemoryStores::new()), h.users.clone());
+    assert_eq!(
+        strict.decrypt_secret(&rewritten).as_deref(),
+        Some(raw_secret.as_slice())
+    );
+}
+
+/// The retired-key rewrite abandons for the same reason the splice does.
+///
+/// A TOTP challenge persists nothing on its own, so the rewrite is its own write — and it
+/// carries `mfa_enabled: true` and the secret. Landing it after a completed `disable` would
+/// re-enrol the account under the very secret the user removed, from a path whose whole purpose
+/// is bookkeeping.
+#[tokio::test]
+async fn the_retired_key_rewrite_abandons_when_mfa_vanished_under_the_lock() {
+    let retired_bytes = [4u8; 32];
+    let retired_b64 = base64::engine::general_purpose::STANDARD.encode(retired_bytes);
+    let Some(h) = build_rotating(retired_b64) else {
+        return;
+    };
+    let Some(uid) = register(&h.engine, "rot-abandon@example.com").await else {
+        return;
+    };
+
+    let mut old_deps = service_deps(Arc::new(InMemoryStores::new()), h.users.clone());
+    old_deps.encryption_key = zeroize::Zeroizing::new(retired_bytes);
+    let old_service = MfaService::new(old_deps);
+    let Ok((raw_secret, _codes, data)) = old_service.generate_setup_material() else {
+        return;
+    };
+    let stored_under_retired = data.encrypted_secret.clone();
+    assert!(
+        h.users
+            .update_mfa(
+                &uid,
+                bymax_auth_types::UpdateMfaData {
+                    mfa_enabled: true,
+                    mfa_secret: Some(stored_under_retired.clone()),
+                    mfa_recovery_codes: Some(data.hashed_codes),
+                },
+            )
+            .await
+            .is_ok()
+    );
+
+    let Some(mfa) = h.engine.mfa() else { return };
+    let Some(temp) = login_temp_token(&h.engine, "rot-abandon@example.com").await else {
+        return;
+    };
+
+    // The `disable` completes in the window the rewrite's own lock opens.
+    let gone = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    h.users.report_mfa_gone_when(gone.clone());
+    h.stores.raise_on_next_mfa_lock(gone);
+
+    let _ = mfa
+        .challenge(&temp, &raw_code(&raw_secret, now_secs()), "1.2.3.4", "ua")
+        .await;
+
+    // The rewrite did not put the removed factor back.
+    let after = h.users.find_by_id(&uid, None).await;
+    assert!(
+        matches!(&after, Ok(Some(u)) if !u.mfa_enabled),
+        "the abandoned rewrite must not have re-enrolled the account: {after:?}"
+    );
+}
+
+#[tokio::test]
+async fn an_mfa_state_change_kills_the_outstanding_access_tokens() {
+    // Enabling a second factor advances the token epoch: every access token issued before
+    // that moment is stamped `mfa_enabled: false`, and the MFA gate refuses only
+    // `mfa_enabled && !mfa_verified` — so without the bump a stolen access token keeps
+    // clearing every MFA-gated route for its remaining lifetime, at the exact moment the
+    // user enabled MFA because they suspected that theft. Disable applies the same rule in
+    // the other direction: an auth-state change revokes everything issued under the
+    // previous state, exactly as the password-reset flow does.
+    let Some(h) = build(true, false) else { return };
+    let input = crate::services::auth::RegisterInput {
+        email: "epoch@example.com".to_owned(),
+        name: "U".to_owned(),
+        password: PASSWORD.to_owned(),
+        tenant_id: TENANT.to_owned(),
+    };
+    let registered = h.engine.register(input, &ctx()).await;
+    let Ok(LoginResult::Success(auth)) = registered else {
+        return;
+    };
+    let uid = auth.user.id.clone();
+    let pre_enable_token = auth.access_token.clone();
+    assert!(
+        h.engine
+            .tokens()
+            .verify_access(&pre_enable_token)
+            .await
+            .is_ok()
+    );
+
+    // Enable MFA. Distinct TOTP steps per verification, as in the lifecycle test.
+    let Some(mfa) = h.engine.mfa() else { return };
+    let Ok(setup) = mfa.setup(&uid, MfaContext::Dashboard, Some(PASSWORD)).await else {
+        return;
+    };
+    let base = now_secs();
+    assert!(
+        mfa.verify_and_enable(
+            &uid,
+            &code_at(&setup.secret, base),
+            "1.2.3.4",
+            "ua",
+            MfaContext::Dashboard
+        )
+        .await
+        .is_ok()
+    );
+
+    // The pre-enable token is dead the moment the state changed — not fifteen minutes later.
+    assert!(
+        h.engine
+            .tokens()
+            .verify_access(&pre_enable_token)
+            .await
+            .is_err()
+    );
+
+    // A fresh login through the challenge mints a token stamped with the NEW epoch…
+    let Some(temp) = login_temp_token(&h.engine, "epoch@example.com").await else {
+        return;
+    };
+    let challenged = mfa
+        .challenge(&temp, &code_at(&setup.secret, base + 30), "1.2.3.4", "ua")
+        .await;
+    let Ok(LoginResultMfa::Dashboard(post_enable)) = challenged else {
+        return;
+    };
+    assert!(
+        h.engine
+            .tokens()
+            .verify_access(&post_enable.access_token)
+            .await
+            .is_ok()
+    );
+
+    // …and disabling bumps again, so that token dies with the state that minted it.
+    assert!(
+        mfa.disable(
+            &uid,
+            &code_at(&setup.secret, base + 60),
+            "1.2.3.4",
+            "ua",
+            MfaContext::Dashboard
+        )
+        .await
+        .is_ok()
+    );
+    assert!(
+        h.engine
+            .tokens()
+            .verify_access(&post_enable.access_token)
+            .await
+            .is_err()
+    );
+}
+
+#[tokio::test]
+async fn a_recovery_challenge_that_loses_the_temp_token_consume_issues_no_session() {
+    // The gate that keeps ONE recovery code and ONE temp token from minting TWO sessions. The
+    // recovery path has no `tu:` marker to fuse against (unlike TOTP), so it consumes the temp
+    // token standalone — and when that consume reported nothing, both concurrent challenges
+    // "succeeded". The losing store forces the interleaving directly: the in-memory repository
+    // serialises the recovery-code splice, so a spawned race resolves on the code instead and
+    // would pass with or without this gate.
+    let users = Arc::new(InMemoryUserRepository::new());
+    let inner = Arc::new(InMemoryStores::new());
+    let losing: Arc<dyn MfaStore> = Arc::new(LosingConsumeMfaStore {
+        inner: inner.clone(),
+    });
+
+    let created = users
+        .create(bymax_auth_types::CreateUserData {
+            email: "lose@example.com".to_owned(),
+            name: "L".to_owned(),
+            password_hash: Some("$scrypt$x".to_owned()),
+            role: Some("USER".to_owned()),
+            status: Some("ACTIVE".to_owned()),
+            tenant_id: TENANT.to_owned(),
+            email_verified: Some(true),
+        })
+        .await;
+    let Ok(user) = created else { return };
+
+    // Enrol with a known recovery code, digested exactly as the service digests one.
+    let mut deps = service_deps(losing.clone(), users.clone());
+    // The token manager needs MFA support over the SAME losing store, so the temp token it
+    // issues is readable and its consume is the one that loses.
+    deps.tokens = Arc::new(
+        TokenManagerService::new(
+            HsKey::from_bytes(b"0123456789abcdef0123456789abcdef"),
+            Vec::new(),
+            inner.clone(),
+            Duration::from_secs(900),
+            7,
+            Duration::from_secs(30),
+            0,
+        )
+        .with_mfa_support(crate::services::token_manager::MfaTokenSupport::new(
+            losing.clone(),
+        )),
+    );
+    let service = MfaService::new(deps);
+
+    let plain = "AAAA-BBBB-CCCC-DDDD-EEEE-FFFF";
+    let digest = crate::services::to_hex(&bymax_auth_crypto::mac::hmac_sha256(
+        &[9u8; 64],
+        plain.as_bytes(),
+    ));
+    let material = service.generate_setup_material();
+    let Ok((_, _, data)) = material else { return };
+    assert!(
+        users
+            .update_mfa(
+                &user.id,
+                bymax_auth_types::UpdateMfaData {
+                    mfa_enabled: true,
+                    mfa_secret: Some(data.encrypted_secret),
+                    mfa_recovery_codes: Some(vec![digest]),
+                },
+            )
+            .await
+            .is_ok()
+    );
+
+    let issued = service
+        .tokens
+        .issue_mfa_temp_token(&user.id, MfaContext::Dashboard)
+        .await;
+    let Ok(temp) = issued else { return };
+
+    // The code is valid and the token is present — only the consume loses. No session.
+    let outcome = service.challenge(&temp, plain, "1.2.3.4", "ua").await;
+    assert!(
+        matches!(outcome, Err(AuthError::MfaTempTokenInvalid)),
+        "a lost consume must issue no session, got {outcome:?}"
+    );
+}
+
+#[tokio::test]
+async fn one_recovery_code_cannot_be_spent_twice_even_with_two_temp_tokens() {
+    // Splicing a code out of the stored set is a read-modify-write against the CONSUMER's
+    // repository: two challenges landing together both read the array containing the code, both
+    // match it, and both write. The temp-token consume does not cover this — that gate is per
+    // token, and two logins hold two tokens. One code, two sessions, which is the one property
+    // a recovery code has. The claim in the store the engine owns is what closes it.
+    let users = Arc::new(InMemoryUserRepository::new());
+    let stores = Arc::new(InMemoryStores::new());
+    let created = users
+        .create(bymax_auth_types::CreateUserData {
+            email: "twice@example.com".to_owned(),
+            name: "T".to_owned(),
+            password_hash: Some("$scrypt$x".to_owned()),
+            role: Some("USER".to_owned()),
+            status: Some("ACTIVE".to_owned()),
+            tenant_id: TENANT.to_owned(),
+            email_verified: Some(true),
+        })
+        .await;
+    let Ok(user) = created else { return };
+
+    // The token manager needs MFA support over the SAME store, or the temp tokens it issues
+    // are not store-backed and no challenge can consume one.
+    let mfa_store: Arc<dyn MfaStore> = stores.clone();
+    let mut deps = service_deps(mfa_store.clone(), users.clone());
+    deps.tokens = Arc::new(
+        TokenManagerService::new(
+            HsKey::from_bytes(b"0123456789abcdef0123456789abcdef"),
+            Vec::new(),
+            stores.clone(),
+            Duration::from_secs(900),
+            7,
+            Duration::from_secs(30),
+            0,
+        )
+        .with_mfa_support(crate::services::token_manager::MfaTokenSupport::new(
+            mfa_store,
+        )),
+    );
+    let service = MfaService::new(deps);
+    let plain = "AAAA-BBBB-CCCC-DDDD-EEEE-FFFF";
+    let digest = crate::services::to_hex(&bymax_auth_crypto::mac::hmac_sha256(
+        &[9u8; 64],
+        plain.as_bytes(),
+    ));
+    let material = service.generate_setup_material();
+    let Ok((_, _, data)) = material else { return };
+    // The SAME digest stored twice, so the second challenge would still find a match after the
+    // first spliced one out — the shape a stale read produces, without needing real
+    // concurrency to reproduce it.
+    assert!(
+        users
+            .update_mfa(
+                &user.id,
+                bymax_auth_types::UpdateMfaData {
+                    mfa_enabled: true,
+                    mfa_secret: Some(data.encrypted_secret),
+                    mfa_recovery_codes: Some(vec![digest.clone(), digest]),
+                },
+            )
+            .await
+            .is_ok()
+    );
+
+    // Two temp tokens: two independent logins, so the per-token consume gate does not apply.
+    let Ok(first_token) = service
+        .tokens
+        .issue_mfa_temp_token(&user.id, MfaContext::Dashboard)
+        .await
+    else {
+        return;
+    };
+    let Ok(second_token) = service
+        .tokens
+        .issue_mfa_temp_token(&user.id, MfaContext::Dashboard)
+        .await
+    else {
+        return;
+    };
+
+    let first = service
+        .challenge(&first_token, plain, "1.2.3.4", "ua")
+        .await;
+    assert!(first.is_ok(), "the first use must succeed: {first:?}");
+
+    let second = service
+        .challenge(&second_token, plain, "1.2.3.4", "ua")
+        .await;
+    // The code is spent. It reads as an invalid code, which is what it now is.
+    assert!(
+        matches!(second, Err(AuthError::MfaInvalidCode)),
+        "a spent recovery code must not mint a second session, got {second:?}"
+    );
+}
+
+#[test]
+fn every_mfa_key_is_namespaced_by_identity_plane() {
+    // The two planes draw their ids from DIFFERENT consumer repositories, which may hand out
+    // the same string — sequential integers make it certain. Keyed on the id alone, a dashboard
+    // user and a platform admin sharing an id shared: the pending-enrolment record (so whoever
+    // called `verify_and_enable` second adopted the FIRST party's secret and recovery digests),
+    // the TOTP anti-replay marker, and both brute-force counters (so either could exhaust the
+    // other's lockout budget, or clear it).
+    //
+    // Everything else about the two planes is already separate — Redis prefixes, claim types,
+    // session indexes. This was the one place the isolation leaked.
+    let users = Arc::new(InMemoryUserRepository::new());
+    let service = service_over(Arc::new(InMemoryStores::new()), users);
+    let id = "1";
+
+    assert_ne!(
+        service.setup_key(MfaContext::Dashboard, id),
+        service.setup_key(MfaContext::Platform, id),
+        "a shared pending-enrolment record lets one plane adopt the other's secret"
+    );
+    assert_ne!(
+        service.replay_id(MfaContext::Dashboard, id, "123456"),
+        service.replay_id(MfaContext::Platform, id, "123456"),
+        "a shared anti-replay marker lets one plane burn the other's code"
+    );
+    assert_ne!(
+        service.challenge_bf_id(MfaContext::Dashboard, id),
+        service.challenge_bf_id(MfaContext::Platform, id),
+        "a shared challenge counter lets one plane lock the other out"
+    );
+    assert_ne!(
+        service.disable_bf_id(MfaContext::Dashboard, id),
+        service.disable_bf_id(MfaContext::Platform, id),
+        "a shared disable counter lets one plane lock the other out"
+    );
+
+    // The `challenge:` / `disable:` split still holds WITHIN a plane — the pre-auth counter an
+    // attacker can drive must not be able to exhaust the authenticated user's management
+    // budget.
+    assert_ne!(
+        service.challenge_bf_id(MfaContext::Dashboard, id),
+        service.disable_bf_id(MfaContext::Dashboard, id)
+    );
+
+    // And the plane component is the wire name, so nest-auth derives the same key.
+    assert_eq!(MfaContext::Dashboard.as_str(), "dashboard");
+    assert_eq!(MfaContext::Platform.as_str(), "platform");
+}
+
+#[tokio::test]
+async fn enrolment_re_authenticates_against_the_account_password() {
+    // Enabling MFA changes how the account authenticates, and an access token alone is not
+    // proof of who is asking: a token lifted by XSS or from a shared machine could otherwise
+    // enrol an authenticator the attacker holds — and the enable then revokes every session
+    // and bumps the epoch, locking the real owner out of an account they still know the
+    // password to, with the recovery codes displayed only to the attacker. ASVS requires
+    // re-authentication before an authentication factor changes; `disable` already demanded a
+    // TOTP code, and this closes the other half.
+    let users = Arc::new(InMemoryUserRepository::new());
+    let password = "correct horse battery staple";
+    let params = bymax_auth_crypto::password::PasswordParams::default();
+    let Ok(hash) = bymax_auth_crypto::password::hash(password.as_bytes(), &params) else {
+        return;
+    };
+
+    let created = users
+        .create(bymax_auth_types::CreateUserData {
+            email: "reauth@example.com".to_owned(),
+            name: "R".to_owned(),
+            password_hash: Some(hash),
+            role: Some("USER".to_owned()),
+            status: Some("ACTIVE".to_owned()),
+            tenant_id: TENANT.to_owned(),
+            email_verified: Some(true),
+        })
+        .await;
+    let Ok(user) = created else { return };
+    let service = service_over(Arc::new(InMemoryStores::new()), users);
+
+    // No password, and the wrong password, are both refused — with the same error a failed
+    // login returns, so an attacker holding a stolen token learns nothing new.
+    for attempt in [None, Some("wrong")] {
+        let refused = service
+            .setup(&user.id, MfaContext::Dashboard, attempt)
+            .await;
+        assert!(
+            matches!(refused, Err(AuthError::InvalidCredentials)),
+            "enrolment must refuse {attempt:?}, got {refused:?}"
+        );
+    }
+
+    // The correct password enrols.
+    let allowed = service
+        .setup(&user.id, MfaContext::Dashboard, Some(password))
+        .await;
+    assert!(
+        allowed.is_ok(),
+        "the right password must enrol, got {allowed:?}"
+    );
+}
+
+#[tokio::test]
+async fn enrolment_skips_re_authentication_for_an_account_with_no_password() {
+    // An account provisioned purely through OAuth has no local password. There is nothing to
+    // re-authenticate against, and refusing would make MFA unreachable for those users — their
+    // credential belongs to the provider, which this engine cannot re-verify inline.
+    let users = Arc::new(InMemoryUserRepository::new());
+    let Some(uid) = seed_user(&users, "oauthonly@example.com").await else {
+        return;
+    };
+    let service = service_over(Arc::new(InMemoryStores::new()), users);
+
+    let enrolled = service.setup(&uid, MfaContext::Dashboard, None).await;
+    assert!(
+        enrolled.is_ok(),
+        "an account with no password must still be able to enrol, got {enrolled:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_platform_recovery_challenge_that_loses_the_consume_issues_no_session() {
+    // The platform twin of the dashboard gate. Both planes run the recovery path with a
+    // standalone temp-token consume — no `tu:` marker to fuse against — so both need the
+    // deletion to WIN before a session is issued. The dashboard one was gated first and this
+    // one was missed, which is exactly the shape a per-plane copy of a rule tends to take.
+    let users = Arc::new(InMemoryUserRepository::new());
+    let admins = Arc::new(InMemoryPlatformUserRepository::new());
+    let inner = Arc::new(InMemoryStores::new());
+    let losing: Arc<dyn MfaStore> = Arc::new(LosingConsumeMfaStore {
+        inner: inner.clone(),
+    });
+
+    let plain = "AAAA-BBBB-CCCC-DDDD-EEEE-FFFF";
+    let digest = crate::services::to_hex(&bymax_auth_crypto::mac::hmac_sha256(
+        &[9u8; 64],
+        plain.as_bytes(),
+    ));
+
+    let mut deps = service_deps(losing.clone(), users);
+    deps.platform_repo = Some(admins.clone());
+    deps.tokens = Arc::new(
+        TokenManagerService::new(
+            HsKey::from_bytes(b"0123456789abcdef0123456789abcdef"),
+            Vec::new(),
+            inner.clone(),
+            Duration::from_secs(900),
+            7,
+            Duration::from_secs(30),
+            0,
+        )
+        .with_mfa_support(crate::services::token_manager::MfaTokenSupport::new(
+            losing.clone(),
+        )),
+    );
+    let service = MfaService::new(deps);
+
+    let material = service.generate_setup_material();
+    let Ok((_, _, data)) = material else { return };
+    admins.insert(AuthPlatformUser {
+        id: "plose".to_owned(),
+        email: "plose@example.com".to_owned(),
+        name: "Admin".to_owned(),
+        password_hash: admin_password_hash(),
+        role: "SUPER_ADMIN".to_owned(),
+        status: "ACTIVE".to_owned(),
+        mfa_enabled: true,
+        mfa_secret: Some(data.encrypted_secret),
+        mfa_recovery_codes: Some(vec![digest]),
+        platform_id: None,
+        last_login_at: None,
+        updated_at: OffsetDateTime::UNIX_EPOCH,
+        created_at: OffsetDateTime::UNIX_EPOCH,
+    });
+
+    let issued = service
+        .tokens
+        .issue_mfa_temp_token("plose", MfaContext::Platform)
+        .await;
+    let Ok(temp) = issued else { return };
+
+    let outcome = service.challenge(&temp, plain, "1.2.3.4", "ua").await;
+    assert!(
+        matches!(outcome, Err(AuthError::MfaTempTokenInvalid)),
+        "a lost consume must issue no platform session, got {outcome:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_platform_recovery_code_is_claimed_before_it_is_accepted() {
+    // The platform twin of the double-spend gate. Splicing a code out is a read-modify-write
+    // against the consumer's platform repository, so two challenges landing together both read
+    // the array containing it, both match, and both write — and the per-token consume does not
+    // cover it, because two logins hold two tokens. This is the plane where a spent code buys
+    // the most.
+    let users = Arc::new(InMemoryUserRepository::new());
+    let admins = Arc::new(InMemoryPlatformUserRepository::new());
+    let stores = Arc::new(InMemoryStores::new());
+    let mfa_store: Arc<dyn MfaStore> = stores.clone();
+
+    let plain = "AAAA-BBBB-CCCC-DDDD-EEEE-FFFF";
+    let digest = crate::services::to_hex(&bymax_auth_crypto::mac::hmac_sha256(
+        &[9u8; 64],
+        plain.as_bytes(),
+    ));
+
+    let mut deps = service_deps(mfa_store.clone(), users);
+    deps.platform_repo = Some(admins.clone());
+    deps.tokens = Arc::new(
+        TokenManagerService::new(
+            HsKey::from_bytes(b"0123456789abcdef0123456789abcdef"),
+            Vec::new(),
+            stores.clone(),
+            Duration::from_secs(900),
+            7,
+            Duration::from_secs(30),
+            0,
+        )
+        .with_mfa_support(crate::services::token_manager::MfaTokenSupport::new(
+            mfa_store,
+        )),
+    );
+    let service = MfaService::new(deps);
+
+    let material = service.generate_setup_material();
+    let Ok((_, _, data)) = material else { return };
+    // The same digest twice, so the second challenge still finds a match after the first
+    // spliced one out — the shape a stale read produces, without needing real concurrency.
+    admins.insert(AuthPlatformUser {
+        id: "ptwice".to_owned(),
+        email: "ptwice@example.com".to_owned(),
+        name: "Admin".to_owned(),
+        password_hash: admin_password_hash(),
+        role: "SUPER_ADMIN".to_owned(),
+        status: "ACTIVE".to_owned(),
+        mfa_enabled: true,
+        mfa_secret: Some(data.encrypted_secret),
+        mfa_recovery_codes: Some(vec![digest.clone(), digest]),
+        platform_id: None,
+        last_login_at: None,
+        updated_at: OffsetDateTime::UNIX_EPOCH,
+        created_at: OffsetDateTime::UNIX_EPOCH,
+    });
+
+    let Ok(first_token) = service
+        .tokens
+        .issue_mfa_temp_token("ptwice", MfaContext::Platform)
+        .await
+    else {
+        return;
+    };
+    let first = service
+        .challenge(&first_token, plain, "1.2.3.4", "ua")
+        .await;
+    assert!(first.is_ok(), "the first use must succeed: {first:?}");
+
+    let Ok(second_token) = service
+        .tokens
+        .issue_mfa_temp_token("ptwice", MfaContext::Platform)
+        .await
+    else {
+        return;
+    };
+    let second = service
+        .challenge(&second_token, plain, "1.2.3.4", "ua")
+        .await;
+    assert!(
+        matches!(second, Err(AuthError::MfaInvalidCode)),
+        "a spent platform recovery code must not mint a second session, got {second:?}"
+    );
 }

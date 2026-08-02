@@ -6,22 +6,11 @@ use async_trait::async_trait;
 use bymax_auth_core::traits::{OtpPurpose, OtpStore};
 use bymax_auth_crypto::compare::constant_time_eq;
 use bymax_auth_types::AuthError;
-use redis::AsyncCommands;
-use serde::{Deserialize, Serialize};
 
 use crate::error::RedisStoreError;
 use crate::keys::Prefix;
 use crate::pool::RedisStores;
 use crate::script;
-
-/// The stored `otp:` record: the code plus the running failed-attempt counter.
-#[derive(Serialize, Deserialize)]
-struct OtpRecord {
-    /// The issued one-time code.
-    code: String,
-    /// Failed-verification attempts so far (bumped atomically by the Lua script).
-    attempts: u32,
-}
 
 /// The `otp_verify` reply tag for an absent record (TTL elapsed).
 const TAG_EXPIRED: &str = "EXPIRED";
@@ -68,13 +57,22 @@ impl RedisStores {
         let key = self
             .keys()
             .key(Prefix::Otp, &purpose_segment(purpose, identifier));
-        let record = OtpRecord {
-            code: code.to_owned(),
-            attempts: 0,
-        };
-        let json = serde_json::to_string(&record)?;
+        // A HASH of `code` + `attempts`, not a JSON string: the verify script bumps the
+        // counter with `HINCRBY`, which is what lets "check the ceiling, compare, bump or
+        // consume" be one atomic step without decoding anything — and leaves the TTL alone, so
+        // a wrong guess cannot extend the OTP's lifetime. Written in a transaction so the
+        // record never exists without its expiry.
         let mut conn = self.connection().await?;
-        conn.set_ex::<_, _, ()>(&key, json, ttl_secs).await?;
+        redis::pipe()
+            .atomic()
+            .hset(&key, "code", code)
+            .ignore()
+            .hset(&key, "attempts", 0)
+            .ignore()
+            .expire(&key, i64::try_from(ttl_secs).unwrap_or(i64::MAX))
+            .ignore()
+            .query_async::<()>(&mut conn)
+            .await?;
         Ok(())
     }
 
@@ -203,16 +201,27 @@ mod tests {
     }
 
     #[test]
-    fn otp_record_serializes_code_and_attempts() {
-        // The stored record carries the code and a zeroed counter, the shape the Lua decodes.
-        let json = serde_json::to_string(&OtpRecord {
-            code: "123456".to_owned(),
-            attempts: 0,
-        })
-        .unwrap_or_default();
-        assert!(json.contains("\"code\":\"123456\""));
-        assert!(json.contains("\"attempts\":0"));
-        let back: Result<OtpRecord, _> = serde_json::from_str(&json);
-        assert!(matches!(back, Ok(r) if r.attempts == 0));
+    fn the_verify_script_bumps_in_place_and_never_extends_the_ttl() {
+        // Static guard on the shared script. The bump must be an in-place `HINCRBY`: computing
+        // it in the caller is the race the HASH form exists to close (N concurrent guesses each
+        // read the same counter and each write back 1, so the ceiling is exceeded by simply
+        // submitting in parallel), and re-writing the record would reset the TTL, letting a
+        // wrong guess buy extra OTP lifetime. The ceiling is checked BEFORE the comparison so
+        // an exhausted record cannot be probed further.
+        let source = include_str!("../lua/otp_verify.lua");
+        assert!(source.contains("redis.call('HINCRBY', KEYS[1], 'attempts', 1)"));
+        // No `cjson` in the executable body — the comment block explains why it left, and the
+        // in-memory Redis the nest-auth end-to-end tier runs against does not provide it.
+        let body: String = source
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("--"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(!body.contains("cjson"));
+        let ceiling = source.find("attempts >= tonumber(ARGV[2])");
+        let compare = source.find("code == ARGV[1]");
+        assert!(matches!((ceiling, compare), (Some(c), Some(k)) if c < k));
+        // A match consumes the record, so a correct code is single-use.
+        assert!(source.contains("redis.call('DEL', KEYS[1])"));
     }
 }

@@ -52,6 +52,30 @@ pub(crate) fn internal_error(context: &'static str) -> AuthError {
     AuthError::Internal(context.into())
 }
 
+/// Read `identifierPreimages.{name}` from the shared cross-implementation wire contract and
+/// return just the template inside the quotes.
+///
+/// The file at `conformance/wire-contract.json` is held byte-identical by nest-auth, which
+/// can back the same deployment over the same Redis. Reading it here rather than repeating
+/// its values means a preimage change on either side turns that side red immediately,
+/// instead of surfacing later as counters and records that silently stopped being shared.
+#[cfg(test)]
+pub(crate) fn contract_preimage(name: &str) -> String {
+    let path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../conformance/wire-contract.json"
+    );
+    let raw = std::fs::read_to_string(path).unwrap_or_default();
+    let root: serde_json::Value = serde_json::from_str(&raw).unwrap_or(serde_json::Value::Null);
+    let rendered = root
+        .get("identifierPreimages")
+        .and_then(|s| s.get(name))
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default();
+    // `hmac_sha256(hmacKey, '<template>')` — take what is between the single quotes.
+    rendered.split('\'').nth(1).unwrap_or_default().to_owned()
+}
+
 /// Lower-case hex-encode a byte slice. Used to render a digest (a SHA-256 / HMAC-SHA-256
 /// output) into the no-PII identifier form a store key uses.
 pub(crate) fn to_hex(bytes: &[u8]) -> String {
@@ -92,15 +116,25 @@ pub(crate) fn now_offset() -> OffsetDateTime {
     OffsetDateTime::now_utc()
 }
 
-/// The fixed shape of an engine-issued opaque refresh token: exactly 64 lower-case hex
-/// characters (256 bits, the `generate_secure_token(32)` output). Checking the shape before
-/// hashing rejects an oversized or malformed value cheaply — without an allocation and a
-/// SHA-256 over an unbounded input — and such a value could never match a stored hash anyway.
+/// Whether `raw` could be a refresh token this deployment would have issued.
+///
+/// The current shape is exactly 64 lower-case hex characters (256 bits, the
+/// `generate_secure_token(32)` output). Checking before hashing rejects an oversized or
+/// malformed value cheaply — no allocation and no SHA-256 over unbounded input — and such a
+/// value could never match a stored hash anyway.
+///
 pub(crate) fn is_refresh_token_shape(raw: &str) -> bool {
-    raw.len() == 64
-        && raw
-            .bytes()
-            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    is_hex_token_shape(raw)
+}
+
+/// The current shape: 64 lower-case hex characters.
+fn is_hex_token_shape(raw: &str) -> bool {
+    raw.len() == 64 && raw.bytes().all(is_lower_hex)
+}
+
+/// Whether `byte` is a lower-case hexadecimal digit.
+fn is_lower_hex(byte: u8) -> bool {
+    byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)
 }
 
 #[cfg(test)]
@@ -120,6 +154,25 @@ mod tests {
     }
 
     #[test]
+    fn is_refresh_token_shape_rejects_anything_but_64_hex() {
+        // A UUID is not a refresh token: the shape is 64 lower-case hex characters and
+        // nothing else, so a dash in any position, an upper-case digit, a non-hex character
+        // and a wrong length are all refused before any hashing happens.
+        assert!(!is_refresh_token_shape(
+            "111111112-222-4333-8444-555555555555"
+        ));
+        assert!(!is_refresh_token_shape(
+            "11111111-2222-4333-8444-55555555555Z"
+        ));
+        assert!(!is_refresh_token_shape(
+            "AAAAAAAA-2222-4333-8444-555555555555"
+        ));
+        assert!(!is_refresh_token_shape(
+            "11111111-2222-4333-8444-5555555555"
+        ));
+    }
+
+    #[test]
     fn to_hex_encodes_lowercase_two_chars_per_byte() {
         // The encoder must be lower-case and fixed-width — the identifier/key contract.
         assert_eq!(to_hex(&[0x00, 0x0f, 0xa0, 0xff]), "000fa0ff");
@@ -130,22 +183,27 @@ mod tests {
     fn new_uuid_v4_has_the_canonical_version_4_layout() {
         // 8-4-4-4-12 hyphenation, the version nibble pinned to '4', and the variant nibble
         // in {8,9,a,b} — the structural proof a minted value is a v4 UUID (§24 invariant 2).
-        let id = new_uuid_v4();
-        assert_eq!(id.len(), 36);
-        let bytes = id.as_bytes();
-        assert_eq!(bytes[8], b'-');
-        assert_eq!(bytes[13], b'-');
-        assert_eq!(bytes[18], b'-');
-        assert_eq!(bytes[23], b'-');
-        assert_eq!(bytes[14], b'4', "version nibble must be 4");
-        assert!(
-            matches!(bytes[19], b'8' | b'9' | b'a' | b'b'),
-            "variant nibble"
-        );
-        assert!(
-            id.bytes()
-                .all(|c| c == b'-' || (c.is_ascii_hexdigit() && !c.is_ascii_uppercase()))
-        );
+        // Drawn repeatedly rather than once: the version and variant nibbles are forced on
+        // top of CSPRNG bytes, so a masking bug leaves them correct for a good fraction of
+        // draws. A single sample would pass by luck.
+        for _ in 0..64 {
+            let id = new_uuid_v4();
+            assert_eq!(id.len(), 36);
+            let bytes = id.as_bytes();
+            assert_eq!(bytes[8], b'-');
+            assert_eq!(bytes[13], b'-');
+            assert_eq!(bytes[18], b'-');
+            assert_eq!(bytes[23], b'-');
+            assert_eq!(bytes[14], b'4', "version nibble must be 4: {id}");
+            assert!(
+                matches!(bytes[19], b'8' | b'9' | b'a' | b'b'),
+                "variant nibble: {id}"
+            );
+            assert!(
+                id.bytes()
+                    .all(|c| c == b'-' || (c.is_ascii_hexdigit() && !c.is_ascii_uppercase()))
+            );
+        }
         // Two successive draws differ (CSPRNG).
         assert_ne!(new_uuid_v4(), new_uuid_v4());
     }

@@ -85,8 +85,19 @@ pub struct OAuthProfile {
     pub provider: String,
     /// The opaque, stable user id within the provider.
     pub provider_id: String,
-    /// The verified email address.
+    /// The email address the provider returned.
     pub email: String,
+    /// Whether the provider asserts it has verified that address.
+    ///
+    /// A provider MUST report what it actually said, not what would be convenient. The account
+    /// created from an unverified address belongs to whoever controls the OAuth account, not to
+    /// whoever controls the mailbox — and if the engine marks it verified anyway, the consumer's
+    /// "this email is proven" invariant is false from the first login.
+    ///
+    /// The bundled Google provider refuses an unverified profile outright, so it always reports
+    /// `true`. Providers that hand back unverified addresses (GitHub, among others) must report
+    /// `false` and leave the consumer's own verification flow to do its job.
+    pub email_verified: bool,
     /// Display name; providers that omit it leave `None`, and the engine derives a
     /// fallback from the email local-part on account creation.
     pub name: Option<String>,

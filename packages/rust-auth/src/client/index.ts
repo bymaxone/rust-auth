@@ -345,12 +345,12 @@ export function createAuthClient(config: AuthClientConfig): AuthClient {
     },
     refresh: async () =>
       readJson<AuthResult>(await authFetch(routes.refresh, { method: "POST" })),
-    getMe: async () => {
-      const wrapper = await readJson<{ user: AuthUserClient }>(
-        await authFetch(routes.me, { method: "GET" }),
-      );
-      return wrapper.user;
-    },
+    // `GET /auth/me` answers with the bare user object, not a `{ user }` envelope — see
+    // `user_body` in the axum adapter. Unwrapping a key the server does not send returned
+    // `undefined` while every other signal said "authenticated", so `AuthProvider` reported a
+    // session with no user and a consumer reading `user.role` threw on a perfectly good login.
+    getMe: async () =>
+      readJson<AuthUserClient>(await authFetch(routes.me, { method: "GET" })),
     mfaChallenge: async (tempToken, code) =>
       readJson<AuthResult>(
         await authFetch(routes.mfaChallenge, jsonPost({ mfaTempToken: tempToken, code })),

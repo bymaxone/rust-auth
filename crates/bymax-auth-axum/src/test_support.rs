@@ -55,6 +55,7 @@ pub(crate) fn scaffold(delivery: TokenDelivery) -> Option<Scaffold> {
     ]));
     config.platform.enabled = true;
     config.mfa = Some(MfaConfig {
+        previous_encryption_keys: Vec::new(),
         encryption_key: SecretString::from(mfa_key()),
         issuer: "Bymax".to_owned(),
         recovery_code_count: 8,
@@ -98,6 +99,18 @@ pub(crate) fn resolved_config_with(
             mfa_temp_path: "/auth/mfa".to_owned(),
             secure: true,
             same_site,
+            // Tracks what validation permits rather than being set unconditionally. A
+            // non-empty allowlist under `Lax`/`Strict` with no shared cookie domain is refused
+            // at startup (`ConfigError::TrustedOriginsUnused`), so a fixture that always set
+            // one built a config no deployment can hold — and a unit test over an unreachable
+            // config proves nothing about the reachable ones.
+            trusted_origins: match same_site {
+                bymax_auth_core::config::SameSite::None => {
+                    vec!["https://app.example.com".to_owned()]
+                }
+                bymax_auth_core::config::SameSite::Lax
+                | bymax_auth_core::config::SameSite::Strict => Vec::new(),
+            },
             access_max_age_secs: 900,
             refresh_max_age_secs: 604_800,
         },
@@ -114,7 +127,7 @@ fn mfa_key() -> String {
 /// Seed an active dashboard user with the given role; returns its id.
 pub(crate) async fn seed(users: &InMemoryUserRepository, email: &str, role: &str) -> String {
     let params = bymax_auth_crypto::password::PasswordParams::default();
-    let hash = bymax_auth_crypto::password::hash(b"password123", &params).unwrap_or_default();
+    let hash = bymax_auth_crypto::password::hash(b"glidingwalnut42", &params).unwrap_or_default();
     let created = users
         .create(CreateUserData {
             email: email.to_owned(),

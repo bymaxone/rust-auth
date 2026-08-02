@@ -112,6 +112,24 @@ async fn standalone_replay_marker_rejects_a_second_use() {
         stores.mark_totp_used("replay-id", 90).await,
         Ok(false)
     ));
+
+    // The recovery-code claim is the same primitive over its own keyspace: first caller wins,
+    // every other reads as already spent. Two challenges racing one code is how a single-use
+    // recovery code mints two sessions, and the repository splice cannot stop it.
+    assert!(matches!(
+        stores.claim_recovery_code("claim-id", 300).await,
+        Ok(true)
+    ));
+    assert!(matches!(
+        stores.claim_recovery_code("claim-id", 300).await,
+        Ok(false)
+    ));
+    // …and the two keyspaces are distinct: an id already marked as a TOTP replay is still
+    // claimable as a recovery code, or one would silently spend the other.
+    assert!(matches!(
+        stores.claim_recovery_code("replay-id", 300).await,
+        Ok(true)
+    ));
 }
 
 #[tokio::test]

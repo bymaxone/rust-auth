@@ -9,11 +9,13 @@ use super::*;
 
 #[test]
 fn default_params_are_scrypt_at_the_baseline() {
-    // The default writer is scrypt at the nest-auth baseline (N=2^15, r=8, p=1) — the
-    // drop-in parity posture the library promises out of the box.
+    // The default writer is scrypt at OWASP's recommended minimum (N=2^17, r=8, p=1), which
+    // nest-auth also defaults to — the drop-in parity posture the library promises out of the
+    // box. Pinned to the literal: read back through `ScryptParams::default()` this would agree
+    // with itself no matter what the number became.
     let params = PasswordParams::default();
     assert_eq!(params.active, PasswordAlgorithm::Scrypt);
-    assert_eq!(params.scrypt.cost_factor, 1 << 15);
+    assert_eq!(params.scrypt.cost_factor, 1 << 17);
     assert_eq!(params.scrypt.block_size, 8);
     assert_eq!(params.scrypt.parallelization, 1);
 }
@@ -50,14 +52,6 @@ mod scrypt_tests {
     use super::*;
     use proptest::prelude::*;
 
-    /// A correct password and an independently computed legacy `scrypt:hex:hex` vector
-    /// (Python `hashlib.scrypt`, N=2^15, r=8, p=1, 32-byte key) — an external KAT
-    /// proving the legacy verifier reproduces nest-auth's stored format rather than
-    /// just agreeing with itself.
-    const LEGACY_PASSWORD: &[u8] = b"correct horse battery staple";
-    const LEGACY_HASH: &str = "scrypt:6e6573742d617574682d6c6567616379:\
-                               f07791588511498573e76f19c5ec479c2fdbd3340e2e1a9e1c817bb0aacbdadf";
-
     #[test]
     fn scrypt_hash_round_trips() {
         // A scrypt hash is a `$scrypt$` PHC string that verifies for the right password
@@ -83,43 +77,6 @@ mod scrypt_tests {
     }
 
     #[test]
-    fn legacy_scrypt_hash_verifies_against_external_vector() {
-        // The legacy `scrypt:hex:hex` corpus verifies (external KAT) for the right
-        // password and rejects a wrong one — the migration-compatibility guarantee.
-        assert!(matches!(verify(LEGACY_PASSWORD, LEGACY_HASH), Ok(true)));
-        assert!(matches!(verify(b"wrong password", LEGACY_HASH), Ok(false)));
-    }
-
-    #[test]
-    fn legacy_hash_is_always_stale() {
-        // A legacy hash always reports needs_rehash → true so the next successful login
-        // transparently upgrades it to a PHC string.
-        assert!(needs_rehash(LEGACY_HASH, &PasswordParams::default()));
-    }
-
-    #[test]
-    fn legacy_parser_rejects_malformed_hex_and_shapes() {
-        // Malformed legacy strings (odd-length hex, non-hex chars, a too-short or
-        // over-long derived key, extra/empty segments) must not verify — exercises the
-        // hex decoder, the length cap, and the short-key KDF guard.
-        assert!(matches!(verify(b"pw", "scrypt:abc:00"), Ok(false))); // odd-length salt hex
-        assert!(matches!(verify(b"pw", "scrypt:zz:00"), Ok(false))); // first nibble non-hex
-        assert!(matches!(verify(b"pw", "scrypt:az:00"), Ok(false))); // second nibble non-hex
-        assert!(matches!(verify(b"pw", "scrypt:aa:00"), Ok(false))); // 1-byte key < KDF min
-        assert!(matches!(verify(b"pw", "scrypt:aa:bb:cc"), Ok(false))); // extra segment
-        assert!(matches!(verify(b"pw", "scrypt::00"), Ok(false))); // empty salt
-        assert!(matches!(verify(b"pw", "scrypt:aa:"), Ok(false))); // empty hash
-        assert!(matches!(verify(b"pw", "scrypt:aa:zz"), Ok(false))); // valid salt, non-hex hash
-        assert!(matches!(verify(b"pw", "scrypt:no-second-colon"), Ok(false))); // single segment
-        let over_long = format!("scrypt:aa:{}", "ab".repeat(65)); // 65-byte key > cap
-        assert!(matches!(verify(b"pw", &over_long), Ok(false)));
-        // Upper-case hex must decode (exercises the A–F branch of the nibble decoder);
-        // the recomputed KDF then rejects the wrong password.
-        let upper = format!("scrypt:AABBCCDD:{}", "AB".repeat(32));
-        assert!(matches!(verify(b"pw", &upper), Ok(false)));
-    }
-
-    #[test]
     fn needs_rehash_is_false_for_a_current_scrypt_hash() {
         // A hash written with the current params is not stale — rehash-on-verify must
         // not fire pointlessly on an up-to-date hash.
@@ -134,7 +91,7 @@ mod scrypt_tests {
         let phc = hash(b"pw", &PasswordParams::default()).unwrap_or_default();
         let stronger = PasswordParams {
             scrypt: ScryptParams {
-                cost_factor: 1 << 16,
+                cost_factor: 1 << 18,
                 ..ScryptParams::default()
             },
             ..PasswordParams::default()
@@ -189,6 +146,18 @@ mod scrypt_tests {
             .is_err()
         );
         assert!(ScryptParams::default().validate().is_ok());
+        // The floor is inclusive: 2^14 is the documented minimum, not the first rejected
+        // value. Only a config sitting exactly on it separates `<` from `<=`, and refusing it
+        // would reject the very parameters the constant advertises.
+        assert!(
+            ScryptParams {
+                cost_factor: ScryptParams::MIN_COST_FACTOR,
+                ..ScryptParams::default()
+            }
+            .validate()
+            .is_ok()
+        );
+        assert_eq!(ScryptParams::MIN_COST_FACTOR, 16_384);
 
         let weak = PasswordParams {
             scrypt: ScryptParams {

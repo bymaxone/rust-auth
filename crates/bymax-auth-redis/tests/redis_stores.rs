@@ -22,9 +22,9 @@ use bymax_auth_core::services::auth::{
 use bymax_auth_core::services::auth::{LoginInput, RegisterInput};
 use bymax_auth_core::testing::InMemoryUserRepository;
 use bymax_auth_core::traits::{
-    BruteForceStore, InvitationStore, OtpPurpose, OtpStore, PasswordResetStore, ResetContext,
-    RotateOutcome, SessionKind, SessionRecord, SessionRotation, SessionStore, StoredInvitation,
-    UserRepository, WsTicketSnapshot, WsTicketStore,
+    BruteForceStore, EmailChangeContext, InvitationStore, OtpPurpose, OtpStore, PasswordResetStore,
+    ResetContext, RotateOutcome, SessionKind, SessionRecord, SessionRotation, SessionStore,
+    StoredInvitation, UserRepository, WsTicketSnapshot, WsTicketStore,
 };
 use bymax_auth_core::{AuthConfig, AuthEngine, Environment};
 use bymax_auth_types::{AuthError, LoginResult};
@@ -34,6 +34,15 @@ use time::OffsetDateTime;
 /// A dashboard/platform session record for the given user. All of a user's sessions share one
 /// family here, so a rotation (whose `new_record` is `record(user)`) inherits it and the whole
 /// lineage stays revocable together.
+/// `sha256(token)` in lowercase hex — the form every opaque-token keyspace is keyed by, and
+/// the value the invitee index points at.
+fn token_hash(token: &str) -> String {
+    bymax_auth_crypto::mac::sha256(token.as_bytes())
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
 fn record(user: &str) -> SessionRecord {
     SessionRecord {
         user_id: user.to_owned(),
@@ -42,7 +51,9 @@ fn record(user: &str) -> SessionRecord {
         device: "Chrome on macOS".to_owned(),
         ip: "203.0.113.4".to_owned(),
         created_at: OffsetDateTime::UNIX_EPOCH,
+        mfa_enabled: false,
         family_id: format!("fam-{user}"),
+        family_created_at: Some(OffsetDateTime::UNIX_EPOCH),
     }
 }
 
@@ -160,6 +171,142 @@ async fn session_create_rotate_grace_revoke_and_blacklist() {
     ));
 }
 
+/// `recover_grace.lua` refuses the write when either witness is already gone.
+///
+/// This is the script the whole grace-recovery race turns on, and it was reachable only through
+/// the in-memory twin — which has no namespace and no Lua, so it cannot disagree with the real
+/// store the way the real store can disagree with itself. That is not hypothetical: the sweep
+/// in this same commit built its key from the index member without the namespace and therefore
+/// deleted nothing, and only a test against a real Redis could see it. The three cases here are
+/// the script's whole contract.
+#[tokio::test]
+async fn a_grace_recovery_is_refused_once_either_witness_is_gone() {
+    let Some(redis) = common::try_start().await else {
+        return;
+    };
+    let Some(stores) = redis.stores() else { return };
+    let kind = SessionKind::Dashboard;
+
+    // (1) Both witnesses present: the write lands, and every key it owes is there.
+    assert!(
+        stores
+            .create_session(kind, "w1", &record("wu"), 3600)
+            .await
+            .is_ok()
+    );
+    let written = stores
+        .create_recovered_session(kind, "w2", &record("wu"), 3600)
+        .await;
+    assert!(matches!(written, Ok(true)), "{written:?}");
+    assert!(redis.ttl("auth:rt:w2").await > 0, "the session record");
+    assert!(redis.ttl("auth:sd:w2").await > 0, "the detail record");
+    let members = redis.smembers("auth:sess:wu").await;
+    assert!(members.iter().any(|m| m == "rt:w2"), "index: {members:?}");
+    let family = redis.smembers("auth:fam:fam-wu").await;
+    assert!(family.iter().any(|m| m == "w2"), "family: {family:?}");
+
+    // (2) The per-user index is gone — the witness `invalidate_user_sessions` deletes once it
+    // has emptied the set, so its absence IS "a revoke-all has run". Nothing is written.
+    assert!(redis.del("auth:sess:wu").await);
+    let swept = stores
+        .create_recovered_session(kind, "w3", &record("wu"), 3600)
+        .await;
+    assert!(matches!(swept, Ok(false)), "{swept:?}");
+    assert_eq!(redis.ttl("auth:rt:w3").await, -2, "nothing may be written");
+
+    // (3) The index is back but the LINEAGE is gone — the shape reuse detection leaves behind.
+    // A recovery into a revoked family would hand back the login the detection just killed.
+    assert!(
+        stores
+            .create_session(kind, "w4", &record("wu"), 3600)
+            .await
+            .is_ok()
+    );
+    assert!(redis.del("auth:fam:fam-wu").await);
+    let orphaned = stores
+        .create_recovered_session(kind, "w5", &record("wu"), 3600)
+        .await;
+    assert!(matches!(orphaned, Ok(false)), "{orphaned:?}");
+    assert_eq!(redis.ttl("auth:rt:w5").await, -2, "nothing may be written");
+}
+
+/// `sweep_grace_pointers` removes every `rp:` the user's session index names, and takes each
+/// out of the index as it goes.
+///
+/// The grace pointer is what lets a rotation that lost a race still recover, so a "log out
+/// everywhere" that deletes the live sessions and leaves the pointers behind leaves a way back
+/// in: the next replay of a consumed token finds its pointer, recovers, and mints a session on
+/// an account the user was told had been swept. The engine calls this before the revoke so the
+/// two cannot disagree.
+#[tokio::test]
+async fn sweep_grace_pointers_clears_every_pointer_and_its_index_entry() {
+    let Some(redis) = common::try_start().await else {
+        return;
+    };
+    let Some(stores) = redis.stores() else { return };
+    let kind = SessionKind::Dashboard;
+
+    // Two live sessions for one user, each rotated so each leaves a grace pointer behind.
+    for (old, new) in [("g1", "g2"), ("g3", "g4")] {
+        assert!(
+            stores
+                .create_session(kind, old, &record("gu"), 3600)
+                .await
+                .is_ok()
+        );
+        assert!(matches!(
+            stores.rotate(kind, &rotation(old, new, "gu")).await,
+            Ok(RotateOutcome::Rotated(_))
+        ));
+    }
+
+    // Both pointers exist and both are named by the user's session index.
+    assert!(redis.ttl("auth:rp:g1").await > 0);
+    assert!(redis.ttl("auth:rp:g3").await > 0);
+    let before = redis.smembers("auth:sess:gu").await;
+    assert!(before.iter().any(|m| m == "rp:g1"), "index: {before:?}");
+    assert!(before.iter().any(|m| m == "rp:g3"), "index: {before:?}");
+
+    assert!(stores.sweep_grace_pointers(kind, "gu").await.is_ok());
+
+    // Every pointer key is gone (an absent key reports a -2 TTL)...
+    assert_eq!(redis.ttl("auth:rp:g1").await, -2);
+    assert_eq!(redis.ttl("auth:rp:g3").await, -2);
+    // ...and so is every pointer MEMBER, which is the half a bare key delete would miss: a
+    // member naming a key that no longer exists would keep the index reporting sessions the
+    // account does not have.
+    let after = redis.smembers("auth:sess:gu").await;
+    assert!(
+        !after.iter().any(|m| m.starts_with("rp:")),
+        "no grace member may survive the sweep: {after:?}"
+    );
+    // The live sessions are untouched — this sweeps pointers, not sessions.
+    assert!(after.iter().any(|m| m == "rt:g2"), "index: {after:?}");
+    assert!(after.iter().any(|m| m == "rt:g4"), "index: {after:?}");
+}
+
+/// A user with no grace pointers at all is not an error, and touches nothing.
+#[tokio::test]
+async fn sweep_grace_pointers_is_a_no_op_when_there_are_none() {
+    let Some(redis) = common::try_start().await else {
+        return;
+    };
+    let Some(stores) = redis.stores() else { return };
+    let kind = SessionKind::Dashboard;
+
+    assert!(
+        stores
+            .create_session(kind, "n1", &record("nu"), 3600)
+            .await
+            .is_ok()
+    );
+
+    assert!(stores.sweep_grace_pointers(kind, "nu").await.is_ok());
+
+    let after = redis.smembers("auth:sess:nu").await;
+    assert!(after.iter().any(|m| m == "rt:n1"), "index: {after:?}");
+}
+
 #[tokio::test]
 async fn rotate_with_zero_grace_writes_no_grace_pointer() {
     let Some(redis) = common::try_start().await else {
@@ -252,15 +399,84 @@ async fn reuse_past_grace_is_detected_and_revoke_family_kills_the_lineage() {
 }
 
 #[tokio::test]
-async fn a_revoked_family_cannot_be_resurrected_through_a_surviving_grace_pointer() {
+async fn a_grace_pointer_cannot_resurrect_a_revoked_family() {
     let Some(redis) = common::try_start().await else {
         return;
     };
     let Some(stores) = redis.stores() else { return };
     let kind = SessionKind::Dashboard;
 
-    // A login under `g1`, then a rotation g1 -> g2 in family "fam-gu" with a long grace window,
-    // so the `rp:g1` pointer comfortably outlives the revoke below.
+    // SECURITY REGRESSION GUARD. Revoking a family deletes its live sessions, but a grace
+    // pointer planted by an EARLIER rotation of the same lineage can still be inside its (much
+    // shorter) window when the reuse fires — the reuse is only detected once the REPLAYED
+    // token's own pointer expired, which says nothing about a younger sibling's. Recovering
+    // from that pointer would mint a fresh session carrying the revoked family id, handing the
+    // thief back the lineage the revocation just killed.
+    assert!(
+        stores
+            .create_session(kind, "k1", &record("ku"), 3600)
+            .await
+            .is_ok()
+    );
+    // k1 -> k2 -> k3: after this, `rp:k2` is live and holds a record of family "fam-ku".
+    assert!(matches!(
+        stores.rotate(kind, &rotation("k1", "k2", "ku")).await,
+        Ok(RotateOutcome::Rotated(_))
+    ));
+    assert!(matches!(
+        stores.rotate(kind, &rotation("k2", "k3", "ku")).await,
+        Ok(RotateOutcome::Rotated(_))
+    ));
+    assert!(
+        redis.ttl("auth:rp:k2").await > 0,
+        "the sibling pointer is live"
+    );
+
+    // The oldest token is replayed once its own grace window has closed: a reuse, and the
+    // family is revoked.
+    assert!(redis.del("auth:rp:k1").await);
+    assert!(matches!(
+        stores.rotate(kind, &rotation("k1", "kX", "ku")).await,
+        Ok(RotateOutcome::Reused(family)) if family == "fam-ku"
+    ));
+    assert!(stores.revoke_family(kind, "fam-ku").await.is_ok());
+
+    // The still-live sibling pointer must NOT recover a session. Two independent guards now
+    // refuse it: the successor probe inside the script (k3 was deleted with the family, so the
+    // pointer has nothing to recover *to*) and the family-liveness check above it. Because the
+    // script now falls through the dead-successor pointer to the reuse check, and `cf:k2` is
+    // still planted, the outcome is the truthful classification — k2 is a consumed token being
+    // replayed — rather than the flat `Invalid` the family check alone used to produce. What
+    // the guard cares about is that no session comes back, which both spellings satisfy.
+    assert!(
+        redis.ttl("auth:rp:k2").await > 0,
+        "the pointer itself survives"
+    );
+    let replayed = stores.rotate(kind, &rotation("k2", "kY", "ku")).await;
+    assert!(
+        matches!(
+            replayed,
+            Ok(RotateOutcome::Invalid) | Ok(RotateOutcome::Reused(_))
+        ),
+        "a pointer whose successor is gone must never recover, got {replayed:?}"
+    );
+    assert!(matches!(stores.find_session(kind, "kY").await, Ok(None)));
+    assert!(matches!(stores.list_sessions(kind, "ku").await, Ok(v) if v.is_empty()));
+}
+
+#[tokio::test]
+async fn a_revoked_session_cannot_be_rebuilt_from_its_predecessors_grace_pointer() {
+    let Some(redis) = common::try_start().await else {
+        return;
+    };
+    let Some(stores) = redis.stores() else { return };
+    let kind = SessionKind::Dashboard;
+
+    // SECURITY REGRESSION GUARD. A grace pointer is keyed by the OLD hash, so revoking a
+    // session — which acts on the NEW hash — cannot find and delete it. Before the successor
+    // probe, replaying the predecessor inside the (default 30 s) window rebuilt a fresh
+    // FULL-lifetime session out of the very record the user had just revoked: "log out this
+    // device" undone by the device's own consumed token.
     assert!(
         stores
             .create_session(kind, "g1", &record("gu"), 3600)
@@ -268,37 +484,78 @@ async fn a_revoked_family_cannot_be_resurrected_through_a_surviving_grace_pointe
             .is_ok()
     );
     assert!(matches!(
-        stores
-            .rotate(kind, &rotation_with_grace("g1", "g2", "gu", 600))
-            .await,
-        Ok(RotateOutcome::Rotated(old)) if old.user_id == "gu"
+        stores.rotate(kind, &rotation("g1", "g2", "gu")).await,
+        Ok(RotateOutcome::Rotated(_))
     ));
-    // While the lineage is live, replaying the consumed token recovers through the grace window.
+    assert!(
+        redis.ttl("auth:rp:g1").await > 0,
+        "the predecessor pointer is live"
+    );
+
+    // While the successor is alive the pointer still works — the retry it exists for is the
+    // one where the client never received the new token. This is the control case: without it
+    // the test below would pass even if grace recovery were simply broken.
     assert!(matches!(
-        stores
-            .rotate(kind, &rotation_with_grace("g1", "g3", "gu", 600))
-            .await,
+        stores.rotate(kind, &rotation("g1", "gA", "gu")).await,
         Ok(RotateOutcome::Grace(r)) if r.user_id == "gu"
     ));
 
-    // Reuse detection revokes the lineage. `revoke_family` drops the family index but cannot
-    // reach `rp:g1` — that pointer belongs to a hash which already rotated out of the index.
-    assert!(stores.revoke_family(kind, "fam-gu").await.is_ok());
-    assert_eq!(redis.ttl("auth:fam:fam-gu").await, -2);
-    // The grace pointer is demonstrably still alive, so this is a genuine test of the family
-    // check and not of an incidentally-expired pointer.
-    assert!(redis.ttl("auth:rp:g1").await > 0);
-
-    // Replaying the consumed token must now be rejected outright: honoring the leftover pointer
-    // would mint a fresh live session inside the family reuse detection just locked out.
+    // Re-plant a pointer, then revoke the live session the way the session list does.
     assert!(matches!(
-        stores
-            .rotate(kind, &rotation_with_grace("g1", "g4", "gu", 600))
-            .await,
-        Ok(RotateOutcome::Invalid)
+        stores.rotate(kind, &rotation("g2", "g3", "gu")).await,
+        Ok(RotateOutcome::Rotated(_))
     ));
-    // Nothing was persisted for the rejected replay.
-    assert!(matches!(stores.find_session(kind, "g4").await, Ok(None)));
+    assert!(redis.ttl("auth:rp:g2").await > 0);
+    assert!(stores.revoke_session(kind, "gu", "g3").await.is_ok());
+
+    // The pointer survives (nothing knew to delete it) but must no longer recover: its
+    // successor g3 is gone.
+    assert!(
+        redis.ttl("auth:rp:g2").await > 0,
+        "the pointer itself survives the revoke"
+    );
+    let replayed = stores.rotate(kind, &rotation("g2", "gZ", "gu")).await;
+    assert!(
+        !matches!(replayed, Ok(RotateOutcome::Grace(_))),
+        "a revoked session must not come back through its predecessor's pointer, got {replayed:?}"
+    );
+    assert!(matches!(stores.find_session(kind, "gZ").await, Ok(None)));
+}
+
+#[tokio::test]
+async fn a_grace_recovery_is_refused_when_the_family_index_is_gone() {
+    let Some(redis) = common::try_start().await else {
+        return;
+    };
+    let Some(stores) = redis.stores() else { return };
+    let kind = SessionKind::Dashboard;
+
+    // The script's successor probe and this store-side family check are two independent
+    // guards, and the second is not redundant: `revoke_family` enumerates the index and then
+    // deletes it, so a session created between those two steps stays live while its family
+    // index is already gone. This reconstructs exactly that state — successor alive, family
+    // index deleted — which the probe alone would wave through.
+    assert!(
+        stores
+            .create_session(kind, "f1", &record("fu"), 3600)
+            .await
+            .is_ok()
+    );
+    assert!(matches!(
+        stores.rotate(kind, &rotation("f1", "f2", "fu")).await,
+        Ok(RotateOutcome::Rotated(_))
+    ));
+    assert!(matches!(stores.find_session(kind, "f2").await, Ok(Some(_))));
+
+    // Drop the family index only. The successor f2 is untouched and still live.
+    assert!(redis.del("auth:fam:fam-fu").await);
+
+    let replayed = stores.rotate(kind, &rotation("f1", "fX", "fu")).await;
+    assert!(
+        matches!(replayed, Ok(RotateOutcome::Invalid)),
+        "a lineage whose family index is gone must not recover, got {replayed:?}"
+    );
+    assert!(matches!(stores.find_session(kind, "fX").await, Ok(None)));
 }
 
 #[tokio::test]
@@ -350,6 +607,7 @@ async fn a_legacy_session_without_a_family_plants_no_family_keys() {
     // skip every family write: no `fam:` index and no `cf:` consumed marker are ever planted.
     let legacy = SessionRecord {
         family_id: String::new(),
+        family_created_at: Some(OffsetDateTime::UNIX_EPOCH),
         ..record("lu")
     };
     assert!(
@@ -363,6 +621,7 @@ async fn a_legacy_session_without_a_family_plants_no_family_keys() {
     let rot = SessionRotation {
         new_record: SessionRecord {
             family_id: String::new(),
+            family_created_at: Some(OffsetDateTime::UNIX_EPOCH),
             ..record("lu")
         },
         ..rotation("l1", "l2", "lu")
@@ -377,13 +636,87 @@ async fn a_legacy_session_without_a_family_plants_no_family_keys() {
         "no consumed marker planted"
     );
 
-    // With no consumed marker, a post-grace replay is a plain Invalid, never a reuse. Drop the
-    // grace pointer to close the window first.
-    assert!(redis.del("auth:rp:l1").await);
+    // A legacy record still recovers through its grace window: the family-alive check has no
+    // family to check, so it must not refuse a session that predates the mechanism entirely.
+    assert!(matches!(
+        stores.rotate(kind, &rot).await,
+        Ok(RotateOutcome::Grace(r)) if r.user_id == "lu"
+    ));
+
+    // With no consumed marker, a post-grace replay is a plain Invalid, never a reuse. The
+    // grace pointer was consumed by the recovery above, so the window is already closed.
     assert!(matches!(
         stores.rotate(kind, &rot).await,
         Ok(RotateOutcome::Invalid)
     ));
+}
+
+#[tokio::test]
+async fn revoking_a_family_resolves_the_owner_past_unreadable_members() {
+    let Some(redis) = common::try_start().await else {
+        return;
+    };
+    let Some(stores) = redis.stores() else { return };
+    let kind = SessionKind::Dashboard;
+
+    // A family outlives its individual sessions, so the first member is not always the one
+    // that still names its owner. The owner lookup has to walk past a member whose record has
+    // expired and one whose record is unreadable, or the revocation would prune nothing from
+    // the index and leave every revoked session listed until the index itself expired.
+    assert!(
+        stores
+            .create_session(kind, "o1", &record("ou"), 3600)
+            .await
+            .is_ok()
+    );
+    assert!(
+        stores
+            .create_session(kind, "o2", &record("ou"), 3600)
+            .await
+            .is_ok()
+    );
+    assert!(
+        stores
+            .create_session(kind, "o3", &record("ou"), 3600)
+            .await
+            .is_ok()
+    );
+    // o1's record is gone; o2's is unparseable; o3 parses but names no owner at all — an
+    // empty id would build `sess:` with nothing after the colon, a key every ownerless family
+    // would share, so it has to be skipped like the other two. o4 is the one that answers.
+    assert!(
+        stores
+            .create_session(kind, "o4", &record("ou"), 3600)
+            .await
+            .is_ok()
+    );
+    assert!(redis.del("auth:rt:o1").await);
+    assert!(redis.set_raw("auth:rt:o2", "not-json{{{").await);
+    let ownerless = serde_json::to_string(&SessionRecord {
+        user_id: String::new(),
+        ..record("ou")
+    })
+    .unwrap_or_default();
+    assert!(redis.set_raw("auth:rt:o3", &ownerless).await);
+
+    assert!(stores.revoke_family(kind, "fam-ou").await.is_ok());
+
+    // Every member key is gone and the owner's index was pruned, which is only possible if the
+    // walk reached o4.
+    assert_eq!(redis.ttl("auth:rt:o4").await, -2);
+    assert!(redis.smembers("auth:sess:ou").await.is_empty());
+
+    // And when NO member names an owner — every record already expired — the revocation still
+    // drops the family index rather than failing. There is simply no index left to prune.
+    assert!(
+        stores
+            .create_session(kind, "g1", &record("gu2"), 3600)
+            .await
+            .is_ok()
+    );
+    assert!(redis.del("auth:rt:g1").await);
+    assert!(stores.revoke_family(kind, "fam-gu2").await.is_ok());
+    assert_eq!(redis.ttl("auth:fam:fam-gu2").await, -2);
 }
 
 #[tokio::test]
@@ -412,6 +745,214 @@ async fn platform_sessions_use_the_platform_keyspace() {
     ));
     assert!(stores.revoke_all(kind, "padmin").await.is_ok());
     assert!(matches!(stores.list_sessions(kind, "padmin").await, Ok(v) if v.is_empty()));
+}
+
+#[tokio::test]
+async fn session_index_members_are_prefixed_key_suffixes() {
+    let Some(redis) = common::try_start().await else {
+        return;
+    };
+    let Some(stores) = redis.stores() else { return };
+
+    // Cross-backend parity: nest-auth stores the `sess:`/`psess:` members as full key SUFFIXES
+    // (`rt:{hash}`, `prt:{hash}`) and its revoke-all Lua deletes `{namespace}:{member}`
+    // verbatim. A bare hash — the format this replaced — is unrevokable from the other backend
+    // on a shared Redis, and unrevokable *here* for anything the other backend wrote.
+    assert!(
+        stores
+            .create_session(SessionKind::Dashboard, "m1", &record("mu"), 3600)
+            .await
+            .is_ok()
+    );
+    assert_eq!(redis.smembers("auth:sess:mu").await, vec!["rt:m1"]);
+
+    // The platform keyspace stays SEPARATE (`psess:` not `sess:`) and uses its own `prt:` member.
+    assert!(
+        stores
+            .create_session(SessionKind::Platform, "p1", &record("pu"), 3600)
+            .await
+            .is_ok()
+    );
+    assert_eq!(redis.smembers("auth:psess:pu").await, vec!["prt:p1"]);
+    assert!(redis.smembers("auth:sess:pu").await.is_empty());
+
+    // Listing strips the prefix so `session_hash` stays the bare hash the domain layer
+    // validates as 64-hex, and so the `sd:` detail key (keyed by the bare hash) resolves.
+    assert!(matches!(
+        stores.list_sessions(SessionKind::Dashboard, "mu").await,
+        Ok(v) if v.len() == 1 && v[0].session_hash == "m1"
+    ));
+
+    // Revoke is ownership-checked against the prefixed member; it must still match.
+    assert!(
+        stores
+            .revoke_session(SessionKind::Dashboard, "mu", "m1")
+            .await
+            .is_ok()
+    );
+    assert!(redis.smembers("auth:sess:mu").await.is_empty());
+}
+
+#[tokio::test]
+async fn revoke_all_sweeps_rotation_grace_pointers() {
+    let Some(redis) = common::try_start().await else {
+        return;
+    };
+    let Some(stores) = redis.stores() else { return };
+    let kind = SessionKind::Dashboard;
+
+    // SECURITY REGRESSION GUARD. A rotation plants an `rp:{oldHash}` grace pointer that can
+    // still mint a live session for the whole grace window. With bare-hash SET members the
+    // revoke-all script could not tell an `rt:` hash from an `rp:` one, so it could not delete
+    // the pointer — a rotated-away refresh token survived "log out everywhere" and kept
+    // recovering sessions. Indexing the pointer as `rp:{oldHash}` is what makes it sweepable.
+    assert!(
+        stores
+            .create_session(kind, "g1", &record("gu"), 3600)
+            .await
+            .is_ok()
+    );
+    assert!(matches!(
+        stores.rotate(kind, &rotation("g1", "g2", "gu")).await,
+        Ok(RotateOutcome::Rotated(_))
+    ));
+
+    // Post-rotation the index holds the new live session AND the grace pointer for the old one.
+    assert_eq!(redis.smembers("auth:sess:gu").await, vec!["rp:g1", "rt:g2"]);
+    assert!(redis.ttl("auth:rp:g1").await > 0);
+    // The grace pointer is not a session, so it must not appear in the user's session list.
+    assert!(matches!(
+        stores.list_sessions(kind, "gu").await,
+        Ok(v) if v.len() == 1 && v[0].session_hash == "g2"
+    ));
+
+    assert!(stores.revoke_all(kind, "gu").await.is_ok());
+
+    // The grace pointer key is GONE (`-2` = absent), not merely orphaned in the index.
+    assert_eq!(redis.ttl("auth:rp:g1").await, -2);
+    // …and so are the live session, its detail, and the index itself.
+    assert_eq!(redis.ttl("auth:rt:g2").await, -2);
+    assert_eq!(redis.ttl("auth:sd:g2").await, -2);
+    assert!(redis.smembers("auth:sess:gu").await.is_empty());
+
+    // The security property, observed through the API: replaying the rotated-away token can no
+    // longer recover a session through the grace window after a revoke-all. It is reported as a
+    // reuse rather than a plain invalid because the consumed-family marker (`cf:`) deliberately
+    // outlives both the grace pointer and the revoke-all — a replayed consumed token stays a
+    // reportable theft signal even after the user logged everything out. Either way it never
+    // mints a session.
+    assert!(matches!(
+        stores.rotate(kind, &rotation("g1", "g3", "gu")).await,
+        Ok(RotateOutcome::Reused(family)) if family == "fam-gu"
+    ));
+}
+
+#[tokio::test]
+async fn platform_revoke_all_sweeps_its_own_grace_pointers() {
+    let Some(redis) = common::try_start().await else {
+        return;
+    };
+    let Some(stores) = redis.stores() else { return };
+    let kind = SessionKind::Platform;
+
+    // The same grace-pointer sweep must hold for the platform keyspace, which keeps its own
+    // SEPARATE index (`psess:`) and its own prefixes (`prt:`/`prp:`/`psd:`) — the separation is
+    // deliberate, only the member FORMAT is shared with the dashboard side.
+    assert!(
+        stores
+            .create_session(kind, "pg1", &record("pgu"), 3600)
+            .await
+            .is_ok()
+    );
+    assert!(matches!(
+        stores.rotate(kind, &rotation("pg1", "pg2", "pgu")).await,
+        Ok(RotateOutcome::Rotated(_))
+    ));
+    assert_eq!(
+        redis.smembers("auth:psess:pgu").await,
+        vec!["prp:pg1", "prt:pg2"]
+    );
+    assert!(redis.ttl("auth:prp:pg1").await > 0);
+
+    assert!(stores.revoke_all(kind, "pgu").await.is_ok());
+    assert_eq!(redis.ttl("auth:prp:pg1").await, -2);
+    assert_eq!(redis.ttl("auth:prt:pg2").await, -2);
+    assert_eq!(redis.ttl("auth:psd:pg2").await, -2);
+    // The dashboard index was never touched — the keyspaces stay independent.
+    assert!(redis.smembers("auth:sess:pgu").await.is_empty());
+}
+
+#[tokio::test]
+async fn zero_grace_rotation_indexes_no_grace_member() {
+    let Some(redis) = common::try_start().await else {
+        return;
+    };
+    let Some(stores) = redis.stores() else { return };
+    let kind = SessionKind::Dashboard;
+
+    // A zero-width grace window writes no `rp:` key, so indexing an `rp:` member for it would
+    // leave a member pointing at nothing. Only the live session is indexed.
+    assert!(
+        stores
+            .create_session(kind, "n1", &record("nu"), 3600)
+            .await
+            .is_ok()
+    );
+    assert!(matches!(
+        stores
+            .rotate(kind, &rotation_with_grace("n1", "n2", "nu", 0))
+            .await,
+        Ok(RotateOutcome::Rotated(_))
+    ));
+    assert_eq!(redis.smembers("auth:sess:nu").await, vec!["rt:n2"]);
+}
+
+#[tokio::test]
+async fn session_detail_is_stored_with_unix_millisecond_timestamps() {
+    let Some(redis) = common::try_start().await else {
+        return;
+    };
+    let Some(stores) = redis.stores() else { return };
+
+    // Wire-format parity for `sd:`: nest-auth writes `createdAt`/`lastActivityAt` as numbers and
+    // discards a detail record whose fields are not numbers. Assert what actually lands in
+    // Redis, not just what the DTO round-trips — this is the byte-level shared-Redis contract.
+    let rec = SessionRecord {
+        created_at: OffsetDateTime::from_unix_timestamp(1_700_000_000)
+            .unwrap_or(OffsetDateTime::UNIX_EPOCH),
+        ..record("tu")
+    };
+    assert!(
+        stores
+            .create_session(SessionKind::Dashboard, "t1", &rec, 3600)
+            .await
+            .is_ok()
+    );
+    let raw = redis.get("auth:sd:t1").await.unwrap_or_default();
+    assert!(raw.contains("\"createdAt\":1700000000000"), "got {raw}");
+    assert!(
+        raw.contains("\"lastActivityAt\":1700000000000"),
+        "got {raw}"
+    );
+    assert!(!raw.contains("\"createdAt\":\""), "got {raw}");
+
+    // A detail record written by nest-auth (numeric timestamps) is readable here: the session
+    // shows up in the listing with the exact instants nest-auth recorded.
+    assert!(
+        redis
+            .set_raw(
+                "auth:sd:t1",
+                r#"{"device":"Safari","ip":"198.51.100.9","createdAt":1700000000123,"lastActivityAt":1700000060456}"#,
+            )
+            .await
+    );
+    assert!(matches!(
+        stores.list_sessions(SessionKind::Dashboard, "tu").await,
+        Ok(v) if v.len() == 1
+            && v[0].device == "Safari"
+            && v[0].created_at.unix_timestamp_nanos() / 1_000_000 == 1_700_000_000_123
+            && v[0].last_activity_at.unix_timestamp_nanos() / 1_000_000 == 1_700_000_060_456
+    ));
 }
 
 #[tokio::test]
@@ -581,12 +1122,13 @@ async fn keys_are_namespaced_no_pii_and_carry_a_ttl() {
     ));
     assert!(matches!(stores.record_failure("bfhmac", 900).await, Ok(1)));
     assert!(stores.blacklist_access("jti-xyz", 60).await.is_ok());
-    // The single-use opaque-token keyspaces (`pr:`/`prv:`/`inv:`) also appear, hashed by
+    // The single-use opaque-token keyspaces (`pw_reset:`/`pw_vtok:`/`inv:`) also appear, hashed by
     // sha256(token) so a raw token (which could contain attacker-chosen bytes) is never a key.
     let reset_context = ResetContext {
         user_id: "user-42".to_owned(),
         email: "victim@example.com".to_owned(),
         tenant_id: "t1".to_owned(),
+        password_fingerprint: String::new(),
     };
     assert!(
         stores
@@ -609,6 +1151,7 @@ async fn keys_are_namespaced_no_pii_and_carry_a_ttl() {
                     role: "MEMBER".to_owned(),
                     tenant_id: "t1".to_owned(),
                     inviter_user_id: "user-42".to_owned(),
+                    created_at: OffsetDateTime::UNIX_EPOCH,
                 },
                 604800,
             )
@@ -620,9 +1163,11 @@ async fn keys_are_namespaced_no_pii_and_carry_a_ttl() {
 
     let keys = redis.all_keys().await;
     assert!(!keys.is_empty(), "operations should have written keys");
+    // The catalog is exhaustive on purpose: an unlisted prefix fails the test rather than
+    // passing silently, so adding a keyspace forces a deliberate decision here.
     let allowed = [
         "rt", "rv", "ep", "pep", "rp", "cf", "fam", "sess", "sd", "lf", "otp", "resend", "wst",
-        "pr", "prv", "inv", "prt", "prp", "pcf", "pfam", "psess", "psd",
+        "pw_reset", "pw_vtok", "inv", "prt", "prp", "pcf", "pfam", "psess", "psd",
     ];
     for key in &keys {
         // Namespaced under the configured prefix, applied in exactly one place.
@@ -649,11 +1194,12 @@ async fn password_reset_and_invitation_stores_are_single_use_via_getdel() {
     };
     let Some(stores) = redis.stores() else { return };
 
-    // Reset link token: stored under `pr:`, consumed once.
+    // Reset link token: stored under `pw_reset:`, consumed once.
     let reset = ResetContext {
         user_id: "u1".to_owned(),
         email: "u@example.com".to_owned(),
         tenant_id: "t1".to_owned(),
+        password_fingerprint: String::new(),
     };
     assert!(stores.put_token("rt-secret", &reset, 600).await.is_ok());
     assert!(matches!(
@@ -671,7 +1217,7 @@ async fn password_reset_and_invitation_stores_are_single_use_via_getdel() {
         Ok(None)
     ));
 
-    // Verified token: stored under `prv:`, consumed once.
+    // Verified token: stored under `pw_vtok:`, consumed once.
     assert!(stores.put_verified("vt-secret", &reset, 300).await.is_ok());
     assert!(matches!(
         stores.consume_verified("vt-secret").await,
@@ -689,6 +1235,7 @@ async fn password_reset_and_invitation_stores_are_single_use_via_getdel() {
         role: "MEMBER".to_owned(),
         tenant_id: "t1".to_owned(),
         inviter_user_id: "owner".to_owned(),
+        created_at: OffsetDateTime::UNIX_EPOCH,
     };
     assert!(
         stores
@@ -708,6 +1255,188 @@ async fn password_reset_and_invitation_stores_are_single_use_via_getdel() {
     assert!(matches!(
         stores.consume_invitation("never-seen").await,
         Ok(None)
+    ));
+}
+
+#[tokio::test]
+async fn the_invitee_index_is_the_only_handle_on_a_pending_invitation() {
+    // The invitation record is keyed by the hash of a token only the invitee's mailbox ever
+    // held, so the index is the whole of what the issuing side can name. Its behaviour is
+    // asserted HERE, at the store, and not through the route: the withdrawal answers 204
+    // whether or not anything was pending — deliberately, so it cannot be used as an oracle
+    // for which addresses have invitations — which leaves an end-to-end test unable to tell a
+    // working index from one that does nothing at all.
+    let Some(redis) = common::try_start().await else {
+        return;
+    };
+    let Some(stores) = redis.stores() else {
+        return;
+    };
+
+    let invitation = StoredInvitation {
+        email: "invitee@example.com".to_owned(),
+        role: "MEMBER".to_owned(),
+        tenant_id: "t1".to_owned(),
+        inviter_user_id: "owner".to_owned(),
+        created_at: OffsetDateTime::UNIX_EPOCH,
+    };
+    let hash = token_hash("inv-secret");
+    assert!(
+        stores
+            .put_invitation("inv-secret", &invitation, 604_800)
+            .await
+            .is_ok()
+    );
+    assert!(
+        stores
+            .put_invitation_index("t1", "invitee@example.com", &hash, 604_800)
+            .await
+            .is_ok()
+    );
+
+    // The index points at the record, and the record reads back through the hash it points at
+    // — the two halves of the only path a withdrawal has.
+    assert!(matches!(
+        stores.read_invitation_index("t1", "invitee@example.com").await,
+        Ok(Some(h)) if h == hash
+    ));
+    assert!(matches!(
+        stores.read_invitation_by_hash(&hash).await,
+        Ok(Some(i)) if i.role == "MEMBER" && i.email == "invitee@example.com"
+    ));
+
+    // The key is derived from BOTH the tenant and the address. A key that ignored either
+    // would let one tenant read — and withdraw — another's invitations, or let any address
+    // withdraw any other's.
+    assert!(matches!(
+        stores
+            .read_invitation_index("t2", "invitee@example.com")
+            .await,
+        Ok(None)
+    ));
+    assert!(matches!(
+        stores
+            .read_invitation_index("t1", "someone@example.com")
+            .await,
+        Ok(None)
+    ));
+
+    // Reading leaves the entry in place; TAKING removes it. `invite` supersedes through the
+    // taking form, and a read that consumed would drop the index on every revoke that then
+    // refuses on the role check.
+    assert!(matches!(
+        stores
+            .read_invitation_index("t1", "invitee@example.com")
+            .await,
+        Ok(Some(_))
+    ));
+    assert!(matches!(
+        stores.take_invitation_index("t1", "invitee@example.com").await,
+        Ok(Some(h)) if h == hash
+    ));
+    assert!(matches!(
+        stores
+            .take_invitation_index("t1", "invitee@example.com")
+            .await,
+        Ok(None)
+    ));
+
+    // Deleting by hash reports whether THIS call removed the record. The second call finds
+    // nothing: a withdrawal that reported success over an already-accepted invitation would
+    // tell an operator the link was live when it was already spent.
+    assert!(matches!(
+        stores.delete_invitation_by_hash(&hash).await,
+        Ok(true)
+    ));
+    assert!(matches!(
+        stores.delete_invitation_by_hash(&hash).await,
+        Ok(false)
+    ));
+    // …and the record is gone for the accept path too.
+    assert!(matches!(
+        stores.read_invitation_by_hash(&hash).await,
+        Ok(None)
+    ));
+    assert!(matches!(
+        stores.consume_invitation("inv-secret").await,
+        Ok(None)
+    ));
+}
+
+#[tokio::test]
+async fn a_pending_address_change_round_trips_and_is_consumed_once() {
+    // Asserted at the store, not through the route: the request answers 204 and the
+    // confirmation answers 204, so an end-to-end test cannot tell a working `ec:` keyspace
+    // from one that writes nothing and reads nothing — the same blindness the invitation
+    // index had, for the same reason.
+    let Some(redis) = common::try_start().await else {
+        return;
+    };
+    let Some(stores) = redis.stores() else {
+        return;
+    };
+
+    let context = EmailChangeContext {
+        user_id: "user-42".to_owned(),
+        new_email: "new@example.com".to_owned(),
+        tenant_id: "t1".to_owned(),
+        password_fingerprint: "a".repeat(64),
+    };
+    assert!(
+        stores
+            .put_email_change("change-secret", &context, 3600)
+            .await
+            .is_ok()
+    );
+
+    // Every field survives the round trip. `new_email` and `tenant_id` drive the uniqueness
+    // re-check at confirm time, and `password_fingerprint` is what makes a planted request die
+    // when the victim changes their password — a field lost in transit silently disarms it.
+    assert!(matches!(
+        stores.consume_email_change("change-secret").await,
+        Ok(Some(c))
+            if c.user_id == "user-42"
+            && c.new_email == "new@example.com"
+            && c.tenant_id == "t1"
+            && c.password_fingerprint == "a".repeat(64)
+    ));
+
+    // Single-use: the read and the delete are one operation, so a link clicked twice — or
+    // raced — applies once.
+    assert!(matches!(
+        stores.consume_email_change("change-secret").await,
+        Ok(None)
+    ));
+    // …and a token that was never issued reaches nothing.
+    assert!(matches!(
+        stores.consume_email_change("never-issued").await,
+        Ok(None)
+    ));
+}
+
+#[tokio::test]
+async fn a_stored_invitation_that_no_longer_parses_reads_as_absent() {
+    // The revocation path reaches the record through the index rather than through a token, so
+    // it can meet a value the accept path never would. A corrupted record answers `None` — the
+    // withdrawal then removes it without a role check, which is the right end state: it could
+    // not have been accepted either, and leaving it indexed would be worse.
+    let Some(redis) = common::try_start().await else {
+        return;
+    };
+    let Some(stores) = redis.stores() else {
+        return;
+    };
+
+    assert!(redis.set_raw("auth:inv:deadbeef", r#"{"nope":true}"#).await);
+
+    assert!(matches!(
+        stores.read_invitation_by_hash("deadbeef").await,
+        Ok(None)
+    ));
+    // …and it is still deletable, or the corrupted record would sit there for its whole TTL.
+    assert!(matches!(
+        stores.delete_invitation_by_hash("deadbeef").await,
+        Ok(true)
     ));
 }
 
@@ -752,14 +1481,17 @@ async fn engine_runs_password_reset_via_token_against_redis() {
         return;
     };
 
-    // Initiate stores a reset token under `pr:` (best-effort); the raw token is opaque to the
+    // Initiate stores a reset token under `pw_reset:` (best-effort); the raw token is opaque to the
     // test, so plant a known token via the store to drive the reset deterministically.
     assert!(
         engine
-            .initiate_reset(ForgotPasswordInput {
-                email: "reset@example.com".to_owned(),
-                tenant_id: "t1".to_owned(),
-            })
+            .initiate_reset(
+                ForgotPasswordInput {
+                    email: "reset@example.com".to_owned(),
+                    tenant_id: "t1".to_owned(),
+                },
+                &ctx
+            )
             .await
             .is_ok()
     );
@@ -772,6 +1504,7 @@ async fn engine_runs_password_reset_via_token_against_redis() {
                     user_id: auth.user.id.clone(),
                     email: "reset@example.com".to_owned(),
                     tenant_id: "t1".to_owned(),
+                    password_fingerprint: String::new(),
                 },
                 600,
             )
@@ -780,14 +1513,17 @@ async fn engine_runs_password_reset_via_token_against_redis() {
     );
     assert!(
         engine
-            .reset_password(ResetPasswordInput {
-                email: "reset@example.com".to_owned(),
-                tenant_id: "t1".to_owned(),
-                new_password: "a-brand-new-password".to_owned(),
-                token: Some("known-reset-token".to_owned()),
-                otp: None,
-                verified_token: None,
-            })
+            .reset_password(
+                ResetPasswordInput {
+                    email: "reset@example.com".to_owned(),
+                    tenant_id: "t1".to_owned(),
+                    new_password: "a-brand-new-password".to_owned(),
+                    token: Some("known-reset-token".to_owned()),
+                    otp: None,
+                    verified_token: None,
+                },
+                &ctx
+            )
             .await
             .is_ok()
     );
@@ -802,14 +1538,17 @@ async fn engine_runs_password_reset_via_token_against_redis() {
     // The reset token is single-use: a replay is invalid.
     assert!(matches!(
         engine
-            .reset_password(ResetPasswordInput {
-                email: "reset@example.com".to_owned(),
-                tenant_id: "t1".to_owned(),
-                new_password: "again".to_owned(),
-                token: Some("known-reset-token".to_owned()),
-                otp: None,
-                verified_token: None,
-            })
+            .reset_password(
+                ResetPasswordInput {
+                    email: "reset@example.com".to_owned(),
+                    tenant_id: "t1".to_owned(),
+                    new_password: "again".to_owned(),
+                    token: Some("known-reset-token".to_owned()),
+                    otp: None,
+                    verified_token: None,
+                },
+                &ctx
+            )
             .await,
         Err(AuthError::PasswordResetTokenInvalid)
     ));
@@ -827,6 +1566,7 @@ async fn engine_runs_password_reset_via_otp_against_redis() {
     // OTP method: register, drive the engine to generate+store a real OTP, read the code back
     // from its `otp:` record, then run the verify→verified-token→reset bridge against real Redis
     // and confirm the password changed and every session was revoked.
+    let ctx = RequestContext::new("203.0.113.4", "agent/1.0", BTreeMap::new());
     let otp_users = Arc::new(InMemoryUserRepository::new());
     let mut otp_config = AuthConfig::default();
     otp_config.jwt.secret = SecretString::from("fedcba9876543210fedcba9876543210".to_owned());
@@ -871,10 +1611,13 @@ async fn engine_runs_password_reset_via_otp_against_redis() {
     // read the code back from the record's value rather than recomputing the key.
     assert!(
         otp_engine
-            .initiate_reset(ForgotPasswordInput {
-                email: "otp-reset@example.com".to_owned(),
-                tenant_id: "t1".to_owned(),
-            })
+            .initiate_reset(
+                ForgotPasswordInput {
+                    email: "otp-reset@example.com".to_owned(),
+                    tenant_id: "t1".to_owned(),
+                },
+                &ctx
+            )
             .await
             .is_ok()
     );
@@ -900,24 +1643,30 @@ async fn engine_runs_password_reset_via_otp_against_redis() {
 
     // Verify the OTP for a short-lived verified token, then reset through the verified path.
     let verified = otp_engine
-        .verify_reset_otp(VerifyResetOtpInput {
-            email: "otp-reset@example.com".to_owned(),
-            tenant_id: "t1".to_owned(),
-            otp: code,
-        })
+        .verify_reset_otp(
+            VerifyResetOtpInput {
+                email: "otp-reset@example.com".to_owned(),
+                tenant_id: "t1".to_owned(),
+                otp: code,
+            },
+            &ctx,
+        )
         .await;
     assert!(verified.is_ok());
     let Ok(verified_token) = verified else { return };
     assert!(
         otp_engine
-            .reset_password(ResetPasswordInput {
-                email: "otp-reset@example.com".to_owned(),
-                tenant_id: "t1".to_owned(),
-                new_password: "a-fresh-new-password".to_owned(),
-                token: None,
-                otp: None,
-                verified_token: Some(verified_token.clone()),
-            })
+            .reset_password(
+                ResetPasswordInput {
+                    email: "otp-reset@example.com".to_owned(),
+                    tenant_id: "t1".to_owned(),
+                    new_password: "a-fresh-new-password".to_owned(),
+                    token: None,
+                    otp: None,
+                    verified_token: Some(verified_token.clone()),
+                },
+                &ctx
+            )
             .await
             .is_ok()
     );
@@ -943,14 +1692,17 @@ async fn engine_runs_password_reset_via_otp_against_redis() {
     // The verified token is single-use: a replay through the verified path is rejected.
     assert!(matches!(
         otp_engine
-            .reset_password(ResetPasswordInput {
-                email: "otp-reset@example.com".to_owned(),
-                tenant_id: "t1".to_owned(),
-                new_password: "another".to_owned(),
-                token: None,
-                otp: None,
-                verified_token: Some(verified_token),
-            })
+            .reset_password(
+                ResetPasswordInput {
+                    email: "otp-reset@example.com".to_owned(),
+                    tenant_id: "t1".to_owned(),
+                    new_password: "another".to_owned(),
+                    token: None,
+                    otp: None,
+                    verified_token: Some(verified_token),
+                },
+                &ctx
+            )
             .await,
         Err(AuthError::PasswordResetTokenInvalid)
     ));
@@ -1132,6 +1884,7 @@ async fn engine_runs_invitation_accept_against_redis() {
                     role: "MEMBER".to_owned(),
                     tenant_id: "t1".to_owned(),
                     inviter_user_id: admin.id.clone(),
+                    created_at: OffsetDateTime::UNIX_EPOCH,
                 },
                 604800,
             )
@@ -1312,7 +2065,7 @@ async fn engine_runs_register_login_refresh_logout_against_redis() {
         .refresh(&auth.refresh_token, "203.0.113.4", "agent/1.0")
         .await;
     assert!(
-        matches!(&refreshed, Ok(tokens) if tokens.refresh_token != auth.refresh_token),
+        matches!(&refreshed, Ok(session) if session.tokens.refresh_token != auth.refresh_token),
         "refresh should rotate to a new token"
     );
     let Ok(rotated) = refreshed else { return };
@@ -1321,14 +2074,14 @@ async fn engine_runs_register_login_refresh_logout_against_redis() {
     // always Ok.
     assert!(
         engine
-            .logout(&rotated.access_token, &rotated.refresh_token, &auth.user.id)
+            .logout(&rotated.tokens.access_token, &rotated.tokens.refresh_token)
             .await
             .is_ok()
     );
     // The revoked refresh token no longer rotates after logout.
     assert!(matches!(
         engine
-            .refresh(&rotated.refresh_token, "203.0.113.4", "agent/1.0")
+            .refresh(&rotated.tokens.refresh_token, "203.0.113.4", "agent/1.0")
             .await,
         Err(AuthError::RefreshTokenInvalid)
     ));

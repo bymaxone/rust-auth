@@ -63,7 +63,13 @@ impl PasswordAlgorithm {
 /// scrypt cost parameters.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ScryptParams {
-    /// CPU/memory cost N — a power of two, default 32768 (2^15), minimum 16384 (2^14).
+    /// CPU/memory cost N — a power of two, default 131072 (2^17), minimum 16384 (2^14).
+    ///
+    /// The default is OWASP's recommended minimum for scrypt alongside `r=8, p=1`: roughly
+    /// 128 MiB and ~100 ms per hash on a modern core. That cost is the point — it is what makes
+    /// an offline attack on a leaked hash expensive. A deployment that cannot afford the memory
+    /// should lower this deliberately, knowing what it gives up, rather than inherit a weaker
+    /// default that never announced itself.
     pub cost_factor: u32,
     /// Block size r, default 8.
     pub block_size: u32,
@@ -74,7 +80,7 @@ pub struct ScryptParams {
 impl Default for ScryptParams {
     fn default() -> Self {
         Self {
-            cost_factor: 1 << 15,
+            cost_factor: 1 << 17,
             block_size: 8,
             parallelization: 1,
         }
@@ -134,14 +140,61 @@ impl Default for PasswordConfig {
 pub struct JwtConfig {
     /// Signing secret. Required. Redacted in `Debug`, zeroized on drop.
     pub secret: SecretString,
+    /// Secrets retired by a rotation, accepted for **verification only**. Default: empty.
+    ///
+    /// Rotating [`JwtConfig::secret`] with nothing else in place invalidates every token in
+    /// flight at once — every signed-in user is signed out the moment the new configuration
+    /// rolls out — and invalidates every stored recovery-code digest, which is keyed by an HMAC
+    /// derived from the secret. Users would be locked out of the codes they printed and filed,
+    /// and would discover it at the moment they most need them. Listing the previous secret
+    /// here keeps both readable while tokens issued under it drain, so a rotation is a rollout
+    /// rather than a mass logout.
+    ///
+    /// Signing always uses [`JwtConfig::secret`]. Entries here are only ever tried after it,
+    /// and only to verify, so a rotation is one-way: nothing new is ever produced under a
+    /// retired secret. Remove an entry once the longest-lived thing signed under it has
+    /// expired — every entry is a key that still opens the door — and each is validated exactly
+    /// like the current secret, because a weak one is just as forgeable.
+    pub previous_secrets: Vec<SecretString>,
     /// Access-token lifetime, default 15m.
     pub access_expires_in: Duration,
     /// Access-token cookie `Max-Age`, default 15m.
     pub access_cookie_max_age: Duration,
     /// Refresh-token lifetime in days, default 7.
     pub refresh_expires_in_days: u32,
+    /// Hard cap on how long one login can be extended by rotation, in days. Default `0` — no
+    /// cap.
+    ///
+    /// `refresh_expires_in_days` bounds a single refresh token, not a session: a client that
+    /// rotates every fifteen minutes renews that lifetime indefinitely, so a session
+    /// established once never has to be established again. This caps the whole lineage — the
+    /// family's birth is stamped at login and carried through every rotation — and once it is
+    /// passed the rotation is refused and the user signs in again.
+    ///
+    /// Off by default because switching it on ends sessions already older than the cap, which
+    /// is a decision a deployment makes rather than one an upgrade makes for it. A record with
+    /// no family birth time — the replay placeholder — carries no cap to measure from.
+    pub absolute_session_lifetime_days: u32,
     /// Pinned to HS256.
     pub algorithm: JwtAlgorithm,
+    /// The `iss` claim stamped on every token this backend mints, and REQUIRED on every token
+    /// it verifies. `None` by default, so an existing deployment is unchanged.
+    ///
+    /// When set, a token carrying a different issuer — or none at all — is rejected. That is
+    /// the point: a verifier that accepted an unstamped token would give an attacker a way to
+    /// opt out of the check by omitting the claim.
+    ///
+    /// Both backends sharing a deployment must carry the same value, or they stop accepting
+    /// each other's tokens. Turning it on invalidates the access tokens already in flight; the
+    /// window is one access-token lifetime and clients recover by refreshing, since the
+    /// refresh token is opaque and carries no claims.
+    pub issuer: Option<String>,
+    /// The `aud` claim, with the same semantics as [`Self::issuer`].
+    ///
+    /// Names who the token is *for*. With HS256 the verifier can also sign, so audience
+    /// binding is what stops a token minted for one service being replayed at another that
+    /// trusts the same secret.
+    pub audience: Option<String>,
     /// Grace window during which a rotated refresh token stays valid, default 30s.
     pub refresh_grace_window: Duration,
 }
@@ -153,10 +206,14 @@ impl Default for JwtConfig {
     fn default() -> Self {
         Self {
             secret: SecretString::from(String::new()),
+            previous_secrets: Vec::new(),
             access_expires_in: Duration::from_secs(15 * 60),
             access_cookie_max_age: Duration::from_secs(15 * 60),
             refresh_expires_in_days: 7,
+            absolute_session_lifetime_days: 0,
             algorithm: JwtAlgorithm::Hs256,
+            issuer: None,
+            audience: None,
             refresh_grace_window: Duration::from_secs(30),
         }
     }
@@ -211,6 +268,20 @@ pub struct CookieConfig {
     pub mfa_temp_cookie_path: String,
     /// `SameSite` attribute, default `Lax`.
     pub same_site: SameSite,
+    /// Origins allowed to make state-changing requests that carry the session cookie,
+    /// default empty.
+    ///
+    /// Each entry is a full origin — scheme, host and, when non-default, port
+    /// (`https://app.example.com`, `http://localhost:3000`) — compared verbatim against the
+    /// request's `Origin` header. There are no wildcards: an allowlist matched by pattern is
+    /// one typo away from admitting an attacker-controlled subdomain.
+    ///
+    /// This only matters under [`SameSite::None`], the one posture where the browser sends the
+    /// session cookie on a cross-site request and there is therefore a cross-origin caller to
+    /// authorize. Validation refuses either half without the other, because both fail quietly:
+    /// `None` with no list rejects every cross-site call, and a list under `Lax`/`Strict` is
+    /// never consulted.
+    pub trusted_origins: Vec<String>,
     /// Optional resolver for the cookie `Domain`(s), derived from the request host.
     pub resolve_domains: Option<Arc<dyn CookieDomainResolver>>,
 }
@@ -224,6 +295,7 @@ impl Default for CookieConfig {
             refresh_cookie_path: "/auth".to_owned(),
             mfa_temp_cookie_path: "/auth/mfa".to_owned(),
             same_site: SameSite::Lax,
+            trusted_origins: Vec::new(),
             resolve_domains: None,
         }
     }
@@ -252,6 +324,19 @@ pub struct MfaConfig {
     /// AES-256-GCM key for TOTP-secret encryption. Must decode (base64 standard or
     /// url-safe) to exactly 32 bytes. Redacted in `Debug`, zeroized on drop.
     pub encryption_key: SecretString,
+    /// Keys retired by a rotation, accepted for **decryption only**. Default: empty.
+    ///
+    /// A TOTP secret is stored encrypted under [`MfaConfig::encryption_key`] and the ciphertext
+    /// records no key identifier, so changing that key without this makes every stored secret
+    /// undecryptable — every enrolled user's authenticator stops matching, at once, with no way
+    /// back. Listing the previous key keeps those secrets readable, and each is re-encrypted
+    /// under the current key the next time its owner passes a challenge, so the rotation drains
+    /// on its own.
+    ///
+    /// Encryption always uses the current key; entries here are only ever tried after it, and
+    /// only to decrypt. AES-GCM authenticates, so a wrong key fails unambiguously rather than
+    /// returning garbage. Each is validated exactly like the current key.
+    pub previous_encryption_keys: Vec<SecretString>,
     /// Issuer shown in authenticator apps. Required, non-empty.
     pub issuer: String,
     /// Recovery codes generated on enable, default 8.
@@ -388,6 +473,28 @@ impl Default for InvitationConfig {
     }
 }
 
+/// Address-change policy.
+///
+/// The flow itself is switched on by `controllers.email_change`; this only tunes it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct EmailChangeConfig {
+    /// Verification-token TTL, default 3600s (1h).
+    ///
+    /// Shorter than an invitation because the recipient is a user who just asked for the
+    /// change and is waiting on the message — and because the token points at the account's
+    /// recovery credential, so a link sitting in a mailbox for two days is a longer window
+    /// than the flow needs.
+    pub token_ttl: Duration,
+}
+
+impl Default for EmailChangeConfig {
+    fn default() -> Self {
+        Self {
+            token_ttl: Duration::from_secs(3_600),
+        }
+    }
+}
+
 /// OAuth redirect/flow knobs and the built-in Google provider credentials.
 #[derive(Clone, Debug, Default)]
 pub struct OAuthConfig {
@@ -455,6 +562,8 @@ pub struct ControllerToggles {
     pub oauth: bool,
     /// The invitations group (auto-true when `invitations.enabled`), default false.
     pub invitations: bool,
+    /// Mount the address-change routes, default false. Opt-in.
+    pub email_change: bool,
 }
 
 impl Default for ControllerToggles {
@@ -463,6 +572,7 @@ impl Default for ControllerToggles {
             auth: true,
             password_reset: true,
             mfa: false,
+            email_change: false,
             sessions: false,
             platform: false,
             oauth: false,
@@ -505,6 +615,8 @@ pub struct AuthConfig {
     pub platform: PlatformConfig,
     /// Invitation configuration.
     pub invitations: InvitationConfig,
+    /// Address-change policy.
+    pub email_change: EmailChangeConfig,
     /// OAuth configuration.
     pub oauth: OAuthConfig,
     /// Route prefix, default `auth`.

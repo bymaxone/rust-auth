@@ -1,7 +1,7 @@
 //! Password hashing over RustCrypto: scrypt (default) and Argon2id (`argon2`
 //! feature), producing self-describing PHC strings with constant-time verification,
 //! rehash-on-verify detection, parameter-floor validation, and a compatibility
-//! parser for the legacy `scrypt:hex:hex` corpus.
+//! parser.
 //!
 //! Run [`hash`] and [`verify`] inside `tokio::task::spawn_blocking` (or equivalent);
 //! both are synchronous, memory-hard CPU work (~100–200 ms) and would otherwise stall
@@ -12,9 +12,9 @@
 //!
 //! New hashes are written as standard PHC strings — `$scrypt$ln=15,r=8,p=1$…` or
 //! `$argon2id$v=19$m=19456,t=2,p=1$…` — which self-describe their algorithm and
-//! parameters. [`verify`] additionally accepts the legacy nest-auth
-//! `scrypt:{salt_hex}:{hash_hex}` form (under the `scrypt` feature) and
-//! [`needs_rehash`] always reports it as stale so it migrates to PHC on next login.
+//! parameters. A hash is always verified under the parameters it records, never under
+//! whatever the deployment is configured to write today — which is what makes the cost
+//! factor raisable at all, with [`needs_rehash`] driving the migration on next login.
 
 #[cfg(feature = "argon2")]
 mod argon2;
@@ -76,9 +76,14 @@ impl ScryptParams {
 }
 
 impl Default for ScryptParams {
+    /// OWASP's recommended minimum for scrypt: `N = 2^17`, `r = 8`, `p = 1`.
+    ///
+    /// This has to stay equal to `AuthConfig`'s scrypt default. They are two declarations of one
+    /// number, and when they disagreed every hash written by a caller using these params was
+    /// immediately "stale" to an engine running the other — a rehash on every single login.
     fn default() -> Self {
         Self {
-            cost_factor: 1 << 15,
+            cost_factor: 1 << 17,
             block_size: 8,
             parallelization: 1,
         }
@@ -189,9 +194,9 @@ pub fn hash(password: &[u8], params: &PasswordParams) -> Result<String, CryptoEr
 ///
 /// This function is **total**: a wrong password, a malformed PHC string, or an
 /// unknown algorithm all return `Ok(false)` — never `Err`, never a panic. The stored
-/// algorithm is auto-detected from the PHC prefix (or the legacy `scrypt:hex:hex`
-/// form), so hashes written under any supported scheme still verify, and the password
-/// comparison itself is constant-time (via the `password-hash` verifier).
+/// algorithm is auto-detected from the PHC prefix, so hashes written under any supported
+/// scheme still verify, and the password comparison itself is constant-time (via the
+/// `password-hash` verifier).
 ///
 /// Timing: a *malformed* stored hash returns before the KDF runs, so it is not
 /// time-equivalent to a wrong password (which runs the full KDF). This is not a login
@@ -205,25 +210,16 @@ pub fn hash(password: &[u8], params: &PasswordParams) -> Result<String, CryptoEr
 /// Never returns `Err`; the `Result` exists for symmetry with [`hash`] and forward
 /// compatibility.
 pub fn verify(password: &[u8], phc: &str) -> Result<bool, CryptoError> {
-    #[cfg(feature = "scrypt")]
-    if let Some((salt, expected)) = phc::parse_legacy(phc) {
-        return Ok(phc::verify_legacy(password, &salt, &expected));
-    }
     Ok(phc::verify_phc(password, phc))
 }
 
 /// Return `true` when a stored hash should be re-hashed with the current config.
 ///
 /// True when the stored hash uses a different algorithm than `current.active`, uses
-/// weaker-than-current parameters, is unparseable, or is the legacy
-/// `scrypt:hex:hex` format. Drives transparent rehash-on-verify: the caller re-hashes
-/// the just-verified plaintext and persists it.
+/// weaker-than-current parameters, or is unparseable. Drives transparent rehash-on-verify:
+/// the caller re-hashes the just-verified plaintext and persists it.
 #[must_use]
 pub fn needs_rehash(phc: &str, current: &PasswordParams) -> bool {
-    #[cfg(feature = "scrypt")]
-    if phc::is_legacy(phc) {
-        return true;
-    }
     phc::needs_rehash_phc(phc, current)
 }
 

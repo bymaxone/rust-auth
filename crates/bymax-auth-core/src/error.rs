@@ -35,6 +35,25 @@ pub enum ConfigError {
         /// The refresh-token lifetime, in seconds.
         lifetime: u64,
     },
+    /// `jwt.refresh_grace_window` exceeds the absolute ceiling: it is the replay window for an
+    /// already-consumed refresh token, so it covers a network retry, not a session policy.
+    #[error("jwt.refresh_grace_window ({got}s) must be <= {max}s")]
+    RefreshGraceCeiling {
+        /// The configured grace window, in seconds.
+        got: u64,
+        /// The ceiling, in seconds.
+        max: u64,
+    },
+    /// `brute_force.window` is zero, which makes the store delete each counter as it is
+    /// created (`EXPIRE key 0`) and silently disables the account lockout.
+    #[error("brute_force.window must be at least 1s (a zero window deletes the counter)")]
+    BruteForceWindowInvalid,
+    /// `brute_force.max_attempts` is outside the accepted `1..=100` range.
+    #[error("brute_force.max_attempts must be within 1..=100 (got {got})")]
+    BruteForceAttemptsRange {
+        /// The rejected threshold.
+        got: u32,
+    },
     /// `jwt.refresh_expires_in_days` is zero (it must be a positive number of days).
     #[error("jwt.refresh_expires_in_days must be a positive value (got {got})")]
     RefreshLifetimeInvalid {
@@ -53,6 +72,10 @@ pub enum ConfigError {
         /// The guaranteed token-epoch retention window, in seconds.
         retention: u64,
     },
+    /// A `jwt.previous_secrets` entry repeats `jwt.secret` or an earlier entry, which means the
+    /// rotation it claims to describe did not happen.
+    #[error("jwt.previous_secrets repeats jwt.secret or an earlier entry")]
+    PreviousSecretRepeated,
     /// `roles.hierarchy` is empty (at least one role must be declared).
     #[error("roles.hierarchy must not be empty")]
     EmptyRoleHierarchy,
@@ -76,6 +99,35 @@ pub enum ConfigError {
     ScryptCostFactor {
         /// The rejected cost factor.
         got: u32,
+    },
+    /// `password.scrypt.block_size` is below the floor that makes the cost factor mean what
+    /// it says.
+    #[error("password.scrypt.block_size must be >= 8 (got {got})")]
+    ScryptBlockSize {
+        /// The rejected block size.
+        got: u32,
+    },
+    /// `password.scrypt.parallelization` is below 1.
+    #[error("password.scrypt.parallelization must be >= 1 (got {got})")]
+    ScryptParallelization {
+        /// The rejected parallelization.
+        got: u32,
+    },
+    /// `mfa.totp_window` is outside the accepted `0..=10` range.
+    #[error(
+        "mfa.totp_window must be within 0..=10 (got {got}; {valid} codes would be valid at once)"
+    )]
+    TotpWindowRange {
+        /// The rejected window.
+        got: u8,
+        /// How many codes that window would accept simultaneously.
+        valid: u16,
+    },
+    /// `mfa.recovery_code_count` is outside the accepted `1..=50` range.
+    #[error("mfa.recovery_code_count must be within 1..=50 (got {got})")]
+    RecoveryCodeCountRange {
+        /// The rejected count.
+        got: u8,
     },
     /// `password.argon2.memory_kib` is below the OWASP production floor of 19456 KiB.
     #[error("password.argon2.memory_kib must be >= 19456 (OWASP floor; got {got})")]
@@ -161,6 +213,21 @@ pub enum ConfigError {
     /// browsers reject.
     #[error("cookies.same_site = None requires secure_cookies = true")]
     SameSiteNoneRequiresSecure,
+    /// `cookies.same_site = None` was resolved with an empty `cookies.trusted_origins`, so
+    /// every cross-site state-changing request would be rejected.
+    #[error("cookies.same_site = None requires a non-empty cookies.trusted_origins")]
+    TrustedOriginsRequired,
+    /// `cookies.trusted_origins` was set under a `SameSite` posture that never sends the
+    /// session cookie cross-site, so the allow-list could never be consulted.
+    #[error("cookies.trusted_origins is set but cookies.same_site is not None")]
+    TrustedOriginsUnused,
+    /// An entry in `cookies.trusted_origins` is not a bare absolute origin, so it can never
+    /// equal an `Origin` header.
+    #[error("cookies.trusted_origins entry '{origin}' is not an absolute origin")]
+    TrustedOriginMalformed {
+        /// The offending entry.
+        origin: String,
+    },
     /// `route_prefix` was changed from its default without an explicit
     /// `cookies.refresh_cookie_path`, so the refresh cookie would no longer be scoped to
     /// the refresh endpoint.

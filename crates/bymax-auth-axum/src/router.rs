@@ -68,7 +68,12 @@ impl AuthRouter {
         // Nest the grouped routes under the configured prefix, apply the middleware stack,
         // then bind the shared state so the router is self-contained.
         let nested: Router<AuthState> = Router::new().nest(&prefix, grouped);
-        let nested = apply_middleware(nested, config.max_body_bytes, config.cors.clone());
+        let nested = apply_middleware(
+            nested,
+            state.clone(),
+            config.max_body_bytes,
+            config.cors.clone(),
+        );
         let router = nested.with_state(state);
 
         Self { router, groups }
@@ -89,20 +94,13 @@ impl AuthRouter {
 /// Mount the feature- and toggle-gated optional groups. Each arm is doubly gated: a
 /// `#[cfg(feature = ...)]` removes the code when the Cargo feature is off, and the runtime
 /// toggle removes the routes when the engine did not wire the capability.
-#[cfg_attr(
-    not(any(
-        feature = "mfa",
-        feature = "sessions",
-        feature = "platform",
-        feature = "oauth",
-        feature = "invitations"
-    )),
-    expect(
-        unused_variables,
-        unused_mut,
-        reason = "a bare adapter mounts no optional groups, so the inputs are unused"
-    )
-)]
+// No `expect(unused_variables, unused_mut)` here any more. It was correct while every optional
+// group sat behind a Cargo feature: with none of them on, the function mounted nothing and its
+// inputs really were unused. The email-change group is not feature-gated — the flow ships with
+// the adapter and is switched on at runtime — so the parameters are read in every build, and
+// the expectation became unfulfilled. Under `-D warnings` an unfulfilled expectation is an
+// error, which is the right outcome: it is the compiler saying the annotation stopped
+// describing the code.
 fn mount_optional_groups(
     mut router: Router<AuthState>,
     groups: RouteGroups,
@@ -136,6 +134,9 @@ fn mount_optional_groups(
     if groups.invitations {
         router = router.merge(crate::routes::invitations::routes(config, ip_source));
     }
+    if groups.email_change {
+        router = router.merge(crate::routes::email_change::routes(config, ip_source));
+    }
 
     router
 }
@@ -153,6 +154,7 @@ fn resolve_config(engine: &AuthEngine, config: &AxumAuthConfig) -> ResolvedConfi
         mfa_temp_path: auth_config.cookies.mfa_temp_cookie_path.clone(),
         secure: resolved.secure_cookies(),
         same_site: auth_config.cookies.same_site,
+        trusted_origins: auth_config.cookies.trusted_origins.clone(),
         access_max_age_secs: clamp_secs(auth_config.jwt.access_cookie_max_age.as_secs()),
         refresh_max_age_secs: refresh_max_age_secs(auth_config.jwt.refresh_expires_in_days),
     };
@@ -185,11 +187,16 @@ pub(crate) fn throttled(
 ) -> MethodRouter<AuthState> {
     match build_governor_config(limit, ip_source) {
         Some(GovernorConfigKind::Peer(config)) => {
+            // The governor keys its state in a map that is only ever inserted into, so each
+            // throttled route gets a sweeper. See `spawn_key_gc` for why this is the library's
+            // job rather than the consumer's.
+            crate::rate_limit::spawn_key_gc(Arc::clone(&config));
             let layer =
                 GovernorLayer::<_, _, Body>::new(config).error_handler(governor_error_to_response);
             method_router.route_layer(layer)
         }
         Some(GovernorConfigKind::Smart(config)) => {
+            crate::rate_limit::spawn_key_gc(Arc::clone(&config));
             let layer =
                 GovernorLayer::<_, _, Body>::new(config).error_handler(governor_error_to_response);
             method_router.route_layer(layer)

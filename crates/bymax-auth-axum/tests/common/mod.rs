@@ -8,7 +8,7 @@
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use axum::Router;
@@ -64,9 +64,16 @@ pub struct EngineSpec {
     pub platform: bool,
     pub oauth: bool,
     pub invitations: bool,
+    pub email_change: bool,
     pub sessions: bool,
     pub verification_required: bool,
     pub allow_oauth: bool,
+    /// Origins the deployment trusts for cross-site, cookie-authenticated writes. Setting any
+    /// switches `SameSite` to `None`, since the two are only valid together.
+    pub trusted_origins: &'static [&'static str],
+    /// Cookie `Domain`(s) a configured `resolve_domains` should return. Empty leaves the
+    /// resolver unconfigured, which is the host-only default.
+    pub cookie_domains: &'static [&'static str],
 }
 
 impl Default for EngineSpec {
@@ -77,10 +84,31 @@ impl Default for EngineSpec {
             platform: false,
             oauth: false,
             invitations: false,
+            email_change: false,
             sessions: false,
             verification_required: false,
             allow_oauth: false,
+            trusted_origins: &[],
+            cookie_domains: &[],
         }
+    }
+}
+
+/// A `CookieDomainResolver` that answers with a fixed list, and records the request host it
+/// was handed so a test can assert the adapter passes the real one (port stripped) rather than
+/// an empty string — a resolver that cannot see the host cannot scope anything.
+pub struct RecordingDomains {
+    domains: Vec<String>,
+    /// The last host the adapter handed the resolver.
+    pub seen_host: Mutex<Option<String>>,
+}
+
+impl bymax_auth_core::config::CookieDomainResolver for RecordingDomains {
+    fn resolve(&self, request_host: &str) -> Vec<String> {
+        if let Ok(mut seen) = self.seen_host.lock() {
+            *seen = Some(request_host.to_owned());
+        }
+        self.domains.clone()
     }
 }
 
@@ -102,6 +130,8 @@ pub struct Harness {
     pub users: Arc<InMemoryUserRepository>,
     pub admins: Arc<InMemoryPlatformUserRepository>,
     pub stores: Arc<InMemoryStores>,
+    /// The cookie-domain resolver, present only when `EngineSpec::cookie_domains` asked for one.
+    pub domain_resolver: Option<Arc<RecordingDomains>>,
 }
 
 /// Build an engine + router over in-memory stores per `spec`.
@@ -122,11 +152,36 @@ pub fn build(spec: EngineSpec) -> Option<Harness> {
     config.sessions.enabled = spec.sessions;
     config.controllers.sessions = spec.sessions;
     config.controllers.invitations = spec.invitations;
+    config.controllers.email_change = spec.email_change;
     config.invitations.enabled = spec.invitations;
     config.controllers.oauth = spec.oauth;
+    let domain_resolver = if spec.cookie_domains.is_empty() {
+        None
+    } else {
+        let resolver = Arc::new(RecordingDomains {
+            domains: spec
+                .cookie_domains
+                .iter()
+                .map(|domain| (*domain).to_owned())
+                .collect(),
+            seen_host: Mutex::new(None),
+        });
+        config.cookies.resolve_domains = Some(resolver.clone());
+        Some(resolver)
+    };
+    if !spec.trusted_origins.is_empty() {
+        config.cookies.same_site = bymax_auth_core::config::SameSite::None;
+        config.cookies.trusted_origins = spec
+            .trusted_origins
+            .iter()
+            .map(|origin| (*origin).to_owned())
+            .collect();
+        config.secure_cookies = Some(true);
+    }
 
     if spec.mfa {
         config.mfa = Some(MfaConfig {
+            previous_encryption_keys: Vec::new(),
             encryption_key: SecretString::from(mfa_key_b64()),
             issuer: "Bymax".to_owned(),
             recovery_code_count: 8,
@@ -164,6 +219,7 @@ pub fn build(spec: EngineSpec) -> Option<Harness> {
         users,
         admins,
         stores,
+        domain_resolver,
     })
 }
 
@@ -199,13 +255,54 @@ pub fn build_oauth_with_redirects() -> Option<Harness> {
         users,
         admins,
         stores,
+        domain_resolver: None,
     })
 }
 
-/// Assemble the adapter router for the harness engine with default adapter config.
+/// Build an OAuth-enabled engine whose state store fails on `take_state`, with the error
+/// redirect configured. Drives the one path where the callback must NOT redirect: an
+/// infrastructure failure has to surface to monitoring rather than be dressed up as a user
+/// declining consent.
+pub fn build_oauth_with_failing_state_store() -> Option<Harness> {
+    let users = Arc::new(InMemoryUserRepository::new());
+    let admins = Arc::new(InMemoryPlatformUserRepository::new());
+    let failing = Arc::new(FailingStores::with_failing_oauth_state());
+    let inert = Arc::new(InMemoryStores::new());
+
+    let mut config = AuthConfig::default();
+    config.jwt.secret = SecretString::from(JWT_SECRET.to_owned());
+    config.roles.hierarchy = HashMap::from([("USER".to_owned(), Vec::new())]);
+    config.controllers.oauth = true;
+    config.oauth.error_redirect_url = Some("http://localhost/error".to_owned());
+    config.oauth.redirect_allowlist = vec!["localhost".to_owned()];
+
+    let engine = AuthEngine::builder()
+        .config(config)
+        .environment(Environment::Development)
+        .user_repository(users.clone())
+        .platform_user_repository(admins.clone())
+        .redis_stores(failing.clone())
+        .oauth_provider(Arc::new(MockOAuthProvider::new("google")))
+        .oauth_state_store(failing)
+        .hooks(Arc::new(AllowOAuthHooks))
+        .build()
+        .ok()?;
+    Some(Harness {
+        engine: Arc::new(engine),
+        users,
+        admins,
+        stores: inert,
+        domain_resolver: None,
+    })
+}
+
+/// Assemble the adapter router for the harness engine, keyed on the socket peer address.
 pub fn router(harness: &Harness) -> Router {
-    bymax_auth_axum::AuthRouter::from_engine(harness.engine.clone(), AxumAuthConfig::default())
-        .into_router()
+    bymax_auth_axum::AuthRouter::from_engine(
+        harness.engine.clone(),
+        AxumAuthConfig::new(bymax_auth_axum::ClientIpSource::PeerAddr),
+    )
+    .into_router()
 }
 
 /// Seed an active, verified dashboard user with the given role; returns the id.
@@ -234,6 +331,8 @@ pub async fn seed_user(harness: &Harness, email: &str, password: &str, role: &st
 pub fn mint_dashboard_token(sub: &str, role: &str, status: &str) -> String {
     use bymax_auth_types::{DashboardClaims, DashboardType};
     let claims = DashboardClaims {
+        iss: None,
+        aud: None,
         sub: sub.to_owned(),
         jti: "jti-mint".to_owned(),
         tenant_id: TENANT.to_owned(),
@@ -254,6 +353,8 @@ pub fn mint_dashboard_token(sub: &str, role: &str, status: &str) -> String {
 pub fn mint_platform_token(sub: &str, role: &str) -> String {
     use bymax_auth_types::{PlatformClaims, PlatformType};
     let claims = PlatformClaims {
+        iss: None,
+        aud: None,
         sub: sub.to_owned(),
         jti: "jti-mint-p".to_owned(),
         role: role.to_owned(),
@@ -281,6 +382,10 @@ pub struct FailingStores {
     /// revocation check), so a test can drive the auth-extractor's internal-error path rather
     /// than the handler error arms. Default `false` keeps the auth extractors passing.
     blacklist_fails: bool,
+    /// When set, `take_state` fails, so the OAuth callback surfaces a store error rather than
+    /// `OauthFailed` — the one input that proves an infrastructure failure is NOT swallowed
+    /// into the friendly `?error=oauth_failed` redirect.
+    oauth_state_fails: bool,
 }
 
 impl FailingStores {
@@ -288,6 +393,7 @@ impl FailingStores {
         Self {
             inner: Arc::new(InMemoryStores::new()),
             blacklist_fails: false,
+            oauth_state_fails: false,
         }
     }
 
@@ -295,6 +401,15 @@ impl FailingStores {
         Self {
             inner: Arc::new(InMemoryStores::new()),
             blacklist_fails: true,
+            oauth_state_fails: false,
+        }
+    }
+
+    fn with_failing_oauth_state() -> Self {
+        Self {
+            inner: Arc::new(InMemoryStores::new()),
+            blacklist_fails: false,
+            oauth_state_fails: true,
         }
     }
 }
@@ -353,6 +468,24 @@ impl bymax_auth_core::traits::SessionStore for FailingStores {
     ) -> Result<(), bymax_auth_types::AuthError> {
         self.inner.delete_grace_pointer(kind, session_hash).await
     }
+    async fn create_recovered_session(
+        &self,
+        kind: bymax_auth_core::traits::SessionKind,
+        token_hash: &str,
+        detail: &bymax_auth_core::traits::SessionRecord,
+        ttl_secs: u64,
+    ) -> Result<bool, bymax_auth_types::AuthError> {
+        self.inner
+            .create_recovered_session(kind, token_hash, detail, ttl_secs)
+            .await
+    }
+    async fn sweep_grace_pointers(
+        &self,
+        kind: bymax_auth_core::traits::SessionKind,
+        user_id: &str,
+    ) -> Result<(), bymax_auth_types::AuthError> {
+        self.inner.sweep_grace_pointers(kind, user_id).await
+    }
     async fn revoke_all(
         &self,
         _kind: bymax_auth_core::traits::SessionKind,
@@ -364,7 +497,7 @@ impl bymax_auth_core::traits::SessionStore for FailingStores {
         &self,
         kind: bymax_auth_core::traits::SessionKind,
         family_id: &str,
-    ) -> Result<(), bymax_auth_types::AuthError> {
+    ) -> Result<Option<String>, bymax_auth_types::AuthError> {
         self.inner.revoke_family(kind, family_id).await
     }
     async fn blacklist_access(
@@ -479,6 +612,22 @@ impl bymax_auth_core::traits::WsTicketStore for FailingStores {
 
 #[async_trait]
 impl bymax_auth_core::traits::PasswordResetStore for FailingStores {
+    async fn put_email_change(
+        &self,
+        token: &str,
+        context: &bymax_auth_core::traits::EmailChangeContext,
+        ttl_secs: u64,
+    ) -> Result<(), bymax_auth_types::AuthError> {
+        self.inner.put_email_change(token, context, ttl_secs).await
+    }
+    async fn consume_email_change(
+        &self,
+        token: &str,
+    ) -> Result<Option<bymax_auth_core::traits::EmailChangeContext>, bymax_auth_types::AuthError>
+    {
+        self.inner.consume_email_change(token).await
+    }
+
     async fn put_token(
         &self,
         token: &str,
@@ -529,6 +678,44 @@ impl bymax_auth_core::traits::InvitationStore for FailingStores {
     {
         self.inner.consume_invitation(token).await
     }
+    async fn put_invitation_index(
+        &self,
+        tenant_id: &str,
+        email: &str,
+        token_hash: &str,
+        ttl_secs: u64,
+    ) -> Result<(), bymax_auth_types::AuthError> {
+        self.inner
+            .put_invitation_index(tenant_id, email, token_hash, ttl_secs)
+            .await
+    }
+    async fn read_invitation_index(
+        &self,
+        tenant_id: &str,
+        email: &str,
+    ) -> Result<Option<String>, bymax_auth_types::AuthError> {
+        self.inner.read_invitation_index(tenant_id, email).await
+    }
+    async fn take_invitation_index(
+        &self,
+        tenant_id: &str,
+        email: &str,
+    ) -> Result<Option<String>, bymax_auth_types::AuthError> {
+        self.inner.take_invitation_index(tenant_id, email).await
+    }
+    async fn read_invitation_by_hash(
+        &self,
+        token_hash: &str,
+    ) -> Result<Option<bymax_auth_core::traits::StoredInvitation>, bymax_auth_types::AuthError>
+    {
+        self.inner.read_invitation_by_hash(token_hash).await
+    }
+    async fn delete_invitation_by_hash(
+        &self,
+        token_hash: &str,
+    ) -> Result<bool, bymax_auth_types::AuthError> {
+        self.inner.delete_invitation_by_hash(token_hash).await
+    }
 }
 
 #[async_trait]
@@ -567,7 +754,7 @@ impl bymax_auth_core::traits::MfaStore for FailingStores {
     ) -> Result<Option<String>, bymax_auth_types::AuthError> {
         self.inner.get_temp(jti_hash).await
     }
-    async fn del_temp(&self, jti_hash: &str) -> Result<(), bymax_auth_types::AuthError> {
+    async fn del_temp(&self, jti_hash: &str) -> Result<bool, bymax_auth_types::AuthError> {
         self.inner.del_temp(jti_hash).await
     }
     async fn mark_totp_used(
@@ -576,6 +763,28 @@ impl bymax_auth_core::traits::MfaStore for FailingStores {
         ttl: u64,
     ) -> Result<bool, bymax_auth_types::AuthError> {
         self.inner.mark_totp_used(replay_id, ttl).await
+    }
+    async fn claim_recovery_code(
+        &self,
+        claim_id: &str,
+        ttl: u64,
+    ) -> Result<bool, bymax_auth_types::AuthError> {
+        self.inner.claim_recovery_code(claim_id, ttl).await
+    }
+    async fn acquire_mfa_lock(
+        &self,
+        lock_id: &str,
+        token: &str,
+        ttl: u64,
+    ) -> Result<bool, bymax_auth_types::AuthError> {
+        self.inner.acquire_mfa_lock(lock_id, token, ttl).await
+    }
+    async fn release_mfa_lock(
+        &self,
+        lock_id: &str,
+        token: &str,
+    ) -> Result<(), bymax_auth_types::AuthError> {
+        self.inner.release_mfa_lock(lock_id, token).await
     }
     async fn challenge_consume(
         &self,
@@ -601,6 +810,9 @@ impl bymax_auth_core::traits::OAuthStateStore for FailingStores {
         &self,
         state_hash: &str,
     ) -> Result<Option<String>, bymax_auth_types::AuthError> {
+        if self.oauth_state_fails {
+            return Err(fail());
+        }
         self.inner.take_state(state_hash).await
     }
 }
@@ -637,6 +849,7 @@ pub fn build_failing() -> Option<Harness> {
         users,
         admins,
         stores: inert,
+        domain_resolver: None,
     })
 }
 
@@ -671,6 +884,7 @@ pub fn build_failing_blacklist() -> Option<Harness> {
         users,
         admins,
         stores: inert,
+        domain_resolver: None,
     })
 }
 
@@ -717,14 +931,39 @@ pub fn current_totp(secret_b32: &str) -> String {
 /// several TOTP-gated operations in one test uses distinct window offsets (0, 30, 60, …) so the
 /// per-window anti-replay never rejects a reused code. The configured `totp_window` (2) accepts
 /// codes a couple of steps away from the verifier's clock, so a near-future offset still validates.
-pub fn totp_at(secret_b32: &str, offset_secs: u64) -> String {
+pub fn now_unix() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
+/// A TOTP code at an absolute instant. Lifecycle tests that need several distinct,
+/// non-replayed codes capture ONE base with [`now_unix`] and derive every code from it —
+/// per-call clock reads can straddle a 30-second step boundary mid-test, silently colliding
+/// two "distinct" steps and tripping the anti-replay marker.
+pub fn totp_at_abs(secret_b32: &str, at_unix: i64) -> String {
+    let raw = bymax_auth_crypto::totp::decode_secret_base32(secret_b32).unwrap_or_default();
+    format!(
+        "{:06}",
+        bymax_auth_crypto::totp::totp(&raw, u64::try_from(at_unix).unwrap_or(0), 30, 6)
+    )
+}
+
+pub fn totp_at(secret_b32: &str, offset_secs: i64) -> String {
+    // Signed offset: a lifecycle test that has already consumed the present and near-future
+    // steps against the anti-replay marker still needs a valid in-window code, and the only
+    // ones left are in the near past.
     let raw = bymax_auth_crypto::totp::decode_secret_base32(secret_b32).unwrap_or_default();
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
+        .map(|d| d.as_secs() as i64)
         .unwrap_or(0)
         + offset_secs;
-    format!("{:06}", bymax_auth_crypto::totp::totp(&raw, now, 30, 6))
+    format!(
+        "{:06}",
+        bymax_auth_crypto::totp::totp(&raw, u64::try_from(now).unwrap_or(0), 30, 6)
+    )
 }
 
 /// Mark a seeded user as MFA-enabled with a stored (encrypted-placeholder) secret.

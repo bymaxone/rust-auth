@@ -1,0 +1,514 @@
+{
+  "$comment": [
+    "CROSS-IMPLEMENTATION WIRE CONTRACT — keep this file byte-identical in both repos:",
+    "  nest-auth/conformance/wire-contract.json",
+    "  rust-auth/conformance/wire-contract.json",
+    "",
+    "Both libraries can back the same deployment and share one Redis, so these values are a",
+    "contract between them rather than an implementation detail of either. Each repo has a",
+    "test that reads this file and asserts its own implementation matches, so a change on one",
+    "side turns that side's suite red immediately instead of surfacing months later as",
+    "sessions, lockouts, and reset links that silently miss each other in production.",
+    "",
+    "Changing a value here is a breaking change to the shared keyspace. Do it in both repos in",
+    "the same change, and only with a migration story for data already written in the old form."
+  ],
+  "version": 1,
+
+  "hmacKeyDerivation": {
+    "$comment": [
+      "The identifier-hashing key both sides derive from the JWT secret, and one identifier",
+      "keyed with it. Three things are pinned at once: the ':' separator between label and",
+      "secret, the SHA-256, and the fact that the HMAC is keyed with the hex TEXT of the digest",
+      "rather than its raw bytes. Any of the three drifting produces different Redis keys for",
+      "every lockout, OTP, resend cooldown, MFA setup, and anti-replay record."
+    ],
+    "label": "bymax-auth:hmac-key:v1",
+    "vectors": [
+      {
+        "secret": "0123456789abcdef0123456789abcdef",
+        "derivedKeyHex": "0dd66555bd2d89e0eb4ce050f1fef427bea6799bec27fb8e313f69ab965048c1",
+        "identifierMessage": "tenant-a:user@example.com",
+        "identifierHex": "609a759522bd8b397748fad2dbde07957cea580fe4f4f1f0ce0f526485de2b6d"
+      }
+    ]
+  },
+
+  "redisKeyPrefixes": {
+    "$comment": [
+      "The prefix each keyspace uses, under the configured namespace: {namespace}:{prefix}:{id}.",
+      "The dashboard and platform planes are deliberately separate — a consumer's user ids and",
+      "admin ids come from different repositories and may collide, so one shared index let a",
+      "revoke on one plane log the other out."
+    ],
+    "dashboardRefreshSession": "rt",
+    "dashboardGracePointer": "rp",
+    "dashboardConsumedFamilyMarker": "cf",
+    "dashboardFamilyIndex": "fam",
+    "dashboardSessionIndex": "sess",
+    "dashboardSessionDetail": "sd",
+    "dashboardTokenEpoch": "ep",
+    "platformRefreshSession": "prt",
+    "platformGracePointer": "prp",
+    "platformConsumedFamilyMarker": "pcf",
+    "platformFamilyIndex": "pfam",
+    "platformSessionIndex": "psess",
+    "platformSessionDetail": "psd",
+    "platformTokenEpoch": "pep",
+    "accessTokenBlacklist": "rv",
+    "failedLoginCounter": "lf",
+    "oneTimePassword": "otp",
+    "passwordResetToken": "pw_reset",
+    "passwordResetVerifiedToken": "pw_vtok",
+    "totpReplayMarker": "tu",
+    "oauthState": "os",
+    "wsTicket": "wst",
+    "invitation": "inv",
+    "recoveryCodeClaim": "rcu",
+    "emailChangeToken": "ec",
+    "pendingMfaSetup": "mfa_setup",
+    "mfaTempTokenMarker": "mfa",
+    "mfaTransitionLock": "mfalock",
+    "otpResendCooldown": "resend",
+    "invitationIndex": "invidx"
+  },
+
+  "graceRecoveryWrite": {
+    "$comment": [
+      "The session a grace recovery produces is written in ONE atomic step, gated on the",
+      "per-user session index still existing.",
+      "The rotation script moved the session-index bookkeeping inside itself precisely to close",
+      "the window in which 'log out everywhere' could miss a session a rotation had just",
+      "minted. The GRACE arm was left outside it: the script returned the recovered record and",
+      "the engine wrote the session keys several round trips later. A revoke-all landing in",
+      "between — a password reset, an MFA enable, a ban compensation — swept an index that did",
+      "not yet contain the session, so the session survived a revocation the user was told had",
+      "happened, and its access token, signed afterwards, carried the POST-bump epoch and",
+      "verified. An attacker holding a stolen token gets one grace-eligible token per rotation,",
+      "so they can keep a continuous stream of these in flight for as long as the reset takes.",
+      "The witness is the per-user session index: the revoke-all transaction deletes that set",
+      "once it has removed every member, so its absence is exactly 'a revoke-all has run', and",
+      "the successor the grace pointer named is itself indexed, so a legitimate recovery always",
+      "finds it present. The family index is re-checked in the same step, because the engine's",
+      "own EXISTS ran before the write and a revoke-family in between would be undone by it.",
+      "A refused write must surface as auth.refresh_token_invalid: the grace pointer is already",
+      "consumed, so there is nothing to retry against, and the revocation is what the caller",
+      "must obey. Both implementations must gate on the same witness, or one of them keeps the",
+      "window the other closed."
+    ],
+    "gate": "EXISTS {sessionIndex}:{userId}, and EXISTS {familyIndex}:{familyId} when the record names a family",
+    "writes": ["refreshSession", "sessionIndex", "sessionDetail", "familyIndex"],
+    "refusedError": "auth.refresh_token_invalid"
+  },
+
+  "mfaTransitionLock": {
+    "key": "mfalock:{hmac_sha256(hmacKey, '{plane}:{userId}')}",
+    "value": "a per-call nonce (16 CSPRNG bytes, hex) — the release compares against it",
+    "ttlSeconds": 10,
+    "$comment": [
+      "Serializes MFA state transitions for one account. Every transition rewrites a single",
+      "repository record carrying mfaEnabled, the encrypted secret and the recovery-code",
+      "digests TOGETHER, and the update replaces all three wholesale — the repository is the",
+      "host's and offers no compare-and-set — so interleaved transitions are last-write-wins.",
+      "Three ways that bit: two challenges spending DIFFERENT recovery codes each write the",
+      "full list minus their own, resurrecting the loser's code; a challenge that read the list",
+      "before a regenerate and splices after it restores the whole replaced set; and a challenge",
+      "that splices after a disable completes writes mfaEnabled back with the pre-disable",
+      "secret. The recoveryCodeClaim below does not cover any of them — it is keyed on the code,",
+      "so it serializes two attempts at the SAME code and nothing else.",
+      "A caller that cannot take the lock is refused with auth.mfa_state_conflict rather than",
+      "made to wait. The TTL is short because the lock is released explicitly; it bounds only a",
+      "process that dies mid-transition, and an account whose MFA is briefly unchangeable is",
+      "worse than a window this narrow.",
+      "The release must be a compare-and-delete against that nonce, in ONE step. The TTL is",
+      "short and a transition calls into the consumer's repository twice, so a run that",
+      "overruns has already lost the lock: deleting the key unconditionally then removes",
+      "whichever transition holds it now, and a third caller enters beside the second. A GET",
+      "followed by a DEL does not express the check either — the key can be retaken between",
+      "the two round trips, which is the interleaving the nonce exists to catch.",
+      "Both implementations must derive the same key, or the two halves of one deployment",
+      "serialize against different locks and the property is lost."
+    ]
+  },
+
+  "recoveryCodeClaim": {
+    "key": "rcu:{hmac_sha256(hmacKey, '{plane}:{userId}:{code}')}",
+    "value": "'1' — presence is the whole meaning",
+    "ttlSeconds": 300,
+    "$comment": [
+      "Consuming a recovery code is a read-modify-write against the CONSUMER's user repository:",
+      "the challenge reads the whole array, removes one entry, and writes the rest back. Two",
+      "challenges landing together both read the array, both match, and both write — one code",
+      "mints two sessions, which is the one property a recovery code has. Neither library can fix",
+      "that in the repository, whose atomicity is the consumer's to define, so both claim the code",
+      "with SET NX in the store they share. First claim wins; every other reads as an invalid code.",
+      "Same construction as the TOTP anti-replay marker: the key discloses neither the user nor the",
+      "code, and binding the plane stops a dashboard user and a platform admin with the same id",
+      "burning each other's codes. Deliberately short-lived — it serializes a race, it is not the",
+      "durable record of consumption, and outliving the repository write would turn a failed write",
+      "into a code the account can see but can never use."
+    ]
+  },
+
+  "identifierPreimages": {
+    "$comment": [
+      "The preimage each plane HMACs into its `lf:` counter key. The identity PLANE is part of",
+      "it, not just the tenant: without the `dashboard:` segment a tenant whose id is literally",
+      "`platform` produced a byte-identical identifier to the platform plane's own, so five",
+      "unauthenticated dashboard logins against an operator's address locked that operator out",
+      "of the console — repeatably, without the platform surface ever being touched — and a",
+      "successful one cleared their lockout mid-attack. `tenantId` comes from the request body",
+      "whenever no resolver is configured, which is the default, so it was attacker-chosen.",
+      "",
+      "The OTP identifier is deliberately NOT plane-scoped and keeps the bare",
+      "`{tenantId}:{email}` shape: its keyspace is already purpose-scoped (`otp:{purpose}:`),",
+      "the platform plane has no OTP flow, and moving it would split records in flight.",
+      "",
+      "The invitee index takes the canonicalized address alone — the tenant is already a literal",
+      "segment of that key. It is an HMAC and not a bare digest for the reason all of these are:",
+      "an address carries too little entropy for a plain SHA-256 to hide it."
+    ],
+    "dashboard": "hmac_sha256(hmacKey, 'dashboard:{tenantId}:{email}')",
+    "platform": "hmac_sha256(hmacKey, 'platform:{email}')",
+    "otpRecord": "hmac_sha256(hmacKey, '{tenantId}:{email}')",
+    "inviteeIndex": "hmac_sha256(hmacKey, '{email}')"
+  },
+
+  "requestFieldBounds": {
+    "$comment": [
+      "The length bounds every request DTO applies to a shared field, held identical by both",
+      "implementations. They matter beyond tidiness: an unbounded field on a public route is a",
+      "free byte sink to carry, parse and log, and a bound that differs between the two backends",
+      "means the same request is accepted by one and refused by the other — for a deployment that",
+      "runs both behind one address, that is a difference nobody can explain from the outside.",
+      "",
+      "The password bounds split deliberately. Setting a password enforces the policy minimum;",
+      "PROVING one (login, or the current-password re-proof) floors at 1, because the credential",
+      "may predate whatever the policy says today and a policy floor on a login door refuses a",
+      "legitimate holder with a validation error while telling an unauthenticated caller what the",
+      "policy is, before any key derivation runs."
+    ],
+    "email": { "max": 255 },
+    "newPassword": { "min": 8, "max": 128 },
+    "provenPassword": { "min": 1, "max": 128 },
+    "tenantId": { "min": 1, "max": 128 },
+    "displayName": { "min": 2, "max": 128 },
+    "invitationDisplayName": { "min": 2, "max": 100 },
+    "singleUseToken": { "min": 64, "max": 64 },
+    "resetOtp": { "min": 4, "max": 8 },
+    "verificationOtp": { "min": 6, "max": 6 },
+    "totpCode": { "min": 6, "max": 6 },
+    "role": { "min": 1, "max": 64 },
+    "opaqueToken": { "min": 1, "max": 2048 }
+  },
+  "sessionIndexMembers": {
+    "$comment": [
+      "Index members are FULL key suffixes, not bare hashes. The member has to name its own",
+      "keyspace: an atomic revoke rebuilds keys from members, and a bare hash cannot say whether",
+      "it is a live session or a rotation grace pointer. Grace pointers are members too, which is",
+      "what lets a revoke-all also kill a token that was rotated away but is still in its window.",
+      "The membership is maintained BY THE ROTATION SCRIPT, not by the caller afterwards. Done",
+      "after the script it left a window between the consume and the SADD in which a revoke-all",
+      "sweep could miss the session the rotation had just minted — leaving it alive, and still",
+      "rotating, after a revocation the user was told had happened. Inside the script the two",
+      "serialize. Either backend rotating the other's sessions must keep it there."
+    ],
+    "dashboardLive": "rt:{sha256(refreshToken)}",
+    "dashboardGrace": "rp:{sha256(supersededToken)}",
+    "platformLive": "prt:{sha256(refreshToken)}",
+    "platformGrace": "prp:{sha256(supersededToken)}"
+  },
+
+  "familyIndexMembers": {
+    "$comment": [
+      "A refresh-token FAMILY is one login lineage: minted at login, inherited unchanged by",
+      "every rotation, and the unit reuse detection revokes. Unlike the session index, its",
+      "members are BARE hashes — a family only ever tracks live refresh sessions, so the",
+      "keyspace is implied and does not need to be carried in the member."
+    ],
+    "dashboardLive": "{sha256(refreshToken)}",
+    "platformLive": "{sha256(refreshToken)}"
+  },
+
+  "rotationSemantics": {
+    "$comment": [
+      "What a presented refresh token can be, and what each outcome does. These are behaviours",
+      "rather than bytes, but they have to agree: the two backends share the markers below, so",
+      "one side treating a replay as recoverable while the other treats it as theft would make",
+      "the reaction depend on which backend the request happened to reach."
+    ],
+    "graceWindow": "single-shot — the pointer is consumed on use, so one captured token cannot mint a session repeatedly inside the window",
+    "graceRequiresLiveFamily": "a recovery is refused once its family index is gone, so a pointer that outlived a revocation cannot resurrect the lineage",
+    "reuseSignal": "a consumed token replayed after its grace window closed, detected by the consumed-family marker outliving the pointer",
+    "reuseReaction": "revoke the whole family (every live descendant of that login) and reject the request; the user's other logins are untouched",
+    "legacySessionWithoutFamily": "skips all family bookkeeping and can never trip reuse detection"
+  },
+
+  "recordEncodings": {
+    "$comment": [
+      "Timestamp encoding differs per record and is NOT uniform — this is the trap. The session",
+      "DETAIL uses epoch milliseconds because the reader guards on `typeof === 'number'` and",
+      "evicts a member whose detail fails to parse; everything else uses an ISO-8601 string."
+    ],
+    "refreshSession": {
+      "key": "{rt|prt}:{sha256(refreshToken)}",
+      "fields": [
+        "userId",
+        "tenantId",
+        "role",
+        "device",
+        "ip",
+        "createdAt",
+        "mfaEnabled",
+        "familyId",
+        "familyCreatedAt"
+      ],
+      "createdAt": "iso8601-string",
+      "familyId": "omitted from the record entirely when empty, never written as an empty string",
+      "familyCreatedAt": "iso8601-string; the FAMILY's birth, carried unchanged through every rotation — distinct from createdAt, which is this session's own and resets on each one. Omitted alongside familyId on a legacy record, which is then not subject to the absolute lifetime cap.",
+      "$comment": "mfaEnabled must survive rotation: the MFA gate refuses only when mfaEnabled && !mfaVerified, so losing it turns one refresh into a silent second-factor bypass."
+    },
+    "sessionDetail": {
+      "key": "{sd|psd}:{sha256(refreshToken)}",
+      "fields": ["device", "ip", "createdAt", "lastActivityAt"],
+      "createdAt": "unix-milliseconds-number",
+      "lastActivityAt": "unix-milliseconds-number"
+    },
+    "invitation": {
+      "key": "inv:{sha256(token)}",
+      "fields": ["email", "role", "tenantId", "inviterUserId", "createdAt"],
+      "createdAt": "iso8601-string",
+      "$comment": "Consumption is a single-use GETDEL, so a record the reader rejects is destroyed rather than retried — a missing field loses the invitation outright."
+    },
+    "invitationIndex": {
+      "key": "invidx:{tenantId}:{hmacSha256(email, hmacKey)}",
+      "value": "the invitation's token hash (lowercase hex), pointing at its `inv:` record",
+      "$comment": [
+        "The one handle the issuing side has on a pending invitation: the record itself is keyed by",
+        "the hash of a token only the invitee's mailbox ever held, so without this nobody can name a",
+        "pending invitation, let alone withdraw one. Carries the invitation's TTL, so the pair expires",
+        "together. The email is hashed rather than stored in the clear — a dump of the keyspace must",
+        "not enumerate who a tenant has been inviting. Re-inviting an address supersedes the previous",
+        "invitation through this key: two live tokens for one invitee is two chances for an",
+        "intercepted link, and a revoke would only ever reach the newest.",
+        "The address is HMAC'd, not plainly digested: an address carries too little entropy for a",
+        "bare SHA-256 to hide it, and this key is the one handle anyone reading a keyspace dump has",
+        "on who a tenant has been inviting. The preimage is the canonicalized address alone — the",
+        "tenant is already a literal segment of the key."
+      ]
+    },
+    "wsTicket": {
+      "key": "wst:{sha256(ticket)}",
+      "fields": ["sub", "tenantId", "role", "status", "mfaEnabled", "mfaVerified"],
+      "tenantId": "omitted from the record entirely when the ticket is not tenant-scoped",
+      "$comment": "A verified-identity SNAPSHOT, never a token: no jti, no signature, no expiry of its own. The socket it authorizes cannot be turned back into a session. Redemption is a single-use GETDEL, so a captured upgrade URL is worthless once the socket opens."
+    },
+    "emailChangeContext": {
+      "key": "ec:{sha256(token)}",
+      "fields": ["userId", "newEmail", "tenantId", "passwordFingerprint"],
+      "$comment": [
+        "The pending address change, held under a token that is mailed to the NEW address and",
+        "nowhere else — proving the requester controls it before it becomes the account's",
+        "address. Consumed with GETDEL, so a link works exactly once.",
+        "",
+        "`newEmail` is stored ALREADY NORMALIZED (trimmed, lowercased), because the uniqueness",
+        "check at confirm time compares it against the repository the same way login does. The",
+        "old address is not stored: it is read from the account at confirm time, so a record",
+        "that outlives an intervening change still notifies wherever the account actually is.",
+        "",
+        "`passwordFingerprint` binds the token to the password in force when it was minted,",
+        "exactly as the reset context does. An attacker who plants a change request and waits",
+        "loses it the moment the victim changes their password — which is the first thing a",
+        "victim does. An ABSENT field is read as 'no binding' and accepted, so a rolling deploy",
+        "does not break the changes already in flight."
+      ],
+      "passwordFingerprint": "sha256 of the account's password hash when the token was minted, or the empty string when the account had none."
+    },
+
+    "passwordResetContext": {
+      "key": "pw_reset:{sha256(token)}",
+      "fields": ["userId", "email", "tenantId", "passwordFingerprint"],
+      "passwordFingerprint": "sha256 of the account's password hash at the moment the token was minted, or the empty string when the account had none. Several reset tokens can be alive at once, and completing one used to leave the rest valid — the wrong end state exactly when it matters, since a victim resetting BECAUSE an attacker read a link from their mailbox had not closed the link the attacker read. The binding makes the first completed reset invalidate all of them, with no per-user index to keep in step. An ABSENT field is read as 'no binding' and accepted, so a rolling deploy does not break the resets already in flight."
+    }
+  },
+
+  "credentialFormats": {
+    "$comment": [
+      "The shapes of the credentials themselves. Both sides must mint and accept the same ones",
+      "or a session started on one backend cannot continue on the other."
+    ],
+    "refreshToken": "64 lowercase hex characters (32 CSPRNG bytes)",
+    "passwordHash": "self-describing: the parameters the hash was written under travel with it, so a verify never assumes the currently configured cost",
+    "totpSecretAtRest": "aes-256-gcm over the BASE32 TEXT of the secret",
+    "recoveryCodeDigest": "hex hmac-sha256 of the code under the derived identifier key",
+    "wsTicket": "64 lowercase hex characters (32 CSPRNG bytes), single-use, 30 s lifetime"
+  },
+
+  "rateLimits": {
+    "$comment": [
+      "The per-IP limit each auth route is served under, as `requests/windowSeconds`. Both",
+      "backends enforce these — nest-auth with a Redis fixed-window counter, rust-auth with a",
+      "per-route governor layer — so a deployment that puts the two behind one load balancer",
+      "gets the same answer whichever one serves the request. A value changed on one side only",
+      "is a silent divergence: the same client would be throttled at different points.",
+      "",
+      "The STORAGE differs deliberately and is not part of the contract: nest-auth's counter is",
+      "in Redis and therefore shared across instances, rust-auth's is in process memory and",
+      "therefore per-instance. The Redis one is the stricter of the two under horizontal scale."
+    ],
+    "login": "5/60",
+    "register": "10/3600",
+    "refresh": "10/60",
+    "logout": "20/60",
+    "wsTicket": "20/60",
+    "forgotPassword": "3/300",
+    "resetPassword": "3/300",
+    "changePassword": "5/60",
+    "verifyOtp": "3/300",
+    "resendPasswordOtp": "3/300",
+    "verifyEmail": "5/60",
+    "resendVerification": "3/300",
+    "mfaSetup": "5/60",
+    "mfaVerifyEnable": "5/60",
+    "mfaChallenge": "5/60",
+    "mfaDisable": "3/300",
+    "platformLogin": "5/60",
+    "invitationCreate": "10/3600",
+    "invitationAccept": "5/60",
+    "invitationRevoke": "10/3600",
+    "emailChangeRequest": "3/300",
+    "emailChangeConfirm": "5/60",
+    "listSessions": "30/60",
+    "revokeSession": "10/60",
+    "revokeAllSessions": "5/60",
+    "oauthInitiate": "10/60",
+    "oauthCallback": "10/60"
+  },
+
+  "accessTokenClaims": {
+    "$comment": [
+      "Claims both sides stamp and both sides check. `epoch` is the per-user generation counter",
+      "behind bulk revocation: a password reset advances the stored epoch, and any token stamped",
+      "below it is rejected. A token that predates the claim reads as generation 0, which is",
+      "inert until the user's first bump. Absent from the MFA challenge token, which grants no",
+      "resource access on its own."
+    ],
+
+    "issuerAndAudience": {
+      "claims": ["iss", "aud"],
+      "type": "string, or absent",
+      "configuredBy": "jwt.issuer / jwt.audience",
+      "$comment": [
+        "Optional on both sides and absent by default, so an existing deployment is unchanged.",
+        "When configured, the value is STAMPED on every token the backend mints and REQUIRED on",
+        "every token it verifies: a token carrying the wrong issuer or audience, or none at all,",
+        "is rejected. That is the whole point — a verifier that accepts an unstamped token gives",
+        "an attacker a way to opt out of the check.",
+        "",
+        "Both backends must be configured with the SAME pair or they stop accepting each other's",
+        "tokens, which is the one way this setting can split a shared deployment. It is also the",
+        "reason it is not on by default.",
+        "",
+        "Turning it on invalidates the access tokens already in flight, because they were minted",
+        "without the claims. The window is one access-token lifetime and clients recover by",
+        "refreshing — the refresh token is opaque and carries no claims, so rotation is unaffected."
+      ]
+    },
+    "epoch": {
+      "claim": "epoch",
+      "type": "non-negative integer",
+      "storedUnder": "{ep|pep}:{userId}",
+      "absentReadsAs": 0,
+      "rejectWhen": "stampedEpoch < storedEpoch"
+    }
+  },
+
+  "responseBodies": {
+    "$comment": [
+      "The client-facing payloads. These are what a consumer's TypeScript describes, so a",
+      "difference here is not a store that fails to read — it is a client that compiles against",
+      "one backend and reads `undefined` from the other. The platform login body is the trap:",
+      "the account rides under `admin`, not `user`, on both sides."
+    ],
+    "login": {
+      "cookie": ["user"],
+      "bearer": ["user", "accessToken", "refreshToken"],
+      "$comment": "In cookie mode the tokens are in Set-Cookie and MUST NOT also be in the body: a refresh token in a JSON payload is one an XSS can read, which is the whole reason the cookie is HttpOnly."
+    },
+    "platformLogin": {
+      "bearer": ["admin", "accessToken", "refreshToken"],
+      "$comment": "Always bearer — a platform admin console is not a browser session — and the account key is `admin`."
+    },
+    "me": {
+      "envelope": "none",
+      "$comment": "GET /auth/me answers with the BARE user object — no `{ user }` wrapper. Pinned because its absence from this table is what let one side change shape while the other kept unwrapping a key that was no longer there: the client returned `undefined` while every other signal said authenticated, and the test that should have caught it mocked the old envelope."
+    },
+    "mfaChallenge": ["mfaRequired", "mfaTempToken"],
+    "wsTicket": ["ticket", "expiresIn"]
+  },
+
+  "errorCatalog": {
+    "$comment": [
+      "Every `auth.*` code either implementation can name, in the order the catalog declares them.",
+      "The two libraries can back the same deployment, so a client switching on `error.code` must",
+      "see one vocabulary \u2014 a code present on one side only is a branch that never fires against",
+      "the other, and a code neither side emits is a branch that never fires at all.",
+      "",
+      "`internalOnly` names the codes that must never reach a client. Each collapses onto a public",
+      "one \u2014 the token sentinels onto `auth.token_invalid`, the OTP sentinels onto",
+      "`auth.otp_invalid` \u2014 so a caller cannot tell 'valid until revoked' from 'never valid', or",
+      "'no record was ever written here' from 'wrong code'. They stay in the catalog because they",
+      "are real internal outcomes worth logging, and the status must collapse with the code."
+    ],
+    "codes": [
+      "auth.invalid_credentials",
+      "auth.account_locked",
+      "auth.account_inactive",
+      "auth.account_suspended",
+      "auth.account_banned",
+      "auth.pending_approval",
+      "auth.token_expired",
+      "auth.token_revoked",
+      "auth.token_invalid",
+      "auth.refresh_token_invalid",
+      "auth.session_not_found",
+      "auth.token_missing",
+      "auth.email_already_exists",
+      "auth.email_not_verified",
+      "auth.email_change_token_invalid",
+      "auth.mfa_required",
+      "auth.mfa_invalid_code",
+      "auth.mfa_already_enabled",
+      "auth.mfa_not_enabled",
+      "auth.mfa_setup_required",
+      "auth.mfa_temp_token_invalid",
+      "auth.mfa_state_conflict",
+      "auth.password_compromised",
+      "auth.password_reset_token_invalid",
+      "auth.otp_invalid",
+      "auth.otp_expired",
+      "auth.otp_max_attempts",
+      "auth.insufficient_role",
+      "auth.forbidden",
+      "auth.untrusted_origin",
+      "auth.invalid_invitation_token",
+      "auth.oauth_failed",
+      "auth.oauth_email_mismatch",
+      "auth.platform_auth_required",
+      "auth.validation",
+      "auth.too_many_requests",
+      "auth.internal"
+    ],
+    "internalOnly": [
+      "auth.token_expired",
+      "auth.token_revoked",
+      "auth.token_missing",
+      "auth.otp_expired",
+      "auth.otp_max_attempts"
+    ]
+  },
+  "errorEnvelope": {
+    "$comment": "The body shape every auth error serializes to. `details` is present and null when the thrower supplied none.",
+    "shape": { "error": { "code": "string", "message": "string", "details": "object|null" } }
+  }
+}

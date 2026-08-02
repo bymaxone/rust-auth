@@ -19,7 +19,7 @@ bymax-auth-jwt = { workspace = true }
 # Tokio backs the async engine surface and the fire-and-forget hook model (detached
 # tasks under a timeout ceiling). The core takes only the runtime + timer + macro
 # features — no net/fs — keeping it transport-agnostic.
-tokio = { version = "1", features = ["rt", "macros", "time"] }
+tokio = { version = "1", features = ["rt", "macros", "time", "sync"] }
 # Object-safe async plugin traits (`UserRepository`, `EmailProvider`, hooks, stores,
 # `OAuthProvider`, `HttpClient`) desugar through `#[async_trait]` so they are usable as
 # `Arc<dyn _>`.
@@ -69,6 +69,9 @@ scrypt = ["bymax-auth-crypto/scrypt"]
 argon2 = ["bymax-auth-crypto/argon2"]
 # Forwards the MFA-gated crypto set (AES-256-GCM / TOTP / Base32).
 mfa = ["bymax-auth-crypto/mfa"]
+# The bundled Have I Been Pwned checker. The `PasswordBreachChecker` seam itself is always
+# present; this only compiles the shipped implementation and its SHA-1 dependency.
+breach = ["bymax-auth-crypto/breach"]
 # Optional flow capabilities. These gate which engine flows and route groups a build
 # compiles; each is additive.
 sessions = []
@@ -81,7 +84,7 @@ invitations = []
 # mock OAuth/HTTP clients) for downstream integration tests and this crate's own tests.
 testing = []
 # Convenience meta-feature: every optional flow capability for a full backend.
-full = ["sessions", "mfa", "oauth", "oauth-reqwest", "platform", "invitations"]
+full = ["sessions", "mfa", "oauth", "oauth-reqwest", "platform", "invitations", "breach"]
 
 # docs.rs renders every flow plus both hashers; `--cfg docsrs` enables the
 # feature-gated doc annotations. `testing` is excluded — the in-memory doubles are
