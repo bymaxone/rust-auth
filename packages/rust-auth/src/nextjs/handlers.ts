@@ -20,6 +20,7 @@ import {
 } from "../shared/cookie-defaults";
 import { AUTH_ERROR_CODES } from "../shared/error-codes";
 import { AUTH_ROUTE_PREFIX, AUTH_ROUTES } from "../shared/routes";
+import { trimSlashes, trimTrailingSlashes } from "../shared/trim-slashes";
 import {
   dedupeSetCookieHeaders,
   getSetCookieHeaders,
@@ -53,9 +54,11 @@ interface ResolvedHandlerConfig {
 }
 
 /** Apply defaults and strip a trailing slash from the backend origin. */
-function resolveHandlerConfig(config: AuthHandlerConfig): ResolvedHandlerConfig {
+function resolveHandlerConfig(
+  config: AuthHandlerConfig,
+): ResolvedHandlerConfig {
   return {
-    backendUrl: config.backendUrl.replace(/\/+$/, ""),
+    backendUrl: trimTrailingSlashes(config.backendUrl),
     routePrefix: config.routePrefix ?? AUTH_ROUTE_PREFIX,
     loginPath: config.loginPath ?? DEFAULT_LOGIN_PATH,
   };
@@ -65,7 +68,7 @@ function resolveHandlerConfig(config: AuthHandlerConfig): ResolvedHandlerConfig 
 function rebaseRoute(routePath: string, routePrefix: string): string {
   const from = `/${AUTH_ROUTE_PREFIX}`;
   if (routePrefix === AUTH_ROUTE_PREFIX) return routePath;
-  const to = `/${routePrefix.replace(/^\/+|\/+$/g, "")}`;
+  const to = `/${trimSlashes(routePrefix)}`;
   return routePath.startsWith(`${from}/`) || routePath === from
     ? `${to}${routePath.slice(from.length)}`
     : routePath;
@@ -78,10 +81,13 @@ async function callBackend(
   request: NextRequest,
 ): Promise<Response | null> {
   try {
-    return await fetch(`${config.backendUrl}${rebaseRoute(routePath, config.routePrefix)}`, {
-      method: "POST",
-      headers: { cookie: request.headers.get("cookie") ?? "" },
-    });
+    return await fetch(
+      `${config.backendUrl}${rebaseRoute(routePath, config.routePrefix)}`,
+      {
+        method: "POST",
+        headers: { cookie: request.headers.get("cookie") ?? "" },
+      },
+    );
   } catch {
     return null;
   }
@@ -97,7 +103,10 @@ function forwardSetCookies(from: Headers, to: NextResponse): void {
 /** Expire the three session cookies on an outgoing response. */
 function clearSessionCookies(response: NextResponse): void {
   response.cookies.set(AUTH_ACCESS_COOKIE_NAME, "", { path: "/", maxAge: 0 });
-  response.cookies.set(AUTH_HAS_SESSION_COOKIE_NAME, "", { path: "/", maxAge: 0 });
+  response.cookies.set(AUTH_HAS_SESSION_COOKIE_NAME, "", {
+    path: "/",
+    maxAge: 0,
+  });
   response.cookies.set(AUTH_REFRESH_COOKIE_NAME, "", {
     path: AUTH_REFRESH_COOKIE_PATH,
     maxAge: 0,
@@ -124,9 +133,15 @@ export function createSilentRefreshHandler(
       resolved.loginPath,
     );
 
-    const backendResponse = await callBackend(resolved, AUTH_ROUTES.REFRESH, request);
+    const backendResponse = await callBackend(
+      resolved,
+      AUTH_ROUTES.REFRESH,
+      request,
+    );
     if (!backendResponse || !backendResponse.ok) {
-      const failure = NextResponse.redirect(buildLoginUrl(resolved.loginPath, origin));
+      const failure = NextResponse.redirect(
+        buildLoginUrl(resolved.loginPath, origin),
+      );
       clearSessionCookies(failure);
       return failure;
     }
@@ -150,7 +165,11 @@ export function createClientRefreshHandler(
 ): (request: NextRequest) => Promise<NextResponse> {
   const resolved = resolveHandlerConfig(config);
   return async (request) => {
-    const backendResponse = await callBackend(resolved, AUTH_ROUTES.REFRESH, request);
+    const backendResponse = await callBackend(
+      resolved,
+      AUTH_ROUTES.REFRESH,
+      request,
+    );
     if (!backendResponse || !backendResponse.ok) {
       return NextResponse.json(
         // The code the BACKEND answers a failed rotation with. It used to be

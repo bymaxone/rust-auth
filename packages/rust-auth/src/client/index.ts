@@ -9,14 +9,16 @@
 
 import { AuthClientError } from "../shared/auth-client-error";
 import type { AuthErrorResponse } from "../shared/auth-error.types";
-import type {
-  AuthResult,
-  LoginResult,
-} from "../shared/auth-result.types";
+import type { AuthResult, LoginResult } from "../shared/auth-result.types";
 import type { AuthUserClient } from "../shared/auth-user.types";
 import type { AuthErrorCode } from "../shared/error-codes";
 import { buildAuthRefreshSkipSuffixes } from "../shared/refresh-skip";
 import { AUTH_ROUTE_PREFIX, AUTH_ROUTES } from "../shared/routes";
+import {
+  trimLeadingSlashes,
+  trimSlashes,
+  trimTrailingSlashes,
+} from "../shared/trim-slashes";
 
 export { AuthClientError } from "../shared/auth-client-error";
 export type { AuthErrorCode } from "../shared/error-codes";
@@ -29,13 +31,18 @@ const DEFAULT_REFRESH_ENDPOINT = "/api/auth/client-refresh";
 const DEFAULT_TIMEOUT_MS = 30_000;
 
 /** The default content type sent with every request unless the caller overrides it. */
-const DEFAULT_HEADERS: Readonly<Record<string, string>> = { "Content-Type": "application/json" };
+const DEFAULT_HEADERS: Readonly<Record<string, string>> = {
+  "Content-Type": "application/json",
+};
 
 /**
  * A `fetch`-compatible function: it accepts the exact same arguments as the platform
  * `fetch` and resolves to a `Response`, so it can be passed anywhere a `fetch` is expected.
  */
-export type AuthFetch = (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
+export type AuthFetch = (
+  input: RequestInfo | URL,
+  init?: RequestInit,
+) => Promise<Response>;
 
 /**
  * Configuration for {@link createAuthFetch}. Every field is optional; the defaults match the
@@ -84,7 +91,12 @@ export function createAuthFetch(config: AuthFetchConfig = {}): AuthFetch {
 
   const runRefresh = (): Promise<boolean> => {
     if (refreshInFlight === null) {
-      refreshInFlight = performRefresh(refreshEndpoint, baseUrl, credentials, defaultHeaders);
+      refreshInFlight = performRefresh(
+        refreshEndpoint,
+        baseUrl,
+        credentials,
+        defaultHeaders,
+      );
       // Clear the slot once settled so a later 401 burst can refresh again.
       void refreshInFlight.finally(() => {
         refreshInFlight = null;
@@ -96,10 +108,14 @@ export function createAuthFetch(config: AuthFetchConfig = {}): AuthFetch {
   return async (input, init) => {
     const resolvedUrl = resolveUrl(toUrlString(input), baseUrl);
     const mergedInit = mergeInit(init, credentials, defaultHeaders);
-    const send = (): Promise<Response> => fetchWithTimeout(resolvedUrl, mergedInit, timeout);
+    const send = (): Promise<Response> =>
+      fetchWithTimeout(resolvedUrl, mergedInit, timeout);
 
     const response = await send();
-    if (response.status !== 401 || isRefreshSkipped(resolvedUrl, skipSuffixes)) {
+    if (
+      response.status !== 401 ||
+      isRefreshSkipped(resolvedUrl, skipSuffixes)
+    ) {
       return response;
     }
 
@@ -138,7 +154,10 @@ async function performRefresh(
  * a genuinely-relative path (no leading slash, no scheme) is resolved against `baseUrl`.
  */
 function resolveRefreshUrl(refreshEndpoint: string, baseUrl: string): string {
-  if (refreshEndpoint.startsWith("/") || /^[a-z][a-z0-9+.-]*:\/\//i.test(refreshEndpoint)) {
+  if (
+    refreshEndpoint.startsWith("/") ||
+    /^[a-z][a-z0-9+.-]*:\/\//i.test(refreshEndpoint)
+  ) {
     return refreshEndpoint;
   }
   return resolveUrl(refreshEndpoint, baseUrl);
@@ -193,7 +212,9 @@ function combineSignals(
   timeoutSignal: AbortSignal,
 ): AbortSignal {
   if (!callerSignal) return timeoutSignal;
-  const anyFn = (AbortSignal as { any?: (signals: AbortSignal[]) => AbortSignal }).any;
+  const anyFn = (
+    AbortSignal as { any?: (signals: AbortSignal[]) => AbortSignal }
+  ).any;
   if (typeof anyFn === "function") {
     return anyFn([callerSignal, timeoutSignal]);
   }
@@ -223,11 +244,14 @@ function resolveUrl(url: string, baseUrl: string): string {
   if (baseUrl === "" || /^([a-z][a-z0-9+.-]*:)?\/\//i.test(url)) {
     return url;
   }
-  return `${baseUrl.replace(/\/+$/, "")}/${url.replace(/^\/+/, "")}`;
+  return `${trimTrailingSlashes(baseUrl)}/${trimLeadingSlashes(url)}`;
 }
 
 /** True when the request path ends with a refresh-skip suffix (query/hash ignored). */
-function isRefreshSkipped(url: string, skipSuffixes: readonly string[]): boolean {
+function isRefreshSkipped(
+  url: string,
+  skipSuffixes: readonly string[],
+): boolean {
   const pathPart = url.split("?")[0]?.split("#")[0] ?? url;
   return skipSuffixes.some((suffix) => pathPart.endsWith(suffix));
 }
@@ -353,10 +377,15 @@ export function createAuthClient(config: AuthClientConfig): AuthClient {
       readJson<AuthUserClient>(await authFetch(routes.me, { method: "GET" })),
     mfaChallenge: async (tempToken, code) =>
       readJson<AuthResult>(
-        await authFetch(routes.mfaChallenge, jsonPost({ mfaTempToken: tempToken, code })),
+        await authFetch(
+          routes.mfaChallenge,
+          jsonPost({ mfaTempToken: tempToken, code }),
+        ),
       ),
     forgotPassword: async (email, tenantId) => {
-      await ensureOk(await authFetch(routes.forgotPassword, jsonPost({ email, tenantId })));
+      await ensureOk(
+        await authFetch(routes.forgotPassword, jsonPost({ email, tenantId })),
+      );
     },
     resetPassword: async (input) => {
       await ensureOk(await authFetch(routes.resetPassword, jsonPost(input)));
@@ -373,7 +402,7 @@ function jsonPost(payload: unknown): RequestInit {
 function rebaseRoute(routePath: string, routePrefix: string): string {
   const from = `/${AUTH_ROUTE_PREFIX}`;
   if (routePrefix === AUTH_ROUTE_PREFIX) return routePath;
-  const to = `/${routePrefix.replace(/^\/+|\/+$/g, "")}`;
+  const to = `/${trimSlashes(routePrefix)}`;
   return routePath.startsWith(`${from}/`) || routePath === from
     ? `${to}${routePath.slice(from.length)}`
     : routePath;
@@ -400,7 +429,10 @@ async function toAuthClientError(response: Response): Promise<AuthClientError> {
     if (isErrorEnvelope(parsed)) {
       // The wire `code` is an open string; the shared union is forward-compatible and the
       // thrown error's `.code` is widened to `AuthResponseCode`, so this is a safe narrowing.
-      body = { code: parsed.error.code as AuthErrorCode, message: parsed.error.message };
+      body = {
+        code: parsed.error.code as AuthErrorCode,
+        message: parsed.error.message,
+      };
       message = parsed.error.message;
     }
   } catch {
