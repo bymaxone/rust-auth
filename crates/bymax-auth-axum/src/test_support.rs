@@ -99,9 +99,18 @@ pub(crate) fn resolved_config_with(
             mfa_temp_path: "/auth/mfa".to_owned(),
             secure: true,
             same_site,
-            // The suite drives same-origin requests, which the origin check admits without
-            // consulting the list; a `SameSite::None` case names its own origin explicitly.
-            trusted_origins: vec!["https://app.example.com".to_owned()],
+            // Tracks what validation permits rather than being set unconditionally. A
+            // non-empty allowlist under `Lax`/`Strict` with no shared cookie domain is refused
+            // at startup (`ConfigError::TrustedOriginsUnused`), so a fixture that always set
+            // one built a config no deployment can hold — and a unit test over an unreachable
+            // config proves nothing about the reachable ones.
+            trusted_origins: match same_site {
+                bymax_auth_core::config::SameSite::None => {
+                    vec!["https://app.example.com".to_owned()]
+                }
+                bymax_auth_core::config::SameSite::Lax
+                | bymax_auth_core::config::SameSite::Strict => Vec::new(),
+            },
             access_max_age_secs: 900,
             refresh_max_age_secs: 604_800,
         },

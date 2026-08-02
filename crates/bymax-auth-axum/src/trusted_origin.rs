@@ -27,8 +27,9 @@ const SAFE_FETCH_SITES: [&str; 2] = ["same-origin", "none"];
 ///
 /// 1. A safe method changes nothing — allowed. `OPTIONS` in particular must pass, or every
 ///    cross-origin call would fail at the preflight.
-/// 2. A request carrying none of the module's auth cookies has no ambient credential to abuse,
-///    so a bearer-token client is never affected — allowed.
+/// 2. An empty `cookies.trusted_origins` means no origin has been authorized and none needs to
+///    be: config validation refuses an empty list wherever it would be consulted, so an empty
+///    one is a posture where the browser never delivers the cookie cross-origin — allowed.
 /// 3. `Sec-Fetch-Site: same-origin` / `none` proves the request is not cross-site — allowed.
 /// 4. An `Origin` present must be in `cookies.trusted_origins` — allowed only then.
 /// 5. `Sec-Fetch-Site` present and cross-site with no `Origin`: a browser that sends one header
@@ -36,6 +37,25 @@ const SAFE_FETCH_SITES: [&str; 2] = ["same-origin", "none"];
 /// 6. Neither header at all — a non-browser client. Allowed: an attacker's page cannot make a
 ///    browser *omit* `Origin` on a cross-site request, so the absence is evidence there is no
 ///    browser involved, not a way around the check.
+///
+/// **The check does not depend on the request already being authenticated.** It used to: a
+/// request carrying none of the module's cookies went straight to allowed, on the reasoning
+/// that there was no ambient credential to abuse. The reasoning missed the requests that MINT
+/// one. This layer wraps the whole router, `POST /auth/login` and `/auth/register` included —
+/// they carry no cookie and answer with a session — so under `SameSite=None` an attacker's page
+/// could log a victim's browser into the ATTACKER's account and then read back whatever the
+/// victim did there believing it was their own. A non-browser client is unaffected: it sends
+/// neither header, and rule 6 still admits that shape.
+///
+/// Step 2 replaced that skip and closes the opposite failure. `Origin` is sent on a SAME-origin
+/// POST too, and with no `Sec-Fetch-Site` the two cannot be told apart, so the check assumed
+/// cross-site — correct where a cross-site cookie can arrive, wrong where it cannot. Under
+/// `Lax`/`Strict` with no shared cookie domain the browser withholds the cookie itself and the
+/// allowlist is required to be empty, yet every same-origin POST from a browser that omits
+/// `Sec-Fetch-Site` was refused. Gating on `same_site == None` instead would reopen a real
+/// hole: a shared cookie domain makes sibling origins SAME-site under `Lax`, the browser does
+/// send the cookie on a POST between them, and `same-site` is deliberately not one of the
+/// values in [`SAFE_FETCH_SITES`].
 ///
 /// The request's own origin is never reconstructed from `Host` or `X-Forwarded-Proto`: both are
 /// client-controlled, and a check that trusts them is not a check. Same-origin requests are
@@ -49,31 +69,37 @@ pub(crate) async fn enforce_trusted_origin(
         return next.run(request).await;
     }
 
-    let cookies = state.config().cookies.clone();
-    if !carries_auth_cookie(&request, &cookies.access_name, &cookies.refresh_name) {
-        return next.run(request).await;
-    }
-
-    let fetch_site = header(&request, "sec-fetch-site");
-    if fetch_site.is_some_and(|site| SAFE_FETCH_SITES.contains(&site)) {
-        return next.run(request).await;
-    }
-
-    match header(&request, "origin") {
-        Some(origin) => {
-            if cookies
-                .trusted_origins
-                .iter()
-                .any(|allowed| allowed == origin)
-            {
-                next.run(request).await
+    // Scoped so every borrow of `state` and `request` ends before the request is moved into the
+    // next layer, and so the allowlist is read where it lives instead of being cloned — this
+    // runs on every state-changing request, and the clone copied the whole `Vec` each time.
+    let allowed = {
+        let trusted = &state.config().cookies.trusted_origins;
+        if trusted.is_empty() {
+            true
+        } else {
+            let fetch_site = header(&request, "sec-fetch-site");
+            if fetch_site.is_some_and(|site| SAFE_FETCH_SITES.contains(&site)) {
+                true
             } else {
-                error_response(&AuthError::UntrustedOrigin).into_response()
+                match header(&request, "origin") {
+                    // Scheme and host are case-insensitive (RFC 6454 §4), so two origins that
+                    // differ only in case ARE the same origin and must compare equal. ASCII
+                    // folding specifically: Unicode case folding can map distinct hosts onto
+                    // one another, which in an allowlist is a way in rather than a convenience.
+                    Some(origin) => trusted
+                        .iter()
+                        .any(|allowed| allowed.eq_ignore_ascii_case(origin)),
+                    // A browser that sent `Sec-Fetch-Site` would have sent `Origin` here too.
+                    None => fetch_site.is_none(),
+                }
             }
         }
-        // A browser that sent `Sec-Fetch-Site` would have sent `Origin` here too.
-        None if fetch_site.is_some() => error_response(&AuthError::UntrustedOrigin).into_response(),
-        None => next.run(request).await,
+    };
+
+    if allowed {
+        next.run(request).await
+    } else {
+        error_response(&AuthError::UntrustedOrigin).into_response()
     }
 }
 
@@ -82,17 +108,3 @@ fn header<'r>(request: &'r Request, name: &str) -> Option<&'r str> {
     request.headers().get(name)?.to_str().ok()
 }
 
-/// Whether the request carries one of the module's credential-bearing cookies.
-///
-/// Only those two count. The session-signal cookie is readable by JavaScript by design and
-/// authenticates nothing, so a request carrying only that one has no ambient credential for an
-/// attacker page to spend.
-fn carries_auth_cookie(request: &Request, access_name: &str, refresh_name: &str) -> bool {
-    let Some(header) = header(request, "cookie") else {
-        return false;
-    };
-    header.split(';').any(|pair| {
-        let name = pair.split('=').next().unwrap_or_default().trim();
-        name == access_name || name == refresh_name
-    })
-}

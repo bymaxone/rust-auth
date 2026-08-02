@@ -3046,6 +3046,28 @@ async fn a_cookie_authenticated_write_from_an_untrusted_origin_is_refused() {
         .send(&app)
         .await;
     assert_eq!(refresh_only.status, StatusCode::FORBIDDEN);
+
+    // These two used to be admitted, because a request carrying none of the module's cookies
+    // was read as having no ambient credential to abuse. The requests that MINT one were the
+    // gap: this layer wraps the whole router, and `POST /auth/login` carries no cookie and
+    // answers with a session — so an attacker's page could log a victim's browser into the
+    // ATTACKER's account and then read back whatever the victim did there.
+    let login_csrf = Req::post("/auth/login")
+        .header(header::ORIGIN, "https://evil.example.com")
+        .header(HeaderName::from_static("sec-fetch-site"), "cross-site")
+        .json(serde_json::json!({ "email": "origin@e.com", "password": "glidingwalnut42" }))
+        .send(&app)
+        .await;
+    assert_eq!(login_csrf.status, StatusCode::FORBIDDEN);
+
+    // Same for the session-signal cookie, which authenticates nothing: what decides the
+    // refusal is the announced origin, not what the request already carries.
+    let signal_only = Req::post("/auth/logout")
+        .cookie("has_session", "1")
+        .header(header::ORIGIN, "https://evil.example.com")
+        .send(&app)
+        .await;
+    assert_eq!(signal_only.status, StatusCode::FORBIDDEN);
 }
 
 #[tokio::test]
@@ -3079,24 +3101,26 @@ async fn the_cross_site_check_admits_what_it_should() {
         .await;
     assert_eq!(same_origin.status, StatusCode::NO_CONTENT);
 
-    // A bearer client has no ambient credential for a page to spend, so the check does not
-    // apply to it at all — blocking it would break every non-browser caller for no gain.
+    // The real non-browser caller: no `Origin`, no `Sec-Fetch-Site`. That shape is admitted,
+    // and it is the one that keeps curl and server-to-server callers working — no page can
+    // make a browser OMIT `Origin` on a cross-site request, so the absence is evidence there
+    // is no browser involved. A caller that DOES announce an untrusted origin is refused
+    // whether or not it carries a cookie; see the two cases below.
     let bearer = Req::post("/auth/logout")
-        .header(header::ORIGIN, "https://evil.example.com")
         .json(serde_json::json!({ "refreshToken": "r".repeat(64) }))
         .send(&app)
         .await;
     assert_ne!(bearer.status, StatusCode::FORBIDDEN);
 
-    // The session-signal cookie is readable by JavaScript by design and authenticates
-    // nothing, so a request carrying only that one has no ambient credential for an attacker
-    // page to spend — counting it would reject cross-site calls that cannot do any harm.
-    let signal_only = Req::post("/auth/logout")
-        .cookie("has_session", "1")
-        .header(header::ORIGIN, "https://evil.example.com")
+    // Origin casing: scheme and host are case-insensitive (RFC 6454 §4), so an origin that
+    // differs from the listed one only in case IS the listed origin and must be admitted.
+    let access = login_access_cookie(&app, "origin@e.com", "glidingwalnut42").await;
+    let upper = Req::post("/auth/logout")
+        .cookie("access_token", &access)
+        .header(header::ORIGIN, "https://APP.Example.COM")
         .send(&app)
         .await;
-    assert_ne!(signal_only.status, StatusCode::FORBIDDEN);
+    assert_eq!(upper.status, StatusCode::NO_CONTENT);
 
     // A read changes nothing and is never a target.
     let read = Req::get("/auth/me")
