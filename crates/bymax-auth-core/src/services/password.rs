@@ -73,6 +73,10 @@ fn kdf_working_set_mib(config: &crate::config::PasswordConfig) -> usize {
             let r = config.scrypt.block_size as usize;
             (128usize.saturating_mul(n).saturating_mul(r) / (1024 * 1024)).max(1)
         }
+        // `Argon2id` is compile-gated behind the `argon2` feature — it is not merely unselectable
+        // without it, the VARIANT does not exist — so the arm has to carry the same gate or a
+        // build without the feature fails to compile on a pattern naming something absent.
+        #[cfg(feature = "argon2")]
         crate::config::PasswordAlgorithm::Argon2id => {
             (config.argon2.memory_kib as usize / 1024).max(1)
         }
