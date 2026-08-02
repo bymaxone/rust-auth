@@ -105,16 +105,35 @@ done < <(find crates bindings -name lib.rs)
 # ── Invariant 4: bearer/refresh credentials are never read from the query string. ──
 # Flag any extractor that pulls an access/refresh token out of a query map.
 #
-# Comment lines are stripped first. The pattern is deliberately loose — it has to catch an
-# extractor written in a shape nobody predicted — and that looseness makes it match prose
-# that *documents* the invariant just as readily as code that breaks it. Punishing the
-# documentation would push the next author to describe this rule less clearly, or not at
-# all, which is the opposite of what a security gate is for. Code is never a comment, so
-# nothing that could actually read a token is skipped here.
-if grep -rEn -i 'query[^;]*(access_token|refresh_token|bearer)' "${SRC_GLOB[@]}" \
-     --include='*.rs' 2>/dev/null \
-     | grep -qvE '^[^:]+:[0-9]+:[[:space:]]*//'; then
+# Line comments (`//`, and so `///` and `//!` too) are stripped first. The pattern is
+# deliberately loose — it has to catch an extractor written in a shape nobody predicted — and
+# that looseness makes it match prose that *documents* the invariant just as readily as code
+# that breaks it. Punishing the documentation would push the next author to describe this rule
+# less clearly, or not at all, which is the opposite of what a security gate is for. Code is
+# never a comment, so nothing that could actually read a token is skipped here.
+#
+# BLOCK comments are NOT stripped, and deliberately so: recognising them line by line means
+# skipping continuation lines, which start with `*` — and so does a Rust deref statement.
+# `*query_token = access_token;` is exactly the code this gate exists to catch, and it would
+# be the first thing such a filter waved through. A `/* */` comment matching the pattern is a
+# false positive to be reworded; a skipped deref is a miss.
+#
+# Collected rather than short-circuited with `grep -q`. That exits at its first match and
+# closes the pipe, killing the recursive grep with SIGPIPE (141) — and under `set -o pipefail`
+# the pipeline then reports failure, so the `if` takes the ELSE branch and the gate announces
+# "no violation" BECAUSE it found one. It needs enough input for the upstream grep to still be
+# writing, so it does not reproduce on a small tree; at 400 files it is reliable, which is how
+# a gate that cannot fail went unnoticed. `grep -v` without `-q` drains stdin and lets the
+# upstream exit cleanly.
+violations=$(
+  grep -rEn -i 'query[^;]*(access_token|refresh_token|bearer)' "${SRC_GLOB[@]}" \
+    --include='*.rs' 2>/dev/null |
+    grep -vE '^[^:]+:[0-9]+:[[:space:]]*//' ||
+    true
+)
+if [ -n "$violations" ]; then
   note "invariant 4: a token must never be read from the query string"
+  printf '%s\n' "$violations" >&2
 else
   pass "invariant 4: no token read from a query string"
 fi
