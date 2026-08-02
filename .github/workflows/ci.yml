@@ -216,7 +216,12 @@ jobs:
       - run: cargo install --locked cargo-vet@0.10.2
       - run: cargo deny check
       - run: cargo audit
-      - run: cargo vet
+      # `--locked` on purpose: without it `cargo vet` refetches the import sets on every run,
+      # so the gate answers a question about what upstream happened to publish this minute
+      # rather than about what this repository recorded and reviewed. That also makes the
+      # result differ between a networked and an offline run. Refresh deliberately, in a PR
+      # that shows the diff, rather than implicitly on every CI run.
+      - run: cargo vet --locked
       - name: Dependency budget (per-crate transitive-graph cap)
         run: bash scripts/dependency-budget.sh
 
