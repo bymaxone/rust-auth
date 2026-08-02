@@ -107,4 +107,3 @@ pub(crate) async fn enforce_trusted_origin(
 fn header<'r>(request: &'r Request, name: &str) -> Option<&'r str> {
     request.headers().get(name)?.to_str().ok()
 }
-
