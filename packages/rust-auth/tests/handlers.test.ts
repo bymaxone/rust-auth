@@ -221,7 +221,12 @@ describe("cross-site callers are refused before any cookie is written", () => {
   for (const [name, handler] of Object.entries(handlers)) {
     for (const site of ["cross-site", "same-site"]) {
       it(`${name} refuses a ${site} caller with 403 and no Set-Cookie`, async () => {
-        const fetchSpy = vi.spyOn(globalThis, "fetch");
+        // Mocked, not merely spied on. A bare `spyOn` leaves the real `fetch` in place, so a
+        // regression in the guard would reach the network and the test would hang or flake
+        // instead of failing — the one outcome a regression test must not have.
+        const fetchSpy = vi
+          .spyOn(globalThis, "fetch")
+          .mockRejectedValue(new Error("the guard must refuse before any backend call"));
 
         const response = await handler(from(site));
 
@@ -245,6 +250,10 @@ describe("cross-site callers are refused before any cookie is written", () => {
       const response = await handlers.logout(from(site));
 
       expect(response.status).toBe(200);
+      // "Admitted" means the handler PROXIED, not merely that it answered 200. Asserted so a
+      // future refactor cannot satisfy this case by short-circuiting to a 200 that never
+      // reaches the backend — which would look like success and revoke nothing.
+      expect(fetchSpy).toHaveBeenCalledTimes(1);
       fetchSpy.mockRestore();
     }
   });
