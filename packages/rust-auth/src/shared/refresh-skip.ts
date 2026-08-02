@@ -2,6 +2,7 @@
 // the generated route constants so it can never drift from the server's route table.
 
 import { AUTH_ROUTE_PREFIX, AUTH_ROUTES } from "./routes";
+import { trimSlashes } from "./trim-slashes";
 
 /**
  * The route keys whose paths must NOT trigger a silent 401 → refresh → retry in the auth
@@ -45,9 +46,11 @@ export function buildAuthRefreshSkipSuffixes(
   routePrefix: string = AUTH_ROUTE_PREFIX,
 ): readonly string[] {
   const fromPrefix = `/${AUTH_ROUTE_PREFIX}`;
-  const toPrefix = `/${routePrefix.replace(/^\/+|\/+$/g, "")}`;
+  const toPrefix = `/${trimSlashes(routePrefix)}`;
   return Object.freeze(
-    SKIP_ROUTE_KEYS.map((key) => AUTH_ROUTES[key].replace(fromPrefix, toPrefix)),
+    SKIP_ROUTE_KEYS.map((key) =>
+      AUTH_ROUTES[key].replace(fromPrefix, toPrefix),
+    ),
   );
 }
 
