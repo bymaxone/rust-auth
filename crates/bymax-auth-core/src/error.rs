@@ -217,10 +217,6 @@ pub enum ConfigError {
     /// every cross-site state-changing request would be rejected.
     #[error("cookies.same_site = None requires a non-empty cookies.trusted_origins")]
     TrustedOriginsRequired,
-    /// `cookies.trusted_origins` was set under a `SameSite` posture that never sends the
-    /// session cookie cross-site, so the allow-list could never be consulted.
-    #[error("cookies.trusted_origins is set but cookies.same_site is not None")]
-    TrustedOriginsUnused,
     /// An entry in `cookies.trusted_origins` is not a bare absolute origin, so it can never
     /// equal an `Origin` header.
     #[error("cookies.trusted_origins entry '{origin}' is not an absolute origin")]

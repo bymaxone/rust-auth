@@ -52,7 +52,7 @@ const DEFAULT_MAX_REDIRECTS = 3;
  * stops a CDN or the client router cache from storing the 401 and replaying it to a later,
  * genuinely authenticated visitor.
  */
-const NO_STORE_CACHE_CONTROL = "no-store, no-cache";
+export const NO_STORE_CACHE_CONTROL = "no-store, no-cache";
 
 /** A single RBAC rule: the roles permitted under a path prefix. */
 export interface AuthProxyRoleRule {
@@ -266,7 +266,7 @@ const FORBIDDEN_IN_PATH = /[\u0000-\u001f\u007f]/;
  * @param path - The intended same-origin path.
  * @returns `path` when it can only name this origin, `/` otherwise.
  */
-function toSameOriginPath(path: string): string {
+export function toSameOriginPath(path: string): string {
   if (!path.startsWith("/")) return "/";
   if (path.startsWith("//") || path.startsWith("/\\")) return "/";
   if (FORBIDDEN_IN_PATH.test(path)) return "/";
@@ -593,6 +593,17 @@ export function buildSilentRefreshUrl(request: NextRequest, redirectTo?: string)
  * Absolute URLs, protocol-relative (`//host`), backslash-tricked (`/\\host`), and any target
  * that resolves off-origin are rejected in favor of the `loginPath` fallback.
  *
+ * The RETURN value is checked as well as the input, and the two are not the same check. The
+ * input test rejects a literal `//host`; WHATWG dot-segment normalisation then *produces* one
+ * from an input that passed it. `new URL("/..//evil.example", origin)` has a `pathname` of
+ * `//evil.example`, and its `origin` is still ours, so the off-origin test passes too — the
+ * authority is smuggled out inside the path. It only becomes a redirect off-site when a caller
+ * resolves the value again: `new URL("//evil.example", origin)` is `https://evil.example/`.
+ * That is not hypothetical — `createSilentRefreshHandler` does exactly that resolution.
+ *
+ * Re-running the same reduction on the output closes it wherever the value is consumed, which
+ * is the property callers are entitled to assume from the name.
+ *
  * @param raw - The requested destination (e.g. a `redirectTo` query value).
  * @param origin - The current request origin to compare against.
  * @param loginPath - The fallback returned when `raw` is unsafe or absent.
@@ -608,7 +619,8 @@ export function resolveSafeDestination(
   try {
     const candidate = new URL(raw, origin);
     if (candidate.origin !== origin) return loginPath;
-    return candidate.pathname + candidate.search + candidate.hash;
+    const resolved = candidate.pathname + candidate.search + candidate.hash;
+    return toSameOriginPath(resolved) === resolved ? resolved : loginPath;
   } catch {
     return loginPath;
   }

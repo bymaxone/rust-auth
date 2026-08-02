@@ -99,11 +99,11 @@ pub(crate) fn resolved_config_with(
             mfa_temp_path: "/auth/mfa".to_owned(),
             secure: true,
             same_site,
-            // Tracks what validation permits rather than being set unconditionally. A
-            // non-empty allowlist under `Lax`/`Strict` with no shared cookie domain is refused
-            // at startup (`ConfigError::TrustedOriginsUnused`), so a fixture that always set
-            // one built a config no deployment can hold — and a unit test over an unreachable
-            // config proves nothing about the reachable ones.
+            // Kept split by posture even though validation now accepts a list under every one:
+            // `Lax` with an empty list is the DEFAULT deployment shape, and it is the shape
+            // where `enforce_trusted_origin` has the least to work with, so the extractor tests
+            // should run against it rather than against the configuration that is easiest to
+            // pass. The `None` arm covers the listed case.
             trusted_origins: match same_site {
                 bymax_auth_core::config::SameSite::None => {
                     vec!["https://app.example.com".to_owned()]

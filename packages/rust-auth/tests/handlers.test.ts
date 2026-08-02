@@ -188,3 +188,64 @@ describe("createLogoutHandler", () => {
     );
   });
 });
+
+// ---------------------------------------------------------------------------
+// Cross-site refusal
+// ---------------------------------------------------------------------------
+
+/**
+ * Each handler ends by writing `Set-Cookie`, so a cross-site caller extracts something from it
+ * without ever reading the response — which is what made these reachable with no CORS
+ * cooperation. `POST /api/auth/logout` from an attacker's page sends no session cookie under
+ * `Lax`, so the backend revocation no-ops, but the handler cleared the browser's cookies anyway;
+ * a form POST is a top-level navigation, so the browser applied them first-party. Any page on
+ * the internet could sign a visitor out, repeatably. The silent-refresh GET is the same shape
+ * from an `<img>`.
+ */
+describe("cross-site callers are refused before any cookie is written", () => {
+  const config = { backendUrl: BACKEND, loginPath: "/login" };
+
+  const handlers = {
+    silentRefresh: createSilentRefreshHandler(config),
+    clientRefresh: createClientRefreshHandler(config),
+    logout: createLogoutHandler(config),
+  };
+
+  /** A request to one of the handlers, carrying the session cookie and a `Sec-Fetch-Site`. */
+  function from(site?: string): NextRequest {
+    const headers: Record<string, string> = { cookie: `${AUTH_REFRESH_COOKIE_NAME}=r_1` };
+    if (site !== undefined) headers["sec-fetch-site"] = site;
+    return new NextRequest("https://app.example.com/auth/logout", { headers });
+  }
+
+  for (const [name, handler] of Object.entries(handlers)) {
+    for (const site of ["cross-site", "same-site"]) {
+      it(`${name} refuses a ${site} caller with 403 and no Set-Cookie`, async () => {
+        const fetchSpy = vi.spyOn(globalThis, "fetch");
+
+        const response = await handler(from(site));
+
+        expect(response.status).toBe(403);
+        expect(response.headers.get("set-cookie")).toBeNull();
+        // Not an amplifier either: the backend is never called.
+        expect(fetchSpy).not.toHaveBeenCalled();
+        fetchSpy.mockRestore();
+      });
+    }
+  }
+
+  // A browser too old to send the header, or a non-browser client, is admitted — no page can
+  // make a browser omit it, so its absence is evidence rather than an opening.
+  it("admits a same-origin caller and one that sends no Sec-Fetch-Site", async () => {
+    for (const site of ["same-origin", undefined]) {
+      const fetchSpy = vi
+        .spyOn(globalThis, "fetch")
+        .mockResolvedValue(new Response(null, { status: 200 }));
+
+      const response = await handlers.logout(from(site));
+
+      expect(response.status).toBe(200);
+      fetchSpy.mockRestore();
+    }
+  });
+});

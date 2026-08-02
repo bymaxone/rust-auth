@@ -220,6 +220,42 @@ describe("resolveSafeDestination — open-redirect guard", () => {
     expect(resolveSafeDestination("/\\evil.test", origin, "/login")).toBe("/login");
     expect(resolveSafeDestination(null, origin, "/login")).toBe("/login");
   });
+
+  // The forms that got through. The input test rejects a literal `//host`; WHATWG dot-segment
+  // normalisation then PRODUCES one from an input that passed it. `new URL("/..//evil.test",
+  // origin).pathname` is `//evil.test`, and the URL's origin is still ours, so the off-origin
+  // test passed too — the authority was smuggled out inside the path. It only became a redirect
+  // off-site when the value was resolved again, which `createSilentRefreshHandler` does:
+  // `new URL("//evil.test", origin)` is `https://evil.test/`.
+  it.each([
+    "/..//evil.test",
+    "/.//evil.test",
+    "/a/../..//evil.test",
+    "/%2e%2e//evil.test",
+    "/a/b/../../..//evil.test",
+  ])("rejects %s, which normalises into a protocol-relative path", (raw) => {
+    expect(resolveSafeDestination(raw, origin, "/login")).toBe("/login");
+  });
+
+  // The property callers are entitled to: whatever comes back, resolving it against the origin
+  // again cannot leave the origin. Asserted directly rather than through the shapes above, so a
+  // future normalisation quirk nobody predicted is caught by the same test.
+  it.each([
+    "/..//evil.test",
+    "/.//evil.test",
+    "/%2e%2e//evil.test",
+    "/dashboard?tab=1#x",
+    "/a/../b",
+  ])("returns a value that stays on-origin when re-resolved: %s", (raw) => {
+    const out = resolveSafeDestination(raw, origin, "/login");
+    expect(new URL(out, origin).origin).toBe(origin);
+  });
+
+  // Legitimate dot-segments still resolve rather than being refused wholesale — the guard
+  // rejects the smuggled authority, not normalisation itself.
+  it("normalises a harmless relative segment instead of rejecting it", () => {
+    expect(resolveSafeDestination("/a/../dashboard", origin, "/login")).toBe("/dashboard");
+  });
 });
 
 describe("server-only enforcement", () => {

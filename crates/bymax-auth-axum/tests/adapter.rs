@@ -3159,6 +3159,80 @@ async fn a_cross_site_fetch_with_no_origin_header_is_refused() {
 }
 
 #[tokio::test]
+async fn the_default_posture_refuses_a_cross_site_login_with_nothing_allowlisted() {
+    // The DEFAULT deployment: `SameSite=Lax`, empty `trusted_origins`. Every other test in this
+    // file that exercises the origin layer populates the list, which forces `SameSite=None` in
+    // the harness — so this shape, the one most consumers actually run, had no coverage at all.
+    //
+    // It used to be admitted: an empty list short-circuited the whole check. The justification
+    // was that `Lax` withholds the session cookie cross-site anyway, which is true and beside
+    // the point here. `POST /auth/login` carries the attacker's credentials in its OWN body and
+    // needs no cookie; the response plants a session, and because a form POST is a top-level
+    // navigation the browser stores it first-party. The victim then works inside the attacker's
+    // account. `Sec-Fetch-Site` states plainly that the request came from elsewhere and no page
+    // can forge it, so an empty list no longer excuses it.
+    let Some(h) = build(EngineSpec::default()) else {
+        return;
+    };
+    let app = router(&h);
+    seed_user(&h, "defcsrf@e.com", "glidingwalnut42", "USER").await;
+
+    for site in ["cross-site", "same-site"] {
+        let refused = Req::post("/auth/login")
+            .json(serde_json::json!({
+                "email": "defcsrf@e.com",
+                "password": "glidingwalnut42",
+                "tenantId": "t1",
+            }))
+            .header(header::ORIGIN, "https://evil.example.com")
+            .header(HeaderName::from_static("sec-fetch-site"), site)
+            .send(&app)
+            .await;
+
+        assert_eq!(refused.status, StatusCode::FORBIDDEN, "site = {site}");
+        assert_eq!(
+            refused.json()["error"]["code"],
+            serde_json::json!("auth.untrusted_origin"),
+            "site = {site}"
+        );
+    }
+
+    // The browser vouching for the request still passes with nothing listed, so an ordinary
+    // same-origin deployment is untouched.
+    for site in ["same-origin", "none"] {
+        let allowed = Req::post("/auth/login")
+            .json(serde_json::json!({
+                "email": "defcsrf@e.com",
+                "password": "glidingwalnut42",
+                "tenantId": "t1",
+            }))
+            .header(header::ORIGIN, "https://app.internal")
+            .header(HeaderName::from_static("sec-fetch-site"), site)
+            .send(&app)
+            .await;
+
+        assert_eq!(allowed.status, StatusCode::OK, "site = {site}");
+    }
+
+    // And the case the layer genuinely cannot classify: an `Origin` with no `Sec-Fetch-Site`,
+    // which a same-origin POST also produces. Admitted deliberately — refusing it would answer
+    // 403 to every same-origin write from such a browser, since this crate never learns its own
+    // origin. A deployment that wants it closed lists its origin, which validation now accepts
+    // under `Lax` for exactly this reason.
+    let ambiguous = Req::post("/auth/login")
+        .json(serde_json::json!({
+            "email": "defcsrf@e.com",
+            "password": "glidingwalnut42",
+            "tenantId": "t1",
+        }))
+        .header(header::ORIGIN, "https://app.internal")
+        .send(&app)
+        .await;
+
+    assert_eq!(ambiguous.status, StatusCode::OK);
+}
+
+#[tokio::test]
 async fn the_address_change_routes_move_an_account_only_after_the_new_address_proves_itself() {
     // End to end through the router: the request changes nothing, the confirmation changes
     // everything, and each guard along the way answers through the HTTP surface a consumer
