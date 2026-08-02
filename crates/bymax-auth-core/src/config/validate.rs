@@ -627,6 +627,17 @@ fn validate_password(password: &PasswordConfig) -> Result<(), ConfigError> {
                 got: password.argon2.iterations,
             });
         }
+        // The twin of the scrypt check three blocks up, and it was missing. Below 1 is not a
+        // weaker setting but an invalid one: `crypto/password/mod.rs` rejects it at hash time,
+        // so a config that sets it starts green and then answers 500 on every register, reset
+        // and password change — a credential path failing at runtime over something startup
+        // could have caught. Verification still works, because the parameters travel in the PHC
+        // string, which is what makes it read as a runtime fault rather than a config error.
+        if password.argon2.parallelism < 1 {
+            return Err(ConfigError::Argon2Parallelism {
+                got: password.argon2.parallelism,
+            });
+        }
     }
 
     // The active algorithm must be backed by a compiled-in hasher. `Argon2id` is only

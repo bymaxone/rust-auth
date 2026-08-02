@@ -46,6 +46,18 @@ export interface AuthHandlerConfig {
   routePrefix?: string;
   /** The sign-in path a failed silent refresh redirects to. Defaults to `/login`. */
   loginPath?: string;
+  /**
+   * The cookie `Domain` the backend planted the session with, when `cookies.resolve_domains` is
+   * configured there. Leave unset for the host-only default.
+   *
+   * A browser matches a deletion on **name, domain AND path** (RFC 6265 §5.3). The clears below
+   * used to emit no `Domain` at all, so on a subdomain-sharing deployment they created a new
+   * host-only cookie and the `Domain=`-scoped originals survived the logout. The Rust half gets
+   * this right — `clear_session` reuses `self.domain()` for exactly this reason — and this half
+   * had no way to. The backend session is revoked either way, so what survived was a dead
+   * credential in the jar plus a stale `has_session` driving pointless silent-refresh bounces.
+   */
+  cookieDomain?: string;
 }
 
 /** The fully-resolved handler configuration. */
@@ -53,6 +65,7 @@ interface ResolvedHandlerConfig {
   backendUrl: string;
   routePrefix: string;
   loginPath: string;
+  cookieDomain: string | undefined;
 }
 
 /** Apply defaults and strip a trailing slash from the backend origin. */
@@ -63,6 +76,7 @@ function resolveHandlerConfig(
     backendUrl: trimTrailingSlashes(config.backendUrl),
     routePrefix: config.routePrefix ?? AUTH_ROUTE_PREFIX,
     loginPath: config.loginPath ?? DEFAULT_LOGIN_PATH,
+    cookieDomain: config.cookieDomain,
   };
 }
 
@@ -102,16 +116,31 @@ function forwardSetCookies(from: Headers, to: NextResponse): void {
   }
 }
 
-/** Expire the three session cookies on an outgoing response. */
-function clearSessionCookies(response: NextResponse): void {
-  response.cookies.set(AUTH_ACCESS_COOKIE_NAME, "", { path: "/", maxAge: 0 });
+/**
+ * Expire the three session cookies on an outgoing response.
+ *
+ * `domain` is carried through because a browser matches a deletion on name, domain AND path: a
+ * clear that omits it cannot remove a cookie that was planted with one. See
+ * {@link AuthHandlerConfig.cookieDomain}.
+ */
+function clearSessionCookies(
+  response: NextResponse,
+  domain: string | undefined,
+): void {
+  response.cookies.set(AUTH_ACCESS_COOKIE_NAME, "", {
+    path: "/",
+    maxAge: 0,
+    domain,
+  });
   response.cookies.set(AUTH_HAS_SESSION_COOKIE_NAME, "", {
     path: "/",
     maxAge: 0,
+    domain,
   });
   response.cookies.set(AUTH_REFRESH_COOKIE_NAME, "", {
     path: AUTH_REFRESH_COOKIE_PATH,
     maxAge: 0,
+    domain,
   });
 }
 
@@ -185,7 +214,7 @@ export function createSilentRefreshHandler(
       const failure = NextResponse.redirect(
         buildLoginUrl(resolved.loginPath, origin),
       );
-      clearSessionCookies(failure);
+      clearSessionCookies(failure, resolved.cookieDomain);
       return failure;
     }
 
@@ -262,7 +291,7 @@ export function createLogoutHandler(
 
     await callBackend(resolved, AUTH_ROUTES.LOGOUT, request);
     const response = NextResponse.json({ ok: true }, { status: 200 });
-    clearSessionCookies(response);
+    clearSessionCookies(response, resolved.cookieDomain);
     return response;
   };
 }

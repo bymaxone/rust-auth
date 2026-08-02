@@ -3233,6 +3233,44 @@ async fn the_default_posture_refuses_a_cross_site_login_with_nothing_allowlisted
 }
 
 #[tokio::test]
+async fn a_body_that_does_not_declare_json_is_refused() {
+    // `Bytes::from_request` accepts any `Content-Type`, so `POST /auth/login` with
+    // `text/plain` and a JSON body used to be accepted. That combination is a CORS SIMPLE
+    // request — no preflight — so a cross-origin page can send it and the browser attaches
+    // cookies wherever `SameSite` permits; an HTML form with `enctype="text/plain"` produces
+    // exactly that shape. Requiring the type re-arms the preflight behind the origin layer.
+    //
+    // It is also a wire divergence: nest-auth runs behind `express.json()`, which parses only
+    // `application/json`, so the same request 400s there and succeeded here.
+    let Some(h) = build(EngineSpec::default()) else {
+        return;
+    };
+    let app = router(&h);
+    seed_user(&h, "ctype@e.com", "glidingwalnut42", "USER").await;
+
+    let body = br#"{"email":"ctype@e.com","password":"glidingwalnut42","tenantId":"t1"}"#;
+    let refused = Req::post("/auth/login")
+        .raw_body(body.to_vec(), "text/plain")
+        .send(&app)
+        .await;
+
+    assert_eq!(refused.status, StatusCode::BAD_REQUEST);
+    assert_eq!(
+        refused.json()["error"]["code"],
+        serde_json::json!("auth.validation")
+    );
+
+    // The declared type still works, including with parameters and the `+json` suffix family.
+    for content_type in ["application/json", "application/json; charset=utf-8"] {
+        let ok = Req::post("/auth/login")
+            .raw_body(body.to_vec(), content_type)
+            .send(&app)
+            .await;
+        assert_eq!(ok.status, StatusCode::OK, "content-type = {content_type}");
+    }
+}
+
+#[tokio::test]
 async fn the_address_change_routes_move_an_account_only_after_the_new_address_proves_itself() {
     // End to end through the router: the request changes nothing, the confirmation changes
     // everything, and each guard along the way answers through the HTTP surface a consumer

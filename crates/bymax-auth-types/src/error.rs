@@ -139,6 +139,15 @@ pub enum AuthErrorCode {
     /// deployment does not trust.
     #[serde(rename = "auth.untrusted_origin")]
     UntrustedOrigin,
+    /// A change to how the account authenticates was attempted without a recent authentication.
+    ///
+    /// Raised when enrolling MFA on an account with no local password to re-prove — one
+    /// provisioned purely through OAuth. Those accounts have nothing this engine can verify
+    /// inline, so the proof is temporal: the caller must have completed a real authentication
+    /// within the last few minutes. Its own code rather than `InvalidCredentials`, because the
+    /// client's correct reaction is to send the user back through sign-in and retry.
+    #[serde(rename = "auth.reauthentication_required")]
+    ReauthenticationRequired,
 
     // Invitations
     /// Invitation token absent from the store — invalid or expired.
@@ -202,7 +211,8 @@ impl AuthErrorCode {
             | Self::MfaRequired
             | Self::InsufficientRole
             | Self::Forbidden
-            | Self::UntrustedOrigin => 403,
+            | Self::UntrustedOrigin
+            | Self::ReauthenticationRequired => 403,
             Self::SessionNotFound => 404,
             Self::EmailAlreadyExists
             | Self::MfaAlreadyEnabled
@@ -258,6 +268,9 @@ impl AuthErrorCode {
             Self::InsufficientRole => "Insufficient permission",
             Self::Forbidden => "Access denied",
             Self::UntrustedOrigin => "Request origin not allowed",
+            Self::ReauthenticationRequired => {
+                "Please sign in again to change your security settings."
+            }
             Self::InvalidInvitationToken => "Invalid or expired invitation token",
             Self::OauthFailed => "OAuth authentication failed",
             Self::OauthEmailMismatch => "OAuth email does not match",
@@ -464,6 +477,9 @@ pub enum AuthError {
     /// A state-changing request carrying the session cookie came from an untrusted origin.
     #[error("untrusted origin")]
     UntrustedOrigin,
+    /// A change to how the account authenticates was attempted without a recent authentication.
+    #[error("reauthentication required")]
+    ReauthenticationRequired,
 
     // Invitations
     /// Invitation token absent — invalid or expired.
@@ -538,6 +554,7 @@ impl AuthError {
             Self::InsufficientRole => AuthErrorCode::InsufficientRole,
             Self::Forbidden => AuthErrorCode::Forbidden,
             Self::UntrustedOrigin => AuthErrorCode::UntrustedOrigin,
+            Self::ReauthenticationRequired => AuthErrorCode::ReauthenticationRequired,
             Self::InvalidInvitationToken => AuthErrorCode::InvalidInvitationToken,
             Self::OauthFailed => AuthErrorCode::OauthFailed,
             Self::OauthEmailMismatch => AuthErrorCode::OauthEmailMismatch,

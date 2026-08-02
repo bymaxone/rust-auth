@@ -167,6 +167,7 @@ impl PlatformAuthService {
                 self.repo.clone(),
                 password.to_owned(),
                 admin.id.clone(),
+                admin.password_hash.clone(),
             ));
         }
 
@@ -476,13 +477,23 @@ async fn run_update_platform_last_login(
 
 /// Re-hash the just-proven plaintext with the current scheme and persist the upgrade — the
 /// transparent rehash-on-verify path for a platform admin (fire-and-forget).
+///
+/// `verified_hash` gates the write for the same reason it does on the dashboard plane: the task
+/// carries the plaintext and lands after a slow derivation, so an unconditional write can
+/// re-install a credential the admin has since replaced — most likely replaced BECAUSE it was
+/// compromised, by the very login that scheduled this. See `detached::run_rehash_password`.
 async fn run_rehash_platform_password(
     passwords: Arc<PasswordService>,
     repo: Arc<dyn PlatformUserRepository>,
     password: String,
     admin_id: String,
+    verified_hash: String,
 ) -> Result<(), AuthError> {
     let new_hash = passwords.hash(&password).await?;
+    let current = repo.find_by_id(&admin_id).await.map_err(repository_error)?;
+    if current.map(|admin| admin.password_hash) != Some(verified_hash) {
+        return Ok(());
+    }
     repo.update_password(&admin_id, &new_hash)
         .await
         .map_err(repository_error)

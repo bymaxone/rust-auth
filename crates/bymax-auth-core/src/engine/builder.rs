@@ -427,6 +427,9 @@ impl AuthEngineBuilder {
             absolute_session_lifetime_days,
         )
         .with_hooks(hooks.clone())
+        // The identifier key that derives the recent-authentication marker. Wired here rather
+        // than in `new` because every unit-test caller builds the manager without one.
+        .with_identifier_key(zeroize::Zeroizing::new(*config.hmac_key()))
         // Empty strings read as unconfigured rather than as "require the empty issuer": a
         // host threading an unset environment variable through must not silently turn the
         // check on and start minting tokens its own verifier rejects.

@@ -1237,6 +1237,23 @@ mod tests {
 
     #[async_trait::async_trait]
     impl SessionStore for FailingRevokeStore {
+        async fn mark_recent_auth(
+            &self,
+            _kind: SessionKind,
+            _user_id_hash: &str,
+            _ttl: u64,
+        ) -> Result<(), AuthError> {
+            Ok(())
+        }
+
+        async fn has_recent_auth(
+            &self,
+            _kind: SessionKind,
+            _user_id_hash: &str,
+        ) -> Result<bool, AuthError> {
+            Ok(false)
+        }
+
         async fn create_session(
             &self,
             _kind: SessionKind,

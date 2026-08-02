@@ -8,33 +8,36 @@ repository.workspace = true
 authors.workspace = true
 description = "Production-grade authentication and authorization — the single crates.io facade over the bymax-auth-* crates."
 
-# Feature bodies are placeholders while the internal crates are still skeletons:
-# each is wired to its target crate's capability (e.g. `bymax-auth-core/mfa`,
-# `dep:bymax-auth-redis`) as that crate lands. The feature *names* and the
-# at-least-one-hasher invariant (enforced by the `compile_error!` in lib.rs) are
-# stable from the start, so downstream feature selection never has to change.
-# Features are strictly additive, and there is deliberately no `core` feature —
-# the engine is always compiled.
+# Every feature forwards to the internal crate that implements it. They used to be empty
+# placeholders "while the internal crates are still skeletons" — the crates stopped being
+# skeletons and the bodies never caught up, so `bymax-auth/mfa` compiled the facade with MFA
+# nominally on and `bymax-auth-core` with it OFF. No error, no warning: an operator who enables
+# `mfa` or `platform` here believed the capability was compiled in and it was not, which for a
+# second factor is worse than not offering the flag at all.
+#
+# There is deliberately no `core` feature — the engine is always compiled.
 [features]
 default = ["scrypt"]
 
-# Password hashers — at least one is required.
-scrypt = []
-argon2 = []
+# Password hashers — at least one is required (enforced by the `compile_error!` in lib.rs).
+scrypt = ["bymax-auth-core/scrypt"]
+argon2 = ["bymax-auth-core/argon2"]
 
 # Optional engine flows.
-sessions = []
-mfa = []
-oauth = []                # OAuth orchestration + traits; no HTTP client
-oauth-reqwest = ["oauth"] # adds the bundled ReqwestHttpClient (pulls reqwest)
-platform = []
-invitations = []
-breach = []               # breached-password refusal (HIBP k-anonymity over the HttpClient seam)
+sessions = ["bymax-auth-core/sessions"]
+mfa = ["bymax-auth-core/mfa"]
+oauth = ["bymax-auth-core/oauth"]                # OAuth orchestration + traits; no HTTP client
+oauth-reqwest = ["oauth", "bymax-auth-core/oauth-reqwest"] # adds the bundled ReqwestHttpClient
+platform = ["bymax-auth-core/platform"]
+invitations = ["bymax-auth-core/invitations"]
+breach = ["bymax-auth-core/breach"]              # HIBP k-anonymity over the HttpClient seam
 
-# Infrastructure / adapters.
-redis = []
-axum = []
-client = []
+# Infrastructure / adapters. Each pulls its crate in as an optional dependency AND forwards the
+# flow features already selected above, so an adapter can never be compiled without the engine
+# capability it exposes.
+redis = ["dep:bymax-auth-redis"]
+axum = ["dep:bymax-auth-axum"]
+client = ["dep:bymax-auth-client"]
 
 # Convenience meta-feature: every capability on.
 full = [
@@ -60,3 +63,10 @@ rustdoc-args = ["--cfg", "docsrs"]
 
 [lints]
 workspace = true
+
+[dependencies]
+bymax-auth-core = { path = "../bymax-auth-core", version = "0.0.0" }
+bymax-auth-types = { path = "../bymax-auth-types", version = "0.0.0" }
+bymax-auth-redis = { path = "../bymax-auth-redis", version = "0.0.0", optional = true }
+bymax-auth-axum = { path = "../bymax-auth-axum", version = "0.0.0", optional = true }
+bymax-auth-client = { path = "../bymax-auth-client", version = "0.0.0", optional = true }

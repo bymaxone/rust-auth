@@ -1922,7 +1922,7 @@ async fn engine_runs_invitation_accept_against_redis() {
                 AcceptInvitationInput {
                     token: "known-invite-token".to_owned(),
                     name: "Replay".to_owned(),
-                    password: "pw".to_owned(),
+                    password: "glidingwalnut42".to_owned(),
                 },
                 "203.0.113.4",
                 "agent/1.0",

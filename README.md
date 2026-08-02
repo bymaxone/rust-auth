@@ -51,7 +51,7 @@ Instead of stitching together a dozen crates and packages for JWT, MFA, OAuth, s
 - **🦀 Pure-Rust crypto only** — Password hashing, MFA encryption, TOTP, and token generation run entirely on [RustCrypto](https://github.com/RustCrypto) (`scrypt`, `argon2`, `aes-gcm`, `hmac`, `sha2`, `subtle`). **No `ring`, no OpenSSL, no C bindings**, and `#![forbid(unsafe_code)]` on every first-party crate.
 - **⚡ Pay for what you use** — A tiny always-compiled core; every heavy integration (Redis, Axum, `reqwest`, MFA) is a Cargo feature or a trait you plug. A per-feature dependency budget is enforced in CI, so a minimal build pulls a minimal tree.
 - **🏢 Multi-tenant ready** — Every operation is scoped by `tenant_id`, taken from a resolver and **never the request body**. A separate platform-admin identity domain is isolated from tenant users from day one.
-- **🌐 Edge-native** — The exact same HS256 verifier that runs on the server compiles to `wasm32-unknown-unknown` and runs in the **Next.js Edge runtime with no network call** — one implementation, server and edge, proven by tests.
+- **🌐 Edge-native** — The same HS256 verifier that runs on the server compiles to `wasm32-unknown-unknown` and runs in the **Next.js Edge runtime with no network call** — one crypto implementation, server and edge, proven by tests. The edge is a fast *reject*, not the authority: with no network it cannot read the revocation list or the token epoch, so a revoked token still verifies there until it expires. Anything that must not outlive a revocation has to reach the backend.
 
 ```bash
 cargo add bymax-auth --features "argon2,sessions,mfa,oauth,oauth-reqwest,redis,axum"

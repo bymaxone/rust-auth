@@ -196,7 +196,10 @@ pub struct ResendVerificationDto {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct MfaSetupDto {
     /// The account password. `None` for an OAuth-only account.
-    #[garde(length(min = 1, max = 128))]
+    ///
+    /// `inner(...)` is required on an `Option`: without it the rule never runs against the
+    /// contained value, so the bound was declared and enforced nothing.
+    #[garde(inner(length(min = 1, max = 128)))]
     pub password: Option<String>,
 }
 

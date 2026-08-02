@@ -50,6 +50,11 @@ fn catalog() -> Vec<(AuthErrorCode, &'static str, u16)> {
         (InsufficientRole, "auth.insufficient_role", 403),
         (Forbidden, "auth.forbidden", 403),
         (UntrustedOrigin, "auth.untrusted_origin", 403),
+        (
+            ReauthenticationRequired,
+            "auth.reauthentication_required",
+            403,
+        ),
         (InvalidInvitationToken, "auth.invalid_invitation_token", 400),
         (OauthFailed, "auth.oauth_failed", 401),
         (OauthEmailMismatch, "auth.oauth_email_mismatch", 409),
@@ -95,6 +100,7 @@ fn all_errors() -> Vec<AuthError> {
         AuthError::InsufficientRole,
         AuthError::Forbidden,
         AuthError::UntrustedOrigin,
+        AuthError::ReauthenticationRequired,
         AuthError::InvalidInvitationToken,
         AuthError::OauthFailed,
         AuthError::OauthEmailMismatch,
@@ -115,8 +121,8 @@ fn all_errors() -> Vec<AuthError> {
 #[test]
 fn every_code_serializes_to_its_string_and_maps_to_its_status() {
     // Table-driven parity check: each code's `auth.*` string and HTTP status must match
-    // the catalog exactly. The catalog covers all 37 codes.
-    assert_eq!(catalog().len(), 37);
+    // the catalog exactly. The catalog covers all 38 codes.
+    assert_eq!(catalog().len(), 38);
     for (code, wire, status) in catalog() {
         let json = serde_json::to_string(&code).unwrap_or_default();
         assert_eq!(json, format!("\"{wire}\""), "wrong string for {code:?}");

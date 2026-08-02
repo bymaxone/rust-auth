@@ -53,27 +53,59 @@ pub struct PasswordService {
     kdf_permits: Arc<Semaphore>,
 }
 
-/// How many KDF derivations may run concurrently: one per available core, never fewer than two.
+/// The resident-memory budget the concurrent KDF derivations must fit inside, in MiB.
+///
+/// 512 MiB, which is what nest-auth admits by construction: Node's `crypto.scrypt` runs on the
+/// libuv thread pool, four threads by default, at ~128 MiB of working set each. The two
+/// libraries can back the same deployment, so their load shapes should not differ by an order
+/// of magnitude on the one route an unauthenticated caller can drive.
+const KDF_MEMORY_BUDGET_MIB: usize = 512;
+
+/// The working set one derivation holds, in MiB, for the algorithm new hashes are made with.
+///
+/// scrypt's is `128 * N * r` bytes — at the default `N = 2^17, r = 8` that is **128 MiB**, not
+/// the ~16 MiB this module used to claim. The figure was wrong by 8×, and it was the number the
+/// concurrency ceiling was reasoned from, so the ceiling inherited the error.
+fn kdf_working_set_mib(config: &crate::config::PasswordConfig) -> usize {
+    match config.active_algorithm {
+        crate::config::PasswordAlgorithm::Scrypt => {
+            let n = config.scrypt.cost_factor as usize;
+            let r = config.scrypt.block_size as usize;
+            (128usize.saturating_mul(n).saturating_mul(r) / (1024 * 1024)).max(1)
+        }
+        crate::config::PasswordAlgorithm::Argon2id => {
+            (config.argon2.memory_kib as usize / 1024).max(1)
+        }
+    }
+}
+
+/// How many KDF derivations may run concurrently.
 ///
 /// `spawn_blocking` alone bounds nothing useful here. Tokio's blocking pool defaults to 512
-/// threads, and every one of these tasks holds the KDF's working memory for its whole run —
-/// ~16 MiB for scrypt at the default cost, ~19 MiB for Argon2id. Unbounded, a few hundred
-/// concurrent logins reach several gigabytes of resident memory, and login is a route an
-/// unauthenticated caller can drive: the derivation runs before the password is known to be
-/// right, and the absent-user path deliberately runs one too. The per-IP limiter does not help
-/// against a distributed caller, and the per-account lockout does not fire on distinct
-/// addresses.
+/// threads, and every one of these tasks holds the KDF's working memory for its whole run.
+/// Unbounded, a few hundred concurrent logins reach tens of gigabytes of resident memory — and
+/// login is a route an unauthenticated caller can drive: the derivation runs before the password
+/// is known to be right, and the absent-user path deliberately runs one too. The per-IP limiter
+/// does not help against a distributed caller, and the per-account lockout does not fire on
+/// distinct addresses.
 ///
-/// One per core is the useful ceiling rather than a compromise: the work is CPU- and
-/// memory-bound, so admitting more than that adds memory pressure without adding throughput.
-/// Past the ceiling requests queue, which is the behaviour to want under load. The wait is
-/// identical for a real and an absent account, so the timing-uniformity property the sentinel
-/// exists for survives the queue.
+/// The ceiling is a MEMORY budget, not a core count. One-per-core was the previous rule and it
+/// scaled the wrong quantity: a 32-core host admitted 32 concurrent derivations, which at the
+/// real 128 MiB working set is ~4 GiB resident on an unauthenticated route — while nest-auth,
+/// pinned at four by the libuv pool, admitted ~512 MiB for the same traffic. Dividing a fixed
+/// budget by the configured working set makes a heavier cost factor buy fewer slots rather than
+/// more memory, which is the direction that stays safe when someone raises it.
 ///
-/// nest-auth reaches the same bound by construction: Node's `crypto.scrypt` runs on the libuv
-/// thread pool, which is four threads by default.
-fn kdf_permit_count() -> usize {
-    std::thread::available_parallelism().map_or(2, |n| n.get().max(2))
+/// Still capped by the core count on top, because the work is CPU- and memory-bound and
+/// admitting more than that adds pressure without adding throughput. Never fewer than two, so a
+/// deliberately huge cost factor cannot serialize the service into a deadlock-shaped queue.
+/// Past the ceiling requests queue, which is the behaviour to want under load — and the wait is
+/// identical for a real and an absent account, so the timing uniformity the sentinel exists for
+/// survives it.
+fn kdf_permit_count(config: &crate::config::PasswordConfig) -> usize {
+    let cores = std::thread::available_parallelism().map_or(2, std::num::NonZeroUsize::get);
+    let by_memory = KDF_MEMORY_BUDGET_MIB / kdf_working_set_mib(config);
+    by_memory.clamp(2, cores.max(2))
 }
 
 impl PasswordService {
@@ -97,7 +129,7 @@ impl PasswordService {
             rehash_on_verify: config.rehash_on_verify,
             sentinel,
             breach_checker,
-            kdf_permits: Arc::new(Semaphore::new(kdf_permit_count())),
+            kdf_permits: Arc::new(Semaphore::new(kdf_permit_count(config))),
         })
     }
 
@@ -275,21 +307,49 @@ mod tests {
     }
 
     #[test]
-    fn the_kdf_admits_one_derivation_per_core_and_never_fewer_than_two() {
+    fn the_kdf_ceiling_is_a_memory_budget_rather_than_a_core_count() {
         // `spawn_blocking` bounds nothing useful on its own: Tokio's blocking pool defaults to
-        // 512 threads, and each of these tasks holds ~16-19 MiB of KDF working memory for its
-        // whole run. Unbounded, a few hundred concurrent logins reach gigabytes of resident
-        // memory — and login is a route an unauthenticated caller drives, because the
-        // derivation runs before the password is known to be right and the absent-user path
-        // deliberately runs one too.
-        let expected = std::thread::available_parallelism().map_or(2, |n| n.get().max(2));
-        assert_eq!(kdf_permit_count(), expected);
+        // 512 threads, and each of these tasks holds the KDF's working memory for its whole run.
+        // Login is a route an unauthenticated caller drives — the derivation runs before the
+        // password is known to be right, and the absent-user path deliberately runs one too.
+        //
+        // The ceiling used to be one-per-core, reasoned from a working set this module stated as
+        // "~16 MiB". scrypt's is `128 * N * r`, so at the default `N = 2^17, r = 8` it is
+        // **128 MiB** — the figure was wrong by 8×, and a 32-core host therefore admitted ~4 GiB
+        // resident where nest-auth, pinned at four by the libuv pool, admitted ~512 MiB.
+        let defaults = crate::config::PasswordConfig::default();
+        assert_eq!(
+            kdf_working_set_mib(&defaults),
+            128,
+            "scrypt at N=2^17, r=8 holds 128 MiB, not the 16 MiB the old comment claimed"
+        );
+
+        let cores = std::thread::available_parallelism().map_or(2, std::num::NonZeroUsize::get);
+        assert_eq!(
+            kdf_permit_count(&defaults),
+            (512 / 128usize).clamp(2, cores.max(2)),
+            "the budget divided by the working set, capped by the cores"
+        );
+
+        // The direction that matters: raising the cost factor must buy FEWER slots, not more
+        // memory. The old rule was indifferent to it — the same 32 permits at any cost.
+        let mut heavier = crate::config::PasswordConfig::default();
+        heavier.scrypt.cost_factor = 1 << 19;
         assert!(
-            kdf_permit_count() >= 2,
+            kdf_permit_count(&heavier) <= kdf_permit_count(&defaults),
+            "a heavier KDF must not admit more concurrency"
+        );
+
+        assert!(
+            kdf_permit_count(&defaults) >= 2,
             "a single permit would serialize login"
         );
         assert!(
-            kdf_permit_count() < 512,
+            kdf_permit_count(&heavier) >= 2,
+            "even a deliberately huge cost factor keeps two, so the queue cannot deadlock-shape"
+        );
+        assert!(
+            kdf_permit_count(&defaults) < 512,
             "the point is to be below the blocking pool's default"
         );
     }
@@ -320,7 +380,7 @@ mod tests {
         // the semaphore and watching a hash fail to make progress is what proves it: without
         // the acquire, the hash would complete while every permit is held elsewhere.
         let Some(svc) = service() else { return };
-        let permits = u32::try_from(kdf_permit_count()).unwrap_or(u32::MAX);
+        let permits = u32::try_from(kdf_permit_count(&config())).unwrap_or(u32::MAX);
         let all = Arc::clone(&svc.kdf_permits)
             .acquire_many_owned(permits)
             .await;

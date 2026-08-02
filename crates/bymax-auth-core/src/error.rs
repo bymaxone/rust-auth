@@ -141,6 +141,12 @@ pub enum ConfigError {
         /// The rejected iteration count.
         got: u32,
     },
+    /// `password.argon2.parallelism` is 0, which the hasher rejects at hash time.
+    #[error("password.argon2.parallelism must be >= 1 (got {got})")]
+    Argon2Parallelism {
+        /// The rejected degree of parallelism.
+        got: u32,
+    },
     /// `password.active_algorithm` names an algorithm whose hasher feature is not
     /// compiled in (e.g. `Scrypt` selected in a build without the `scrypt` feature).
     #[error("password.active_algorithm '{algorithm}' requires its hasher feature to be enabled")]

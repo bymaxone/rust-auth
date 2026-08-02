@@ -189,6 +189,26 @@ impl AuthEngine {
             .invitation_store()
             .ok_or(AuthError::InvalidInvitationToken)?;
 
+        // The breach screen runs BEFORE the token is spent, and the ordering is the whole point.
+        // The consume is a single-use `GETDEL`, so anything that fails after it destroys the
+        // invitation rather than merely refusing the request — and a breached password is a
+        // RECOVERABLE client error: the invitee picks another one and retries. Screening after
+        // the consume told them their password was unacceptable and, in the same breath, that
+        // the only credential they had to fix it was gone. `reset_password` was refactored away
+        // from exactly this shape; the reasoning never reached here.
+        //
+        // It needs nothing from the stored record, so it can simply move. The duplicate-address
+        // guard below cannot — it reads `invitation.email` — and stays after the consume.
+        //
+        // Judging first does mean a caller holding no valid token can drive the screen, which
+        // for the bundled HIBP checker is an outbound range query. That is the same exposure
+        // `register` already carries on the same screen and the same trade `reset_password`
+        // makes for the same reason; the route is rate-limited, and the burned invitation was
+        // the larger of the two costs by a wide margin.
+        self.passwords()
+            .assert_not_compromised(&input.password)
+            .await?;
+
         // Atomic single-use consume; an absent/expired/already-used token is invalid.
         let invitation = store
             .consume_invitation(&input.token)
@@ -242,9 +262,7 @@ impl AuthEngine {
         }
 
         // Token possession implies email ownership, so the new account is created verified.
-        self.passwords()
-            .assert_not_compromised(&input.password)
-            .await?;
+        // The breach screen already ran, before the token was spent — see the top of this method.
         let password_hash = self.passwords().hash(&input.password).await?;
         let user = self
             .user_repository()
@@ -568,7 +586,7 @@ mod tests {
                     AcceptInvitationInput {
                         token,
                         name: "Replay".to_owned(),
-                        password: "pw".to_owned(),
+                        password: "glidingwalnut42".to_owned(),
                     },
                     "203.0.113.4",
                     "agent/1.0",
@@ -706,6 +724,67 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_breached_password_leaves_the_invitation_usable() {
+        // The consume is a single-use `GETDEL`, so anything that fails after it destroys the
+        // invitation rather than merely refusing the request. A breached password is a
+        // RECOVERABLE client error — the invitee picks another one and retries — so screening
+        // after the consume told them their password was unacceptable and, in the same breath,
+        // that the only credential they had to fix it was gone. `reset_password` was refactored
+        // away from exactly this shape; the reasoning had not reached here.
+        let Some(s) = setup(invite_config()) else { return };
+        let token = "e".repeat(64);
+        assert!(
+            s.stores
+                .put_invitation(
+                    &token,
+                    &StoredInvitation {
+                        email: "retry@example.com".to_owned(),
+                        role: "MEMBER".to_owned(),
+                        tenant_id: "t1".to_owned(),
+                        inviter_user_id: "x".to_owned(),
+                        created_at: OffsetDateTime::UNIX_EPOCH,
+                    },
+                    600
+                )
+                .await
+                .is_ok()
+        );
+
+        // A password the screen refuses.
+        let refused = s
+            .engine
+            .accept_invitation(
+                AcceptInvitationInput {
+                    token: token.clone(),
+                    name: "N".to_owned(),
+                    password: "password".to_owned(),
+                },
+                "1.2.3.4",
+                "agent",
+                BTreeMap::new(),
+            )
+            .await;
+        assert!(
+            matches!(refused, Err(AuthError::PasswordCompromised)),
+            "expected the screen to refuse, got {refused:?}"
+        );
+
+        // THE property: the invitation is still in the store, so the invitee can simply retry
+        // with a different password. Before the reorder the refusal had already spent it and
+        // the next call answered `InvalidInvitationToken` — they had to be invited all over
+        // again for a mistake their own request carried.
+        //
+        // Asserted against the store rather than by retrying the whole flow, so the case stays
+        // about the ordering: a retry would also have to satisfy the inviter and duplicate
+        // checks, and a failure there would look like this bug without being it.
+        let survived = s.stores.consume_invitation(&token).await;
+        assert!(
+            matches!(survived, Ok(Some(_))),
+            "the invitation must survive a recoverable client error, got {survived:?}"
+        );
+    }
+
+    #[tokio::test]
     async fn accept_rejects_a_tampered_role_and_a_duplicate_email() {
         // A stored invitation whose role is not a declared role (tamper) is rejected; an
         // invitee who already has an account is EmailAlreadyExists.
@@ -734,7 +813,7 @@ mod tests {
                     AcceptInvitationInput {
                         token: tampered,
                         name: "T".to_owned(),
-                        password: "pw".to_owned(),
+                        password: "glidingwalnut42".to_owned(),
                     },
                     "1.2.3.4",
                     "agent",
@@ -772,7 +851,7 @@ mod tests {
                     AcceptInvitationInput {
                         token: dup,
                         name: "D".to_owned(),
-                        password: "pw".to_owned(),
+                        password: "glidingwalnut42".to_owned(),
                     },
                     "1.2.3.4",
                     "agent",
@@ -822,7 +901,7 @@ mod tests {
                     AcceptInvitationInput {
                         token,
                         name: "N".to_owned(),
-                        password: "pw".to_owned(),
+                        password: "glidingwalnut42".to_owned(),
                     },
                     "1.2.3.4",
                     "agent",
@@ -844,7 +923,7 @@ mod tests {
                     AcceptInvitationInput {
                         token: "unknown".to_owned(),
                         name: "N".to_owned(),
-                        password: "pw".to_owned(),
+                        password: "glidingwalnut42".to_owned(),
                     },
                     "1.2.3.4",
                     "agent",

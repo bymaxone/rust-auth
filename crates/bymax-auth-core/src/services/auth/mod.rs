@@ -213,6 +213,24 @@ impl AuthEngine {
         to_hex(&hmac_sha256(self.config().hmac_key(), input.as_bytes()))
     }
 
+    /// The brute-force identifier for a password re-proof that guards a sensitive change.
+    ///
+    /// `login` refuses an account after N wrong passwords. The doors that ask for the SAME
+    /// secret — change-password, request-email-change — refused nothing, so a caller holding a
+    /// stolen access token but not the password could guess it there without limit. The only
+    /// control was the per-IP rate limit, which in this crate is in-process and per-instance
+    /// (see `rateLimits.$comment` in the wire contract), so a distributed caller sidesteps it
+    /// entirely. Winning the guess buys the whole account: replace the credential, or move the
+    /// address recovery runs through.
+    ///
+    /// Namespaced by `flow` so an authenticated caller cannot spend the owner's `login` budget
+    /// and lock them out of their own sign-in, and keyed on the user id rather than the address
+    /// because that is what the caller is attacking here.
+    pub(crate) fn reproof_identifier(&self, flow: &str, user_id: &str) -> String {
+        let input = format!("reauth:{flow}:{user_id}");
+        to_hex(&hmac_sha256(self.config().hmac_key(), input.as_bytes()))
+    }
+
     /// The invitee-index identifier for an address: `hmac_sha256(email)`, hex.
     ///
     /// The index used to key on a bare `sha256(email)`, which is reversible by dictionary — an

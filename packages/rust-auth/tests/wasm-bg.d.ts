@@ -15,5 +15,8 @@ declare module "*bymax_auth_wasm_bg.js" {
     token: string,
     secret: string,
     leewaySecs?: bigint | null,
+    expectedIss?: string | null,
+    expectedAud?: string | null,
+    expectedType?: string | null,
   ): string | undefined;
 }

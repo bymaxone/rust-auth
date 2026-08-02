@@ -170,7 +170,17 @@ impl RedisStores {
         let detail_json = serde_json::to_string(&SessionDetailValue::at_creation(detail))?;
         let ttl_window = i64::try_from(ttl_secs).unwrap_or(i64::MAX);
 
+        // `.atomic()` — a MULTI/EXEC transaction, as every other multi-command write in this
+        // crate uses (`move_session_detail`, `bump_epoch`, the OTP put). This was the one that
+        // did not, and the gap is the exact window the rest of the crate was written to close:
+        // between the `SET rt:` and the `SADD sess:` a concurrent `invalidate_user_sessions`
+        // (itself atomic, run by a password reset, a ban, or an MFA enable) sweeps a per-user
+        // index that does not yet name this session, and the `SADD` then recreates the index
+        // with it. A session created by a login that raced the revocation survives the
+        // revocation the user was told had happened. A connection drop between the `SADD` and
+        // the `EXPIRE` also left the index with no TTL at all.
         let mut pipe = redis::pipe();
+        pipe.atomic();
         pipe.cmd("SET")
             .arg(&rt_key)
             .arg(&record_json)
@@ -646,6 +656,54 @@ impl RedisStores {
     /// (re)apply its TTL, returning the new value. The TTL is deliberately far longer than any
     /// access token lives, so a bump stays effective for the whole window a pre-bump token could
     /// still be presented, while still bounding growth to a small integer per reset-affected user.
+    /// Plant the recent-authentication marker. `SET key 1 EX ttl` — presence is the meaning,
+    /// so the value is a constant and a re-authentication simply refreshes the window.
+    ///
+    /// The plane is part of the key because a dashboard user and a platform admin can carry the
+    /// same id from different consumer repositories; without it one could satisfy the other's
+    /// freshness check, the same collision the `lf:` lockout identifier was fixed for.
+    async fn mark_recent_auth_inner(
+        &self,
+        kind: SessionKind,
+        user_id_hash: &str,
+        ttl: u64,
+    ) -> Result<(), RedisStoreError> {
+        // `ra:{hash}` and nothing more. The plane is already inside the hash's preimage
+        // (`hmac_sha256("{plane}:{userId}")`), held byte-identical with nest-auth's
+        // `recentAuthKey` — adding a segment here would split the shared keyspace.
+        let _ = kind;
+        let key = self.keys().key(Prefix::Ra, user_id_hash);
+        let mut conn = self.connection().await?;
+        redis::cmd("SET")
+            .arg(&key)
+            .arg("1")
+            .arg("EX")
+            .arg(ttl)
+            .query_async::<()>(&mut conn)
+            .await?;
+        Ok(())
+    }
+
+    /// Read the marker. `EXISTS`, never `GETDEL`: a user who signs in and then makes two
+    /// security changes in a row must not have the second refused because the first spent it.
+    async fn has_recent_auth_inner(
+        &self,
+        kind: SessionKind,
+        user_id_hash: &str,
+    ) -> Result<bool, RedisStoreError> {
+        // `ra:{hash}` and nothing more. The plane is already inside the hash's preimage
+        // (`hmac_sha256("{plane}:{userId}")`), held byte-identical with nest-auth's
+        // `recentAuthKey` — adding a segment here would split the shared keyspace.
+        let _ = kind;
+        let key = self.keys().key(Prefix::Ra, user_id_hash);
+        let mut conn = self.connection().await?;
+        let present: bool = redis::cmd("EXISTS")
+            .arg(&key)
+            .query_async(&mut conn)
+            .await?;
+        Ok(present)
+    }
+
     async fn bump_epoch_inner(
         &self,
         kind: SessionKind,
@@ -807,6 +865,27 @@ impl SessionStore for RedisStores {
 
     async fn current_epoch(&self, kind: SessionKind, user_id: &str) -> Result<u64, AuthError> {
         self.current_epoch_inner(kind, user_id)
+            .await
+            .map_err(AuthError::from)
+    }
+
+    async fn mark_recent_auth(
+        &self,
+        kind: SessionKind,
+        user_id_hash: &str,
+        ttl: u64,
+    ) -> Result<(), AuthError> {
+        self.mark_recent_auth_inner(kind, user_id_hash, ttl)
+            .await
+            .map_err(AuthError::from)
+    }
+
+    async fn has_recent_auth(
+        &self,
+        kind: SessionKind,
+        user_id_hash: &str,
+    ) -> Result<bool, AuthError> {
+        self.has_recent_auth_inner(kind, user_id_hash)
             .await
             .map_err(AuthError::from)
     }
