@@ -42,7 +42,7 @@ thiserror = "2"
 time = { version = "0.3", default-features = false, features = ["std", "serde-well-known"] }
 # Decoding the configured MFA encryption key (base64 standard or url-safe) during startup
 # validation to confirm it is exactly 32 bytes for AES-256-GCM.
-base64 = "0.22"
+base64 = "0.23"
 
 # Reserved for the bundled `reqwest`-backed `HttpClient` transport. Optional and pulled in
 # ONLY by `oauth-reqwest`; the base `oauth` feature is HTTP-client-free, with transport
