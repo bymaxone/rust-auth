@@ -39,3 +39,16 @@ updates:
     commit-message:
       prefix: chore
       include: scope
+    groups:
+      # react, react-dom and next are peer dependencies of one another and of this package,
+      # and their type packages track react's version. Bumped one at a time, each PR moves a
+      # dev-dependency out of the range its siblings still declare, so the install resolves to
+      # a combination no consumer would ever have. They move together or not at all.
+      react-next:
+        patterns:
+          - "react"
+          - "react-dom"
+          - "next"
+          - "@types/react"
+          - "@types/react-dom"
+          - "@testing-library/react"
