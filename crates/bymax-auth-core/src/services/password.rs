@@ -53,12 +53,21 @@ pub struct PasswordService {
     kdf_permits: Arc<Semaphore>,
 }
 
-/// The resident-memory budget the concurrent KDF derivations must fit inside, in MiB.
+/// The resident-memory budget the concurrent KDF derivations are sized against, in MiB.
 ///
 /// 512 MiB, which is what nest-auth admits by construction: Node's `crypto.scrypt` runs on the
 /// libuv thread pool, four threads by default, at ~128 MiB of working set each. The two
 /// libraries can back the same deployment, so their load shapes should not differ by an order
 /// of magnitude on the one route an unauthenticated caller can drive.
+///
+/// **Sized against, not capped by.** [`kdf_permit_count`] floors at two permits, so a
+/// configuration whose single derivation already exceeds 256 MiB admits 2 × that working set
+/// and overshoots this figure. That is deliberate and it is the lesser of the two failures: one
+/// permit makes every login on the deployment strictly sequential behind a memory-hard KDF,
+/// which is a self-inflicted denial of service on the same unauthenticated route. A working set
+/// that large is a configuration worth questioning on its own — the defaults are 128 MiB
+/// (scrypt at `N = 2^17, r = 8`) and 19 MiB (Argon2id) — and the budget is what keeps the
+/// ordinary case bounded rather than a guarantee for the extreme one.
 const KDF_MEMORY_BUDGET_MIB: usize = 512;
 
 /// The working set one derivation holds, in MiB, for the algorithm new hashes are made with.
@@ -93,7 +102,7 @@ fn kdf_working_set_mib(config: &crate::config::PasswordConfig) -> usize {
 /// does not help against a distributed caller, and the per-account lockout does not fire on
 /// distinct addresses.
 ///
-/// The ceiling is a MEMORY budget, not a core count. One-per-core was the previous rule and it
+/// The ceiling is sized from a MEMORY budget rather than a core count. One-per-core was the previous rule and it
 /// scaled the wrong quantity: a 32-core host admitted 32 concurrent derivations, which at the
 /// real 128 MiB working set is ~4 GiB resident on an unauthenticated route — while nest-auth,
 /// pinned at four by the libuv pool, admitted ~512 MiB for the same traffic. Dividing a fixed
@@ -348,6 +357,29 @@ mod tests {
             kdf_permit_count(&defaults) >= 2,
             "a single permit would serialize login"
         );
+        // The floor takes precedence over the budget, and the case is pinned so the doc cannot
+        // drift back into claiming otherwise: a working set past half the budget still admits
+        // two, and therefore overshoots it. One permit would serialize every login on the
+        // deployment behind a memory-hard KDF, which is a self-inflicted denial of service on
+        // the same unauthenticated route the budget exists to protect.
+        let enormous = crate::config::PasswordConfig {
+            // 4 GiB working set at r = 8.
+            scrypt: crate::config::ScryptParams {
+                cost_factor: 1 << 22,
+                ..crate::config::ScryptParams::default()
+            },
+            ..crate::config::PasswordConfig::default()
+        };
+        assert_eq!(
+            kdf_permit_count(&enormous),
+            2,
+            "the floor wins over the budget, deliberately"
+        );
+        assert!(
+            kdf_working_set_mib(&enormous) * kdf_permit_count(&enormous) > KDF_MEMORY_BUDGET_MIB,
+            "and that is what overshooting the budget looks like — sized against, not capped by"
+        );
+
         assert!(
             kdf_permit_count(&heavier) >= 2,
             "even a deliberately huge cost factor keeps two, so the queue cannot deadlock-shape"
