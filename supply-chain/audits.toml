@@ -5,7 +5,20 @@
 who = "Maximiliano Salvatti <msalvatti@gmail.com>"
 criteria = "safe-to-deploy"
 delta = "5.4.1 -> 5.4.2"
-notes = "Delta reviewed against RUSTSEC-2026-0221. The advisory's subject is the fix: 'unsafe impl<T> Send/Sync for StackSlot' is now bounded by 'T: Send', so a !Send tag can no longer cross a thread boundary. The rest of the delta removes the slab implementation in favour of the intrusive one plus a spinlock fallback, which compiles only when neither 'std' nor 'critical-section' is enabled — this workspace enables 'std' through async-lock, so that path is not built here. The spinlock's own unsafe is a compare_exchange Acquire/Release pair with a drop guard releasing the flag. No new dependencies (concurrent-queue is dropped), no build script, no I/O."
+notes = """
+Delta reviewed against RUSTSEC-2026-0221.
+
+The advisory's subject is the fix: `unsafe impl<T> Send/Sync for StackSlot` is now
+bounded by `T: Send`, so a `!Send` tag can no longer cross a thread boundary.
+
+The rest of the delta replaces the slab implementation with the intrusive one plus a
+spinlock fallback. Both the removed slab module and the new spinlock sit behind
+`cfg(not(any(feature = "std", feature = "critical-section")))`; this workspace enables
+`std` through async-lock, so neither is built here. The spinlock's own unsafe is a
+compare_exchange Acquire/Release pair with a drop guard releasing the flag.
+
+No new dependencies (concurrent-queue is dropped), no build script, no I/O.
+"""
 
 [[trusted.aead]]
 criteria = "safe-to-deploy"
