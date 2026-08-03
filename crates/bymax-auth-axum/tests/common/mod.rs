@@ -423,7 +423,6 @@ fn fail() -> bymax_auth_types::AuthError {
 impl bymax_auth_core::traits::SessionStore for FailingStores {
     async fn mark_recent_auth(
         &self,
-        _kind: bymax_auth_core::traits::SessionKind,
         _user_id_hash: &str,
         _ttl: u64,
     ) -> Result<(), bymax_auth_types::AuthError> {
@@ -435,7 +434,6 @@ impl bymax_auth_core::traits::SessionStore for FailingStores {
 
     async fn has_recent_auth(
         &self,
-        _kind: bymax_auth_core::traits::SessionKind,
         _user_id_hash: &str,
     ) -> Result<bool, bymax_auth_types::AuthError> {
         Ok(false)

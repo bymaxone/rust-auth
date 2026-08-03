@@ -1237,20 +1237,11 @@ mod tests {
 
     #[async_trait::async_trait]
     impl SessionStore for FailingRevokeStore {
-        async fn mark_recent_auth(
-            &self,
-            _kind: SessionKind,
-            _user_id_hash: &str,
-            _ttl: u64,
-        ) -> Result<(), AuthError> {
+        async fn mark_recent_auth(&self, _user_id_hash: &str, _ttl: u64) -> Result<(), AuthError> {
             Ok(())
         }
 
-        async fn has_recent_auth(
-            &self,
-            _kind: SessionKind,
-            _user_id_hash: &str,
-        ) -> Result<bool, AuthError> {
+        async fn has_recent_auth(&self, _user_id_hash: &str) -> Result<bool, AuthError> {
             Ok(false)
         }
 
@@ -1446,6 +1437,11 @@ mod tests {
 
         // Exercise the rest of the double's object-safe surface so it is fully covered.
         let store = FailingRevokeStore;
+        // The recent-authentication pair, and the direction that matters: an unknown marker
+        // answers `false`, so a flow that requires recent authentication FAILS CLOSED against a
+        // store that knows nothing — it refuses rather than admitting an unproven caller.
+        assert!(store.mark_recent_auth("hash", 300).await.is_ok());
+        assert!(matches!(store.has_recent_auth("hash").await, Ok(false)));
         let rec = record("u1", OffsetDateTime::UNIX_EPOCH);
         assert!(
             store

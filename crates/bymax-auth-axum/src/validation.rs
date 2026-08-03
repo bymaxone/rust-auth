@@ -107,6 +107,9 @@ fn require_json_content_type(headers: &http::HeaderMap) -> Result<(), AuthReject
 /// An empty body still means "nothing supplied"; anything else must be well-formed JSON of the
 /// declared shape, and must say so in its `Content-Type` for the reason
 /// [`require_json_content_type`] gives.
+// Only the MFA-setup routes take an optional body, and they compile only with the `mfa`
+// feature — so without it this is dead code, and the workspace builds with `-D warnings`.
+#[cfg(feature = "mfa")]
 pub(crate) fn validate_optional_json<T>(
     headers: &http::HeaderMap,
     bytes: &[u8],

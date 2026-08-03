@@ -459,6 +459,38 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn the_address_change_carries_the_password_lockout() {
+        // `login` refuses an account after N wrong passwords. This door asks for the SAME secret
+        // and used to refuse nothing, so a caller holding a stolen access token but not the
+        // password could guess it here without limit — and winning moves the address the
+        // account recovers through, which is persistence rather than a single theft. The per-IP
+        // limiter is not that control: in this crate it is in-process and per-instance, so a
+        // distributed caller sidesteps it, and it is not keyed to the account under attack.
+        let Some(h) = setup() else { return };
+        let id = h
+            .seed(SeedUser::active("guessed@example.com", "right"))
+            .await;
+
+        for _ in 0..5 {
+            let _ = h
+                .engine
+                .request_email_change(&id, "new@example.com", "wrong")
+                .await;
+        }
+
+        // Even the right password is refused now, and with the lockout code rather than the
+        // credential one — the caller has to wait, not keep guessing.
+        let refused = h
+            .engine
+            .request_email_change(&id, "new@example.com", "right")
+            .await;
+        assert!(
+            matches!(refused, Err(AuthError::AccountLocked { .. })),
+            "expected the re-proof lockout to engage, got {refused:?}"
+        );
+    }
+
+    #[tokio::test]
     async fn a_blocked_account_cannot_move_its_address() {
         // The address is where every reset link and verification code goes, so moving it is at
         // least as privileged as minting an invitation — which this library already refuses a

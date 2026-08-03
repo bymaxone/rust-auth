@@ -2346,6 +2346,46 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn change_password_carries_the_password_lockout() {
+        // `login` refuses an account after N wrong passwords. This door asks for the SAME secret
+        // and used to refuse nothing, so a caller holding a stolen access token but not the
+        // password could guess it here without limit — and winning replaces the credential,
+        // which locks the owner out of their own account. The per-IP limiter is not that
+        // control: in this crate it is in-process and per-instance, so a distributed caller
+        // sidesteps it entirely, and it is not keyed to the account under attack.
+        let Some(h) = token_harness() else { return };
+        let id = h
+            .seed(SeedUser::active("locked@example.com", "oldsecret77"))
+            .await;
+
+        // Spend the budget on wrong guesses.
+        for _ in 0..5 {
+            let _ = h
+                .engine
+                .change_password(&id, "not-the-password", "glidingwalnut42", None)
+                .await;
+        }
+
+        // Now even the RIGHT password is refused, and with the lockout code rather than the
+        // credential one — the caller has to wait, not keep guessing.
+        let refused = h
+            .engine
+            .change_password(&id, "oldsecret77", "glidingwalnut42", None)
+            .await;
+        assert!(
+            matches!(refused, Err(AuthError::AccountLocked { .. })),
+            "expected the re-proof lockout to engage, got {refused:?}"
+        );
+
+        // …and nothing was written: the credential the owner still knows is intact.
+        assert!(
+            login_ok(&h, "locked@example.com", "oldsecret77")
+                .await
+                .is_some()
+        );
+    }
+
+    #[tokio::test]
     async fn change_password_spares_the_caller_session_when_it_is_identified() {
         // ASVS v5 §7.4.3: the other sessions end. The caller's own survives, so the device that
         // made the change is not signed out by making it — it silently re-mints its access

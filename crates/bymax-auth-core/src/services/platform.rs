@@ -684,6 +684,63 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn the_platform_rehash_refuses_to_overwrite_a_password_that_changed() {
+        // The dashboard twin's reasoning, on the plane where it matters most. The task carries
+        // the PLAINTEXT it is upgrading and a KDF derivation is slow by construction, so it
+        // lands well after the login that scheduled it. The situation where an admin's password
+        // changes in that window is not random: it is a rotation BECAUSE the old one was
+        // compromised, where the attacker's own login is what scheduled this task. An
+        // unconditional write re-installs the compromised credential over the new one.
+        let Some(h) = harness(platform_config()) else { return };
+        let id = seed_admin(&h.admins, "rotate@admin.io", "oldsecret77");
+        // Read as one expression rather than a `let ... else { return }`: the else arm of a
+        // binding that cannot fail is a branch no test can take, and this crate's coverage gate
+        // is 100% of lines.
+        let original = h
+            .admins
+            .find_by_id(&id)
+            .await
+            .ok()
+            .flatten()
+            .map(|admin| admin.password_hash)
+            .unwrap_or_default();
+
+        // The rotation lands first, so the row no longer holds the hash that was verified.
+        assert!(
+            h.admins
+                .update_password(&id, "$scrypt$rotated")
+                .await
+                .is_ok()
+        );
+
+        // The upgrade, still carrying the OLD plaintext, must decline rather than write.
+        assert!(
+            run_rehash_platform_password(
+                h.engine.passwords().clone(),
+                h.admins.clone(),
+                "oldsecret77".to_owned(),
+                id.clone(),
+                original,
+            )
+            .await
+            .is_ok()
+        );
+
+        let after = h
+            .admins
+            .find_by_id(&id)
+            .await
+            .ok()
+            .flatten()
+            .map(|admin| admin.password_hash)
+            .unwrap_or_default();
+        assert_eq!(
+            after, "$scrypt$rotated",
+            "the rotation must survive the upgrade that raced it"
+        );
+    }
+
+    #[tokio::test]
     async fn login_issues_a_platform_session_with_no_tenant() {
         // A correct password for an active admin returns a full platform session; me/refresh
         // then work against the platform keyspace.

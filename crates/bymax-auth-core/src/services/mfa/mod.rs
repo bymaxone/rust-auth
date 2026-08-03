@@ -272,19 +272,16 @@ impl MfaService {
             // The marker is planted by `TokenManagerService::issue_tokens` and NOT by
             // `reissue_tokens`, which is what makes it proof of anything: an attacker holding a
             // stolen session can rotate it indefinitely and never make the mark fresh again.
-            let plane = match ctx {
-                MfaContext::Dashboard => "dashboard",
-                MfaContext::Platform => "platform",
-            };
+            // `MfaContext::as_str` rather than a match written here: the plane's wire name has
+            // exactly one definition, and this preimage has to agree byte-for-byte with
+            // nest-auth's `recentAuthKey`. A second copy is a second thing to keep in step —
+            // and the `Platform` arm of that copy was unreachable anyway, since a platform
+            // admin's `password_hash` is non-optional and so never takes this branch.
             let marker = to_hex(&hmac_sha256(
                 self.identifier_key.as_ref(),
-                format!("{plane}:{user_id}").as_bytes(),
+                format!("{}:{user_id}", ctx.as_str()).as_bytes(),
             ));
-            let kind = match ctx {
-                MfaContext::Dashboard => SessionKind::Dashboard,
-                MfaContext::Platform => SessionKind::Platform,
-            };
-            if !self.session_store.has_recent_auth(kind, &marker).await? {
+            if !self.session_store.has_recent_auth(&marker).await? {
                 tracing::warn!(%user_id, "mfa setup: no recent authentication");
                 return Err(AuthError::ReauthenticationRequired);
             }

@@ -28,7 +28,10 @@
 # Gates: fmt clippy test hack wasm doc examples-rust examples-web npm
 #
 # Deliberately NOT in the default run, and the only two CI gates this script omits:
-#   coverage   — available by name; several minutes, and the figure only matters pre-merge.
+#   coverage   — available by name; several minutes. It IS a blocking PR gate at
+#                `--fail-under-lines 100 --fail-under-functions 100`, so "not in the default
+#                run" means "you must remember to run it", not "it will not stop your PR".
+#                Run it before pushing anything that adds a function or a branch.
 #   mutation   — never runs on a PR (post-merge on main only); use `cargo mutants` directly.
 # Nothing else is omitted. A gate that cannot run in your environment must FAIL here rather
 # than be skipped, because "it did not run" and "it passed" have to stay distinguishable.
@@ -93,8 +96,14 @@ gate_coverage() {
 # Two halves, exactly as the job splits them: the hasher-gated crates carry a compile_error!
 # that rules out isolated non-hasher features, so they are checked against valid combinations
 # and excluded from --each-feature.
+# `RUSTFLAGS=-D warnings` is not decoration: the CI runner sets it job-wide (via
+# `setup-rust-toolchain`), so a warning there is a red job. Without it this gate is strictly
+# weaker than the one it claims to reproduce — a function used only under one feature is dead
+# code in the builds that omit it, which is a warning locally and a failure in CI. That exact
+# shape shipped a green local run into two red jobs.
 gate_hack() {
   local features
+  export RUSTFLAGS="${RUSTFLAGS:-} -D warnings"
   for features in scrypt argon2 'scrypt,argon2' 'scrypt,mfa' 'argon2,mfa' 'scrypt,argon2,mfa'; do
     echo "checking bymax-auth-crypto --features $features"
     cargo check -p bymax-auth-crypto --no-default-features --features "$features" --locked || return 1

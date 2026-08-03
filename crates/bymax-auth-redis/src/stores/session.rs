@@ -664,14 +664,12 @@ impl RedisStores {
     /// freshness check, the same collision the `lf:` lockout identifier was fixed for.
     async fn mark_recent_auth_inner(
         &self,
-        kind: SessionKind,
         user_id_hash: &str,
         ttl: u64,
     ) -> Result<(), RedisStoreError> {
         // `ra:{hash}` and nothing more. The plane is already inside the hash's preimage
         // (`hmac_sha256("{plane}:{userId}")`), held byte-identical with nest-auth's
         // `recentAuthKey` — adding a segment here would split the shared keyspace.
-        let _ = kind;
         let key = self.keys().key(Prefix::Ra, user_id_hash);
         let mut conn = self.connection().await?;
         redis::cmd("SET")
@@ -686,15 +684,10 @@ impl RedisStores {
 
     /// Read the marker. `EXISTS`, never `GETDEL`: a user who signs in and then makes two
     /// security changes in a row must not have the second refused because the first spent it.
-    async fn has_recent_auth_inner(
-        &self,
-        kind: SessionKind,
-        user_id_hash: &str,
-    ) -> Result<bool, RedisStoreError> {
+    async fn has_recent_auth_inner(&self, user_id_hash: &str) -> Result<bool, RedisStoreError> {
         // `ra:{hash}` and nothing more. The plane is already inside the hash's preimage
         // (`hmac_sha256("{plane}:{userId}")`), held byte-identical with nest-auth's
         // `recentAuthKey` — adding a segment here would split the shared keyspace.
-        let _ = kind;
         let key = self.keys().key(Prefix::Ra, user_id_hash);
         let mut conn = self.connection().await?;
         let present: bool = redis::cmd("EXISTS")
@@ -869,23 +862,14 @@ impl SessionStore for RedisStores {
             .map_err(AuthError::from)
     }
 
-    async fn mark_recent_auth(
-        &self,
-        kind: SessionKind,
-        user_id_hash: &str,
-        ttl: u64,
-    ) -> Result<(), AuthError> {
-        self.mark_recent_auth_inner(kind, user_id_hash, ttl)
+    async fn mark_recent_auth(&self, user_id_hash: &str, ttl: u64) -> Result<(), AuthError> {
+        self.mark_recent_auth_inner(user_id_hash, ttl)
             .await
             .map_err(AuthError::from)
     }
 
-    async fn has_recent_auth(
-        &self,
-        kind: SessionKind,
-        user_id_hash: &str,
-    ) -> Result<bool, AuthError> {
-        self.has_recent_auth_inner(kind, user_id_hash)
+    async fn has_recent_auth(&self, user_id_hash: &str) -> Result<bool, AuthError> {
+        self.has_recent_auth_inner(user_id_hash)
             .await
             .map_err(AuthError::from)
     }

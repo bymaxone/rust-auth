@@ -1081,6 +1081,27 @@ async fn mfa_setup_verify_enable_and_challenge_error_arms() {
     let secret = setup.json()["secret"].as_str().unwrap_or("").to_owned();
     assert!(!secret.is_empty());
 
+    // A body that IS present must satisfy the DTO. The route used to reach for
+    // `serde_json::from_slice(..).unwrap_or_default()`, which skipped `garde` entirely: the
+    // declared `max = 128` on the password never ran, and a `deny_unknown_fields` failure became
+    // `password: None` rather than the 400 nest-auth answers with. Same request, two different
+    // outcomes across the two backends, on a bound the shared wire contract pins.
+    for bad in [
+        serde_json::json!({ "password": "x".repeat(129) }),
+        serde_json::json!({ "password": "glidingwalnut42", "unexpected": 1 }),
+    ] {
+        let refused = Req::post("/auth/mfa/setup")
+            .cookie("access_token", &access)
+            .json(bad)
+            .send(&app)
+            .await;
+        assert_eq!(refused.status, StatusCode::BAD_REQUEST);
+        assert_eq!(
+            refused.json()["error"]["code"],
+            serde_json::json!("auth.validation")
+        );
+    }
+
     // verify-enable with a valid TOTP enables MFA (204).
     let code = current_totp(&secret);
     let enable = Req::post("/auth/mfa/verify-enable")
@@ -1244,6 +1265,18 @@ async fn platform_mfa_setup_requires_platform_auth() {
         .await;
     assert_eq!(setup_ok.status, StatusCode::CREATED);
     assert!(setup_ok.json()["secret"].is_string());
+
+    // The platform twin of the dashboard case: a present body still has to satisfy the DTO.
+    let refused = Req::post("/auth/platform/mfa/setup")
+        .bearer(&access)
+        .json(serde_json::json!({ "password": "x".repeat(129) }))
+        .send(&app)
+        .await;
+    assert_eq!(refused.status, StatusCode::BAD_REQUEST);
+    assert_eq!(
+        refused.json()["error"]["code"],
+        serde_json::json!("auth.validation")
+    );
 }
 
 // ----------------------------------------------------------------------------------------

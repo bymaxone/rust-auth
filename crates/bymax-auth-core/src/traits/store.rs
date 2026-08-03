@@ -461,22 +461,18 @@ pub trait SessionStore: Send + Sync {
     /// Called only where a session is BORN — never on a refresh rotation, which proves
     /// possession of a token rather than of a credential. That asymmetry is what the marker is
     /// for: a stolen session can be rotated indefinitely and never make the mark fresh again.
-    async fn mark_recent_auth(
-        &self,
-        kind: SessionKind,
-        user_id_hash: &str,
-        ttl: u64,
-    ) -> Result<(), AuthError>;
+    /// `user_id_hash` is already plane-bound — it is `hmac_sha256("{plane}:{userId}")`, held
+    /// byte-identical with nest-auth's `recentAuthKey` — so this takes no `SessionKind`. It
+    /// briefly did, and the parameter was ignored by the Redis store while the in-memory double
+    /// keyed on it: two implementations disagreeing about the keyspace, which is the shape of
+    /// bug where a test passes against the double and the real store behaves otherwise.
+    async fn mark_recent_auth(&self, user_id_hash: &str, ttl: u64) -> Result<(), AuthError>;
 
     /// Whether the account authenticated within the marker's TTL.
     ///
     /// Read, never consumed: a user who signs in and then makes two security changes in a row
     /// should not have the second refused because the first spent the proof.
-    async fn has_recent_auth(
-        &self,
-        kind: SessionKind,
-        user_id_hash: &str,
-    ) -> Result<bool, AuthError>;
+    async fn has_recent_auth(&self, user_id_hash: &str) -> Result<bool, AuthError>;
 }
 
 /// One-time-password records for email verification and OTP-based password reset.

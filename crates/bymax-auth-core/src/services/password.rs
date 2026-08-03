@@ -356,6 +356,22 @@ mod tests {
             kdf_permit_count(&defaults) < 512,
             "the point is to be below the blocking pool's default"
         );
+
+        // Argon2id sizes from its own declared budget rather than scrypt's derived one, so the
+        // ceiling tracks whichever algorithm actually hashes new passwords.
+        #[cfg(feature = "argon2")]
+        {
+            let argon = crate::config::PasswordConfig {
+                active_algorithm: crate::config::PasswordAlgorithm::Argon2id,
+                ..crate::config::PasswordConfig::default()
+            };
+            assert_eq!(
+                kdf_working_set_mib(&argon),
+                usize::try_from(argon.argon2.memory_kib / 1024).unwrap_or(usize::MAX),
+                "Argon2id's working set is the configured memory_kib, in MiB"
+            );
+            assert!(kdf_permit_count(&argon) >= 2);
+        }
     }
 
     #[tokio::test]

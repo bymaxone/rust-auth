@@ -1419,6 +1419,26 @@ mod tests {
         assert!(cfg.validate(Environment::Production).is_ok());
     }
 
+    #[cfg(feature = "argon2")]
+    #[test]
+    fn argon2_parallelism_below_one_is_a_startup_error() {
+        // The twin of the scrypt check, and it was missing. Below 1 is not a weaker setting but
+        // an invalid one: the hasher rejects it at hash time, so a config that sets it starts
+        // GREEN and then answers 500 on every register, reset and password change — a credential
+        // path failing at runtime over something startup could have caught. Verification keeps
+        // working, because the parameters travel in the PHC string, which is exactly what makes
+        // it read as a runtime fault rather than a configuration error.
+        let mut cfg = valid_config();
+        cfg.password.argon2.parallelism = 0;
+        assert!(matches!(
+            cfg.validate(Environment::Production),
+            Err(ConfigError::Argon2Parallelism { got: 0 })
+        ));
+
+        cfg.password.argon2.parallelism = 1;
+        assert!(cfg.validate(Environment::Production).is_ok());
+    }
+
     #[test]
     fn the_trusted_origin_list_and_the_same_site_posture_must_agree() {
         // `None` with no list is still refused: that posture sends the session cookie on every

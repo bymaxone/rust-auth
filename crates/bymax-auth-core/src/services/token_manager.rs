@@ -457,7 +457,7 @@ impl TokenManagerService {
         // can rotate it forever and never make the mark fresh again.
         if let Some(hash) = self.recent_auth_hash("dashboard", &user.id) {
             self.session_store
-                .mark_recent_auth(SessionKind::Dashboard, &hash, RECENT_AUTH_TTL_SECS)
+                .mark_recent_auth(&hash, RECENT_AUTH_TTL_SECS)
                 .await?;
         }
 

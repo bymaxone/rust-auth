@@ -1467,6 +1467,9 @@ async fn a_transition_is_refused_while_another_one_holds_the_lock() {
     let Some(uid) = seed_user(&users, "locked@example.com").await else {
         return;
     };
+    // Enrolment on a passwordless account takes a recent authentication, so this test has to
+    // arrange one — without it `setup` refuses and the case below silently becomes a no-op.
+    plant_recent_auth(&mfa, &uid).await;
 
     // `setup` writes only the pending record, so it does not contend; `verify_and_enable` is
     // the first call that rewrites the account, and it is the one refused.
@@ -1562,6 +1565,9 @@ async fn the_transition_releases_with_the_token_it_acquired_with() {
     let Some(uid) = seed_user(&users, "nonce@example.com").await else {
         return;
     };
+    // Enrolment on a passwordless account takes a recent authentication, so this test has to
+    // arrange one — without it `setup` refuses and the case below silently becomes a no-op.
+    plant_recent_auth(&mfa, &uid).await;
     let Ok(setup) = mfa.setup(&uid, MfaContext::Dashboard, None).await else {
         return;
     };
@@ -1683,6 +1689,9 @@ async fn a_transition_abandons_when_mfa_is_disabled_under_the_lock() {
         armed: Mutex::new(false),
     });
     let mfa = service_over(store.clone(), users.clone());
+    // Enrolment on a passwordless account takes a recent authentication, so this test has to
+    // arrange one — without it `setup` refuses and everything below silently becomes a no-op.
+    plant_recent_auth(&mfa, &uid).await;
 
     // Enrol first: the account really does have MFA when the caller starts.
     let base = now_secs();
@@ -2078,10 +2087,7 @@ async fn plant_recent_auth(service: &MfaService, user_id: &str) {
         &[9u8; 64],
         format!("dashboard:{user_id}").as_bytes(),
     ));
-    let _ = service
-        .session_store
-        .mark_recent_auth(crate::traits::SessionKind::Dashboard, &hash, 300)
-        .await;
+    let _ = service.session_store.mark_recent_auth(&hash, 300).await;
 }
 
 /// Seed a fresh user (not MFA-enabled) and return its id.
@@ -3337,6 +3343,39 @@ async fn enrolment_on_a_passwordless_account_takes_a_recent_authentication_inste
 }
 
 #[tokio::test]
+async fn the_recent_auth_marker_is_derived_per_plane() {
+    // A dashboard user and a platform admin can carry the same id from different consumer
+    // repositories, so the plane is part of the marker's PREIMAGE. Without it one plane's
+    // authentication would satisfy the other's freshness check — the same collision the `lf:`
+    // lockout identifier was fixed for.
+    //
+    // Asserted on the derivation rather than through `setup`, because the passwordless branch
+    // is dashboard-only in practice: `AuthPlatformUser::password_hash` is non-optional, so a
+    // platform admin always has a credential to re-prove and never reaches the marker.
+    let users = Arc::new(InMemoryUserRepository::new());
+    let Some(uid) = seed_user(&users, "twoplanes@example.com").await else {
+        return;
+    };
+    let service = service_over(Arc::new(InMemoryStores::new()), users);
+
+    // Plant only the DASHBOARD marker, exactly as `issue_tokens` derives it.
+    plant_recent_auth(&service, &uid).await;
+
+    let platform_marker = crate::services::to_hex(&bymax_auth_crypto::mac::hmac_sha256(
+        &[9u8; 64],
+        format!("platform:{uid}").as_bytes(),
+    ));
+    assert!(
+        !service
+            .session_store
+            .has_recent_auth(&platform_marker)
+            .await
+            .unwrap_or(true),
+        "a dashboard authentication must not answer for the platform plane"
+    );
+}
+
+#[tokio::test]
 async fn a_rotation_cannot_refresh_the_recent_authentication_proof() {
     // THE property the marker rests on. A refresh proves possession of a token, not of a
     // credential — so if rotating re-planted the mark, an attacker holding a stolen session
@@ -3358,7 +3397,7 @@ async fn a_rotation_cannot_refresh_the_recent_authentication_proof() {
         assert!(
             service
                 .session_store
-                .has_recent_auth(crate::traits::SessionKind::Dashboard, &hash)
+                .has_recent_auth(&hash)
                 .await
                 .unwrap_or(false),
             "reading the proof must not spend it"

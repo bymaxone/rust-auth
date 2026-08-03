@@ -609,4 +609,61 @@ mod tests {
         // unchanged — the check is opt-in, not a silent narrowing.
         assert!(verify_claims_json(&token, secret_string(), 0, 1_500, None, None, None).is_ok());
     }
+
+    /// A platform access token whose validity window spans the fixed test clock.
+    fn platform_claims() -> PlatformClaims {
+        PlatformClaims {
+            iss: None,
+            aud: None,
+            sub: "p_1".to_owned(),
+            jti: "jti-2".to_owned(),
+            role: "admin".to_owned(),
+            token_type: PlatformType::Platform,
+            mfa_enabled: false,
+            mfa_verified: true,
+            iat: 1_000,
+            exp: 9_999_999_999,
+            epoch: 0,
+        }
+    }
+
+    /// An MFA-temp token — the one issued BEFORE the second factor is presented.
+    fn mfa_temp_claims() -> MfaTempClaims {
+        MfaTempClaims {
+            iss: None,
+            aud: None,
+            sub: "u_1".to_owned(),
+            jti: "jti-3".to_owned(),
+            token_type: MfaTempType::MfaChallenge,
+            epoch: 0,
+            context: MfaContext::Platform,
+            iat: 1_000,
+            exp: 9_999_999_999,
+        }
+    }
+
+    #[test]
+    fn every_token_kind_can_be_named_as_the_expected_type() {
+        // The MFA-temp case is the one that matters: that token is issued BEFORE the second
+        // factor is presented, so a consumer gating on this helper without naming a type
+        // authenticates a caller mid-MFA as a full session. Each kind is checked against its own
+        // name and against a neighbour's, so the discriminator cannot collapse to a constant.
+        let platform = sign(&platform_claims(), &HsKey::from_bytes(SECRET)).unwrap_or_default();
+        let mfa = sign(&mfa_temp_claims(), &HsKey::from_bytes(SECRET)).unwrap_or_default();
+
+        for (token, own, other) in [
+            (&platform, "platform", "dashboard"),
+            (&mfa, "mfa_challenge", "platform"),
+        ] {
+            assert!(
+                verify_claims_json(token, secret_string(), 0, 1_500, None, None, Some(own)).is_ok(),
+                "a {own} token must verify when {own} is what was asked for"
+            );
+            assert!(
+                verify_claims_json(token, secret_string(), 0, 1_500, None, None, Some(other))
+                    .is_err(),
+                "a {own} token must not pass as {other}"
+            );
+        }
+    }
 }
