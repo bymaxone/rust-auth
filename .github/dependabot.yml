@@ -19,6 +19,19 @@ updates:
     commit-message:
       prefix: chore
       include: scope
+    groups:
+      # The CodeQL sub-actions are one product shipping one version. `init` writes a
+      # configuration that `analyze` reads back, and a mismatch fails the scan with
+      # "Loaded a configuration file for version '<older>', but running version
+      # '<newer>'". Split one pull request per sub-action, merging any single one
+      # leaves the default branch in exactly that state. They move together.
+      codeql:
+        patterns:
+          - "github/codeql-action/*"
+        update-types:
+          - "major"
+          - "minor"
+          - "patch"
 
   # Node dev-tooling (husky / commitlint) from the root package.json + committed lockfile.
   - package-ecosystem: npm

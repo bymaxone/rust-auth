@@ -646,6 +646,21 @@ version bump.
   account for the gates above; the authority was sitting there, unused. It is re-stamped now, and
   only when it differs.
 
+### Security
+
+- **`event-listener` advanced to 5.4.2 (RUSTSEC-2026-0221).** The crate reaches this
+  workspace transitively, through `redis` → `async-lock`. Its `StackSlot` carried
+  `unsafe impl<T> Send` and `Sync` with no bound on `T`, so a `!Send` value could be
+  moved across a thread boundary — unsound for any listener holding one. 5.4.2 bounds
+  both on `T: Send`. The rest of that release removes the slab implementation, which
+  compiles only when neither `std` nor `critical-section` is enabled and is therefore
+  not built here, and drops the `concurrent-queue` dependency. The delta is recorded
+  as a `safe-to-deploy` audit in `supply-chain/audits.toml`: no import set covers
+  5.4.2 yet, and its publisher differs from the one this project already trusts.
+
+  The advisory was failing `cargo audit --deny warnings` on `main`, which blocked
+  every open dependency pull request behind a finding none of them introduced.
+
 ### Internal
 
 - **The mutation gate's configuration was never being read.** `cargo-mutants`
