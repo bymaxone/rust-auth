@@ -30,9 +30,14 @@ workspace_version=$(
 echo "workspace version: $workspace_version"
 
 # Every publishable crate must resolve to it. A crate that opted out of inheritance
-# would otherwise publish its own number without anything noticing.
+# would otherwise publish its own number without anything noticing. `cargo metadata`
+# is captured first so a manifest cargo cannot even parse reports itself as that,
+# rather than as a parse error from the reader downstream of it.
+metadata=$(cargo metadata --no-deps --format-version 1) ||
+  fail "cargo metadata failed — the workspace manifests do not parse"
+
 mismatched=$(
-  cargo metadata --no-deps --format-version 1 |
+  printf '%s' "$metadata" |
     python3 -c "
 import json, sys
 want = sys.argv[1]
@@ -47,12 +52,15 @@ for p in json.load(sys.stdin)['packages']:
   fail "crate version mismatch:
 $mismatched"
 
-# The internal pins are exact by design; each must name the same version.
-bad_pins=$(
-  awk '/^\[workspace\.dependencies\]/{f=1;next} /^\[/{f=0} f && /^bymax-auth/{print}' Cargo.toml |
-    grep -v "version = \"=$workspace_version\"" || true
-)
-[ -z "$bad_pins" ] && echo "✓ every internal pin is =$workspace_version" ||
+# The internal pins are exact by design; each must name the same version. The count
+# is checked first: with no pins at all every later test passes vacuously, and a pin
+# deleted by accident is exactly the kind of thing this gate exists to catch.
+pins=$(awk '/^\[workspace\.dependencies\]/{f=1;next} /^\[/{f=0} f && /^bymax-auth/{print}' Cargo.toml)
+pin_count=$(printf '%s' "$pins" | grep -c '^bymax-auth' || true)
+[ "$pin_count" -gt 0 ] || fail "no bymax-auth pins in [workspace.dependencies] — nothing to check"
+
+bad_pins=$(printf '%s' "$pins" | grep -v "version = \"=$workspace_version\"" || true)
+[ -z "$bad_pins" ] && echo "✓ all $pin_count internal pins are =$workspace_version" ||
   fail "internal pin does not name =$workspace_version:
 $bad_pins"
 

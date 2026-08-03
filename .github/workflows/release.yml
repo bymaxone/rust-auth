@@ -183,7 +183,9 @@ jobs:
           NOTES=$(awk -v ver="$VERSION" '
             /^## \[/ {
               if (found) exit
-              if ($0 ~ "\\[" ver "\\]") { found=1; next }
+              # `index`, not a regex: the version is data, and its dots would
+              # otherwise match any character — `1.1.0` would accept `1x1y0`.
+              if (index($0, "[" ver "]") > 0) { found=1; next }
             }
             found { print }
           ' CHANGELOG.md)
