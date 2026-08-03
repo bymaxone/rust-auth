@@ -663,6 +663,26 @@ version bump.
   The advisory was failing `cargo audit --deny warnings` on `main`, which blocked
   every open dependency pull request behind a finding none of them introduced.
 
+### Fixed
+
+- **`@bymax-one/rust-auth` resolved its types wrongly for every consumer that is not
+  on a bundler.** The `exports` map declared one `types` condition per subpath, so
+  `require()` landed on the ESM `.d.ts` while the matching `.d.cts` was being built
+  and shipped all along, and the manifest carried no `typesVersions`, so a resolver
+  that does not read the `exports` map found no declarations at all. `attw` reported
+  `node10: Resolution failed` and `node16 (from CJS): Masquerading as ESM` on all four
+  subpaths; it now reports `No problems found`. The package has never been published,
+  so this is caught before the first release rather than after it — the same defect
+  reached npm in `@bymax-one/nest-auth` 1.0.11.
+
+  Each `typesVersions` entry lists the CommonJS declaration first and the ESM one as a
+  fallback, so a resolver too old to load a `.d.cts` still finds declarations rather
+  than none — the same shape `@types/react` uses for TypeScript 5.0 and below.
+
+  `npm run check:exports` runs `attw --profile strict` against the packed tarball and
+  is part of the npm package CI job. A `tsc --noEmit` compiles `src` and never resolves
+  through the `exports` map, which is why nothing caught this.
+
 ### Internal
 
 - **The mutation gate's configuration was never being read.** `cargo-mutants`

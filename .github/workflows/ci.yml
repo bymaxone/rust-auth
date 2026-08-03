@@ -363,6 +363,13 @@ jobs:
       - name: Typecheck every subpath
         working-directory: packages/rust-auth
         run: npx tsc --noEmit
+      - name: Type resolution across module systems
+        working-directory: packages/rust-auth
+        # attw resolves every subpath the way each module system does, against the
+        # packed tarball rather than the source tree. The `tsc --noEmit` above compiles
+        # `src` and never reads the `exports` map, so it cannot see a CommonJS consumer
+        # being handed the ESM declarations.
+        run: npm run check:exports
       - name: Lint the kept TypeScript layers
         working-directory: packages/rust-auth
         run: npm run lint
