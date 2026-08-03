@@ -9,6 +9,11 @@ members = ["crates/*", "bindings/*"]
 exclude = ["examples", "fuzz"]
 
 [workspace.package]
+# Every publishable crate inherits this. The workspace publishes in lockstep — the
+# internal pins in `[workspace.dependencies]` below are exact (`=`) — so a release
+# moves this line and those pins, and `scripts/check-release-versions.sh` refuses a
+# tag that disagrees with any of them.
+version = "0.0.0"
 edition = "2024"
 rust-version = "1.90"
 license = "MIT"

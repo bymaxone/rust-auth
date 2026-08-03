@@ -246,6 +246,26 @@ jobs:
       - run: bash scripts/check-invariants.sh
 
   # ─────────────────────────────────────────────────────────────────────────────
+  # Release readiness — the eight crates pin each other exactly and ship one
+  # version together with the npm package. Checked on every pull request rather
+  # than only when a tag is cut: at tag time the only fix is a new tag, because
+  # crates.io and npm are both append-only.
+  # ─────────────────────────────────────────────────────────────────────────────
+  versions:
+    name: release versions
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+      - uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1.17.0
+      - run: bash scripts/check-release-versions.sh
+
+  # ─────────────────────────────────────────────────────────────────────────────
   # Public API surface — `cargo public-api` snapshots the exported surface and
   # `cargo-semver-checks` gates SemVer compatibility, so a breaking change to the
   # published API cannot ship unnoticed. `cargo public-api` builds rustdoc JSON,

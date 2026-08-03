@@ -683,6 +683,39 @@ version bump.
   is part of the npm package CI job. A `tsc --noEmit` compiles `src` and never resolves
   through the `exports` map, which is why nothing caught this.
 
+### Added
+
+- **A release pipeline for both halves of this library** (`.github/workflows/release.yml`).
+  One `v*.*.*` tag publishes the eight crates to crates.io and `@bymax-one/rust-auth`
+  to npm — they are one product, the npm package speaks the wire contract the crates
+  implement, so they carry one version and ship together.
+
+  Both registries authenticate by OIDC trusted publishing: crates.io through
+  `rust-lang/crates-io-auth-action`, npm through `npm publish --provenance`. No
+  long-lived registry token exists in this repository. Both, however, can only add a
+  trusted publisher to something that already exists, so the **first** publish of each
+  crate and of the npm package is a manual one from a maintainer's machine; every
+  release after that runs here.
+
+  The publish is ordered `verify → crates → npm → GitHub Release`. `verify` runs
+  `cargo publish --workspace --dry-run`, which packages each crate and rebuilds it
+  from the resulting tarball — the only check that sees what the registry will see,
+  rather than what the working tree happens to contain. `--workspace` also settles the
+  publish order from the dependency graph instead of a hand-maintained list.
+
+- **`scripts/check-release-versions.sh`**, run by CI on every pull request and again
+  at tag time. The workspace pins its own crates exactly (`=x.y.z`), so a single stale
+  pin publishes a crate that cannot resolve its sibling — and the correction would
+  have to be a new version, since crates.io and npm are both append-only. The script
+  holds the workspace version, every publishable crate, every internal pin and the npm
+  package to one number, and to the tag being cut.
+
+### Changed
+
+- **The crate version is declared once, in `[workspace.package]`**, and inherited by
+  all eight crates. A release moves that line and the pins beside it, rather than
+  eight manifests that could disagree.
+
 ### Internal
 
 - **The mutation gate's configuration was never being read.** `cargo-mutants`
