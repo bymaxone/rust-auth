@@ -43,7 +43,7 @@ jobs:
         # publishes a crate that cannot resolve its sibling. The script checks the
         # workspace version, every publishable crate, every internal pin and the npm
         # package against each other and against the tag.
-        run: ./scripts/check-release-versions.sh "$GITHUB_REF_NAME"
+        run: bash scripts/check-release-versions.sh "$GITHUB_REF_NAME"
 
       - name: Package every crate as crates.io would
         # `--dry-run` packages each crate and rebuilds it from the resulting tarball,
