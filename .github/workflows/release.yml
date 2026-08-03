@@ -1,0 +1,211 @@
+name: Release
+
+# Tag-driven release. One tag publishes both halves of this library: the eight
+# crates to crates.io and `@bymax-one/rust-auth` to npm. They are one product —
+# the npm package speaks the wire contract the crates implement — so they carry
+# one version and ship together. `workflow_dispatch` is kept so an interrupted
+# release can be resumed from the Actions tab.
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - 'v*.*.*'
+
+# A release is a destructive, shared-state operation — only one at a time. Both
+# registries are append-only: a wrong publish is corrected by a new version, never
+# by an edit, so a second concurrent run has nothing to undo with.
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: Verify versions and packaging
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      - uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1.17.0
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+
+      - name: Every published artifact carries the tag's version
+        # The workspace pins its own crates exactly (`=x.y.z`), so one stale pin
+        # publishes a crate that cannot resolve its sibling. The script checks the
+        # workspace version, every publishable crate, every internal pin and the npm
+        # package against each other and against the tag.
+        run: bash scripts/check-release-versions.sh "$GITHUB_REF_NAME"
+
+      - name: Package every crate as crates.io would
+        # `--dry-run` packages each crate and rebuilds it from the resulting tarball,
+        # which is the only check that sees what the registry will see: a file the
+        # working tree has but `include`/`exclude` drops, or a path dependency that
+        # resolves locally and nowhere else. `--workspace` also settles the publish
+        # order from the dependency graph rather than a hand-maintained list.
+        run: cargo publish --workspace --dry-run
+
+  crates:
+    name: Publish crates to crates.io
+    needs: verify
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    # Gates the run behind a manual approval configured in Settings → Environments,
+    # so an accidentally pushed tag cannot publish without a reviewer.
+    environment:
+      name: crates-io-publish
+      url: https://crates.io/crates/bymax-auth
+
+    # `id-token: write` is what the trusted-publishing exchange needs; no long-lived
+    # registry token is involved.
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1.17.0
+
+      - name: Exchange the OIDC token for a crates.io credential
+        # Trusted publishing: crates.io issues a token scoped to this repository and
+        # workflow, valid for 30 minutes, and the action revokes it when the job ends.
+        # It must be configured per crate on crates.io — and it can only be configured
+        # for a crate that already exists, so the first publish of each crate is a
+        # manual `cargo publish` from a maintainer's machine.
+        id: auth
+        uses: rust-lang/crates-io-auth-action@c6f97d42243bad5fab37ca0427f495c86d5b1a18 # v1.0.5
+
+      - name: Publish
+        # `--no-verify`: the `verify` job above already packaged and rebuilt every
+        # crate from its tarball. Repeating it here would cost the same minutes to
+        # learn the same thing, and this job's window is the 30 minutes the token
+        # lives.
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
+        run: cargo publish --workspace --no-verify
+
+  npm:
+    name: Publish @bymax-one/rust-auth to npm
+    needs: crates
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    environment:
+      name: npm-publish
+      url: https://www.npmjs.com/package/@bymax-one/rust-auth
+
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+
+      - uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1.17.0
+        with:
+          target: wasm32-unknown-unknown
+
+      - uses: taiki-e/install-action@6a1bd70eaac3c8bdf093356838d7ee09fda951cf # v2.85.5
+        with:
+          tool: wasm-pack
+
+      - name: Install dependencies
+        working-directory: packages/rust-auth
+        run: npm ci
+
+      - name: Build the edge wasm and the dual ESM + CJS bundles
+        working-directory: packages/rust-auth
+        run: |
+          npm run build:wasm
+          npm run build
+
+      - name: Type resolution across module systems
+        working-directory: packages/rust-auth
+        # attw against the packed tarball. A `tsc --noEmit` compiles `src` and never
+        # resolves through the `exports` map, so it cannot see a CommonJS consumer
+        # being handed the ESM declarations.
+        run: npm run check:exports
+
+      - name: Test
+        working-directory: packages/rust-auth
+        run: npm run test:cov
+
+      - name: Publish with provenance
+        working-directory: packages/rust-auth
+        # `npm publish`, not `pnpm publish`: pnpm 11 does not send the registry's
+        # `readme` field, and every package in this family published under it carries
+        # an empty one, which renders the npm page with no documentation at all.
+        #
+        # Authentication is OIDC trusted publishing — no `NPM_TOKEN` secret. Like
+        # crates.io, npm can only add a trusted publisher to a package that already
+        # exists, so the first publish is manual.
+        run: npm publish --provenance --access public
+
+  release:
+    name: Create GitHub Release
+    needs: [crates, npm]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      - name: Extract release notes from CHANGELOG
+        # Keeps the release body and the changelog from drifting: the body IS the
+        # changelog section for this tag. Falls back to a pointer when the section
+        # is missing rather than publishing an empty release.
+        id: changelog
+        run: |
+          VERSION=${GITHUB_REF_NAME#v}
+          NOTES=$(awk -v ver="$VERSION" '
+            /^## \[/ {
+              if (found) exit
+              # `index`, not a regex: the version is data, and its dots would
+              # otherwise match any character — `1.1.0` would accept `1x1y0`.
+              if (index($0, "[" ver "]") > 0) { found=1; next }
+            }
+            found { print }
+          ' CHANGELOG.md)
+          if [ -z "$NOTES" ]; then
+            NOTES="See [CHANGELOG.md](./CHANGELOG.md) for details."
+          fi
+          {
+            echo 'notes<<EOF'
+            echo "$NOTES"
+            echo 'EOF'
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Create GitHub Release
+        # Notes travel in an env var rather than a `${{ }}` interpolation: backticks
+        # and `$()` inside the CHANGELOG would otherwise be evaluated by bash, letting
+        # changelog text run commands on the runner with this job's token.
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_NOTES: ${{ steps.changelog.outputs.notes }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            --title "$GITHUB_REF_NAME" \
+            --notes "$RELEASE_NOTES"
