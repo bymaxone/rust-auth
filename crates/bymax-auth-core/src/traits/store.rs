@@ -454,6 +454,25 @@ pub trait SessionStore: Send + Sync {
     /// Idempotent in effect: each call advances the generation, and only tokens stamped at or
     /// above the new value remain valid.
     async fn bump_epoch(&self, kind: SessionKind, user_id: &str) -> Result<u64, AuthError>;
+
+    /// Record that the account completed a REAL authentication, at `ra:{user_id_hash}` with a
+    /// short TTL. Presence is the whole meaning; the value carries nothing.
+    ///
+    /// Called only where a session is BORN — never on a refresh rotation, which proves
+    /// possession of a token rather than of a credential. That asymmetry is what the marker is
+    /// for: a stolen session can be rotated indefinitely and never make the mark fresh again.
+    /// `user_id_hash` is already plane-bound — it is `hmac_sha256("{plane}:{userId}")`, held
+    /// byte-identical with nest-auth's `recentAuthKey` — so this takes no `SessionKind`. It
+    /// briefly did, and the parameter was ignored by the Redis store while the in-memory double
+    /// keyed on it: two implementations disagreeing about the keyspace, which is the shape of
+    /// bug where a test passes against the double and the real store behaves otherwise.
+    async fn mark_recent_auth(&self, user_id_hash: &str, ttl: u64) -> Result<(), AuthError>;
+
+    /// Whether the account authenticated within the marker's TTL.
+    ///
+    /// Read, never consumed: a user who signs in and then makes two security changes in a row
+    /// should not have the second refused because the first spent the proof.
+    async fn has_recent_auth(&self, user_id_hash: &str) -> Result<bool, AuthError>;
 }
 
 /// One-time-password records for email verification and OTP-based password reset.

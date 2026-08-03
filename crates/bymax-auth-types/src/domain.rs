@@ -28,8 +28,16 @@ fn redacted<T: ?Sized>(_value: &T) -> &'static str {
 /// consumer's user table. Returned by every authentication operation and projected
 /// (minus secrets, via [`SafeAuthUser`]) into JWT access-token payloads.
 ///
-/// Server-internal: it carries credential material and is never serialized to a
-/// client or exported to TypeScript.
+/// Server-internal: it carries credential material and is never serialized to a client by this
+/// library or exported to TypeScript. `Debug` is hand-written to redact `password_hash`,
+/// `mfa_secret` and `mfa_recovery_codes`, so a stray `{:?}` cannot leak them.
+///
+/// **`Serialize` is NOT redacted, and cannot be.** It is derived because a consumer's repository
+/// may legitimately need to round-trip the full record (a cache, a fixture), and the round-trip
+/// has to be lossless to be worth having. That makes `serde_json::to_string(&user)` a hole the
+/// redacted `Debug` does not cover: it emits all three secrets. Project through
+/// [`SafeAuthUser`] before anything that logs, returns or stores a record outside the
+/// credential store — that projection is what the wire is meant to see.
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AuthUser {

@@ -150,6 +150,7 @@ export async function verifyJwtToken(
   token: string,
   secret?: string | null,
   binding?: TokenBinding,
+  expectedType?: string,
 ): Promise<DecodedToken> {
   // Fail closed on a missing or empty secret — see the doc comment above for rationale.
   if (typeof secret !== "string" || secret.length === 0) {
@@ -163,6 +164,7 @@ export async function verifyJwtToken(
       undefined,
       binding?.issuer ?? undefined,
       binding?.audience ?? undefined,
+      expectedType,
     );
     if (raw === undefined) return { isValid: false, signatureVerified: false };
     return {

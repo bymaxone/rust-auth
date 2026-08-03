@@ -421,6 +421,24 @@ fn fail() -> bymax_auth_types::AuthError {
 
 #[async_trait]
 impl bymax_auth_core::traits::SessionStore for FailingStores {
+    async fn mark_recent_auth(
+        &self,
+        _user_id_hash: &str,
+        _ttl: u64,
+    ) -> Result<(), bymax_auth_types::AuthError> {
+        // Succeeds deliberately. This double exists to fail ONE named operation per test; a
+        // marker write that failed too would turn every login in this file into an error and
+        // hide the arm the test is actually about.
+        Ok(())
+    }
+
+    async fn has_recent_auth(
+        &self,
+        _user_id_hash: &str,
+    ) -> Result<bool, bymax_auth_types::AuthError> {
+        Ok(false)
+    }
+
     async fn create_session(
         &self,
         kind: bymax_auth_core::traits::SessionKind,

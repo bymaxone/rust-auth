@@ -48,11 +48,16 @@ pub(crate) fn routes(config: &AxumAuthConfig, ip_source: ClientIpSource) -> Rout
 async fn setup(
     State(state): State<AuthState>,
     user: PlatformUser,
+    headers: http::HeaderMap,
     body: axum::body::Bytes,
 ) -> Response {
     // See the dashboard route: the password body is optional on the wire and the engine is
     // what decides whether this account needs one.
-    let dto: crate::dto::MfaSetupDto = serde_json::from_slice(&body).unwrap_or_default();
+    let dto: crate::dto::MfaSetupDto =
+        match crate::validation::validate_optional_json(&headers, &body) {
+            Ok(dto) => dto,
+            Err(rejection) => return rejection.into_response(),
+        };
     match state
         .engine()
         .mfa_setup(&user.0.sub, MfaContext::Platform, dto.password.as_deref())

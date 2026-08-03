@@ -62,6 +62,11 @@ pub enum Prefix {
     Inv,
     /// Single-use claim on an MFA recovery code (`rcu`).
     Rcu,
+    /// Recent-authentication marker (`ra`). Presence means the account completed a REAL
+    /// authentication within the last few minutes — planted where a session is BORN and never
+    /// on a refresh rotation, which proves possession of a token rather than of a credential.
+    /// Gates enrolling MFA on an account with no local password to re-prove.
+    Ra,
     /// Pending address change (`ec`).
     Ec,
     /// Invitee index for a pending invitation (`invidx`). Keyed by
@@ -118,6 +123,7 @@ impl Prefix {
             Self::PwVtok => "pw_vtok",
             Self::Inv => "inv",
             Self::Rcu => "rcu",
+            Self::Ra => "ra",
             Self::Ec => "ec",
             Self::Invidx => "invidx",
             Self::Prt => "prt",

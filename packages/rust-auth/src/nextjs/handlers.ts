@@ -24,7 +24,9 @@ import { trimSlashes, trimTrailingSlashes } from "../shared/trim-slashes";
 import {
   dedupeSetCookieHeaders,
   getSetCookieHeaders,
+  NO_STORE_CACHE_CONTROL,
   resolveSafeDestination,
+  toSameOriginPath,
 } from "./proxy";
 
 export {
@@ -44,6 +46,18 @@ export interface AuthHandlerConfig {
   routePrefix?: string;
   /** The sign-in path a failed silent refresh redirects to. Defaults to `/login`. */
   loginPath?: string;
+  /**
+   * The cookie `Domain` the backend planted the session with, when `cookies.resolve_domains` is
+   * configured there. Leave unset for the host-only default.
+   *
+   * A browser matches a deletion on **name, domain AND path** (RFC 6265 §5.3). The clears below
+   * used to emit no `Domain` at all, so on a subdomain-sharing deployment they created a new
+   * host-only cookie and the `Domain=`-scoped originals survived the logout. The Rust half gets
+   * this right — `clear_session` reuses `self.domain()` for exactly this reason — and this half
+   * had no way to. The backend session is revoked either way, so what survived was a dead
+   * credential in the jar plus a stale `has_session` driving pointless silent-refresh bounces.
+   */
+  cookieDomain?: string;
 }
 
 /** The fully-resolved handler configuration. */
@@ -51,6 +65,7 @@ interface ResolvedHandlerConfig {
   backendUrl: string;
   routePrefix: string;
   loginPath: string;
+  cookieDomain: string | undefined;
 }
 
 /** Apply defaults and strip a trailing slash from the backend origin. */
@@ -61,6 +76,7 @@ function resolveHandlerConfig(
     backendUrl: trimTrailingSlashes(config.backendUrl),
     routePrefix: config.routePrefix ?? AUTH_ROUTE_PREFIX,
     loginPath: config.loginPath ?? DEFAULT_LOGIN_PATH,
+    cookieDomain: config.cookieDomain,
   };
 }
 
@@ -100,16 +116,70 @@ function forwardSetCookies(from: Headers, to: NextResponse): void {
   }
 }
 
-/** Expire the three session cookies on an outgoing response. */
-function clearSessionCookies(response: NextResponse): void {
-  response.cookies.set(AUTH_ACCESS_COOKIE_NAME, "", { path: "/", maxAge: 0 });
+/**
+ * Expire the three session cookies on an outgoing response.
+ *
+ * `domain` is carried through because a browser matches a deletion on name, domain AND path: a
+ * clear that omits it cannot remove a cookie that was planted with one. See
+ * {@link AuthHandlerConfig.cookieDomain}.
+ */
+function clearSessionCookies(
+  response: NextResponse,
+  domain: string | undefined,
+): void {
+  response.cookies.set(AUTH_ACCESS_COOKIE_NAME, "", {
+    path: "/",
+    maxAge: 0,
+    domain,
+  });
   response.cookies.set(AUTH_HAS_SESSION_COOKIE_NAME, "", {
     path: "/",
     maxAge: 0,
+    domain,
   });
   response.cookies.set(AUTH_REFRESH_COOKIE_NAME, "", {
     path: AUTH_REFRESH_COOKIE_PATH,
     maxAge: 0,
+    domain,
+  });
+}
+
+/**
+ * `Sec-Fetch-Site` values that prove a request did not come from another site. `same-origin` is
+ * the app calling itself; `none` is a user-initiated navigation, which no attacker page causes.
+ */
+const SAFE_FETCH_SITES = new Set(["same-origin", "none"]);
+
+/**
+ * Whether the browser has stated this request came from another site.
+ *
+ * Every handler below ends by writing `Set-Cookie`, so a cross-site caller gets something out of
+ * them without ever reading the response — which is what made them reachable with no CORS
+ * cooperation. `POST /api/auth/logout` from an attacker's page sends no session cookie under
+ * `Lax`, so the backend revocation no-ops, but the handler cleared the browser's cookies anyway;
+ * a form POST is a top-level navigation, so they were applied first-party. Any page on the
+ * internet could sign a visitor out, repeatably. The silent-refresh GET is the same shape from
+ * an `<img>`.
+ *
+ * The decision is `Sec-Fetch-Site` alone. `Origin` cannot make it: a same-origin request sends
+ * one too, and a route handler has no configured notion of its own origin — `nextUrl.origin`
+ * derives from `Host`, which the client controls. `Sec-Fetch-Site` is unforgeable by a page and
+ * shipped in Chrome 76, Firefox 90 and Safari 16.4; a request without it is an older browser or
+ * a non-browser client, admitted for the same reason the backend's origin layer admits it.
+ *
+ * @param request - The incoming request.
+ * @returns `true` when the request announced itself as cross-site.
+ */
+function isCrossSiteRequest(request: NextRequest): boolean {
+  const fetchSite = request.headers.get("sec-fetch-site");
+  return fetchSite !== null && !SAFE_FETCH_SITES.has(fetchSite);
+}
+
+/** The response a cross-site caller gets: no body, no cookies, nothing cacheable. */
+function crossSiteRefused(): NextResponse {
+  return new NextResponse(null, {
+    status: 403,
+    headers: { "cache-control": NO_STORE_CACHE_CONTROL },
   });
 }
 
@@ -126,6 +196,8 @@ export function createSilentRefreshHandler(
 ): (request: NextRequest) => Promise<NextResponse> {
   const resolved = resolveHandlerConfig(config);
   return async (request) => {
+    if (isCrossSiteRequest(request)) return crossSiteRefused();
+
     const origin = request.nextUrl.origin;
     const destination = resolveSafeDestination(
       request.nextUrl.searchParams.get("redirectTo"),
@@ -142,11 +214,16 @@ export function createSilentRefreshHandler(
       const failure = NextResponse.redirect(
         buildLoginUrl(resolved.loginPath, origin),
       );
-      clearSessionCookies(failure);
+      clearSessionCookies(failure, resolved.cookieDomain);
       return failure;
     }
 
-    const success = NextResponse.redirect(new URL(destination, origin));
+    // Reduced again on the way out. `resolveSafeDestination` already guarantees a same-origin
+    // path, but this is the line that turns a string into a `Location`, and the guarantee a
+    // redirect needs belongs to the code that writes the header rather than to the discipline of
+    // whoever called it. Resolving against an origin is what makes a smuggled authority
+    // (`//host`, which a path-shaped value can still be) into a redirect off-site.
+    const success = NextResponse.redirect(new URL(toSameOriginPath(destination), origin));
     forwardSetCookies(backendResponse.headers, success);
     return success;
   };
@@ -165,6 +242,8 @@ export function createClientRefreshHandler(
 ): (request: NextRequest) => Promise<NextResponse> {
   const resolved = resolveHandlerConfig(config);
   return async (request) => {
+    if (isCrossSiteRequest(request)) return crossSiteRefused();
+
     const backendResponse = await callBackend(
       resolved,
       AUTH_ROUTES.REFRESH,
@@ -208,9 +287,11 @@ export function createLogoutHandler(
 ): (request: NextRequest) => Promise<NextResponse> {
   const resolved = resolveHandlerConfig(config);
   return async (request) => {
+    if (isCrossSiteRequest(request)) return crossSiteRefused();
+
     await callBackend(resolved, AUTH_ROUTES.LOGOUT, request);
     const response = NextResponse.json({ ok: true }, { status: 200 });
-    clearSessionCookies(response);
+    clearSessionCookies(response, resolved.cookieDomain);
     return response;
   };
 }

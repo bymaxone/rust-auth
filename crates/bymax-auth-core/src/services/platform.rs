@@ -167,6 +167,7 @@ impl PlatformAuthService {
                 self.repo.clone(),
                 password.to_owned(),
                 admin.id.clone(),
+                admin.password_hash.clone(),
             ));
         }
 
@@ -476,13 +477,23 @@ async fn run_update_platform_last_login(
 
 /// Re-hash the just-proven plaintext with the current scheme and persist the upgrade — the
 /// transparent rehash-on-verify path for a platform admin (fire-and-forget).
+///
+/// `verified_hash` gates the write for the same reason it does on the dashboard plane: the task
+/// carries the plaintext and lands after a slow derivation, so an unconditional write can
+/// re-install a credential the admin has since replaced — most likely replaced BECAUSE it was
+/// compromised, by the very login that scheduled this. See `detached::run_rehash_password`.
 async fn run_rehash_platform_password(
     passwords: Arc<PasswordService>,
     repo: Arc<dyn PlatformUserRepository>,
     password: String,
     admin_id: String,
+    verified_hash: String,
 ) -> Result<(), AuthError> {
     let new_hash = passwords.hash(&password).await?;
+    let current = repo.find_by_id(&admin_id).await.map_err(repository_error)?;
+    if current.map(|admin| admin.password_hash) != Some(verified_hash) {
+        return Ok(());
+    }
     repo.update_password(&admin_id, &new_hash)
         .await
         .map_err(repository_error)
@@ -670,6 +681,63 @@ mod tests {
             .redis_stores(stores)
             .build();
         assert!(matches!(&built, Ok(engine) if engine.platform_auth().is_some()));
+    }
+
+    #[tokio::test]
+    async fn the_platform_rehash_refuses_to_overwrite_a_password_that_changed() {
+        // The dashboard twin's reasoning, on the plane where it matters most. The task carries
+        // the PLAINTEXT it is upgrading and a KDF derivation is slow by construction, so it
+        // lands well after the login that scheduled it. The situation where an admin's password
+        // changes in that window is not random: it is a rotation BECAUSE the old one was
+        // compromised, where the attacker's own login is what scheduled this task. An
+        // unconditional write re-installs the compromised credential over the new one.
+        let Some(h) = harness(platform_config()) else { return };
+        let id = seed_admin(&h.admins, "rotate@admin.io", "oldsecret77");
+        // Read as one expression rather than a `let ... else { return }`: the else arm of a
+        // binding that cannot fail is a branch no test can take, and this crate's coverage gate
+        // is 100% of lines.
+        let original = h
+            .admins
+            .find_by_id(&id)
+            .await
+            .ok()
+            .flatten()
+            .map(|admin| admin.password_hash)
+            .unwrap_or_default();
+
+        // The rotation lands first, so the row no longer holds the hash that was verified.
+        assert!(
+            h.admins
+                .update_password(&id, "$scrypt$rotated")
+                .await
+                .is_ok()
+        );
+
+        // The upgrade, still carrying the OLD plaintext, must decline rather than write.
+        assert!(
+            run_rehash_platform_password(
+                h.engine.passwords().clone(),
+                h.admins.clone(),
+                "oldsecret77".to_owned(),
+                id.clone(),
+                original,
+            )
+            .await
+            .is_ok()
+        );
+
+        let after = h
+            .admins
+            .find_by_id(&id)
+            .await
+            .ok()
+            .flatten()
+            .map(|admin| admin.password_hash)
+            .unwrap_or_default();
+        assert_eq!(
+            after, "$scrypt$rotated",
+            "the rotation must survive the upgrade that raced it"
+        );
     }
 
     #[tokio::test]

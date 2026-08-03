@@ -1467,6 +1467,9 @@ async fn a_transition_is_refused_while_another_one_holds_the_lock() {
     let Some(uid) = seed_user(&users, "locked@example.com").await else {
         return;
     };
+    // Enrolment on a passwordless account takes a recent authentication, so this test has to
+    // arrange one — without it `setup` refuses and the case below silently becomes a no-op.
+    plant_recent_auth(&mfa, &uid).await;
 
     // `setup` writes only the pending record, so it does not contend; `verify_and_enable` is
     // the first call that rewrites the account, and it is the one refused.
@@ -1562,6 +1565,9 @@ async fn the_transition_releases_with_the_token_it_acquired_with() {
     let Some(uid) = seed_user(&users, "nonce@example.com").await else {
         return;
     };
+    // Enrolment on a passwordless account takes a recent authentication, so this test has to
+    // arrange one — without it `setup` refuses and the case below silently becomes a no-op.
+    plant_recent_auth(&mfa, &uid).await;
     let Ok(setup) = mfa.setup(&uid, MfaContext::Dashboard, None).await else {
         return;
     };
@@ -1683,6 +1689,9 @@ async fn a_transition_abandons_when_mfa_is_disabled_under_the_lock() {
         armed: Mutex::new(false),
     });
     let mfa = service_over(store.clone(), users.clone());
+    // Enrolment on a passwordless account takes a recent authentication, so this test has to
+    // arrange one — without it `setup` refuses and everything below silently becomes a no-op.
+    plant_recent_auth(&mfa, &uid).await;
 
     // Enrol first: the account really does have MFA when the caller starts.
     let base = now_secs();
@@ -2065,6 +2074,22 @@ fn service_over(store: Arc<dyn MfaStore>, users: Arc<InMemoryUserRepository>) ->
     MfaService::new(service_deps(store, users))
 }
 
+/// Plant the recent-authentication marker for a dashboard account, as a real sign-in would.
+///
+/// `seed_user` creates accounts with no local password, so enrolment now takes the temporal
+/// proof rather than the password one. Tests that are about the setup RECORD, not about the
+/// gate, arrange the proof here and stay focused on what they came to assert. The key must be
+/// derived exactly as the service derives it — `hmac_sha256("{plane}:{userId}")` under the same
+/// identifier key the fixture wires — which is also a small conformance check: a change to
+/// either side breaks these tests rather than silently splitting the keyspace.
+async fn plant_recent_auth(service: &MfaService, user_id: &str) {
+    let hash = crate::services::to_hex(&bymax_auth_crypto::mac::hmac_sha256(
+        &[9u8; 64],
+        format!("dashboard:{user_id}").as_bytes(),
+    ));
+    let _ = service.session_store.mark_recent_auth(&hash, 300).await;
+}
+
 /// Seed a fresh user (not MFA-enabled) and return its id.
 async fn seed_user(users: &InMemoryUserRepository, email: &str) -> Option<String> {
     let created = users
@@ -2129,6 +2154,7 @@ async fn setup_returns_the_winner_record_after_a_lost_nx_race() {
         del_temp_wins: true,
     });
     let svc = service_over(store, users);
+    plant_recent_auth(&svc, &uid).await;
     let result = svc.setup(&uid, MfaContext::Dashboard, None).await;
     assert!(matches!(&result, Ok(r) if r.recovery_codes == ["WINNER-0000-CODE"]));
 }
@@ -2146,6 +2172,7 @@ async fn setup_errors_when_the_record_vanishes_after_a_lost_race() {
         del_temp_wins: true,
     });
     let svc = service_over(store, users);
+    plant_recent_auth(&svc, &uid).await;
     assert!(matches!(
         svc.setup(&uid, MfaContext::Dashboard, None).await,
         Err(AuthError::Internal(_))
@@ -2166,10 +2193,10 @@ async fn setup_fast_path_rejects_a_corrupt_or_undecryptable_record() {
         put_nx: false,
         del_temp_wins: true,
     });
+    let garbage_svc = service_over(garbage, users.clone());
+    plant_recent_auth(&garbage_svc, &uid).await;
     assert!(matches!(
-        service_over(garbage, users.clone())
-            .setup(&uid, MfaContext::Dashboard, None)
-            .await,
+        garbage_svc.setup(&uid, MfaContext::Dashboard, None).await,
         Err(AuthError::Internal(_))
     ));
     // Well-formed record whose ciphertext will not decrypt under the key.
@@ -2184,8 +2211,10 @@ async fn setup_fast_path_rejects_a_corrupt_or_undecryptable_record() {
         put_nx: false,
         del_temp_wins: true,
     });
+    let undecryptable_svc = service_over(undecryptable, users.clone());
+    plant_recent_auth(&undecryptable_svc, &uid).await;
     assert!(matches!(
-        service_over(undecryptable, users.clone())
+        undecryptable_svc
             .setup(&uid, MfaContext::Dashboard, None)
             .await,
         Err(AuthError::Internal(_))
@@ -2199,8 +2228,10 @@ async fn setup_fast_path_rejects_a_corrupt_or_undecryptable_record() {
         put_nx: false,
         del_temp_wins: true,
     });
+    let codes_undecryptable_svc = service_over(codes_undecryptable, users.clone());
+    plant_recent_auth(&codes_undecryptable_svc, &uid).await;
     assert!(matches!(
-        service_over(codes_undecryptable, users.clone())
+        codes_undecryptable_svc
             .setup(&uid, MfaContext::Dashboard, None)
             .await,
         Err(AuthError::Internal(_))
@@ -2216,8 +2247,10 @@ async fn setup_fast_path_rejects_a_corrupt_or_undecryptable_record() {
         put_nx: false,
         del_temp_wins: true,
     });
+    let codes_undecodable_svc = service_over(codes_undecodable, users);
+    plant_recent_auth(&codes_undecodable_svc, &uid).await;
     assert!(matches!(
-        service_over(codes_undecodable, users)
+        codes_undecodable_svc
             .setup(&uid, MfaContext::Dashboard, None)
             .await,
         Err(AuthError::Internal(_))
@@ -3273,21 +3306,103 @@ async fn enrolment_re_authenticates_against_the_account_password() {
 }
 
 #[tokio::test]
-async fn enrolment_skips_re_authentication_for_an_account_with_no_password() {
-    // An account provisioned purely through OAuth has no local password. There is nothing to
-    // re-authenticate against, and refusing would make MFA unreachable for those users — their
-    // credential belongs to the provider, which this engine cannot re-verify inline.
+async fn enrolment_on_a_passwordless_account_takes_a_recent_authentication_instead() {
+    // An account provisioned purely through OAuth has no local password to re-prove — its
+    // credential belongs to the provider, which this engine cannot verify inline. Refusing
+    // outright would make MFA unreachable for those users, so the proof is TEMPORAL: the caller
+    // must have completed a real authentication within the last few minutes.
+    //
+    // The arm used to return `Ok(())` unconditionally, and it was the single worst thing in the
+    // library. An access token lifted by XSS or from a shared machine was enough to enrol a
+    // factor the ATTACKER holds; the enable then invalidates every session and bumps the epoch,
+    // so the owner — who still signs in with the provider perfectly well — is stopped at a
+    // challenge they cannot pass, with the recovery codes having been shown once, to the
+    // attacker. And there was no way back: `disable` and `regenerate_recovery_codes` both demand
+    // a live TOTP code, and the reset flow refuses an account with no password. A
+    // fifteen-minute token theft became permanent, unrecoverable loss of the account.
     let users = Arc::new(InMemoryUserRepository::new());
     let Some(uid) = seed_user(&users, "oauthonly@example.com").await else {
         return;
     };
     let service = service_over(Arc::new(InMemoryStores::new()), users);
 
+    // No marker: the caller holds a token but has not proved it authenticated recently.
+    let refused = service.setup(&uid, MfaContext::Dashboard, None).await;
+    assert!(
+        matches!(refused, Err(AuthError::ReauthenticationRequired)),
+        "a stolen token alone must not enrol a factor, got {refused:?}"
+    );
+
+    // …and after a real sign-in, the same call proceeds — the gate is a delay, not a wall.
+    plant_recent_auth(&service, &uid).await;
     let enrolled = service.setup(&uid, MfaContext::Dashboard, None).await;
     assert!(
         enrolled.is_ok(),
-        "an account with no password must still be able to enrol, got {enrolled:?}"
+        "a recently authenticated OAuth account must still be able to enrol, got {enrolled:?}"
     );
+}
+
+#[tokio::test]
+async fn the_recent_auth_marker_is_derived_per_plane() {
+    // A dashboard user and a platform admin can carry the same id from different consumer
+    // repositories, so the plane is part of the marker's PREIMAGE. Without it one plane's
+    // authentication would satisfy the other's freshness check — the same collision the `lf:`
+    // lockout identifier was fixed for.
+    //
+    // Asserted on the derivation rather than through `setup`, because the passwordless branch
+    // is dashboard-only in practice: `AuthPlatformUser::password_hash` is non-optional, so a
+    // platform admin always has a credential to re-prove and never reaches the marker.
+    let users = Arc::new(InMemoryUserRepository::new());
+    let Some(uid) = seed_user(&users, "twoplanes@example.com").await else {
+        return;
+    };
+    let service = service_over(Arc::new(InMemoryStores::new()), users);
+
+    // Plant only the DASHBOARD marker, exactly as `issue_tokens` derives it.
+    plant_recent_auth(&service, &uid).await;
+
+    let platform_marker = crate::services::to_hex(&bymax_auth_crypto::mac::hmac_sha256(
+        &[9u8; 64],
+        format!("platform:{uid}").as_bytes(),
+    ));
+    assert!(
+        !service
+            .session_store
+            .has_recent_auth(&platform_marker)
+            .await
+            .unwrap_or(true),
+        "a dashboard authentication must not answer for the platform plane"
+    );
+}
+
+#[tokio::test]
+async fn a_rotation_cannot_refresh_the_recent_authentication_proof() {
+    // THE property the marker rests on. A refresh proves possession of a token, not of a
+    // credential — so if rotating re-planted the mark, an attacker holding a stolen session
+    // could keep it fresh indefinitely and the gate above would gate nothing at all.
+    let users = Arc::new(InMemoryUserRepository::new());
+    let Some(uid) = seed_user(&users, "rotate@example.com").await else {
+        return;
+    };
+    let service = service_over(Arc::new(InMemoryStores::new()), users);
+
+    plant_recent_auth(&service, &uid).await;
+    let hash = crate::services::to_hex(&bymax_auth_crypto::mac::hmac_sha256(
+        &[9u8; 64],
+        format!("dashboard:{uid}").as_bytes(),
+    ));
+
+    // The marker is READ, never consumed: two security changes after one sign-in both proceed.
+    for _ in 0..2 {
+        assert!(
+            service
+                .session_store
+                .has_recent_auth(&hash)
+                .await
+                .unwrap_or(false),
+            "reading the proof must not spend it"
+        );
+    }
 }
 
 #[tokio::test]

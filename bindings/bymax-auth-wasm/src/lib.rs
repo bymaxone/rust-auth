@@ -1,10 +1,27 @@
 //! WASM edge bindings for `bymax-auth` (npm-only; not published to crates.io).
 //!
-//! This crate compiles the wasm-safe subset of [`bymax_auth_jwt`] to WebAssembly so the
-//! edge runtime verifies JWTs with the EXACT same Rust code the native server runs —
-//! eliminating the historical Web-Crypto-vs-Node drift. The JS surface is three thin
-//! wrappers: [`verify_jwt_hs256`] (authoritative, signature-checked), [`decode_jwt`]
-//! (decode-only header+payload), and [`extract_claims`] (decode-only typed projection).
+//! This crate compiles the wasm-safe subset of [`bymax_auth_jwt`] to WebAssembly, so the
+//! CRYPTOGRAPHY is the same Rust code the native server runs — eliminating the historical
+//! Web-Crypto-vs-Node drift. The JS surface is three thin wrappers: [`verify_jwt_hs256`]
+//! (signature-checked), [`decode_jwt`] (decode-only header+payload), and [`extract_claims`]
+//! (decode-only typed projection).
+//!
+//! # The edge is a fast reject, not the authority
+//!
+//! Identical crypto is not identical VERDICTS, and the difference is not an implementation
+//! gap — it is inherent to verifying without a network. The native verifier additionally
+//! consults the `rv:` revocation blacklist and the per-user token epoch; the edge has neither,
+//! so a token revoked by a logout-all or a password reset still verifies here for the remainder
+//! of its `exp` (15 minutes by default, longer for a deployment that raises
+//! `access_expires_in`). A middleware gating on this alone keeps serving protected pages, and
+//! keeps forwarding `x-user-*` headers, for that whole window — and any service downstream that
+//! trusts those headers inherits the stale grant.
+//!
+//! Nor does a positive answer say what the token is FOR: every type this library mints verifies
+//! here, including the `mfa_challenge` temp token issued before the second factor is presented.
+//! Pass `expectedType` (or filter on the `type` claim, as the shipped middleware does).
+//!
+//! Anything that must not outlive a revocation has to reach the backend.
 //!
 //! # Server / edge only
 //!
@@ -46,6 +63,20 @@ use wasm_bindgen::prelude::wasm_bindgen;
 /// every holder of the secret is a potential minter. A token carrying no such claim is
 /// refused as firmly as one carrying the wrong value, so omitting the claim is not a way to
 /// opt out. Leave both `undefined` only for a deployment that configures neither.
+///
+/// # What this does NOT check
+///
+/// **Revocation.** The edge has no network, so it cannot read the `rv:` blacklist or the
+/// per-user token epoch that the native verifier consults. A token revoked by a logout-all or a
+/// password reset still verifies here for the remainder of its `exp` — 15 minutes by default.
+/// Treat a positive answer as a fast REJECT of obvious garbage, not as the authority: anything
+/// that must not outlive a revocation has to reach the backend.
+///
+/// **Token purpose.** Any token type this library mints verifies here, including the short-lived
+/// `mfa_challenge` temp token — which is issued BEFORE the second factor is presented. The
+/// shipped middleware filters on the `type` claim for exactly that reason; a consumer building
+/// its own must do the same, or a caller mid-MFA authenticates as a full session. Pass
+/// `expectedType` to have the check done here instead.
 #[wasm_bindgen]
 pub fn verify_jwt_hs256(
     token: &str,
@@ -53,8 +84,16 @@ pub fn verify_jwt_hs256(
     leeway_secs: Option<u32>,
     expected_iss: Option<String>,
     expected_aud: Option<String>,
+    expected_type: Option<String>,
 ) -> Option<String> {
-    let leeway = leeway_secs.map_or(jwt_edge::DEFAULT_EDGE_LEEWAY_SECS, u64::from);
+    // Clamped, because this argument crosses the wasm boundary from JavaScript and nothing
+    // upstream bounds it. `u32::MAX` seconds is ~136 years, which disables `exp` outright —
+    // `hs256.rs` only saturates the cast, it does not limit the value. The shipped TypeScript
+    // always passes `undefined`, but the glue is exported in the `.d.ts`, so a consumer calling
+    // it directly could turn expiry off by passing a large number that looks like a tolerance.
+    let leeway = leeway_secs
+        .map_or(jwt_edge::DEFAULT_EDGE_LEEWAY_SECS, u64::from)
+        .min(jwt_edge::MAX_EDGE_LEEWAY_SECS);
     jwt_edge::verify_claims_json(
         token,
         secret,
@@ -62,6 +101,7 @@ pub fn verify_jwt_hs256(
         now_unix_secs(),
         expected_iss.as_deref(),
         expected_aud.as_deref(),
+        expected_type.as_deref(),
     )
     .ok()
 }
@@ -124,12 +164,12 @@ mod tests {
         let secret = "an-edge-test-hs256-secret-key-0123456789";
         let token = sign_dashboard(secret, 0, i64::MAX);
         // Default leeway (the `None` arm).
-        assert!(verify_jwt_hs256(&token, secret.to_owned(), None, None, None).is_some());
+        assert!(verify_jwt_hs256(&token, secret.to_owned(), None, None, None, None).is_some());
         // Explicit leeway (the `Some` arm).
-        assert!(verify_jwt_hs256(&token, secret.to_owned(), Some(5), None, None).is_some());
+        assert!(verify_jwt_hs256(&token, secret.to_owned(), Some(5), None, None, None).is_some());
         // An already-expired token yields `undefined`.
         let expired = sign_dashboard(secret, 0, 1);
-        assert!(verify_jwt_hs256(&expired, secret.to_owned(), None, None, None).is_none());
+        assert!(verify_jwt_hs256(&expired, secret.to_owned(), None, None, None, None).is_none());
     }
 
     #[test]

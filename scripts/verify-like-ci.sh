@@ -25,10 +25,13 @@
 #   scripts/verify-like-ci.sh fmt clippy       # only the named ones
 #   scripts/verify-like-ci.sh coverage         # opt-in, see below
 #
-# Gates: fmt clippy test hack doc examples-rust examples-web npm
+# Gates: fmt clippy test hack wasm doc examples-rust examples-web npm
 #
 # Deliberately NOT in the default run, and the only two CI gates this script omits:
-#   coverage   — available by name; several minutes, and the figure only matters pre-merge.
+#   coverage   — available by name; several minutes. It IS a blocking PR gate at
+#                `--fail-under-lines 100 --fail-under-functions 100`, so "not in the default
+#                run" means "you must remember to run it", not "it will not stop your PR".
+#                Run it before pushing anything that adds a function or a branch.
 #   mutation   — never runs on a PR (post-merge on main only); use `cargo mutants` directly.
 # Nothing else is omitted. A gate that cannot run in your environment must FAIL here rather
 # than be skipped, because "it did not run" and "it passed" have to stay distinguishable.
@@ -42,7 +45,7 @@ set -uo pipefail
 
 cd "$(dirname "$0")/.."
 
-ALL_GATES=(fmt clippy test hack doc examples-rust examples-web npm)
+ALL_GATES=(fmt clippy test hack wasm doc examples-rust examples-web npm)
 
 # Spelled out rather than `("${@:-${ALL_GATES[@]}}")`. That form does work — bash keeps `$@`'s
 # word-splitting inside the `:-` default even within the quotes, so the list expands to one
@@ -93,8 +96,14 @@ gate_coverage() {
 # Two halves, exactly as the job splits them: the hasher-gated crates carry a compile_error!
 # that rules out isolated non-hasher features, so they are checked against valid combinations
 # and excluded from --each-feature.
+# `RUSTFLAGS=-D warnings` is not decoration: the CI runner sets it job-wide (via
+# `setup-rust-toolchain`), so a warning there is a red job. Without it this gate is strictly
+# weaker than the one it claims to reproduce — a function used only under one feature is dead
+# code in the builds that omit it, which is a warning locally and a failure in CI. That exact
+# shape shipped a green local run into two red jobs.
 gate_hack() {
   local features
+  export RUSTFLAGS="${RUSTFLAGS:-} -D warnings"
   for features in scrypt argon2 'scrypt,argon2' 'scrypt,mfa' 'argon2,mfa' 'scrypt,argon2,mfa'; do
     echo "checking bymax-auth-crypto --features $features"
     cargo check -p bymax-auth-crypto --no-default-features --features "$features" --locked || return 1
@@ -104,6 +113,26 @@ gate_hack() {
     cargo check -p bymax-auth --no-default-features --features "$features" --locked || return 1
   done
   cargo hack check --workspace --exclude bymax-auth-crypto --exclude bymax-auth --each-feature --locked
+}
+
+# ── wasm target (ci.yml: wasm binding build / wasm-pack) ──────────────────────
+#
+# Compiles the binding for `wasm32-unknown-unknown`, which is the only way its
+# `wasm-bindgen-test` target is built at all: `tests/web.rs` is gated to that architecture, so
+# `cargo check --workspace --all-targets` on the host silently skips it. A signature change to
+# an exported function therefore compiles clean locally and fails in the `wasm-pack` job — which
+# is exactly what happened, four stale call sites at once.
+#
+# `cargo check` rather than a full `wasm-pack test`: the point is the compile, and this runs in
+# seconds where wasm-pack downloads a toolchain and a headless runner.
+
+gate_wasm() {
+  if ! rustup target list --installed | grep -q '^wasm32-unknown-unknown$'; then
+    echo "wasm32-unknown-unknown target missing — install it with:" >&2
+    echo "  rustup target add wasm32-unknown-unknown" >&2
+    return 1
+  fi
+  cargo check -p bymax-auth-wasm --target wasm32-unknown-unknown --all-targets --locked
 }
 
 # ── rustdoc (ci.yml: doc) ─────────────────────────────────────────────────────

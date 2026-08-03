@@ -575,15 +575,28 @@ impl AuthEngine {
             return Err(AuthError::InvalidCredentials);
         };
 
+        // Counted like a login: this door asks for the account password, so it carries the
+        // password's lockout. Checked BEFORE the KDF, so a locked account is not an amplifier.
+        let bf_id = self.reproof_identifier("change-password", user_id);
+        if self.brute_force().is_locked(&bf_id).await? {
+            let retry = self.brute_force().remaining_lockout_secs(&bf_id).await?;
+            tracing::warn!(user_id = %user_id, "password change: account locked");
+            return Err(AuthError::AccountLocked {
+                retry_after_seconds: Some(retry),
+            });
+        }
+
         if !self
             .passwords()
             .verify(current_password, &phc)
             .await?
             .matched
         {
+            self.brute_force().record_failure(&bf_id).await?;
             tracing::warn!(user_id = %user_id, "password change: current password rejected");
             return Err(AuthError::InvalidCredentials);
         }
+        self.brute_force().reset(&bf_id).await?;
 
         self.passwords()
             .assert_not_compromised(new_password)
@@ -658,7 +671,13 @@ impl AuthEngine {
             .map(|user| password_fingerprint(&user))
             .unwrap_or_default();
 
-        if current == context.password_fingerprint {
+        // Constant-time, per §24 invariant 13 ("no `==` on secret bytes anywhere"). Both operands
+        // are server-side here — a stored digest against one derived from the repository row — so
+        // there is no attacker-controlled operand and no oracle to read the timing through. It
+        // goes through `digest_eq` regardless: the invariant is worth more as a rule with no
+        // exceptions than as one whose exceptions each need re-deriving, and the next edit to
+        // this function does not have to re-establish why this one was safe.
+        if digest_eq(&current, &context.password_fingerprint) {
             return Ok(());
         }
         tracing::warn!(
@@ -756,7 +775,7 @@ enum ProofKind {
 
 /// Constant-time equality of two strings by their SHA-256 digests. Hashing first compares
 /// fixed-length values, so the compare reveals nothing about the inputs' lengths.
-fn digest_eq(a: &str, b: &str) -> bool {
+pub(crate) fn digest_eq(a: &str, b: &str) -> bool {
     verify_digest(&sha256(a.as_bytes()), &sha256(b.as_bytes()))
 }
 
@@ -2321,6 +2340,46 @@ mod tests {
         );
         assert!(
             login_ok(&h, "changer@example.com", "glidingwalnut42")
+                .await
+                .is_some()
+        );
+    }
+
+    #[tokio::test]
+    async fn change_password_carries_the_password_lockout() {
+        // `login` refuses an account after N wrong passwords. This door asks for the SAME secret
+        // and used to refuse nothing, so a caller holding a stolen access token but not the
+        // password could guess it here without limit — and winning replaces the credential,
+        // which locks the owner out of their own account. The per-IP limiter is not that
+        // control: in this crate it is in-process and per-instance, so a distributed caller
+        // sidesteps it entirely, and it is not keyed to the account under attack.
+        let Some(h) = token_harness() else { return };
+        let id = h
+            .seed(SeedUser::active("locked@example.com", "oldsecret77"))
+            .await;
+
+        // Spend the budget on wrong guesses.
+        for _ in 0..5 {
+            let _ = h
+                .engine
+                .change_password(&id, "not-the-password", "glidingwalnut42", None)
+                .await;
+        }
+
+        // Now even the RIGHT password is refused, and with the lockout code rather than the
+        // credential one — the caller has to wait, not keep guessing.
+        let refused = h
+            .engine
+            .change_password(&id, "oldsecret77", "glidingwalnut42", None)
+            .await;
+        assert!(
+            matches!(refused, Err(AuthError::AccountLocked { .. })),
+            "expected the re-proof lockout to engage, got {refused:?}"
+        );
+
+        // …and nothing was written: the credential the owner still knows is intact.
+        assert!(
+            login_ok(&h, "locked@example.com", "oldsecret77")
                 .await
                 .is_some()
         );

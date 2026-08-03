@@ -446,6 +446,9 @@ pub struct InMemoryStores {
     /// so a post-grace replay of the consumed token is detected as a reuse rather than a plain
     /// invalid. Keyed by `(kind, old_hash)`.
     consumed: Mutex<HashMap<(SessionKind, String), String>>,
+    /// Recent-authentication markers, keyed by plane + id hash. No TTL is modelled: the double
+    /// is driven by explicit calls, so expiry is expressed by not planting one.
+    recent_auth: Mutex<HashMap<String, ()>>,
     /// `fam:` family index: a family id → the set of its live session hashes, so a whole
     /// lineage can be revoked on reuse detection. Keyed by `(kind, family_id)`.
     families: Mutex<HashMap<(SessionKind, String), HashSet<String>>>,
@@ -903,6 +906,15 @@ impl SessionStore for InMemoryStores {
             .get(&(kind, user_id.to_owned()))
             .copied()
             .unwrap_or(0))
+    }
+
+    async fn mark_recent_auth(&self, user_id_hash: &str, _ttl: u64) -> Result<(), AuthError> {
+        lock(&self.recent_auth).insert(user_id_hash.to_owned(), ());
+        Ok(())
+    }
+
+    async fn has_recent_auth(&self, user_id_hash: &str) -> Result<bool, AuthError> {
+        Ok(lock(&self.recent_auth).contains_key(user_id_hash))
     }
 
     async fn bump_epoch(&self, kind: SessionKind, user_id: &str) -> Result<u64, AuthError> {

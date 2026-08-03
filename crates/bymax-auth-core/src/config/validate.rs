@@ -426,6 +426,19 @@ impl AuthConfig {
     /// Validate that `cookies.trusted_origins` is reachable under the configured cookie
     /// policy, and that every entry is a bare absolute origin.
     ///
+    /// `None` with no list is still refused: that posture sends the session cookie on every
+    /// cross-site request, so naming no origin means refusing every cross-site state change — a
+    /// deployment that cannot work, caught at boot rather than at the first request.
+    ///
+    /// A list under `Lax`/`Strict` used to be refused too, unless `resolve_domains` made sibling
+    /// origins same-site. The reasoning was that the browser withholds the cookie otherwise, so
+    /// the list could never be consulted. That only ever covered requests that RIDE a cookie.
+    /// `POST /auth/login` carries its credentials in its own body, needs no cookie, and answers
+    /// with a session — so an allowlist is exactly what refuses a cross-site login, under every
+    /// posture. Refusing the configuration left a `Lax` deployment with nothing it could set to
+    /// close that, which is why `enforce_trusted_origin` now consults the list unconditionally
+    /// and this rule is gone.
+    ///
     /// The shape check is deliberately strict: an entry must be exactly scheme, host and an
     /// optional port, with nothing after the authority. A trailing slash, a path, or a naked
     /// hostname would all be silently blocked at request time instead — an `Origin` header is
@@ -433,21 +446,9 @@ impl AuthConfig {
     fn validate_trusted_origins(&self) -> Result<(), ConfigError> {
         let cross_site = self.cookies.same_site == SameSite::None;
         let listed = !self.cookies.trusted_origins.is_empty();
-        // A cookie-domain resolver puts the list back in play under `Lax`/`Strict` too. Those
-        // withhold the cookie CROSS-SITE, not cross-ORIGIN: a deployment serving
-        // `app.example.com` and `api.example.com` from one `.example.com` cookie is same-site,
-        // so the browser sends it on a POST between them — and `Sec-Fetch-Site: same-site` is
-        // not one of the values that proves a request came from the app itself, so the guard
-        // falls through to the origin check. Refusing the list there left that deployment with
-        // no configuration at all: the cookie arrives and the request is refused 403, and the
-        // only setting that would have allowed it was rejected at startup.
-        let shares_a_cookie_domain = self.cookies.resolve_domains.is_some();
 
         if cross_site && !listed {
             return Err(ConfigError::TrustedOriginsRequired);
-        }
-        if !cross_site && !shares_a_cookie_domain && listed {
-            return Err(ConfigError::TrustedOriginsUnused);
         }
         for origin in &self.cookies.trusted_origins {
             if !is_bare_origin(origin) {
@@ -624,6 +625,17 @@ fn validate_password(password: &PasswordConfig) -> Result<(), ConfigError> {
         if password.argon2.iterations < 2 {
             return Err(ConfigError::Argon2Iterations {
                 got: password.argon2.iterations,
+            });
+        }
+        // The twin of the scrypt check three blocks up, and it was missing. Below 1 is not a
+        // weaker setting but an invalid one: `crypto/password/mod.rs` rejects it at hash time,
+        // so a config that sets it starts green and then answers 500 on every register, reset
+        // and password change — a credential path failing at runtime over something startup
+        // could have caught. Verification still works, because the parameters travel in the PHC
+        // string, which is what makes it read as a runtime fault rather than a config error.
+        if password.argon2.parallelism < 1 {
+            return Err(ConfigError::Argon2Parallelism {
+                got: password.argon2.parallelism,
             });
         }
     }
@@ -1407,12 +1419,30 @@ mod tests {
         assert!(cfg.validate(Environment::Production).is_ok());
     }
 
+    #[cfg(feature = "argon2")]
+    #[test]
+    fn argon2_parallelism_below_one_is_a_startup_error() {
+        // The twin of the scrypt check, and it was missing. Below 1 is not a weaker setting but
+        // an invalid one: the hasher rejects it at hash time, so a config that sets it starts
+        // GREEN and then answers 500 on every register, reset and password change — a credential
+        // path failing at runtime over something startup could have caught. Verification keeps
+        // working, because the parameters travel in the PHC string, which is exactly what makes
+        // it read as a runtime fault rather than a configuration error.
+        let mut cfg = valid_config();
+        cfg.password.argon2.parallelism = 0;
+        assert!(matches!(
+            cfg.validate(Environment::Production),
+            Err(ConfigError::Argon2Parallelism { got: 0 })
+        ));
+
+        cfg.password.argon2.parallelism = 1;
+        assert!(cfg.validate(Environment::Production).is_ok());
+    }
+
     #[test]
     fn the_trusted_origin_list_and_the_same_site_posture_must_agree() {
-        // The list only matters under `None`: that is the one posture where the browser sends
-        // the session cookie cross-site, so it is the only one with a cross-origin caller to
-        // authorize. Either half without the other fails quietly — `None` with no list rejects
-        // every cross-site call, a list under `Lax` is never consulted — so both are refused.
+        // `None` with no list is still refused: that posture sends the session cookie on every
+        // cross-site request, so naming no origin refuses every cross-site state change.
         let mut none_without_list = valid_config();
         none_without_list.cookies.same_site = SameSite::None;
         none_without_list.secure_cookies = Some(true);
@@ -1421,12 +1451,15 @@ mod tests {
             Err(ConfigError::TrustedOriginsRequired)
         ));
 
+        // The inverse is now ACCEPTED. It used to be `TrustedOriginsUnused`, on the reasoning
+        // that `Lax` withholds the cookie cross-site so the list could never be consulted —
+        // which only ever covered requests that RIDE a cookie. `POST /auth/login` carries its
+        // credentials in its own body and answers with a session, so the list is exactly what
+        // refuses a cross-site login. Refusing the configuration left a `Lax` deployment with
+        // nothing it could set to close that.
         let mut list_without_none = valid_config();
         list_without_none.cookies.trusted_origins = vec!["https://app.example.com".to_owned()];
-        assert!(matches!(
-            list_without_none.validate(Environment::Production),
-            Err(ConfigError::TrustedOriginsUnused)
-        ));
+        assert!(list_without_none.validate(Environment::Production).is_ok());
     }
 
     /// A resolver that shares one cookie across every subdomain of `example.com`.
@@ -1461,13 +1494,11 @@ mod tests {
             vec![".example.com".to_owned()]
         );
 
-        // Without the shared domain the list really is unreachable, and is still refused.
+        // Without the shared domain the list is no longer refused either: it is what stops a
+        // cross-site login, which needs no cookie to be delivered at all.
         let mut single_host = valid_config();
         single_host.cookies.trusted_origins = vec!["https://app.example.com".to_owned()];
-        assert!(matches!(
-            single_host.validate(Environment::Production),
-            Err(ConfigError::TrustedOriginsUnused)
-        ));
+        assert!(single_host.validate(Environment::Production).is_ok());
     }
 
     #[test]

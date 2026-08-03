@@ -40,7 +40,7 @@ impl MfaService {
         // before an authentication factor changes; `disable` already demands a TOTP code.
         // Gating `setup` rather than `verify_and_enable` means the attacker cannot even obtain
         // a secret they control, and it costs the user one prompt at the natural moment.
-        self.assert_reauthenticated(view.password_hash.as_deref(), password)
+        self.assert_reauthenticated(ctx, user_id, view.password_hash.as_deref(), password)
             .await?;
         let key = self.setup_key(ctx, user_id);
 

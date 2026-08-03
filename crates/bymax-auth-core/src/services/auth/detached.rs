@@ -79,13 +79,37 @@ pub(crate) async fn run_update_last_login(
 
 /// Re-hash the just-proven plaintext with the current scheme and persist the upgrade — the
 /// transparent rehash-on-verify path.
+///
+/// `verified_hash` is what makes this safe to detach. The task carries the PLAINTEXT it is
+/// upgrading and a KDF derivation is slow by construction, so it lands well after the login that
+/// scheduled it. In between, the account's password may have changed — and the situation where
+/// that happens is not random: it is a user resetting BECAUSE the old password was compromised,
+/// where the attacker's own login is what scheduled this task. Writing unconditionally then
+/// re-installs the compromised credential over the new one — the old password works again, the
+/// new one does not, and the "password changed" mail has already gone out. `needs_rehash` is true
+/// for EVERY account during the parameter migration this feature exists to serve, so the
+/// alignment is not rare either.
+///
+/// The write is therefore conditional on the stored hash still being the one that was verified.
+/// A re-read rather than a compare-and-set, because `UserRepository` is implemented by the
+/// consuming application and a CAS primitive cannot be required of every backing store; what
+/// remains is the repository round-trip rather than the whole derivation, and losing that race
+/// can only drop an upgrade, never a password — the next login schedules it again.
 pub(crate) async fn run_rehash_password(
     passwords: Arc<PasswordService>,
     repository: Arc<dyn UserRepository>,
     password: String,
     user_id: String,
+    verified_hash: String,
 ) -> Result<(), AuthError> {
     let new_hash = passwords.hash(&password).await?;
+    let current = repository
+        .find_by_id(&user_id, None)
+        .await
+        .map_err(map_repository_error)?;
+    if current.and_then(|user| user.password_hash) != Some(verified_hash) {
+        return Ok(());
+    }
     repository
         .update_password(&user_id, &new_hash)
         .await
@@ -512,6 +536,7 @@ mod tests {
                 h.users.clone(),
                 "pw".to_owned(),
                 id.clone(),
+                original.clone(),
             )
             .await
             .is_ok()
@@ -520,5 +545,48 @@ mod tests {
         let Ok(Some(after)) = after else { return };
         // A fresh hash is produced (different salt), so the stored value changed.
         assert_ne!(after.password_hash.unwrap_or_default(), original);
+    }
+
+    #[tokio::test]
+    async fn rehash_password_refuses_to_overwrite_a_hash_that_changed() {
+        // The case the `verified_hash` argument exists for, and the reason it is not an edge
+        // one. The task carries the PLAINTEXT it is upgrading and a KDF derivation is slow by
+        // construction, so it lands well after the login that scheduled it. The situation where
+        // the password changes in that window is not random: it is a user resetting BECAUSE the
+        // old password was compromised, where the attacker's own login scheduled this task. An
+        // unconditional write re-installs the compromised credential over the new one — the old
+        // password works again, the new one does not, and the "password changed" mail has
+        // already gone out.
+        let Some(h) = harness(base_config(), None) else { return };
+        let id = h
+            .seed(SeedUser::active("reset-race@example.com", "pw"))
+            .await;
+        let before = h.users.find_by_id(&id, None).await;
+        let Ok(Some(before)) = before else { return };
+        let original = before.password_hash.clone().unwrap_or_default();
+
+        // The reset lands first, so the row no longer holds the hash that was verified.
+        assert!(h.users.update_password(&id, "$scrypt$reset").await.is_ok());
+
+        // The upgrade, still carrying the OLD plaintext, must decline rather than write.
+        assert!(
+            run_rehash_password(
+                h.engine.passwords().clone(),
+                h.users.clone(),
+                "pw".to_owned(),
+                id.clone(),
+                original,
+            )
+            .await
+            .is_ok()
+        );
+
+        let after = h.users.find_by_id(&id, None).await;
+        let Ok(Some(after)) = after else { return };
+        assert_eq!(
+            after.password_hash.unwrap_or_default(),
+            "$scrypt$reset",
+            "the reset must survive the upgrade that raced it"
+        );
     }
 }

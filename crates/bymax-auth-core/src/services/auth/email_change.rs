@@ -76,15 +76,30 @@ impl AuthEngine {
         // still holding an unexpired access token and the password.
         self.assert_user_not_blocked(&user.status)?;
 
+        // Counted like a login: this door asks for the account password, so it carries the
+        // password's lockout. Winning the guess here moves the address the account recovers
+        // through, which is persistence rather than a single theft. Checked BEFORE the KDF, so
+        // a locked account is not an amplifier either.
+        let bf_id = self.reproof_identifier("email-change", user_id);
+        if self.brute_force().is_locked(&bf_id).await? {
+            let retry = self.brute_force().remaining_lockout_secs(&bf_id).await?;
+            tracing::warn!(%user_id, "email change: account locked");
+            return Err(AuthError::AccountLocked {
+                retry_after_seconds: Some(retry),
+            });
+        }
+
         if !self
             .passwords()
             .verify(current_password, &phc)
             .await?
             .matched
         {
+            self.brute_force().record_failure(&bf_id).await?;
             tracing::warn!(%user_id, "email change: current password rejected");
             return Err(AuthError::InvalidCredentials);
         }
+        self.brute_force().reset(&bf_id).await?;
 
         self.assert_address_is_free(&user, &new_email).await?;
 
@@ -217,7 +232,12 @@ fn assert_still_bound(context: &EmailChangeContext, user: &AuthUser) -> Result<(
     if context.password_fingerprint.is_empty() {
         return Ok(());
     }
-    if context.password_fingerprint == super::password_reset::password_fingerprint(user) {
+    // Constant-time, per §24 invariant 13. Both operands are server-side, so this is the letter
+    // of the invariant rather than a reachable oracle — see the twin in `password_reset.rs`.
+    if super::password_reset::digest_eq(
+        &context.password_fingerprint,
+        &super::password_reset::password_fingerprint(user),
+    ) {
         return Ok(());
     }
     tracing::warn!(
@@ -436,6 +456,38 @@ mod tests {
             .request_email_change(&user.id, "new@example.com", "anything")
             .await;
         assert!(matches!(refused, Err(AuthError::InvalidCredentials)));
+    }
+
+    #[tokio::test]
+    async fn the_address_change_carries_the_password_lockout() {
+        // `login` refuses an account after N wrong passwords. This door asks for the SAME secret
+        // and used to refuse nothing, so a caller holding a stolen access token but not the
+        // password could guess it here without limit — and winning moves the address the
+        // account recovers through, which is persistence rather than a single theft. The per-IP
+        // limiter is not that control: in this crate it is in-process and per-instance, so a
+        // distributed caller sidesteps it, and it is not keyed to the account under attack.
+        let Some(h) = setup() else { return };
+        let id = h
+            .seed(SeedUser::active("guessed@example.com", "right"))
+            .await;
+
+        for _ in 0..5 {
+            let _ = h
+                .engine
+                .request_email_change(&id, "new@example.com", "wrong")
+                .await;
+        }
+
+        // Even the right password is refused now, and with the lockout code rather than the
+        // credential one — the caller has to wait, not keep guessing.
+        let refused = h
+            .engine
+            .request_email_change(&id, "new@example.com", "right")
+            .await;
+        assert!(
+            matches!(refused, Err(AuthError::AccountLocked { .. })),
+            "expected the re-proof lockout to engage, got {refused:?}"
+        );
     }
 
     #[tokio::test]

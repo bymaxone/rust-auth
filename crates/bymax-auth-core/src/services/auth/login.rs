@@ -185,6 +185,7 @@ impl AuthEngine {
                 self.user_repository().clone(),
                 input.password.clone(),
                 user.id.clone(),
+                phc.clone(),
             ));
         }
 

@@ -5,7 +5,7 @@
  * string literal, byte-identical to nest-auth's `AUTH_ERROR_CODES`, and maps to a
  * fixed HTTP status via [`AuthErrorCode::http_status`].
  */
-export type AuthErrorCode = "auth.invalid_credentials" | "auth.account_locked" | "auth.account_inactive" | "auth.account_suspended" | "auth.account_banned" | "auth.pending_approval" | "auth.token_expired" | "auth.token_revoked" | "auth.token_invalid" | "auth.refresh_token_invalid" | "auth.session_not_found" | "auth.token_missing" | "auth.email_already_exists" | "auth.email_not_verified" | "auth.email_change_token_invalid" | "auth.mfa_required" | "auth.mfa_invalid_code" | "auth.mfa_already_enabled" | "auth.mfa_not_enabled" | "auth.mfa_setup_required" | "auth.mfa_temp_token_invalid" | "auth.mfa_state_conflict" | "auth.password_compromised" | "auth.password_reset_token_invalid" | "auth.otp_invalid" | "auth.otp_expired" | "auth.otp_max_attempts" | "auth.insufficient_role" | "auth.forbidden" | "auth.untrusted_origin" | "auth.invalid_invitation_token" | "auth.oauth_failed" | "auth.oauth_email_mismatch" | "auth.platform_auth_required" | "auth.validation" | "auth.too_many_requests" | "auth.internal";
+export type AuthErrorCode = "auth.invalid_credentials" | "auth.account_locked" | "auth.account_inactive" | "auth.account_suspended" | "auth.account_banned" | "auth.pending_approval" | "auth.token_expired" | "auth.token_revoked" | "auth.token_invalid" | "auth.refresh_token_invalid" | "auth.session_not_found" | "auth.token_missing" | "auth.email_already_exists" | "auth.email_not_verified" | "auth.email_change_token_invalid" | "auth.mfa_required" | "auth.mfa_invalid_code" | "auth.mfa_already_enabled" | "auth.mfa_not_enabled" | "auth.mfa_setup_required" | "auth.mfa_temp_token_invalid" | "auth.mfa_state_conflict" | "auth.password_compromised" | "auth.password_reset_token_invalid" | "auth.otp_invalid" | "auth.otp_expired" | "auth.otp_max_attempts" | "auth.insufficient_role" | "auth.forbidden" | "auth.untrusted_origin" | "auth.reauthentication_required" | "auth.invalid_invitation_token" | "auth.oauth_failed" | "auth.oauth_email_mismatch" | "auth.platform_auth_required" | "auth.validation" | "auth.too_many_requests" | "auth.internal";
 export const AUTH_ERROR_CODES = {
   INVALID_CREDENTIALS: "auth.invalid_credentials",
   ACCOUNT_LOCKED: "auth.account_locked",
@@ -37,6 +37,7 @@ export const AUTH_ERROR_CODES = {
   INSUFFICIENT_ROLE: "auth.insufficient_role",
   FORBIDDEN: "auth.forbidden",
   UNTRUSTED_ORIGIN: "auth.untrusted_origin",
+  REAUTHENTICATION_REQUIRED: "auth.reauthentication_required",
   INVALID_INVITATION_TOKEN: "auth.invalid_invitation_token",
   OAUTH_FAILED: "auth.oauth_failed",
   OAUTH_EMAIL_MISMATCH: "auth.oauth_email_mismatch",

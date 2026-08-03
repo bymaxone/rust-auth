@@ -41,6 +41,15 @@ pub enum EdgeError {
 /// token. Adjustable per call via the binding's `leeway_secs` argument.
 pub const DEFAULT_EDGE_LEEWAY_SECS: u64 = 30;
 
+/// The ceiling on the caller-supplied clock tolerance.
+///
+/// `leeway_secs` crosses the wasm boundary from JavaScript and nothing upstream bounds it.
+/// `u32::MAX` seconds is roughly 136 years, which disables `exp` outright — the verifier only
+/// saturates the cast, it does not limit the value. Five minutes covers every legitimate use
+/// (clock skew between the edge and the signing backend) and leaves no number a caller could
+/// pass that turns expiry off while still reading as a tolerance.
+pub const MAX_EDGE_LEEWAY_SECS: u64 = 300;
+
 /// The three shared claim shapes the edge can verify, selected by the `type`
 /// discriminator. The codec's [`bymax_auth_jwt::JwtClaims`] trait is sealed, so the edge
 /// dispatches over exactly these structs rather than a generic claims type.
@@ -51,6 +60,17 @@ enum TokenKind {
     Platform,
     /// A short-lived MFA-temp token (`type: "mfa_challenge"`).
     MfaTemp,
+}
+
+impl TokenKind {
+    /// The wire discriminator, so a caller can name the type it expects.
+    const fn as_str(&self) -> &'static str {
+        match self {
+            Self::Dashboard => "dashboard",
+            Self::Platform => "platform",
+            Self::MfaTemp => "mfa_challenge",
+        }
+    }
 }
 
 /// Minimal projection used to read the (still unverified) `type` discriminator before
@@ -107,6 +127,7 @@ pub fn verify_claims_json(
     now_unix: i64,
     expected_iss: Option<&str>,
     expected_aud: Option<&str>,
+    expected_type: Option<&str>,
 ) -> Result<String, EdgeError> {
     // Construct the zeroizing key FIRST, before any fallible step, so the secret bytes are
     // wiped on drop no matter which path returns. `into_bytes` reuses the String's buffer,
@@ -126,7 +147,18 @@ pub fn verify_claims_json(
         expected_iss,
         expected_aud,
     };
-    let result = match peek_kind(token) {
+    // The purpose check, before any signature work. Every token this library mints verifies
+    // here, `mfa_challenge` included — and that one is issued BEFORE the second factor is
+    // presented, so a consumer using this helper as its own gate would authenticate a caller
+    // mid-MFA as a full session. The shipped middleware filters on `type` for exactly that
+    // reason; naming the expected type makes the check available to anyone who does not.
+    let kind = peek_kind(token);
+    if let (Some(expected), Ok(actual)) = (expected_type, kind.as_ref())
+        && actual.as_str() != expected
+    {
+        return Err(EdgeError::Malformed);
+    }
+    let result = match kind {
         Ok(TokenKind::Dashboard) => verify::<DashboardClaims>(token, &key, &opts)
             .map_err(EdgeError::Jwt)
             .and_then(|c| to_json(&c)),
@@ -248,7 +280,8 @@ mod tests {
                 0,
                 1_500,
                 Some("bymax-one"),
-                Some("dashboard")
+                Some("dashboard"),
+                None
             )
             .is_ok()
         );
@@ -257,7 +290,7 @@ mod tests {
             (Some("bymax-one"), Some("some-other-service")),
         ] {
             assert!(
-                verify_claims_json(&token, secret_string(), 0, 1_500, iss, aud).is_err(),
+                verify_claims_json(&token, secret_string(), 0, 1_500, iss, aud, None).is_err(),
                 "the edge accepted a token bound to another service"
             );
         }
@@ -270,13 +303,31 @@ mod tests {
         let token = sign_dashboard(1_000, 9_999_999_999);
 
         assert!(
-            verify_claims_json(&token, secret_string(), 0, 1_500, Some("bymax-one"), None).is_err()
+            verify_claims_json(
+                &token,
+                secret_string(),
+                0,
+                1_500,
+                Some("bymax-one"),
+                None,
+                None
+            )
+            .is_err()
         );
         assert!(
-            verify_claims_json(&token, secret_string(), 0, 1_500, None, Some("dashboard")).is_err()
+            verify_claims_json(
+                &token,
+                secret_string(),
+                0,
+                1_500,
+                None,
+                Some("dashboard"),
+                None
+            )
+            .is_err()
         );
         // …and an unbound edge, which is the default, still accepts it.
-        assert!(verify_claims_json(&token, secret_string(), 0, 1_500, None, None).is_ok());
+        assert!(verify_claims_json(&token, secret_string(), 0, 1_500, None, None, None).is_ok());
     }
 
     #[test]
@@ -284,8 +335,8 @@ mod tests {
         // A backend-signed access token verifies at the edge and the JSON carries the
         // wire field names (the server/edge-parity guarantee).
         let token = sign_dashboard(1_000, 2_000);
-        let json =
-            verify_claims_json(&token, secret_string(), 0, 1_500, None, None).unwrap_or_default();
+        let json = verify_claims_json(&token, secret_string(), 0, 1_500, None, None, None)
+            .unwrap_or_default();
         assert!(json.contains("\"type\":\"dashboard\""));
         assert!(json.contains("\"tenantId\":\"t_1\""));
         assert!(json.contains("\"mfaEnabled\":true"));
@@ -308,7 +359,7 @@ mod tests {
             epoch: 0,
         };
         let token = sign(&claims, &HsKey::from_bytes(SECRET)).unwrap_or_default();
-        let json = verify_claims_json(&token, secret_string(), 0, 1_500, None, None);
+        let json = verify_claims_json(&token, secret_string(), 0, 1_500, None, None, None);
         assert!(matches!(&json, Ok(j) if j.contains("\"type\":\"platform\"")));
     }
 
@@ -327,7 +378,7 @@ mod tests {
             exp: 2_000,
         };
         let token = sign(&claims, &HsKey::from_bytes(SECRET)).unwrap_or_default();
-        let json = verify_claims_json(&token, secret_string(), 0, 1_500, None, None);
+        let json = verify_claims_json(&token, secret_string(), 0, 1_500, None, None, None);
         assert!(matches!(&json, Ok(j) if j.contains("\"type\":\"mfa_challenge\"")));
     }
 
@@ -335,9 +386,9 @@ mod tests {
     fn rejects_an_expired_token() {
         // `exp` is the first invalid second; at `exp` the edge rejects.
         let token = sign_dashboard(1_000, 2_000);
-        assert!(verify_claims_json(&token, secret_string(), 0, 2_000, None, None).is_err());
+        assert!(verify_claims_json(&token, secret_string(), 0, 2_000, None, None, None).is_err());
         // One second earlier it is still valid.
-        assert!(verify_claims_json(&token, secret_string(), 0, 1_999, None, None).is_ok());
+        assert!(verify_claims_json(&token, secret_string(), 0, 1_999, None, None, None).is_ok());
     }
 
     #[test]
@@ -345,15 +396,15 @@ mod tests {
         // A small edge leeway keeps an expiring token valid up to (but not including)
         // `exp + leeway`, tolerating edge clock drift.
         let token = sign_dashboard(1_000, 2_000);
-        assert!(verify_claims_json(&token, secret_string(), 5, 2_004, None, None).is_ok());
-        assert!(verify_claims_json(&token, secret_string(), 5, 2_005, None, None).is_err());
+        assert!(verify_claims_json(&token, secret_string(), 5, 2_004, None, None, None).is_ok());
+        assert!(verify_claims_json(&token, secret_string(), 5, 2_005, None, None, None).is_err());
     }
 
     #[test]
     fn rejects_a_token_issued_in_the_future_beyond_leeway() {
         // An `iat` beyond now+leeway is an invalid token (TokenInvalid at the boundary).
         let token = sign_dashboard(5_000, 9_000);
-        assert!(verify_claims_json(&token, secret_string(), 0, 1_000, None, None).is_err());
+        assert!(verify_claims_json(&token, secret_string(), 0, 1_000, None, None, None).is_err());
     }
 
     #[test]
@@ -361,7 +412,7 @@ mod tests {
         // A token signed with one secret must not verify under another.
         let token = sign_dashboard(1_000, 2_000);
         let other = String::from("a-different-edge-secret-9876543210ab-xx");
-        assert!(verify_claims_json(&token, other, 0, 1_500, None, None).is_err());
+        assert!(verify_claims_json(&token, other, 0, 1_500, None, None, None).is_err());
     }
 
     #[test]
@@ -374,7 +425,7 @@ mod tests {
         )
         .unwrap_or_default();
         assert!(matches!(
-            verify_claims_json(&weird, secret_string(), 0, 5, None, None),
+            verify_claims_json(&weird, secret_string(), 0, 5, None, None, None),
             Err(EdgeError::UnknownType)
         ));
         // And the decode-only projection rejects it the same way.
@@ -389,7 +440,7 @@ mod tests {
         // No `type` field at all is a decode failure on the peek (mapped through Jwt).
         let no_type =
             sign(&serde_json::json!({ "x": 1 }), &HsKey::from_bytes(SECRET)).unwrap_or_default();
-        assert!(verify_claims_json(&no_type, secret_string(), 0, 5, None, None).is_err());
+        assert!(verify_claims_json(&no_type, secret_string(), 0, 5, None, None, None).is_err());
     }
 
     #[test]
@@ -404,7 +455,7 @@ mod tests {
             &HsKey::from_bytes(SECRET),
         )
         .unwrap_or_default();
-        assert!(verify_claims_json(&token, secret_string(), 0, 5, None, None).is_err());
+        assert!(verify_claims_json(&token, secret_string(), 0, 5, None, None, None).is_err());
     }
 
     #[test]
@@ -519,5 +570,100 @@ mod tests {
         // The shipped default leeway is well under the access lifetime so it never
         // meaningfully extends a token.
         assert_eq!(DEFAULT_EDGE_LEEWAY_SECS, 30);
+    }
+
+    #[test]
+    fn an_expected_type_refuses_every_other_token_shape() {
+        // Every token this library mints verifies at the edge, `mfa_challenge` included — and
+        // that one is issued BEFORE the second factor is presented. The shipped middleware
+        // filters on `type` for exactly that reason; a consumer building its own gate around
+        // this helper had no way to ask for the same check, so a caller mid-MFA would
+        // authenticate as a full session. Naming the type does the check here.
+        let claims = dashboard(1_000, 9_999_999_999);
+        let token = sign(&claims, &HsKey::from_bytes(SECRET)).unwrap_or_default();
+
+        // The matching type passes…
+        assert!(
+            verify_claims_json(
+                &token,
+                secret_string(),
+                0,
+                1_500,
+                None,
+                None,
+                Some("dashboard")
+            )
+            .is_ok()
+        );
+
+        // …and every other name is refused, including the MFA-temp one.
+        for wrong in ["platform", "mfa_challenge", "", "Dashboard"] {
+            assert!(
+                verify_claims_json(&token, secret_string(), 0, 1_500, None, None, Some(wrong))
+                    .is_err(),
+                "the edge accepted a {wrong} token where dashboard was required"
+            );
+        }
+
+        // Omitting the expectation keeps the previous behaviour, so existing callers are
+        // unchanged — the check is opt-in, not a silent narrowing.
+        assert!(verify_claims_json(&token, secret_string(), 0, 1_500, None, None, None).is_ok());
+    }
+
+    /// A platform access token whose validity window spans the fixed test clock.
+    fn platform_claims() -> PlatformClaims {
+        PlatformClaims {
+            iss: None,
+            aud: None,
+            sub: "p_1".to_owned(),
+            jti: "jti-2".to_owned(),
+            role: "admin".to_owned(),
+            token_type: PlatformType::Platform,
+            mfa_enabled: false,
+            mfa_verified: true,
+            iat: 1_000,
+            exp: 9_999_999_999,
+            epoch: 0,
+        }
+    }
+
+    /// An MFA-temp token — the one issued BEFORE the second factor is presented.
+    fn mfa_temp_claims() -> MfaTempClaims {
+        MfaTempClaims {
+            iss: None,
+            aud: None,
+            sub: "u_1".to_owned(),
+            jti: "jti-3".to_owned(),
+            token_type: MfaTempType::MfaChallenge,
+            epoch: 0,
+            context: MfaContext::Platform,
+            iat: 1_000,
+            exp: 9_999_999_999,
+        }
+    }
+
+    #[test]
+    fn every_token_kind_can_be_named_as_the_expected_type() {
+        // The MFA-temp case is the one that matters: that token is issued BEFORE the second
+        // factor is presented, so a consumer gating on this helper without naming a type
+        // authenticates a caller mid-MFA as a full session. Each kind is checked against its own
+        // name and against a neighbour's, so the discriminator cannot collapse to a constant.
+        let platform = sign(&platform_claims(), &HsKey::from_bytes(SECRET)).unwrap_or_default();
+        let mfa = sign(&mfa_temp_claims(), &HsKey::from_bytes(SECRET)).unwrap_or_default();
+
+        for (token, own, other) in [
+            (&platform, "platform", "dashboard"),
+            (&mfa, "mfa_challenge", "platform"),
+        ] {
+            assert!(
+                verify_claims_json(token, secret_string(), 0, 1_500, None, None, Some(own)).is_ok(),
+                "a {own} token must verify when {own} is what was asked for"
+            );
+            assert!(
+                verify_claims_json(token, secret_string(), 0, 1_500, None, None, Some(other))
+                    .is_err(),
+                "a {own} token must not pass as {other}"
+            );
+        }
     }
 }

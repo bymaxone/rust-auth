@@ -23,12 +23,17 @@ use bymax_auth_types::MfaTempType;
 #[cfg(feature = "platform")]
 use bymax_auth_types::{PlatformAuthResult, PlatformClaims, PlatformType, SafeAuthPlatformUser};
 
+use zeroize::Zeroizing;
+
 use crate::services::session::normalize_session_metadata;
-use crate::services::{internal_error, is_refresh_token_shape, new_uuid_v4, now_offset, now_unix};
+use crate::services::{
+    internal_error, is_refresh_token_shape, new_uuid_v4, now_offset, now_unix, to_hex,
+};
 use crate::traits::{
     AuthHooks, HookContext, RotateOutcome, SessionKind, SessionRecord, SessionRotation,
     SessionStore,
 };
+use bymax_auth_crypto::mac::hmac_sha256;
 
 /// MFA temp-token lifetime, in seconds (§7.3 constant `MFA_TEMP_TOKEN_TTL_SECONDS`).
 ///
@@ -133,6 +138,15 @@ impl Stampable for MfaTempClaims {
     }
 }
 
+/// How long a completed authentication counts as recent, in seconds.
+///
+/// Five minutes, matching the MFA temp token's lifetime — the same span this library already
+/// treats as "the user is still at the keyboard, mid-flow". Long enough that a user who signs in
+/// and then opens their security settings is not sent back through the door; short enough that a
+/// session lifted hours later cannot spend it. Held identical with nest-auth's
+/// `RECENT_AUTH_TTL_SECONDS`.
+pub const RECENT_AUTH_TTL_SECS: u64 = 300;
+
 /// Issues and rotates the dashboard token pair over the [`SessionStore`] seam. Platform
 /// issuance (`SafeAuthPlatformUser`/`PlatformClaims`) is a separate identity surface and
 /// is wired with the platform domain.
@@ -157,6 +171,11 @@ pub struct TokenManagerService {
     /// stamped with an issuer the verifier does not require, or required where none is
     /// stamped, is a deployment that rejects its own tokens.
     binding: TokenBinding,
+    /// The engine's identifier-hashing key, used to derive the recent-authentication marker's
+    /// key. `None` only on the bare constructor the unit tests use; the engine always wires it,
+    /// and an absent key means no marker is planted, which fails CLOSED — a flow that requires
+    /// recent authentication refuses rather than admitting an unproven caller.
+    identifier_key: Option<Zeroizing<[u8; 64]>>,
     /// The MFA single-use temp-token support, wired only when an MFA store is supplied.
     #[cfg(feature = "mfa")]
     mfa: Option<MfaTokenSupport>,
@@ -282,9 +301,38 @@ impl TokenManagerService {
             absolute_lifetime_secs: u64::from(absolute_session_lifetime_days) * 86_400,
             hooks: Arc::new(crate::traits::NoOpAuthHooks),
             binding: TokenBinding::default(),
+            identifier_key: None,
             #[cfg(feature = "mfa")]
             mfa: None,
         }
+    }
+
+    /// Install the identifier-hashing key that derives the recent-authentication marker.
+    ///
+    /// Separate from [`Self::new`] for the same reason [`Self::with_hooks`] is: every unit-test
+    /// caller builds the manager without one, and threading it through those call sites would
+    /// say nothing about the behaviour they exercise.
+    #[must_use]
+    pub(crate) fn with_identifier_key(mut self, key: Zeroizing<[u8; 64]>) -> Self {
+        self.identifier_key = Some(key);
+        self
+    }
+
+    /// The recent-authentication marker key for one account on one plane, or `None` when no
+    /// identifier key is wired.
+    ///
+    /// `hmac_sha256("{plane}:{user_id}")`, held byte-identical with nest-auth's
+    /// `recentAuthKey` and pinned by `conformance/wire-contract.json`. The plane is in the
+    /// PREIMAGE rather than the key path because a dashboard user and a platform admin can
+    /// carry the same id from different consumer repositories, and without it one would satisfy
+    /// the other's freshness check.
+    fn recent_auth_hash(&self, plane: &str, user_id: &str) -> Option<String> {
+        self.identifier_key.as_ref().map(|key| {
+            to_hex(&hmac_sha256(
+                key.as_ref(),
+                format!("{plane}:{user_id}").as_bytes(),
+            ))
+        })
     }
 
     /// Install the consumer's hooks, so reuse detection can report itself.
@@ -400,6 +448,18 @@ impl TokenManagerService {
                 self.refresh_ttl_secs,
             )
             .await?;
+
+        // Record that a REAL authentication just completed, for the flows that need to know how
+        // recently rather than merely whether. Planted here and nowhere else: this method is the
+        // single point where a dashboard session is born, while `reissue_tokens` deliberately
+        // does not plant one, because a refresh proves possession of a token rather than of a
+        // credential. That asymmetry is the whole value — an attacker holding a stolen session
+        // can rotate it forever and never make the mark fresh again.
+        if let Some(hash) = self.recent_auth_hash("dashboard", &user.id) {
+            self.session_store
+                .mark_recent_auth(&hash, RECENT_AUTH_TTL_SECS)
+                .await?;
+        }
 
         Ok(AuthResult {
             user: user.clone(),

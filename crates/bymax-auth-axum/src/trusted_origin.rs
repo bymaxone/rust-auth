@@ -27,14 +27,14 @@ const SAFE_FETCH_SITES: [&str; 2] = ["same-origin", "none"];
 ///
 /// 1. A safe method changes nothing — allowed. `OPTIONS` in particular must pass, or every
 ///    cross-origin call would fail at the preflight.
-/// 2. An empty `cookies.trusted_origins` means no origin has been authorized and none needs to
-///    be: config validation refuses an empty list wherever it would be consulted, so an empty
-///    one is a posture where the browser never delivers the cookie cross-origin — allowed.
-/// 3. `Sec-Fetch-Site: same-origin` / `none` proves the request is not cross-site — allowed.
-/// 4. An `Origin` present must be in `cookies.trusted_origins` — allowed only then.
-/// 5. `Sec-Fetch-Site` present and cross-site with no `Origin`: a browser that sends one header
-///    sends the other on a state-changing request, so this shape is refused.
-/// 6. Neither header at all — a non-browser client. Allowed: an attacker's page cannot make a
+/// 2. `Sec-Fetch-Site: same-origin` / `none` proves the request is not cross-site — allowed.
+/// 3. `Sec-Fetch-Site` present with any other value (`cross-site`, `same-site`) is the browser
+///    stating the request came from somewhere else. Allowed only if `Origin` is listed in
+///    `cookies.trusted_origins`; refused otherwise, **including when the list is empty** — an
+///    empty list means no other origin is authorized, not that every one is.
+/// 4. `Sec-Fetch-Site` absent and `Origin` present: allowed if listed. Otherwise refused when a
+///    list is configured, and allowed when it is empty — see the ambiguity below.
+/// 5. Neither header at all — a non-browser client. Allowed: an attacker's page cannot make a
 ///    browser *omit* `Origin` on a cross-site request, so the absence is evidence there is no
 ///    browser involved, not a way around the check.
 ///
@@ -42,24 +42,28 @@ const SAFE_FETCH_SITES: [&str; 2] = ["same-origin", "none"];
 /// request carrying none of the module's cookies went straight to allowed, on the reasoning
 /// that there was no ambient credential to abuse. The reasoning missed the requests that MINT
 /// one. This layer wraps the whole router, `POST /auth/login` and `/auth/register` included —
-/// they carry no cookie and answer with a session — so under `SameSite=None` an attacker's page
-/// could log a victim's browser into the ATTACKER's account and then read back whatever the
-/// victim did there believing it was their own. A non-browser client is unaffected: it sends
-/// neither header, and rule 6 still admits that shape.
+/// they carry no cookie and answer with a session — so an attacker's page could log a victim's
+/// browser into the ATTACKER's account and then read back whatever the victim did there
+/// believing it was their own.
 ///
-/// Step 2 replaced that skip and closes the opposite failure. `Origin` is sent on a SAME-origin
-/// POST too, and with no `Sec-Fetch-Site` the two cannot be told apart, so the check assumed
-/// cross-site — correct where a cross-site cookie can arrive, wrong where it cannot. Under
-/// `Lax`/`Strict` with no shared cookie domain the browser withholds the cookie itself and the
-/// allowlist is required to be empty, yet every same-origin POST from a browser that omits
-/// `Sec-Fetch-Site` was refused. Gating on `same_site == None` instead would reopen a real
-/// hole: a shared cookie domain makes sibling origins SAME-site under `Lax`, the browser does
-/// send the cookie on a POST between them, and `same-site` is deliberately not one of the
-/// values in [`SAFE_FETCH_SITES`].
+/// **Nor does it depend on the allowlist being populated**, which was the same bug one level up.
+/// An empty list used to short-circuit the whole check, justified here as "config validation
+/// refuses an empty list wherever it would be consulted". That justification was false:
+/// `SameSite=Lax` with `resolve_domains` configured and an empty list validates cleanly, and
+/// that is precisely the deployment where a shared cookie domain makes sibling origins SAME-site
+/// so the browser DOES send the session cookie on a POST between them. It was also beside the
+/// point for a login CSRF, where the credentials ride in the attacker's own body and no cookie
+/// need be sent at all. Since an empty list is the default, the check was inert on most
+/// deployments while this comment claimed the class was closed.
 ///
-/// The request's own origin is never reconstructed from `Host` or `X-Forwarded-Proto`: both are
-/// client-controlled, and a check that trusts them is not a check. Same-origin requests are
-/// recognised by `Sec-Fetch-Site` alone.
+/// **The one case that stays permissive, and why.** `Origin` is sent on a SAME-origin POST too,
+/// and this crate never learns its own origin — reconstructing it from `Host` or
+/// `X-Forwarded-Proto` would trust a client-controlled header, and a check that trusts them is
+/// not a check. So an `Origin` with no `Sec-Fetch-Site` cannot be classified, and refusing it
+/// would answer 403 to every same-origin POST from such a browser. `Sec-Fetch-Site` resolves the
+/// ambiguity wherever it is present — Chrome 76, Firefox 90 and Safari 16.4 all send it — so the
+/// residual gap is a browser old enough to send `Origin` without it, closed by listing the
+/// deployment's own origin in `cookies.trusted_origins`.
 pub(crate) async fn enforce_trusted_origin(
     State(state): State<AuthState>,
     request: Request,
@@ -74,24 +78,27 @@ pub(crate) async fn enforce_trusted_origin(
     // runs on every state-changing request, and the clone copied the whole `Vec` each time.
     let allowed = {
         let trusted = &state.config().cookies.trusted_origins;
-        if trusted.is_empty() {
+        let fetch_site = header(&request, "sec-fetch-site");
+        if fetch_site.is_some_and(|site| SAFE_FETCH_SITES.contains(&site)) {
             true
         } else {
-            let fetch_site = header(&request, "sec-fetch-site");
-            if fetch_site.is_some_and(|site| SAFE_FETCH_SITES.contains(&site)) {
-                true
-            } else {
-                match header(&request, "origin") {
-                    // Scheme and host are case-insensitive (RFC 6454 §4), so two origins that
-                    // differ only in case ARE the same origin and must compare equal. ASCII
-                    // folding specifically: Unicode case folding can map distinct hosts onto
-                    // one another, which in an allowlist is a way in rather than a convenience.
-                    Some(origin) => trusted
+            match header(&request, "origin") {
+                // Scheme and host are case-insensitive (RFC 6454 §4), so two origins that
+                // differ only in case ARE the same origin and must compare equal. ASCII
+                // folding specifically: Unicode case folding can map distinct hosts onto
+                // one another, which in an allowlist is a way in rather than a convenience.
+                Some(origin) => {
+                    trusted
                         .iter()
-                        .any(|allowed| allowed.eq_ignore_ascii_case(origin)),
-                    // A browser that sent `Sec-Fetch-Site` would have sent `Origin` here too.
-                    None => fetch_site.is_none(),
+                        .any(|allowed| allowed.eq_ignore_ascii_case(origin))
+                        // Unlisted. Refused whenever the browser has already said the request is
+                        // not our own, and whenever a list exists to be checked against. What is
+                        // left — no `Sec-Fetch-Site`, empty list — is the shape this layer cannot
+                        // classify at all, since it does not know its own origin.
+                        || (fetch_site.is_none() && trusted.is_empty())
                 }
+                // A browser that sent `Sec-Fetch-Site` would have sent `Origin` here too.
+                None => fetch_site.is_none(),
             }
         }
     };

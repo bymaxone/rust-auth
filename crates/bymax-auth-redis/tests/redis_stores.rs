@@ -748,6 +748,65 @@ async fn platform_sessions_use_the_platform_keyspace() {
 }
 
 #[tokio::test]
+async fn the_recent_auth_marker_is_planted_read_without_being_spent_and_expires() {
+    // The marker is the whole proof behind enrolling MFA on an account with no local password:
+    // presence means the account completed a REAL authentication within the TTL. Its store
+    // contract has three parts, and each one is load-bearing.
+    let Some(redis) = common::try_start().await else {
+        return;
+    };
+    let Some(stores) = redis.stores() else { return };
+
+    // Absent until an authentication plants it — the default answer must be "no proof", so a
+    // store that cannot see the key fails CLOSED rather than admitting an unproven caller.
+    assert!(matches!(stores.has_recent_auth("hash-a").await, Ok(false)));
+
+    assert!(stores.mark_recent_auth("hash-a", 300).await.is_ok());
+    assert!(matches!(stores.has_recent_auth("hash-a").await, Ok(true)));
+
+    // READ, never consumed. A user who signs in and then makes two security changes in a row
+    // must not have the second refused because the first spent the proof — which is what a
+    // `GETDEL` here would do.
+    assert!(matches!(stores.has_recent_auth("hash-a").await, Ok(true)));
+
+    // Scoped to the id: one account's authentication is not another's.
+    assert!(matches!(stores.has_recent_auth("hash-b").await, Ok(false)));
+
+    // The TTL is real. A zero-second window is refused by Redis rather than planting a key with
+    // no expiry, so the shortest observable one is used and waited out — the marker has to age
+    // out on its own, or "recent" would mean "ever".
+    assert!(stores.mark_recent_auth("hash-c", 1).await.is_ok());
+    tokio::time::sleep(std::time::Duration::from_millis(1_400)).await;
+    assert!(matches!(stores.has_recent_auth("hash-c").await, Ok(false)));
+}
+
+#[tokio::test]
+async fn the_recent_auth_marker_keys_on_exactly_what_it_is_given() {
+    // The store is deliberately plane-AGNOSTIC: the plane rides inside the hash's preimage
+    // (`hmac_sha256("{plane}:{userId}")`, built by the caller and held byte-identical with
+    // nest-auth's `recentAuthKey`), so the key is `ra:{hash}` and nothing more. Adding a plane
+    // segment here would split a keyspace the two libraries share.
+    //
+    // The trait briefly took a `SessionKind` that this implementation ignored while the
+    // in-memory double keyed on it — two implementations disagreeing about the keyspace, which
+    // is how a test passes against the double and the real store behaves otherwise. The
+    // parameter is gone; this case pins what replaced it.
+    let Some(redis) = common::try_start().await else {
+        return;
+    };
+    let Some(stores) = redis.stores() else { return };
+
+    // Two plane-bound hashes, exactly as the engine derives them.
+    let dashboard = "dashboard-derived-hash";
+    let platform = "platform-derived-hash";
+
+    assert!(stores.mark_recent_auth(dashboard, 300).await.is_ok());
+
+    assert!(matches!(stores.has_recent_auth(dashboard).await, Ok(true)));
+    assert!(matches!(stores.has_recent_auth(platform).await, Ok(false)));
+}
+
+#[tokio::test]
 async fn session_index_members_are_prefixed_key_suffixes() {
     let Some(redis) = common::try_start().await else {
         return;
@@ -1922,7 +1981,7 @@ async fn engine_runs_invitation_accept_against_redis() {
                 AcceptInvitationInput {
                     token: "known-invite-token".to_owned(),
                     name: "Replay".to_owned(),
-                    password: "pw".to_owned(),
+                    password: "glidingwalnut42".to_owned(),
                 },
                 "203.0.113.4",
                 "agent/1.0",
