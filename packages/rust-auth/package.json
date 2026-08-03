@@ -126,16 +126,20 @@
   "typesVersions": {
     "*": {
       "shared": [
-        "./dist/shared/index.d.cts"
+        "./dist/shared/index.d.cts",
+        "./dist/shared/index.d.ts"
       ],
       "client": [
-        "./dist/client/index.d.cts"
+        "./dist/client/index.d.cts",
+        "./dist/client/index.d.ts"
       ],
       "react": [
-        "./dist/react/index.d.cts"
+        "./dist/react/index.d.cts",
+        "./dist/react/index.d.ts"
       ],
       "nextjs": [
-        "./dist/nextjs/index.d.cts"
+        "./dist/nextjs/index.d.cts",
+        "./dist/nextjs/index.d.ts"
       ]
     }
   }
