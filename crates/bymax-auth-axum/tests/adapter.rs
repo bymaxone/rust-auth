@@ -3418,3 +3418,126 @@ async fn the_address_change_routes_move_an_account_only_after_the_new_address_pr
         .await;
     assert_eq!(under_old.status, StatusCode::UNAUTHORIZED);
 }
+
+// ----------------------------------------------------------------------------------------
+// Which limit each route actually wears
+// ----------------------------------------------------------------------------------------
+
+/// Build a router whose limits are all generous except the one `narrow` names, which is
+/// bottled down to a single request. Whatever 429s under it is what that route is wired to.
+fn router_with_one_narrow_limit(
+    harness: &common::Harness,
+    narrow: fn(&mut bymax_auth_axum::RateLimitConfig, Option<bymax_auth_axum::RateLimit>),
+) -> axum::Router {
+    let mut config =
+        bymax_auth_axum::AxumAuthConfig::new(bymax_auth_axum::ClientIpSource::PeerAddr);
+    // Every limit generous enough that nothing else can trip during the probe.
+    let generous = Some(bymax_auth_axum::RateLimit::new(10_000, 60));
+    let mut limits = bymax_auth_axum::RateLimitConfig::default();
+    for setter in ALL_LIMIT_SETTERS {
+        setter(&mut limits, generous);
+    }
+    narrow(&mut limits, Some(bymax_auth_axum::RateLimit::new(1, 60)));
+    config.rate_limits = limits;
+    bymax_auth_axum::AuthRouter::from_engine(harness.engine.clone(), config).into_router()
+}
+
+/// Every field of `RateLimitConfig`, as setters, so the helper above can widen them all
+/// without naming each one at every call site — and so a NEW limit added to the struct shows
+/// up here rather than being silently left at its default during a probe.
+#[allow(clippy::type_complexity)]
+const ALL_LIMIT_SETTERS: &[fn(
+    &mut bymax_auth_axum::RateLimitConfig,
+    Option<bymax_auth_axum::RateLimit>,
+)] = &[
+    |c, v| c.login = v,
+    |c, v| c.register = v,
+    |c, v| c.refresh = v,
+    |c, v| c.logout = v,
+    |c, v| c.mfa_setup = v,
+    |c, v| c.mfa_disable = v,
+    |c, v| c.mfa_challenge = v,
+    |c, v| c.revoke_all_sessions = v,
+];
+
+/// Hit `request` twice against `app` and report whether the second call was throttled.
+async fn trips_on_second_call(app: &axum::Router, build: impl Fn() -> Req) -> bool {
+    let first = build().send(app).await;
+    assert_ne!(
+        first.status,
+        StatusCode::TOO_MANY_REQUESTS,
+        "the FIRST call must pass — a burst of 1 means the limiter trips on the second"
+    );
+    let second = build().send(app).await;
+    assert_ne!(
+        second.status,
+        StatusCode::NOT_FOUND,
+        "the route must be mounted — a 404 would make this assertion vacuous"
+    );
+    second.status == StatusCode::TOO_MANY_REQUESTS
+}
+
+/// Every value in `rateLimits` is pinned against the shared contract, and the contract is
+/// checked for extra names — but nothing asserted which limit each ROUTE is wired to. Wiring
+/// `login` to `register`'s 10/3600 would have passed the entire suite.
+///
+/// That gap hid four real divergences from nest-auth, found by the second audit:
+/// `/platform/logout` and `/platform/sessions` carried NO limit at all, and both
+/// `recovery-codes` routes were served under `mfa_setup` (5/60) instead of `mfa_disable`
+/// (3/300) — 25x more permissive than the sibling backend on a TOTP-gated route that can also
+/// invalidate a victim's recovery codes repeatedly.
+///
+/// `/platform/logout` is the one that mattered most: it is PUBLIC by design, so unthrottled it
+/// let an unauthenticated caller drive `find_session`, an HMAC verify, `revoke_session` and
+/// `delete_grace_pointer` — two to four round trips each holding a pool connection — for any
+/// 64-hex string they invent.
+#[tokio::test]
+async fn each_route_is_served_under_the_limit_it_declares() {
+    // Every optional group on: the four routes under test live in `platform` and `mfa`, and a
+    // group that is not mounted answers 404, which would make every assertion below vacuous.
+    let Some(h) = build(EngineSpec {
+        platform: true,
+        mfa: true,
+        sessions: true,
+        ..EngineSpec::default()
+    }) else {
+        return;
+    };
+
+    // Public platform logout, wired to `logout`.
+    let app = router_with_one_narrow_limit(&h, |c, v| c.logout = v);
+    assert!(
+        trips_on_second_call(&app, || Req::post("/auth/platform/logout")
+            .json(serde_json::json!({ "refreshToken": "a".repeat(64) })))
+        .await,
+        "POST /auth/platform/logout must be served under the `logout` limit"
+    );
+
+    // Revoke-all, wired to `revoke_all_sessions`.
+    let app = router_with_one_narrow_limit(&h, |c, v| c.revoke_all_sessions = v);
+    assert!(
+        trips_on_second_call(&app, || Req::delete("/auth/platform/sessions")).await,
+        "DELETE /auth/platform/sessions must be served under the `revoke_all_sessions` limit"
+    );
+
+    // Both recovery-code routes, wired to `mfa_disable` rather than `mfa_setup`.
+    let app = router_with_one_narrow_limit(&h, |c, v| c.mfa_disable = v);
+    assert!(
+        trips_on_second_call(&app, || Req::post("/auth/mfa/recovery-codes")).await,
+        "POST /auth/mfa/recovery-codes must be served under the `mfa_disable` limit"
+    );
+
+    let app = router_with_one_narrow_limit(&h, |c, v| c.mfa_disable = v);
+    assert!(
+        trips_on_second_call(&app, || Req::post("/auth/platform/mfa/recovery-codes")).await,
+        "POST /auth/platform/mfa/recovery-codes must be served under the `mfa_disable` limit"
+    );
+
+    // The negative half: narrowing `mfa_setup` must NOT throttle a recovery-code request, or
+    // the assertions above would pass for a route wired to either name.
+    let app = router_with_one_narrow_limit(&h, |c, v| c.mfa_setup = v);
+    assert!(
+        !trips_on_second_call(&app, || Req::post("/auth/mfa/recovery-codes")).await,
+        "recovery-codes must NOT be served under the `mfa_setup` limit"
+    );
+}

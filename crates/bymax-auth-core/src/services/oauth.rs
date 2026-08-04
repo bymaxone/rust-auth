@@ -1617,12 +1617,13 @@ mod tests {
         let mut headers = std::collections::BTreeMap::new();
         headers.insert("host".to_owned(), "resolved-tenant".to_owned());
         let resolved_ctx = RequestContext::new("1.2.3.4", "ua", headers);
-        let Ok(redirect) = engine
+        // Asserted first, destructured second: the workspace denies `panic!` in tests too, so
+        // the failure has to come from the assertion rather than from an `else` arm.
+        let minted = engine
             .oauth_initiate("google", "victim-tenant", &resolved_ctx)
-            .await
-        else {
-            panic!("a resolvable request must mint a redirect")
-        };
+            .await;
+        assert!(minted.is_ok(), "a resolvable request must mint a redirect");
+        let Ok(redirect) = minted else { return };
         let stored = OAuthStateStore::take_state(stores.as_ref(), &state_key(&redirect.state))
             .await
             .ok()

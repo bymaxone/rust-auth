@@ -52,7 +52,7 @@ pub use engine::{AuthEngine, AuthEngineBuilder};
 #[doc(inline)]
 pub use error::{ConfigError, RepositoryError};
 #[doc(inline)]
-pub use normalize::{mask_email, normalize_email};
+pub use normalize::{log_safe, mask_email, normalize_email};
 #[cfg(feature = "oauth")]
 #[doc(inline)]
 pub use providers::GoogleOAuthProvider;

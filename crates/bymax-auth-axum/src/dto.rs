@@ -9,6 +9,28 @@
 use garde::Validate;
 use serde::Deserialize;
 
+/// Refuse a value carrying a control character.
+///
+/// `tenant_id` is the widest attacker-controlled field on this surface: it arrives in the body
+/// of `/login`, `/register`, `/verify-email`, `/password/forgot-password` and
+/// `/oauth/{provider}` — all public — and is the caller's own value whenever no
+/// `TenantIdResolver` is configured, which is the default. It then reaches a `tracing` event, a
+/// Redis key segment and an HMAC preimage.
+///
+/// A length bound alone does not cover that. nest-auth has always rejected control characters
+/// here, and this side accepted them, so the same request was a 400 on one backend and a 200 on
+/// the other — the exact divergence `requestFieldBounds` exists to prevent, and one that also
+/// let a caller forge a record in a plain-text log pipeline (ASVS 16.4.1).
+///
+/// `log_safe` is the second lock at the log site, for values that reach one without passing a
+/// DTO — a host's `TenantIdResolver` returns whatever it returns.
+fn no_control_characters(value: &str, _: &()) -> garde::Result {
+    if value.chars().any(|c| c.is_control() || c == '\u{7f}') {
+        return Err(garde::Error::new("must not contain control characters"));
+    }
+    Ok(())
+}
+
 /// `POST /auth/register` body.
 #[derive(Debug, Deserialize, Validate)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -23,7 +45,7 @@ pub struct RegisterDto {
     #[garde(length(min = 2, max = 128))]
     pub name: String,
     /// The tenant scope; ignored when a `TenantIdResolver` is configured.
-    #[garde(length(min = 1, max = 128))]
+    #[garde(length(min = 1, max = 128), custom(no_control_characters))]
     pub tenant_id: String,
 }
 
@@ -44,7 +66,7 @@ pub struct LoginDto {
     #[garde(length(min = 1, max = 128))]
     pub password: String,
     /// The tenant scope; ignored when a `TenantIdResolver` is configured.
-    #[garde(length(min = 1, max = 128))]
+    #[garde(length(min = 1, max = 128), custom(no_control_characters))]
     pub tenant_id: String,
 }
 
@@ -56,7 +78,7 @@ pub struct ForgotPasswordDto {
     #[garde(email, length(max = 255))]
     pub email: String,
     /// The tenant scope.
-    #[garde(length(min = 1, max = 128))]
+    #[garde(length(min = 1, max = 128), custom(no_control_characters))]
     pub tenant_id: String,
 }
 
@@ -119,7 +141,7 @@ pub struct ResetPasswordDto {
     #[garde(inner(length(min = 64, max = 64)))]
     pub verified_token: Option<String>,
     /// The tenant scope.
-    #[garde(length(min = 1, max = 128))]
+    #[garde(length(min = 1, max = 128), custom(no_control_characters))]
     pub tenant_id: String,
 }
 
@@ -134,7 +156,7 @@ pub struct VerifyOtpDto {
     #[garde(length(min = 4, max = 8))]
     pub otp: String,
     /// The tenant scope.
-    #[garde(length(min = 1, max = 128))]
+    #[garde(length(min = 1, max = 128), custom(no_control_characters))]
     pub tenant_id: String,
 }
 
@@ -146,7 +168,7 @@ pub struct ResendOtpDto {
     #[garde(email, length(max = 255))]
     pub email: String,
     /// The tenant scope.
-    #[garde(length(min = 1, max = 128))]
+    #[garde(length(min = 1, max = 128), custom(no_control_characters))]
     pub tenant_id: String,
 }
 
@@ -166,7 +188,7 @@ pub struct VerifyEmailDto {
     #[garde(length(min = 6, max = 6))]
     pub otp: String,
     /// The tenant scope.
-    #[garde(length(min = 1, max = 128))]
+    #[garde(length(min = 1, max = 128), custom(no_control_characters))]
     pub tenant_id: String,
 }
 
@@ -178,7 +200,7 @@ pub struct ResendVerificationDto {
     #[garde(email, length(max = 255))]
     pub email: String,
     /// The tenant scope.
-    #[garde(length(min = 1, max = 128))]
+    #[garde(length(min = 1, max = 128), custom(no_control_characters))]
     pub tenant_id: String,
 }
 
@@ -363,7 +385,7 @@ pub struct OAuthInitiateQuery {
     /// The tenant the user will join on success; carried in the Redis state and recovered
     /// on callback. Not validated against the DB here (the `on_oauth_login` hook enforces
     /// tenant membership).
-    #[garde(length(min = 1, max = 128))]
+    #[garde(length(min = 1, max = 128), custom(no_control_characters))]
     pub tenant_id: String,
 }
 

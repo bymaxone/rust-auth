@@ -38,7 +38,8 @@ pub(crate) fn routes(config: &AxumAuthConfig, ip_source: ClientIpSource) -> Rout
         )
         .route(
             "/platform/mfa/recovery-codes",
-            crate::router::throttled(post(recovery_codes), limits.mfa_setup, ip_source),
+            // `mfa_disable`, not `mfa_setup` — see the dashboard twin in `routes/mfa.rs`.
+            crate::router::throttled(post(recovery_codes), limits.mfa_disable, ip_source),
         )
 }
 

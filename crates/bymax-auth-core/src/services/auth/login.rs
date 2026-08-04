@@ -12,7 +12,7 @@ use bymax_auth_types::{
 
 use crate::context::RequestContext;
 use crate::engine::AuthEngine;
-use crate::normalize::{mask_email, normalize_email};
+use crate::normalize::{log_safe, mask_email, normalize_email};
 use crate::services::auth::detached::{
     run_after_login, run_rehash_password, run_update_last_login,
 };
@@ -226,7 +226,18 @@ impl AuthEngine {
         user_id: Option<&str>,
         hook_ctx: &HookContext,
     ) -> Result<T, AuthError> {
-        tracing::warn!("login: invalid credentials");
+        // Named, like the success line six lines up and like nest-auth's own refusal. Both
+        // values are parameters of this function and were simply unused: an operator reading a
+        // run of these could see that credentials were being refused and not for which account
+        // or tenant, which is the difference between a log and an audit trail (ASVS 16.2.1).
+        // The address is masked and the tenant sanitized — `tenant_id` is attacker-chosen from
+        // the request body whenever no `TenantIdResolver` is configured, which is the default,
+        // and a raw newline in it forges a record on a plain-text subscriber.
+        tracing::warn!(
+            email = %mask_email(email),
+            tenant_id = %log_safe(tenant_id),
+            "login: invalid credentials"
+        );
         self.brute_force().record_failure(identifier).await?;
         self.fire_login_failed(
             email,

@@ -56,6 +56,45 @@ pub fn mask_email(email: &str) -> String {
     }
 }
 
+/// Sanitize a request-derived value before it is interpolated into a log line.
+///
+/// A log line is a record, and a value carrying a newline writes a second one. `tracing`'s
+/// `fmt` subscriber — the default a consumer reaches for — writes plain text, so an
+/// unauthenticated caller who controls any field that reaches a log event can forge records in
+/// it. `tenant_id` is the widest such field: it arrives in the body of `/login`, `/register`,
+/// `/verify-email`, `/password/forgot-password` and `/oauth/{provider}`, all public, and is
+/// attacker-chosen whenever no `TenantIdResolver` is configured — the default. A value like
+/// `acme\nINFO login: success user_id=<victim>` puts a fabricated successful sign-in into the
+/// operator's SIEM, or truncates the genuine records around it. ASVS v5 §16.4.1 requires log
+/// data to be sanitized against exactly this.
+///
+/// The value is replaced wholesale rather than escaped: an operator reading `<malformed>`
+/// learns the useful thing, which is that the field carried something no legitimate caller
+/// sends. Anything printable passes through untouched, so a tenant naming scheme this library
+/// cannot anticipate still reads normally.
+///
+/// Byte-for-byte the same rule as nest-auth's `logSafe`, so one log pipeline fed by both
+/// backends renders one value one way. The DTOs reject control characters at the boundary as
+/// well; this is the second lock, because a `TenantIdResolver` is the host's code and returns
+/// whatever it returns.
+///
+/// # Examples
+///
+/// ```
+/// # use bymax_auth_core::log_safe;
+/// assert_eq!(log_safe("acme-corp"), "acme-corp");
+/// assert_eq!(log_safe("acme\nINFO forged"), "<malformed>");
+/// ```
+#[must_use]
+pub fn log_safe(value: &str) -> String {
+    // C0, DEL and C1 — every character that can forge a record boundary in a line-oriented
+    // pipeline. `is_control` covers C0 and C1 but not DEL, which is named explicitly.
+    if value.chars().any(|c| c.is_control() || c == '\u{7f}') {
+        return "<malformed>".to_owned();
+    }
+    value.to_owned()
+}
+
 #[cfg(test)]
 mod tests {
     use super::{mask_email, normalize_email};

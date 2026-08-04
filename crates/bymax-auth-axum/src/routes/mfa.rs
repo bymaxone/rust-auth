@@ -51,7 +51,13 @@ pub(crate) fn routes(config: &AxumAuthConfig, ip_source: ClientIpSource) -> Rout
             )
             .route(
                 "/recovery-codes",
-                crate::router::throttled(post(recovery_codes), limits.mfa_setup, ip_source),
+                // `mfa_disable`, not `mfa_setup`. nest-auth serves regeneration under the
+                // disable throttle and says why: the security posture is identical —
+                // authenticated, TOTP-gated, and MFA-affecting state. `mfa_setup` is 5/60
+                // against `mfa_disable`'s 3/300, so this route was 25x more permissive here
+                // than on the sibling backend: a wider TOTP-guessing surface, and a way to
+                // invalidate a victim's recovery codes repeatedly.
+                crate::router::throttled(post(recovery_codes), limits.mfa_disable, ip_source),
             ),
     )
 }

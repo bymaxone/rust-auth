@@ -578,7 +578,18 @@ impl TokenManagerService {
                 // signature of a stolen token. Revoke the whole family (every live descendant
                 // of that login) so the thief's chain dies too, then reject: every holder must
                 // re-authenticate (§12.5.2, OWASP rotation with automatic reuse detection).
+                // Named, on both lines. This is the strongest compromise signal the library
+                // produces, and it used to be logged as bare prose: the account it concerns
+                // reached only a consumer who had wired `on_refresh_token_reuse_detected`,
+                // and the shipped hooks are no-ops. On a default deployment the one
+                // unambiguous theft signal was anonymous in the log and nowhere else, so an
+                // operator could tell that something happened and not to whom (ASVS 16.2.1).
+                //
+                // Two events rather than one: the detection is the finding and the revocation
+                // is the response to it, and a `revoke_family` that fails must not take the
+                // finding down with it. The owner is only knowable after the revocation.
                 tracing::warn!(
+                    family_id = %family,
                     "refresh: reuse of a consumed refresh token detected — revoking the token family"
                 );
                 // The owner comes back from the revocation, and can come from nowhere
@@ -588,6 +599,11 @@ impl TokenManagerService {
                     .session_store
                     .revoke_family(SessionKind::Dashboard, &family)
                     .await?;
+                tracing::warn!(
+                    user_id = owner.as_deref().unwrap_or("<unknown>"),
+                    family_id = %family,
+                    "refresh: token family revoked after reuse detection"
+                );
                 self.fire_reuse_detected(owner.as_deref(), &family).await;
                 Err(AuthError::RefreshTokenInvalid)
             }
@@ -782,7 +798,10 @@ impl TokenManagerService {
             RotateOutcome::Reused(family) => {
                 // Post-grace replay of a consumed platform refresh token: revoke the whole
                 // family and reject, the platform-keyspace analogue of the dashboard path.
+                // Named for the same reason as the dashboard plane, and more so: this is the
+                // highest-privilege identity in the system.
                 tracing::warn!(
+                    family_id = %family,
                     "platform refresh: reuse of a consumed refresh token detected — revoking the token family"
                 );
                 // The owner comes back from the revocation, and can come from nowhere
@@ -792,6 +811,11 @@ impl TokenManagerService {
                     .session_store
                     .revoke_family(SessionKind::Platform, &family)
                     .await?;
+                tracing::warn!(
+                    user_id = owner.as_deref().unwrap_or("<unknown>"),
+                    family_id = %family,
+                    "platform refresh: token family revoked after reuse detection"
+                );
                 self.fire_reuse_detected(owner.as_deref(), &family).await;
                 Err(AuthError::RefreshTokenInvalid)
             }

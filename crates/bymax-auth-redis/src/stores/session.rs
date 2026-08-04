@@ -489,8 +489,37 @@ impl RedisStores {
         let mut conn = self.connection().await?;
         let members: Vec<String> = conn.smembers(&sess_key).await?;
         let mut details = Vec::with_capacity(members.len());
+        let grace_prefix = format!("{}:", prefixes.rp.as_str());
+        let namespace = keys.namespace().to_owned();
         for member in &members {
             let Some(hash) = live_member_hash(member, prefixes.rt) else {
+                // Not a live session. If it is a grace pointer whose key has already expired,
+                // drop the member here rather than leaving it: a rotation removes `rt:{old}`
+                // and adds TWO members — `rt:{new}` and `rp:{old}` — and until now only a full
+                // revoke-all ever removed the second. The `rp:` KEY dies with the grace window
+                // (30 s by default); the MEMBER did not, while `refresh_rotate` re-arms the
+                // set's own TTL on every rotation. The index therefore gained one permanent
+                // ~70-byte entry per refresh and never aged out while the account was in use.
+                //
+                // It is a growth defect with an amplifier attached, because every reader of
+                // this index is linear in its size: this method, `sweep_grace_pointers` (two
+                // sequential round trips per member), and `invalidate_user_sessions`, which
+                // iterates it inside a Lua script and so blocks the whole single-threaded
+                // store. One stolen refresh token rotated at the route limit adds ~14k members
+                // a day to its own index, with no ceiling.
+                //
+                // Pruned from the LIST path rather than from the rotation: the rotation is the
+                // hot path and an O(n) sweep there would trade a slow leak for a slow refresh.
+                // Session-cap enforcement lists too, so a login bounds it.
+                //
+                // A pointer still inside its window is left alone — that is what lets a
+                // revoke-all also kill a token rotated away moments earlier.
+                if member.starts_with(&grace_prefix) {
+                    let live: bool = conn.exists(format!("{namespace}:{member}")).await?;
+                    if !live {
+                        let _: i64 = conn.srem(&sess_key, member).await?;
+                    }
+                }
                 continue;
             };
             // The detail record is keyed by the BARE hash, so the member's prefix is stripped.
