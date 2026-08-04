@@ -18,6 +18,7 @@
 
 #[cfg(feature = "argon2")]
 mod argon2;
+mod legacy;
 mod phc;
 #[cfg(feature = "scrypt")]
 mod scrypt;

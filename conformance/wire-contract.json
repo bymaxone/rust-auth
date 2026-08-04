@@ -350,10 +350,54 @@
       "or a session started on one backend cannot continue on the other."
     ],
     "refreshToken": "64 lowercase hex characters (32 CSPRNG bytes)",
-    "passwordHash": "self-describing: the parameters the hash was written under travel with it, so a verify never assumes the currently configured cost",
+    "passwordHash": "PHC — see the passwordHashFormat section, which pins it by vector",
     "totpSecretAtRest": "aes-256-gcm over the BASE32 TEXT of the secret",
     "recoveryCodeDigest": "hex hmac-sha256 of the code under the derived identifier key",
     "wsTicket": "64 lowercase hex characters (32 CSPRNG bytes), single-use, 30 s lifetime"
+  },
+
+  "passwordHashFormat": {
+    "$comment": [
+      "The stored password hash, pinned by known-answer vector rather than by description.",
+      "credentialFormats.passwordHash used to read 'self-describing: the parameters the hash was",
+      "written under travel with it'. BOTH sides satisfied that while writing mutually unreadable",
+      "strings — nest-auth wrote scrypt:N:r:p:{saltHex}:{derivedHex}, rust-auth wrote PHC. Neither",
+      "could verify the other's, and because verification is total the failure surfaced as",
+      "auth.invalid_credentials rather than as a parse error: five correct attempts by the owner",
+      "tripped the SHARED brute-force counter and locked the account out of both backends. Prose",
+      "each side can satisfy alone is not a contract. A vector each side must verify against the",
+      "other's real output is. Nothing below is hand-written — every string is emitted output."
+    ],
+    "encoding": "$scrypt$ln={log2(N)},r={r},p={p}${saltB64}${derivedB64}",
+    "b64": "PHC 'B64': the standard base64 alphabet with padding stripped. NOT base64url — a hash written with '-' or '_' is one the sibling parser rejects.",
+    "params": "read by name, never by position: ln, r and p may appear in any order, and a repeated key is refused rather than resolved",
+    "derivedKeyLengthBytes": "carried implicitly by the field's own length; 10..=64 accepted (the bounds of rust-auth's password_hash::Output). nest-auth writes 64, rust-auth writes 32, and each verifies the other under the length it reads.",
+    "needsRehash": "each vector's flag is evaluated with the deployment configured at exactly the cost that vector records (ln=14, r=8, p=1). Against a higher configured cost every vector is stale, which would make the flag say nothing about the encoding.",
+    "rehashTriggers": "a recorded cost below the configured one, or the legacy encoding. NOT the derived-key length: treating the sibling's length as stale would rehash every hash on every crossing of a shared user table and never converge.",
+    "legacyEncoding": "scrypt:{N}:{r}:{p}:{saltHex}:{derivedHex} — nest-auth's pre-PHC shape. READ-ONLY on both sides and always reported as needing a rehash, so a stored corpus migrates on each owner's next successful sign-in. Nothing mints it.",
+    "vectors": [
+      {
+        "password": "correct horse battery staple",
+        "hash": "$scrypt$ln=14,r=8,p=1$1kyoaG59xNOp3cu0ikQZTg$yycIZlUDbS+4ho98Hh41gIiPcFp75kvtypfOmV6AcTJrfTfo3k2GgQmpzS2SpHJ/L32+OwUuwfOt7JMO+s9iRQ",
+        "writtenBy": "nest-auth",
+        "needsRehash": false,
+        "note": "64-byte derived key — the maximum password_hash::Output can represent"
+      },
+      {
+        "password": "correct horse battery staple",
+        "hash": "$scrypt$ln=14,r=8,p=1$IoZhPkOiIMJkWmsBVfD5KA$9S6n0x6kJv5C+T+0eZDOMuXevCc+UGv0dqWCivQQcUY",
+        "writtenBy": "rust-auth",
+        "needsRehash": false,
+        "note": "32-byte derived key — the RustCrypto default"
+      },
+      {
+        "password": "correct horse battery staple",
+        "hash": "scrypt:16384:8:1:d64ca8686e7dc4d3a9ddcbb48a44194e:cb27086655036d2fb8868f7c1e1e3580888f705a7be64bedca97ce995e8071326b7d37e8de4d868109a9cd2d92a4727f2f7dbe3b052ec1f3adec930efacf6245",
+        "writtenBy": "nest-auth (pre-PHC)",
+        "needsRehash": true,
+        "note": "must verify AND must report needsRehash on both sides"
+      }
+    ]
   },
 
   "rateLimits": {

@@ -371,4 +371,135 @@ mod cross {
         let argon_phc = hash(b"pw", &argon2_params()).unwrap_or_default();
         assert!(needs_rehash(&argon_phc, &PasswordParams::default()));
     }
+
+    // -----------------------------------------------------------------------
+    // Cross-implementation conformance: `passwordHashFormat` in the wire contract
+    // -----------------------------------------------------------------------
+
+    /// Read `passwordHashFormat.vectors` from the shared cross-implementation wire contract.
+    ///
+    /// The file at `conformance/wire-contract.json` is held byte-identical by nest-auth, which
+    /// backs the same user table over the same Redis. Reading it here rather than copying the
+    /// strings in means a drift on either side turns that side red immediately.
+    fn contract_vectors() -> Vec<serde_json::Value> {
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../conformance/wire-contract.json"
+        );
+        let raw = std::fs::read_to_string(path).unwrap_or_default();
+        let root: serde_json::Value = serde_json::from_str(&raw).unwrap_or(serde_json::Value::Null);
+        root.get("passwordHashFormat")
+            .and_then(|s| s.get("vectors"))
+            .and_then(serde_json::Value::as_array)
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn every_contract_password_hash_vector_verifies_here() {
+        // The vectors are real emitted output — one hash written by this crate, one written by
+        // nest-auth, and one in nest-auth's pre-PHC encoding. Each must verify, must refuse a
+        // wrong password, and must report the staleness the contract declares.
+        //
+        // This replaces an agreement that was prose: `credentialFormats.passwordHash` read
+        // "self-describing: the parameters travel with the hash", which BOTH sides satisfied
+        // while writing strings the other could not parse. Neither suite could fail, because
+        // neither was testing against the other's output. And the failure did not look like a
+        // parse error: `verify` is total, so an unreadable hash returns `Ok(false)` and the
+        // engine answers `invalid_credentials` — five of which trip the SHARED `lf:` counter
+        // and lock the account out of both backends using the owner's own correct password.
+        // Evaluated with the deployment configured at exactly the cost the PHC vectors record,
+        // which is what the contract's `needsRehash` field means. Against a HIGHER configured
+        // cost every vector is stale, and the assertion would say nothing about the encoding.
+        let at_vector_cost = PasswordParams {
+            scrypt: ScryptParams {
+                cost_factor: 1 << 14,
+                block_size: 8,
+                parallelization: 1,
+            },
+            ..PasswordParams::default()
+        };
+        let vectors = contract_vectors();
+        assert_eq!(
+            vectors.len(),
+            3,
+            "the contract must pin one vector per writer plus the legacy encoding — \
+             it declared {} (did the file load?)",
+            vectors.len()
+        );
+
+        for vector in &vectors {
+            let password = vector
+                .get("password")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default();
+            let stored = vector
+                .get("hash")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default();
+            let written_by = vector
+                .get("writtenBy")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default();
+            let wants_rehash = vector
+                .get("needsRehash")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or_default();
+
+            assert!(
+                matches!(verify(password.as_bytes(), stored), Ok(true)),
+                "the vector written by {written_by} must verify here"
+            );
+            assert!(
+                matches!(verify(b"definitely-not-the-password", stored), Ok(false)),
+                "the vector written by {written_by} must refuse a wrong password"
+            );
+            assert_eq!(
+                needs_rehash(stored, &at_vector_cost),
+                wants_rehash,
+                "the vector written by {written_by} must report the staleness the contract declares"
+            );
+        }
+    }
+
+    #[test]
+    fn the_legacy_encoding_is_read_but_never_written() {
+        // It is a migration path. A migration that keeps producing the shape it is migrating
+        // away from never finishes, so nothing here mints it.
+        let phc = hash(b"pw", &PasswordParams::default()).unwrap_or_default();
+        assert!(phc.starts_with("$scrypt$"));
+        assert!(!phc.starts_with("scrypt:"));
+    }
+
+    #[test]
+    fn a_malformed_legacy_hash_is_refused_rather_than_verified() {
+        // Every rejection path in the legacy parser, so none of them can be widened into one
+        // that accepts a corrupt record under a cost it never used.
+        let salt = "d64ca8686e7dc4d3a9ddcbb48a44194e";
+        let key = "cb".repeat(64);
+        for bad in [
+            // Not the legacy prefix.
+            &format!("bcrypt:16384:8:1:{salt}:{key}"),
+            // A cost that is not a power of two: scrypt cannot have been run with it.
+            &format!("scrypt:16385:8:1:{salt}:{key}"),
+            // Zeroed cost parameters.
+            &format!("scrypt:16384:0:1:{salt}:{key}"),
+            &format!("scrypt:16384:8:0:{salt}:{key}"),
+            // Non-hex, odd-length and empty salt.
+            &format!("scrypt:16384:8:1:zzzz:{key}"),
+            &format!("scrypt:16384:8:1:abc:{key}"),
+            &format!("scrypt:16384:8:1::{key}"),
+            // A derived key that is not the 64 bytes this encoding always carried.
+            &format!("scrypt:16384:8:1:{salt}:cbcb"),
+            // A seventh field — not this encoding.
+            &format!("scrypt:16384:8:1:{salt}:{key}:extra"),
+            // Truncated.
+            &"scrypt:16384:8:1".to_owned(),
+        ] {
+            assert!(
+                matches!(verify(b"correct horse battery staple", bad), Ok(false)),
+                "must refuse {bad}"
+            );
+        }
+    }
 }
