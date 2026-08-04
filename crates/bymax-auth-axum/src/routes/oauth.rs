@@ -70,11 +70,15 @@ async fn initiate(
     State(state): State<AuthState>,
     cookies: Cookies,
     Path(provider): Path<String>,
+    RequestMeta(ctx): RequestMeta,
     ValidatedQuery(query): ValidatedQuery<OAuthInitiateQuery>,
 ) -> Response {
+    // The context is what lets the engine consult the configured `TenantIdResolver`. Without
+    // it this route took `?tenantId=` verbatim — the only flow that did — and it is the flow
+    // that decides which tenant an account is provisioned into.
     match state
         .engine()
-        .oauth_initiate(&provider, &query.tenant_id)
+        .oauth_initiate(&provider, &query.tenant_id, &ctx)
         .await
     {
         Ok(redirect) => {

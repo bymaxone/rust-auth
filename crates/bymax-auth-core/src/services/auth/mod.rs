@@ -699,6 +699,12 @@ mod tests {
                 .await,
             Err(AuthError::Forbidden)
         ));
+
+        // `oauth_initiate` is the eighth tenant-scoped flow and belongs on this list, but it
+        // needs a configured provider to reach the resolver at all (the provider is resolved
+        // first, so an unknown one fails before any consumer code runs). It is asserted in
+        // `services::oauth::tests::oauth_initiate_honours_the_tenant_resolver`, against a
+        // harness that wires Google.
     }
 
     #[tokio::test]
