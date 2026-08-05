@@ -25,7 +25,9 @@ use serde::Deserialize;
 /// `log_safe` is the second lock at the log site, for values that reach one without passing a
 /// DTO — a host's `TenantIdResolver` returns whatever it returns.
 fn no_control_characters(value: &str, _: &()) -> garde::Result {
-    if value.chars().any(|c| c.is_control() || c == '\u{7f}') {
+    // `is_control` is Unicode category Cc — C0, DEL and C1 — which is exactly the set that can
+    // forge a record boundary. Held identical to `log_safe`, the second lock at the log site.
+    if value.chars().any(char::is_control) {
         return Err(garde::Error::new("must not contain control characters"));
     }
     Ok(())
@@ -620,5 +622,61 @@ mod tests {
             over.validate().is_err(),
             "an oversized address was accepted"
         );
+    }
+
+    /// `tenant_id` carrying a control character must be refused at the boundary.
+    ///
+    /// It is the widest attacker-controlled field on this surface — it arrives in the body of
+    /// five public routes and is the caller's own value whenever no `TenantIdResolver` is
+    /// configured, which is the default — and it reaches a `tracing` event, a Redis key segment
+    /// and an HMAC preimage. A newline in it forges a record on a plain-text subscriber
+    /// (ASVS 16.4.1), and a length bound alone does not cover that.
+    ///
+    /// nest-auth has always rejected these, so this is also a wire divergence: without it the
+    /// same request is a 400 on one backend and a 200 on the other, which is precisely what
+    /// `requestFieldBounds` exists to prevent.
+    #[test]
+    fn a_tenant_id_with_a_control_character_is_refused() {
+        for bad in [
+            "acme\nINFO login: success user_id=victim",
+            "acme\r\nforged",
+            "acme\u{0}truncated",
+            "acme\u{7f}del",
+            "acme\u{1b}[31mescape",
+            "acme\u{85}c1-next-line",
+        ] {
+            let dto = LoginDto {
+                email: "user@example.com".to_owned(),
+                password: "hunter2hunter2".to_owned(),
+                tenant_id: bad.to_owned(),
+            };
+            assert!(
+                dto.validate().is_err(),
+                "a tenant_id carrying a control character was accepted: {bad:?}"
+            );
+        }
+    }
+
+    /// …and an ordinary tenant id is still accepted, or the check above would be satisfied by a
+    /// validator that refuses everything.
+    #[test]
+    fn an_ordinary_tenant_id_is_accepted() {
+        for good in [
+            "acme",
+            "acme-corp",
+            "tenant_42",
+            "ACME.Corp",
+            "empresa-são-paulo",
+        ] {
+            let dto = LoginDto {
+                email: "user@example.com".to_owned(),
+                password: "hunter2hunter2".to_owned(),
+                tenant_id: good.to_owned(),
+            };
+            assert!(
+                dto.validate().is_ok(),
+                "a legitimate tenant_id was refused: {good:?}"
+            );
+        }
     }
 }

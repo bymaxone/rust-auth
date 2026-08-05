@@ -87,9 +87,14 @@ pub fn mask_email(email: &str) -> String {
 /// ```
 #[must_use]
 pub fn log_safe(value: &str) -> String {
-    // C0, DEL and C1 — every character that can forge a record boundary in a line-oriented
-    // pipeline. `is_control` covers C0 and C1 but not DEL, which is named explicitly.
-    if value.chars().any(|c| c.is_control() || c == '\u{7f}') {
+    // `is_control` is the whole rule: Unicode general category Cc, which is C0 (00-1F), DEL
+    // (7F) and C1 (80-9F) — every character that can forge a record boundary in a
+    // line-oriented pipeline. An earlier version named DEL separately on the belief that
+    // `is_control` missed it; it does not, and the extra clause was unreachable.
+    //
+    // U+2028/U+2029 are deliberately NOT included. They are line separators to a text renderer
+    // but not to a `\n`-oriented log pipeline, which is the thing this defends.
+    if value.chars().any(char::is_control) {
         return "<malformed>".to_owned();
     }
     value.to_owned()

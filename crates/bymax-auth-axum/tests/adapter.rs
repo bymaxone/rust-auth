@@ -3425,10 +3425,7 @@ async fn the_address_change_routes_move_an_account_only_after_the_new_address_pr
 
 /// Build a router whose limits are all generous except the one `narrow` names, which is
 /// bottled down to a single request. Whatever 429s under it is what that route is wired to.
-fn router_with_one_narrow_limit(
-    harness: &common::Harness,
-    narrow: fn(&mut bymax_auth_axum::RateLimitConfig, Option<bymax_auth_axum::RateLimit>),
-) -> axum::Router {
+fn router_with_one_narrow_limit(harness: &common::Harness, narrow: LimitSetter) -> axum::Router {
     let mut config =
         bymax_auth_axum::AxumAuthConfig::new(bymax_auth_axum::ClientIpSource::PeerAddr);
     // Every limit generous enough that nothing else can trip during the probe.
@@ -3442,14 +3439,17 @@ fn router_with_one_narrow_limit(
     bymax_auth_axum::AuthRouter::from_engine(harness.engine.clone(), config).into_router()
 }
 
+/// One field of `RateLimitConfig`, as a setter.
+///
+/// Named rather than written inline: the inline form trips `clippy::type_complexity`, and a
+/// suppression is itself a finding under the workspace rules — an alias removes the complexity
+/// rather than hiding it.
+type LimitSetter = fn(&mut bymax_auth_axum::RateLimitConfig, Option<bymax_auth_axum::RateLimit>);
+
 /// Every field of `RateLimitConfig`, as setters, so the helper above can widen them all
 /// without naming each one at every call site — and so a NEW limit added to the struct shows
 /// up here rather than being silently left at its default during a probe.
-#[allow(clippy::type_complexity)]
-const ALL_LIMIT_SETTERS: &[fn(
-    &mut bymax_auth_axum::RateLimitConfig,
-    Option<bymax_auth_axum::RateLimit>,
-)] = &[
+const ALL_LIMIT_SETTERS: &[LimitSetter] = &[
     |c, v| c.login = v,
     |c, v| c.register = v,
     |c, v| c.refresh = v,

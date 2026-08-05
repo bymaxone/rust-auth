@@ -17,7 +17,7 @@ use time::OffsetDateTime;
 
 use crate::context::RequestContext;
 use crate::engine::AuthEngine;
-use crate::normalize::normalize_email;
+use crate::normalize::{log_safe, normalize_email};
 use crate::services::auth::detached::run_after_invitation_accepted;
 use crate::services::auth::{map_repository_error, spawn_guarded};
 use crate::traits::{HookContext, InviteData, StoredInvitation};
@@ -165,7 +165,11 @@ impl AuthEngine {
         {
             tracing::error!(%error, "invitation: delivery failed (the invitation stands)");
         }
-        tracing::info!(%tenant_id, role = %invitation.role, "invitation: created");
+        tracing::info!(
+            tenant_id = %log_safe(tenant_id),
+            role = %invitation.role,
+            "invitation: created"
+        );
         Ok(())
     }
 
@@ -382,7 +386,7 @@ impl AuthEngine {
             )
         {
             tracing::warn!(
-                %tenant_id,
+                tenant_id = %log_safe(tenant_id),
                 %revoker_user_id,
                 "invitation: revoke refused — outranked by the invitation"
             );
@@ -393,7 +397,11 @@ impl AuthEngine {
             .take_invitation_index(tenant_id, &self.invitee_identifier(&email))
             .await?;
         let removed = store.delete_invitation_by_hash(&hash).await?;
-        tracing::info!(%tenant_id, %revoker_user_id, "invitation: withdrawn");
+        tracing::info!(
+            tenant_id = %log_safe(tenant_id),
+            %revoker_user_id,
+            "invitation: withdrawn"
+        );
         Ok(removed)
     }
 

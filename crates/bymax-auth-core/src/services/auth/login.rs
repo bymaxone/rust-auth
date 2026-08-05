@@ -58,7 +58,11 @@ impl AuthEngine {
             // Kept on one line on purpose: a `tracing` field expression on its own line is
             // never evaluated without an installed subscriber, so it would read as an
             // uncovered line under the 100% gate while being perfectly exercised.
-            tracing::warn!(email = %mask_email(&input.email), %tenant_id, "login: account locked");
+            tracing::warn!(
+                email = %mask_email(&input.email),
+                tenant_id = %log_safe(&tenant_id),
+                "login: account locked"
+            );
             self.fire_login_failed(
                 &input.email,
                 &tenant_id,
@@ -196,7 +200,11 @@ impl AuthEngine {
                 .tokens()
                 .issue_mfa_temp_token(&user.id, MfaContext::Dashboard)
                 .await?;
-            tracing::info!(user_id = %user.id, tenant_id = %tenant_id, "login: MFA challenge issued");
+            tracing::info!(
+                user_id = %user.id,
+                tenant_id = %log_safe(&tenant_id),
+                "login: MFA challenge issued"
+            );
             return Ok(LoginResult::MfaChallenge(MfaChallengeResult {
                 mfa_required: true,
                 mfa_temp_token,
@@ -204,7 +212,11 @@ impl AuthEngine {
         }
 
         // A fresh session is minted on success (session-fixation resistance).
-        tracing::info!(user_id = %user.id, tenant_id = %tenant_id, "login: success");
+        tracing::info!(
+            user_id = %user.id,
+            tenant_id = %log_safe(&tenant_id),
+            "login: success"
+        );
         self.issue_session_result(user, &ctx.ip, &ctx.user_agent, hook_ctx)
             .await
     }
@@ -343,7 +355,11 @@ impl AuthEngine {
         // lockout actually wrote and the unlock silently does nothing.
         let identifier = self.lockout_identifier(tenant_id, &normalize_email(email));
         self.brute_force().reset(&identifier).await?;
-        tracing::info!(email = %mask_email(email), %tenant_id, "lockout cleared");
+        tracing::info!(
+            email = %mask_email(email),
+            tenant_id = %log_safe(tenant_id),
+            "lockout cleared"
+        );
         Ok(())
     }
 

@@ -10,7 +10,7 @@ use bymax_auth_types::{AuthError, SafeAuthUser};
 
 use crate::context::RequestContext;
 use crate::engine::AuthEngine;
-use crate::normalize::normalize_email;
+use crate::normalize::{log_safe, normalize_email};
 use crate::services::auth::detached::{run_after_email_verified, run_send_verification_email};
 use crate::services::auth::{map_repository_error, normalize_anti_enum, spawn_guarded};
 use crate::traits::{HookContext, OtpPurpose};
@@ -68,7 +68,11 @@ impl AuthEngine {
             .await
             .map_err(map_repository_error)?;
 
-        tracing::info!(user_id = %user.id, %tenant_id, "verify email: address verified");
+        tracing::info!(
+            user_id = %user.id,
+            tenant_id = %log_safe(tenant_id),
+            "verify email: address verified"
+        );
         let hook_ctx = verification_context(&user.id, &user.email, tenant_id);
         let safe = SafeAuthUser::from(user);
         spawn_guarded(run_after_email_verified(

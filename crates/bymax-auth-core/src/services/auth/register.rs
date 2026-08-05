@@ -7,7 +7,7 @@ use bymax_auth_types::{AuthError, AuthUser, CreateUserData, LoginResult, SafeAut
 
 use crate::context::RequestContext;
 use crate::engine::AuthEngine;
-use crate::normalize::normalize_email;
+use crate::normalize::{log_safe, normalize_email};
 use crate::services::auth::detached::run_after_register;
 use crate::services::auth::{RegisterInput, map_repository_error, spawn_guarded};
 use crate::traits::{BeforeRegisterResult, HookContext, RegisterAttempt, RegisterOverrides};
@@ -80,7 +80,7 @@ impl AuthEngine {
             .await?;
 
         let safe = SafeAuthUser::from(user);
-        tracing::info!(user_id = %safe.id, tenant_id = %tenant_id, "register: user registered");
+        tracing::info!(user_id = %safe.id, tenant_id = %log_safe(&tenant_id), "register: user registered");
         let result = self
             .tokens()
             .issue_tokens(&safe, &ctx.ip, &ctx.user_agent, false)
