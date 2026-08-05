@@ -314,6 +314,16 @@ fn is_padded_repeat(value: &str) -> bool {
 /// knows nothing about breach corpora. A deployment that wants that extends it with
 /// [`CommonPasswordChecker::with_extra_words`] (the context-specific words ASVS v5 §6.2.11 asks
 /// for) or supplies the HIBP checker, which searches a real corpus over the network.
+///
+/// **The shipped base words are ASCII.** The reduction preserves letters and numbers in any
+/// script — a strong Cyrillic, Han, Kana, Hangul, Greek, Arabic, Hebrew or Thai passphrase is
+/// admitted, and used to be refused outright with the "commonly used" error, which pushed those
+/// users onto the smaller ASCII keyspace. But the list itself holds no entries in those
+/// scripts, so the equivalent of `password` in one of them passes this screen. A deployment
+/// serving those users should add the common ones for its locale through
+/// [`CommonPasswordChecker::with_extra_words`]; extras are normalized through the same
+/// reduction, so a non-Latin entry matches a decorated form of itself the way an ASCII one
+/// does. Held in step with nest-auth's `CommonPasswordChecker`.
 pub struct CommonPasswordChecker {
     blocked: HashSet<String>,
 }
