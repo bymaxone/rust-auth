@@ -397,9 +397,9 @@ mod cross {
 
     #[test]
     fn every_contract_password_hash_vector_verifies_here() {
-        // The vectors are real emitted output — one hash written by this crate, one written by
-        // nest-auth, and one in nest-auth's pre-PHC encoding. Each must verify, must refuse a
-        // wrong password, and must report the staleness the contract declares.
+        // The vectors are real emitted output — one hash written by this crate and one written
+        // by nest-auth. Each must verify here, must refuse a wrong password, and must report
+        // the staleness the contract declares.
         //
         // This replaces an agreement that was prose: `credentialFormats.passwordHash` read
         // "self-describing: the parameters travel with the hash", which BOTH sides satisfied
@@ -422,9 +422,9 @@ mod cross {
         let vectors = contract_vectors();
         assert_eq!(
             vectors.len(),
-            3,
-            "the contract must pin one vector per writer plus the legacy encoding — \
-             it declared {} (did the file load?)",
+            2,
+            "the contract must pin one vector per implementation — it declared {} \
+             (did the file load?)",
             vectors.len()
         );
 
@@ -458,47 +458,6 @@ mod cross {
                 needs_rehash(stored, &at_vector_cost),
                 wants_rehash,
                 "the vector written by {written_by} must report the staleness the contract declares"
-            );
-        }
-    }
-
-    #[test]
-    fn the_legacy_encoding_is_read_but_never_written() {
-        // It is a migration path. A migration that keeps producing the shape it is migrating
-        // away from never finishes, so nothing here mints it.
-        let phc = hash(b"pw", &PasswordParams::default()).unwrap_or_default();
-        assert!(phc.starts_with("$scrypt$"));
-        assert!(!phc.starts_with("scrypt:"));
-    }
-
-    #[test]
-    fn a_malformed_legacy_hash_is_refused_rather_than_verified() {
-        // Every rejection path in the legacy parser, so none of them can be widened into one
-        // that accepts a corrupt record under a cost it never used.
-        let salt = "d64ca8686e7dc4d3a9ddcbb48a44194e";
-        let key = "cb".repeat(64);
-        for bad in [
-            // Not the legacy prefix.
-            &format!("bcrypt:16384:8:1:{salt}:{key}"),
-            // A cost that is not a power of two: scrypt cannot have been run with it.
-            &format!("scrypt:16385:8:1:{salt}:{key}"),
-            // Zeroed cost parameters.
-            &format!("scrypt:16384:0:1:{salt}:{key}"),
-            &format!("scrypt:16384:8:0:{salt}:{key}"),
-            // Non-hex, odd-length and empty salt.
-            &format!("scrypt:16384:8:1:zzzz:{key}"),
-            &format!("scrypt:16384:8:1:abc:{key}"),
-            &format!("scrypt:16384:8:1::{key}"),
-            // A derived key that is not the 64 bytes this encoding always carried.
-            &format!("scrypt:16384:8:1:{salt}:cbcb"),
-            // A seventh field — not this encoding.
-            &format!("scrypt:16384:8:1:{salt}:{key}:extra"),
-            // Truncated.
-            &"scrypt:16384:8:1".to_owned(),
-        ] {
-            assert!(
-                matches!(verify(b"correct horse battery staple", bad), Ok(false)),
-                "must refuse {bad}"
             );
         }
     }

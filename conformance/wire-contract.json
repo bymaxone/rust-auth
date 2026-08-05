@@ -366,15 +366,19 @@
       "auth.invalid_credentials rather than as a parse error: five correct attempts by the owner",
       "tripped the SHARED brute-force counter and locked the account out of both backends. Prose",
       "each side can satisfy alone is not a contract. A vector each side must verify against the",
-      "other's real output is. Nothing below is hand-written — every string is emitted output."
+      "other's real output is. Nothing below is hand-written — every string is emitted output.",
+      "",
+      "There is no compatibility path and no second encoding. Both libraries are new and have",
+      "never backed a deployment, so a reader for an older shape would be a branch in the",
+      "credential-verification core serving a corpus that does not exist — which is where an",
+      "unused branch is most expensive. A hash either parses as PHC or is refused."
     ],
     "encoding": "$scrypt$ln={log2(N)},r={r},p={p}${saltB64}${derivedB64}",
     "b64": "PHC 'B64': the standard base64 alphabet with padding stripped. NOT base64url — a hash written with '-' or '_' is one the sibling parser rejects.",
     "params": "read by name, never by position: ln, r and p may appear in any order, and a repeated key is refused rather than resolved",
     "derivedKeyLengthBytes": "carried implicitly by the field's own length; 10..=64 accepted (the bounds of rust-auth's password_hash::Output). nest-auth writes 64, rust-auth writes 32, and each verifies the other under the length it reads.",
     "needsRehash": "each vector's flag is evaluated with the deployment configured at exactly the cost that vector records (ln=14, r=8, p=1). Against a higher configured cost every vector is stale, which would make the flag say nothing about the encoding.",
-    "rehashTriggers": "a recorded cost below the configured one, or the legacy encoding. NOT the derived-key length: treating the sibling's length as stale would rehash every hash on every crossing of a shared user table and never converge.",
-    "legacyEncoding": "scrypt:{N}:{r}:{p}:{saltHex}:{derivedHex} — nest-auth's pre-PHC shape. READ-ONLY on both sides and always reported as needing a rehash, so a stored corpus migrates on each owner's next successful sign-in. Nothing mints it.",
+    "rehashTriggers": "a recorded cost below the configured one. NOT the derived-key length: the two implementations write different lengths (64 and 32), both carry it in the hash, and treating the sibling's as stale would rehash every record on every crossing and never converge.",
     "vectors": [
       {
         "password": "correct horse battery staple",
@@ -389,13 +393,6 @@
         "writtenBy": "rust-auth",
         "needsRehash": false,
         "note": "32-byte derived key — the RustCrypto default"
-      },
-      {
-        "password": "correct horse battery staple",
-        "hash": "scrypt:16384:8:1:d64ca8686e7dc4d3a9ddcbb48a44194e:cb27086655036d2fb8868f7c1e1e3580888f705a7be64bedca97ce995e8071326b7d37e8de4d868109a9cd2d92a4727f2f7dbe3b052ec1f3adec930efacf6245",
-        "writtenBy": "nest-auth (pre-PHC)",
-        "needsRehash": true,
-        "note": "must verify AND must report needsRehash on both sides"
       }
     ]
   },
