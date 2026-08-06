@@ -102,7 +102,7 @@ pub fn log_safe(value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{mask_email, normalize_email};
+    use super::{log_safe, mask_email, normalize_email};
 
     #[test]
     fn trims_and_lowercases() {
@@ -176,5 +176,30 @@ mod tests {
             mask_email("\u{e9}lise@example.com"),
             "\u{e9}***@example.com"
         );
+    }
+
+    #[test]
+    fn log_safe_passes_printable_values_and_replaces_record_forgers() {
+        // Anything printable reaches the log untouched, so a tenant naming scheme this library
+        // cannot anticipate still reads normally.
+        assert_eq!(log_safe("acme-corp"), "acme-corp");
+        assert_eq!(log_safe("tenant/1_2.3:4"), "tenant/1_2.3:4");
+        assert_eq!(log_safe("caf\u{e9}"), "caf\u{e9}");
+        assert_eq!(log_safe(""), "");
+
+        // The attack the helper exists for: a newline in a request-derived field writes a
+        // second record into a plain-text pipeline. The value is replaced wholesale, so an
+        // operator reads that the field carried something no legitimate caller sends.
+        assert_eq!(log_safe("acme\nINFO login: success"), "<malformed>");
+        assert_eq!(log_safe("acme\rINFO"), "<malformed>");
+        // Every category the rule names, one representative each: C0, DEL and C1. DEL and C1
+        // are the two an "ASCII printable range" check would let through.
+        assert_eq!(log_safe("a\u{0}b"), "<malformed>");
+        assert_eq!(log_safe("a\u{7f}b"), "<malformed>");
+        assert_eq!(log_safe("a\u{85}b"), "<malformed>");
+        // …and the two deliberately NOT covered: they separate lines to a text renderer, not
+        // to the `\n`-oriented pipeline this defends, so they pass through.
+        assert_eq!(log_safe("a\u{2028}b"), "a\u{2028}b");
+        assert_eq!(log_safe("a\u{2029}b"), "a\u{2029}b");
     }
 }

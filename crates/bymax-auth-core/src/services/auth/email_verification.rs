@@ -68,11 +68,9 @@ impl AuthEngine {
             .await
             .map_err(map_repository_error)?;
 
-        tracing::info!(
-            user_id = %user.id,
-            tenant_id = %log_safe(tenant_id),
-            "verify email: address verified"
-        );
+        // Sanitized into a binding rather than inline in the field; see the note in `login`.
+        let tenant = log_safe(tenant_id);
+        tracing::info!(user_id = %user.id, tenant_id = %tenant, "verify email: address verified");
         let hook_ctx = verification_context(&user.id, &user.email, tenant_id);
         let safe = SafeAuthUser::from(user);
         spawn_guarded(run_after_email_verified(
@@ -220,12 +218,19 @@ mod tests {
             .stores
             .peek_otp(OtpPurpose::EmailVerification, &identifier);
         let Some(code) = stored else { return };
+        // Captured so the event's fields are actually rendered: `log_safe` is the second lock on
+        // a host-supplied tenant reaching a log line, and with no subscriber installed the call
+        // never runs, which leaves the sanitization unfalsifiable from a test.
+        let (events, capture) = crate::log_capture::capture_events();
         assert!(
             h.engine
                 .verify_email("t1", "v@example.com", &code, &ctx())
                 .await
                 .is_ok()
         );
+        drop(capture);
+        assert!(events.contains_at(tracing::Level::INFO, "verify email: address verified"));
+        assert!(events.contains("tenant_id=t1"));
         let stored = h.users.find_by_id(&id, None).await;
         assert!(matches!(stored, Ok(Some(u)) if u.email_verified));
         // The OTP is consumed: a second submission is now expired.

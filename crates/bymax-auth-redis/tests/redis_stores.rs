@@ -333,6 +333,13 @@ async fn listing_prunes_expired_grace_members_and_keeps_live_ones() {
         Ok(RotateOutcome::Rotated(_))
     ));
 
+    // A legacy bare-hash member, the format the index carried before members became full key
+    // suffixes. It is neither a live session nor a grace pointer, so it is the one member that
+    // reaches the prune's "not a pointer" path — and it must be left alone: the prune keys on
+    // an EXPIRED `rp:` key, and a bare hash has no `rp:` key to look up at all. Deleting it on
+    // that basis would drop an entry whose meaning this version cannot read.
+    assert!(redis.sadd("auth:sess:pu", "legacyhash").await);
+
     // Both members are in the index while both pointers are live.
     let before = redis.smembers("auth:sess:pu").await;
     assert!(before.iter().any(|m| m == "rp:p1"), "index: {before:?}");
@@ -365,6 +372,8 @@ async fn listing_prunes_expired_grace_members_and_keeps_live_ones() {
     // The live sessions are untouched — this prunes dead pointers, not sessions.
     assert!(after.iter().any(|m| m == "rt:p2"), "index: {after:?}");
     assert!(after.iter().any(|m| m == "rt:p4"), "index: {after:?}");
+    // …and so is the legacy member: it is skipped, not swept.
+    assert!(after.iter().any(|m| m == "legacyhash"), "index: {after:?}");
 }
 
 /// A user with no grace pointers at all is not an error, and touches nothing.
