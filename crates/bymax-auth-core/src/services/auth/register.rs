@@ -80,7 +80,9 @@ impl AuthEngine {
             .await?;
 
         let safe = SafeAuthUser::from(user);
-        tracing::info!(user_id = %safe.id, tenant_id = %log_safe(&tenant_id), "register: user registered");
+        // Sanitized into a binding rather than inline in the field; see the note in `login`.
+        let tenant = log_safe(&tenant_id);
+        tracing::info!(user_id = %safe.id, tenant_id = %tenant, "register: user registered");
         let result = self
             .tokens()
             .issue_tokens(&safe, &ctx.ip, &ctx.user_agent, false)
