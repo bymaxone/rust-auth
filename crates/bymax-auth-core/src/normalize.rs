@@ -56,9 +56,53 @@ pub fn mask_email(email: &str) -> String {
     }
 }
 
+/// Sanitize a request-derived value before it is interpolated into a log line.
+///
+/// A log line is a record, and a value carrying a newline writes a second one. `tracing`'s
+/// `fmt` subscriber — the default a consumer reaches for — writes plain text, so an
+/// unauthenticated caller who controls any field that reaches a log event can forge records in
+/// it. `tenant_id` is the widest such field: it arrives in the body of `/login`, `/register`,
+/// `/verify-email`, `/password/forgot-password` and `/oauth/{provider}`, all public, and is
+/// attacker-chosen whenever no `TenantIdResolver` is configured — the default. A value like
+/// `acme\nINFO login: success user_id=<victim>` puts a fabricated successful sign-in into the
+/// operator's SIEM, or truncates the genuine records around it. ASVS v5 §16.4.1 requires log
+/// data to be sanitized against exactly this.
+///
+/// The value is replaced wholesale rather than escaped: an operator reading `<malformed>`
+/// learns the useful thing, which is that the field carried something no legitimate caller
+/// sends. Anything printable passes through untouched, so a tenant naming scheme this library
+/// cannot anticipate still reads normally.
+///
+/// Byte-for-byte the same rule as nest-auth's `logSafe`, so one log pipeline fed by both
+/// backends renders one value one way. The DTOs reject control characters at the boundary as
+/// well; this is the second lock, because a `TenantIdResolver` is the host's code and returns
+/// whatever it returns.
+///
+/// # Examples
+///
+/// ```
+/// # use bymax_auth_core::log_safe;
+/// assert_eq!(log_safe("acme-corp"), "acme-corp");
+/// assert_eq!(log_safe("acme\nINFO forged"), "<malformed>");
+/// ```
+#[must_use]
+pub fn log_safe(value: &str) -> String {
+    // `is_control` is the whole rule: Unicode general category Cc, which is C0 (00-1F), DEL
+    // (7F) and C1 (80-9F) — every character that can forge a record boundary in a
+    // line-oriented pipeline. An earlier version named DEL separately on the belief that
+    // `is_control` missed it; it does not, and the extra clause was unreachable.
+    //
+    // U+2028/U+2029 are deliberately NOT included. They are line separators to a text renderer
+    // but not to a `\n`-oriented log pipeline, which is the thing this defends.
+    if value.chars().any(char::is_control) {
+        return "<malformed>".to_owned();
+    }
+    value.to_owned()
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{mask_email, normalize_email};
+    use super::{log_safe, mask_email, normalize_email};
 
     #[test]
     fn trims_and_lowercases() {
@@ -132,5 +176,30 @@ mod tests {
             mask_email("\u{e9}lise@example.com"),
             "\u{e9}***@example.com"
         );
+    }
+
+    #[test]
+    fn log_safe_passes_printable_values_and_replaces_record_forgers() {
+        // Anything printable reaches the log untouched, so a tenant naming scheme this library
+        // cannot anticipate still reads normally.
+        assert_eq!(log_safe("acme-corp"), "acme-corp");
+        assert_eq!(log_safe("tenant/1_2.3:4"), "tenant/1_2.3:4");
+        assert_eq!(log_safe("caf\u{e9}"), "caf\u{e9}");
+        assert_eq!(log_safe(""), "");
+
+        // The attack the helper exists for: a newline in a request-derived field writes a
+        // second record into a plain-text pipeline. The value is replaced wholesale, so an
+        // operator reads that the field carried something no legitimate caller sends.
+        assert_eq!(log_safe("acme\nINFO login: success"), "<malformed>");
+        assert_eq!(log_safe("acme\rINFO"), "<malformed>");
+        // Every category the rule names, one representative each: C0, DEL and C1. DEL and C1
+        // are the two an "ASCII printable range" check would let through.
+        assert_eq!(log_safe("a\u{0}b"), "<malformed>");
+        assert_eq!(log_safe("a\u{7f}b"), "<malformed>");
+        assert_eq!(log_safe("a\u{85}b"), "<malformed>");
+        // …and the two deliberately NOT covered: they separate lines to a text renderer, not
+        // to the `\n`-oriented pipeline this defends, so they pass through.
+        assert_eq!(log_safe("a\u{2028}b"), "a\u{2028}b");
+        assert_eq!(log_safe("a\u{2029}b"), "a\u{2029}b");
     }
 }

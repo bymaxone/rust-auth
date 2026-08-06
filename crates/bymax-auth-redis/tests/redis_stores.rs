@@ -285,6 +285,97 @@ async fn sweep_grace_pointers_clears_every_pointer_and_its_index_entry() {
     assert!(after.iter().any(|m| m == "rt:g4"), "index: {after:?}");
 }
 
+/// Listing a user's sessions drops the grace members whose pointer has already expired, and
+/// leaves the ones still inside their window.
+///
+/// A rotation removes `rt:{old}` from the index and adds TWO members: `rt:{new}` and
+/// `rp:{old}`. The `rp:` KEY dies with the grace window; the MEMBER did not, and
+/// `refresh_rotate` re-arms the set's own TTL on every rotation — so the index gained one
+/// permanent ~70-byte entry per refresh and never aged out while the account was in use. Every
+/// reader of it is linear in its size, including `invalidate_user_sessions`, which walks it
+/// inside a script and so blocks the whole single-threaded store.
+///
+/// The second half is what makes this delicate: a pointer still inside its window must SURVIVE
+/// the listing. That member is what lets a revoke-all also kill a token rotated away moments
+/// earlier, so a prune that took it would reopen the window `sweep_grace_pointers` exists to
+/// close.
+#[tokio::test]
+async fn listing_prunes_expired_grace_members_and_keeps_live_ones() {
+    let Some(redis) = common::try_start().await else {
+        return;
+    };
+    let Some(stores) = redis.stores() else { return };
+    let kind = SessionKind::Dashboard;
+
+    // One rotation whose pointer expires almost immediately, one whose pointer stays.
+    assert!(
+        stores
+            .create_session(kind, "p1", &record("pu"), 3600)
+            .await
+            .is_ok()
+    );
+    assert!(matches!(
+        stores
+            .rotate(kind, &rotation_with_grace("p1", "p2", "pu", 1))
+            .await,
+        Ok(RotateOutcome::Rotated(_))
+    ));
+    assert!(
+        stores
+            .create_session(kind, "p3", &record("pu"), 3600)
+            .await
+            .is_ok()
+    );
+    assert!(matches!(
+        stores
+            .rotate(kind, &rotation_with_grace("p3", "p4", "pu", 300))
+            .await,
+        Ok(RotateOutcome::Rotated(_))
+    ));
+
+    // A legacy bare-hash member, the format the index carried before members became full key
+    // suffixes. It is neither a live session nor a grace pointer, so it is the one member that
+    // reaches the prune's "not a pointer" path — and it must be left alone: the prune keys on
+    // an EXPIRED `rp:` key, and a bare hash has no `rp:` key to look up at all. Deleting it on
+    // that basis would drop an entry whose meaning this version cannot read.
+    assert!(redis.sadd("auth:sess:pu", "legacyhash").await);
+
+    // Both members are in the index while both pointers are live.
+    let before = redis.smembers("auth:sess:pu").await;
+    assert!(before.iter().any(|m| m == "rp:p1"), "index: {before:?}");
+    assert!(before.iter().any(|m| m == "rp:p3"), "index: {before:?}");
+
+    // Let the short pointer expire for real rather than deleting it — the prune keys on the
+    // key's absence, and an expiry is the way that absence actually arises.
+    tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+    assert_eq!(
+        redis.ttl("auth:rp:p1").await,
+        -2,
+        "the short pointer must have expired"
+    );
+    assert!(
+        redis.ttl("auth:rp:p3").await > 0,
+        "the long pointer must still be live"
+    );
+
+    assert!(stores.list_sessions(kind, "pu").await.is_ok());
+
+    let after = redis.smembers("auth:sess:pu").await;
+    assert!(
+        !after.iter().any(|m| m == "rp:p1"),
+        "the expired grace member must be pruned: {after:?}"
+    );
+    assert!(
+        after.iter().any(|m| m == "rp:p3"),
+        "a grace member whose pointer is still live must survive the listing: {after:?}"
+    );
+    // The live sessions are untouched — this prunes dead pointers, not sessions.
+    assert!(after.iter().any(|m| m == "rt:p2"), "index: {after:?}");
+    assert!(after.iter().any(|m| m == "rt:p4"), "index: {after:?}");
+    // …and so is the legacy member: it is skipped, not swept.
+    assert!(after.iter().any(|m| m == "legacyhash"), "index: {after:?}");
+}
+
 /// A user with no grace pointers at all is not an error, and touches nothing.
 #[tokio::test]
 async fn sweep_grace_pointers_is_a_no_op_when_there_are_none() {

@@ -350,10 +350,51 @@
       "or a session started on one backend cannot continue on the other."
     ],
     "refreshToken": "64 lowercase hex characters (32 CSPRNG bytes)",
-    "passwordHash": "self-describing: the parameters the hash was written under travel with it, so a verify never assumes the currently configured cost",
+    "passwordHash": "PHC — see the passwordHashFormat section, which pins it by vector",
     "totpSecretAtRest": "aes-256-gcm over the BASE32 TEXT of the secret",
     "recoveryCodeDigest": "hex hmac-sha256 of the code under the derived identifier key",
     "wsTicket": "64 lowercase hex characters (32 CSPRNG bytes), single-use, 30 s lifetime"
+  },
+
+  "passwordHashFormat": {
+    "$comment": [
+      "The stored password hash, pinned by known-answer vector rather than by description.",
+      "credentialFormats.passwordHash used to read 'self-describing: the parameters the hash was",
+      "written under travel with it'. BOTH sides satisfied that while writing mutually unreadable",
+      "strings — nest-auth wrote scrypt:N:r:p:{saltHex}:{derivedHex}, rust-auth wrote PHC. Neither",
+      "could verify the other's, and because verification is total the failure surfaced as",
+      "auth.invalid_credentials rather than as a parse error: five correct attempts by the owner",
+      "tripped the SHARED brute-force counter and locked the account out of both backends. Prose",
+      "each side can satisfy alone is not a contract. A vector each side must verify against the",
+      "other's real output is. Nothing below is hand-written — every string is emitted output.",
+      "",
+      "There is no compatibility path and no second encoding. Both libraries are new and have",
+      "never backed a deployment, so a reader for an older shape would be a branch in the",
+      "credential-verification core serving a corpus that does not exist — which is where an",
+      "unused branch is most expensive. A hash either parses as PHC or is refused."
+    ],
+    "encoding": "$scrypt$ln={log2(N)},r={r},p={p}${saltB64}${derivedB64}",
+    "b64": "PHC 'B64': the standard base64 alphabet with padding stripped. NOT base64url — a hash written with '-' or '_' is one the sibling parser rejects.",
+    "params": "read by name, never by position: ln, r and p may appear in any order, and a repeated key is refused rather than resolved",
+    "derivedKeyLengthBytes": "carried implicitly by the field's own length; 10..=64 accepted (the bounds of rust-auth's password_hash::Output). nest-auth writes 64, rust-auth writes 32, and each verifies the other under the length it reads.",
+    "needsRehash": "each vector's flag is evaluated with the deployment configured at exactly the cost that vector records (ln=14, r=8, p=1). Against a higher configured cost every vector is stale, which would make the flag say nothing about the encoding.",
+    "rehashTriggers": "a recorded cost below the configured one. NOT the derived-key length: the two implementations write different lengths (64 and 32), both carry it in the hash, and treating the sibling's as stale would rehash every record on every crossing and never converge.",
+    "vectors": [
+      {
+        "password": "correct horse battery staple",
+        "hash": "$scrypt$ln=14,r=8,p=1$1kyoaG59xNOp3cu0ikQZTg$yycIZlUDbS+4ho98Hh41gIiPcFp75kvtypfOmV6AcTJrfTfo3k2GgQmpzS2SpHJ/L32+OwUuwfOt7JMO+s9iRQ",
+        "writtenBy": "nest-auth",
+        "needsRehash": false,
+        "note": "64-byte derived key — the maximum password_hash::Output can represent"
+      },
+      {
+        "password": "correct horse battery staple",
+        "hash": "$scrypt$ln=14,r=8,p=1$IoZhPkOiIMJkWmsBVfD5KA$9S6n0x6kJv5C+T+0eZDOMuXevCc+UGv0dqWCivQQcUY",
+        "writtenBy": "rust-auth",
+        "needsRehash": false,
+        "note": "32-byte derived key — the RustCrypto default"
+      }
+    ]
   },
 
   "rateLimits": {

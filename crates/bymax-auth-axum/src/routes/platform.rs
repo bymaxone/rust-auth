@@ -41,13 +41,29 @@ pub(crate) fn routes(config: &AxumAuthConfig, ip_source: ClientIpSource) -> Rout
             "/platform/mfa/challenge",
             crate::router::throttled(post(mfa_challenge), limits.mfa_challenge, ip_source),
         )
+        // `/platform/me` is deliberately unthrottled, matching nest-auth: it is a cheap read
+        // behind a verified access token, and limiting it would cap a dashboard's own polling.
         .route("/platform/me", get(me))
-        .route("/platform/logout", post(logout))
+        // `/platform/logout` is PUBLIC by design (a caller with an expired access token must
+        // still be able to kill their refresh session), which is exactly why it needs a limit:
+        // unauthenticated and unthrottled, it drives `find_session`, an HMAC verify,
+        // `revoke_session` and `delete_grace_pointer` — two to four round trips, each holding
+        // one of the pool's connections — for any 64-hex string a caller invents. nest-auth
+        // has always served it under `logout` (20/60).
+        .route(
+            "/platform/logout",
+            crate::router::throttled(post(logout), limits.logout, ip_source),
+        )
         .route(
             "/platform/refresh",
             crate::router::throttled(post(refresh), limits.refresh, ip_source),
         )
-        .route("/platform/sessions", delete(revoke_all))
+        // Revoking every session is a state change over the whole account, and nest-auth
+        // serves it under `revoke_all_sessions` (5/60). It was unthrottled here.
+        .route(
+            "/platform/sessions",
+            crate::router::throttled(delete(revoke_all), limits.revoke_all_sessions, ip_source),
+        )
 }
 
 /// `POST /auth/platform/login` (200). Public. Full platform session or an MFA challenge.

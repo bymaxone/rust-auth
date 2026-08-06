@@ -12,7 +12,7 @@ use bymax_auth_types::{
 
 use crate::context::RequestContext;
 use crate::engine::AuthEngine;
-use crate::normalize::{mask_email, normalize_email};
+use crate::normalize::{log_safe, mask_email, normalize_email};
 use crate::services::auth::detached::{
     run_after_login, run_rehash_password, run_update_last_login,
 };
@@ -55,10 +55,13 @@ impl AuthEngine {
 
         // Brute-force gate first (so an already-locked account never increments again).
         if let Err(error) = self.assert_not_locked(&identifier).await {
-            // Kept on one line on purpose: a `tracing` field expression on its own line is
-            // never evaluated without an installed subscriber, so it would read as an
-            // uncovered line under the 100% gate while being perfectly exercised.
-            tracing::warn!(email = %mask_email(&input.email), %tenant_id, "login: account locked");
+            // Redacted into bindings rather than inline in the fields: a call inside a `tracing`
+            // field expression is not evaluated without an installed subscriber, so as its own
+            // line it reads as uncovered under the 100% gate while being perfectly exercised.
+            // That the redaction actually reaches the log is asserted under `log_capture`.
+            let masked = mask_email(&input.email);
+            let tenant = log_safe(&tenant_id);
+            tracing::warn!(email = %masked, tenant_id = %tenant, "login: account locked");
             self.fire_login_failed(
                 &input.email,
                 &tenant_id,
@@ -196,7 +199,8 @@ impl AuthEngine {
                 .tokens()
                 .issue_mfa_temp_token(&user.id, MfaContext::Dashboard)
                 .await?;
-            tracing::info!(user_id = %user.id, tenant_id = %tenant_id, "login: MFA challenge issued");
+            let tenant = log_safe(&tenant_id);
+            tracing::info!(user_id = %user.id, tenant_id = %tenant, "login: MFA challenge issued");
             return Ok(LoginResult::MfaChallenge(MfaChallengeResult {
                 mfa_required: true,
                 mfa_temp_token,
@@ -204,7 +208,8 @@ impl AuthEngine {
         }
 
         // A fresh session is minted on success (session-fixation resistance).
-        tracing::info!(user_id = %user.id, tenant_id = %tenant_id, "login: success");
+        let tenant = log_safe(&tenant_id);
+        tracing::info!(user_id = %user.id, tenant_id = %tenant, "login: success");
         self.issue_session_result(user, &ctx.ip, &ctx.user_agent, hook_ctx)
             .await
     }
@@ -226,7 +231,16 @@ impl AuthEngine {
         user_id: Option<&str>,
         hook_ctx: &HookContext,
     ) -> Result<T, AuthError> {
-        tracing::warn!("login: invalid credentials");
+        // Named, like the success line six lines up and like nest-auth's own refusal. Both
+        // values are parameters of this function and were simply unused: an operator reading a
+        // run of these could see that credentials were being refused and not for which account
+        // or tenant, which is the difference between a log and an audit trail (ASVS 16.2.1).
+        // The address is masked and the tenant sanitized — `tenant_id` is attacker-chosen from
+        // the request body whenever no `TenantIdResolver` is configured, which is the default,
+        // and a raw newline in it forges a record on a plain-text subscriber.
+        let masked = mask_email(email);
+        let tenant = log_safe(tenant_id);
+        tracing::warn!(email = %masked, tenant_id = %tenant, "login: invalid credentials");
         self.brute_force().record_failure(identifier).await?;
         self.fire_login_failed(
             email,
@@ -332,7 +346,9 @@ impl AuthEngine {
         // lockout actually wrote and the unlock silently does nothing.
         let identifier = self.lockout_identifier(tenant_id, &normalize_email(email));
         self.brute_force().reset(&identifier).await?;
-        tracing::info!(email = %mask_email(email), %tenant_id, "lockout cleared");
+        let masked = mask_email(email);
+        let tenant = log_safe(tenant_id);
+        tracing::info!(email = %masked, tenant_id = %tenant, "lockout cleared");
         Ok(())
     }
 
@@ -435,11 +451,17 @@ mod tests {
         let _ = h
             .seed(SeedUser::active("ok@example.com", "s3cret-pass"))
             .await;
+        // Captured so the success event renders its fields; the tenant reaches it through
+        // `log_safe` and nothing else observes that call.
+        let (events, capture) = crate::log_capture::capture_events();
         let result = h
             .engine
             .login(login_input("ok@example.com", "s3cret-pass"), &ctx())
             .await;
+        drop(capture);
         assert!(matches!(&result, Ok(LoginResult::Success(_))));
+        assert!(events.contains_at(tracing::Level::INFO, "login: success"));
+        assert!(events.contains("tenant_id=t1"));
         let Ok(LoginResult::Success(auth)) = result else { return };
         assert_eq!(auth.user.email, "ok@example.com");
         assert!(!auth.access_token.is_empty());
@@ -552,6 +574,10 @@ mod tests {
         // with a retry hint, before any credential check.
         let Some(h) = active_harness(false).await else { return };
         let _ = h.seed(SeedUser::active("lock@example.com", "right")).await;
+        // Captured so both refusals actually render their fields. The address must reach the log
+        // masked and the tenant sanitized — the redaction is a security property with no other
+        // observable effect, so a subscriber is the only thing that can falsify it.
+        let (events, capture) = crate::log_capture::capture_events();
         for _ in 0..5 {
             let attempt = h
                 .engine
@@ -563,12 +589,18 @@ mod tests {
             .engine
             .login(login_input("lock@example.com", "right"), &ctx())
             .await;
+        drop(capture);
         assert!(matches!(
             locked,
             Err(AuthError::AccountLocked {
                 retry_after_seconds: Some(_)
             })
         ));
+        assert!(events.contains_at(tracing::Level::WARN, "login: invalid credentials"));
+        assert!(events.contains_at(tracing::Level::WARN, "login: account locked"));
+        // The address is never logged whole, and the tenant passes through `log_safe`.
+        assert!(!events.contains("lock@example.com"));
+        assert!(events.contains("tenant_id=t1"));
     }
 
     #[tokio::test]
@@ -805,10 +837,13 @@ mod tests {
                 mfa_enabled: true,
             })
             .await;
+        // Captured so the challenge event renders its fields, `log_safe` included.
+        let (events, capture) = crate::log_capture::capture_events();
         let result = h
             .engine
             .login(login_input("mfa@example.com", "pw"), &ctx())
             .await;
+        drop(capture);
         assert!(matches!(
             result,
             Ok(LoginResult::MfaChallenge(MfaChallengeResult {
@@ -816,6 +851,8 @@ mod tests {
                 ..
             }))
         ));
+        assert!(events.contains_at(tracing::Level::INFO, "login: MFA challenge issued"));
+        assert!(events.contains("tenant_id=t1"));
     }
 
     #[tokio::test]
@@ -1215,13 +1252,20 @@ mod tests {
         ));
 
         // The address is normalized on the way in, so a differently-cased spelling still
-        // clears the counter the lockout wrote.
+        // clears the counter the lockout wrote. Captured so the event renders its fields: an
+        // unlock is an administrative action and the record of it is masked and sanitized like
+        // every other, which nothing but a subscriber can check.
+        let (events, capture) = crate::log_capture::capture_events();
         assert!(
             h.engine
                 .unlock_account(" Locked@Example.com ", "t1")
                 .await
                 .is_ok()
         );
+        drop(capture);
+        assert!(events.contains_at(tracing::Level::INFO, "lockout cleared"));
+        assert!(events.contains("tenant_id=t1"));
+        assert!(!events.contains("Locked@Example.com"));
 
         assert!(matches!(
             h.engine

@@ -17,7 +17,7 @@ use time::OffsetDateTime;
 
 use crate::context::RequestContext;
 use crate::engine::AuthEngine;
-use crate::normalize::normalize_email;
+use crate::normalize::{log_safe, normalize_email};
 use crate::services::auth::detached::run_after_invitation_accepted;
 use crate::services::auth::{map_repository_error, spawn_guarded};
 use crate::traits::{HookContext, InviteData, StoredInvitation};
@@ -165,7 +165,8 @@ impl AuthEngine {
         {
             tracing::error!(%error, "invitation: delivery failed (the invitation stands)");
         }
-        tracing::info!(%tenant_id, role = %invitation.role, "invitation: created");
+        let tenant = log_safe(tenant_id);
+        tracing::info!(tenant_id = %tenant, role = %invitation.role, "invitation: created");
         Ok(())
     }
 
@@ -381,8 +382,9 @@ impl AuthEngine {
                 &self.config().config().roles.hierarchy,
             )
         {
+            let tenant = log_safe(tenant_id);
             tracing::warn!(
-                %tenant_id,
+                tenant_id = %tenant,
                 %revoker_user_id,
                 "invitation: revoke refused — outranked by the invitation"
             );
@@ -393,7 +395,8 @@ impl AuthEngine {
             .take_invitation_index(tenant_id, &self.invitee_identifier(&email))
             .await?;
         let removed = store.delete_invitation_by_hash(&hash).await?;
-        tracing::info!(%tenant_id, %revoker_user_id, "invitation: withdrawn");
+        let tenant = log_safe(tenant_id);
+        tracing::info!(tenant_id = %tenant, %revoker_user_id, "invitation: withdrawn");
         Ok(removed)
     }
 
@@ -1184,6 +1187,10 @@ mod tests {
         // account at a role, and it was unwithdrawable for its whole TTL.
         let Some(s) = setup(invite_config()) else { return };
         let inviter = seed_admin(&s.users, "admin@example.com", "ADMIN").await;
+        // Captured across both halves: a `tracing` field expression is not evaluated without a
+        // subscriber, so `log_safe` on the tenant — the second lock against a forged record —
+        // runs only under capture, and nothing else observes it.
+        let (events, capture) = crate::log_capture::capture_events();
         assert!(
             s.engine
                 .invite(&inviter, "invitee@example.com", "MEMBER", "t1", None)
@@ -1198,6 +1205,10 @@ mod tests {
                 .await,
             Ok(true)
         ));
+        drop(capture);
+        assert!(events.contains_at(tracing::Level::INFO, "invitation: created"));
+        assert!(events.contains_at(tracing::Level::INFO, "invitation: withdrawn"));
+        assert!(events.contains("tenant_id=t1"));
         // Both the record and the pointer are gone — a surviving index would read to an
         // operator as "still pending".
         assert!(indexed(&s, "invitee@example.com").await.is_none());
@@ -1240,12 +1251,22 @@ mod tests {
         // `InsufficientRole` would say "there is a pending invitation here, at a role above
         // yours" while `Ok(false)` says "there is none" — an oracle any member could walk an
         // address list through, which is what hashing the address into the index prevents.
+        // Captured because the refusal answers `Ok(false)` — the same as "nothing pending" — so
+        // the warning is the ONLY place the two cases are distinguishable, and an operator
+        // looking at a member probing an address list has nothing else to read.
+        let (events, capture) = crate::log_capture::capture_events();
         assert!(matches!(
             s.engine
                 .revoke_invitation(&member, "invitee@example.com", "t1")
                 .await,
             Ok(false)
         ));
+        drop(capture);
+        assert!(events.contains_at(
+            tracing::Level::WARN,
+            "invitation: revoke refused — outranked by the invitation"
+        ));
+        assert!(events.contains("tenant_id=t1"));
         // The same caller, against an address with nothing pending: the same answer.
         assert!(matches!(
             s.engine

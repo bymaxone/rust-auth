@@ -12,6 +12,10 @@ use super::{PasswordAlgorithm, PasswordParams};
 /// Verify `password` against a PHC string, auto-selecting the verifier from the PHC
 /// algorithm prefix. Returns `false` for a wrong password, a malformed string, or an
 /// algorithm whose feature is not compiled in — never panics.
+///
+/// PHC is the only encoding either implementation reads. nest-auth writes it too, so a hash
+/// from one backend verifies under the other, and there is no second shape to fall back to:
+/// nothing in the credential path branches on which library wrote the record.
 pub(super) fn verify_phc(password: &[u8], phc: &str) -> bool {
     let Ok(hash) = PasswordHash::new(phc) else {
         return false;

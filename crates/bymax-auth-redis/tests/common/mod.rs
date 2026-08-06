@@ -114,6 +114,21 @@ impl TestRedis {
         members
     }
 
+    /// Add a member to a SET out-of-band. Used to plant a member the current writer never
+    /// emits — a legacy bare-hash entry — into a session index, which is the only way to
+    /// reach the readers' "neither a live session nor a grace pointer" path.
+    pub async fn sadd(&self, key: &str, member: &str) -> bool {
+        let Some(mut conn) = self.raw().await else {
+            return false;
+        };
+        redis::cmd("SADD")
+            .arg(key)
+            .arg(member)
+            .query_async::<()>(&mut conn)
+            .await
+            .is_ok()
+    }
+
     /// The TTL (seconds) of a key: `-2` when absent, `-1` when it has no expiry.
     pub async fn ttl(&self, key: &str) -> i64 {
         let Some(mut conn) = self.raw().await else {

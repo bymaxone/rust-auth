@@ -93,14 +93,11 @@ additional_cargo_args = ["--all-features"]
 #     were shifted into disjoint bit ranges (`<< 24`, `<< 16`, `<< 8`, none), so no two
 #     operands share a set bit and XOR produces the identical word. The `| with &` mutants of
 #     the same expression are NOT equivalent and the RFC 4226 vectors kill them.
-# 11. `replace is_legacy -> bool with false` — its only caller is `needs_rehash`, where it is
-#     a fast path: a legacy `scrypt:hex:hex` string can never parse as a current PHC, so the
-#     fallback it short-circuits answers `true` for exactly the same inputs. The `with true`
-#     mutant of the same function is NOT equivalent (it would flag every current hash as
-#     stale) and is killed.
-# 12. `replace | with ^ in decode_hex` — same shape as 1 and 10: `(hi << 4) | lo` combines a
-#     high nibble with a value `hex_nibble` bounds to 0..=15, so the two never share a set bit
-#     and XOR writes the identical byte.
+# 11-12. REMOVED. These described `is_legacy` and a `decode_hex` built on `(hi << 4) | lo`,
+#     both part of the legacy credential reader that 6da0382 deleted, and neither matched a
+#     mutant any more. A stale exclusion is worse than none — it silently suppresses a future
+#     function that happens to share the name, and nobody decided that. The numbering below is
+#     left as it was so the remaining entries keep their identities.
 # 13. `EmailProvider::send_email_changed_notification` default body — the same shape as 8: it is
 #     literally `let _ = (args); Ok(())`, where the binding exists only to tell the compiler the
 #     arguments are deliberately unused. Replacing it with `Ok(())` is the same program. The
@@ -119,7 +116,5 @@ exclude_re = [
     'replace < with <= in MfaService::challenge_platform',
     'replace < with <= in MfaService::splice_recovery_code',
     'replace \| with \^ in hotp',
-    'replace is_legacy -> bool with false',
-    'replace \| with \^ in decode_hex',
     'replace EmailProvider::send_email_changed_notification -> Result<\(\), EmailError> with Ok\(\(\)\)',
 ]

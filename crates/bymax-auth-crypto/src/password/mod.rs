@@ -1,7 +1,6 @@
 //! Password hashing over RustCrypto: scrypt (default) and Argon2id (`argon2`
 //! feature), producing self-describing PHC strings with constant-time verification,
-//! rehash-on-verify detection, parameter-floor validation, and a compatibility
-//! parser.
+//! rehash-on-verify detection, and parameter-floor validation.
 //!
 //! Run [`hash`] and [`verify`] inside `tokio::task::spawn_blocking` (or equivalent);
 //! both are synchronous, memory-hard CPU work (~100–200 ms) and would otherwise stall

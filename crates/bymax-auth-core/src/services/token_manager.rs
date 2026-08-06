@@ -578,7 +578,18 @@ impl TokenManagerService {
                 // signature of a stolen token. Revoke the whole family (every live descendant
                 // of that login) so the thief's chain dies too, then reject: every holder must
                 // re-authenticate (§12.5.2, OWASP rotation with automatic reuse detection).
+                // Named, on both lines. This is the strongest compromise signal the library
+                // produces, and it used to be logged as bare prose: the account it concerns
+                // reached only a consumer who had wired `on_refresh_token_reuse_detected`,
+                // and the shipped hooks are no-ops. On a default deployment the one
+                // unambiguous theft signal was anonymous in the log and nowhere else, so an
+                // operator could tell that something happened and not to whom (ASVS 16.2.1).
+                //
+                // Two events rather than one: the detection is the finding and the revocation
+                // is the response to it, and a `revoke_family` that fails must not take the
+                // finding down with it. The owner is only knowable after the revocation.
                 tracing::warn!(
+                    family_id = %family,
                     "refresh: reuse of a consumed refresh token detected — revoking the token family"
                 );
                 // The owner comes back from the revocation, and can come from nowhere
@@ -588,6 +599,13 @@ impl TokenManagerService {
                     .session_store
                     .revoke_family(SessionKind::Dashboard, &family)
                     .await?;
+                // Bound rather than inlined in the field; see the note in `login`.
+                let owner_id = owner.as_deref().unwrap_or("<unknown>");
+                tracing::warn!(
+                    user_id = owner_id,
+                    family_id = %family,
+                    "refresh: token family revoked after reuse detection"
+                );
                 self.fire_reuse_detected(owner.as_deref(), &family).await;
                 Err(AuthError::RefreshTokenInvalid)
             }
@@ -782,7 +800,10 @@ impl TokenManagerService {
             RotateOutcome::Reused(family) => {
                 // Post-grace replay of a consumed platform refresh token: revoke the whole
                 // family and reject, the platform-keyspace analogue of the dashboard path.
+                // Named for the same reason as the dashboard plane, and more so: this is the
+                // highest-privilege identity in the system.
                 tracing::warn!(
+                    family_id = %family,
                     "platform refresh: reuse of a consumed refresh token detected — revoking the token family"
                 );
                 // The owner comes back from the revocation, and can come from nowhere
@@ -792,6 +813,12 @@ impl TokenManagerService {
                     .session_store
                     .revoke_family(SessionKind::Platform, &family)
                     .await?;
+                let owner_id = owner.as_deref().unwrap_or("<unknown>");
+                tracing::warn!(
+                    user_id = owner_id,
+                    family_id = %family,
+                    "platform refresh: token family revoked after reuse detection"
+                );
                 self.fire_reuse_detected(owner.as_deref(), &family).await;
                 Err(AuthError::RefreshTokenInvalid)
             }
@@ -1542,12 +1569,21 @@ mod tests {
                 .await
                 .is_ok()
         );
-        // Replaying the consumed old token is rejected as a detected reuse...
+        // Replaying the consumed old token is rejected as a detected reuse... Captured, because
+        // the account the revocation hit is named only in the log: the caller is told
+        // `RefreshTokenInvalid` either way, so which family was cut is otherwise unobservable.
+        let (events, capture) = crate::log_capture::capture_events();
         assert!(matches!(
             svc.reissue_tokens(&issued.refresh_token, "10.0.0.1", "agent/1.0")
                 .await,
             Err(AuthError::RefreshTokenInvalid)
         ));
+        drop(capture);
+        assert!(events.contains_at(
+            tracing::Level::WARN,
+            "refresh: token family revoked after reuse detection"
+        ));
+        assert!(events.contains("user_id=u1"));
         // ...and the reuse revoked the whole family, so the live rotated token no longer rotates.
         assert!(matches!(
             svc.reissue_tokens(&rotated.refresh_token, "10.0.0.1", "agent/1.0")
@@ -1757,11 +1793,20 @@ mod tests {
                 .await
                 .is_ok()
         );
+        // Captured for the same reason as the dashboard case: the revoked account is named in
+        // the log and nowhere else.
+        let (events, capture) = crate::log_capture::capture_events();
         assert!(matches!(
             svc.reissue_platform_tokens(&issued.refresh_token, "10.0.0.1", "agent/1.0")
                 .await,
             Err(AuthError::RefreshTokenInvalid)
         ));
+        drop(capture);
+        assert!(events.contains_at(
+            tracing::Level::WARN,
+            "platform refresh: token family revoked after reuse detection"
+        ));
+        assert!(events.contains("user_id=p1"));
         assert!(matches!(
             svc.reissue_platform_tokens(&rotated.refresh_token, "10.0.0.1", "agent/1.0")
                 .await,

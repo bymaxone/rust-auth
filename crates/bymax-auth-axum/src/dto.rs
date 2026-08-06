@@ -9,6 +9,30 @@
 use garde::Validate;
 use serde::Deserialize;
 
+/// Refuse a value carrying a control character.
+///
+/// `tenant_id` is the widest attacker-controlled field on this surface: it arrives in the body
+/// of `/login`, `/register`, `/verify-email`, `/password/forgot-password` and
+/// `/oauth/{provider}` — all public — and is the caller's own value whenever no
+/// `TenantIdResolver` is configured, which is the default. It then reaches a `tracing` event, a
+/// Redis key segment and an HMAC preimage.
+///
+/// A length bound alone does not cover that. nest-auth has always rejected control characters
+/// here, and this side accepted them, so the same request was a 400 on one backend and a 200 on
+/// the other — the exact divergence `requestFieldBounds` exists to prevent, and one that also
+/// let a caller forge a record in a plain-text log pipeline (ASVS 16.4.1).
+///
+/// `log_safe` is the second lock at the log site, for values that reach one without passing a
+/// DTO — a host's `TenantIdResolver` returns whatever it returns.
+fn no_control_characters(value: &str, _: &()) -> garde::Result {
+    // `is_control` is Unicode category Cc — C0, DEL and C1 — which is exactly the set that can
+    // forge a record boundary. Held identical to `log_safe`, the second lock at the log site.
+    if value.chars().any(char::is_control) {
+        return Err(garde::Error::new("must not contain control characters"));
+    }
+    Ok(())
+}
+
 /// `POST /auth/register` body.
 #[derive(Debug, Deserialize, Validate)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -23,7 +47,7 @@ pub struct RegisterDto {
     #[garde(length(min = 2, max = 128))]
     pub name: String,
     /// The tenant scope; ignored when a `TenantIdResolver` is configured.
-    #[garde(length(min = 1, max = 128))]
+    #[garde(length(min = 1, max = 128), custom(no_control_characters))]
     pub tenant_id: String,
 }
 
@@ -44,7 +68,7 @@ pub struct LoginDto {
     #[garde(length(min = 1, max = 128))]
     pub password: String,
     /// The tenant scope; ignored when a `TenantIdResolver` is configured.
-    #[garde(length(min = 1, max = 128))]
+    #[garde(length(min = 1, max = 128), custom(no_control_characters))]
     pub tenant_id: String,
 }
 
@@ -56,7 +80,7 @@ pub struct ForgotPasswordDto {
     #[garde(email, length(max = 255))]
     pub email: String,
     /// The tenant scope.
-    #[garde(length(min = 1, max = 128))]
+    #[garde(length(min = 1, max = 128), custom(no_control_characters))]
     pub tenant_id: String,
 }
 
@@ -119,7 +143,7 @@ pub struct ResetPasswordDto {
     #[garde(inner(length(min = 64, max = 64)))]
     pub verified_token: Option<String>,
     /// The tenant scope.
-    #[garde(length(min = 1, max = 128))]
+    #[garde(length(min = 1, max = 128), custom(no_control_characters))]
     pub tenant_id: String,
 }
 
@@ -134,7 +158,7 @@ pub struct VerifyOtpDto {
     #[garde(length(min = 4, max = 8))]
     pub otp: String,
     /// The tenant scope.
-    #[garde(length(min = 1, max = 128))]
+    #[garde(length(min = 1, max = 128), custom(no_control_characters))]
     pub tenant_id: String,
 }
 
@@ -146,7 +170,7 @@ pub struct ResendOtpDto {
     #[garde(email, length(max = 255))]
     pub email: String,
     /// The tenant scope.
-    #[garde(length(min = 1, max = 128))]
+    #[garde(length(min = 1, max = 128), custom(no_control_characters))]
     pub tenant_id: String,
 }
 
@@ -166,7 +190,7 @@ pub struct VerifyEmailDto {
     #[garde(length(min = 6, max = 6))]
     pub otp: String,
     /// The tenant scope.
-    #[garde(length(min = 1, max = 128))]
+    #[garde(length(min = 1, max = 128), custom(no_control_characters))]
     pub tenant_id: String,
 }
 
@@ -178,7 +202,7 @@ pub struct ResendVerificationDto {
     #[garde(email, length(max = 255))]
     pub email: String,
     /// The tenant scope.
-    #[garde(length(min = 1, max = 128))]
+    #[garde(length(min = 1, max = 128), custom(no_control_characters))]
     pub tenant_id: String,
 }
 
@@ -360,10 +384,16 @@ pub struct RefreshDto {
 #[derive(Debug, Deserialize, Validate)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct OAuthInitiateQuery {
-    /// The tenant the user will join on success; carried in the Redis state and recovered
-    /// on callback. Not validated against the DB here (the `on_oauth_login` hook enforces
-    /// tenant membership).
-    #[garde(length(min = 1, max = 128))]
+    /// The tenant the user will join on success — a REQUEST for one, not a decision.
+    ///
+    /// `oauth_initiate` resolves it through the configured `TenantIdResolver` before anything
+    /// is minted, and the RESOLVED value is what goes into the single-use Redis state and is
+    /// recovered on callback. This field previously went in verbatim, on the rationale that
+    /// "the `on_oauth_login` hook enforces tenant membership" — which did not hold: the hook
+    /// is handed the same value through its `HookContext`, so a hook deciding on the profile
+    /// alone admitted a caller into any tenant they named, on the one flow that decides which
+    /// tenant an account is PROVISIONED into.
+    #[garde(length(min = 1, max = 128), custom(no_control_characters))]
     pub tenant_id: String,
 }
 
@@ -598,5 +628,61 @@ mod tests {
             over.validate().is_err(),
             "an oversized address was accepted"
         );
+    }
+
+    /// `tenant_id` carrying a control character must be refused at the boundary.
+    ///
+    /// It is the widest attacker-controlled field on this surface — it arrives in the body of
+    /// five public routes and is the caller's own value whenever no `TenantIdResolver` is
+    /// configured, which is the default — and it reaches a `tracing` event, a Redis key segment
+    /// and an HMAC preimage. A newline in it forges a record on a plain-text subscriber
+    /// (ASVS 16.4.1), and a length bound alone does not cover that.
+    ///
+    /// nest-auth has always rejected these, so this is also a wire divergence: without it the
+    /// same request is a 400 on one backend and a 200 on the other, which is precisely what
+    /// `requestFieldBounds` exists to prevent.
+    #[test]
+    fn a_tenant_id_with_a_control_character_is_refused() {
+        for bad in [
+            "acme\nINFO login: success user_id=victim",
+            "acme\r\nforged",
+            "acme\u{0}truncated",
+            "acme\u{7f}del",
+            "acme\u{1b}[31mescape",
+            "acme\u{85}c1-next-line",
+        ] {
+            let dto = LoginDto {
+                email: "user@example.com".to_owned(),
+                password: "hunter2hunter2".to_owned(),
+                tenant_id: bad.to_owned(),
+            };
+            assert!(
+                dto.validate().is_err(),
+                "a tenant_id carrying a control character was accepted: {bad:?}"
+            );
+        }
+    }
+
+    /// …and an ordinary tenant id is still accepted, or the check above would be satisfied by a
+    /// validator that refuses everything.
+    #[test]
+    fn an_ordinary_tenant_id_is_accepted() {
+        for good in [
+            "acme",
+            "acme-corp",
+            "tenant_42",
+            "ACME.Corp",
+            "empresa-são-paulo",
+        ] {
+            let dto = LoginDto {
+                email: "user@example.com".to_owned(),
+                password: "hunter2hunter2".to_owned(),
+                tenant_id: good.to_owned(),
+            };
+            assert!(
+                dto.validate().is_ok(),
+                "a legitimate tenant_id was refused: {good:?}"
+            );
+        }
     }
 }

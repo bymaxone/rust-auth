@@ -100,8 +100,17 @@ impl AuthEngine {
     /// provider authorization URL. The raw `state` is never stored — only its hash is a key —
     /// and only the `code_challenge` is exposed to the provider.
     ///
-    /// `tenant_id` is carried verbatim into the state and recovered on callback; it is **not**
-    /// validated here (the `on_oauth_login` hook enforces tenant membership).
+    /// The tenant is resolved through the configured [`crate::config::TenantIdResolver`]
+    /// before it is written into the state, exactly as login, register, the reset flows and
+    /// email verification resolve theirs (§24 invariant 8). This was the one door that still
+    /// took the caller's value verbatim, and it is the door that decides which tenant an
+    /// account gets PROVISIONED into — strictly more than the others were protecting. Its
+    /// previous rationale ("the `on_oauth_login` hook enforces tenant membership") did not
+    /// hold: the hook is handed the same `tenant_id` through its `HookContext`, so a hook
+    /// deciding on the profile alone admitted an attacker into any tenant they named.
+    ///
+    /// The RESOLVED value is what goes into the single-use state record, so the callback
+    /// cannot be talked into a different one either.
     ///
     /// # Errors
     ///
@@ -112,14 +121,19 @@ impl AuthEngine {
         &self,
         provider: &str,
         tenant_id: &str,
+        ctx: &RequestContext,
     ) -> Result<OAuthRedirect, AuthError> {
         // Resolve the provider first: an unknown provider fails without minting state.
         let provider_impl = self.resolve_oauth_provider(provider)?;
+        // A deployment that derives the tenant from the request has stated that the caller's
+        // value is not to be trusted. Resolved before any state is minted, so a request that
+        // the resolver refuses consumes nothing.
+        let tenant_id = self.resolve_tenant(tenant_id, ctx).await?;
 
         let state = generate_state();
         let (code_verifier, code_challenge) = generate_pkce();
         let payload = serde_json::to_string(&OAuthStatePayload {
-            tenant_id: tenant_id.to_owned(),
+            tenant_id,
             code_verifier,
         })
         .map_err(oauth_state_serialize_failed)?;
@@ -766,7 +780,7 @@ mod tests {
     /// Run a full initiate → callback, returning the callback outcome. The `code` is canned
     /// (the recording transport ignores it); the `state` is recovered from the authorize URL.
     async fn run_flow(h: &OAuthHarness) -> Result<OAuthOutcome, AuthError> {
-        let url = h.engine.oauth_initiate("google", "t1").await;
+        let url = h.engine.oauth_initiate("google", "t1", &ctx()).await;
         let Ok(url) = url.map(|r| r.authorize_url) else { return Err(AuthError::OauthFailed) };
         let state = extract_query_param(&url, "state").unwrap_or_default();
         h.engine
@@ -790,7 +804,7 @@ mod tests {
         // URL carrying the state and an S256 challenge.
         let hooks: Arc<dyn AuthHooks> = Arc::new(DecisionHook(OAuthLoginResult::Create));
         let Some(h) = harness(hooks, Arc::new(RoutingHttpClient::new()), false) else { return };
-        let url = h.engine.oauth_initiate("google", "t1").await;
+        let url = h.engine.oauth_initiate("google", "t1", &ctx()).await;
         assert!(
             matches!(&url, Ok(r) if r.authorize_url.starts_with("https://accounts.google.com/"))
         );
@@ -818,11 +832,11 @@ mod tests {
         let hooks: Arc<dyn AuthHooks> = Arc::new(DecisionHook(OAuthLoginResult::Create));
         let Some(h) = harness(hooks, Arc::new(RoutingHttpClient::new()), false) else { return };
         assert!(matches!(
-            h.engine.oauth_initiate("github", "t1").await,
+            h.engine.oauth_initiate("github", "t1", &ctx()).await,
             Err(AuthError::OauthFailed)
         ));
         assert!(matches!(
-            h.engine.oauth_initiate("BAD_NAME", "t1").await,
+            h.engine.oauth_initiate("BAD_NAME", "t1", &ctx()).await,
             Err(AuthError::OauthFailed)
         ));
     }
@@ -840,7 +854,7 @@ mod tests {
         assert_eq!(result.user.oauth_provider.as_deref(), Some("google"));
         assert!(!result.access_token.is_empty());
         // The PKCE verifier was forwarded on exchange and matches the issued challenge.
-        let body = h.engine.oauth_initiate("google", "t1").await;
+        let body = h.engine.oauth_initiate("google", "t1", &ctx()).await;
         assert!(body.is_ok());
         let Some(exchange) = h.http.exchange_body() else { return };
         assert!(exchange.contains("code_verifier="));
@@ -853,7 +867,7 @@ mod tests {
         // challenge that left in the authorize URL.
         let hooks: Arc<dyn AuthHooks> = Arc::new(DecisionHook(OAuthLoginResult::Create));
         let Some(h) = harness(hooks, Arc::new(RoutingHttpClient::new()), false) else { return };
-        let url = h.engine.oauth_initiate("google", "t1").await;
+        let url = h.engine.oauth_initiate("google", "t1", &ctx()).await;
         let Ok(url) = url.map(|r| r.authorize_url) else { return };
         let state = extract_query_param(&url, "state").unwrap_or_default();
         let challenge = extract_query_param(&url, "code_challenge").unwrap_or_default();
@@ -972,7 +986,7 @@ mod tests {
             Err(AuthError::OauthFailed)
         ));
         // Issue a real state, consume it once, then replay it.
-        let url = h.engine.oauth_initiate("google", "t1").await;
+        let url = h.engine.oauth_initiate("google", "t1", &ctx()).await;
         let Ok(url) = url.map(|r| r.authorize_url) else { return };
         let state = extract_query_param(&url, "state").unwrap_or_default();
         assert!(
@@ -999,7 +1013,7 @@ mod tests {
         // mismatched one are both fatal.
         let hooks: Arc<dyn AuthHooks> = Arc::new(DecisionHook(OAuthLoginResult::Create));
         let Some(h) = harness(hooks, Arc::new(RoutingHttpClient::new()), false) else { return };
-        let url = h.engine.oauth_initiate("google", "t1").await;
+        let url = h.engine.oauth_initiate("google", "t1", &ctx()).await;
         let Ok(url) = url.map(|r| r.authorize_url) else { return };
         let state = extract_query_param(&url, "state").unwrap_or_default();
 
@@ -1039,7 +1053,7 @@ mod tests {
         // callback unsatisfiable, and no other test would notice.
         let hooks: Arc<dyn AuthHooks> = Arc::new(DecisionHook(OAuthLoginResult::Create));
         let Some(h) = harness(hooks, Arc::new(RoutingHttpClient::new()), false) else { return };
-        let Ok(redirect) = h.engine.oauth_initiate("google", "t1").await else { return };
+        let Ok(redirect) = h.engine.oauth_initiate("google", "t1", &ctx()).await else { return };
         assert_eq!(
             extract_query_param(&redirect.authorize_url, "state").as_deref(),
             Some(redirect.state.as_str())
@@ -1271,7 +1285,7 @@ mod tests {
             .build();
         let Ok(engine) = engine else { return };
         assert!(matches!(
-            engine.oauth_initiate("google", "t1").await,
+            engine.oauth_initiate("google", "t1", &ctx()).await,
             Err(AuthError::Internal(_))
         ));
     }
@@ -1386,7 +1400,7 @@ mod tests {
             .build();
         let Ok(engine) = engine else { return };
 
-        let url = engine.oauth_initiate("google", "t1").await;
+        let url = engine.oauth_initiate("google", "t1", &ctx()).await;
         let Ok(url) = url.map(|r| r.authorize_url) else { return };
         let state = extract_query_param(&url, "state").unwrap_or_default();
         let outcome = engine
@@ -1426,7 +1440,7 @@ mod tests {
             .build();
         let Ok(engine) = engine else { return };
 
-        let url = engine.oauth_initiate("google", "t1").await;
+        let url = engine.oauth_initiate("google", "t1", &ctx()).await;
         let Ok(url) = url.map(|r| r.authorize_url) else { return };
         let state = extract_query_param(&url, "state").unwrap_or_default();
         let outcome = engine
@@ -1461,7 +1475,7 @@ mod tests {
         let Ok(engine) = engine else { return };
 
         // First sign-in creates the account and succeeds.
-        let url = engine.oauth_initiate("google", "t1").await;
+        let url = engine.oauth_initiate("google", "t1", &ctx()).await;
         let Ok(url) = url.map(|r| r.authorize_url) else { return };
         let state = extract_query_param(&url, "state").unwrap_or_default();
         assert!(matches!(
@@ -1493,7 +1507,7 @@ mod tests {
             .build();
         let Ok(linking) = linking else { return };
 
-        let url = linking.oauth_initiate("google", "t1").await;
+        let url = linking.oauth_initiate("google", "t1", &ctx()).await;
         let Ok(url) = url.map(|r| r.authorize_url) else { return };
         let state = extract_query_param(&url, "state").unwrap_or_default();
         let banned = linking
@@ -1534,5 +1548,95 @@ mod tests {
         let cloned = outcome.clone();
         assert!(matches!(cloned, OAuthOutcome::MfaChallenge(_)));
         assert!(format!("{outcome:?}").contains("MfaChallenge"));
+    }
+
+    /// A configured `TenantIdResolver` must win over `?tenantId=` on the OAuth initiate.
+    ///
+    /// This was the last flow reading the caller's value verbatim, and the worst one to leave:
+    /// it decides which tenant an account is PROVISIONED into. An attacker could name any
+    /// tenant, complete a normal sign-in with their OWN provider account, and be created or
+    /// linked inside it. The doc comment's rationale — that `on_oauth_login` enforces tenant
+    /// membership — did not hold: the hook is handed the same spoofed value through its
+    /// `HookContext`, so a hook deciding on the profile alone admitted it.
+    ///
+    /// The check is indirect but exact: the resolver refuses when no `host` header is present,
+    /// so a flow that consults it fails with `Forbidden` on an empty context and a flow that
+    /// ignores it mints a redirect. nest-auth has resolved here since its own fix; this side
+    /// had not, which is the drift the parity work exists to end.
+    #[tokio::test]
+    async fn oauth_initiate_honours_the_tenant_resolver() {
+        /// Resolves the tenant from the `host` header, refusing when it is absent.
+        struct HostTenantResolver;
+
+        #[async_trait::async_trait]
+        impl crate::config::TenantIdResolver for HostTenantResolver {
+            async fn resolve(
+                &self,
+                parts: &crate::config::RequestParts,
+            ) -> Result<String, crate::config::TenantResolveError> {
+                match parts.host.as_deref() {
+                    Some("") | None => Err(crate::config::TenantResolveError::Empty),
+                    Some(host) => Ok(host.to_owned()),
+                }
+            }
+        }
+
+        let http = Arc::new(RoutingHttpClient::new());
+        let users = Arc::new(InMemoryUserRepository::new());
+        let stores = Arc::new(InMemoryStores::new());
+        let google = GoogleOAuthProvider::new(google_config(), http.clone());
+        let mut cfg = base_config();
+        cfg.controllers.oauth = true;
+        cfg.tenant_id_resolver = Some(Arc::new(HostTenantResolver));
+        let built = AuthEngine::builder()
+            .config(cfg)
+            .environment(Environment::Test)
+            .user_repository(users)
+            .redis_stores(stores.clone())
+            .oauth_provider(Arc::new(google))
+            .oauth_state_store(stores.clone())
+            .build();
+        // Bound on one line so the never-taken divergent arm stays a region rather than
+        // becoming an uncovered LINE, which is what the 100% gate measures.
+        let Ok(engine) = built else { return };
+
+        // No `host`: the resolver refuses, and the spoofed body value must not stand in for it.
+        let empty = RequestContext::new("1.2.3.4", "ua", std::collections::BTreeMap::new());
+        // Awaited into a binding first, as the resolvable case below is: an `.await` inside the
+        // `matches!` scrutinee splits the expression across the suspend point and leaves the
+        // resumption region on a line of its own, which the 100% gate reads as uncovered.
+        let refused = engine
+            .oauth_initiate("google", "victim-tenant", &empty)
+            .await;
+        assert!(
+            matches!(refused, Err(AuthError::Forbidden)),
+            "the initiate must consult the resolver, not the query string"
+        );
+
+        // With a `host`, the RESOLVED tenant is what lands in the single-use state record — so
+        // the callback cannot be talked into a different one either.
+        let mut headers = std::collections::BTreeMap::new();
+        headers.insert("host".to_owned(), "resolved-tenant".to_owned());
+        let resolved_ctx = RequestContext::new("1.2.3.4", "ua", headers);
+        // Asserted first, destructured second: the workspace denies `panic!` in tests too, so
+        // the failure has to come from the assertion rather than from an `else` arm.
+        let minted = engine
+            .oauth_initiate("google", "victim-tenant", &resolved_ctx)
+            .await;
+        assert!(minted.is_ok(), "a resolvable request must mint a redirect");
+        let Ok(redirect) = minted else { return };
+        let stored = OAuthStateStore::take_state(stores.as_ref(), &state_key(&redirect.state))
+            .await
+            .ok()
+            .flatten()
+            .unwrap_or_default();
+        assert!(
+            stored.contains("resolved-tenant"),
+            "the state must carry the resolved tenant, not the requested one"
+        );
+        assert!(
+            !stored.contains("victim-tenant"),
+            "the requested tenant must not survive into the state record"
+        );
     }
 }

@@ -273,7 +273,17 @@ pub fn reduce_to_base_word(password: &str) -> String {
     undecorated
         .chars()
         .map(undo_leet)
-        .filter(char::is_ascii_alphanumeric)
+        // Letters and numbers in ANY script, not just ASCII. `is_ascii_alphanumeric` discarded
+        // every non-Latin character, so a password written in Cyrillic, Han, Kana, Hangul,
+        // Greek, Arabic, Hebrew or Thai reduced to the empty string — and an empty base is
+        // below `MIN_BASE_LENGTH`, which `is_breached` reads as "breached". Users of those
+        // scripts were refused on register, reset and change, and told their strong password
+        // was commonly used, which pushes them toward the strictly smaller ASCII keyspace.
+        //
+        // Keeping the characters also makes a consumer's non-Latin blocklist entry reachable:
+        // extra entries are normalized through this same function, so under the ASCII filter
+        // every one of them collapsed to "" and could never match.
+        .filter(|c| c.is_alphanumeric())
         .collect()
 }
 
@@ -304,6 +314,16 @@ fn is_padded_repeat(value: &str) -> bool {
 /// knows nothing about breach corpora. A deployment that wants that extends it with
 /// [`CommonPasswordChecker::with_extra_words`] (the context-specific words ASVS v5 §6.2.11 asks
 /// for) or supplies the HIBP checker, which searches a real corpus over the network.
+///
+/// **The shipped base words are ASCII.** The reduction preserves letters and numbers in any
+/// script — a strong Cyrillic, Han, Kana, Hangul, Greek, Arabic, Hebrew or Thai passphrase is
+/// admitted, and used to be refused outright with the "commonly used" error, which pushed those
+/// users onto the smaller ASCII keyspace. But the list itself holds no entries in those
+/// scripts, so the equivalent of `password` in one of them passes this screen. A deployment
+/// serving those users should add the common ones for its locale through
+/// [`CommonPasswordChecker::with_extra_words`]; extras are normalized through the same
+/// reduction, so a non-Latin entry matches a decorated form of itself the way an ASCII one
+/// does. Held in step with nest-auth's `CommonPasswordChecker`.
 pub struct CommonPasswordChecker {
     blocked: HashSet<String>,
 }
@@ -352,7 +372,10 @@ impl PasswordBreachChecker for CommonPasswordChecker {
 
         // Almost nothing survived the reduction, so the password was decoration wrapped around
         // a fragment: `!!!!!!!!` and `12345678` leave nothing at all, `a1234567` leaves `a`.
-        if base.len() < MIN_BASE_LENGTH {
+        // Counted in CHARACTERS, not bytes: `len()` is the UTF-8 byte count, so a two-character
+        // Han base would score 6 and clear a floor meant to be about how many characters the
+        // reduction actually kept. nest-auth counts code points for the same reason.
+        if base.chars().count() < MIN_BASE_LENGTH {
             return true;
         }
 
@@ -498,5 +521,80 @@ mod tests {
                 .is_breached("password")
                 .await
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // Non-ASCII scripts
+    // -----------------------------------------------------------------------
+
+    /// A strong passphrase in a script that is not Latin must be ADMITTED.
+    ///
+    /// This was a live defect in both implementations. `reduce_to_base_word` filtered to
+    /// `is_ascii_alphanumeric`, so a password written in Cyrillic, Han, Kana, Hangul, Greek,
+    /// Arabic, Hebrew or Thai reduced to the empty string — below `MIN_BASE_LENGTH`, which
+    /// `is_breached` answers `true` for. Every such user was refused on register, on reset and
+    /// on change, and told their password was commonly used. The effect was to push a whole
+    /// class of users onto the strictly smaller ASCII keyspace, which inverts the purpose of a
+    /// breach screen. Neither suite caught it: both tested ASCII inputs only.
+    #[tokio::test]
+    async fn a_strong_non_latin_password_is_admitted() {
+        let checker = CommonPasswordChecker::new();
+        for password in [
+            "пароль-очень-длинный",
+            "日本語のパスワードです",
+            "κωδικόςπρόσβασης",
+            "비밀번호가아주깁니다",
+            "סיסמאארוכהמאוד",
+            "كلمةالمرورطويلةجدا",
+            "ЖЫрафЖираф77",
+            "Ünterwegs-2024",
+        ] {
+            assert!(
+                !checker.is_breached(password).await,
+                "{password} is strong and must be admitted"
+            );
+        }
+    }
+
+    /// The characters survive the reduction rather than merely being tolerated, which is what
+    /// makes a consumer's non-Latin extra word reachable at all: extras are normalized through
+    /// the same function, so under the ASCII filter every one of them became "".
+    #[test]
+    fn non_ascii_letters_survive_the_reduction() {
+        assert_eq!(reduce_to_base_word("Пароль"), "пароль");
+        assert_eq!(reduce_to_base_word("日本語"), "日本語");
+        assert_eq!(reduce_to_base_word("Ünterwegs-2024"), "ünterwegs");
+    }
+
+    #[tokio::test]
+    async fn a_non_latin_extra_word_matches() {
+        let checker = CommonPasswordChecker::with_extra_words(["пароль"]);
+        assert!(checker.is_breached("Пароль123").await);
+        // A different Cyrillic word is still admitted — the entry blocks itself, not the script.
+        assert!(!checker.is_breached("черепаха").await);
+    }
+
+    /// Widening what reduces to a non-empty base must not widen what gets through. Each of
+    /// these is decoration around a fragment too short to be a word, which is what the length
+    /// floor exists for.
+    #[tokio::test]
+    async fn the_weak_ascii_shapes_are_still_refused() {
+        let checker = CommonPasswordChecker::new();
+        for password in ["!!!!!!!!", "12345678", "a1234567", "abc12345"] {
+            assert!(
+                checker.is_breached(password).await,
+                "{password} must be refused"
+            );
+        }
+    }
+
+    /// A repeated single character in a non-Latin script is now caught by the repeated-unit
+    /// rule instead of by collapsing to "". Same answer, reached for the right reason — and the
+    /// reason is what keeps holding when the script changes again.
+    #[tokio::test]
+    async fn a_repeated_non_ascii_character_is_refused_by_the_repetition_rule() {
+        let checker = CommonPasswordChecker::new();
+        assert!(checker.is_breached("аааааааа").await);
+        assert!(checker.is_breached("東東東東東東東東").await);
     }
 }

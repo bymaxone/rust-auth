@@ -48,6 +48,10 @@ data-encoding = { version = "2", optional = true }
 [dev-dependencies]
 proptest = "1"
 hex = "0.4"
+# Reads `conformance/wire-contract.json` so the password-hash vectors are asserted against
+# the shared file rather than copied into the test — a copy drifts silently, which is the
+# failure mode the contract exists to prevent.
+serde_json = "1"
 # Benchmarks only (`cargo bench`). `default-features = false` drops the HTML/plotters
 # and rayon trees, keeping the dev dependency graph lean.
 criterion = { version = "0.8", default-features = false, features = ["cargo_bench_support"] }
