@@ -384,9 +384,15 @@ pub struct RefreshDto {
 #[derive(Debug, Deserialize, Validate)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct OAuthInitiateQuery {
-    /// The tenant the user will join on success; carried in the Redis state and recovered
-    /// on callback. Not validated against the DB here (the `on_oauth_login` hook enforces
-    /// tenant membership).
+    /// The tenant the user will join on success — a REQUEST for one, not a decision.
+    ///
+    /// `oauth_initiate` resolves it through the configured `TenantIdResolver` before anything
+    /// is minted, and the RESOLVED value is what goes into the single-use Redis state and is
+    /// recovered on callback. This field previously went in verbatim, on the rationale that
+    /// "the `on_oauth_login` hook enforces tenant membership" — which did not hold: the hook
+    /// is handed the same value through its `HookContext`, so a hook deciding on the profile
+    /// alone admitted a caller into any tenant they named, on the one flow that decides which
+    /// tenant an account is PROVISIONED into.
     #[garde(length(min = 1, max = 128), custom(no_control_characters))]
     pub tenant_id: String,
 }
