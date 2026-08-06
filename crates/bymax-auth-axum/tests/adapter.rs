@@ -3449,15 +3449,36 @@ type LimitSetter = fn(&mut bymax_auth_axum::RateLimitConfig, Option<bymax_auth_a
 /// Every field of `RateLimitConfig`, as setters, so the helper above can widen them all
 /// without naming each one at every call site — and so a NEW limit added to the struct shows
 /// up here rather than being silently left at its default during a probe.
+/// In declaration order, so a field added to the struct between two of these is visibly
+/// missing here rather than lost at the end of an unordered list.
 const ALL_LIMIT_SETTERS: &[LimitSetter] = &[
     |c, v| c.login = v,
     |c, v| c.register = v,
     |c, v| c.refresh = v,
-    |c, v| c.logout = v,
+    |c, v| c.forgot_password = v,
+    |c, v| c.reset_password = v,
+    |c, v| c.verify_otp = v,
+    |c, v| c.resend_password_otp = v,
+    |c, v| c.verify_email = v,
+    |c, v| c.resend_verification = v,
     |c, v| c.mfa_setup = v,
-    |c, v| c.mfa_disable = v,
+    |c, v| c.mfa_verify_enable = v,
     |c, v| c.mfa_challenge = v,
+    |c, v| c.mfa_disable = v,
+    |c, v| c.platform_login = v,
+    |c, v| c.invitation_create = v,
+    |c, v| c.invitation_accept = v,
+    |c, v| c.invitation_revoke = v,
+    |c, v| c.email_change_request = v,
+    |c, v| c.email_change_confirm = v,
+    |c, v| c.list_sessions = v,
+    |c, v| c.revoke_session = v,
     |c, v| c.revoke_all_sessions = v,
+    |c, v| c.oauth_initiate = v,
+    |c, v| c.oauth_callback = v,
+    |c, v| c.change_password = v,
+    |c, v| c.logout = v,
+    |c, v| c.ws_ticket = v,
 ];
 
 /// Hit `request` twice against `app` and report whether the second call was throttled.
