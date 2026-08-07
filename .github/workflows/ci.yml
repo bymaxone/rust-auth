@@ -616,7 +616,25 @@ jobs:
       - dogfood
       - e2e-browser
     runs-on: ubuntu-latest
+    # Once this is the required check, a hung runner holds every merge behind it
+    # for GitHub's default of six hours. The job is one comparison, so a short
+    # ceiling costs nothing and bounds that.
+    timeout-minutes: 5
     steps:
-      - name: Fail when any dependency did not succeed
+      # Printed on success as well as failure. Without it the check reports a bare
+      # red X and the reader has to open each dependency to find which one broke.
+      - name: Report the result of every dependency
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+        run: |
+          {
+            echo "| Job | Result |"
+            echo "| --- | --- |"
+            echo "$NEEDS" | jq -r 'to_entries[] | "| \(.key) | \(.value.result) |"' | sort
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+
+      # Named for what the condition does: `skipped` is deliberately not a failure
+      # here, so "did not succeed" would describe a stricter gate than this is.
+      - name: Fail when any dependency failed or was cancelled
         if: contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled')
         run: exit 1
