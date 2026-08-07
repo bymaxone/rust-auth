@@ -48,6 +48,70 @@ impl MfaService {
         Ok(())
     }
 
+    /// Remove a user's second factor WITHOUT their TOTP code — the administrative path, for a
+    /// support desk facing a user who has lost both the authenticator and the recovery codes.
+    ///
+    /// Every self-service exit from MFA needs the factor itself: [`MfaService::disable`] wants a
+    /// valid TOTP code and the recovery codes want the codes, so a user who has lost both is
+    /// locked out permanently by the control that exists to protect them. ASVS v5 §6.1.1 asks for
+    /// an administrative path out for exactly that case.
+    ///
+    /// **Authorising the caller is the host's job.** No route is exposed for this, the same
+    /// decision and for the same reason as `unlock_account`: every route this library ships is
+    /// scoped to the caller's own account, and who may reset whom is a question only the host
+    /// application can answer.
+    ///
+    /// Idempotent: resetting an account with no second factor is a no-op, so a support desk
+    /// retrying is not told a job already done has failed.
+    ///
+    /// Three things happen beyond clearing the record, and none of them are optional:
+    ///
+    /// - **Sessions are revoked and the token epoch is bumped**, so access tokens carrying
+    ///   `mfa_verified: true` die with the factor rather than outliving it.
+    /// - **The user is notified**, through the same channel [`MfaService::disable`] uses. An
+    ///   administrative reset the account holder cannot see is an account-takeover path: an
+    ///   attacker who reaches the support desk removes the second factor with nothing reaching
+    ///   the owner. The notification is what makes it an event they can detect and dispute.
+    /// - **It is logged** under its own target, so an administrative removal is distinguishable
+    ///   from a user-initiated one in this library's own trace output.
+    ///
+    /// The `after_mfa_disabled` hook fires too, so host-side alerting keeps working. It gets no
+    /// separate hook: the host is the one calling this, so it already knows — the hooks exist to
+    /// report the paths the host does not initiate.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AuthError::MfaNotEnabled`] if no user with that id exists in the given plane
+    /// (the same answer the rest of this service gives for an unresolvable subject), or an
+    /// internal/store [`AuthError`].
+    pub async fn reset_mfa(&self, user_id: &str, ctx: MfaContext) -> Result<(), AuthError> {
+        let view = self.fetch_user_mfa(user_id, ctx).await?;
+        if !view.mfa_enabled {
+            tracing::info!(
+                target: "bymax_auth::mfa",
+                user_id, "reset_mfa: no second factor to remove"
+            );
+            return Ok(());
+        }
+        self.transition_mfa_record(user_id, ctx, |_| Some((false, None, None)))
+            .await?;
+        self.session_store
+            .revoke_all(session_kind(ctx), user_id)
+            .await?;
+        self.session_store
+            .bump_epoch(session_kind(ctx), user_id)
+            .await?;
+        tracing::warn!(
+            target: "bymax_auth::mfa",
+            user_id, "reset_mfa: MFA removed administratively"
+        );
+        // No request context: this call does not come from one. Empty rather than invented, so a
+        // host logging the hook cannot mistake a placeholder for an address someone connected
+        // from.
+        self.notify_disabled(&view, user_id, "", "");
+        Ok(())
+    }
+
     /// Regenerate the recovery-code set after a successful TOTP re-auth (§7.5.5). Same TOTP-only
     /// gate and `disable:` counter as [`MfaService::disable`], **but sessions are intentionally
     /// not invalidated** (the TOTP factor is unchanged). The prior set is replaced wholesale in
