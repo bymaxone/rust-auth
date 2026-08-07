@@ -115,7 +115,7 @@ impl AuthEngine {
     ) -> Result<AuthUser, AuthError> {
         let verification_required = self.config().config().email_verification.required;
         self.passwords()
-            .assert_not_compromised(&input.password)
+            .assert_acceptable(&input.password, "password")
             .await?;
         let password_hash = self.passwords().hash(&input.password).await?;
 

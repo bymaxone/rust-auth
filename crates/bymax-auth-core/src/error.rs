@@ -44,6 +44,17 @@ pub enum ConfigError {
         /// The ceiling, in seconds.
         max: u64,
     },
+    /// `password.min_length` is outside the accepted `8..=128` range.
+    ///
+    /// Below 8 cannot describe a conformant deployment (NIST SP 800-63B-4 §3.1.1.1) and is
+    /// unreachable anyway — the DTOs refuse the request first — so the setting would look
+    /// applied and do nothing. Above 128 exceeds the longest password the DTOs accept, so no
+    /// password could ever be set and the failure would read as a user-input problem.
+    #[error("password.min_length must be within 8..=128 (got {got})")]
+    PasswordMinLengthRange {
+        /// The rejected floor.
+        got: u32,
+    },
     /// `brute_force.window` is zero, which makes the store delete each counter as it is
     /// created (`EXPIRE key 0`) and silently disables the account lockout.
     #[error("brute_force.window must be at least 1s (a zero window deletes the counter)")]

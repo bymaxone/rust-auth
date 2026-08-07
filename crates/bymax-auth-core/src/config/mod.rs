@@ -109,7 +109,7 @@ impl Default for Argon2Params {
 }
 
 /// Password-hashing configuration: which algorithm writes new hashes, whether to rehash on
-/// verify, and the per-algorithm cost parameters.
+/// verify, the minimum length a new password must have, and the per-algorithm cost parameters.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PasswordConfig {
     /// Algorithm used to hash new passwords. Verification accepts either.
@@ -117,6 +117,12 @@ pub struct PasswordConfig {
     /// When true, a successful verify whose stored hash is not the active algorithm — or
     /// is weaker than current params — triggers a transparent rehash.
     pub rehash_on_verify: bool,
+    /// Minimum length, in characters, of a password being SET. Validated at startup to
+    /// `8..=128`; see [`PasswordConfig::default`] for why the default is 15.
+    ///
+    /// Never applied on login or on a rehash: refusing a password someone already has would
+    /// lock them out of the account they need in order to change it.
+    pub min_length: u32,
     /// scrypt parameters.
     pub scrypt: ScryptParams,
     /// Argon2id parameters.
@@ -128,6 +134,12 @@ impl Default for PasswordConfig {
         Self {
             active_algorithm: PasswordAlgorithm::Scrypt,
             rehash_on_verify: true,
+            // NIST SP 800-63B-4 §3.1.1.1 allows 8 only for a password used as part of
+            // multi-factor authentication, and requires 15 for one used as a single factor.
+            // MFA here is opt-in per user, so the default deployment IS single-factor.
+            // The DTOs keep a structural floor of 8; this is the policy layered on top,
+            // and it matches nest-auth's `password.minLength`.
+            min_length: 15,
             scrypt: ScryptParams::default(),
             argon2: Argon2Params::default(),
         }

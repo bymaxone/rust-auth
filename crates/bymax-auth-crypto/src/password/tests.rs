@@ -33,6 +33,71 @@ fn verify_is_total_on_malformed_and_unknown_input() {
 }
 
 #[test]
+fn verify_refuses_a_record_asking_for_more_memory_than_the_ceiling() {
+    // Scenario: a well-formed scrypt record whose recorded cost asks for a working set no
+    // configuration could have been validated with. Expected: refused, and refused by
+    // RETURNING — never by attempting the derivation. Why: the verifier takes its parameters
+    // from the record, so without this bound the stored string decides how much memory the
+    // process allocates. `ln=31, r=8` is `128 * 2^31 * 8` — 2 TiB. That is not a failed login;
+    // it is an allocation that OOM-kills the host and takes every in-flight connection with it,
+    // reachable from an unauthenticated route because the derivation runs before the password
+    // is known to be right.
+    //
+    // These assertions must return promptly. If one hangs or the runner dies, the bound is gone
+    // and the derivation is being attempted for real.
+    let salt = "c2FsdHNhbHRzYWx0c2FsdA";
+    let key = "aGFzaGhhc2hoYXNoaGFzaGhhc2hoYXNoaGFzaGhhc2g";
+    for params in [
+        "ln=31,r=8,p=1",   // 2 TiB
+        "ln=23,r=1,p=1",   // 1 GiB — the first power of two past the ceiling at the smallest r
+        "ln=14,r=256,p=1", // r above the parameter ceiling, at a working set that would pass
+    ] {
+        let record = format!("$scrypt${params}${salt}${key}");
+        assert!(
+            matches!(verify(b"anything", &record), Ok(false)),
+            "expected {params} to be refused"
+        );
+    }
+}
+
+#[test]
+fn the_cost_ceiling_admits_its_own_boundary_and_nothing_past_it() {
+    // The predicate directly, because `verify` cannot show this: an admitted record and a
+    // refused one both answer `Ok(false)` for a password that does not match, and the only
+    // other way to tell them apart is to let the admitted one actually derive — 512 MiB of
+    // real work for one assertion.
+    //
+    // `128 * 2^22 * 1` is exactly 512 MiB and the bound is `<=`, so it is admitted; one more
+    // power of two, or one more block, is not. Without the admitted side, the ceiling could be
+    // tightened to nothing and every refusal test above would stay green while every legitimate
+    // login stopped working.
+    let salt = "c2FsdHNhbHRzYWx0c2FsdA";
+    let key = "aGFzaGhhc2hoYXNoaGFzaGhhc2hoYXNoaGFzaGhhc2g";
+    let admissible = |params: &str| {
+        let record = format!("$scrypt${params}${salt}${key}");
+        password_hash::PasswordHash::new(&record).is_ok_and(|h| super::phc::cost_is_admissible(&h))
+    };
+
+    assert!(admissible("ln=22,r=1,p=1"), "exactly 512 MiB must be read");
+    assert!(
+        admissible("ln=17,r=8,p=1"),
+        "the shipped default must be read"
+    );
+    assert!(!admissible("ln=23,r=1,p=1"), "one power of two past it");
+    assert!(!admissible("ln=22,r=2,p=1"), "one block past it");
+    // `2 ** ln` does not exist in a u64 at all here: the shift must answer "no", not wrap to
+    // something small enough to look admissible.
+    assert!(!admissible("ln=64,r=1,p=1"), "no representable working set");
+    assert!(!admissible("ln=0,r=8,p=1"), "N = 1 is not a cost");
+    assert!(!admissible("ln=14,r=0,p=1"), "r = 0 is not a block size");
+    assert!(!admissible("ln=14,r=8,p=0"), "p = 0 is not a lane count");
+    assert!(
+        !admissible("ln=14,r=8"),
+        "a missing parameter is not a zero"
+    );
+}
+
+#[test]
 fn needs_rehash_is_true_for_unparseable_phc() {
     // Both a non-PHC string (rejected outright) and a scrypt-tagged hash missing its
     // cost parameters are treated as stale, so a corrupt record is replaced on next
