@@ -3556,3 +3556,90 @@ async fn a_platform_recovery_code_is_claimed_before_it_is_accepted() {
         "a spent platform recovery code must not mint a second session, got {second:?}"
     );
 }
+
+#[tokio::test]
+async fn reset_mfa_removes_the_factor_without_a_code_and_tells_the_owner() {
+    // Scenario: a user who has lost both the authenticator and the recovery codes. Expected: the
+    // support desk can clear the factor with no code at all, and the owner is told. Why: every
+    // self-service exit needs the factor itself, so without this path that user is locked out
+    // permanently by the control meant to protect them (ASVS v5 §6.1.1).
+    //
+    // The notification is not decoration. An administrative reset the account holder cannot see
+    // is an account-takeover path — an attacker who reaches the support desk removes the second
+    // factor and nothing reaches the owner. Asserting the mail and the hook is asserting that
+    // the event is detectable.
+    let spy = Arc::new(AlertSpy::default());
+    let email: Arc<dyn EmailProvider> = spy.clone();
+    let hooks: Arc<dyn AuthHooks> = spy.clone();
+    let Some(h) = build_with(false, false, Some(email), Some(hooks)) else {
+        return;
+    };
+    let Some(uid) = register(&h.engine, "reset@example.com").await else {
+        return;
+    };
+    let Some(mfa) = h.engine.mfa() else { return };
+    let Ok(setup) = mfa.setup(&uid, MfaContext::Dashboard, Some(PASSWORD)).await else {
+        return;
+    };
+    assert!(
+        mfa.verify_and_enable(
+            &uid,
+            &code(&setup.secret, 0),
+            "1.2.3.4",
+            "ua",
+            MfaContext::Dashboard
+        )
+        .await
+        .is_ok()
+    );
+
+    assert!(mfa.reset_mfa(&uid, MfaContext::Dashboard).await.is_ok());
+
+    // The factor is actually gone, not merely reported gone: `disable` answers "not enabled",
+    // which it can only do by reading the record back.
+    assert!(matches!(
+        mfa.disable(
+            &uid,
+            &code(&setup.secret, 30),
+            "1.2.3.4",
+            "ua",
+            MfaContext::Dashboard
+        )
+        .await,
+        Err(AuthError::MfaNotEnabled)
+    ));
+
+    // Long enough for the detached notifications to have run.
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let seen = spy.seen();
+    assert!(
+        seen.contains(&"mail:disabled:reset@example.com".to_owned()),
+        "the owner was not told: {seen:?}"
+    );
+    assert!(
+        seen.contains(&format!("hook:disabled:{uid}")),
+        "no hook for host-side alerting: {seen:?}"
+    );
+}
+
+#[tokio::test]
+async fn reset_mfa_is_idempotent_and_refuses_an_unknown_subject() {
+    // Idempotent: a support desk retrying a job already done is not told it failed — the same
+    // promise `unlock_account` makes. And an id that resolves to nobody is refused rather than
+    // answering `Ok`, so a typo at the desk cannot read as "reset done".
+    let Some(h) = build(false, false) else { return };
+    let Some(uid) = register(&h.engine, "noreset@example.com").await else {
+        return;
+    };
+    let Some(mfa) = h.engine.mfa() else { return };
+
+    // No second factor was ever enrolled.
+    assert!(mfa.reset_mfa(&uid, MfaContext::Dashboard).await.is_ok());
+    // And again, for the retry.
+    assert!(mfa.reset_mfa(&uid, MfaContext::Dashboard).await.is_ok());
+
+    assert!(matches!(
+        mfa.reset_mfa("nobody-at-all", MfaContext::Dashboard).await,
+        Err(AuthError::MfaNotEnabled)
+    ));
+}

@@ -271,7 +271,7 @@ impl AuthEngine {
         // `register` already carries on the same screen, and this route is rate-limited — the
         // burned proof was the larger of the two costs by a wide margin.
         self.passwords()
-            .assert_not_compromised(&input.new_password)
+            .assert_acceptable(&input.new_password, "newPassword")
             .await?;
 
         match dispatch {
@@ -599,7 +599,7 @@ impl AuthEngine {
         self.brute_force().reset(&bf_id).await?;
 
         self.passwords()
-            .assert_not_compromised(new_password)
+            .assert_acceptable(new_password, "newPassword")
             .await?;
         let new_hash = self.passwords().hash(new_password).await?;
         self.user_repository()
@@ -1011,11 +1011,12 @@ mod tests {
                 .is_ok()
         );
 
-        // `password1` is exactly what the default screen exists to refuse.
+        // `password1234567` reduces to `password`, which is exactly what the default screen refuses —
+        // and it clears the length floor, so the refusal it asserts is the screen and not the floor.
         let refused = ResetPasswordInput {
             email: "spend@example.com".to_owned(),
             tenant_id: "t1".to_owned(),
-            new_password: "password1".to_owned(),
+            new_password: "password1234567".to_owned(),
             token: Some(known.clone()),
             otp: None,
             verified_token: None,
@@ -1092,7 +1093,7 @@ mod tests {
         let reset = ResetPasswordInput {
             email: "otp@example.com".to_owned(),
             tenant_id: "t1".to_owned(),
-            new_password: "walnutviaotp42".to_owned(),
+            new_password: "walnutviaotp4242".to_owned(),
             token: None,
             otp: Some(code.clone()),
             verified_token: None,
@@ -1284,7 +1285,7 @@ mod tests {
         let bridged = ResetPasswordInput {
             email: "CASE@example.com".to_owned(),
             tenant_id: "t1".to_owned(),
-            new_password: "walnutagain42".to_owned(),
+            new_password: "walnutagain4242".to_owned(),
             token: None,
             otp: None,
             verified_token: Some(verified_token),
@@ -1762,7 +1763,7 @@ mod tests {
         let reset = ResetPasswordInput {
             email: "hooked@example.com".to_owned(),
             tenant_id: "t1".to_owned(),
-            new_password: "brand-new".to_owned(),
+            new_password: "brand-new-walnut".to_owned(),
             token: None,
             otp: Some(code),
             verified_token: None,
@@ -1819,7 +1820,7 @@ mod tests {
         let reset = ResetPasswordInput {
             email: "mailed@example.com".to_owned(),
             tenant_id: "t1".to_owned(),
-            new_password: "the-new-one".to_owned(),
+            new_password: "the-new-one-walnut".to_owned(),
             token: Some(token),
             otp: None,
             verified_token: None,
@@ -2464,7 +2465,7 @@ mod tests {
 
         let refused = h
             .engine
-            .change_password(&id, "oldsecret77", "Password123", None)
+            .change_password(&id, "oldsecret77", "Password1234567", None)
             .await;
         assert!(matches!(refused, Err(AuthError::PasswordCompromised)));
     }

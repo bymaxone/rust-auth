@@ -123,14 +123,33 @@ pub trait EmailProvider: Send + Sync {
     /// Security alert: MFA was disabled on the account.
     async fn send_mfa_disabled(&self, email: &str, locale: Option<&str>) -> Result<(), EmailError>;
 
-    /// Security alert: a new session was established from an unrecognized device or
-    /// location. The body should show the device, IP, and session hash.
+    /// Security alert about a newly established session. The body should show the device, IP,
+    /// and session hash.
+    ///
+    /// **This library never calls it**, which is why it has a default: it is a typed signature
+    /// for the host to call from the `on_new_session` hook — which the library DOES fire, on
+    /// every session it creates, with the same [`SessionInfo`] this takes.
+    ///
+    /// The alert deliberately does not live inside the library, because the library cannot send
+    /// it well. Without device recognition it fires on *every* login, and an alert that arrives
+    /// on every login is one the user learns to dismiss — at which point the control has stopped
+    /// existing while still appearing to be in place. Recognizing a device means keeping a
+    /// per-user device history, and the host already has one (or can key it to its own user
+    /// record); the library would have to invent that state in the Redis keyspace it shares with
+    /// nest-auth, which is a contract change to solve a problem the caller is better placed to
+    /// solve.
+    ///
+    /// So: decide in `on_new_session` whether the session is worth alerting about, and call this
+    /// when it is.
     async fn send_new_session_alert(
         &self,
         email: &str,
         session: &SessionInfo,
         locale: Option<&str>,
-    ) -> Result<(), EmailError>;
+    ) -> Result<(), EmailError> {
+        let _ = (email, session, locale);
+        Ok(())
+    }
 
     /// Tenant invitation: the body should show the inviter, the tenant, the accept URL
     /// (built from `invite.invite_token`), and the expiry. Never log `invite.invite_token`.
@@ -261,15 +280,10 @@ impl EmailProvider for NoOpEmailProvider {
         tracing::debug!(event = "mfa_disabled", email = %mask_email(email), "noop email");
         Ok(())
     }
-    async fn send_new_session_alert(
-        &self,
-        email: &str,
-        _session: &SessionInfo,
-        _locale: Option<&str>,
-    ) -> Result<(), EmailError> {
-        tracing::debug!(event = "new_session_alert", email = %mask_email(email), "noop email");
-        Ok(())
-    }
+    // `send_new_session_alert` is deliberately NOT overridden here. It is the one method with a
+    // default, because the library never calls it — so the log line the other no-ops write
+    // ("this is what would have been sent") could never fire for this one from library code, and
+    // inheriting the default is what keeps the no-op honest about that.
     async fn send_invitation(
         &self,
         email: &str,

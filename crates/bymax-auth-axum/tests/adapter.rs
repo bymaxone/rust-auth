@@ -136,7 +136,7 @@ async fn password_change_requires_a_session_and_the_current_password() {
 
     let reg = Req::post("/auth/register")
         .json(serde_json::json!({
-            "email": "changer@e.com", "password": "oldsecret77", "name": "Cha", "tenantId": TENANT
+            "email": "changer@e.com", "password": "oldsecret777777", "name": "Cha", "tenantId": TENANT
         }))
         .send(&app)
         .await;
@@ -149,7 +149,7 @@ async fn password_change_requires_a_session_and_the_current_password() {
     // Unauthenticated: refused before anything is read.
     let anonymous = Req::post("/auth/password/change")
         .json(serde_json::json!({
-            "currentPassword": "oldsecret77", "newPassword": "glidingwalnut42"
+            "currentPassword": "oldsecret777777", "newPassword": "glidingwalnut42"
         }))
         .send(&app)
         .await;
@@ -170,7 +170,7 @@ async fn password_change_requires_a_session_and_the_current_password() {
     let changed = Req::post("/auth/password/change")
         .bearer(&access)
         .json(serde_json::json!({
-            "currentPassword": "oldsecret77", "newPassword": "glidingwalnut42"
+            "currentPassword": "oldsecret777777", "newPassword": "glidingwalnut42"
         }))
         .send(&app)
         .await;
@@ -196,7 +196,12 @@ async fn register_refuses_a_common_password_by_default() {
     let Some(h) = build(EngineSpec::default()) else { return };
     let app = router(&h);
 
-    for weak in ["Password1", "12345678", "qwerty123", "iloveyou"] {
+    for weak in [
+        "Password1234567",
+        "123456789012345",
+        "qwerty123456789",
+        "iloveyou1234567",
+    ] {
         let res = Req::post("/auth/register")
             .json(serde_json::json!({
                 "email": format!("{weak}@e.com"), "password": weak, "name": "Weak",
@@ -859,7 +864,7 @@ async fn password_reset_endpoints_are_anti_enumerating() {
     // reset-password with a bogus token is a reset-token error.
     let reset = Req::post("/auth/password/reset-password")
         .json(serde_json::json!({
-            "email": "ghost@e.com", "newPassword": "newpassword1", "token": "bogus", "tenantId": TENANT
+            "email": "ghost@e.com", "newPassword": "newpassword1234", "token": "bogus", "tenantId": TENANT
         }))
         .send(&app)
         .await;
@@ -2250,7 +2255,7 @@ async fn password_reset_otp_two_step_success_flow() {
 
     let reset = Req::post("/auth/password/reset-password")
         .json(serde_json::json!({
-            "email": "pw@e.com", "newPassword": "newpassword1",
+            "email": "pw@e.com", "newPassword": "newpassword1234",
             "verifiedToken": verified, "tenantId": TENANT
         }))
         .send(&app)

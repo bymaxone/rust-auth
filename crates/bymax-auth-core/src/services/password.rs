@@ -13,7 +13,7 @@ use std::sync::Arc;
 
 use bymax_auth_crypto::CryptoError;
 use bymax_auth_crypto::password::{PasswordParams, hash, needs_rehash, verify};
-use bymax_auth_types::AuthError;
+use bymax_auth_types::{AuthError, FieldError};
 use tokio::sync::Semaphore;
 use tokio::task::JoinError;
 
@@ -29,6 +29,14 @@ use crate::traits::breach::PasswordBreachChecker;
 /// run the full KDF against, so timing cannot distinguish a missing account from a wrong
 /// password. The value is not a credential — it never authenticates anything.
 const SENTINEL_PLAINTEXT: &[u8] = b"bymax-auth::anti-enumeration-sentinel::v1";
+
+/// The lowest `password.min_length` a deployment may configure — the structural floor the
+/// DTOs already enforce, below which the setting could not change any outcome.
+const MIN_CONFIGURABLE_LENGTH: u32 = 8;
+
+/// The highest `password.min_length` a deployment may configure — the longest password the
+/// DTOs accept, above which no password could be set at all.
+const MAX_CONFIGURABLE_LENGTH: u32 = 128;
 
 /// The result of [`PasswordService::verify`]: whether the password matched the stored hash
 /// and whether that stored hash is weaker than the active configuration (so the caller can
@@ -47,6 +55,7 @@ pub struct VerifyOutcome {
 pub struct PasswordService {
     params: PasswordParams,
     rehash_on_verify: bool,
+    min_length: u32,
     sentinel: String,
     breach_checker: Arc<dyn PasswordBreachChecker>,
     /// Bounds how many memory-hard derivations run at once. See [`kdf_permit_count`].
@@ -134,12 +143,18 @@ impl PasswordService {
         config: &PasswordConfig,
         breach_checker: Arc<dyn PasswordBreachChecker>,
     ) -> Result<Self, ConfigError> {
+        if !(MIN_CONFIGURABLE_LENGTH..=MAX_CONFIGURABLE_LENGTH).contains(&config.min_length) {
+            return Err(ConfigError::PasswordMinLengthRange {
+                got: config.min_length,
+            });
+        }
         let params = to_crypto_params(config);
         let sentinel =
             hash(SENTINEL_PLAINTEXT, &params).map_err(|_| ConfigError::SentinelHashFailed)?;
         Ok(Self {
             params,
             rehash_on_verify: config.rehash_on_verify,
+            min_length: config.min_length,
             sentinel,
             breach_checker,
             kdf_permits: Arc::new(Semaphore::new(kdf_permit_count(config))),
@@ -180,6 +195,58 @@ impl PasswordService {
             return Err(AuthError::PasswordCompromised);
         }
         Ok(())
+    }
+
+    /// Reject a password shorter than the configured floor.
+    ///
+    /// The DTOs carry a structural `length(min = 8)` — the lowest NIST SP 800-63B-4 permits
+    /// under any circumstance — and this is the deployment's policy on top of it. It lives here
+    /// rather than in the DTO because a `garde` attribute is fixed when the type is compiled,
+    /// before any configuration exists.
+    ///
+    /// It answers [`AuthError::Validation`] with the same `FieldError` shape the adapter's own
+    /// validation failure produces for a short password, so the shared error catalog gains no
+    /// entry and a client already handling that case sees no new shape. This is the same code
+    /// and the same details nest-auth answers with.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AuthError::Validation`] when the password is shorter than the floor.
+    pub(crate) fn assert_long_enough(&self, password: &str, field: &str) -> Result<(), AuthError> {
+        // Characters, not bytes: `len()` would make the floor depend on the alphabet, so the
+        // same policy would admit a 15-character ASCII password and refuse a 15-character one
+        // written in an accented or non-Latin script.
+        if password.chars().count() >= self.min_length as usize {
+            return Ok(());
+        }
+        Err(AuthError::Validation {
+            details: vec![FieldError {
+                field: field.to_owned(),
+                message: format!("{field} must be at least {} characters", self.min_length),
+            }],
+        })
+    }
+
+    /// The whole password policy, applied wherever a password is being *set*.
+    ///
+    /// One entry point so the four call sites — registration, reset, authenticated change and
+    /// invitation acceptance — cannot drift into applying different halves of it.
+    ///
+    /// Order matters: length first, because it is decided locally and for free, and the breach
+    /// check may reach a network corpus. A password refused for being short should not cost a
+    /// round trip, and should not be sent anywhere first.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AuthError::Validation`] when it is too short, or
+    /// [`AuthError::PasswordCompromised`] when the corpus knows it.
+    pub(crate) async fn assert_acceptable(
+        &self,
+        password: &str,
+        field: &str,
+    ) -> Result<(), AuthError> {
+        self.assert_long_enough(password, field)?;
+        self.assert_not_compromised(password).await
     }
 
     /// Whether rehash-on-verify is enabled, so the caller upgrades a stale-but-valid hash.
@@ -605,5 +672,176 @@ mod tests {
             params.active,
             bymax_auth_crypto::password::PasswordAlgorithm::Argon2id
         ));
+    }
+
+    /// A checker that records whether it was consulted, so "the corpus is not reached" is
+    /// assertable rather than assumed.
+    struct RecordingChecker {
+        consulted: std::sync::atomic::AtomicBool,
+    }
+
+    #[async_trait::async_trait]
+    impl PasswordBreachChecker for RecordingChecker {
+        async fn is_breached(&self, _password: &str) -> bool {
+            self.consulted
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+            false
+        }
+    }
+
+    /// Build a service whose only difference from the fixture is the configured floor.
+    fn service_with_floor(min_length: u32) -> Option<PasswordService> {
+        PasswordService::new(
+            &PasswordConfig {
+                min_length,
+                ..config()
+            },
+            Arc::new(AllowAllBreachChecker),
+        )
+        .ok()
+    }
+
+    #[test]
+    fn the_default_floor_is_the_single_factor_requirement() {
+        // NIST SP 800-63B-4 §3.1.1.1 allows 8 only for a password used as part of multi-factor
+        // authentication and requires 15 for one used as a single factor. MFA here is opt-in per
+        // user, so the default deployment IS single-factor. This is also the number nest-auth
+        // defaults to: the two libraries back the same accounts, and a password one of them
+        // accepts and the other refuses is a policy that exists only on paper.
+        assert_eq!(PasswordConfig::default().min_length, 15);
+    }
+
+    #[test]
+    fn a_floor_outside_the_window_is_refused_at_construction() {
+        // Below 8 cannot describe a conformant deployment and is unreachable anyway — the DTOs
+        // refuse the request first — so the setting would look applied and do nothing. Above 128
+        // exceeds the longest password the DTOs accept, so no password could ever be set and the
+        // failure would read as a user-input problem rather than a configuration one.
+        for refused in [0, 7, 129, u32::MAX] {
+            assert!(
+                matches!(
+                    PasswordService::new(
+                        &PasswordConfig {
+                            min_length: refused,
+                            ..config()
+                        },
+                        Arc::new(AllowAllBreachChecker),
+                    ),
+                    Err(ConfigError::PasswordMinLengthRange { got }) if got == refused
+                ),
+                "expected {refused} to be refused"
+            );
+        }
+        // Both ends of the window are accepted, so neither bound can be off by one.
+        assert!(service_with_floor(8).is_some());
+        assert!(service_with_floor(128).is_some());
+    }
+
+    #[test]
+    fn a_password_below_the_floor_is_a_validation_failure_naming_its_field() {
+        // The wire shape must not change: this answers the same code and the same
+        // `{ field, message }` details the adapter's own length validation produces, so the
+        // shared error catalog gains no entry and a client already handling a short password
+        // sees nothing new. The field travels in so the error points at the input the caller
+        // actually sent rather than at whatever this library calls it internally.
+        let Some(svc) = service() else { return };
+
+        let refused = svc.assert_long_enough(&"x".repeat(14), "newPassword");
+
+        // Everything asserted through expressions rather than a destructuring block. The
+        // workspace denies `panic!` even in tests, so the usual `let-else { panic! }` is out —
+        // and an `if let` with no `else` leaves the not-taken arm as a line no run reaches,
+        // which the 100% line gate then reports. `matches!` and a `Debug` render carry the same
+        // facts with nothing unreachable behind them.
+        assert!(
+            matches!(&refused, Err(AuthError::Validation { details }) if details.len() == 1),
+            "expected exactly one validation detail, got {refused:?}"
+        );
+        let rendered = format!("{refused:?}");
+        assert!(rendered.contains(r#"field: "newPassword""#), "{rendered}");
+        assert!(
+            rendered.contains("newPassword must be at least 15 characters"),
+            "{rendered}"
+        );
+    }
+
+    #[test]
+    fn the_floor_is_the_configured_value_and_its_boundary_is_inclusive() {
+        // Exactly at the floor is admitted — the comparison is `>=`, and an off-by-one here
+        // rejects a password the policy allows, on every registration. And the floor is the
+        // CONFIGURED number: without the second half, a hardcoded 15 would satisfy every other
+        // test in this module.
+        let Some(default) = service() else { return };
+        assert!(
+            default
+                .assert_long_enough(&"x".repeat(15), "password")
+                .is_ok()
+        );
+        assert!(
+            default
+                .assert_long_enough(&"x".repeat(14), "password")
+                .is_err()
+        );
+
+        // One line on purpose: a `let-else` whose body is on its own line leaves that line
+        // unreachable, and the coverage gate is per line.
+        let Some(raised) = service_with_floor(20) else { return };
+        assert!(
+            raised
+                .assert_long_enough(&"x".repeat(20), "password")
+                .is_ok()
+        );
+        assert!(
+            raised
+                .assert_long_enough(&"x".repeat(19), "password")
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn the_floor_counts_characters_rather_than_bytes() {
+        // `len()` would make the policy depend on the alphabet: the same fifteen characters
+        // written with accents are 20-odd bytes and written in a non-Latin script more still, so
+        // a byte floor silently demands a shorter password from some users and a longer one from
+        // others. Fifteen characters is fifteen characters.
+        let Some(svc) = service() else { return };
+        let accented = "ãéîõüçñáàâê"
+            .chars()
+            .chain("çãõü".chars())
+            .collect::<String>();
+
+        assert_eq!(accented.chars().count(), 15);
+        assert!(accented.len() > 15, "the fixture must be multi-byte");
+        assert!(svc.assert_long_enough(&accented, "password").is_ok());
+    }
+
+    #[tokio::test]
+    async fn a_password_refused_locally_never_reaches_the_breach_corpus() {
+        // Ordering is the point: the length is decided locally and for free, and the corpus may
+        // be a network call. A password refused for being short should not cost a round trip,
+        // and should not be sent anywhere first.
+        let checker = Arc::new(RecordingChecker {
+            consulted: std::sync::atomic::AtomicBool::new(false),
+        });
+        // Method syntax, not `Arc::clone(&checker)`: with the annotation on the binding, the
+        // associated-function form resolves against `Arc<dyn …>` and then rejects a
+        // `&Arc<RecordingChecker>`. `.clone()` resolves on the concrete type and coerces after.
+        let breach: Arc<dyn PasswordBreachChecker> = checker.clone();
+        let Ok(svc) = PasswordService::new(&config(), breach) else { return };
+
+        assert!(svc.assert_acceptable("short", "password").await.is_err());
+        assert!(
+            !checker.consulted.load(std::sync::atomic::Ordering::SeqCst),
+            "the corpus was consulted for a password refused on length"
+        );
+
+        // And a long-enough password DOES reach it — otherwise "never consulted" passes for a
+        // service that simply never screens anything.
+        assert!(
+            svc.assert_acceptable(&"x".repeat(15), "password")
+                .await
+                .is_ok()
+        );
+        assert!(checker.consulted.load(std::sync::atomic::Ordering::SeqCst));
     }
 }

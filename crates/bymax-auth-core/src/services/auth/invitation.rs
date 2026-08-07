@@ -207,7 +207,7 @@ impl AuthEngine {
         // makes for the same reason; the route is rate-limited, and the burned invitation was
         // the larger of the two costs by a wide margin.
         self.passwords()
-            .assert_not_compromised(&input.password)
+            .assert_acceptable(&input.password, "password")
             .await?;
 
         // Atomic single-use consume; an absent/expired/already-used token is invalid.
@@ -760,7 +760,7 @@ mod tests {
                 AcceptInvitationInput {
                     token: token.clone(),
                     name: "N".to_owned(),
-                    password: "password".to_owned(),
+                    password: "password1234567".to_owned(),
                 },
                 "1.2.3.4",
                 "agent",

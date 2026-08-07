@@ -1685,14 +1685,17 @@ async fn engine_runs_password_reset_via_token_against_redis() {
             .await,
         Err(AuthError::RefreshTokenInvalid)
     ));
-    // The reset token is single-use: a replay is invalid.
+    // The reset token is single-use: a replay is invalid. The new password has to clear the
+    // length floor for this to mean anything — the policy is screened BEFORE the token is
+    // spent, so a short one would be refused here for the wrong reason and the replay would
+    // go untested.
     assert!(matches!(
         engine
             .reset_password(
                 ResetPasswordInput {
                     email: "reset@example.com".to_owned(),
                     tenant_id: "t1".to_owned(),
-                    new_password: "again".to_owned(),
+                    new_password: "again-and-again-42".to_owned(),
                     token: Some("known-reset-token".to_owned()),
                     otp: None,
                     verified_token: None,

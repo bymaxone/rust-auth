@@ -54,6 +54,21 @@ const PERCENT_HEX: &[u8; 16] = b"0123456789ABCDEF";
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct OAuthStatePayload {
+    /// The provider this state was minted for, compared against the provider the callback
+    /// names before the record is used.
+    ///
+    /// RFC 9700 §2.1/§4.4 makes mix-up defence REQUIRED for a client that talks to more than
+    /// one authorization server. Without this field the callback resolves the provider from its
+    /// own URL path and then consumes any structurally valid state, so an attacker able to
+    /// steer an honest provider's callback to a hostile provider's path receives both the
+    /// `code` and the PKCE `code_verifier` — enough to redeem the code at the honest provider.
+    /// PKCE does not help: the verifier travels with the code by design.
+    ///
+    /// Only Google ships in-tree today, so this is defence-in-depth. It is stored anyway
+    /// because the record is shared with nest-auth and adding a field costs less now than
+    /// after a second provider lands. A plain `String`, so a record without it fails to
+    /// deserialize rather than being read as "unbound".
+    provider: String,
     /// The tenant scope carried from the initiate query and recovered on callback. Never
     /// validated server-side here — `on_oauth_login` is the tenant-membership gate.
     tenant_id: String,
@@ -96,7 +111,7 @@ pub enum OAuthOutcome {
 impl AuthEngine {
     /// Begin an OAuth authorize redirect (§11.3.1): resolve the provider **before** any Redis
     /// write, mint a fresh 64-hex `state` and a PKCE verifier/challenge pair, store
-    /// `os:{sha256(state)} → { tenant_id, code_verifier }` at a 600 s TTL, and return the
+    /// `os:{sha256(state)} → { provider, tenant_id, code_verifier }` at a 600 s TTL, and return the
     /// provider authorization URL. The raw `state` is never stored — only its hash is a key —
     /// and only the `code_challenge` is exposed to the provider.
     ///
@@ -132,7 +147,10 @@ impl AuthEngine {
 
         let state = generate_state();
         let (code_verifier, code_challenge) = generate_pkce();
+        // The provider's own canonical name, not the caller's spelling of it, so the callback
+        // compares against the same value on both sides of the flow.
         let payload = serde_json::to_string(&OAuthStatePayload {
+            provider: provider_impl.name().to_owned(),
             tenant_id,
             code_verifier,
         })
@@ -207,9 +225,26 @@ impl AuthEngine {
             return Err(AuthError::OauthFailed);
         };
         let Ok(payload) = serde_json::from_str::<OAuthStatePayload>(&raw_payload) else {
-            // A malformed payload is treated as a failed state, not an internal error.
+            // A malformed payload is treated as a failed state, not an internal error. A record
+            // written before `provider` existed lands here too, which is the right answer: it
+            // cannot be checked, so it cannot be trusted.
             return Err(AuthError::OauthFailed);
         };
+
+        // Mix-up defence (RFC 9700 §2.1/§4.4). `provider_name` is the provider this callback
+        // belongs to; `payload.provider` is the one the flow was started with. A mismatch means
+        // the state was minted for somebody else, and consuming it would forward the `code` and
+        // the PKCE `code_verifier` to a provider the user never authorized — exactly what lets a
+        // hostile provider redeem an honest one's code.
+        //
+        // A plain comparison, deliberately: unlike the state nonce this is not a secret. Both
+        // sides are provider names drawn from the configured set, and the callback's own value
+        // is a URL path segment the caller supplied. There is nothing here for a timing side
+        // channel to reveal, and a constant-time compare would only suggest otherwise.
+        if payload.provider != provider_name {
+            return Err(AuthError::OauthFailed);
+        }
+
         let tenant_id = payload.tenant_id;
 
         // Token exchange (forwarding the PKCE verifier) and profile fetch. Every provider
@@ -459,7 +494,7 @@ fn state_key(state: &str) -> String {
 }
 
 /// Map a failure to serialize the `os:` state payload to the opaque internal error.
-/// Serializing the concrete [`OAuthStatePayload`] (two `String` fields) cannot fail in
+/// Serializing the concrete [`OAuthStatePayload`] (three `String` fields) cannot fail in
 /// practice, so this is a defensive mapping that never surfaces the failing step.
 fn oauth_state_serialize_failed(_error: serde_json::Error) -> AuthError {
     internal_error("oauth state payload serialization failed")
@@ -907,6 +942,81 @@ mod tests {
         let hooks: Arc<dyn AuthHooks> = Arc::new(DecisionHook(OAuthLoginResult::Link));
         let Some(h) = harness(hooks, Arc::new(RoutingHttpClient::new()), false) else { return };
         assert!(matches!(run_flow(&h).await, Err(AuthError::OauthFailed)));
+    }
+
+    #[tokio::test]
+    async fn callback_refuses_a_state_minted_for_another_provider() {
+        // Scenario: a structurally valid state record whose payload names a DIFFERENT provider
+        // than the callback being served. Expected: refused before the code is exchanged.
+        //
+        // Why: this is the mix-up defence RFC 9700 §2.1/§4.4 makes REQUIRED. Without the
+        // comparison, the callback resolves the provider from its own URL path and then consumes
+        // any structurally valid state — so an attacker who can steer an honest provider's
+        // callback to a hostile provider's path receives both the `code` and the PKCE
+        // `code_verifier`, which is enough to redeem the code at the honest provider. PKCE does
+        // not help here: the verifier travels with the code by design.
+        //
+        // The record is planted rather than produced by `oauth_initiate`, because only Google
+        // ships in-tree — there is no second configured provider to mint a real one from, and a
+        // callback naming an unconfigured provider would be refused a step earlier, at
+        // resolution, without ever reaching this comparison.
+        // Asserted as a PAIR, and that is not thoroughness — it is the only way to assert
+        // anything here. Every failure in this flow collapses to the same opaque `OauthFailed`
+        // by design, so `Err(OauthFailed)` alone would pass just as happily if the record were
+        // never found or failed to parse: the test would be green and the comparison could be
+        // deleted. The distinguishing signal is whether the provider was CONTACTED. Identical
+        // records, one naming this provider and one naming another; only the first reaches the
+        // token exchange.
+        let planted = |provider: &str| {
+            serde_json::json!({
+                "provider": provider,
+                "tenantId": "t1",
+                "codeVerifier": "verifier-the-attacker-wants-forwarded"
+            })
+            .to_string()
+        };
+        let hooks: Arc<dyn AuthHooks> = Arc::new(DecisionHook(OAuthLoginResult::Link));
+
+        // The client is bound first so each `let-else` fits one line: rustfmt splits a longer
+        // one, and a `return` on its own line is a line no run reaches — which the 100% line
+        // gate then reports as uncovered.
+        let http = Arc::new(RoutingHttpClient::new());
+        let Some(mismatched) = harness(hooks.clone(), http, false) else { return };
+        // 64 hex characters, because `oauth_callback` rejects any other SHAPE before it reads
+        // the store at all — a readable-looking string like "state-for-somebody-else" is refused
+        // three checks earlier and never reaches the comparison this test is about.
+        let state = &"0123456789abcdef".repeat(4);
+        let stored = mismatched
+            .stores
+            .put_state(&state_key(state), &planted("github"), OAUTH_STATE_TTL_SECS)
+            .await;
+        assert!(stored.is_ok());
+        let refused = mismatched
+            .engine
+            .oauth_callback("google", "auth-code", state, Some(state), &ctx())
+            .await;
+
+        assert!(matches!(refused, Err(AuthError::OauthFailed)));
+        // The refusal lands BEFORE the exchange. Forwarding the code and the verifier to a
+        // provider the user never authorized is the harm; refusing afterwards would not help.
+        assert!(lock(&mismatched.http.requests).is_empty());
+
+        let http = Arc::new(RoutingHttpClient::new());
+        let Some(matched) = harness(hooks, http, false) else { return };
+        let stored = matched
+            .stores
+            .put_state(&state_key(state), &planted("google"), OAUTH_STATE_TTL_SECS)
+            .await;
+        assert!(stored.is_ok());
+        let _ = matched
+            .engine
+            .oauth_callback("google", "auth-code", state, Some(state), &ctx())
+            .await;
+
+        // Same record, same everything, one field different — and this one is contacted. That
+        // is what proves the record above was readable and that only the provider check stopped
+        // it.
+        assert!(!lock(&matched.http.requests).is_empty());
     }
 
     #[tokio::test]

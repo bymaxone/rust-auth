@@ -6,9 +6,10 @@
 //! Each named limit becomes its **own** `GovernorConfig`, attached to a single route during
 //! router assembly — never one global layer (§16.2), exactly as nest-auth applies a distinct
 //! `@Throttle(...)` per handler. The limiter keys on the client IP, derived per the
-//! configured trusted-proxy strategy ([`crate::state::ClientIpSource`]).
+//! configured trusted-proxy strategy ([`crate::state::ClientIpSource`]) and charged to its
+//! [`rate_limit_bucket`] — the address itself for IPv4, the /64 prefix for IPv6.
 
-use std::net::IpAddr;
+use std::net::{IpAddr, Ipv6Addr};
 use std::sync::Arc;
 
 use axum::body::Body;
@@ -18,7 +19,7 @@ use governor::middleware::NoOpMiddleware;
 use http::Response;
 use tower_governor::GovernorError;
 use tower_governor::governor::{GovernorConfig, GovernorConfigBuilder};
-use tower_governor::key_extractor::{KeyExtractor, PeerIpKeyExtractor};
+use tower_governor::key_extractor::KeyExtractor;
 
 use crate::response::error_response;
 use crate::state::ClientIpSource;
@@ -62,8 +63,60 @@ impl KeyExtractor for RightmostForwardedIpKeyExtractor {
                     .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
                     .map(|info| info.0.ip())
             })
+            .map(rate_limit_bucket)
             .ok_or(GovernorError::UnableToExtractKey)
     }
+}
+
+/// A [`KeyExtractor`] that keys on the peer socket address, charged to its
+/// [`rate_limit_bucket`].
+///
+/// This replaces `tower_governor`'s `PeerIpKeyExtractor`, which keys on the full address. That
+/// is correct for IPv4 and useless for IPv6: the budget is per key, so an attacker with one
+/// routine /64 gets 2^64 of them. The extraction is otherwise identical.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct PeerIpBucketKeyExtractor;
+
+impl KeyExtractor for PeerIpBucketKeyExtractor {
+    type Key = IpAddr;
+
+    fn extract<T>(&self, req: &http::Request<T>) -> Result<Self::Key, GovernorError> {
+        req.extensions()
+            .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
+            .map(|info| rate_limit_bucket(info.0.ip()))
+            .ok_or(GovernorError::UnableToExtractKey)
+    }
+}
+
+/// Collapse an address to the unit a rate limit should actually be charged against.
+///
+/// IPv4 is returned unchanged: one address is one host, and the smallest routine allocation is
+/// a single address.
+///
+/// IPv6 is truncated to its /64 prefix, because there the address is not the unit. A /64 is the
+/// standard end-site subnet — the smallest thing a residential or cloud customer is handed —
+/// and every one of its 2^64 addresses is free to mint and free to rotate. Keying on the full
+/// /128 therefore hands one attacker 2^64 independent budgets: the per-route limit is per key,
+/// so "5 login attempts per minute" becomes 5 attempts per address per minute, which is no
+/// limit at all. Charging the /64 makes the budget belong to the subnet that was actually
+/// allocated to somebody.
+///
+/// The cost is that hosts sharing a /64 share a budget. That is the same trade IPv4 NAT already
+/// forces, and it is the correct side of it: the alternative is a limiter an attacker steps
+/// around by incrementing a counter.
+///
+/// IPv4-mapped addresses (`::ffff:a.b.c.d`) are unwrapped **first**. Truncating one to /64 would
+/// send every IPv4 client to the single key `::`, collapsing the entire IPv4 internet into one
+/// bucket — a denial of service against legitimate users, delivered by the anti-abuse control.
+fn rate_limit_bucket(ip: IpAddr) -> IpAddr {
+    let IpAddr::V6(v6) = ip else { return ip };
+
+    if let Some(v4) = v6.to_ipv4_mapped() {
+        return IpAddr::V4(v4);
+    }
+
+    let [a, b, c, d, ..] = v6.segments();
+    IpAddr::V6(Ipv6Addr::new(a, b, c, d, 0, 0, 0, 0))
 }
 
 /// The last parseable IP in a comma-separated `X-Forwarded-For` value.
@@ -225,7 +278,7 @@ impl Default for RateLimitConfig {
 /// whichever arm is active.
 pub(crate) enum GovernorConfigKind {
     /// Peer-socket-IP keyed (never reads `X-Forwarded-For`) — the secure default.
-    Peer(Arc<GovernorConfig<PeerIpKeyExtractor, NoOpMiddleware>>),
+    Peer(Arc<GovernorConfig<PeerIpBucketKeyExtractor, NoOpMiddleware>>),
     /// Keyed on the rightmost `X-Forwarded-For` entry, for a trusted-proxy deployment.
     Smart(Arc<GovernorConfig<RightmostForwardedIpKeyExtractor, NoOpMiddleware>>),
 }
@@ -295,7 +348,7 @@ pub(crate) fn build_governor_config(
         ClientIpSource::PeerAddr => GovernorConfigBuilder::default()
             .per_second(per_second)
             .burst_size(burst)
-            .key_extractor(PeerIpKeyExtractor)
+            .key_extractor(PeerIpBucketKeyExtractor)
             .finish()
             .map(|config| GovernorConfigKind::Peer(Arc::new(config))),
         ClientIpSource::TrustedForwardedFor => GovernorConfigBuilder::default()
@@ -325,6 +378,8 @@ pub(crate) fn governor_error_to_response(error: GovernorError) -> Response<Body>
 
 #[cfg(test)]
 mod tests {
+    use std::net::Ipv4Addr;
+
     use super::*;
     use http::StatusCode;
 
@@ -559,7 +614,7 @@ mod tests {
         let built = GovernorConfigBuilder::default()
             .per_second(1)
             .burst_size(1)
-            .key_extractor(PeerIpKeyExtractor)
+            .key_extractor(PeerIpBucketKeyExtractor)
             .finish();
         let Some(config) = built else { return };
         let config = Arc::new(config);
@@ -586,12 +641,91 @@ mod tests {
         let built = GovernorConfigBuilder::default()
             .per_second(1)
             .burst_size(1)
-            .key_extractor(PeerIpKeyExtractor)
+            .key_extractor(PeerIpBucketKeyExtractor)
             .finish();
         let Some(config) = built else { return };
 
         // No `#[tokio::test]`: there is deliberately no runtime here. Returning at all is the
         // assertion — the alternative this guards against is an unwrap on `Handle::current`.
         spawn_key_gc(Arc::new(config));
+    }
+
+    // ── rate_limit_bucket ────────────────────────────────────────────────────
+
+    /// Scenario: two addresses inside one IPv6 /64. Expected: one key. Why: a /64 is the
+    /// smallest subnet a customer is allocated, and every one of its 2^64 addresses is free to
+    /// mint. Keying the full /128 made the per-route budget per-address, so "5 attempts per
+    /// minute" became 5 per address per minute — no limit at all against anyone holding a
+    /// routine allocation.
+    #[test]
+    fn two_addresses_in_one_ipv6_slash_64_share_a_key() {
+        let a = IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 1, 2, 0, 0, 0, 1));
+        let b = IpAddr::V6(Ipv6Addr::new(
+            0x2001, 0xdb8, 1, 2, 0xffff, 0xffff, 0xffff, 0xffff,
+        ));
+
+        assert_eq!(rate_limit_bucket(a), rate_limit_bucket(b));
+        // Pinned as a value, not only as an equality: two buckets agree under any consistent
+        // mangling, including one that discarded the wrong number of groups.
+        assert_eq!(
+            rate_limit_bucket(a),
+            IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 1, 2, 0, 0, 0, 0))
+        );
+    }
+
+    /// And the converse, so "collapse everything" cannot pass: a different /64 is a different
+    /// budget. Only the last four groups are discarded.
+    #[test]
+    fn a_different_ipv6_slash_64_is_a_different_key() {
+        let a = IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 1, 2, 0, 0, 0, 1));
+        let b = IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 1, 3, 0, 0, 0, 1));
+
+        assert_ne!(rate_limit_bucket(a), rate_limit_bucket(b));
+    }
+
+    /// IPv4 is one address per host, so it is charged whole. Two neighbours must not share.
+    #[test]
+    fn ipv4_addresses_are_never_merged() {
+        let a = IpAddr::V4(Ipv4Addr::new(203, 0, 113, 7));
+        let b = IpAddr::V4(Ipv4Addr::new(203, 0, 113, 8));
+
+        assert_eq!(rate_limit_bucket(a), a);
+        assert_ne!(rate_limit_bucket(a), rate_limit_bucket(b));
+    }
+
+    /// The trap in the naive version: `::ffff:a.b.c.d` truncated to /64 is `::` for EVERY IPv4
+    /// client, so the whole IPv4 internet would share one budget and the anti-abuse control
+    /// would itself be the denial of service. Mapped addresses must unwrap to their IPv4 form
+    /// first, and two distinct ones must stay distinct.
+    #[test]
+    fn ipv4_mapped_addresses_unwrap_instead_of_collapsing_to_one_key() {
+        let a = IpAddr::V6(Ipv4Addr::new(203, 0, 113, 7).to_ipv6_mapped());
+        let b = IpAddr::V6(Ipv4Addr::new(198, 51, 100, 9).to_ipv6_mapped());
+        let unspecified = IpAddr::V6(Ipv6Addr::UNSPECIFIED);
+
+        assert_eq!(
+            rate_limit_bucket(a),
+            IpAddr::V4(Ipv4Addr::new(203, 0, 113, 7))
+        );
+        assert_ne!(rate_limit_bucket(a), rate_limit_bucket(b));
+        assert_ne!(rate_limit_bucket(a), unspecified);
+        // The same IPv4 host reaching us mapped and unmapped is one host, so one budget.
+        assert_eq!(
+            rate_limit_bucket(a),
+            rate_limit_bucket(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 7)))
+        );
+    }
+
+    /// `ffff` in group 5 does NOT make an address mapped on its own: the range is
+    /// `::ffff:0:0/96`, so all five leading groups must be zero too. Reading either half alone
+    /// answers `0.0.0.0` here — one bucket for everyone who lands on it.
+    #[test]
+    fn ffff_behind_a_non_zero_prefix_is_not_a_mapped_address() {
+        let a = IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0xffff, 0, 0));
+
+        assert_eq!(
+            rate_limit_bucket(a),
+            IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 0))
+        );
     }
 }
