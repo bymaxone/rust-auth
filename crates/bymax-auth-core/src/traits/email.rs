@@ -280,15 +280,10 @@ impl EmailProvider for NoOpEmailProvider {
         tracing::debug!(event = "mfa_disabled", email = %mask_email(email), "noop email");
         Ok(())
     }
-    async fn send_new_session_alert(
-        &self,
-        email: &str,
-        _session: &SessionInfo,
-        _locale: Option<&str>,
-    ) -> Result<(), EmailError> {
-        tracing::debug!(event = "new_session_alert", email = %mask_email(email), "noop email");
-        Ok(())
-    }
+    // `send_new_session_alert` is deliberately NOT overridden here. It is the one method with a
+    // default, because the library never calls it — so the log line the other no-ops write
+    // ("this is what would have been sent") could never fire for this one from library code, and
+    // inheriting the default is what keeps the no-op honest about that.
     async fn send_invitation(
         &self,
         email: &str,

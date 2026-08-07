@@ -67,6 +67,15 @@ const MAX_KDF_BYTES_PER_DERIVATION: u64 = 512 * 1024 * 1024;
 /// The largest `r` or `p` a stored scrypt record may carry. Both implementations write 8 and 1.
 const MAX_SCRYPT_PARAMETER: u32 = 255;
 
+/// The largest `ln` a record can carry and still be admissible: at the smallest legal `r`,
+/// `128 * 2 ** ln` alone already reaches the ceiling above.
+///
+/// Derived rather than written as `22`, so it stays true if the ceiling moves. Checking it
+/// BEFORE the shift is what keeps the arithmetic below inside a `u64` by construction — the
+/// alternative is a chain of `checked_shl`/`checked_mul` whose failure arms no stored record can
+/// reach, which is unreachable code wearing the costume of a defence.
+const MAX_ADMISSIBLE_LN: u32 = (MAX_KDF_BYTES_PER_DERIVATION / 128).ilog2();
+
 /// Whether the cost recorded IN the hash is one this process is willing to derive under.
 ///
 /// The verifiers take their parameters from the record, so without this the stored string
@@ -98,17 +107,15 @@ fn scrypt_cost_is_admissible(hash: &PasswordHash) -> bool {
         return false;
     };
     if ln == 0
+        || ln > MAX_ADMISSIBLE_LN
         || !(1..=MAX_SCRYPT_PARAMETER).contains(&r)
         || !(1..=MAX_SCRYPT_PARAMETER).contains(&p)
     {
         return false;
     }
-    // Checked throughout: an `ln` of 64 or more has no `2 ** ln` in a u64 at all, and
-    // `checked_shl` answers `None` rather than wrapping to a small, admissible-looking number.
-    1u64.checked_shl(ln)
-        .and_then(|n| n.checked_mul(u64::from(r)))
-        .and_then(|nr| nr.checked_mul(128))
-        .is_some_and(|bytes| bytes <= MAX_KDF_BYTES_PER_DERIVATION)
+    // `ln <= 22` and `r <= 255` by the guard above, so the product is at most `128 * 2^22 * 255`
+    // — four orders of magnitude inside a `u64`. No overflow is reachable, so none is checked.
+    128 * (1u64 << ln) * u64::from(r) <= MAX_KDF_BYTES_PER_DERIVATION
 }
 
 /// The Argon2id half of [`cost_is_admissible`]: `m` is the working set, in KiB.
@@ -116,9 +123,9 @@ fn argon2_cost_is_admissible(hash: &PasswordHash) -> bool {
     let Some(memory_kib) = decimal_param(hash, "m") else {
         return false;
     };
-    u64::from(memory_kib)
-        .checked_mul(1024)
-        .is_some_and(|bytes| bytes <= MAX_KDF_BYTES_PER_DERIVATION)
+    // `m` is a `u32`, so the widest this can be is about 4 TiB — a plain multiplication in `u64`
+    // cannot overflow, and a `checked_mul` here would be a failure arm no record could take.
+    u64::from(memory_kib) * 1024 <= MAX_KDF_BYTES_PER_DERIVATION
 }
 
 /// Stale-check for a stored hash against the current scrypt configuration.

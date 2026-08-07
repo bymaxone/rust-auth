@@ -85,8 +85,9 @@ fn the_cost_ceiling_admits_its_own_boundary_and_nothing_past_it() {
     );
     assert!(!admissible("ln=23,r=1,p=1"), "one power of two past it");
     assert!(!admissible("ln=22,r=2,p=1"), "one block past it");
-    // `2 ** ln` does not exist in a u64 at all here: the shift must answer "no", not wrap to
-    // something small enough to look admissible.
+    // An `ln` with no `2 ** ln` in a u64 at all. It is refused by the `ln` guard, which is the
+    // point of having one: the shift below it never runs on a value that would wrap, so there is
+    // no overflow path to check and none to leave untested.
     assert!(!admissible("ln=64,r=1,p=1"), "no representable working set");
     assert!(!admissible("ln=0,r=8,p=1"), "N = 1 is not a cost");
     assert!(!admissible("ln=14,r=0,p=1"), "r = 0 is not a block size");
@@ -95,6 +96,57 @@ fn the_cost_ceiling_admits_its_own_boundary_and_nothing_past_it() {
         !admissible("ln=14,r=8"),
         "a missing parameter is not a zero"
     );
+}
+
+#[test]
+fn the_cost_ceiling_covers_argon2id_too() {
+    // Argon2id has the identical hole and needs the identical bound: `m` is the working set in
+    // KiB and the verifier takes it from the record, so a stored `m=4294967295` asks for 4 TiB.
+    // The scrypt half is the one this pair ships with by default, which is exactly why the other
+    // one is easy to leave open.
+    let salt = "c2FsdHNhbHRzYWx0c2FsdA";
+    let key = "aGFzaGhhc2hoYXNoaGFzaGhhc2hoYXNoaGFzaGhhc2g";
+    let admissible = |params: &str| {
+        let record = format!("$argon2id$v=19${params}${salt}${key}");
+        password_hash::PasswordHash::new(&record).is_ok_and(|h| super::phc::cost_is_admissible(&h))
+    };
+
+    assert!(
+        admissible("m=19456,t=2,p=1"),
+        "the shipped default must be read"
+    );
+    assert!(
+        admissible("m=524288,t=2,p=1"),
+        "exactly 512 MiB must be read"
+    );
+    assert!(!admissible("m=524289,t=2,p=1"), "one KiB past the ceiling");
+    assert!(!admissible("m=4294967295,t=2,p=1"), "4 TiB is not a cost");
+    assert!(!admissible("t=2,p=1"), "a missing m is not a zero");
+}
+
+#[test]
+fn the_cost_ceiling_has_no_opinion_on_an_algorithm_it_cannot_verify() {
+    // A WELL-FORMED PHC string tagged with an algorithm this module has no verifier for. The
+    // predicate answers `true` — it bounds a cost it understands, and it is not the place that
+    // decides which algorithms are accepted; `verify_phc` refuses this record a line later,
+    // because no verifier in its list claims the identifier.
+    //
+    // The existing totality test passes a `$pbkdf2$…` string too, but it never reaches here:
+    // that one fails `PasswordHash::new` outright, so `verify` returns before the predicate
+    // runs. This arm needs a record that actually parses.
+    let record = format!(
+        "$pbkdf2$i=1000${}${}",
+        "c2FsdHNhbHRzYWx0c2FsdA", "aGFzaGhhc2hoYXNoaGFzaGhhc2hoYXNoaGFzaGhhc2g"
+    );
+    let parsed = password_hash::PasswordHash::new(&record);
+
+    assert!(
+        parsed.is_ok(),
+        "the fixture must parse, or it tests nothing"
+    );
+    assert!(parsed.is_ok_and(|h| super::phc::cost_is_admissible(&h)));
+    // And the record is still refused, by the verifier list rather than by the ceiling.
+    assert!(matches!(verify(b"anything", &record), Ok(false)));
 }
 
 #[test]
