@@ -577,3 +577,64 @@ jobs:
             examples/e2e/playwright-report/
             examples/e2e/test-results/
           retention-days: 7
+
+  # Single check the org ruleset can require, in every repo, under one name.
+  #
+  # A required status check is matched by literal name, and this repo's jobs are
+  # named nothing like the next repo's — so there is no list of contexts that
+  # works org-wide. One aggregate per repo, always spelled `CI passed`, is what
+  # makes a single rule at the organisation level possible, and what makes every
+  # repository created from now on inherit the gate without being configured.
+  #
+  # `always()` is what makes this a gate rather than decoration: without it the
+  # job is skipped the moment a dependency fails, and a skipped check reports
+  # neutral — the pull request would look unblocked precisely when it is broken.
+  # `cancelled` is named explicitly for the same reason; a cancelled job is not
+  # a passing one, and a queue timeout produces exactly that.
+  #
+  # A skipped dependency is accepted on purpose: jobs here are conditional on the
+  # event, and failing on skip would break every push that legitimately runs a
+  # subset.
+  ci-pass:
+    name: CI passed
+    if: always()
+    needs:
+      - core
+      - feature-matrix
+      - doc
+      - ts-rs-drift
+      - wasm-purity
+      - wasm-binding
+      - wasm-pack
+      - supply-chain
+      - invariants
+      - versions
+      - public-api
+      - fuzz-smoke
+      - npm
+      - examples
+      - dogfood
+      - e2e-browser
+    runs-on: ubuntu-latest
+    # Once this is the required check, a hung runner holds every merge behind it
+    # for GitHub's default of six hours. The job is one comparison, so a short
+    # ceiling costs nothing and bounds that.
+    timeout-minutes: 5
+    steps:
+      # Printed on success as well as failure. Without it the check reports a bare
+      # red X and the reader has to open each dependency to find which one broke.
+      - name: Report the result of every dependency
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+        run: |
+          {
+            echo "| Job | Result |"
+            echo "| --- | --- |"
+            echo "$NEEDS" | jq -r 'to_entries[] | "| \(.key) | \(.value.result) |"' | sort
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+
+      # Named for what the condition does: `skipped` is deliberately not a failure
+      # here, so "did not succeed" would describe a stricter gate than this is.
+      - name: Fail when any dependency failed or was cancelled
+        if: contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled')
+        run: exit 1
