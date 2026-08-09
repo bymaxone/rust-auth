@@ -116,24 +116,28 @@ pub(crate) async fn run_rehash_password(
         .map_err(map_repository_error)
 }
 
-/// Send a verification OTP to the recipient.
+/// Send a verification OTP to the recipient, attributed to the account's tenant.
 pub(crate) async fn run_send_verification_email(
     provider: Arc<dyn EmailProvider>,
+    tenant_id: String,
     email: String,
     otp: String,
 ) -> Result<(), EmailError> {
     provider
-        .send_email_verification_otp(&email, &otp, None)
+        .send_email_verification_otp(&tenant_id, &email, &otp, None)
         .await
 }
 
-/// Send a password-reset OTP to the recipient.
+/// Send a password-reset OTP to the recipient, attributed to the account's tenant.
 pub(crate) async fn run_send_reset_otp_email(
     provider: Arc<dyn EmailProvider>,
+    tenant_id: String,
     email: String,
     otp: String,
 ) -> Result<(), EmailError> {
-    provider.send_password_reset_otp(&email, &otp, None).await
+    provider
+        .send_password_reset_otp(&tenant_id, &email, &otp, None)
+        .await
 }
 
 #[cfg(test)]
@@ -336,6 +340,7 @@ mod tests {
     impl EmailProvider for RecordingEmails {
         async fn send_email_change_verification(
             &self,
+            _tenant_id: &str,
             _new_email: &str,
             _token: &str,
             _locale: Option<&str>,
@@ -345,6 +350,7 @@ mod tests {
 
         async fn send_password_reset_token(
             &self,
+            _tenant_id: &str,
             email: &str,
             token: &str,
             _locale: Option<&str>,
@@ -356,6 +362,7 @@ mod tests {
         }
         async fn send_password_reset_otp(
             &self,
+            _tenant_id: &str,
             email: &str,
             otp: &str,
             _locale: Option<&str>,
@@ -367,6 +374,7 @@ mod tests {
         }
         async fn send_email_verification_otp(
             &self,
+            _tenant_id: &str,
             email: &str,
             otp: &str,
             _locale: Option<&str>,
@@ -378,6 +386,7 @@ mod tests {
         }
         async fn send_mfa_enabled(
             &self,
+            _tenant_id: &str,
             _email: &str,
             _locale: Option<&str>,
         ) -> Result<(), EmailError> {
@@ -385,6 +394,7 @@ mod tests {
         }
         async fn send_mfa_disabled(
             &self,
+            _tenant_id: &str,
             _email: &str,
             _locale: Option<&str>,
         ) -> Result<(), EmailError> {
@@ -392,6 +402,7 @@ mod tests {
         }
         async fn send_new_session_alert(
             &self,
+            _tenant_id: &str,
             _email: &str,
             _session: &crate::traits::email::SessionInfo,
             _locale: Option<&str>,
@@ -400,6 +411,7 @@ mod tests {
         }
         async fn send_invitation(
             &self,
+            _tenant_id: &str,
             _email: &str,
             _invite: &crate::traits::email::InviteData,
             _locale: Option<&str>,
@@ -416,7 +428,7 @@ mod tests {
         let emails = RecordingEmails::default();
         assert!(
             emails
-                .send_email_change_verification("new@example.com", "t", None)
+                .send_email_change_verification("t1", "new@example.com", "t", None)
                 .await
                 .is_ok()
         );
@@ -432,6 +444,7 @@ mod tests {
         assert!(
             run_send_verification_email(
                 provider.clone(),
+                "t1".to_owned(),
                 "verify@example.com".to_owned(),
                 "123456".to_owned()
             )
@@ -441,6 +454,7 @@ mod tests {
         assert!(
             run_send_reset_otp_email(
                 provider,
+                "t1".to_owned(),
                 "reset@example.com".to_owned(),
                 "654321".to_owned()
             )
@@ -462,12 +476,12 @@ mod tests {
         let direct = RecordingEmails::default();
         assert!(
             direct
-                .send_password_reset_token("e", "t", None)
+                .send_password_reset_token("t1", "e", "t", None)
                 .await
                 .is_ok()
         );
-        assert!(direct.send_mfa_enabled("e", None).await.is_ok());
-        assert!(direct.send_mfa_disabled("e", None).await.is_ok());
+        assert!(direct.send_mfa_enabled("t1", "e", None).await.is_ok());
+        assert!(direct.send_mfa_disabled("t1", "e", None).await.is_ok());
         let session = crate::traits::email::SessionInfo {
             device: "d".to_owned(),
             ip: "i".to_owned(),
@@ -475,7 +489,7 @@ mod tests {
         };
         assert!(
             direct
-                .send_new_session_alert("e", &session, None)
+                .send_new_session_alert("t1", "e", &session, None)
                 .await
                 .is_ok()
         );
@@ -485,7 +499,12 @@ mod tests {
             invite_token: "tok".to_owned(),
             expires_at: OffsetDateTime::UNIX_EPOCH,
         };
-        assert!(direct.send_invitation("e", &invite, None).await.is_ok());
+        assert!(
+            direct
+                .send_invitation("t1", "e", &invite, None)
+                .await
+                .is_ok()
+        );
     }
 
     #[tokio::test]
@@ -495,6 +514,7 @@ mod tests {
         assert!(
             run_send_verification_email(
                 provider.clone(),
+                "t1".to_owned(),
                 "u@example.com".to_owned(),
                 "123456".to_owned()
             )
@@ -502,9 +522,14 @@ mod tests {
             .is_ok()
         );
         assert!(
-            run_send_reset_otp_email(provider, "u@example.com".to_owned(), "654321".to_owned())
-                .await
-                .is_ok()
+            run_send_reset_otp_email(
+                provider,
+                "t1".to_owned(),
+                "u@example.com".to_owned(),
+                "654321".to_owned()
+            )
+            .await
+            .is_ok()
         );
     }
 

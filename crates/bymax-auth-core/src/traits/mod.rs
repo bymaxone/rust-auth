@@ -6,6 +6,7 @@
 
 pub mod breach;
 pub mod common_password;
+pub mod default_email;
 pub mod email;
 pub mod hooks;
 pub mod http;
@@ -20,7 +21,13 @@ pub use breach::HibpBreachChecker;
 pub use breach::{AllowAllBreachChecker, PasswordBreachChecker};
 pub use common_password::{CommonPasswordChecker, reduce_to_base_word};
 #[doc(inline)]
-pub use email::{EmailError, EmailProvider, InviteData, NoOpEmailProvider, SessionInfo};
+pub use default_email::{
+    AuthEmailCatalogue, AuthEmailMessage, AuthEmailSink, DefaultAuthEmailCatalogue,
+    DefaultAuthEmailProvider, DeliveryErrorPolicy, OutgoingEmail,
+};
+pub use email::{
+    EmailError, EmailProvider, InviteData, NoOpEmailProvider, PLATFORM_EMAIL_TENANT, SessionInfo,
+};
 #[doc(inline)]
 pub use hooks::{
     AuthHooks, BeforeRegisterResult, HookContext, HookError, LoginFailure, LoginFailureReason,

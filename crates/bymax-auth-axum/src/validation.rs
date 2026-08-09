@@ -218,14 +218,21 @@ mod tests {
 
     #[test]
     fn deserialize_query_maps_errors_and_parses_valid() {
-        // A missing required field fails; a valid query parses.
-        let err = deserialize_query::<OAuthInitiateQuery>("").err();
+        // An unknown field fails (`deny_unknown_fields`); a valid query parses.
+        let err = deserialize_query::<OAuthInitiateQuery>("nope=1").err();
         assert!(matches!(
             err,
             Some(AuthRejection(AuthError::Validation { details })) if details[0].field == "query"
         ));
         let ok = deserialize_query::<OAuthInitiateQuery>("tenantId=t1");
-        assert!(matches!(ok, Ok(q) if q.tenant_id == "t1"));
+        assert!(matches!(ok, Ok(q) if q.tenant_id.as_deref() == Some("t1")));
+        // An absent `tenantId` now parses: a deployment with a `TenantIdResolver` names the
+        // tenant from the request, and the engine — not this layer — refuses the request when
+        // neither a resolver nor a body value can scope it.
+        assert!(matches!(
+            deserialize_query::<OAuthInitiateQuery>(""),
+            Ok(q) if q.tenant_id.is_none()
+        ));
     }
 
     #[test]

@@ -78,7 +78,7 @@ async fn initiate(
     // that decides which tenant an account is provisioned into.
     match state
         .engine()
-        .oauth_initiate(&provider, &query.tenant_id, &ctx)
+        .oauth_initiate(&provider, query.tenant_id.as_deref(), &ctx)
         .await
     {
         Ok(redirect) => {

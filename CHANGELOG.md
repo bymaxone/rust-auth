@@ -12,6 +12,35 @@ version bump.
 
 ### Added
 
+- **`DefaultAuthEmailProvider`, the overridable default that fills the email port** so a
+  deployment does not hand-write ten methods to send a verification code. It sends through
+  `AuthEmailSink`, a one-method delivery port narrow enough that the module depends on no
+  concrete mailer, and it ships the security policy each of those hand-written providers would
+  otherwise have to get right independently: HTML escaping on a body path that carries
+  caller-chosen text (an inviter's display name, a tenant's name, the address an account moved
+  to), CR/LF stripping on the subject so that text cannot inject an extra header, the NIST
+  SP 800-63B §4.6 notification catalogue, and a swallow-and-log delivery-failure policy so a
+  down channel never turns "enable MFA" into a failed request.
+
+  The copy is entirely replaceable — implement `AuthEmailCatalogue` and override any subset of
+  its ten renderers, returning `html` for real links and branding. A catalogue chooses words,
+  never behaviour: the subject sanitization and the failure policy apply to an override exactly
+  as to the default. **Escaping is the one exception, and it is a security boundary.** The
+  provider escapes what it renders — a message that leaves `html` unset has its `text` turned
+  into escaped paragraphs — but a renderer that RETURNS `html` has that value used verbatim and
+  owns the escaping of every dynamic value it interpolates. That is what makes a real `<a>`
+  link possible, and it means an override must not trust the provider to escape its markup.
+
+  `DeliveryErrorPolicy::Rethrow` restores the error for the two flows that react to one (the
+  reset path deletes an undelivered token early rather than leaving it to its TTL; the
+  email-change path refuses to record "verification sent"). It does not turn an outage into a
+  failed user operation elsewhere: the MFA and password-changed notices are detached through
+  `spawn_guarded`, and the invitation flow catches the error and leaves the invitation
+  standing.
+
+  Mirrors nest-auth's provider of the same name, so the two libraries send the same messages
+  from the same events.
+
 - **`jwt.issuer` and `jwt.audience` — binding tokens to who minted them and who they are for.**
   Optional and `None` by default, so an existing deployment is unchanged. When set, the value
   is stamped on every token this backend mints — dashboard, platform and MFA challenge alike —
@@ -425,6 +454,38 @@ version bump.
   does emit.
 
 ### Changed
+
+- **Every `EmailProvider` method now takes the account's `tenant_id` first**, so a multi-tenant
+  delivery channel can attribute and route each message rather than guessing from the
+  recipient. A cross-tenant platform admin carries no tenant of its own, so MFA notices on that
+  plane arrive under the reserved `PLATFORM_EMAIL_TENANT` (`"platform"`) — held byte-identical
+  to nest-auth's constant, so one adapter behind both backends sees one name for the admin
+  plane rather than two. A deployment that lets tenants choose their own id must keep that one
+  out of the space, the same way `pep:`/`ep:` keep the two epoch namespaces apart in Redis.
+
+  **Breaking for a hand-written `EmailProvider`.** Rust will not silently bind the new
+  parameter the way a structurally-typed language would, so every implementation fails to
+  compile until it is updated — which is the outcome to want here: a provider that kept
+  compiling while passing the recipient where the tenant now goes would attribute every
+  message to an address. Nothing is published on crates.io or npm yet, so this breaks no
+  released consumer.
+
+- **`tenantId` is optional wherever a `TenantIdResolver` can supply it.** A configured resolver
+  is authoritative and ignores the body's value — that is the whole anti-spoofing promise — so
+  a client under one may now omit the field entirely instead of sending a value the server
+  discards. With no resolver configured the body is the only thing that can scope the request,
+  and one naming no tenant is refused with `auth.validation` naming the field, rather than
+  defaulted: inventing a tenant name would silently gather into one scope every account a
+  misconfigured deployment created, and that scope keys the user lookup, the Redis records and
+  the HMAC identifiers built from it.
+
+  The engine inputs (`RegisterInput`, `LoginInput`, `ForgotPasswordInput`, `ResetPasswordInput`,
+  `VerifyResetOtpInput`, `ResendResetOtpInput`) carry `Option<String>`, and `verify_email`,
+  `resend_verification_email` and `oauth_initiate` take `Option<&str>`. The internal reset
+  helpers now receive the RESOLVED tenant as an argument rather than reading it back off the
+  input struct — with both values in scope, reading the wrong one is a one-character mistake
+  that no test would notice, and it is exactly the mistake nest-auth had to fix on this flow.
+
 
 - **A recovery code is claimed before it is accepted.** Consuming one is a read-modify-write
   against the consumer's user repository: the challenge reads the whole array, removes one

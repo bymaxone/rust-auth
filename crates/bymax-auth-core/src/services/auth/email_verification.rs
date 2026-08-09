@@ -33,7 +33,7 @@ impl AuthEngine {
     /// post-OTP enumeration oracle), or a store [`AuthError`].
     pub async fn verify_email(
         &self,
-        tenant_id: &str,
+        tenant_id: Option<&str>,
         email: &str,
         otp: &str,
         ctx: &RequestContext,
@@ -91,7 +91,7 @@ impl AuthEngine {
     /// changes the (always `Ok`) outcome.
     pub async fn resend_verification_email(
         &self,
-        tenant_id: &str,
+        tenant_id: Option<&str>,
         email: &str,
         ctx: &RequestContext,
     ) -> Result<(), AuthError> {
@@ -159,6 +159,7 @@ impl AuthEngine {
 
         spawn_guarded(run_send_verification_email(
             self.email_provider().clone(),
+            tenant_id.to_owned(),
             email.to_owned(),
             otp,
         ));
@@ -224,7 +225,7 @@ mod tests {
         let (events, capture) = crate::log_capture::capture_events();
         assert!(
             h.engine
-                .verify_email("t1", "v@example.com", &code, &ctx())
+                .verify_email(Some("t1"), "v@example.com", &code, &ctx())
                 .await
                 .is_ok()
         );
@@ -236,7 +237,7 @@ mod tests {
         // The OTP is consumed: a second submission is now expired.
         assert!(matches!(
             h.engine
-                .verify_email("t1", "v@example.com", &code, &ctx())
+                .verify_email(Some("t1"), "v@example.com", &code, &ctx())
                 .await,
             Err(AuthError::OtpExpired)
         ));
@@ -265,7 +266,7 @@ mod tests {
         );
         assert!(matches!(
             h.engine
-                .verify_email("t1", "w@example.com", "000000", &ctx())
+                .verify_email(Some("t1"), "w@example.com", "000000", &ctx())
                 .await,
             Err(AuthError::OtpInvalid)
         ));
@@ -283,7 +284,7 @@ mod tests {
         let Some(code) = stored else { return };
         assert!(matches!(
             h.engine
-                .verify_email("t1", "ghost@example.com", &code, &ctx())
+                .verify_email(Some("t1"), "ghost@example.com", &code, &ctx())
                 .await,
             Err(AuthError::OtpInvalid)
         ));
@@ -308,7 +309,7 @@ mod tests {
         let started = Instant::now();
         assert!(
             h.engine
-                .resend_verification_email("t1", "r@example.com", &ctx())
+                .resend_verification_email(Some("t1"), "r@example.com", &ctx())
                 .await
                 .is_ok()
         );
@@ -325,7 +326,7 @@ mod tests {
         // Second resend within the cooldown is the silent-success branch.
         assert!(
             h.engine
-                .resend_verification_email("t1", "r@example.com", &ctx())
+                .resend_verification_email(Some("t1"), "r@example.com", &ctx())
                 .await
                 .is_ok()
         );
@@ -338,7 +339,7 @@ mod tests {
         // An absent account is indistinguishable (uniform Ok).
         assert!(
             h.engine
-                .resend_verification_email("t1", "absent@example.com", &ctx())
+                .resend_verification_email(Some("t1"), "absent@example.com", &ctx())
                 .await
                 .is_ok()
         );
@@ -346,7 +347,7 @@ mod tests {
         let _ = h.seed(SeedUser::active("done@example.com", "pw")).await;
         assert!(
             h.engine
-                .resend_verification_email("t1", "done@example.com", &ctx())
+                .resend_verification_email(Some("t1"), "done@example.com", &ctx())
                 .await
                 .is_ok()
         );

@@ -237,27 +237,64 @@ impl UserRepository for PgUserRepository {
 
 Email delivery is fully delegated — the library never imports a mailer SDK. It passes **structured data** (token, OTP, session info, invite data), never rendered HTML.
 
+**Most deployments should not write this trait by hand.** `DefaultAuthEmailProvider` already implements all ten methods over a one-method delivery port, with the escaping, header sanitization and failure policy described below:
+
+```rust
+use std::sync::Arc;
+use bymax_auth::core::traits::{
+    AuthEmailSink, DefaultAuthEmailProvider, EmailError, OutgoingEmail,
+};
+
+pub struct ResendSink { /* client, from */ }
+
+#[async_trait::async_trait]
+impl AuthEmailSink for ResendSink {
+    async fn send(&self, message: OutgoingEmail<'_>) -> Result<(), EmailError> {
+        // One call, whatever your transport is (Resend/SES/SMTP). `message.tenant_id` is the
+        // tenant the account belongs to, for a multi-tenant channel's attribution and routing.
+        Ok(())
+    }
+}
+
+let email = Arc::new(DefaultAuthEmailProvider::new(Arc::new(ResendSink { /* … */ })));
+```
+
+Override any subset of the copy by implementing `AuthEmailCatalogue` (every method has a secure default) and passing it to `.with_catalogue(…)`. By default a delivery failure is logged and swallowed, so a down channel never turns "enable MFA" into a failed request — `.with_delivery_error_policy(DeliveryErrorPolicy::Rethrow)` restores the error for the two flows that react to one (the reset path deletes an undelivered token early; the email-change path refuses to report "sent"), and changes nothing elsewhere, since the other sends are already detached or caught by their callers.
+
+> [!WARNING]
+> **A renderer that returns `html` owns its own escaping.** The provider escapes what *it* renders — a message that leaves `html` unset has its `text` turned into escaped paragraphs — but a returned `html` value is used verbatim. That is what makes a real `<a>` link possible, and it means an override interpolating a display name, a tenant name or an address must escape those itself. The subject sanitization and the failure policy do apply to overrides; escaping is the one that does not.
+
+To bridge the port onto something the sink shape does not fit, implement `EmailProvider` directly. Every method takes the account's `tenant_id` first; a cross-tenant platform admin carries none, so those notices arrive under the reserved `PLATFORM_EMAIL_TENANT` (`"platform"`).
+
 ```rust
 use async_trait::async_trait;
-use bymax_auth::{EmailProvider, InviteData, SessionInfo};
+use bymax_auth::core::traits::{EmailProvider, InviteData, SessionInfo};
 
 pub struct ResendEmailProvider { /* client, from, app_url */ }
 
 #[async_trait]
 impl EmailProvider for ResendEmailProvider {
-    async fn send_password_reset_token(&self, email: &str, token: &str, locale: Option<&str>) {
+    async fn send_password_reset_token(
+        &self, tenant_id: &str, email: &str, token: &str, locale: Option<&str>,
+    ) {
         // Render and send with your transport of choice (Resend/SES/SMTP).
     }
 
-    async fn send_email_verification_otp(&self, email: &str, otp: &str, locale: Option<&str>) {
+    async fn send_email_verification_otp(
+        &self, tenant_id: &str, email: &str, otp: &str, locale: Option<&str>,
+    ) {
         // …
     }
 
-    async fn send_new_session_alert(&self, email: &str, info: &SessionInfo, locale: Option<&str>) {
+    async fn send_new_session_alert(
+        &self, tenant_id: &str, email: &str, info: &SessionInfo, locale: Option<&str>,
+    ) {
         // …
     }
 
-    async fn send_invitation(&self, email: &str, data: &InviteData, locale: Option<&str>) {
+    async fn send_invitation(
+        &self, tenant_id: &str, email: &str, data: &InviteData, locale: Option<&str>,
+    ) {
         // …
     }
 
@@ -266,7 +303,7 @@ impl EmailProvider for ResendEmailProvider {
 ```
 
 > [!WARNING]
-> Any consumer-supplied value (display name, tenant name, inviter name, device string) interpolated into an HTML email body MUST be escaped to prevent stored XSS. Tokens and OTPs are library-generated and safe; the placeholders you fill in are not.
+> Any consumer-supplied value (display name, tenant name, inviter name, device string) interpolated into an HTML email body MUST be escaped to prevent stored XSS, and a subject line must carry no CR/LF or a channel that builds headers by concatenation will read the rest of it as extra headers. `DefaultAuthEmailProvider` does both for you; a hand-written provider owns them itself. Tokens and OTPs are library-generated and safe; the placeholders you fill in are not.
 
 ### 4. Build the engine and mount the router
 
@@ -588,7 +625,9 @@ Verification pins `header.alg == "HS256"` **before** any signature math — `non
 
 ### Separate Auth Contexts for Multi-Tenant SaaS
 
-Platform admins and tenant users are fully isolated — separate repositories, claims, extractors, and routes. `tenant_id` is always taken from the configured `TenantIdResolver`, **never the request body**, preventing tenant spoofing at the architecture level.
+Platform admins and tenant users are fully isolated — separate repositories, claims, extractors, and routes. When a `TenantIdResolver` is configured it is authoritative on **every** tenant-scoped flow (login, register, both email-verification steps, all four password-reset steps, and the OAuth initiate), and the body's `tenantId` is ignored — preventing tenant spoofing at the architecture level.
+
+Because a configured resolver makes the body's value dead weight, `tenantId` is **optional** on every DTO that carries it and a client may omit it entirely. With no resolver configured the body is the only thing that can name a tenant, and a request naming none is refused with `auth.validation` rather than defaulted — the deployment has to choose one of the two, and neither choice is guessed on its behalf.
 
 ### Atomic State on Shared Redis
 

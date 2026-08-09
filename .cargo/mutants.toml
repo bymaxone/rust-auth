@@ -104,6 +104,18 @@ additional_cargo_args = ["--all-features"]
 #     pattern matches the TRAIT default only; a real provider's implementation is still mutated,
 #     which is what catches a notice that stops firing. The verification sender next to it is
 #     deliberately NOT defaulted, so it generates no such mutant.
+#
+#     WIDENED 2026-08-08 from that one method to the three defaulted notices —
+#     `send_password_changed`, `send_email_changed_notification` and `send_new_session_alert`.
+#     All three have the identical body and the identical reason; naming only one of them was an
+#     accident of which was written last, not a decision. The pattern is still anchored to
+#     `EmailProvider::` (the trait default) and to `with Ok(())` (the whole-body replacement), so
+#     an implementation's mutants — `<impl EmailProvider for X>::…` — and every other kind of
+#     mutant on these methods are still generated and still have to be killed. That matters here:
+#     `DefaultAuthEmailProvider` implements all three with real bodies, and replacing one of
+#     those with `Ok(())` skips the send entirely, which the "every send reaches the sink" test
+#     catches. Only the four REQUIRED trait methods (the two that carry a token and the two MFA
+#     notices) have no default at all and so generate no mutant of this shape.
 exclude_re = [
     'replace \| with \^ in new_uuid_v4',
     'replace AuthEngine::builder -> AuthEngineBuilder with Default::default\(\)',
@@ -116,5 +128,5 @@ exclude_re = [
     'replace < with <= in MfaService::challenge_platform',
     'replace < with <= in MfaService::splice_recovery_code',
     'replace \| with \^ in hotp',
-    'replace EmailProvider::send_email_changed_notification -> Result<\(\), EmailError> with Ok\(\(\)\)',
+    'replace EmailProvider::(send_password_changed|send_email_changed_notification|send_new_session_alert) -> Result<\(\), EmailError> with Ok\(\(\)\)',
 ]

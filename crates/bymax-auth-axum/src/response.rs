@@ -57,6 +57,32 @@ pub fn error_response(error: &AuthError) -> Response {
     response
 }
 
+/// Render an anti-enumerating flow's outcome: the uniform response for everything the
+/// account's state could explain, and the real error for a request-shape failure.
+///
+/// The three public mail-triggering routes (`forgot-password`, `resend-otp`,
+/// `resend-verification`) answer identically whether or not the account exists — that is the
+/// whole anti-enumeration contract, and it is why they discard the engine's `Err`.
+///
+/// [`AuthError::Validation`] is the one error that must not be discarded, because it cannot be
+/// explained by any account. It is reached only when nothing in the request can scope it — no
+/// `TenantIdResolver` is configured and the body named no tenant — a decision made before any
+/// lookup runs, so surfacing it reveals only what the caller already knows about their own
+/// request. Collapsing it instead answers `200` to a request that sent no mail and never
+/// could, which is the failure that looks like success from every side: the caller waits for a
+/// message that was never going to arrive, and the deployment's misconfiguration stays
+/// invisible.
+///
+/// Everything else still collapses. An account that does not exist, one that is blocked, and a
+/// store that is briefly unreachable are all indistinguishable here by design.
+#[must_use]
+pub fn anti_enumerating_outcome(outcome: &Result<(), AuthError>, uniform: Response) -> Response {
+    match outcome {
+        Err(error @ AuthError::Validation { .. }) => error_response(error),
+        _ => uniform,
+    }
+}
+
 /// The `Retry-After` value (seconds) for the codes that carry one — the per-account
 /// lockout, the OTP attempt cap, and the edge rate-limit rejection — or `None` for every
 /// other code. `AccountLocked`/`TooManyRequests` carry an explicit value; `OtpMaxAttempts`
@@ -77,6 +103,38 @@ fn retry_after_seconds(error: &AuthError) -> Option<u64> {
 mod tests {
     use super::*;
     use axum::response::IntoResponse;
+
+    #[test]
+    fn an_unscopable_request_is_surfaced_while_every_account_outcome_still_collapses() {
+        // The anti-enumeration contract is about the ACCOUNT: existence, blocked status and a
+        // briefly unreachable store must be indistinguishable. A request that names no tenant
+        // with no resolver configured is none of those — it is decided before any lookup runs,
+        // so it can be answered honestly, and it must be: collapsing it answers 200 to a caller
+        // whose mail was never going to be sent, and hides the misconfiguration that caused it.
+        let uniform = || StatusCode::NO_CONTENT.into_response();
+
+        let unscopable: Result<(), AuthError> = Err(AuthError::Validation {
+            details: vec![bymax_auth_types::FieldError {
+                field: "tenantId".to_owned(),
+                message: "required".to_owned(),
+            }],
+        });
+        let surfaced = anti_enumerating_outcome(&unscopable, uniform());
+        assert_eq!(surfaced.status(), StatusCode::BAD_REQUEST);
+
+        // Success, an account-dependent refusal, and an infrastructure failure are one response.
+        for outcome in [
+            Ok(()),
+            Err(AuthError::OtpInvalid),
+            Err(AuthError::Internal(Box::new(std::io::Error::other("down")))),
+        ] {
+            assert_eq!(
+                anti_enumerating_outcome(&outcome, uniform()).status(),
+                StatusCode::NO_CONTENT,
+                "an account-dependent outcome escaped the uniform response: {outcome:?}"
+            );
+        }
+    }
 
     #[test]
     fn internal_error_renders_a_generic_500_without_leaking_the_cause() {

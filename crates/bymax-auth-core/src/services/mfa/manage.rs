@@ -213,6 +213,7 @@ impl MfaService {
     fn notify_disabled(&self, view: &MfaUserView, user_id: &str, ip: &str, user_agent: &str) {
         spawn_guarded(run_send_mfa_disabled(
             self.email.clone(),
+            view.email_tenant(),
             view.email.clone(),
         ));
         if let Some(safe) = view.dashboard_user.clone() {
@@ -234,9 +235,10 @@ impl MfaService {
 /// Send the "MFA disabled" email (a named future so the detached spawn owns its data).
 pub(super) async fn run_send_mfa_disabled(
     email: std::sync::Arc<dyn crate::traits::EmailProvider>,
+    tenant_id: String,
     recipient: String,
 ) -> Result<(), crate::traits::EmailError> {
-    email.send_mfa_disabled(&recipient, None).await
+    email.send_mfa_disabled(&tenant_id, &recipient, None).await
 }
 
 /// Invoke the `after_mfa_disabled` hook (a named future so the detached spawn owns its data).

@@ -1622,7 +1622,7 @@ async fn engine_runs_password_reset_via_token_against_redis() {
                 email: "reset@example.com".to_owned(),
                 name: "Reset User".to_owned(),
                 password: "correct horse battery staple".to_owned(),
-                tenant_id: "t1".to_owned(),
+                tenant_id: Some("t1".to_owned()),
             },
             &ctx,
         )
@@ -1638,7 +1638,7 @@ async fn engine_runs_password_reset_via_token_against_redis() {
             .initiate_reset(
                 ForgotPasswordInput {
                     email: "reset@example.com".to_owned(),
-                    tenant_id: "t1".to_owned(),
+                    tenant_id: Some("t1".to_owned()),
                 },
                 &ctx
             )
@@ -1666,7 +1666,7 @@ async fn engine_runs_password_reset_via_token_against_redis() {
             .reset_password(
                 ResetPasswordInput {
                     email: "reset@example.com".to_owned(),
-                    tenant_id: "t1".to_owned(),
+                    tenant_id: Some("t1".to_owned()),
                     new_password: "a-brand-new-password".to_owned(),
                     token: Some("known-reset-token".to_owned()),
                     otp: None,
@@ -1694,7 +1694,7 @@ async fn engine_runs_password_reset_via_token_against_redis() {
             .reset_password(
                 ResetPasswordInput {
                     email: "reset@example.com".to_owned(),
-                    tenant_id: "t1".to_owned(),
+                    tenant_id: Some("t1".to_owned()),
                     new_password: "again-and-again-42".to_owned(),
                     token: Some("known-reset-token".to_owned()),
                     otp: None,
@@ -1742,7 +1742,7 @@ async fn engine_runs_password_reset_via_otp_against_redis() {
                 email: "otp-reset@example.com".to_owned(),
                 name: "Otp User".to_owned(),
                 password: "old-password".to_owned(),
-                tenant_id: "t1".to_owned(),
+                tenant_id: Some("t1".to_owned()),
             },
             &otp_ctx,
         )
@@ -1767,7 +1767,7 @@ async fn engine_runs_password_reset_via_otp_against_redis() {
             .initiate_reset(
                 ForgotPasswordInput {
                     email: "otp-reset@example.com".to_owned(),
-                    tenant_id: "t1".to_owned(),
+                    tenant_id: Some("t1".to_owned()),
                 },
                 &ctx
             )
@@ -1799,7 +1799,7 @@ async fn engine_runs_password_reset_via_otp_against_redis() {
         .verify_reset_otp(
             VerifyResetOtpInput {
                 email: "otp-reset@example.com".to_owned(),
-                tenant_id: "t1".to_owned(),
+                tenant_id: Some("t1".to_owned()),
                 otp: code,
             },
             &ctx,
@@ -1812,7 +1812,7 @@ async fn engine_runs_password_reset_via_otp_against_redis() {
             .reset_password(
                 ResetPasswordInput {
                     email: "otp-reset@example.com".to_owned(),
-                    tenant_id: "t1".to_owned(),
+                    tenant_id: Some("t1".to_owned()),
                     new_password: "a-fresh-new-password".to_owned(),
                     token: None,
                     otp: None,
@@ -1848,7 +1848,7 @@ async fn engine_runs_password_reset_via_otp_against_redis() {
             .reset_password(
                 ResetPasswordInput {
                     email: "otp-reset@example.com".to_owned(),
-                    tenant_id: "t1".to_owned(),
+                    tenant_id: Some("t1".to_owned()),
                     new_password: "another".to_owned(),
                     token: None,
                     otp: None,
@@ -1930,7 +1930,7 @@ async fn engine_persists_normalized_ua_and_ip_matching_the_new_session_hook() {
                 email: "norm@example.com".to_owned(),
                 name: "Norm User".to_owned(),
                 password: "correct horse battery staple".to_owned(),
-                tenant_id: "t1".to_owned(),
+                tenant_id: Some("t1".to_owned()),
             },
             &ctx,
         )
@@ -2120,7 +2120,7 @@ async fn engine_session_limit_evicts_oldest_against_redis() {
         email: "cap@example.com".to_owned(),
         name: "Cap User".to_owned(),
         password: "correct horse battery staple".to_owned(),
-        tenant_id: "t1".to_owned(),
+        tenant_id: Some("t1".to_owned()),
     };
     let first = engine.register(register, &ctx).await;
     let Ok(LoginResult::Success(first)) = first else {
@@ -2133,7 +2133,7 @@ async fn engine_session_limit_evicts_oldest_against_redis() {
     let login = |email: &str| bymax_auth_core::services::auth::LoginInput {
         email: email.to_owned(),
         password: "correct horse battery staple".to_owned(),
-        tenant_id: "t1".to_owned(),
+        tenant_id: Some("t1".to_owned()),
     };
     // Two more logins push the live session count to three, over the cap of two.
     let Ok(LoginResult::Success(_)) = engine.login(login("cap@example.com"), &ctx).await else {
@@ -2184,7 +2184,7 @@ async fn engine_runs_register_login_refresh_logout_against_redis() {
                 email: "e2e@example.com".to_owned(),
                 name: "E2E User".to_owned(),
                 password: "correct horse battery staple".to_owned(),
-                tenant_id: "t1".to_owned(),
+                tenant_id: Some("t1".to_owned()),
             },
             &ctx,
         )
@@ -2200,7 +2200,7 @@ async fn engine_runs_register_login_refresh_logout_against_redis() {
             LoginInput {
                 email: "e2e@example.com".to_owned(),
                 password: "correct horse battery staple".to_owned(),
-                tenant_id: "t1".to_owned(),
+                tenant_id: Some("t1".to_owned()),
             },
             &ctx,
         )

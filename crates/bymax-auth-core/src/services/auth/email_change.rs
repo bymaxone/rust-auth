@@ -120,7 +120,7 @@ impl AuthEngine {
         // sent has not started, and telling the caller it succeeded would leave them waiting on
         // a message that is never coming.
         self.email_provider()
-            .send_email_change_verification(&new_email, &raw, None)
+            .send_email_change_verification(&user.tenant_id, &new_email, &raw, None)
             .await
             .map_err(|error| {
                 tracing::error!(%error, "email change: verification could not be delivered");
@@ -182,7 +182,7 @@ impl AuthEngine {
         // the owner's last chance to see a takeover — did not go out.
         if let Err(error) = self
             .email_provider()
-            .send_email_changed_notification(&old_email, &context.new_email, None)
+            .send_email_changed_notification(&user.tenant_id, &old_email, &context.new_email, None)
             .await
         {
             tracing::error!(%error, "email change: notification to the previous address failed");
@@ -280,6 +280,7 @@ mod tests {
     impl crate::traits::EmailProvider for FailingChangeEmail {
         async fn send_email_change_verification(
             &self,
+            _tenant_id: &str,
             _new_email: &str,
             _token: &str,
             _locale: Option<&str>,
@@ -289,6 +290,7 @@ mod tests {
 
         async fn send_email_changed_notification(
             &self,
+            _tenant_id: &str,
             _old_email: &str,
             _new_email: &str,
             _locale: Option<&str>,
@@ -298,6 +300,7 @@ mod tests {
 
         async fn send_password_reset_token(
             &self,
+            _tenant_id: &str,
             _email: &str,
             _token: &str,
             _locale: Option<&str>,
@@ -307,6 +310,7 @@ mod tests {
 
         async fn send_password_reset_otp(
             &self,
+            _tenant_id: &str,
             _email: &str,
             _otp: &str,
             _locale: Option<&str>,
@@ -316,6 +320,7 @@ mod tests {
 
         async fn send_email_verification_otp(
             &self,
+            _tenant_id: &str,
             _email: &str,
             _otp: &str,
             _locale: Option<&str>,
@@ -325,6 +330,7 @@ mod tests {
 
         async fn send_mfa_enabled(
             &self,
+            _tenant_id: &str,
             _email: &str,
             _locale: Option<&str>,
         ) -> Result<(), crate::traits::EmailError> {
@@ -333,6 +339,7 @@ mod tests {
 
         async fn send_mfa_disabled(
             &self,
+            _tenant_id: &str,
             _email: &str,
             _locale: Option<&str>,
         ) -> Result<(), crate::traits::EmailError> {
@@ -341,6 +348,7 @@ mod tests {
 
         async fn send_new_session_alert(
             &self,
+            _tenant_id: &str,
             _email: &str,
             _session: &crate::traits::email::SessionInfo,
             _locale: Option<&str>,
@@ -350,6 +358,7 @@ mod tests {
 
         async fn send_invitation(
             &self,
+            _tenant_id: &str,
             _email: &str,
             _invite: &crate::traits::email::InviteData,
             _locale: Option<&str>,
@@ -615,43 +624,43 @@ mod tests {
 
         assert!(
             FailingChangeEmail
-                .send_password_reset_token("e@x.io", "t", None)
+                .send_password_reset_token("t1", "e@x.io", "t", None)
                 .await
                 .is_ok()
         );
         assert!(
             FailingChangeEmail
-                .send_password_reset_otp("e@x.io", "123456", None)
+                .send_password_reset_otp("t1", "e@x.io", "123456", None)
                 .await
                 .is_ok()
         );
         assert!(
             FailingChangeEmail
-                .send_email_verification_otp("e@x.io", "123456", None)
+                .send_email_verification_otp("t1", "e@x.io", "123456", None)
                 .await
                 .is_ok()
         );
         assert!(
             FailingChangeEmail
-                .send_mfa_enabled("e@x.io", None)
+                .send_mfa_enabled("t1", "e@x.io", None)
                 .await
                 .is_ok()
         );
         assert!(
             FailingChangeEmail
-                .send_mfa_disabled("e@x.io", None)
+                .send_mfa_disabled("t1", "e@x.io", None)
                 .await
                 .is_ok()
         );
         assert!(
             FailingChangeEmail
-                .send_new_session_alert("e@x.io", &session, None)
+                .send_new_session_alert("t1", "e@x.io", &session, None)
                 .await
                 .is_ok()
         );
         assert!(
             FailingChangeEmail
-                .send_invitation("e@x.io", &invite, None)
+                .send_invitation("t1", "e@x.io", &invite, None)
                 .await
                 .is_ok()
         );

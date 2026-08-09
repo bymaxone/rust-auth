@@ -1310,7 +1310,7 @@ mod tests {
                 crate::services::auth::LoginInput {
                     email: "iso@admin.io".to_owned(),
                     password: "pw".to_owned(),
-                    tenant_id: "t1".to_owned(),
+                    tenant_id: Some("t1".to_owned()),
                 },
                 &RequestContext::new("1.2.3.4", "agent", std::collections::BTreeMap::new()),
             )

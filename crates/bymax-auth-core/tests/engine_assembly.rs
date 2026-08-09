@@ -122,7 +122,7 @@ async fn a_wired_breach_checker_refuses_a_compromised_password_at_registration()
                 email: "breached@example.com".to_owned(),
                 password: "glidingwalnut42".to_owned(),
                 name: "Ada".to_owned(),
-                tenant_id: "t1".to_owned(),
+                tenant_id: Some("t1".to_owned()),
             },
             &ctx,
         )
@@ -140,7 +140,7 @@ async fn a_wired_breach_checker_refuses_a_compromised_password_at_registration()
                 email: "clean@example.com".to_owned(),
                 password: "a-long-unique-passphrase".to_owned(),
                 name: "Ada".to_owned(),
-                tenant_id: "t1".to_owned(),
+                tenant_id: Some("t1".to_owned()),
             },
             &ctx,
         )

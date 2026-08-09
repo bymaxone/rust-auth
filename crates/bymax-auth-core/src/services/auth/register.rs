@@ -34,7 +34,7 @@ impl AuthEngine {
             ..input
         };
         // The resolver, when present, is authoritative — the body tenant is ignored (§24.8).
-        let tenant_id = self.resolve_tenant(&input.tenant_id, ctx).await?;
+        let tenant_id = self.resolve_tenant(input.tenant_id.as_deref(), ctx).await?;
         let hook_ctx = HookContext::from_request(
             ctx,
             None,
@@ -196,7 +196,7 @@ mod tests {
             email: email.to_owned(),
             name: "New User".to_owned(),
             password: "correct horse battery staple".to_owned(),
-            tenant_id: "t1".to_owned(),
+            tenant_id: Some("t1".to_owned()),
         }
     }
 

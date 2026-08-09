@@ -160,7 +160,7 @@ impl AuthEngine {
         // Best-effort delivery: a send failure does not roll back the persisted invitation.
         if let Err(error) = self
             .email_provider()
-            .send_invitation(&email, &invite_data, None)
+            .send_invitation(tenant_id, &email, &invite_data, None)
             .await
         {
             tracing::error!(%error, "invitation: delivery failed (the invitation stands)");
@@ -1023,7 +1023,7 @@ mod tests {
 
         assert!(
             FailingInviteEmail
-                .send_email_change_verification("new@example.com", "t", None)
+                .send_email_change_verification("t1", "new@example.com", "t", None)
                 .await
                 .is_ok()
         );
@@ -1035,6 +1035,7 @@ mod tests {
     impl crate::traits::EmailProvider for FailingInviteEmail {
         async fn send_email_change_verification(
             &self,
+            _tenant_id: &str,
             _new_email: &str,
             _token: &str,
             _locale: Option<&str>,
@@ -1044,6 +1045,7 @@ mod tests {
 
         async fn send_password_reset_token(
             &self,
+            _tenant_id: &str,
             _email: &str,
             _token: &str,
             _locale: Option<&str>,
@@ -1052,6 +1054,7 @@ mod tests {
         }
         async fn send_password_reset_otp(
             &self,
+            _tenant_id: &str,
             _email: &str,
             _otp: &str,
             _locale: Option<&str>,
@@ -1060,6 +1063,7 @@ mod tests {
         }
         async fn send_email_verification_otp(
             &self,
+            _tenant_id: &str,
             _email: &str,
             _otp: &str,
             _locale: Option<&str>,
@@ -1068,6 +1072,7 @@ mod tests {
         }
         async fn send_mfa_enabled(
             &self,
+            _tenant_id: &str,
             _email: &str,
             _locale: Option<&str>,
         ) -> Result<(), crate::traits::EmailError> {
@@ -1075,6 +1080,7 @@ mod tests {
         }
         async fn send_mfa_disabled(
             &self,
+            _tenant_id: &str,
             _email: &str,
             _locale: Option<&str>,
         ) -> Result<(), crate::traits::EmailError> {
@@ -1082,6 +1088,7 @@ mod tests {
         }
         async fn send_new_session_alert(
             &self,
+            _tenant_id: &str,
             _email: &str,
             _session: &crate::traits::email::SessionInfo,
             _locale: Option<&str>,
@@ -1090,6 +1097,7 @@ mod tests {
         }
         async fn send_invitation(
             &self,
+            _tenant_id: &str,
             _to: &str,
             _data: &crate::traits::email::InviteData,
             _locale: Option<&str>,
@@ -1141,30 +1149,35 @@ mod tests {
             ip: "1.2.3.4".to_owned(),
             session_hash: "abcd1234".to_owned(),
         };
-        assert!(provider.send_invitation("e", &invite, None).await.is_err());
         assert!(
             provider
-                .send_password_reset_token("e", "t", None)
+                .send_invitation("t1", "e", &invite, None)
+                .await
+                .is_err()
+        );
+        assert!(
+            provider
+                .send_password_reset_token("t1", "e", "t", None)
                 .await
                 .is_ok()
         );
         assert!(
             provider
-                .send_password_reset_otp("e", "o", None)
+                .send_password_reset_otp("t1", "e", "o", None)
                 .await
                 .is_ok()
         );
         assert!(
             provider
-                .send_email_verification_otp("e", "o", None)
+                .send_email_verification_otp("t1", "e", "o", None)
                 .await
                 .is_ok()
         );
-        assert!(provider.send_mfa_enabled("e", None).await.is_ok());
-        assert!(provider.send_mfa_disabled("e", None).await.is_ok());
+        assert!(provider.send_mfa_enabled("t1", "e", None).await.is_ok());
+        assert!(provider.send_mfa_disabled("t1", "e", None).await.is_ok());
         assert!(
             provider
-                .send_new_session_alert("e", &session, None)
+                .send_new_session_alert("t1", "e", &session, None)
                 .await
                 .is_ok()
         );
