@@ -2768,6 +2768,12 @@ mod tests {
         let reissued = svc
             .reissue_access_with_authority(&stale, "ADMIN", "new-tenant", true)
             .await;
+        // Asserted before unwrapping, for the same reason the verification below is: a re-issue
+        // that fails outright would otherwise skip every freshness assertion and read as a pass.
+        assert!(
+            reissued.is_ok(),
+            "the re-issue itself failed, so nothing below was checked: {reissued:?}"
+        );
         let Ok(token) = reissued else { return };
         let verified = svc.verify_access(&token).await;
         // Asserted before it is unwrapped, and that is load-bearing: a `let-else` that returns
@@ -2884,6 +2890,12 @@ mod tests {
         let reissued = svc
             .reissue_platform_access_with_authority(&stale, "super_admin", true)
             .await;
+        // Asserted before unwrapping, for the same reason the verification below is: a re-issue
+        // that fails outright would otherwise skip every freshness assertion and read as a pass.
+        assert!(
+            reissued.is_ok(),
+            "the re-issue itself failed, so nothing below was checked: {reissued:?}"
+        );
         let Ok(token) = reissued else { return };
         let verified = svc.verify_platform_access(&token).await;
         // Asserted before unwrapping, for the reason the dashboard twin spells out.
