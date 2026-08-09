@@ -17,7 +17,7 @@ use tower_cookies::Cookies;
 use crate::delivery::{TokenDelivery, user_body};
 use crate::dto::{LoginDto, RegisterDto, ResendVerificationDto, VerifyEmailDto};
 use crate::extractors::AuthUser;
-use crate::response::error_response;
+use crate::response::{anti_enumerating_outcome, error_response};
 use crate::routes::{
     CookieDomains, PresentedAccessToken, RequestMeta, parse_optional_refresh_body,
     source_refresh_token,
@@ -217,13 +217,15 @@ async fn resend_verification(
     RequestMeta(ctx): RequestMeta,
     ValidatedJson(dto): ValidatedJson<ResendVerificationDto>,
 ) -> Response {
-    // Anti-enumeration: the response is uniform regardless of the outcome, so even an `Err`
-    // collapses to the same 204 — surfacing it would leak a distinguishable signal.
-    let _ = state
+    // Anti-enumeration: the response is uniform regardless of what the account's state turns
+    // out to be, so those `Err`s collapse to the same 204 — surfacing one would leak a
+    // distinguishable signal. A request that cannot be scoped at all is the exception; see
+    // `anti_enumerating_outcome`.
+    let outcome = state
         .engine()
         .resend_verification_email(dto.tenant_id.as_deref(), &dto.email, &ctx)
         .await;
-    StatusCode::NO_CONTENT.into_response()
+    anti_enumerating_outcome(&outcome, StatusCode::NO_CONTENT.into_response())
 }
 
 /// Shared delivery for a [`LoginResult`] (login/register): a full session in the configured

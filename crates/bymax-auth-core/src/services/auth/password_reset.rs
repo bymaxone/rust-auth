@@ -49,7 +49,7 @@ pub struct ForgotPasswordInput {
     pub email: String,
     /// The tenant scope the caller named, or `None` when it named none. A configured
     /// `TenantIdResolver` overrules it; with no resolver, its absence is refused rather than
-    /// defaulted — see [`AuthEngine::resolve_tenant`].
+    /// defaulted: the refusal is a `validation` error naming this field.
     pub tenant_id: Option<String>,
 }
 
@@ -98,7 +98,7 @@ pub struct VerifyResetOtpInput {
     pub email: String,
     /// The tenant scope the caller named, or `None` when it named none. A configured
     /// `TenantIdResolver` overrules it; with no resolver, its absence is refused rather than
-    /// defaulted — see [`AuthEngine::resolve_tenant`].
+    /// defaulted: the refusal is a `validation` error naming this field.
     pub tenant_id: Option<String>,
     /// The numeric OTP to verify (consumed on success).
     pub otp: String,
@@ -111,7 +111,7 @@ pub struct ResendResetOtpInput {
     pub email: String,
     /// The tenant scope the caller named, or `None` when it named none. A configured
     /// `TenantIdResolver` overrules it; with no resolver, its absence is refused rather than
-    /// defaulted — see [`AuthEngine::resolve_tenant`].
+    /// defaulted: the refusal is a `validation` error naming this field.
     pub tenant_id: Option<String>,
 }
 

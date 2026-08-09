@@ -58,7 +58,7 @@ pub struct RegisterInput {
     pub password: String,
     /// The tenant scope supplied by the caller; ignored when a `TenantIdResolver` is set, and
     /// `None` when the caller named none. A request that names no tenant with no resolver
-    /// configured is refused — see [`AuthEngine::resolve_tenant`].
+    /// configured is refused with a `validation` error naming this field, never defaulted.
     pub tenant_id: Option<String>,
 }
 
@@ -82,7 +82,7 @@ pub struct LoginInput {
     pub password: String,
     /// The tenant scope supplied by the caller; ignored when a `TenantIdResolver` is set, and
     /// `None` when the caller named none. A request that names no tenant with no resolver
-    /// configured is refused — see [`AuthEngine::resolve_tenant`].
+    /// configured is refused with a `validation` error naming this field, never defaulted.
     pub tenant_id: Option<String>,
 }
 

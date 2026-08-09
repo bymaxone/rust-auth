@@ -23,12 +23,20 @@ version bump.
   down channel never turns "enable MFA" into a failed request.
 
   The copy is entirely replaceable — implement `AuthEmailCatalogue` and override any subset of
-  its ten renderers, returning `html` for real links and branding — while the escaping, the
-  subject sanitization and the failure policy apply to overrides too. A catalogue chooses
-  words, never behaviour. `DeliveryErrorPolicy::Rethrow` restores the error for the two flows
-  that react to one (the reset path deletes an undelivered token early rather than leaving it
-  to its TTL; the email-change path refuses to record "verification sent"), accepting that an
-  outage then also fails the awaited MFA and invitation sends.
+  its ten renderers, returning `html` for real links and branding. A catalogue chooses words,
+  never behaviour: the subject sanitization and the failure policy apply to an override exactly
+  as to the default. **Escaping is the one exception, and it is a security boundary.** The
+  provider escapes what it renders — a message that leaves `html` unset has its `text` turned
+  into escaped paragraphs — but a renderer that RETURNS `html` has that value used verbatim and
+  owns the escaping of every dynamic value it interpolates. That is what makes a real `<a>`
+  link possible, and it means an override must not trust the provider to escape its markup.
+
+  `DeliveryErrorPolicy::Rethrow` restores the error for the two flows that react to one (the
+  reset path deletes an undelivered token early rather than leaving it to its TTL; the
+  email-change path refuses to record "verification sent"). It does not turn an outage into a
+  failed user operation elsewhere: the MFA and password-changed notices are detached through
+  `spawn_guarded`, and the invitation flow catches the error and leaves the invitation
+  standing.
 
   Mirrors nest-auth's provider of the same name, so the two libraries send the same messages
   from the same events.

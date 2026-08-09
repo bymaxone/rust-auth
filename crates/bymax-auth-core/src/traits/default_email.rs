@@ -39,7 +39,7 @@ use super::email::{EmailError, EmailProvider, InviteData, SessionInfo};
 /// Borrowed rather than owned: every field is already rendered by the time the sink sees it,
 /// and the provider holds them alive across the single `send` call.
 ///
-/// The `Debug` impl is hand-written and redacts both bodies — see [`OutgoingEmail::fmt`].
+/// The `Debug` impl is hand-written and redacts both bodies; see the impl below.
 ///
 /// Deliberately NOT `#[non_exhaustive]`, even though the host only ever receives one. Sealing it
 /// would buy the freedom to add a field without a major bump, at the cost of making the host's
@@ -153,8 +153,17 @@ const UNEXPECTED_CHANGE_TEXT: &str = "If this was not you, secure your account i
 /// The copy for every message the port can send, as pure renderers keyed by event.
 ///
 /// Every method has a default, so an override implements only the events whose wording it
-/// wants to change and the rest keep the secure default. The escaping and the delivery-error
-/// policy apply to overrides too — a catalogue chooses words, never behaviour.
+/// wants to change and the rest keep the secure default. A catalogue chooses words, never
+/// behaviour: the subject sanitization and the delivery-error policy apply to an override
+/// exactly as they do to the default.
+///
+/// **Escaping is the one exception, and it is a security boundary worth reading twice.** The
+/// provider escapes what it renders — a message that leaves `html` unset has its `text` turned
+/// into escaped paragraphs. A renderer that RETURNS `html` has that value used verbatim, and
+/// owns the escaping of every dynamic value it interpolates: an inviter's display name, a
+/// tenant's name, the address an account moved to. That is deliberate, because the escaped-text
+/// default cannot carry a real `<a>` link — but it means an override that trusts the provider
+/// to escape its markup is trusting a protection that is not there.
 ///
 /// Each renderer is a pure function of its inputs, which is what makes an override a drop-in
 /// replacement and keeps the copy testable without a provider around it.
@@ -381,11 +390,16 @@ pub enum DeliveryErrorPolicy {
     /// failed user request. The default.
     #[default]
     Swallow,
-    /// Log the failure and return it, restoring the error the two flows that react to one
-    /// expect — the reset path deletes an undelivered token early, and the email-change path
-    /// lets a failed verification send surface rather than reporting "sent". The trade is
-    /// symmetric: under `Rethrow` a channel outage also fails MFA, invitation and the other
-    /// awaited sends.
+    /// Log the failure and return it, restoring the error for the two flows that react to one:
+    /// the reset path deletes an undelivered token early instead of leaving it to its TTL, and
+    /// the email-change path lets a failed verification send surface rather than recording
+    /// "sent".
+    ///
+    /// It does NOT turn a channel outage into a failed user operation elsewhere. Every other
+    /// send is already handled by its caller — the MFA and password-changed notices are
+    /// detached through `spawn_guarded`, and the invitation flow catches the error and leaves
+    /// the invitation standing. So the choice is narrower than it looks: `Rethrow` buys the
+    /// cleanup on those two flows, and costs nothing on the rest.
     Rethrow,
 }
 
@@ -421,8 +435,9 @@ pub enum DeliveryErrorPolicy {
 /// recording "verification sent". Under the default both degrade gracefully rather than break:
 /// the reset token still expires at its TTL and was never delivered to anyone, and the change
 /// still requires the verification the recipient never got, so it cannot complete. A deployment
-/// that wants the error back on those flows builds the provider with
-/// [`DeliveryErrorPolicy::Rethrow`], accepting that an outage then also fails the awaited sends.
+/// that wants the error back on those two flows builds the provider with
+/// [`DeliveryErrorPolicy::Rethrow`]. That does not make an outage fail anything else: the other
+/// sends are already detached or caught by their callers.
 pub struct DefaultAuthEmailProvider {
     /// The channel every message goes out through.
     sink: Arc<dyn AuthEmailSink>,

@@ -259,7 +259,10 @@ impl AuthEmailSink for ResendSink {
 let email = Arc::new(DefaultAuthEmailProvider::new(Arc::new(ResendSink { /* … */ })));
 ```
 
-Override any subset of the copy by implementing `AuthEmailCatalogue` (every method has a secure default) and passing it to `.with_catalogue(…)`; return `html` from a renderer for real links, layout and branding. By default a delivery failure is logged and swallowed, so a down channel never turns "enable MFA" into a failed request — `.with_delivery_error_policy(DeliveryErrorPolicy::Rethrow)` restores the error for the two flows that react to one (the reset path deletes an undelivered token early; the email-change path refuses to report "sent").
+Override any subset of the copy by implementing `AuthEmailCatalogue` (every method has a secure default) and passing it to `.with_catalogue(…)`. By default a delivery failure is logged and swallowed, so a down channel never turns "enable MFA" into a failed request — `.with_delivery_error_policy(DeliveryErrorPolicy::Rethrow)` restores the error for the two flows that react to one (the reset path deletes an undelivered token early; the email-change path refuses to report "sent"), and changes nothing elsewhere, since the other sends are already detached or caught by their callers.
+
+> [!WARNING]
+> **A renderer that returns `html` owns its own escaping.** The provider escapes what *it* renders — a message that leaves `html` unset has its `text` turned into escaped paragraphs — but a returned `html` value is used verbatim. That is what makes a real `<a>` link possible, and it means an override interpolating a display name, a tenant name or an address must escape those itself. The subject sanitization and the failure policy do apply to overrides; escaping is the one that does not.
 
 To bridge the port onto something the sink shape does not fit, implement `EmailProvider` directly. Every method takes the account's `tenant_id` first; a cross-tenant platform admin carries none, so those notices arrive under the reserved `PLATFORM_EMAIL_TENANT` (`"platform"`).
 
