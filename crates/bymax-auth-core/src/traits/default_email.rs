@@ -17,9 +17,10 @@
 //! real links, layout and branding. What must survive a rewrite is the security shape — a code
 //! is stated once, a notice of a change the user may not have made tells them how to react, and
 //! nothing the catalogue produced is ever logged. A delivery failure records a library-owned
-//! event name and the channel's own error — never a subject, a body, an address or a code —
-//! because the catalogue is the host's and a subject carrying the code is an ordinary product
-//! decision, not a misuse.
+//! event name and a generic "delivery failed" — never a subject, a body, an address or a code,
+//! and not the transport's own error either, whose text the host's sink controls just as freely
+//! as the subject. The catalogue is the host's, and a subject carrying the code is an ordinary
+//! product decision rather than a misuse, so the guarantee has to hold without their help.
 //!
 //! Mirrors nest-auth's `DefaultAuthEmailProvider` so the two libraries send the same messages
 //! from the same events.
@@ -497,9 +498,10 @@ impl DefaultAuthEmailProvider {
         to: &str,
         message: AuthEmailMessage,
     ) -> Result<(), EmailError> {
-        // Stripped once, then used for both the header and the log line: a subject is a single
-        // header, and a smuggled CR/LF must reach neither the channel (header injection) nor
-        // the logger.
+        // Stripped for the header, which is the only place it goes: a subject is a single email
+        // header, so a smuggled CR/LF would let a channel that builds headers by concatenation
+        // read the rest of the value as more of them. It no longer reaches the logger at all —
+        // see the failure arm below.
         let subject = sanitize_subject(&message.subject);
         // Borrowed when the renderer supplied its own HTML, owned only when one has to be
         // built: a body is the largest thing on this path and there is no reason to copy one.
@@ -535,7 +537,16 @@ impl DefaultAuthEmailProvider {
                 // matching on product copy silently stops firing the day marketing edits it.
                 //
                 // The address stays out for its own reason: a log line reaches a wider audience
-                // than the inbox it was going to. The error is the channel's, not the body.
+                // than the inbox it was going to.
+                //
+                // `%error` renders `EmailError`'s own `Display`, which is the fixed
+                // "email delivery failed" — the transport's real cause hangs off it as
+                // `#[source]` and is deliberately NOT pulled in here. That cause is a
+                // `Box<dyn Error>` the host's sink constructed, so its text is as unconstrained
+                // as the subject was: a sink that formats "could not send to user@example.com"
+                // would walk the recipient straight back into this line. A sink that wants its
+                // diagnostics recorded is the right place to record them, where it knows what
+                // its own error contains.
                 tracing::error!(%error, event, "auth email: delivery failed");
                 // Log first, then honour the configured policy: a deployment on `Rethrow` wants
                 // the failure to reach the caller that reacts to it, not to be absorbed here.
@@ -904,6 +915,13 @@ mod tests {
         assert!(
             !events.contains("user@example.com"),
             "the recipient reached a log line"
+        );
+        // The transport's own cause stays out too. `RecordingSink` fails with the source text
+        // "channel down"; a sink is free to format the recipient into that string, so pulling
+        // `#[source]` into this line would reopen the hole from the other side.
+        assert!(
+            !events.contains("channel down"),
+            "the sink's underlying error text reached a log line"
         );
     }
 

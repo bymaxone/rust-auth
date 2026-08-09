@@ -23,7 +23,11 @@ version bump.
   That the email port's contract forbids logging codes did not help, because the code writing the
   line is the library's, not the adapter's — a rule nobody can see being broken is not a control.
   The failure now records a library-owned event name (`password_reset_token`,
-  `email_verification_otp`, …) and the channel's own error, and nothing the catalogue produced.
+  `email_verification_otp`, …) and a generic delivery error, and nothing the catalogue produced.
+  The transport's underlying cause stays out too: it is a `Box<dyn Error>` the host's sink built,
+  so its text is exactly as unconstrained as the subject was, and a sink formatting "could not
+  send to user@example.com" would walk the recipient straight back in. A sink that wants its
+  diagnostics recorded is the right place to record them.
 
   The constant is also the better field to read: it is stable across a reworded subject and
   across locales, so an alert keys off it once, where matching on product copy silently stops
