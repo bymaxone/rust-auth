@@ -9,9 +9,12 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use bymax_auth_crypto::mac::hmac_sha256;
 use bymax_auth_crypto::token::random_array;
 use bymax_auth_types::AuthError;
+use zeroize::Zeroizing;
 
+use crate::services::to_hex;
 use crate::traits::{OtpPurpose, OtpStore};
 
 /// Maximum failed verify attempts before the record is consumed (§7.6 `MAX_ATTEMPTS`).
@@ -24,12 +27,34 @@ const MIN_VERIFY_MS: u64 = 100;
 /// Generates, stores, and verifies numeric OTPs over the [`OtpStore`].
 pub struct OtpService {
     store: Arc<dyn OtpStore>,
+    /// The identifier-hashing key, reused here to fingerprint the code before it is stored so
+    /// the record never holds the plaintext OTP. Held byte-for-byte with nest-auth's `hmacKey`,
+    /// which is what keeps the two implementations reading the same `otp:` records.
+    identifier_key: Zeroizing<[u8; 64]>,
 }
 
 impl OtpService {
-    /// Assemble the service over an OTP store.
-    pub(crate) fn new(store: Arc<dyn OtpStore>) -> Self {
-        Self { store }
+    /// Assemble the service over an OTP store and the identifier-hashing key.
+    pub(crate) fn new(store: Arc<dyn OtpStore>, identifier_key: Zeroizing<[u8; 64]>) -> Self {
+        Self {
+            store,
+            identifier_key,
+        }
+    }
+
+    /// Keyed one-way transform under which the OTP is stored and compared.
+    ///
+    /// A six-digit code is a keyspace of a million, so a plain digest lets anyone who reads
+    /// Redis reverse it instantly; the transform is therefore HMAC-SHA256 under the server-only
+    /// identifier key, bound to the identifier so the same code under two accounts does not
+    /// collapse to one value. `store` and `verify` transform the same way, and the byte-identical
+    /// verify script keeps comparing two opaque strings — so nest-auth stays in step by hashing
+    /// the code the same way before it reads or writes the shared record.
+    fn fingerprint(&self, identifier: &str, code: &str) -> String {
+        to_hex(&hmac_sha256(
+            &self.identifier_key[..],
+            format!("{identifier}:{code}").as_bytes(),
+        ))
     }
 
     /// Generate a `length`-digit numeric OTP from the CSPRNG, zero-padded. Each digit is
@@ -56,7 +81,10 @@ impl OtpService {
         code: &str,
         ttl_secs: u64,
     ) -> Result<(), AuthError> {
-        self.store.put(purpose, identifier, code, ttl_secs).await
+        let fingerprint = self.fingerprint(identifier, code);
+        self.store
+            .put(purpose, identifier, &fingerprint, ttl_secs)
+            .await
     }
 
     /// Verify a submitted `code` atomically (match + attempt bump + single-use consume),
@@ -74,9 +102,10 @@ impl OtpService {
         code: &str,
     ) -> Result<(), AuthError> {
         let started = Instant::now();
+        let fingerprint = self.fingerprint(identifier, code);
         let result = self
             .store
-            .verify(purpose, identifier, code, MAX_ATTEMPTS)
+            .verify(purpose, identifier, &fingerprint, MAX_ATTEMPTS)
             .await;
         normalize_timing(started).await;
         result
@@ -142,8 +171,28 @@ mod tests {
     use super::*;
     use crate::testing::InMemoryStores;
 
+    /// A fixed identifier-hashing key for the tests; any 64 bytes serve.
+    const TEST_KEY: [u8; 64] = [7u8; 64];
+
     fn service(store: Arc<InMemoryStores>) -> OtpService {
-        OtpService::new(store)
+        OtpService::new(store, Zeroizing::new(TEST_KEY))
+    }
+
+    #[tokio::test]
+    async fn store_writes_the_keyed_fingerprint_not_the_plaintext_code() {
+        // The record holds the keyed fingerprint of the code, never the plaintext OTP: a reader
+        // of Redis must not be able to reverse the six-digit keyspace. Held identical to
+        // nest-auth, whose OTP records carry the same HMAC so the two share one keyspace.
+        let store = Arc::new(InMemoryStores::new());
+        let svc = service(store.clone());
+        let purpose = OtpPurpose::PasswordReset;
+
+        assert!(svc.store(purpose, "id", "123456", 600).await.is_ok());
+
+        let stored = store.peek_otp(purpose, "id");
+        let expected = to_hex(&hmac_sha256(&TEST_KEY[..], b"id:123456"));
+        assert_eq!(stored, Some(expected));
+        assert_ne!(stored, Some("123456".to_owned()));
     }
 
     #[test]

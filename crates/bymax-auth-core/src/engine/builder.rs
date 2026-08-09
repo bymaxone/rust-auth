@@ -462,7 +462,10 @@ impl AuthEngineBuilder {
             brute_max_attempts,
             brute_window_secs,
         ));
-        let otp = OtpService::new(otp_store.clone());
+        let otp = OtpService::new(
+            otp_store.clone(),
+            zeroize::Zeroizing::new(*config.hmac_key()),
+        );
         let sessions = Arc::new(SessionService::new(
             session_store.clone(),
             user_repository.clone(),
