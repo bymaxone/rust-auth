@@ -43,7 +43,7 @@ impl AuthEngine {
             ..input
         };
         let config = self.config().config();
-        let tenant_id = self.resolve_tenant(&input.tenant_id, ctx).await?;
+        let tenant_id = self.resolve_tenant(input.tenant_id.as_deref(), ctx).await?;
         let identifier = self.lockout_identifier(&tenant_id, &input.email);
 
         let hook_ctx = HookContext::from_request(
@@ -434,7 +434,7 @@ mod tests {
         LoginInput {
             email: email.to_owned(),
             password: password.to_owned(),
-            tenant_id: "t1".to_owned(),
+            tenant_id: Some("t1".to_owned()),
         }
     }
 
@@ -1306,7 +1306,7 @@ mod tests {
                 LoginInput {
                     email: "cross@example.com".to_owned(),
                     password: "s3cret-pass".to_owned(),
-                    tenant_id: "t2".to_owned(),
+                    tenant_id: Some("t2".to_owned()),
                 },
                 &ctx(),
             )
@@ -1323,7 +1323,7 @@ mod tests {
                 LoginInput {
                     email: "cross@example.com".to_owned(),
                     password: "s3cret-pass".to_owned(),
-                    tenant_id: "t2".to_owned(),
+                    tenant_id: Some("t2".to_owned()),
                 },
                 &ctx(),
             )

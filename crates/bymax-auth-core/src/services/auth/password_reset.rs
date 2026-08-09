@@ -47,8 +47,10 @@ const RESET_TOKEN_BYTES: usize = 32;
 pub struct ForgotPasswordInput {
     /// The account email.
     pub email: String,
-    /// The tenant scope.
-    pub tenant_id: String,
+    /// The tenant scope the caller named, or `None` when it named none. A configured
+    /// `TenantIdResolver` overrules it; with no resolver, its absence is refused rather than
+    /// defaulted — see [`AuthEngine::resolve_tenant`].
+    pub tenant_id: Option<String>,
 }
 
 /// The proof carried into [`AuthEngine::reset_password`]: exactly one of `token`, `otp`, or
@@ -58,8 +60,9 @@ pub struct ForgotPasswordInput {
 pub struct ResetPasswordInput {
     /// The account email (re-bound against the stored proof context).
     pub email: String,
-    /// The tenant scope (re-bound against the stored proof context).
-    pub tenant_id: String,
+    /// The tenant scope the caller named, or `None` when it named none. The RESOLVED tenant is
+    /// what the stored proof context is re-bound against, not this value.
+    pub tenant_id: Option<String>,
     /// The new plaintext password (redacted in `Debug`).
     pub new_password: String,
     /// The reset link token (token method).
@@ -93,8 +96,10 @@ impl std::fmt::Debug for ResetPasswordInput {
 pub struct VerifyResetOtpInput {
     /// The account email.
     pub email: String,
-    /// The tenant scope.
-    pub tenant_id: String,
+    /// The tenant scope the caller named, or `None` when it named none. A configured
+    /// `TenantIdResolver` overrules it; with no resolver, its absence is refused rather than
+    /// defaulted — see [`AuthEngine::resolve_tenant`].
+    pub tenant_id: Option<String>,
     /// The numeric OTP to verify (consumed on success).
     pub otp: String,
 }
@@ -104,8 +109,10 @@ pub struct VerifyResetOtpInput {
 pub struct ResendResetOtpInput {
     /// The account email.
     pub email: String,
-    /// The tenant scope.
-    pub tenant_id: String,
+    /// The tenant scope the caller named, or `None` when it named none. A configured
+    /// `TenantIdResolver` overrules it; with no resolver, its absence is refused rather than
+    /// defaulted — see [`AuthEngine::resolve_tenant`].
+    pub tenant_id: Option<String>,
 }
 
 impl AuthEngine {
@@ -137,23 +144,25 @@ impl AuthEngine {
         // reset mail at accounts in another — and a reset started under the resolved tenant
         // could never be completed, because the stored context and the confirm step would
         // disagree about which tenant it belonged to.
-        let tenant_id = self.resolve_tenant(&input.tenant_id, ctx).await?;
-        let input = ForgotPasswordInput {
-            email: normalize_email(&input.email),
-            tenant_id,
-        };
+        let tenant_id = self.resolve_tenant(input.tenant_id.as_deref(), ctx).await?;
+        let email = normalize_email(&input.email);
         let started = Instant::now();
         // Run the fallible body, then normalize the elapsed time on EVERY exit — including an
         // infrastructure error — before returning, so a backend failure cannot be told apart
         // from a normal response by latency.
-        let outcome = self.initiate_reset_inner(&input).await;
+        let outcome = self.initiate_reset_inner(&tenant_id, &email).await;
         normalize_anti_enum(started).await;
         outcome
     }
 
     /// The fallible body of [`AuthEngine::initiate_reset`], separated so the caller can apply
     /// the anti-enumeration timing floor to every exit path (success and infra error alike).
-    async fn initiate_reset_inner(&self, input: &ForgotPasswordInput) -> Result<(), AuthError> {
+    ///
+    /// Takes the RESOLVED tenant and the normalized email as plain arguments rather than the
+    /// input struct: the struct's `tenant_id` is what the caller asked for, and a resolver may
+    /// have overruled it. Keeping only the resolved value in scope is what makes reading the
+    /// wrong one impossible rather than merely unlikely.
+    async fn initiate_reset_inner(&self, tenant_id: &str, email: &str) -> Result<(), AuthError> {
         let config = self.config().config();
 
         // The SAME cooldown `resend_reset_otp` claims, under the same key, so the two entry
@@ -164,7 +173,7 @@ impl AuthEngine {
         // call also mails the victim, which is a mail bomb aimed at an address the caller merely
         // has to know. A cooldown hit is a silent success, and the caller's anti-enumeration
         // floor still applies, so the throttle does not itself answer whether the account exists.
-        let identifier = self.hashed_identifier(&input.tenant_id, &input.email);
+        let identifier = self.hashed_identifier(tenant_id, email);
         if !self
             .otp()
             .try_begin_resend(OtpPurpose::PasswordReset, &identifier, RESEND_COOLDOWN_SECS)
@@ -176,22 +185,20 @@ impl AuthEngine {
         // Look up the account; an unknown email or a blocked account takes no visible branch.
         if let Some(user) = crate::services::auth::tenant_scoped(
             self.user_repository()
-                .find_by_email(&input.email, &input.tenant_id)
+                .find_by_email(email, tenant_id)
                 .await
                 .map_err(map_repository_error)?,
-            &input.tenant_id,
+            tenant_id,
         ) && self.assert_user_not_blocked(&user.status).is_ok()
         {
             // Dispatch by configured method. Both paths are best-effort: a store or send
             // failure is logged and dropped so the uniform response is never perturbed.
             match config.password_reset.method {
                 ResetMethod::Otp => {
-                    let _ = self.send_reset_otp(&input.tenant_id, &input.email).await;
+                    let _ = self.send_reset_otp(tenant_id, email).await;
                 }
                 ResetMethod::Token => {
-                    let _ = self
-                        .send_reset_token(&user, &input.email, &input.tenant_id)
-                        .await;
+                    let _ = self.send_reset_token(&user, email, tenant_id).await;
                 }
             }
         }
@@ -220,12 +227,14 @@ impl AuthEngine {
         // is configured it is authoritative and the body value is ignored. That is the
         // anti-spoofing promise, and it also keeps this step reading the same tenant the
         // initiate step wrote under.
-        let tenant_id = self.resolve_tenant(&input.tenant_id, ctx).await?;
-        let input = ResetPasswordInput {
-            email: normalize_email(&input.email),
-            tenant_id,
-            ..input
-        };
+        let tenant_id = self.resolve_tenant(input.tenant_id.as_deref(), ctx).await?;
+        // Bound as plain values rather than rebuilt into a rebound `input`, and the helpers below
+        // take them as arguments. The rebind used to carry BOTH tenants — the caller's in the
+        // struct and the resolved one beside it — and reading the wrong one is a one-character
+        // mistake no test would notice; it is exactly the mistake nest-auth had to fix on this
+        // flow, where the resolved tenant was bound and `dto.tenantId` read anyway. Not carrying
+        // it is what makes that unwritable, where clearing the field only made it unlikely.
+        let email = normalize_email(&input.email);
         // Classify the proofs: exactly one of token / otp / verified_token must be present.
         let proof = match (
             input.token.as_deref(),
@@ -276,19 +285,31 @@ impl AuthEngine {
 
         match dispatch {
             Dispatch::Stored(token, kind) => {
-                self.reset_with_stored_proof(token, &input, kind).await
+                self.reset_with_stored_proof(token, &tenant_id, &email, &input.new_password, kind)
+                    .await
             }
-            Dispatch::Otp(otp) => self.reset_with_otp(otp, &input).await,
+            Dispatch::Otp(otp) => {
+                self.reset_with_otp(otp, &tenant_id, &email, &input.new_password)
+                    .await
+            }
         }
     }
 
     /// Reset using a stored opaque proof (the reset link token or the OTP verified token):
     /// atomically consume it, re-bind it to the presented email/tenant (a digest compare that
     /// removes the variable-length oracle of a raw compare), then apply the reset.
+    ///
+    /// Takes the RESOLVED tenant and the normalized email as plain arguments rather than the
+    /// caller's input struct: the struct's `tenant_id` is only what the caller asked for, a
+    /// configured resolver may have overruled it, and binding the stored proof against the wrong
+    /// one of the two is what turns this check into theatre. Not carrying the unresolved value
+    /// is what makes that unwritable.
     async fn reset_with_stored_proof(
         &self,
         token: &str,
-        input: &ResetPasswordInput,
+        tenant_id: &str,
+        email: &str,
+        new_password: &str,
         kind: ProofKind,
     ) -> Result<(), AuthError> {
         let store = self
@@ -302,40 +323,45 @@ impl AuthEngine {
 
         // Defense-in-depth: bind the stored proof to the submitted email + tenant. Hashing
         // first compares fixed-length digests, so the compare leaks no length information.
-        if !digest_eq(&context.email, &input.email)
-            || !digest_eq(&context.tenant_id, &input.tenant_id)
-        {
+        if !digest_eq(&context.email, email) || !digest_eq(&context.tenant_id, tenant_id) {
             return Err(AuthError::PasswordResetTokenInvalid);
         }
         self.assert_proof_still_bound(&context).await?;
-        self.apply_password_reset(&context, &input.new_password)
-            .await
+        self.apply_password_reset(&context, new_password).await
     }
 
     /// Reset using a direct OTP: verify (single-use, attempt-bounded), then look up the
     /// account and apply the reset. A vanished account collapses to the invalid-token error
     /// rather than a distinct "not found".
-    async fn reset_with_otp(&self, otp: &str, input: &ResetPasswordInput) -> Result<(), AuthError> {
-        let identifier = self.hashed_identifier(&input.tenant_id, &input.email);
+    ///
+    /// Takes the resolved tenant and normalized email directly, for the reason
+    /// [`AuthEngine::reset_with_stored_proof`] does.
+    async fn reset_with_otp(
+        &self,
+        otp: &str,
+        tenant_id: &str,
+        email: &str,
+        new_password: &str,
+    ) -> Result<(), AuthError> {
+        let identifier = self.hashed_identifier(tenant_id, email);
         self.otp()
             .verify(OtpPurpose::PasswordReset, &identifier, otp)
             .await?;
         let user = crate::services::auth::tenant_scoped(
             self.user_repository()
-                .find_by_email(&input.email, &input.tenant_id)
+                .find_by_email(email, tenant_id)
                 .await
                 .map_err(map_repository_error)?,
-            &input.tenant_id,
+            tenant_id,
         )
         .ok_or(AuthError::PasswordResetTokenInvalid)?;
         let context = ResetContext {
             user_id: user.id.clone(),
-            email: input.email.clone(),
-            tenant_id: input.tenant_id.clone(),
+            email: email.to_owned(),
+            tenant_id: tenant_id.to_owned(),
             password_fingerprint: password_fingerprint(&user),
         };
-        self.apply_password_reset(&context, &input.new_password)
-            .await
+        self.apply_password_reset(&context, new_password).await
     }
 
     /// Verify a reset OTP and, on success, mint a short-lived verified token that bridges the
@@ -358,22 +384,20 @@ impl AuthEngine {
         // is configured it is authoritative and the body value is ignored. That is the
         // anti-spoofing promise, and it also keeps this step reading the same tenant the
         // initiate step wrote under.
-        let tenant_id = self.resolve_tenant(&input.tenant_id, ctx).await?;
-        let input = VerifyResetOtpInput {
-            email: normalize_email(&input.email),
-            tenant_id,
-            ..input
-        };
-        let identifier = self.hashed_identifier(&input.tenant_id, &input.email);
+        let tenant_id = self.resolve_tenant(input.tenant_id.as_deref(), ctx).await?;
+        // Bound as plain values, for the reason `reset_password` does: the caller's unresolved
+        // tenant is not carried past this line, so nothing below can read it by mistake.
+        let email = normalize_email(&input.email);
+        let identifier = self.hashed_identifier(&tenant_id, &email);
         self.otp()
             .verify(OtpPurpose::PasswordReset, &identifier, &input.otp)
             .await?;
         let user = crate::services::auth::tenant_scoped(
             self.user_repository()
-                .find_by_email(&input.email, &input.tenant_id)
+                .find_by_email(&email, &tenant_id)
                 .await
                 .map_err(map_repository_error)?,
-            &input.tenant_id,
+            &tenant_id,
         )
         .ok_or(AuthError::PasswordResetTokenInvalid)?;
 
@@ -384,8 +408,8 @@ impl AuthEngine {
         let context = ResetContext {
             password_fingerprint: password_fingerprint(&user),
             user_id: user.id,
-            email: input.email,
-            tenant_id: input.tenant_id,
+            email,
+            tenant_id,
         };
         store
             .put_verified(&raw, &context, VERIFIED_TOKEN_TTL_SECONDS)
@@ -418,24 +442,24 @@ impl AuthEngine {
         // is configured it is authoritative and the body value is ignored. That is the
         // anti-spoofing promise, and it also keeps this step reading the same tenant the
         // initiate step wrote under.
-        let tenant_id = self.resolve_tenant(&input.tenant_id, ctx).await?;
-        let input = ResendResetOtpInput {
-            email: normalize_email(&input.email),
-            tenant_id,
-        };
+        let tenant_id = self.resolve_tenant(input.tenant_id.as_deref(), ctx).await?;
+        let email = normalize_email(&input.email);
         let started = Instant::now();
         // Run the fallible body, then normalize the elapsed time on EVERY exit — the cooldown
         // short-circuit, the success path, and any infrastructure error — so a backend failure
         // cannot be distinguished from a normal response by latency.
-        let outcome = self.resend_reset_otp_inner(&input).await;
+        let outcome = self.resend_reset_otp_inner(&tenant_id, &email).await;
         normalize_anti_enum(started).await;
         outcome
     }
 
     /// The fallible body of [`AuthEngine::resend_reset_otp`], separated so the caller applies
     /// the anti-enumeration timing floor to every exit path (success and infra error alike).
-    async fn resend_reset_otp_inner(&self, input: &ResendResetOtpInput) -> Result<(), AuthError> {
-        let identifier = self.hashed_identifier(&input.tenant_id, &input.email);
+    ///
+    /// Takes the resolved tenant and normalized email directly, for the reason
+    /// [`AuthEngine::initiate_reset_inner`] does.
+    async fn resend_reset_otp_inner(&self, tenant_id: &str, email: &str) -> Result<(), AuthError> {
+        let identifier = self.hashed_identifier(tenant_id, email);
 
         // Atomic cooldown gate — a second resend inside the window is a silent success.
         if !self
@@ -448,14 +472,14 @@ impl AuthEngine {
 
         if let Some(user) = crate::services::auth::tenant_scoped(
             self.user_repository()
-                .find_by_email(&input.email, &input.tenant_id)
+                .find_by_email(email, tenant_id)
                 .await
                 .map_err(map_repository_error)?,
-            &input.tenant_id,
+            tenant_id,
         ) && self.assert_user_not_blocked(&user.status).is_ok()
         {
             // Best-effort: a store/dispatch failure must not change the uniform response.
-            let _ = self.send_reset_otp(&input.tenant_id, &input.email).await;
+            let _ = self.send_reset_otp(tenant_id, email).await;
         }
         Ok(())
     }
@@ -473,6 +497,7 @@ impl AuthEngine {
             .await?;
         spawn_guarded(crate::services::auth::detached::run_send_reset_otp_email(
             self.email_provider().clone(),
+            tenant_id.to_owned(),
             email.to_owned(),
             otp,
         ));
@@ -510,7 +535,7 @@ impl AuthEngine {
         // On a delivery failure, clean up the stored token so it cannot linger unusable.
         if self
             .email_provider()
-            .send_password_reset_token(email, &raw, None)
+            .send_password_reset_token(tenant_id, email, &raw, None)
             .await
             .is_err()
         {
@@ -644,6 +669,7 @@ impl AuthEngine {
         };
         spawn_guarded(run_send_password_changed(
             self.email_provider().clone(),
+            user.tenant_id,
             user.email,
         ));
     }
@@ -808,9 +834,12 @@ pub(super) fn password_fingerprint(user: &AuthUser) -> String {
 /// Send the "password changed" email (a named future so the detached spawn owns its data).
 async fn run_send_password_changed(
     email: std::sync::Arc<dyn crate::traits::EmailProvider>,
+    tenant_id: String,
     recipient: String,
 ) -> Result<(), crate::traits::EmailError> {
-    email.send_password_changed(&recipient, None).await
+    email
+        .send_password_changed(&tenant_id, &recipient, None)
+        .await
 }
 
 #[cfg(test)]
@@ -850,7 +879,7 @@ mod tests {
     fn forgot(email: &str) -> ForgotPasswordInput {
         ForgotPasswordInput {
             email: email.to_owned(),
-            tenant_id: "t1".to_owned(),
+            tenant_id: Some("t1".to_owned()),
         }
     }
 
@@ -912,7 +941,7 @@ mod tests {
         );
         let reset = ResetPasswordInput {
             email: "reset@example.com".to_owned(),
-            tenant_id: "t1".to_owned(),
+            tenant_id: Some("t1".to_owned()),
             new_password: "brandnewwalnut42".to_owned(),
             token: Some(known.clone()),
             otp: None,
@@ -930,7 +959,7 @@ mod tests {
         // The token is single-use: a replay is now invalid.
         let replay = ResetPasswordInput {
             email: "reset@example.com".to_owned(),
-            tenant_id: "t1".to_owned(),
+            tenant_id: Some("t1".to_owned()),
             new_password: "anotherwalnut42".to_owned(),
             token: Some(known),
             otp: None,
@@ -972,7 +1001,7 @@ mod tests {
         );
         let reset = ResetPasswordInput {
             email: "epoch@example.com".to_owned(),
-            tenant_id: "t1".to_owned(),
+            tenant_id: Some("t1".to_owned()),
             new_password: "brandnewwalnut42".to_owned(),
             token: Some(known),
             otp: None,
@@ -1015,7 +1044,7 @@ mod tests {
         // and it clears the length floor, so the refusal it asserts is the screen and not the floor.
         let refused = ResetPasswordInput {
             email: "spend@example.com".to_owned(),
-            tenant_id: "t1".to_owned(),
+            tenant_id: Some("t1".to_owned()),
             new_password: "password1234567".to_owned(),
             token: Some(known.clone()),
             otp: None,
@@ -1029,7 +1058,7 @@ mod tests {
         // The same token still works, which is the whole point.
         let retried = ResetPasswordInput {
             email: "spend@example.com".to_owned(),
-            tenant_id: "t1".to_owned(),
+            tenant_id: Some("t1".to_owned()),
             new_password: "glidingwalnut42".to_owned(),
             token: Some(known),
             otp: None,
@@ -1062,7 +1091,7 @@ mod tests {
         // Submit the token while claiming a different email — the digest binding fails.
         let reset = ResetPasswordInput {
             email: "attacker@example.com".to_owned(),
-            tenant_id: "t1".to_owned(),
+            tenant_id: Some("t1".to_owned()),
             new_password: "glidingwalnut42".to_owned(),
             token: Some(known),
             otp: None,
@@ -1092,7 +1121,7 @@ mod tests {
         let Some(code) = h.stores.peek_otp(OtpPurpose::PasswordReset, &identifier) else { return };
         let reset = ResetPasswordInput {
             email: "otp@example.com".to_owned(),
-            tenant_id: "t1".to_owned(),
+            tenant_id: Some("t1".to_owned()),
             new_password: "walnutviaotp4242".to_owned(),
             token: None,
             otp: Some(code.clone()),
@@ -1120,7 +1149,7 @@ mod tests {
             .verify_reset_otp(
                 VerifyResetOtpInput {
                     email: "otp@example.com".to_owned(),
-                    tenant_id: "t1".to_owned(),
+                    tenant_id: Some("t1".to_owned()),
                     otp: code2,
                 },
                 &ctx(),
@@ -1130,7 +1159,7 @@ mod tests {
         let Ok(verified_token) = verified else { return };
         let reset2 = ResetPasswordInput {
             email: "otp@example.com".to_owned(),
-            tenant_id: "t1".to_owned(),
+            tenant_id: Some("t1".to_owned()),
             new_password: "walnutviaverified42".to_owned(),
             token: None,
             otp: None,
@@ -1141,7 +1170,7 @@ mod tests {
         // The verified token is single-use.
         let replay = ResetPasswordInput {
             email: "otp@example.com".to_owned(),
-            tenant_id: "t1".to_owned(),
+            tenant_id: Some("t1".to_owned()),
             new_password: "glidingwalnut42".to_owned(),
             token: None,
             otp: None,
@@ -1186,7 +1215,7 @@ mod tests {
                 .verify_reset_otp(
                     VerifyResetOtpInput {
                         email: "throttled@example.com".to_owned(),
-                        tenant_id: "t1".to_owned(),
+                        tenant_id: Some("t1".to_owned()),
                         otp: "000000".to_owned(),
                     },
                     &ctx(),
@@ -1239,7 +1268,7 @@ mod tests {
         // And completed with yet another spelling.
         let reset = ResetPasswordInput {
             email: "Case@Example.com".to_owned(),
-            tenant_id: "t1".to_owned(),
+            tenant_id: Some("t1".to_owned()),
             new_password: "walnutaftercasechange42".to_owned(),
             token: None,
             otp: Some(code),
@@ -1274,7 +1303,7 @@ mod tests {
             .verify_reset_otp(
                 VerifyResetOtpInput {
                     email: "cAsE@eXaMpLe.CoM".to_owned(),
-                    tenant_id: "t1".to_owned(),
+                    tenant_id: Some("t1".to_owned()),
                     otp: second,
                 },
                 &ctx(),
@@ -1284,7 +1313,7 @@ mod tests {
         let Ok(verified_token) = verified else { return };
         let bridged = ResetPasswordInput {
             email: "CASE@example.com".to_owned(),
-            tenant_id: "t1".to_owned(),
+            tenant_id: Some("t1".to_owned()),
             new_password: "walnutagain4242".to_owned(),
             token: None,
             otp: None,
@@ -1300,7 +1329,7 @@ mod tests {
         let Some(h) = otp_harness() else { return };
         let none = ResetPasswordInput {
             email: "x@example.com".to_owned(),
-            tenant_id: "t1".to_owned(),
+            tenant_id: Some("t1".to_owned()),
             new_password: "p".to_owned(),
             token: None,
             otp: None,
@@ -1312,7 +1341,7 @@ mod tests {
         ));
         let two = ResetPasswordInput {
             email: "x@example.com".to_owned(),
-            tenant_id: "t1".to_owned(),
+            tenant_id: Some("t1".to_owned()),
             new_password: "p".to_owned(),
             token: None,
             otp: Some("123456".to_owned()),
@@ -1325,7 +1354,7 @@ mod tests {
         // A token to the OTP method is an explicit mismatch.
         let mismatch = ResetPasswordInput {
             email: "x@example.com".to_owned(),
-            tenant_id: "t1".to_owned(),
+            tenant_id: Some("t1".to_owned()),
             new_password: "p".to_owned(),
             token: Some("t".to_owned()),
             otp: None,
@@ -1340,7 +1369,7 @@ mod tests {
         let Some(ht) = token_harness() else { return };
         let otp_to_token = ResetPasswordInput {
             email: "x@example.com".to_owned(),
-            tenant_id: "t1".to_owned(),
+            tenant_id: Some("t1".to_owned()),
             new_password: "p".to_owned(),
             token: None,
             otp: Some("123456".to_owned()),
@@ -1385,7 +1414,7 @@ mod tests {
                 .resend_reset_otp(
                     ResendResetOtpInput {
                         email: "present@example.com".to_owned(),
-                        tenant_id: "t1".to_owned(),
+                        tenant_id: Some("t1".to_owned()),
                     },
                     &ctx()
                 )
@@ -1399,7 +1428,7 @@ mod tests {
                 .resend_reset_otp(
                     ResendResetOtpInput {
                         email: "present@example.com".to_owned(),
-                        tenant_id: "t1".to_owned(),
+                        tenant_id: Some("t1".to_owned()),
                     },
                     &ctx()
                 )
@@ -1412,7 +1441,7 @@ mod tests {
                 .resend_reset_otp(
                     ResendResetOtpInput {
                         email: "ghost@example.com".to_owned(),
-                        tenant_id: "t1".to_owned(),
+                        tenant_id: Some("t1".to_owned()),
                     },
                     &ctx()
                 )
@@ -1437,7 +1466,7 @@ mod tests {
                 .resend_reset_otp(
                     ResendResetOtpInput {
                         email: "SHOUT@Example.com".to_owned(),
-                        tenant_id: "t1".to_owned(),
+                        tenant_id: Some("t1".to_owned()),
                     },
                     &ctx()
                 )
@@ -1469,7 +1498,7 @@ mod tests {
                 .verify_reset_otp(
                     VerifyResetOtpInput {
                         email: "vrf@example.com".to_owned(),
-                        tenant_id: "t1".to_owned(),
+                        tenant_id: Some("t1".to_owned()),
                         otp: "000000".to_owned(),
                     },
                     &ctx()
@@ -1491,7 +1520,7 @@ mod tests {
                 .verify_reset_otp(
                     VerifyResetOtpInput {
                         email: "ghost@example.com".to_owned(),
-                        tenant_id: "t1".to_owned(),
+                        tenant_id: Some("t1".to_owned()),
                         otp: "111111".to_owned(),
                     },
                     &ctx()
@@ -1506,7 +1535,7 @@ mod tests {
         // A stray `{:?}` must never expose the new password or a live single-use proof.
         let input = ResetPasswordInput {
             email: "e@x.io".to_owned(),
-            tenant_id: "t1".to_owned(),
+            tenant_id: Some("t1".to_owned()),
             new_password: "super-secret".to_owned(),
             token: Some("live-token".to_owned()),
             otp: Some("123456".to_owned()),
@@ -1557,14 +1586,14 @@ mod tests {
 
         assert!(
             FailingResetEmail
-                .send_email_change_verification("new@example.com", "t", None)
+                .send_email_change_verification("t1", "new@example.com", "t", None)
                 .await
                 .is_ok()
         );
         let capturing = CapturingResetEmail::default();
         assert!(
             capturing
-                .send_email_change_verification("new@example.com", "t", None)
+                .send_email_change_verification("t1", "new@example.com", "t", None)
                 .await
                 .is_ok()
         );
@@ -1576,6 +1605,7 @@ mod tests {
     impl crate::traits::EmailProvider for FailingResetEmail {
         async fn send_email_change_verification(
             &self,
+            _tenant_id: &str,
             _new_email: &str,
             _token: &str,
             _locale: Option<&str>,
@@ -1585,6 +1615,7 @@ mod tests {
 
         async fn send_password_reset_token(
             &self,
+            _tenant_id: &str,
             _email: &str,
             _token: &str,
             _locale: Option<&str>,
@@ -1593,6 +1624,7 @@ mod tests {
         }
         async fn send_password_reset_otp(
             &self,
+            _tenant_id: &str,
             _email: &str,
             _otp: &str,
             _locale: Option<&str>,
@@ -1601,6 +1633,7 @@ mod tests {
         }
         async fn send_email_verification_otp(
             &self,
+            _tenant_id: &str,
             _email: &str,
             _otp: &str,
             _locale: Option<&str>,
@@ -1609,6 +1642,7 @@ mod tests {
         }
         async fn send_mfa_enabled(
             &self,
+            _tenant_id: &str,
             _email: &str,
             _locale: Option<&str>,
         ) -> Result<(), crate::traits::EmailError> {
@@ -1616,6 +1650,7 @@ mod tests {
         }
         async fn send_mfa_disabled(
             &self,
+            _tenant_id: &str,
             _email: &str,
             _locale: Option<&str>,
         ) -> Result<(), crate::traits::EmailError> {
@@ -1623,6 +1658,7 @@ mod tests {
         }
         async fn send_new_session_alert(
             &self,
+            _tenant_id: &str,
             _email: &str,
             _session: &crate::traits::SessionInfo,
             _locale: Option<&str>,
@@ -1631,6 +1667,7 @@ mod tests {
         }
         async fn send_invitation(
             &self,
+            _tenant_id: &str,
             _email: &str,
             _invite: &crate::traits::InviteData,
             _locale: Option<&str>,
@@ -1644,12 +1681,38 @@ mod tests {
     #[derive(Default)]
     struct CapturingResetEmail {
         token: std::sync::Mutex<Option<String>>,
+        /// Every "your password changed" notice, as the `(tenant_id, recipient)` it was sent
+        /// with — the pair a multi-tenant channel routes on.
+        password_changed: std::sync::Mutex<Vec<(String, String)>>,
+    }
+
+    impl CapturingResetEmail {
+        /// The recorded notices; a poisoned lock (test-only) reads as none rather than panics.
+        fn changed_notices(&self) -> Vec<(String, String)> {
+            self.password_changed
+                .lock()
+                .map(|g| g.clone())
+                .unwrap_or_default()
+        }
     }
 
     #[async_trait::async_trait]
     impl crate::traits::EmailProvider for CapturingResetEmail {
+        async fn send_password_changed(
+            &self,
+            tenant_id: &str,
+            email: &str,
+            _locale: Option<&str>,
+        ) -> Result<(), crate::traits::EmailError> {
+            if let Ok(mut seen) = self.password_changed.lock() {
+                seen.push((tenant_id.to_owned(), email.to_owned()));
+            }
+            Ok(())
+        }
+
         async fn send_email_change_verification(
             &self,
+            _tenant_id: &str,
             _new_email: &str,
             _token: &str,
             _locale: Option<&str>,
@@ -1659,6 +1722,7 @@ mod tests {
 
         async fn send_password_reset_token(
             &self,
+            _tenant_id: &str,
             _email: &str,
             token: &str,
             _locale: Option<&str>,
@@ -1670,6 +1734,7 @@ mod tests {
         }
         async fn send_password_reset_otp(
             &self,
+            _tenant_id: &str,
             _email: &str,
             _otp: &str,
             _locale: Option<&str>,
@@ -1678,6 +1743,7 @@ mod tests {
         }
         async fn send_email_verification_otp(
             &self,
+            _tenant_id: &str,
             _email: &str,
             _otp: &str,
             _locale: Option<&str>,
@@ -1686,6 +1752,7 @@ mod tests {
         }
         async fn send_mfa_enabled(
             &self,
+            _tenant_id: &str,
             _email: &str,
             _locale: Option<&str>,
         ) -> Result<(), crate::traits::EmailError> {
@@ -1693,6 +1760,7 @@ mod tests {
         }
         async fn send_mfa_disabled(
             &self,
+            _tenant_id: &str,
             _email: &str,
             _locale: Option<&str>,
         ) -> Result<(), crate::traits::EmailError> {
@@ -1700,6 +1768,7 @@ mod tests {
         }
         async fn send_new_session_alert(
             &self,
+            _tenant_id: &str,
             _email: &str,
             _session: &crate::traits::SessionInfo,
             _locale: Option<&str>,
@@ -1708,6 +1777,7 @@ mod tests {
         }
         async fn send_invitation(
             &self,
+            _tenant_id: &str,
             _email: &str,
             _invite: &crate::traits::InviteData,
             _locale: Option<&str>,
@@ -1737,6 +1807,79 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_changed_password_mails_the_owner_under_their_own_tenant() {
+        // NIST SP 800-63B §4.6 asks for notification of a credential change through a channel
+        // independent of the transaction that made it. This is the notice that turns "the victim
+        // finds out days later, at a failed login" into "the victim finds out now", and until
+        // this test nothing asserted it was sent at all: removing the whole notification left
+        // every other test green. The tenant is asserted with it, because a notice attributed to
+        // the wrong tenant is one a multi-tenant channel routes into somebody else's audit log.
+        let mut cfg = base_config();
+        cfg.password_reset.method = ResetMethod::Token;
+        let mailer = std::sync::Arc::new(CapturingResetEmail::default());
+        let users = std::sync::Arc::new(crate::testing::InMemoryUserRepository::new());
+        let stores = std::sync::Arc::new(crate::testing::InMemoryStores::new());
+        let built = AuthEngine::builder()
+            .config(cfg)
+            .environment(crate::config::Environment::Test)
+            .user_repository(users.clone())
+            .redis_stores(stores)
+            .email_provider(mailer.clone())
+            .build();
+        let Ok(engine) = built else { return };
+        let hashed = engine.passwords().hash("oldsecret77").await;
+        let Ok(password_hash) = hashed else { return };
+        let created = users
+            .create(bymax_auth_types::CreateUserData {
+                email: "notified@example.com".to_owned(),
+                name: "N".to_owned(),
+                password_hash: Some(password_hash),
+                role: Some("USER".to_owned()),
+                status: Some("ACTIVE".to_owned()),
+                tenant_id: "tenant-nine".to_owned(),
+                email_verified: Some(true),
+            })
+            .await;
+        let Ok(user) = created else { return };
+
+        assert!(
+            engine
+                .change_password(&user.id, "oldsecret77", "glidingwalnut42", None)
+                .await
+                .is_ok()
+        );
+        // Long enough for the detached notification to have run, as the hook test above does.
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        assert_eq!(
+            mailer.changed_notices(),
+            vec![("tenant-nine".to_owned(), "notified@example.com".to_owned())],
+            "the password-changed notice did not reach the owner under their own tenant"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_password_changed_wrapper_forwards_the_tenant_and_recipient() {
+        // The detached body driven directly, the way `detached.rs` drives its own: the flow
+        // schedules it through `spawn_guarded`, which swallows and logs everything, so a wrapper
+        // that sent nothing — or sent to the wrong address — would still report success.
+        let mailer = std::sync::Arc::new(CapturingResetEmail::default());
+        let provider: std::sync::Arc<dyn crate::traits::EmailProvider> = mailer.clone();
+        assert!(
+            run_send_password_changed(
+                provider,
+                "tenant-nine".to_owned(),
+                "notified@example.com".to_owned(),
+            )
+            .await
+            .is_ok()
+        );
+        assert_eq!(
+            mailer.changed_notices(),
+            vec![("tenant-nine".to_owned(), "notified@example.com".to_owned())]
+        );
+    }
+
+    #[tokio::test]
     async fn a_completed_reset_notifies_the_hook_with_its_subject() {
         // The projection feeding the hook can fail open — the reset has already succeeded by
         // then, so the notification is simply skipped and nothing in the result says so. A
@@ -1762,7 +1905,7 @@ mod tests {
         assert!(!code.is_empty());
         let reset = ResetPasswordInput {
             email: "hooked@example.com".to_owned(),
-            tenant_id: "t1".to_owned(),
+            tenant_id: Some("t1".to_owned()),
             new_password: "brand-new-walnut".to_owned(),
             token: None,
             otp: Some(code),
@@ -1819,7 +1962,7 @@ mod tests {
 
         let reset = ResetPasswordInput {
             email: "mailed@example.com".to_owned(),
-            tenant_id: "t1".to_owned(),
+            tenant_id: Some("t1".to_owned()),
             new_password: "the-new-one-walnut".to_owned(),
             token: Some(token),
             otp: None,
@@ -1839,18 +1982,18 @@ mod tests {
         let provider = CapturingResetEmail::default();
         assert!(
             provider
-                .send_password_reset_otp("e", "o", None)
+                .send_password_reset_otp("t1", "e", "o", None)
                 .await
                 .is_ok()
         );
         assert!(
             provider
-                .send_email_verification_otp("e", "o", None)
+                .send_email_verification_otp("t1", "e", "o", None)
                 .await
                 .is_ok()
         );
-        assert!(provider.send_mfa_enabled("e", None).await.is_ok());
-        assert!(provider.send_mfa_disabled("e", None).await.is_ok());
+        assert!(provider.send_mfa_enabled("t1", "e", None).await.is_ok());
+        assert!(provider.send_mfa_disabled("t1", "e", None).await.is_ok());
         let session = crate::traits::SessionInfo {
             device: "d".to_owned(),
             ip: "i".to_owned(),
@@ -1858,7 +2001,7 @@ mod tests {
         };
         assert!(
             provider
-                .send_new_session_alert("e", &session, None)
+                .send_new_session_alert("t1", "e", &session, None)
                 .await
                 .is_ok()
         );
@@ -1868,7 +2011,12 @@ mod tests {
             invite_token: "tok".to_owned(),
             expires_at: time::OffsetDateTime::UNIX_EPOCH,
         };
-        assert!(provider.send_invitation("e", &invite, None).await.is_ok());
+        assert!(
+            provider
+                .send_invitation("t1", "e", &invite, None)
+                .await
+                .is_ok()
+        );
     }
 
     #[tokio::test]
@@ -1932,24 +2080,24 @@ mod tests {
         let provider = FailingResetEmail;
         assert!(
             provider
-                .send_password_reset_token("e", "t", None)
+                .send_password_reset_token("t1", "e", "t", None)
                 .await
                 .is_err()
         );
         assert!(
             provider
-                .send_password_reset_otp("e", "o", None)
+                .send_password_reset_otp("t1", "e", "o", None)
                 .await
                 .is_ok()
         );
         assert!(
             provider
-                .send_email_verification_otp("e", "o", None)
+                .send_email_verification_otp("t1", "e", "o", None)
                 .await
                 .is_ok()
         );
-        assert!(provider.send_mfa_enabled("e", None).await.is_ok());
-        assert!(provider.send_mfa_disabled("e", None).await.is_ok());
+        assert!(provider.send_mfa_enabled("t1", "e", None).await.is_ok());
+        assert!(provider.send_mfa_disabled("t1", "e", None).await.is_ok());
         let session = crate::traits::SessionInfo {
             device: "d".to_owned(),
             ip: "i".to_owned(),
@@ -1957,7 +2105,7 @@ mod tests {
         };
         assert!(
             provider
-                .send_new_session_alert("e", &session, None)
+                .send_new_session_alert("t1", "e", &session, None)
                 .await
                 .is_ok()
         );
@@ -1967,7 +2115,12 @@ mod tests {
             invite_token: "tok".to_owned(),
             expires_at: time::OffsetDateTime::UNIX_EPOCH,
         };
-        assert!(provider.send_invitation("e", &invite, None).await.is_ok());
+        assert!(
+            provider
+                .send_invitation("t1", "e", &invite, None)
+                .await
+                .is_ok()
+        );
         // The cleanup means the (unknown-to-the-test) token is gone; an arbitrary token is
         // invalid, proving the flow did not leave a usable proof behind.
         assert!(matches!(
@@ -1975,7 +2128,7 @@ mod tests {
                 .reset_password(
                     ResetPasswordInput {
                         email: "fail@example.com".to_owned(),
-                        tenant_id: "t1".to_owned(),
+                        tenant_id: Some("t1".to_owned()),
                         new_password: "glidingwalnut42".to_owned(),
                         token: Some("a".repeat(64)),
                         otp: None,
@@ -2147,7 +2300,7 @@ mod tests {
             .resend_reset_otp(
                 ResendResetOtpInput {
                     email: "err2@example.com".to_owned(),
-                    tenant_id: "t1".to_owned(),
+                    tenant_id: Some("t1".to_owned()),
                 },
                 &ctx(),
             )
@@ -2220,7 +2373,7 @@ mod tests {
         let input = LoginInput {
             email: email.to_owned(),
             password: password.to_owned(),
-            tenant_id: "t1".to_owned(),
+            tenant_id: Some("t1".to_owned()),
         };
         let result = h.engine.login(input, &ctx()).await;
         let Ok(LoginResult::Success(auth)) = result else { return None };
@@ -2285,7 +2438,7 @@ mod tests {
         // The victim completes the reset with the second link.
         let input = |token: &str, password: &str| ResetPasswordInput {
             email: "siblings@example.com".to_owned(),
-            tenant_id: "t1".to_owned(),
+            tenant_id: Some("t1".to_owned()),
             new_password: password.to_owned(),
             token: Some(token.to_owned()),
             otp: None,
@@ -2500,7 +2653,7 @@ mod tests {
                 .reset_password(
                     ResetPasswordInput {
                         email: "vanish@example.com".to_owned(),
-                        tenant_id: "t1".to_owned(),
+                        tenant_id: Some("t1".to_owned()),
                         new_password: "glidingwalnut42".to_owned(),
                         token: Some(token),
                         otp: None,

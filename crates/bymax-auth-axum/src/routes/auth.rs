@@ -202,7 +202,7 @@ async fn verify_email(
 ) -> Response {
     match state
         .engine()
-        .verify_email(&dto.tenant_id, &dto.email, &dto.otp, &ctx)
+        .verify_email(dto.tenant_id.as_deref(), &dto.email, &dto.otp, &ctx)
         .await
     {
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
@@ -221,7 +221,7 @@ async fn resend_verification(
     // collapses to the same 204 — surfacing it would leak a distinguishable signal.
     let _ = state
         .engine()
-        .resend_verification_email(&dto.tenant_id, &dto.email, &ctx)
+        .resend_verification_email(dto.tenant_id.as_deref(), &dto.email, &ctx)
         .await;
     StatusCode::NO_CONTENT.into_response()
 }

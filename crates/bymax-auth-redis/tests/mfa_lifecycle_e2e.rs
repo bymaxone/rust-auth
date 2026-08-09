@@ -82,7 +82,7 @@ async fn register(engine: &AuthEngine, email: &str) -> Option<String> {
         email: email.to_owned(),
         name: "U".to_owned(),
         password: PASSWORD.to_owned(),
-        tenant_id: TENANT.to_owned(),
+        tenant_id: Some(TENANT.to_owned()),
     };
     match engine.register(input, &ctx()).await {
         Ok(LoginResult::Success(auth)) => Some(auth.user.id),
@@ -94,7 +94,7 @@ async fn login_temp_token(engine: &AuthEngine, email: &str) -> Option<String> {
     let input = LoginInput {
         email: email.to_owned(),
         password: PASSWORD.to_owned(),
-        tenant_id: TENANT.to_owned(),
+        tenant_id: Some(TENANT.to_owned()),
     };
     match engine.login(input, &ctx()).await {
         Ok(LoginResult::MfaChallenge(c)) => Some(c.mfa_temp_token),
@@ -199,7 +199,7 @@ async fn full_lifecycle_against_real_redis() {
     let input = LoginInput {
         email: "life@example.com".to_owned(),
         password: PASSWORD.to_owned(),
-        tenant_id: TENANT.to_owned(),
+        tenant_id: Some(TENANT.to_owned()),
     };
     assert!(matches!(
         engine.login(input, &ctx()).await,

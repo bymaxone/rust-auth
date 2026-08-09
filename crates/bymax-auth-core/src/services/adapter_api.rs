@@ -641,7 +641,7 @@ mod tests {
                     email: "adapter@e.com".to_owned(),
                     name: "Adapter".to_owned(),
                     password: "correct horse battery staple".to_owned(),
-                    tenant_id: "t1".to_owned(),
+                    tenant_id: Some("t1".to_owned()),
                 },
                 &ctx,
             )
@@ -696,7 +696,7 @@ mod tests {
                 crate::services::auth::LoginInput {
                     email: "adapter@e.com".to_owned(),
                     password: "correct horse battery staple".to_owned(),
-                    tenant_id: "t1".to_owned(),
+                    tenant_id: Some("t1".to_owned()),
                 },
                 &ctx,
             )

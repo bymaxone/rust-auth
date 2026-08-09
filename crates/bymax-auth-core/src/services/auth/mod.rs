@@ -56,8 +56,10 @@ pub struct RegisterInput {
     pub name: String,
     /// The plaintext password (redacted in `Debug`).
     pub password: String,
-    /// The tenant scope supplied by the caller; ignored when a `TenantIdResolver` is set.
-    pub tenant_id: String,
+    /// The tenant scope supplied by the caller; ignored when a `TenantIdResolver` is set, and
+    /// `None` when the caller named none. A request that names no tenant with no resolver
+    /// configured is refused — see [`AuthEngine::resolve_tenant`].
+    pub tenant_id: Option<String>,
 }
 
 impl fmt::Debug for RegisterInput {
@@ -78,8 +80,10 @@ pub struct LoginInput {
     pub email: String,
     /// The plaintext password (redacted in `Debug`).
     pub password: String,
-    /// The tenant scope supplied by the caller; ignored when a `TenantIdResolver` is set.
-    pub tenant_id: String,
+    /// The tenant scope supplied by the caller; ignored when a `TenantIdResolver` is set, and
+    /// `None` when the caller named none. A request that names no tenant with no resolver
+    /// configured is refused — see [`AuthEngine::resolve_tenant`].
+    pub tenant_id: Option<String>,
 }
 
 impl fmt::Debug for LoginInput {
@@ -172,13 +176,23 @@ impl AuthEngine {
     /// is authoritative and overrides the body-supplied value (§24 invariant 8); otherwise
     /// the body value is used verbatim.
     ///
+    /// Because a configured resolver makes the caller's value dead weight, `body_tenant` is
+    /// optional and a request may omit it entirely. The two states a request can arrive in
+    /// therefore differ: with a resolver, the caller's value is ignored whether present or
+    /// absent; without one, it is the only thing that can name a tenant, and its absence is a
+    /// request that cannot be scoped. That case is refused rather than defaulted, because
+    /// inventing a tenant name would silently gather into one scope every account a
+    /// misconfigured deployment created — and that scope keys the user lookup, the Redis
+    /// records and the HMAC identifiers built from it.
+    ///
     /// # Errors
     ///
-    /// Returns [`AuthError::Forbidden`] when the resolver yields an empty id, or
+    /// Returns [`AuthError::Validation`] when no resolver is configured and the caller named no
+    /// tenant, [`AuthError::Forbidden`] when the resolver yields an empty id, or
     /// [`AuthError::Internal`] for any other resolver failure.
     pub(crate) async fn resolve_tenant(
         &self,
-        body_tenant: &str,
+        body_tenant: Option<&str>,
         ctx: &RequestContext,
     ) -> Result<String, AuthError> {
         match self.config().config().tenant_id_resolver.as_ref() {
@@ -186,7 +200,15 @@ impl AuthEngine {
                 let parts = request_parts_from_context(ctx);
                 resolver.resolve(&parts).await.map_err(map_tenant_error)
             }
-            None => Ok(body_tenant.to_owned()),
+            None => body_tenant.map(str::to_owned).ok_or_else(|| {
+                AuthError::Validation {
+                    details: vec![bymax_auth_types::FieldError {
+                        field: "tenantId".to_owned(),
+                        message: "tenantId is required unless the deployment configures a TenantIdResolver"
+                            .to_owned(),
+                    }],
+                }
+            }),
         }
     }
 
@@ -562,7 +584,7 @@ mod tests {
             email: "e@x.io".to_owned(),
             name: "N".to_owned(),
             password: "super-secret".to_owned(),
-            tenant_id: "t1".to_owned(),
+            tenant_id: Some("t1".to_owned()),
         };
         let reg_dbg = format!("{reg:?}");
         assert!(reg_dbg.contains("[REDACTED]"));
@@ -572,7 +594,7 @@ mod tests {
         let login = LoginInput {
             email: "e@x.io".to_owned(),
             password: "super-secret".to_owned(),
-            tenant_id: "t1".to_owned(),
+            tenant_id: Some("t1".to_owned()),
         };
         let login_dbg = format!("{login:?}");
         assert!(login_dbg.contains("[REDACTED]"));
@@ -631,13 +653,45 @@ mod tests {
         headers.insert("host".to_owned(), "resolved-tenant".to_owned());
         let ctx = RequestContext::new("1.2.3.4", "ua", headers);
         assert!(matches!(
-            h.engine.resolve_tenant("body-tenant", &ctx).await,
+            h.engine.resolve_tenant(Some("body-tenant"), &ctx).await,
             Ok(t) if t == "resolved-tenant"
         ));
         let empty_ctx = RequestContext::new("1.2.3.4", "ua", BTreeMap::new());
         assert!(matches!(
-            h.engine.resolve_tenant("body-tenant", &empty_ctx).await,
+            h.engine
+                .resolve_tenant(Some("body-tenant"), &empty_ctx)
+                .await,
             Err(AuthError::Forbidden)
+        ));
+        // A configured resolver makes the caller's value dead weight, so a request that names
+        // no tenant is resolved exactly like one that does.
+        assert!(matches!(
+            h.engine.resolve_tenant(None, &ctx).await,
+            Ok(t) if t == "resolved-tenant"
+        ));
+    }
+
+    #[tokio::test]
+    async fn a_request_naming_no_tenant_with_no_resolver_is_refused_rather_than_defaulted() {
+        // Without a resolver the caller's value is the ONLY thing that can scope the request,
+        // and that scope keys the user lookup, the Redis records and the HMAC identifiers. A
+        // default would silently gather into one scope every account a misconfigured deployment
+        // created — so the request is refused, naming the field the deployment has to fix.
+        // Bound first so the `else` fits on one line: a wrapped `else { return; }` isolates the
+        // `return` on its own line, which no run reaches and the 100% line gate then refuses.
+        let cfg = test_support::base_config();
+        let Some(h) = test_support::harness(cfg, None) else { return };
+        let ctx = RequestContext::new("1.2.3.4", "ua", BTreeMap::new());
+        let refused = h.engine.resolve_tenant(None, &ctx).await;
+        assert!(
+            matches!(&refused, Err(AuthError::Validation { details })
+                if details.len() == 1 && details[0].field == "tenantId"),
+            "expected a tenantId validation failure, got {refused:?}"
+        );
+        // The named value still passes through untouched — the refusal is about absence only.
+        assert!(matches!(
+            h.engine.resolve_tenant(Some("body-tenant"), &ctx).await,
+            Ok(t) if t == "body-tenant"
         ));
     }
 
@@ -661,7 +715,7 @@ mod tests {
 
         let forgot = crate::services::auth::ForgotPasswordInput {
             email: "x@example.com".to_owned(),
-            tenant_id: "body-tenant".to_owned(),
+            tenant_id: Some("body-tenant".to_owned()),
         };
         assert!(matches!(
             h.engine.initiate_reset(forgot, &empty).await,
@@ -670,7 +724,7 @@ mod tests {
 
         let verify_otp = crate::services::auth::VerifyResetOtpInput {
             email: "x@example.com".to_owned(),
-            tenant_id: "body-tenant".to_owned(),
+            tenant_id: Some("body-tenant".to_owned()),
             otp: "123456".to_owned(),
         };
         assert!(matches!(
@@ -680,7 +734,7 @@ mod tests {
 
         let resend = crate::services::auth::ResendResetOtpInput {
             email: "x@example.com".to_owned(),
-            tenant_id: "body-tenant".to_owned(),
+            tenant_id: Some("body-tenant".to_owned()),
         };
         assert!(matches!(
             h.engine.resend_reset_otp(resend, &empty).await,
@@ -689,13 +743,13 @@ mod tests {
 
         assert!(matches!(
             h.engine
-                .verify_email("body-tenant", "x@example.com", "123456", &empty)
+                .verify_email(Some("body-tenant"), "x@example.com", "123456", &empty)
                 .await,
             Err(AuthError::Forbidden)
         ));
         assert!(matches!(
             h.engine
-                .resend_verification_email("body-tenant", "x@example.com", &empty)
+                .resend_verification_email(Some("body-tenant"), "x@example.com", &empty)
                 .await,
             Err(AuthError::Forbidden)
         ));

@@ -144,7 +144,7 @@ async fn register(engine: &AuthEngine, email: &str) -> Option<String> {
         email: email.to_owned(),
         name: "U".to_owned(),
         password: PASSWORD.to_owned(),
-        tenant_id: TENANT.to_owned(),
+        tenant_id: Some(TENANT.to_owned()),
     };
     match engine.register(input, &ctx()).await {
         Ok(LoginResult::Success(auth)) => Some(auth.user.id),
@@ -157,7 +157,7 @@ async fn login_temp_token(engine: &AuthEngine, email: &str) -> Option<String> {
     let input = crate::services::auth::LoginInput {
         email: email.to_owned(),
         password: PASSWORD.to_owned(),
-        tenant_id: TENANT.to_owned(),
+        tenant_id: Some(TENANT.to_owned()),
     };
     match engine.login(input, &ctx()).await {
         Ok(LoginResult::MfaChallenge(challenge)) => Some(challenge.mfa_temp_token),
@@ -371,6 +371,7 @@ impl AlertSpy {
 impl EmailProvider for AlertSpy {
     async fn send_email_change_verification(
         &self,
+        _tenant_id: &str,
         _new_email: &str,
         _token: &str,
         _locale: Option<&str>,
@@ -380,6 +381,7 @@ impl EmailProvider for AlertSpy {
 
     async fn send_password_reset_token(
         &self,
+        _tenant_id: &str,
         _email: &str,
         _token: &str,
         _locale: Option<&str>,
@@ -388,6 +390,7 @@ impl EmailProvider for AlertSpy {
     }
     async fn send_password_reset_otp(
         &self,
+        _tenant_id: &str,
         _email: &str,
         _otp: &str,
         _locale: Option<&str>,
@@ -396,6 +399,7 @@ impl EmailProvider for AlertSpy {
     }
     async fn send_email_verification_otp(
         &self,
+        _tenant_id: &str,
         _email: &str,
         _otp: &str,
         _locale: Option<&str>,
@@ -404,6 +408,7 @@ impl EmailProvider for AlertSpy {
     }
     async fn send_mfa_enabled(
         &self,
+        _tenant_id: &str,
         email: &str,
         _locale: Option<&str>,
     ) -> Result<(), crate::traits::EmailError> {
@@ -412,6 +417,7 @@ impl EmailProvider for AlertSpy {
     }
     async fn send_mfa_disabled(
         &self,
+        _tenant_id: &str,
         email: &str,
         _locale: Option<&str>,
     ) -> Result<(), crate::traits::EmailError> {
@@ -420,6 +426,7 @@ impl EmailProvider for AlertSpy {
     }
     async fn send_new_session_alert(
         &self,
+        _tenant_id: &str,
         _email: &str,
         _session: &crate::traits::SessionInfo,
         _locale: Option<&str>,
@@ -428,6 +435,7 @@ impl EmailProvider for AlertSpy {
     }
     async fn send_invitation(
         &self,
+        _tenant_id: &str,
         _email: &str,
         _invite: &crate::traits::InviteData,
         _locale: Option<&str>,
@@ -2397,12 +2405,16 @@ async fn detached_notifications_invoke_their_targets() {
     let email: Arc<dyn EmailProvider> = Arc::new(NoOpEmailProvider);
     let hooks: Arc<dyn AuthHooks> = Arc::new(NoOpAuthHooks);
     assert!(
-        super::setup::run_send_mfa_enabled(email.clone(), "u@example.com".to_owned())
-            .await
-            .is_ok()
+        super::setup::run_send_mfa_enabled(
+            email.clone(),
+            "t1".to_owned(),
+            "u@example.com".to_owned()
+        )
+        .await
+        .is_ok()
     );
     assert!(
-        super::manage::run_send_mfa_disabled(email, "u@example.com".to_owned())
+        super::manage::run_send_mfa_disabled(email, "t1".to_owned(), "u@example.com".to_owned())
             .await
             .is_ok()
     );
@@ -2944,7 +2956,7 @@ async fn an_mfa_state_change_kills_the_outstanding_access_tokens() {
         email: "epoch@example.com".to_owned(),
         name: "U".to_owned(),
         password: PASSWORD.to_owned(),
-        tenant_id: TENANT.to_owned(),
+        tenant_id: Some(TENANT.to_owned()),
     };
     let registered = h.engine.register(input, &ctx()).await;
     let Ok(LoginResult::Success(auth)) = registered else {
@@ -3642,4 +3654,32 @@ async fn reset_mfa_is_idempotent_and_refuses_an_unknown_subject() {
         mfa.reset_mfa("nobody-at-all", MfaContext::Dashboard).await,
         Err(AuthError::MfaNotEnabled)
     ));
+}
+
+#[test]
+fn an_mfa_notice_is_attributed_to_the_account_tenant_or_the_platform_plane() {
+    // The email port takes a tenant so a multi-tenant channel can attribute and route the
+    // message. A dashboard user has one; a platform admin is cross-tenant and has none, and the
+    // reserved `platform` name is what keeps the admin plane from being silently attributed to
+    // whatever tenant happens to sort first — or to an empty string the channel cannot route.
+    // `dashboard_user` is `None` exactly on the platform plane, which is what makes it the
+    // discriminator rather than a second field that could disagree with it.
+    let dashboard = super::MfaUserView {
+        email: "u@example.com".to_owned(),
+        mfa_enabled: true,
+        mfa_secret: None,
+        mfa_recovery_codes: None,
+        dashboard_user: Some(sample_safe_user()),
+        password_hash: None,
+    };
+    assert_eq!(dashboard.email_tenant(), TENANT);
+
+    let platform = super::MfaUserView {
+        dashboard_user: None,
+        ..dashboard
+    };
+    assert_eq!(
+        platform.email_tenant(),
+        crate::traits::PLATFORM_EMAIL_TENANT
+    );
 }

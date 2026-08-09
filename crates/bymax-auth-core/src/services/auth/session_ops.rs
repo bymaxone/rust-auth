@@ -377,7 +377,7 @@ mod tests {
         LoginInput {
             email: email.to_owned(),
             password: password.to_owned(),
-            tenant_id: "t1".to_owned(),
+            tenant_id: Some("t1".to_owned()),
         }
     }
 

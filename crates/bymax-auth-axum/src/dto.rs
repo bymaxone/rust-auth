@@ -46,9 +46,15 @@ pub struct RegisterDto {
     /// The display name (2–128 chars).
     #[garde(length(min = 2, max = 128))]
     pub name: String,
-    /// The tenant scope; ignored when a `TenantIdResolver` is configured.
-    #[garde(length(min = 1, max = 128), custom(no_control_characters))]
-    pub tenant_id: String,
+    /// The tenant scope. Optional: a deployment that configures a `TenantIdResolver`
+    /// ignores this value, so a client there may omit it. With no resolver configured it is
+    /// the only thing that can scope the request, and omitting it is refused rather than
+    /// defaulted (`auth.validation`) — see `AuthEngine::resolve_tenant`.
+    #[garde(
+        inner(length(min = 1, max = 128)),
+        inner(custom(no_control_characters))
+    )]
+    pub tenant_id: Option<String>,
 }
 
 /// `POST /auth/login` body.
@@ -67,9 +73,15 @@ pub struct LoginDto {
     /// empty string still keeps a caller from spending a KDF derivation for free.
     #[garde(length(min = 1, max = 128))]
     pub password: String,
-    /// The tenant scope; ignored when a `TenantIdResolver` is configured.
-    #[garde(length(min = 1, max = 128), custom(no_control_characters))]
-    pub tenant_id: String,
+    /// The tenant scope. Optional: a deployment that configures a `TenantIdResolver`
+    /// ignores this value, so a client there may omit it. With no resolver configured it is
+    /// the only thing that can scope the request, and omitting it is refused rather than
+    /// defaulted (`auth.validation`) — see `AuthEngine::resolve_tenant`.
+    #[garde(
+        inner(length(min = 1, max = 128)),
+        inner(custom(no_control_characters))
+    )]
+    pub tenant_id: Option<String>,
 }
 
 /// `POST /auth/password/forgot-password` body.
@@ -79,9 +91,15 @@ pub struct ForgotPasswordDto {
     /// The account email (anti-enumeration; the same response regardless of existence).
     #[garde(email, length(max = 255))]
     pub email: String,
-    /// The tenant scope.
-    #[garde(length(min = 1, max = 128), custom(no_control_characters))]
-    pub tenant_id: String,
+    /// The tenant scope. Optional: a deployment that configures a `TenantIdResolver`
+    /// ignores this value, so a client there may omit it. With no resolver configured it is
+    /// the only thing that can scope the request, and omitting it is refused rather than
+    /// defaulted (`auth.validation`) — see `AuthEngine::resolve_tenant`.
+    #[garde(
+        inner(length(min = 1, max = 128)),
+        inner(custom(no_control_characters))
+    )]
+    pub tenant_id: Option<String>,
 }
 
 /// `POST /auth/password/change` body — the **authenticated** rotation.
@@ -142,9 +160,15 @@ pub struct ResetPasswordDto {
     /// 2-step flow: the verified-token issued by `verify-otp` (64 hex chars).
     #[garde(inner(length(min = 64, max = 64)))]
     pub verified_token: Option<String>,
-    /// The tenant scope.
-    #[garde(length(min = 1, max = 128), custom(no_control_characters))]
-    pub tenant_id: String,
+    /// The tenant scope. Optional: a deployment that configures a `TenantIdResolver`
+    /// ignores this value, so a client there may omit it. With no resolver configured it is
+    /// the only thing that can scope the request, and omitting it is refused rather than
+    /// defaulted (`auth.validation`) — see `AuthEngine::resolve_tenant`.
+    #[garde(
+        inner(length(min = 1, max = 128)),
+        inner(custom(no_control_characters))
+    )]
+    pub tenant_id: Option<String>,
 }
 
 /// `POST /auth/password/verify-otp` body.
@@ -157,9 +181,15 @@ pub struct VerifyOtpDto {
     /// The numeric OTP (4–8 digits).
     #[garde(length(min = 4, max = 8))]
     pub otp: String,
-    /// The tenant scope.
-    #[garde(length(min = 1, max = 128), custom(no_control_characters))]
-    pub tenant_id: String,
+    /// The tenant scope. Optional: a deployment that configures a `TenantIdResolver`
+    /// ignores this value, so a client there may omit it. With no resolver configured it is
+    /// the only thing that can scope the request, and omitting it is refused rather than
+    /// defaulted (`auth.validation`) — see `AuthEngine::resolve_tenant`.
+    #[garde(
+        inner(length(min = 1, max = 128)),
+        inner(custom(no_control_characters))
+    )]
+    pub tenant_id: Option<String>,
 }
 
 /// `POST /auth/password/resend-otp` body.
@@ -169,9 +199,15 @@ pub struct ResendOtpDto {
     /// The account email (anti-enumeration).
     #[garde(email, length(max = 255))]
     pub email: String,
-    /// The tenant scope.
-    #[garde(length(min = 1, max = 128), custom(no_control_characters))]
-    pub tenant_id: String,
+    /// The tenant scope. Optional: a deployment that configures a `TenantIdResolver`
+    /// ignores this value, so a client there may omit it. With no resolver configured it is
+    /// the only thing that can scope the request, and omitting it is refused rather than
+    /// defaulted (`auth.validation`) — see `AuthEngine::resolve_tenant`.
+    #[garde(
+        inner(length(min = 1, max = 128)),
+        inner(custom(no_control_characters))
+    )]
+    pub tenant_id: Option<String>,
 }
 
 /// `POST /auth/verify-email` body.
@@ -189,9 +225,15 @@ pub struct VerifyEmailDto {
     // never have been issued.
     #[garde(length(min = 6, max = 6))]
     pub otp: String,
-    /// The tenant scope.
-    #[garde(length(min = 1, max = 128), custom(no_control_characters))]
-    pub tenant_id: String,
+    /// The tenant scope. Optional: a deployment that configures a `TenantIdResolver`
+    /// ignores this value, so a client there may omit it. With no resolver configured it is
+    /// the only thing that can scope the request, and omitting it is refused rather than
+    /// defaulted (`auth.validation`) — see `AuthEngine::resolve_tenant`.
+    #[garde(
+        inner(length(min = 1, max = 128)),
+        inner(custom(no_control_characters))
+    )]
+    pub tenant_id: Option<String>,
 }
 
 /// `POST /auth/resend-verification` body.
@@ -201,9 +243,15 @@ pub struct ResendVerificationDto {
     /// The account email (anti-enumeration).
     #[garde(email, length(max = 255))]
     pub email: String,
-    /// The tenant scope.
-    #[garde(length(min = 1, max = 128), custom(no_control_characters))]
-    pub tenant_id: String,
+    /// The tenant scope. Optional: a deployment that configures a `TenantIdResolver`
+    /// ignores this value, so a client there may omit it. With no resolver configured it is
+    /// the only thing that can scope the request, and omitting it is refused rather than
+    /// defaulted (`auth.validation`) — see `AuthEngine::resolve_tenant`.
+    #[garde(
+        inner(length(min = 1, max = 128)),
+        inner(custom(no_control_characters))
+    )]
+    pub tenant_id: Option<String>,
 }
 
 /// `POST /auth/mfa/setup` body: the account password, re-proving who is asking.
@@ -393,8 +441,14 @@ pub struct OAuthInitiateQuery {
     /// is handed the same value through its `HookContext`, so a hook deciding on the profile
     /// alone admitted a caller into any tenant they named, on the one flow that decides which
     /// tenant an account is PROVISIONED into.
-    #[garde(length(min = 1, max = 128), custom(no_control_characters))]
-    pub tenant_id: String,
+    ///
+    /// Optional for the same reason the body DTOs' is: a resolver makes it dead weight, and
+    /// with no resolver its absence is refused rather than defaulted.
+    #[garde(
+        inner(length(min = 1, max = 128)),
+        inner(custom(no_control_characters))
+    )]
+    pub tenant_id: Option<String>,
 }
 
 /// `GET /auth/oauth/{provider}/callback` query (§11.3.2). Only `code` and `state` are
@@ -547,7 +601,7 @@ mod tests {
                 email: "a@e.com".to_owned(),
                 password,
                 name: "Ok".to_owned(),
-                tenant_id: "t1".to_owned(),
+                tenant_id: Some("t1".to_owned()),
             }
             .validate()
         });
@@ -555,7 +609,7 @@ mod tests {
             LoginDto {
                 email: "a@e.com".to_owned(),
                 password,
-                tenant_id: "t1".to_owned(),
+                tenant_id: Some("t1".to_owned()),
             }
             .validate()
         });
@@ -563,7 +617,7 @@ mod tests {
             LoginDto {
                 email: "a@e.com".to_owned(),
                 password: "hunter2hunter2".to_owned(),
-                tenant_id,
+                tenant_id: Some(tenant_id),
             }
             .validate()
         });
@@ -572,7 +626,7 @@ mod tests {
                 email: "a@e.com".to_owned(),
                 password: "hunter2hunter2".to_owned(),
                 name,
-                tenant_id: "t1".to_owned(),
+                tenant_id: Some("t1".to_owned()),
             }
             .validate()
         });
@@ -596,7 +650,7 @@ mod tests {
             VerifyEmailDto {
                 email: "a@e.com".to_owned(),
                 otp,
-                tenant_id: "t1".to_owned(),
+                tenant_id: Some("t1".to_owned()),
             }
             .validate()
         });
@@ -604,7 +658,7 @@ mod tests {
             VerifyOtpDto {
                 email: "a@e.com".to_owned(),
                 otp,
-                tenant_id: "t1".to_owned(),
+                tenant_id: Some("t1".to_owned()),
             }
             .validate()
         });
@@ -622,7 +676,7 @@ mod tests {
         let over = LoginDto {
             email: address(max + 1),
             password: "hunter2hunter2".to_owned(),
-            tenant_id: "t1".to_owned(),
+            tenant_id: Some("t1".to_owned()),
         };
         assert!(
             over.validate().is_err(),
@@ -654,7 +708,7 @@ mod tests {
             let dto = LoginDto {
                 email: "user@example.com".to_owned(),
                 password: "hunter2hunter2".to_owned(),
-                tenant_id: bad.to_owned(),
+                tenant_id: Some(bad.to_owned()),
             };
             assert!(
                 dto.validate().is_err(),
@@ -677,7 +731,7 @@ mod tests {
             let dto = LoginDto {
                 email: "user@example.com".to_owned(),
                 password: "hunter2hunter2".to_owned(),
-                tenant_id: good.to_owned(),
+                tenant_id: Some(good.to_owned()),
             };
             assert!(
                 dto.validate().is_ok(),

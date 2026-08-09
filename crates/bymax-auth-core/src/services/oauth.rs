@@ -135,7 +135,7 @@ impl AuthEngine {
     pub async fn oauth_initiate(
         &self,
         provider: &str,
-        tenant_id: &str,
+        tenant_id: Option<&str>,
         ctx: &RequestContext,
     ) -> Result<OAuthRedirect, AuthError> {
         // Resolve the provider first: an unknown provider fails without minting state.
@@ -815,7 +815,7 @@ mod tests {
     /// Run a full initiate → callback, returning the callback outcome. The `code` is canned
     /// (the recording transport ignores it); the `state` is recovered from the authorize URL.
     async fn run_flow(h: &OAuthHarness) -> Result<OAuthOutcome, AuthError> {
-        let url = h.engine.oauth_initiate("google", "t1", &ctx()).await;
+        let url = h.engine.oauth_initiate("google", Some("t1"), &ctx()).await;
         let Ok(url) = url.map(|r| r.authorize_url) else { return Err(AuthError::OauthFailed) };
         let state = extract_query_param(&url, "state").unwrap_or_default();
         h.engine
@@ -839,7 +839,7 @@ mod tests {
         // URL carrying the state and an S256 challenge.
         let hooks: Arc<dyn AuthHooks> = Arc::new(DecisionHook(OAuthLoginResult::Create));
         let Some(h) = harness(hooks, Arc::new(RoutingHttpClient::new()), false) else { return };
-        let url = h.engine.oauth_initiate("google", "t1", &ctx()).await;
+        let url = h.engine.oauth_initiate("google", Some("t1"), &ctx()).await;
         assert!(
             matches!(&url, Ok(r) if r.authorize_url.starts_with("https://accounts.google.com/"))
         );
@@ -867,11 +867,13 @@ mod tests {
         let hooks: Arc<dyn AuthHooks> = Arc::new(DecisionHook(OAuthLoginResult::Create));
         let Some(h) = harness(hooks, Arc::new(RoutingHttpClient::new()), false) else { return };
         assert!(matches!(
-            h.engine.oauth_initiate("github", "t1", &ctx()).await,
+            h.engine.oauth_initiate("github", Some("t1"), &ctx()).await,
             Err(AuthError::OauthFailed)
         ));
         assert!(matches!(
-            h.engine.oauth_initiate("BAD_NAME", "t1", &ctx()).await,
+            h.engine
+                .oauth_initiate("BAD_NAME", Some("t1"), &ctx())
+                .await,
             Err(AuthError::OauthFailed)
         ));
     }
@@ -889,7 +891,7 @@ mod tests {
         assert_eq!(result.user.oauth_provider.as_deref(), Some("google"));
         assert!(!result.access_token.is_empty());
         // The PKCE verifier was forwarded on exchange and matches the issued challenge.
-        let body = h.engine.oauth_initiate("google", "t1", &ctx()).await;
+        let body = h.engine.oauth_initiate("google", Some("t1"), &ctx()).await;
         assert!(body.is_ok());
         let Some(exchange) = h.http.exchange_body() else { return };
         assert!(exchange.contains("code_verifier="));
@@ -902,7 +904,7 @@ mod tests {
         // challenge that left in the authorize URL.
         let hooks: Arc<dyn AuthHooks> = Arc::new(DecisionHook(OAuthLoginResult::Create));
         let Some(h) = harness(hooks, Arc::new(RoutingHttpClient::new()), false) else { return };
-        let url = h.engine.oauth_initiate("google", "t1", &ctx()).await;
+        let url = h.engine.oauth_initiate("google", Some("t1"), &ctx()).await;
         let Ok(url) = url.map(|r| r.authorize_url) else { return };
         let state = extract_query_param(&url, "state").unwrap_or_default();
         let challenge = extract_query_param(&url, "code_challenge").unwrap_or_default();
@@ -1096,7 +1098,7 @@ mod tests {
             Err(AuthError::OauthFailed)
         ));
         // Issue a real state, consume it once, then replay it.
-        let url = h.engine.oauth_initiate("google", "t1", &ctx()).await;
+        let url = h.engine.oauth_initiate("google", Some("t1"), &ctx()).await;
         let Ok(url) = url.map(|r| r.authorize_url) else { return };
         let state = extract_query_param(&url, "state").unwrap_or_default();
         assert!(
@@ -1123,7 +1125,7 @@ mod tests {
         // mismatched one are both fatal.
         let hooks: Arc<dyn AuthHooks> = Arc::new(DecisionHook(OAuthLoginResult::Create));
         let Some(h) = harness(hooks, Arc::new(RoutingHttpClient::new()), false) else { return };
-        let url = h.engine.oauth_initiate("google", "t1", &ctx()).await;
+        let url = h.engine.oauth_initiate("google", Some("t1"), &ctx()).await;
         let Ok(url) = url.map(|r| r.authorize_url) else { return };
         let state = extract_query_param(&url, "state").unwrap_or_default();
 
@@ -1163,7 +1165,10 @@ mod tests {
         // callback unsatisfiable, and no other test would notice.
         let hooks: Arc<dyn AuthHooks> = Arc::new(DecisionHook(OAuthLoginResult::Create));
         let Some(h) = harness(hooks, Arc::new(RoutingHttpClient::new()), false) else { return };
-        let Ok(redirect) = h.engine.oauth_initiate("google", "t1", &ctx()).await else { return };
+        // Bound first so the `else` fits on one line — see the note in `services::auth`: a
+        // wrapped `else { return; }` leaves the `return` on a line no run reaches.
+        let initiated = h.engine.oauth_initiate("google", Some("t1"), &ctx()).await;
+        let Ok(redirect) = initiated else { return };
         assert_eq!(
             extract_query_param(&redirect.authorize_url, "state").as_deref(),
             Some(redirect.state.as_str())
@@ -1395,7 +1400,7 @@ mod tests {
             .build();
         let Ok(engine) = engine else { return };
         assert!(matches!(
-            engine.oauth_initiate("google", "t1", &ctx()).await,
+            engine.oauth_initiate("google", Some("t1"), &ctx()).await,
             Err(AuthError::Internal(_))
         ));
     }
@@ -1510,7 +1515,7 @@ mod tests {
             .build();
         let Ok(engine) = engine else { return };
 
-        let url = engine.oauth_initiate("google", "t1", &ctx()).await;
+        let url = engine.oauth_initiate("google", Some("t1"), &ctx()).await;
         let Ok(url) = url.map(|r| r.authorize_url) else { return };
         let state = extract_query_param(&url, "state").unwrap_or_default();
         let outcome = engine
@@ -1550,7 +1555,7 @@ mod tests {
             .build();
         let Ok(engine) = engine else { return };
 
-        let url = engine.oauth_initiate("google", "t1", &ctx()).await;
+        let url = engine.oauth_initiate("google", Some("t1"), &ctx()).await;
         let Ok(url) = url.map(|r| r.authorize_url) else { return };
         let state = extract_query_param(&url, "state").unwrap_or_default();
         let outcome = engine
@@ -1585,7 +1590,7 @@ mod tests {
         let Ok(engine) = engine else { return };
 
         // First sign-in creates the account and succeeds.
-        let url = engine.oauth_initiate("google", "t1", &ctx()).await;
+        let url = engine.oauth_initiate("google", Some("t1"), &ctx()).await;
         let Ok(url) = url.map(|r| r.authorize_url) else { return };
         let state = extract_query_param(&url, "state").unwrap_or_default();
         assert!(matches!(
@@ -1617,7 +1622,7 @@ mod tests {
             .build();
         let Ok(linking) = linking else { return };
 
-        let url = linking.oauth_initiate("google", "t1", &ctx()).await;
+        let url = linking.oauth_initiate("google", Some("t1"), &ctx()).await;
         let Ok(url) = url.map(|r| r.authorize_url) else { return };
         let state = extract_query_param(&url, "state").unwrap_or_default();
         let banned = linking
@@ -1716,7 +1721,7 @@ mod tests {
         // `matches!` scrutinee splits the expression across the suspend point and leaves the
         // resumption region on a line of its own, which the 100% gate reads as uncovered.
         let refused = engine
-            .oauth_initiate("google", "victim-tenant", &empty)
+            .oauth_initiate("google", Some("victim-tenant"), &empty)
             .await;
         assert!(
             matches!(refused, Err(AuthError::Forbidden)),
@@ -1731,7 +1736,7 @@ mod tests {
         // Asserted first, destructured second: the workspace denies `panic!` in tests too, so
         // the failure has to come from the assertion rather than from an `else` arm.
         let minted = engine
-            .oauth_initiate("google", "victim-tenant", &resolved_ctx)
+            .oauth_initiate("google", Some("victim-tenant"), &resolved_ctx)
             .await;
         assert!(minted.is_ok(), "a resolvable request must mint a redirect");
         let Ok(redirect) = minted else { return };

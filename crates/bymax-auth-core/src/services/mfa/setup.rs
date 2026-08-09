@@ -173,7 +173,11 @@ impl MfaService {
     /// domain wires its own notifications). Both are detached so a slow provider never affects
     /// the enable response.
     fn notify_enabled(&self, view: &super::MfaUserView, user_id: &str, ip: &str, user_agent: &str) {
-        spawn_guarded(run_send_mfa_enabled(self.email.clone(), view.email.clone()));
+        spawn_guarded(run_send_mfa_enabled(
+            self.email.clone(),
+            view.email_tenant(),
+            view.email.clone(),
+        ));
         if let Some(safe) = view.dashboard_user.clone() {
             let ctx = self.hook_context(user_id, &view.email, ip, user_agent);
             spawn_guarded(run_after_mfa_enabled(self.hooks.clone(), safe, ctx));
@@ -184,9 +188,10 @@ impl MfaService {
 /// Send the "MFA enabled" email (a named future so the detached spawn owns its data).
 pub(super) async fn run_send_mfa_enabled(
     email: std::sync::Arc<dyn crate::traits::EmailProvider>,
+    tenant_id: String,
     recipient: String,
 ) -> Result<(), crate::traits::EmailError> {
-    email.send_mfa_enabled(&recipient, None).await
+    email.send_mfa_enabled(&tenant_id, &recipient, None).await
 }
 
 /// Invoke the `after_mfa_enabled` hook (a named future so the detached spawn owns its data).

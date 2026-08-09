@@ -4,14 +4,17 @@
 //! send, never *how* to render it — template, layout, and localization are the
 //! adapter's concern.
 //!
-//! Every method takes an optional BCP-47 `locale`; the adapter falls back to a default
-//! when it is `None`. Implementations must never log email bodies, tokens, OTPs, or
-//! recovery codes. Delivery is fire-and-forget from the engine's perspective: a returned
-//! `Err` is logged and dropped, except where a flow is explicitly gated on delivery.
+//! Every method takes the `tenant_id` the account belongs to as its first argument, so a
+//! multi-tenant delivery channel can attribute and route the message; a single-tenant
+//! adapter ignores it. Every method also takes an optional BCP-47 `locale`; the adapter
+//! falls back to a default when it is `None`. Implementations must never log email bodies,
+//! tokens, OTPs, or recovery codes. Delivery is fire-and-forget from the engine's
+//! perspective: a returned `Err` is logged and dropped, except where a flow is explicitly
+//! gated on delivery.
 
 use async_trait::async_trait;
 
-use crate::normalize::mask_email;
+use crate::normalize::{log_safe, mask_email};
 use time::OffsetDateTime;
 
 /// The transactional-email contract, held on the engine as `Arc<dyn EmailProvider>`.
@@ -25,8 +28,13 @@ use time::OffsetDateTime;
 pub trait EmailProvider: Send + Sync {
     /// Send a password-reset link token for the user to embed in a time-limited URL.
     /// Never log `token`.
+    ///
+    /// `tenant_id` is the tenant the account belongs to, resolved by the auth flow, so a
+    /// multi-tenant channel can attribute and route the message; a single-tenant adapter
+    /// ignores it. Every method below takes it for the same reason.
     async fn send_password_reset_token(
         &self,
+        tenant_id: &str,
         email: &str,
         token: &str,
         locale: Option<&str>,
@@ -35,6 +43,7 @@ pub trait EmailProvider: Send + Sync {
     /// Send a short-lived numeric password-reset OTP. Never log `otp`.
     async fn send_password_reset_otp(
         &self,
+        tenant_id: &str,
         email: &str,
         otp: &str,
         locale: Option<&str>,
@@ -43,6 +52,7 @@ pub trait EmailProvider: Send + Sync {
     /// Send the email-verification OTP after registration or on resend. Never log `otp`.
     async fn send_email_verification_otp(
         &self,
+        tenant_id: &str,
         email: &str,
         otp: &str,
         locale: Option<&str>,
@@ -62,10 +72,11 @@ pub trait EmailProvider: Send + Sync {
     /// the notice implements it.
     async fn send_password_changed(
         &self,
+        tenant_id: &str,
         email: &str,
         locale: Option<&str>,
     ) -> Result<(), EmailError> {
-        let _ = (email, locale);
+        let _ = (tenant_id, email, locale);
         Ok(())
     }
 
@@ -87,6 +98,7 @@ pub trait EmailProvider: Send + Sync {
     /// verification could not be sent has not started.
     async fn send_email_change_verification(
         &self,
+        tenant_id: &str,
         new_email: &str,
         token: &str,
         locale: Option<&str>,
@@ -109,19 +121,35 @@ pub trait EmailProvider: Send + Sync {
     /// user asked for and proved is not rolled back because a mail server was down.
     async fn send_email_changed_notification(
         &self,
+        tenant_id: &str,
         old_email: &str,
         new_email: &str,
         locale: Option<&str>,
     ) -> Result<(), EmailError> {
-        let _ = (old_email, new_email, locale);
+        let _ = (tenant_id, old_email, new_email, locale);
         Ok(())
     }
 
     /// Security alert: MFA was enabled on the account.
-    async fn send_mfa_enabled(&self, email: &str, locale: Option<&str>) -> Result<(), EmailError>;
+    ///
+    /// A platform admin is cross-tenant and carries no tenant of its own, so the engine passes
+    /// the reserved [`PLATFORM_EMAIL_TENANT`] for that plane.
+    async fn send_mfa_enabled(
+        &self,
+        tenant_id: &str,
+        email: &str,
+        locale: Option<&str>,
+    ) -> Result<(), EmailError>;
 
-    /// Security alert: MFA was disabled on the account.
-    async fn send_mfa_disabled(&self, email: &str, locale: Option<&str>) -> Result<(), EmailError>;
+    /// Security alert: MFA was disabled on the account. As with
+    /// [`Self::send_mfa_enabled`], the platform plane is named by
+    /// [`PLATFORM_EMAIL_TENANT`].
+    async fn send_mfa_disabled(
+        &self,
+        tenant_id: &str,
+        email: &str,
+        locale: Option<&str>,
+    ) -> Result<(), EmailError>;
 
     /// Security alert about a newly established session. The body should show the device, IP,
     /// and session hash.
@@ -143,11 +171,12 @@ pub trait EmailProvider: Send + Sync {
     /// when it is.
     async fn send_new_session_alert(
         &self,
+        tenant_id: &str,
         email: &str,
         session: &SessionInfo,
         locale: Option<&str>,
     ) -> Result<(), EmailError> {
-        let _ = (email, session, locale);
+        let _ = (tenant_id, email, session, locale);
         Ok(())
     }
 
@@ -155,11 +184,28 @@ pub trait EmailProvider: Send + Sync {
     /// (built from `invite.invite_token`), and the expiry. Never log `invite.invite_token`.
     async fn send_invitation(
         &self,
+        tenant_id: &str,
         email: &str,
         invite: &InviteData,
         locale: Option<&str>,
     ) -> Result<(), EmailError>;
 }
+
+/// The tenant a platform-plane message is attributed to.
+///
+/// A platform admin is cross-tenant and carries no `tenant_id`, but the email port takes one for
+/// a delivery channel's audit attribution and routing; `"platform"` names that plane, mirroring
+/// the `pep:` epoch namespace.
+///
+/// This is a **reserved** attribution, not a real tenant: because tenant ids are arbitrary
+/// strings, a dashboard tenant literally named `platform` would otherwise be indistinguishable
+/// from the admin plane at the port. A deployment that lets tenants choose their own id must keep
+/// this one out of that space, the same way `pep:`/`ep:` keep the two epoch namespaces from
+/// colliding in Redis. A single-tenant adapter ignores the value and the question does not arise.
+///
+/// Held byte-identical to nest-auth's `PLATFORM_EMAIL_TENANT`, so the same adapter behind both
+/// backends attributes the admin plane to one name rather than two.
+pub const PLATFORM_EMAIL_TENANT: &str = "platform";
 
 /// Details of a new session, shared by [`EmailProvider::send_new_session_alert`] and the
 /// `on_new_session` hook.
@@ -228,6 +274,7 @@ pub struct NoOpEmailProvider;
 impl EmailProvider for NoOpEmailProvider {
     async fn send_email_change_verification(
         &self,
+        tenant_id: &str,
         new_email: &str,
         token: &str,
         _locale: Option<&str>,
@@ -235,6 +282,7 @@ impl EmailProvider for NoOpEmailProvider {
         let _ = token;
         tracing::debug!(
             event = "email_change_verification",
+            tenant_id = %log_safe(tenant_id),
             email = %mask_email(new_email),
             "noop email: token redacted"
         );
@@ -243,41 +291,50 @@ impl EmailProvider for NoOpEmailProvider {
 
     async fn send_password_reset_token(
         &self,
+        tenant_id: &str,
         email: &str,
         _token: &str,
         _locale: Option<&str>,
     ) -> Result<(), EmailError> {
-        tracing::debug!(event = "password_reset_token", email = %mask_email(email), "noop email: token redacted");
+        tracing::debug!(event = "password_reset_token", tenant_id = %log_safe(tenant_id), email = %mask_email(email), "noop email: token redacted");
         Ok(())
     }
     async fn send_password_reset_otp(
         &self,
+        tenant_id: &str,
         email: &str,
         _otp: &str,
         _locale: Option<&str>,
     ) -> Result<(), EmailError> {
-        tracing::debug!(event = "password_reset_otp", email = %mask_email(email), "noop email: otp redacted");
+        tracing::debug!(event = "password_reset_otp", tenant_id = %log_safe(tenant_id), email = %mask_email(email), "noop email: otp redacted");
         Ok(())
     }
     async fn send_email_verification_otp(
         &self,
+        tenant_id: &str,
         email: &str,
         _otp: &str,
         _locale: Option<&str>,
     ) -> Result<(), EmailError> {
-        tracing::debug!(event = "email_verification_otp", email = %mask_email(email), "noop email: otp redacted");
+        tracing::debug!(event = "email_verification_otp", tenant_id = %log_safe(tenant_id), email = %mask_email(email), "noop email: otp redacted");
         Ok(())
     }
-    async fn send_mfa_enabled(&self, email: &str, _locale: Option<&str>) -> Result<(), EmailError> {
-        tracing::debug!(event = "mfa_enabled", email = %mask_email(email), "noop email");
+    async fn send_mfa_enabled(
+        &self,
+        tenant_id: &str,
+        email: &str,
+        _locale: Option<&str>,
+    ) -> Result<(), EmailError> {
+        tracing::debug!(event = "mfa_enabled", tenant_id = %log_safe(tenant_id), email = %mask_email(email), "noop email");
         Ok(())
     }
     async fn send_mfa_disabled(
         &self,
+        tenant_id: &str,
         email: &str,
         _locale: Option<&str>,
     ) -> Result<(), EmailError> {
-        tracing::debug!(event = "mfa_disabled", email = %mask_email(email), "noop email");
+        tracing::debug!(event = "mfa_disabled", tenant_id = %log_safe(tenant_id), email = %mask_email(email), "noop email");
         Ok(())
     }
     // `send_new_session_alert` is deliberately NOT overridden here. It is the one method with a
@@ -286,11 +343,12 @@ impl EmailProvider for NoOpEmailProvider {
     // inheriting the default is what keeps the no-op honest about that.
     async fn send_invitation(
         &self,
+        tenant_id: &str,
         email: &str,
         _invite: &InviteData,
         _locale: Option<&str>,
     ) -> Result<(), EmailError> {
-        tracing::debug!(event = "invitation", email = %mask_email(email), "noop email: token redacted");
+        tracing::debug!(event = "invitation", tenant_id = %log_safe(tenant_id), email = %mask_email(email), "noop email: token redacted");
         Ok(())
     }
 }
@@ -333,35 +391,67 @@ mod tests {
         let email: Arc<dyn EmailProvider> = Arc::new(NoOpEmailProvider);
         assert!(
             email
-                .send_password_reset_token("e@x.io", "tok", Some("en"))
+                .send_password_reset_token("t1", "e@x.io", "tok", Some("en"))
                 .await
                 .is_ok()
         );
         assert!(
             email
-                .send_password_reset_otp("e@x.io", "123456", None)
+                .send_password_reset_otp("t1", "e@x.io", "123456", None)
                 .await
                 .is_ok()
         );
         assert!(
             email
-                .send_email_verification_otp("e@x.io", "123456", Some("pt-BR"))
+                .send_email_verification_otp("t1", "e@x.io", "123456", Some("pt-BR"))
                 .await
                 .is_ok()
         );
-        assert!(email.send_mfa_enabled("e@x.io", None).await.is_ok());
-        assert!(email.send_mfa_disabled("e@x.io", None).await.is_ok());
+        assert!(email.send_mfa_enabled("t1", "e@x.io", None).await.is_ok());
         assert!(
             email
-                .send_new_session_alert("e@x.io", &session(), None)
+                .send_mfa_disabled(PLATFORM_EMAIL_TENANT, "e@x.io", None)
                 .await
                 .is_ok()
         );
         assert!(
             email
-                .send_invitation("e@x.io", &invite(), None)
+                .send_new_session_alert("t1", "e@x.io", &session(), None)
                 .await
                 .is_ok()
         );
+        assert!(
+            email
+                .send_invitation("t1", "e@x.io", &invite(), None)
+                .await
+                .is_ok()
+        );
+        assert!(
+            email
+                .send_password_changed("t1", "e@x.io", None)
+                .await
+                .is_ok()
+        );
+        assert!(
+            email
+                .send_email_change_verification("t1", "new@x.io", "tok", None)
+                .await
+                .is_ok()
+        );
+        assert!(
+            email
+                .send_email_changed_notification("t1", "old@x.io", "new@x.io", None)
+                .await
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn the_platform_email_tenant_matches_nest_auth() {
+        // The reserved attribution for the admin plane is a cross-backend contract: an adapter
+        // behind both libraries must see one name for it, not two. A rename here is a divergence
+        // that only shows up in a notification backend's audit trail, which is exactly where it
+        // would go unnoticed.
+        assert_eq!(PLATFORM_EMAIL_TENANT, "platform");
     }
 }

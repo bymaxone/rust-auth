@@ -1691,7 +1691,7 @@ A module-level constant `ANTI_ENUM_MIN_MS: u64 = 300` governs timing normalizati
 Purpose: create a new local (email + password) tenant user, optionally send an email-verification OTP, and issue a full session. Registration **always** issues tokens, even when `email_verification.required` is true, so the host can render a "verify your email" screen for an authenticated user; the *next* login after the access token expires is blocked with `EMAIL_NOT_VERIFIED`.
 
 Algorithm:
-1. Resolve `tenant_id` via `config.tenant_id_resolver` if present, else use `dto.tenant_id`.
+1. Resolve `tenant_id` via `config.tenant_id_resolver` if present, else use `dto.tenant_id` — which is optional, and whose absence with no resolver configured is refused with `AuthError::Validation` naming `tenantId`, never defaulted.
 2. Build `HookContext` from `ctx` + `tenant_id` + `dto.email`.
 3. If `before_register` hook is set, await it. If it returns `allowed = false`, return `AuthError::Forbidden`. If it returns `modified_data`, merge `role` / `status` / `email_verified` overrides **immutably** into a working copy of the create-data (never mutate the validated DTO).
 4. `user_repo.find_by_email(email, tenant_id)`. If `Some`, return `EmailAlreadyExists` (uniqueness check precedes hashing — cheaper than wasting an Argon2/scrypt derivation on conflict).
@@ -3541,7 +3541,7 @@ Four design principles carry over from nest-auth:
 3. **Asynchronous** — every method is `async` and returns `Result<(), EmailError>`.
 4. **Delivery failures are the adapter's concern** — retries, dead-lettering, and provider error handling live in the implementation. The engine treats email sending as fire-and-forget: a returned `Err` is logged via `tracing` and does not fail the user-facing operation (the same posture as the fire-and-forget hooks in §9), except where a flow is explicitly gated on delivery (e.g. email-verification enrollment).
 
-Every method takes an optional `locale: Option<&str>` (a BCP 47 tag such as `"en"` or `"pt-BR"`); the adapter falls back to a default locale when it is `None`. Implementations must never log email bodies, tokens, OTPs, or recovery codes.
+Every method takes the account's `tenant_id: &str` first, so a multi-tenant delivery channel can attribute and route the message; a single-tenant adapter ignores it. A cross-tenant platform admin carries no tenant, so notices on that plane are attributed to the reserved `PLATFORM_EMAIL_TENANT` (`"platform"`), held byte-identical to nest-auth's constant. Every method also takes an optional `locale: Option<&str>` (a BCP 47 tag such as `"en"` or `"pt-BR"`); the adapter falls back to a default locale when it is `None`. Implementations must never log email bodies, tokens, OTPs, or recovery codes.
 
 ### 10.1 `EmailProvider` trait
 
@@ -3552,6 +3552,7 @@ pub trait EmailProvider: Send + Sync {
     /// to embed in a time-limited URL. Never log `token`.
     async fn send_password_reset_token(
         &self,
+        tenant_id: &str,
         email: &str,
         token: &str,
         locale: Option<&str>,
@@ -3560,6 +3561,7 @@ pub trait EmailProvider: Send + Sync {
     /// Password-reset OTP flow: send a short-lived numeric code. Never log `otp`.
     async fn send_password_reset_otp(
         &self,
+        tenant_id: &str,
         email: &str,
         otp: &str,
         locale: Option<&str>,
@@ -3569,6 +3571,7 @@ pub trait EmailProvider: Send + Sync {
     /// resend. Never log `otp`.
     async fn send_email_verification_otp(
         &self,
+        tenant_id: &str,
         email: &str,
         otp: &str,
         locale: Option<&str>,
@@ -3577,6 +3580,7 @@ pub trait EmailProvider: Send + Sync {
     /// Security alert: MFA was enabled on the account.
     async fn send_mfa_enabled(
         &self,
+        tenant_id: &str,
         email: &str,
         locale: Option<&str>,
     ) -> Result<(), EmailError>;
@@ -3584,6 +3588,7 @@ pub trait EmailProvider: Send + Sync {
     /// Security alert: MFA was disabled on the account.
     async fn send_mfa_disabled(
         &self,
+        tenant_id: &str,
         email: &str,
         locale: Option<&str>,
     ) -> Result<(), EmailError>;
@@ -3593,6 +3598,7 @@ pub trait EmailProvider: Send + Sync {
     /// user can judge whether the login was theirs.
     async fn send_new_session_alert(
         &self,
+        tenant_id: &str,
         email: &str,
         session: &SessionInfo,
         locale: Option<&str>,
@@ -3602,6 +3608,7 @@ pub trait EmailProvider: Send + Sync {
     /// the accept URL (built from `invite.token`), and the expiry.
     async fn send_invitation(
         &self,
+        tenant_id: &str,
         email: &str,
         invite: &InviteData,
         locale: Option<&str>,
@@ -3670,6 +3677,8 @@ impl EmailProvider for NoOpEmailProvider {
 
 ### 10.5 Implementing a real provider
 
+Most deployments should not implement this trait at all: `DefaultAuthEmailProvider` (§10.6) already covers all ten methods over a one-method `AuthEmailSink` port and carries the escaping, subject sanitization and failure policy. Implement `EmailProvider` directly only where the sink shape does not fit.
+
 A production adapter wraps an HTTP email API with `reqwest` (or an SMTP client). It renders the body for the requested `locale`, calls the provider, and maps transport failures to `EmailError::Delivery`. Pattern:
 
 ```rust
@@ -3679,6 +3688,7 @@ struct ResendEmailProvider { http: reqwest::Client, api_key: SecretString, from:
 impl EmailProvider for ResendEmailProvider {
     async fn send_password_reset_token(
         &self,
+        tenant_id: &str,
         email: &str,
         token: &str,
         locale: Option<&str>,
@@ -3699,7 +3709,33 @@ impl EmailProvider for ResendEmailProvider {
 }
 ```
 
-Implementation notes that mirror the contract's guarantees: escape every dynamic value before interpolating it into HTML; never log the `token`, `otp`, `session.session_hash`, or `invite.invite_token`; and put any retry/backoff logic inside the adapter, since the engine will not retry a failed fire-and-forget send.
+Implementation notes that mirror the contract's guarantees: escape every dynamic value before interpolating it into HTML; strip CR/LF from the subject, which is a single header a channel may build by concatenation; never log the `token`, `otp`, `session.session_hash`, or `invite.invite_token`; and put any retry/backoff logic inside the adapter, since the engine will not retry a failed fire-and-forget send.
+
+### 10.6 `DefaultAuthEmailProvider`
+
+The overridable default that fills the port, so a deployment does not hand-write ten methods to send a verification code. It exists because each of those hand-written providers would otherwise have to get the same security policy right independently, and the failures are silent ones: an unescaped inviter name that renders as markup, a subject carrying a `\r\n` that a concatenating channel reads as an extra `Bcc:` header, or a delivery error that fails the user's whole request.
+
+```rust
+#[async_trait]
+pub trait AuthEmailSink: Send + Sync {
+    async fn send(&self, message: OutgoingEmail<'_>) -> Result<(), EmailError>;
+}
+
+pub struct OutgoingEmail<'a> {
+    pub tenant_id: &'a str,
+    pub to: &'a str,
+    pub subject: &'a str,   // already stripped of CR/LF
+    pub html: &'a str,
+    pub text: &'a str,
+}
+```
+
+- **`AuthEmailSink`** is the delivery channel — one method, so the module depends on no concrete mailer. The `tenant_id` the port carries is passed straight through, so a multi-tenant channel can attribute and route.
+- **`AuthEmailCatalogue`** is the copy: ten pure renderers, each with a secure default, so an override implements only the events whose wording it changes. Returning `html` from a renderer is the seam for a product's real links, layout and branding — that override owns its own escaping, and everything else stays escaped. A catalogue chooses words, never behaviour.
+- **`DeliveryErrorPolicy`** defaults to `Swallow`: the failure is logged (subject only, never the body, code or address — a log line reaches a wider audience than the inbox it was going to) and the flow continues, because the engine awaits some of these sends and a channel outage must not fail the operation itself. `Rethrow` restores the error for the two flows that react to one: the reset path deletes an undelivered token early rather than leaving it to its TTL, and the email-change path refuses to record "verification sent". Under the default both degrade rather than break — the token still expires unread, and the change still needs a verification nobody received.
+
+Mirrors nest-auth's provider of the same name, so the two libraries send the same messages from the same events.
+
 ## 11. OAuth System
 
 The OAuth subsystem is a faithful Rust port of the nest-auth OAuth flow: a

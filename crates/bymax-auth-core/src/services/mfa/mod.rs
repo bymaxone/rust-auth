@@ -148,6 +148,20 @@ struct MfaUserView {
     password_hash: Option<String>,
 }
 
+impl MfaUserView {
+    /// The tenant an MFA notice is attributed to at the email port: a dashboard user's own
+    /// tenant, or [`PLATFORM_EMAIL_TENANT`] for a cross-tenant admin who carries none.
+    ///
+    /// `dashboard_user` is `None` exactly on the platform plane, which is what makes it the
+    /// discriminator here rather than a second field that could disagree with it.
+    fn email_tenant(&self) -> String {
+        self.dashboard_user.as_ref().map_or_else(
+            || crate::traits::PLATFORM_EMAIL_TENANT.to_owned(),
+            |u| u.tenant_id.clone(),
+        )
+    }
+}
+
 /// The MFA lifecycle service. Constructed by the engine builder only when `config.mfa` is
 /// present; the collaborators it shares with the engine (token manager, session service,
 /// brute-force service) are held as `Arc` handles.
