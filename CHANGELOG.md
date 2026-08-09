@@ -10,6 +10,30 @@ version bump.
 
 ## [Unreleased]
 
+### Security
+
+- **A delivery failure no longer logs the catalogue's subject.** `DefaultAuthEmailProvider`
+  reported a failed send with the rendered subject line, and the subject comes from
+  `AuthEmailCatalogue` — which is the host's. Putting the code in the subject is an ordinary
+  product decision, not a misuse: `"123456 is your verification code"` is what shows in a phone's
+  notification preview, and plenty of products write it exactly that way. A host doing something
+  entirely reasonable would therefore have had this library copy their OTP or reset token into a
+  log pipeline, on a path that is only reachable when something is already going wrong.
+
+  That the email port's contract forbids logging codes did not help, because the code writing the
+  line is the library's, not the adapter's — a rule nobody can see being broken is not a control.
+  The failure now records a library-owned event name (`password_reset_token`,
+  `email_verification_otp`, …) and a generic delivery error, and nothing the catalogue produced.
+  The transport's underlying cause stays out too: it is a `Box<dyn Error>` the host's sink built,
+  so its text is exactly as unconstrained as the subject was, and a sink formatting "could not
+  send to user@example.com" would walk the recipient straight back in. A sink that wants its
+  diagnostics recorded is the right place to record them.
+
+  The constant is also the better field to read: it is stable across a reworded subject and
+  across locales, so an alert keys off it once, where matching on product copy silently stops
+  firing the day the wording changes. Pinned by a test that installs a subscriber, renders a
+  catalogue whose subject carries the OTP, and asserts the code never reaches the event.
+
 ### Added
 
 - **`DefaultAuthEmailProvider`, the overridable default that fills the email port** so a

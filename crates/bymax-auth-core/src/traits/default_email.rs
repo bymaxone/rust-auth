@@ -16,8 +16,11 @@
 //! and override any subset of its methods with a product's own wording, returning `html` for
 //! real links, layout and branding. What must survive a rewrite is the security shape — a code
 //! is stated once, a notice of a change the user may not have made tells them how to react, and
-//! only a message's subject is ever logged (on a delivery failure), never a body, code or
-//! address.
+//! nothing the catalogue produced is ever logged. A delivery failure records a library-owned
+//! event name and a generic "delivery failed" — never a subject, a body, an address or a code,
+//! and not the transport's own error either, whose text the host's sink controls just as freely
+//! as the subject. The catalogue is the host's, and a subject carrying the code is an ordinary
+//! product decision rather than a misuse, so the guarantee has to hold without their help.
 //!
 //! Mirrors nest-auth's `DefaultAuthEmailProvider` so the two libraries send the same messages
 //! from the same events.
@@ -484,15 +487,21 @@ impl DefaultAuthEmailProvider {
 
     /// Render the body to HTML (unless the message carries its own), hand the message to the
     /// channel, and apply the configured failure policy.
+    ///
+    /// `event` is a library-owned constant naming which message this was — never anything the
+    /// catalogue produced. It is the only identifying thing that reaches a log line here; see
+    /// the failure arm for why.
     async fn deliver(
         &self,
+        event: &'static str,
         tenant_id: &str,
         to: &str,
         message: AuthEmailMessage,
     ) -> Result<(), EmailError> {
-        // Stripped once, then used for both the header and the log line: a subject is a single
-        // header, and a smuggled CR/LF must reach neither the channel (header injection) nor
-        // the logger.
+        // Stripped for the header, which is the only place it goes: a subject is a single email
+        // header, so a smuggled CR/LF would let a channel that builds headers by concatenation
+        // read the rest of the value as more of them. It no longer reaches the logger at all —
+        // see the failure arm below.
         let subject = sanitize_subject(&message.subject);
         // Borrowed when the renderer supplied its own HTML, owned only when one has to be
         // built: a body is the largest thing on this path and there is no reason to copy one.
@@ -513,12 +522,32 @@ impl DefaultAuthEmailProvider {
         match outcome {
             Ok(()) => Ok(()),
             Err(error) => {
-                // The subject names the message; the address is deliberately left out, because
-                // a log line reaches a wider audience than the inbox it was going to. The
-                // built-in subjects carry no secret — an override that puts a code in a subject
-                // breaks the same no-log rule the port states — and the error is the channel's
-                // own, not the rendered body.
-                tracing::error!(%error, %subject, "auth email: delivery failed");
+                // A library-owned event name, never the rendered subject.
+                //
+                // The subject is catalogue-produced, and the catalogue is the host's. Putting the
+                // code in the subject is an ordinary product decision — "123456 is your
+                // verification code" is what shows in a phone's notification preview, and plenty
+                // of products write it that way — so a host doing something entirely reasonable
+                // would have had this line copy their OTP into a log pipeline. That the port's
+                // contract forbids logging codes does not help: the code that writes the line is
+                // this one, not theirs, and a rule nobody can see being broken is not a control.
+                //
+                // The constant is also the better field for the reader. It is stable across a
+                // reworded subject and across locales, so an alert keys off it once, where
+                // matching on product copy silently stops firing the day marketing edits it.
+                //
+                // The address stays out for its own reason: a log line reaches a wider audience
+                // than the inbox it was going to.
+                //
+                // `%error` renders `EmailError`'s own `Display`, which is the fixed
+                // "email delivery failed" — the transport's real cause hangs off it as
+                // `#[source]` and is deliberately NOT pulled in here. That cause is a
+                // `Box<dyn Error>` the host's sink constructed, so its text is as unconstrained
+                // as the subject was: a sink that formats "could not send to user@example.com"
+                // would walk the recipient straight back into this line. A sink that wants its
+                // diagnostics recorded is the right place to record them, where it knows what
+                // its own error contains.
+                tracing::error!(%error, event, "auth email: delivery failed");
                 // Log first, then honour the configured policy: a deployment on `Rethrow` wants
                 // the failure to reach the caller that reacts to it, not to be absorbed here.
                 match self.on_delivery_error {
@@ -540,6 +569,7 @@ impl EmailProvider for DefaultAuthEmailProvider {
         locale: Option<&str>,
     ) -> Result<(), EmailError> {
         self.deliver(
+            "password_reset_token",
             tenant_id,
             email,
             self.messages.password_reset_token(token, locale),
@@ -555,6 +585,7 @@ impl EmailProvider for DefaultAuthEmailProvider {
         locale: Option<&str>,
     ) -> Result<(), EmailError> {
         self.deliver(
+            "password_reset_otp",
             tenant_id,
             email,
             self.messages.password_reset_otp(otp, locale),
@@ -570,6 +601,7 @@ impl EmailProvider for DefaultAuthEmailProvider {
         locale: Option<&str>,
     ) -> Result<(), EmailError> {
         self.deliver(
+            "email_verification_otp",
             tenant_id,
             email,
             self.messages.email_verification_otp(otp, locale),
@@ -583,8 +615,13 @@ impl EmailProvider for DefaultAuthEmailProvider {
         email: &str,
         locale: Option<&str>,
     ) -> Result<(), EmailError> {
-        self.deliver(tenant_id, email, self.messages.password_changed(locale))
-            .await
+        self.deliver(
+            "password_changed",
+            tenant_id,
+            email,
+            self.messages.password_changed(locale),
+        )
+        .await
     }
 
     async fn send_email_change_verification(
@@ -595,6 +632,7 @@ impl EmailProvider for DefaultAuthEmailProvider {
         locale: Option<&str>,
     ) -> Result<(), EmailError> {
         self.deliver(
+            "email_change_verification",
             tenant_id,
             new_email,
             self.messages.email_change_verification(token, locale),
@@ -613,6 +651,7 @@ impl EmailProvider for DefaultAuthEmailProvider {
         // moved the account's, and telling the new address that it is the new address warns
         // nobody.
         self.deliver(
+            "email_changed",
             tenant_id,
             old_email,
             self.messages.email_changed(old_email, new_email, locale),
@@ -626,8 +665,13 @@ impl EmailProvider for DefaultAuthEmailProvider {
         email: &str,
         locale: Option<&str>,
     ) -> Result<(), EmailError> {
-        self.deliver(tenant_id, email, self.messages.mfa_enabled(locale))
-            .await
+        self.deliver(
+            "mfa_enabled",
+            tenant_id,
+            email,
+            self.messages.mfa_enabled(locale),
+        )
+        .await
     }
 
     async fn send_mfa_disabled(
@@ -636,8 +680,13 @@ impl EmailProvider for DefaultAuthEmailProvider {
         email: &str,
         locale: Option<&str>,
     ) -> Result<(), EmailError> {
-        self.deliver(tenant_id, email, self.messages.mfa_disabled(locale))
-            .await
+        self.deliver(
+            "mfa_disabled",
+            tenant_id,
+            email,
+            self.messages.mfa_disabled(locale),
+        )
+        .await
     }
 
     async fn send_new_session_alert(
@@ -648,6 +697,7 @@ impl EmailProvider for DefaultAuthEmailProvider {
         locale: Option<&str>,
     ) -> Result<(), EmailError> {
         self.deliver(
+            "new_session_alert",
             tenant_id,
             email,
             self.messages.new_session_alert(session, locale),
@@ -662,8 +712,13 @@ impl EmailProvider for DefaultAuthEmailProvider {
         invite: &InviteData,
         locale: Option<&str>,
     ) -> Result<(), EmailError> {
-        self.deliver(tenant_id, email, self.messages.invitation(invite, locale))
-            .await
+        self.deliver(
+            "invitation",
+            tenant_id,
+            email,
+            self.messages.invitation(invite, locale),
+        )
+        .await
     }
 }
 
@@ -815,6 +870,59 @@ mod tests {
         let changed = sent.get(5).cloned().unwrap_or_default();
         assert_eq!(changed.to, "old@x.io");
         assert!(changed.text.contains("new@x.io"));
+    }
+
+    #[tokio::test]
+    async fn a_delivery_failure_logs_the_event_and_never_the_catalogue_subject() {
+        // The subject is the host's, through their catalogue, and putting the code in it is an
+        // ordinary product decision — "123456 is your verification code" is what shows in a
+        // phone's notification preview. If the failure line logged the subject, a host doing
+        // something entirely reasonable would have this library copy their OTP into a log
+        // pipeline. The port's no-log contract does not cover it either, because the code
+        // writing the line is this library's, not theirs.
+        struct CodeInSubject;
+        impl AuthEmailCatalogue for CodeInSubject {
+            fn email_verification_otp(&self, otp: &str, _locale: Option<&str>) -> AuthEmailMessage {
+                AuthEmailMessage::plain(format!("{otp} is your verification code"), "…")
+            }
+        }
+
+        let provider = DefaultAuthEmailProvider::new(Arc::new(RecordingSink::new(true)))
+            .with_catalogue(Arc::new(CodeInSubject));
+        // Captured so the event's fields are actually rendered: with no subscriber installed the
+        // formatting never runs, which leaves this unfalsifiable from a test.
+        let (events, capture) = crate::log_capture::capture_events();
+        assert!(
+            provider
+                .send_email_verification_otp("t1", "user@example.com", "123456", None)
+                .await
+                .is_ok()
+        );
+        drop(capture);
+
+        assert!(
+            events.contains_at(tracing::Level::ERROR, "auth email: delivery failed"),
+            "the delivery failure was not reported at all"
+        );
+        assert!(
+            events.contains("event=email_verification_otp"),
+            "the failure line does not name which message failed"
+        );
+        assert!(
+            !events.contains("123456"),
+            "the OTP reached a log line through the catalogue's subject"
+        );
+        assert!(
+            !events.contains("user@example.com"),
+            "the recipient reached a log line"
+        );
+        // The transport's own cause stays out too. `RecordingSink` fails with the source text
+        // "channel down"; a sink is free to format the recipient into that string, so pulling
+        // `#[source]` into this line would reopen the hole from the other side.
+        assert!(
+            !events.contains("channel down"),
+            "the sink's underlying error text reached a log line"
+        );
     }
 
     #[tokio::test]
