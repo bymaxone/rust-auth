@@ -2715,6 +2715,243 @@ mod tests {
             "a challenge token minted before the bump must stop verifying, got {after:?}"
         );
     }
+
+    /// A deliberately stale set of dashboard claims: an id, a window and an epoch that a
+    /// re-issue must all replace rather than inherit.
+    ///
+    /// Hand-built rather than taken from a freshly issued token, and that is the point. `iat`
+    /// has one-second resolution, so claims minted moments earlier in the same test carry the
+    /// same second as the re-issue — and a `window` assertion against them holds whether the
+    /// field was replaced or inherited. Only a window that is unmistakably from another time
+    /// can tell the two apart.
+    fn stale_dashboard_claims() -> DashboardClaims {
+        DashboardClaims {
+            iss: None,
+            aud: None,
+            sub: "u1".to_owned(),
+            jti: "00000000-0000-4000-8000-000000000000".to_owned(),
+            tenant_id: "old-tenant".to_owned(),
+            role: "MEMBER".to_owned(),
+            token_type: DashboardType::Dashboard,
+            status: String::new(),
+            mfa_enabled: false,
+            mfa_verified: true,
+            iat: 1_000,
+            exp: 1_900,
+            epoch: 0,
+        }
+    }
+
+    #[tokio::test]
+    async fn a_reissued_access_token_gets_a_fresh_id_window_and_the_current_epoch() {
+        // `reissue_access_with_authority` promises "a fresh `jti`, window, and epoch are
+        // issued", and every one of those was unasserted: each field could be dropped from the
+        // literal — inheriting the old value through `..claims.clone()` — with the whole suite
+        // still green.
+        //
+        // They are not interchangeable in what they cost. A re-used `jti` collapses two tokens
+        // into one revocation identity, so the `rv:{jti}` a logout writes for one silently
+        // revokes the other, and a token minted after a logout is born already blacklisted. An
+        // inherited `exp` re-mints a session with the ORIGINAL login's window, so a console
+        // that has been refreshing for hours hands out tokens that are already expired. An
+        // inherited `epoch` re-mints below the account's current generation, so the token a
+        // refresh just issued is refused by the very check the refresh exists to satisfy.
+        let store = Arc::new(InMemoryStores::new());
+        let svc = service(store.clone());
+
+        // The account's generation has moved on since the stale claims were minted.
+        let bumped = store.bump_epoch(SessionKind::Dashboard, "u1").await;
+        let Ok(bumped) = bumped else { return };
+        assert_eq!(bumped, 1, "the fixture epoch must start at zero");
+
+        let stale = stale_dashboard_claims();
+        let reissued = svc
+            .reissue_access_with_authority(&stale, "ADMIN", "new-tenant", true)
+            .await;
+        let Ok(token) = reissued else { return };
+        let verified = svc.verify_access(&token).await;
+        // Asserted before it is unwrapped, and that is load-bearing: a `let-else` that returns
+        // on `Err` makes this test vacuous for exactly the failures it exists to catch. An
+        // inherited `exp` is already in the past and an inherited `epoch` sits below the
+        // account's generation, so both come back from `verify_access` as an error rather than
+        // as wrong values — and a silent `return` would call that a pass.
+        assert!(
+            verified.is_ok(),
+            "a token this refresh just issued must verify: {verified:?}"
+        );
+        let Ok(fresh) = verified else { return };
+
+        assert_ne!(
+            fresh.jti, stale.jti,
+            "the re-issued token kept the id it replaces, so one revocation now covers both"
+        );
+        assert!(
+            fresh.iat > stale.iat && fresh.exp > stale.exp,
+            "the re-issued token kept the window of the token it replaces: {} / {}",
+            fresh.iat,
+            fresh.exp
+        );
+        assert_eq!(
+            fresh.exp - fresh.iat,
+            900,
+            "the re-issued window is not the configured access lifetime"
+        );
+        assert_eq!(
+            fresh.epoch, bumped,
+            "the re-issued token carries a generation the account has already moved past"
+        );
+        // The re-stamped authority, alongside, so the fresh-field assertions above cannot be
+        // satisfied by a re-issue that quietly dropped what it was asked to carry.
+        assert_eq!(fresh.role, "ADMIN");
+        assert_eq!(fresh.tenant_id, "new-tenant");
+        assert!(fresh.mfa_enabled);
+        // Everything else rides through untouched — `mfa_verified` above all: a second factor
+        // already cleared on this session must not be silently demanded again.
+        assert_eq!(fresh.sub, stale.sub);
+        assert!(fresh.mfa_verified);
+    }
+
+    #[tokio::test]
+    async fn an_expired_access_token_still_verifies_on_the_logout_path() {
+        // `verify_access_ignoring_expiry` exists for exactly one caller, logout, and the
+        // `validate_exp: false` that makes it work was unasserted — dropping the field falls
+        // back to the validating default, and nothing went red. What that costs is in the
+        // method's own doc: an access token that expired while the user was away is the NORMAL
+        // case at logout, and refusing it leaves the refresh session — the long-lived
+        // credential logout exists to kill — alive for its whole remaining lifetime.
+        let store = Arc::new(InMemoryStores::new());
+        let svc = service(store);
+
+        // The stale fixture's window is already long past — that is what makes it stale.
+        let expired = stale_dashboard_claims();
+        let signed = svc.issue_access(&expired);
+        let Ok(token) = signed else { return };
+
+        // The ordinary verifier refuses it, which is what makes the logout path necessary.
+        let ordinary = svc.verify_access(&token).await;
+        assert!(
+            matches!(ordinary, Err(AuthError::TokenExpired)),
+            "a long-expired token must not pass the ordinary verifier: {ordinary:?}"
+        );
+
+        // The logout verifier accepts it, and the signature still had to hold — the `jti` it
+        // returns is what decides which token gets blacklisted.
+        let for_logout = svc.verify_access_ignoring_expiry(&token);
+        assert!(
+            matches!(&for_logout, Ok(claims) if claims.jti == expired.jti),
+            "the logout path refused an expired token: {for_logout:?}"
+        );
+
+        // A garbage signature is still refused, so "ignoring expiry" has not become
+        // "ignoring verification".
+        let tampered = format!("{token}x");
+        assert!(svc.verify_access_ignoring_expiry(&tampered).is_err());
+    }
+
+    /// The platform twin of [`stale_dashboard_claims`], hand-built for the same reason.
+    #[cfg(feature = "platform")]
+    fn stale_platform_claims() -> PlatformClaims {
+        PlatformClaims {
+            iss: None,
+            aud: None,
+            sub: "a1".to_owned(),
+            jti: "00000000-0000-4000-8000-000000000001".to_owned(),
+            role: "support".to_owned(),
+            token_type: PlatformType::Platform,
+            mfa_enabled: false,
+            mfa_verified: true,
+            iat: 1_000,
+            exp: 1_900,
+            epoch: 0,
+        }
+    }
+
+    #[cfg(feature = "platform")]
+    #[tokio::test]
+    async fn a_reissued_platform_token_gets_a_fresh_id_window_and_the_current_epoch() {
+        // The platform twin of the dashboard case above, and the plane where it costs the most:
+        // these are the highest-privilege identities in the system, so a re-used `jti`, a
+        // window inherited from the original sign-in, or a generation the operator has already
+        // been moved past all land on the console rather than on a tenant user.
+        let store = Arc::new(InMemoryStores::new());
+        let svc = service(store.clone());
+
+        let bumped = store.bump_epoch(SessionKind::Platform, "a1").await;
+        let Ok(bumped) = bumped else { return };
+        assert_eq!(bumped, 1, "the fixture epoch must start at zero");
+
+        let stale = stale_platform_claims();
+        let reissued = svc
+            .reissue_platform_access_with_authority(&stale, "super_admin", true)
+            .await;
+        let Ok(token) = reissued else { return };
+        let verified = svc.verify_platform_access(&token).await;
+        // Asserted before unwrapping, for the reason the dashboard twin spells out.
+        assert!(
+            verified.is_ok(),
+            "a token this refresh just issued must verify: {verified:?}"
+        );
+        let Ok(fresh) = verified else { return };
+
+        assert_ne!(
+            fresh.jti, stale.jti,
+            "the re-issued admin token kept the id it replaces"
+        );
+        assert!(
+            fresh.iat > stale.iat && fresh.exp > stale.exp,
+            "the re-issued admin token kept the window of the token it replaces: {} / {}",
+            fresh.iat,
+            fresh.exp
+        );
+        assert_eq!(
+            fresh.exp - fresh.iat,
+            900,
+            "the re-issued window is not the configured access lifetime"
+        );
+        assert_eq!(
+            fresh.epoch, bumped,
+            "the re-issued admin token carries a generation the account has moved past"
+        );
+        // The re-stamped authority is the whole reason this method exists: a demoted admin must
+        // not keep minting tokens with the role they held at sign-in.
+        assert_eq!(fresh.role, "super_admin");
+        assert!(fresh.mfa_enabled);
+        assert_eq!(fresh.sub, stale.sub);
+        assert!(fresh.mfa_verified);
+    }
+
+    #[cfg(feature = "platform")]
+    #[tokio::test]
+    async fn an_expired_platform_token_still_verifies_on_the_logout_path() {
+        // The platform twin, for the case its own doc names: an operator who walks away for
+        // longer than the access lifetime and then signs out is ordinary, and refusing them
+        // leaves the refresh session of the highest-privilege identity in the system alive on a
+        // console they believed they had left.
+        let store = Arc::new(InMemoryStores::new());
+        let svc = service(store);
+
+        let expired = stale_platform_claims();
+        let signed = svc.issue_platform_access(&expired);
+        let Ok(token) = signed else { return };
+
+        let ordinary = svc.verify_platform_access(&token).await;
+        assert!(
+            matches!(ordinary, Err(AuthError::TokenExpired)),
+            "a long-expired admin token must not pass the ordinary verifier: {ordinary:?}"
+        );
+
+        let for_logout = svc.verify_platform_access_ignoring_expiry(&token);
+        assert!(
+            matches!(&for_logout, Ok(claims) if claims.jti == expired.jti),
+            "the platform logout path refused an expired token: {for_logout:?}"
+        );
+
+        let tampered = format!("{token}x");
+        assert!(
+            svc.verify_platform_access_ignoring_expiry(&tampered)
+                .is_err()
+        );
+    }
 }
 
 #[cfg(test)]

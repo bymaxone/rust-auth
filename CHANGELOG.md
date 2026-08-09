@@ -648,6 +648,43 @@ version bump.
 
 ### Security
 
+- **The freshness of a re-issued access token is now tested, not just documented.** Both
+  `reissue_access_with_authority` and its platform twin promise "a fresh `jti`, window, and
+  epoch are issued", and every one of those fields could be dropped from the claim literal —
+  inheriting the value from the token being replaced — with the whole suite still green. Only
+  the re-stamped authority (`role`, `tenantId`, `mfaEnabled`) was covered, which is how four
+  fields on each plane went unasserted at once.
+
+  The three failures are not interchangeable. A re-used `jti` collapses two tokens into one
+  revocation identity, so the `rv:{jti}` a logout writes for one silently revokes the other and
+  a token minted after a logout is born already blacklisted. An inherited `exp` re-mints the
+  session with the ORIGINAL sign-in's window, so a console that has been refreshing for hours
+  hands out tokens that are already expired. An inherited `epoch` re-mints below the account's
+  current generation, so the token a refresh just issued is refused by the very check the
+  refresh exists to satisfy. On the platform plane all three land on the highest-privilege
+  identity in the system.
+
+  The tests drive the re-issue from deliberately stale hand-built claims rather than from a
+  freshly issued token, because `iat` has one-second resolution: claims minted moments earlier
+  in the same test carry the same second, and a window assertion against them holds whether the
+  field was replaced or inherited. They also assert the re-issued token *verifies* before
+  reading its fields — an inherited `exp` or `epoch` surfaces as an error rather than as a wrong
+  value, and unwrapping with a `let-else` that returns would have called that a pass.
+
+- **The logout path's expired-token allowance is now tested.** `verify_access_ignoring_expiry`
+  and its platform twin exist for exactly one caller — logout — and the `validate_exp: false`
+  that makes them work was unasserted: dropping the field falls back to the validating default
+  and nothing went red. An access token that expired while the user was away is the *normal*
+  case at logout, and refusing it leaves the refresh session — the long-lived credential logout
+  exists to kill — alive for its whole remaining lifetime. The new tests pin both halves: an
+  expired token passes this verifier and is refused by the ordinary one, and a tampered
+  signature is still refused, so "ignoring expiry" has not quietly become "ignoring
+  verification".
+
+  Behaviour is unchanged; what changed is that a regression in any of it now fails the suite.
+  Found by a `cargo-mutants` sweep: ten surviving mutants across the two claim literals and the
+  two verifiers, all ten killed by these four tests.
+
 - **`event-listener` advanced to 5.4.2 (RUSTSEC-2026-0221).** The crate reaches this
   workspace transitively, through `redis` → `async-lock`. Its `StackSlot` carried
   `unsafe impl<T> Send` and `Sync` with no bound on `T`, so a `!Send` value could be
