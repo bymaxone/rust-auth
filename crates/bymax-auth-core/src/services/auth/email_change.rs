@@ -385,6 +385,11 @@ mod tests {
                 engine,
                 users,
                 stores,
+                // This harness deliberately wires a FAILING email provider, so nothing is
+                // captured; the field exists for the flows that read a mailed code back.
+                emails: std::sync::Arc::new(
+                    crate::services::auth::test_support::CapturingEmails::default(),
+                ),
             })
     }
 

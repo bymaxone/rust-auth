@@ -848,7 +848,7 @@ mod tests {
     use crate::services::auth::LoginInput;
     use crate::services::auth::test_support::{Harness, SeedUser, base_config, ctx, harness};
     use crate::traits::{
-        EmailProvider, OtpStore, PasswordResetStore, SessionKind, SessionStore, UserRepository,
+        EmailProvider, PasswordResetStore, SessionKind, SessionStore, UserRepository,
     };
     use bymax_auth_types::{AuthResult, CreateUserData, LoginResult};
     use std::time::Duration;
@@ -1118,7 +1118,13 @@ mod tests {
                 .await
                 .is_ok()
         );
-        let Some(code) = h.stores.peek_otp(OtpPurpose::PasswordReset, &identifier) else { return };
+        // From the mail; the stored record is a keyed fingerprint, not the code. Awaited and
+        // asserted like the second issuance below: the send is detached, so an immediate read
+        // races it, and `else { return }` would turn a lost race into a test that exercises
+        // neither reset path and still reports success.
+        let mailed = crate::services::auth::test_support::await_password_reset_code(&h).await;
+        assert!(mailed.is_some(), "the reset mail never carried a code");
+        let Some(code) = mailed else { return };
         let reset = ResetPasswordInput {
             email: "otp@example.com".to_owned(),
             tenant_id: Some("t1".to_owned()),
@@ -1143,7 +1149,11 @@ mod tests {
                 .await
                 .is_ok()
         );
-        let Some(code2) = h.stores.peek_otp(OtpPurpose::PasswordReset, &identifier) else { return };
+        // Submitted below, so it has to be the plaintext — from the mail, not the record.
+        // Awaited and asserted: the send is detached, and a lost race must fail rather than skip.
+        let mailed = crate::services::auth::test_support::await_password_reset_code(&h).await;
+        assert!(mailed.is_some(), "the reset mail never carried a code");
+        let Some(code2) = mailed else { return };
         let verified = h
             .engine
             .verify_reset_otp(
@@ -1257,9 +1267,9 @@ mod tests {
         );
         // The OTP is filed under the canonical spelling, whatever was typed.
         let identifier = h.engine.hashed_identifier("t1", "case@example.com");
-        let code = h
-            .stores
-            .peek_otp(OtpPurpose::PasswordReset, &identifier)
+        // Submitted below, so it has to be the plaintext — from the mail, not the record.
+        let code = crate::services::auth::test_support::await_password_reset_code(&h)
+            .await
             .unwrap_or_default();
         assert!(
             !code.is_empty(),
@@ -1293,9 +1303,9 @@ mod tests {
                 .await
                 .is_ok()
         );
-        let second = h
-            .stores
-            .peek_otp(OtpPurpose::PasswordReset, &identifier)
+        // Submitted below, so it has to be the plaintext — from the mail, not the record.
+        let second = crate::services::auth::test_support::await_password_reset_code(&h)
+            .await
             .unwrap_or_default();
         assert!(!second.is_empty());
         let verified = h
@@ -1509,9 +1519,14 @@ mod tests {
         // A valid OTP stored for an email with no backing user collapses to the
         // invalid-token error (no verified token is issued for a vanished account).
         let ghost_id = h.engine.hashed_identifier("t1", "ghost@example.com");
+        // Planted through the OTP service, not straight into the store: the service fingerprints
+        // the code before it writes, so a record written at the store level would hold a
+        // plaintext the verify step no longer looks for — the test would then pass for the wrong
+        // reason, reporting "no user" where the code simply did not match.
         assert!(
-            h.stores
-                .put(OtpPurpose::PasswordReset, &ghost_id, "111111", 600)
+            h.engine
+                .otp()
+                .store(OtpPurpose::PasswordReset, &ghost_id, "111111", 600)
                 .await
                 .is_ok()
         );
@@ -1891,16 +1906,15 @@ mod tests {
         cfg.password_reset.method = ResetMethod::Otp;
         let Some(h) = harness(cfg, Some(hooks)) else { return };
         let id = h.seed(SeedUser::active("hooked@example.com", "old")).await;
-        let identifier = h.engine.hashed_identifier("t1", "hooked@example.com");
         assert!(
             h.engine
                 .initiate_reset(forgot("hooked@example.com"), &ctx())
                 .await
                 .is_ok()
         );
-        let code = h
-            .stores
-            .peek_otp(OtpPurpose::PasswordReset, &identifier)
+        // Submitted below, so it has to be the plaintext — from the mail, not the record.
+        let code = crate::services::auth::test_support::await_password_reset_code(&h)
+            .await
             .unwrap_or_default();
         assert!(!code.is_empty());
         let reset = ResetPasswordInput {

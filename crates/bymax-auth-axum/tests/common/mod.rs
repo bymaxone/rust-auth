@@ -124,6 +124,136 @@ pub fn hash_password(plain: &str) -> String {
     bymax_auth_crypto::password::hash(plain.as_bytes(), &params).unwrap_or_default()
 }
 
+/// An email provider that keeps the codes it was asked to send.
+///
+/// The OTP record no longer holds the plaintext code — it holds a keyed fingerprint, so a test
+/// cannot read the code back out of the store and never could once the store stopped being a
+/// place a leak would hand an attacker the code. The recipient's mailbox is where the code
+/// actually is, so that is where a test that drives the real flow has to get it.
+#[derive(Default)]
+pub struct CapturingEmails {
+    verification: Mutex<Option<String>>,
+    password_reset: Mutex<Option<String>>,
+}
+
+impl CapturingEmails {
+    /// Wait for the detached send to deliver the verification code, up to a deadline.
+    ///
+    /// The engine mails fire-and-forget, so reading the mailbox the instant a route returns is
+    /// a race — and one a caller loses SILENTLY when it unwraps with `else { return }`. Polling
+    /// rather than a fixed sleep keeps it from becoming a flake on a slower runner.
+    pub async fn await_verification_code(&self) -> Option<String> {
+        for _ in 0..40 {
+            if let Some(code) = self.verification_code() {
+                return Some(code);
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+        None
+    }
+
+    /// The password-reset twin of [`Self::await_verification_code`].
+    pub async fn await_password_reset_code(&self) -> Option<String> {
+        for _ in 0..40 {
+            if let Some(code) = self.password_reset_code() {
+                return Some(code);
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+        None
+    }
+
+    /// Take the last email-verification code sent, leaving the mailbox empty.
+    ///
+    /// Consuming, not peeking: a flow that mails twice would otherwise have the second read
+    /// answer instantly with the FIRST code, and the test would submit a stale one.
+    pub fn verification_code(&self) -> Option<String> {
+        self.verification.lock().ok().and_then(|mut c| c.take())
+    }
+
+    /// Take the last password-reset code sent. See [`Self::verification_code`].
+    pub fn password_reset_code(&self) -> Option<String> {
+        self.password_reset.lock().ok().and_then(|mut c| c.take())
+    }
+}
+
+#[async_trait::async_trait]
+impl bymax_auth_core::traits::EmailProvider for CapturingEmails {
+    async fn send_email_verification_otp(
+        &self,
+        _tenant_id: &str,
+        _email: &str,
+        otp: &str,
+        _locale: Option<&str>,
+    ) -> Result<(), bymax_auth_core::traits::EmailError> {
+        if let Ok(mut slot) = self.verification.lock() {
+            *slot = Some(otp.to_owned());
+        }
+        Ok(())
+    }
+
+    async fn send_password_reset_otp(
+        &self,
+        _tenant_id: &str,
+        _email: &str,
+        otp: &str,
+        _locale: Option<&str>,
+    ) -> Result<(), bymax_auth_core::traits::EmailError> {
+        if let Ok(mut slot) = self.password_reset.lock() {
+            *slot = Some(otp.to_owned());
+        }
+        Ok(())
+    }
+
+    async fn send_password_reset_token(
+        &self,
+        _tenant_id: &str,
+        _email: &str,
+        _token: &str,
+        _locale: Option<&str>,
+    ) -> Result<(), bymax_auth_core::traits::EmailError> {
+        Ok(())
+    }
+
+    async fn send_email_change_verification(
+        &self,
+        _tenant_id: &str,
+        _new_email: &str,
+        _token: &str,
+        _locale: Option<&str>,
+    ) -> Result<(), bymax_auth_core::traits::EmailError> {
+        Ok(())
+    }
+
+    async fn send_mfa_enabled(
+        &self,
+        _tenant_id: &str,
+        _email: &str,
+        _locale: Option<&str>,
+    ) -> Result<(), bymax_auth_core::traits::EmailError> {
+        Ok(())
+    }
+
+    async fn send_mfa_disabled(
+        &self,
+        _tenant_id: &str,
+        _email: &str,
+        _locale: Option<&str>,
+    ) -> Result<(), bymax_auth_core::traits::EmailError> {
+        Ok(())
+    }
+
+    async fn send_invitation(
+        &self,
+        _tenant_id: &str,
+        _email: &str,
+        _invite: &bymax_auth_core::traits::InviteData,
+        _locale: Option<&str>,
+    ) -> Result<(), bymax_auth_core::traits::EmailError> {
+        Ok(())
+    }
+}
+
 /// The built engine plus the concrete in-memory collaborators a test seeds/inspects.
 pub struct Harness {
     pub engine: Arc<AuthEngine>,
@@ -132,6 +262,8 @@ pub struct Harness {
     pub stores: Arc<InMemoryStores>,
     /// The cookie-domain resolver, present only when `EngineSpec::cookie_domains` asked for one.
     pub domain_resolver: Option<Arc<RecordingDomains>>,
+    /// The codes the engine actually mailed, for flows whose store holds only a fingerprint.
+    pub emails: Arc<CapturingEmails>,
 }
 
 /// Build an engine + router over in-memory stores per `spec`.
@@ -197,11 +329,13 @@ pub fn build(spec: EngineSpec) -> Option<Harness> {
         ]));
     }
 
+    let emails = Arc::new(CapturingEmails::default());
     let mut builder = AuthEngine::builder()
         .config(config)
         .environment(Environment::Test)
         .user_repository(users.clone())
         .platform_user_repository(admins.clone())
+        .email_provider(emails.clone())
         .redis_stores(stores.clone());
 
     if spec.oauth {
@@ -220,6 +354,7 @@ pub fn build(spec: EngineSpec) -> Option<Harness> {
         admins,
         stores,
         domain_resolver,
+        emails,
     })
 }
 
@@ -256,6 +391,7 @@ pub fn build_oauth_with_redirects() -> Option<Harness> {
         admins,
         stores,
         domain_resolver: None,
+        emails: Arc::new(CapturingEmails::default()),
     })
 }
 
@@ -293,6 +429,7 @@ pub fn build_oauth_with_failing_state_store() -> Option<Harness> {
         admins,
         stores: inert,
         domain_resolver: None,
+        emails: Arc::new(CapturingEmails::default()),
     })
 }
 
@@ -868,6 +1005,7 @@ pub fn build_failing() -> Option<Harness> {
         admins,
         stores: inert,
         domain_resolver: None,
+        emails: Arc::new(CapturingEmails::default()),
     })
 }
 
@@ -903,18 +1041,8 @@ pub fn build_failing_blacklist() -> Option<Harness> {
         admins,
         stores: inert,
         domain_resolver: None,
+        emails: Arc::new(CapturingEmails::default()),
     })
-}
-
-/// Peek the engine-generated OTP for a `(tenant, email)` pair under a purpose (the in-memory
-/// store keeps the plaintext code so the reset/verify flows can be driven end to end).
-pub fn peek_otp(
-    harness: &Harness,
-    purpose: bymax_auth_core::traits::OtpPurpose,
-    email: &str,
-) -> Option<String> {
-    let identifier = harness.engine.hashed_identifier_for(TENANT, email);
-    harness.stores.peek_otp(purpose, &identifier)
 }
 
 /// Seed an active platform admin with the given role; returns its id.
