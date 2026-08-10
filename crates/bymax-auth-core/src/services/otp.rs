@@ -319,4 +319,64 @@ mod tests {
             Ok(false)
         ));
     }
+
+    /// Read a field of the shared wire contract's HMAC-derivation vector.
+    ///
+    /// `conformance/wire-contract.json` is held byte-identical by nest-auth, so the value read
+    /// here is the value that side computes. Reading it rather than restating it is the point:
+    /// a constant copied into this file would be re-derived from the same code it is meant to
+    /// check, and would follow any drift instead of catching it.
+    fn contract_vector_field(field: &str) -> String {
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../conformance/wire-contract.json"
+        );
+        let raw = std::fs::read_to_string(path).unwrap_or_default();
+        let root: serde_json::Value = serde_json::from_str(&raw).unwrap_or(serde_json::Value::Null);
+        let value = root
+            .get("hmacKeyDerivation")
+            .and_then(|d| d.get("vectors"))
+            .and_then(|v| v.get(0))
+            .and_then(|v| v.get(field))
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .to_owned();
+        assert!(
+            !value.is_empty(),
+            "the wire contract declared no `hmacKeyDerivation.vectors[0].{field}` — it did not load"
+        );
+        value
+    }
+
+    #[test]
+    fn the_stored_otp_matches_the_shared_wire_contract_vector() {
+        // Both backends write and compare the SAME `otp:` record, so this transform is a wire
+        // contract rather than an internal detail: a drift is not a parse error on the other
+        // side, it is every code minted on one failing to verify on the other, both ways. nest-auth
+        // computes `hmacSha256(`${identifier}:${code}`, hmacKey)`; this asserts the Rust side lands
+        // on the byte-identical value for the vector the contract carries.
+        let key_hex = contract_vector_field("derivedKeyHex");
+        let identifier = contract_vector_field("identifierHex");
+        let code = contract_vector_field("otpCode");
+        let expected = contract_vector_field("otpRecordCodeHex");
+
+        // The HMAC key is the hex TEXT of the digest, not its raw bytes — the distinction the
+        // derivation section exists to pin, and the one that would silently split the keyspace.
+        assert_eq!(
+            key_hex.len(),
+            64,
+            "the contract's derivedKeyHex is not the 64 hex characters the key is built from"
+        );
+        let mut key_bytes = [0u8; 64];
+        key_bytes.copy_from_slice(key_hex.as_bytes());
+
+        let store = Arc::new(InMemoryStores::new());
+        let svc = OtpService::new(store, Zeroizing::new(key_bytes));
+        assert_eq!(
+            svc.fingerprint(&identifier, &code),
+            expected,
+            "the stored OTP transform drifted from the shared contract — nest-auth would refuse \
+             every code this backend mints, and vice versa"
+        );
+    }
 }

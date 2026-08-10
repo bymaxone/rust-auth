@@ -21,7 +21,14 @@
       "keyed with it. Three things are pinned at once: the ':' separator between label and",
       "secret, the SHA-256, and the fact that the HMAC is keyed with the hex TEXT of the digest",
       "rather than its raw bytes. Any of the three drifting produces different Redis keys for",
-      "every lockout, OTP, resend cooldown, MFA setup, and anti-replay record."
+      "every lockout, OTP, resend cooldown, MFA setup, and anti-replay record.",
+      "",
+      "The same vector continues into the OTP record. The stored value is never the code",
+      "itself — six digits is a keyspace of a million, reversible offline from a Redis dump —",
+      "but the hmac-sha256 of `{identifier}:{code}` under that derived key. Pinned here",
+      "because both implementations write and compare the SAME `otp:` record, so a drift is",
+      "not a parse error on the other side: it is every code minted on one backend failing to",
+      "verify on the other, in both directions."
     ],
     "label": "bymax-auth:hmac-key:v1",
     "vectors": [
@@ -29,7 +36,9 @@
         "secret": "0123456789abcdef0123456789abcdef",
         "derivedKeyHex": "0dd66555bd2d89e0eb4ce050f1fef427bea6799bec27fb8e313f69ab965048c1",
         "identifierMessage": "tenant-a:user@example.com",
-        "identifierHex": "609a759522bd8b397748fad2dbde07957cea580fe4f4f1f0ce0f526485de2b6d"
+        "identifierHex": "609a759522bd8b397748fad2dbde07957cea580fe4f4f1f0ce0f526485de2b6d",
+        "otpCode": "123456",
+        "otpRecordCodeHex": "d3483e9ed6fe3d6fc54ab28ac5d69dc6a60399d3519fdc0de95dbe77b9065327"
       }
     ]
   },
@@ -353,6 +362,7 @@
     "passwordHash": "PHC — see the passwordHashFormat section, which pins it by vector",
     "totpSecretAtRest": "aes-256-gcm over the BASE32 TEXT of the secret",
     "recoveryCodeDigest": "hex hmac-sha256 of the code under the derived identifier key",
+    "otpRecordCode": "hex hmac-sha256 of `{identifier}:{code}` under the derived identifier key",
     "wsTicket": "64 lowercase hex characters (32 CSPRNG bytes), single-use, 30 s lifetime"
   },
 

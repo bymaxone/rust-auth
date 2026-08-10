@@ -426,6 +426,106 @@ pub(crate) mod test_support {
         pub engine: AuthEngine,
         pub users: Arc<InMemoryUserRepository>,
         pub stores: Arc<InMemoryStores>,
+        /// The codes the engine actually mailed. The OTP record holds a keyed fingerprint, not
+        /// the code, so a flow that has to submit the code back reads it from here — which is
+        /// also where the recipient reads it.
+        pub emails: Arc<CapturingEmails>,
+    }
+
+    /// An email provider that keeps the codes it was asked to send.
+    #[derive(Default)]
+    pub(crate) struct CapturingEmails {
+        verification: std::sync::Mutex<Option<String>>,
+        password_reset: std::sync::Mutex<Option<String>>,
+    }
+
+    impl CapturingEmails {
+        /// Take the last email-verification code sent, leaving the mailbox empty.
+        ///
+        /// Consuming, not peeking, and that is load-bearing: a flow that mails twice would
+        /// otherwise have the second read answer instantly with the FIRST code, because the
+        /// mailbox is already non-empty when the poll starts. The test then submits a stale code
+        /// and its assertion passes for the wrong reason.
+        pub(crate) fn verification_code(&self) -> Option<String> {
+            self.verification.lock().ok().and_then(|mut c| c.take())
+        }
+
+        /// Take the last password-reset code sent, leaving the mailbox empty. See
+        /// [`Self::verification_code`] for why it consumes.
+        pub(crate) fn password_reset_code(&self) -> Option<String> {
+            self.password_reset.lock().ok().and_then(|mut c| c.take())
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl crate::traits::EmailProvider for CapturingEmails {
+        async fn send_email_verification_otp(
+            &self,
+            _tenant_id: &str,
+            _email: &str,
+            otp: &str,
+            _locale: Option<&str>,
+        ) -> Result<(), crate::traits::EmailError> {
+            if let Ok(mut slot) = self.verification.lock() {
+                *slot = Some(otp.to_owned());
+            }
+            Ok(())
+        }
+        async fn send_password_reset_otp(
+            &self,
+            _tenant_id: &str,
+            _email: &str,
+            otp: &str,
+            _locale: Option<&str>,
+        ) -> Result<(), crate::traits::EmailError> {
+            if let Ok(mut slot) = self.password_reset.lock() {
+                *slot = Some(otp.to_owned());
+            }
+            Ok(())
+        }
+        async fn send_password_reset_token(
+            &self,
+            _tenant_id: &str,
+            _email: &str,
+            _token: &str,
+            _locale: Option<&str>,
+        ) -> Result<(), crate::traits::EmailError> {
+            Ok(())
+        }
+        async fn send_email_change_verification(
+            &self,
+            _tenant_id: &str,
+            _new_email: &str,
+            _token: &str,
+            _locale: Option<&str>,
+        ) -> Result<(), crate::traits::EmailError> {
+            Ok(())
+        }
+        async fn send_mfa_enabled(
+            &self,
+            _tenant_id: &str,
+            _email: &str,
+            _locale: Option<&str>,
+        ) -> Result<(), crate::traits::EmailError> {
+            Ok(())
+        }
+        async fn send_mfa_disabled(
+            &self,
+            _tenant_id: &str,
+            _email: &str,
+            _locale: Option<&str>,
+        ) -> Result<(), crate::traits::EmailError> {
+            Ok(())
+        }
+        async fn send_invitation(
+            &self,
+            _tenant_id: &str,
+            _email: &str,
+            _invite: &crate::traits::InviteData,
+            _locale: Option<&str>,
+        ) -> Result<(), crate::traits::EmailError> {
+            Ok(())
+        }
     }
 
     impl Harness {
@@ -501,13 +601,60 @@ pub(crate) mod test_support {
         await_rehash_within(harness, user_id, previous, 40).await
     }
 
+    /// Wait for the detached email send to deliver the verification code, up to a deadline.
+    ///
+    /// The send is fire-and-forget (`spawn_guarded`), so reading the mailbox the instant the
+    /// flow returns is a race the test loses on a quiet machine — and loses SILENTLY, because
+    /// the caller's `let Some(code) = .. else { return }` turns a lost race into a pass. Polling
+    /// rather than sleeping a fixed span for the reason `await_rehash_within` does: a wait tuned
+    /// here becomes a flake on a slower runner.
+    /// Polls to a deadline of `attempts` × 25 ms. Callers pass a generous count; the give-up
+    /// path is reachable — and therefore testable — by passing a small one, exactly as
+    /// [`await_rehash_within`] is.
+    pub(crate) async fn await_verification_code_within(
+        harness: &Harness,
+        attempts: u32,
+    ) -> Option<String> {
+        for _ in 0..attempts {
+            if let Some(code) = harness.emails.verification_code() {
+                return Some(code);
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+        None
+    }
+
+    pub(crate) async fn await_verification_code(harness: &Harness) -> Option<String> {
+        await_verification_code_within(harness, 40).await
+    }
+
+    /// The password-reset twin of [`await_verification_code_within`].
+    pub(crate) async fn await_password_reset_code_within(
+        harness: &Harness,
+        attempts: u32,
+    ) -> Option<String> {
+        for _ in 0..attempts {
+            if let Some(code) = harness.emails.password_reset_code() {
+                return Some(code);
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+        None
+    }
+
+    pub(crate) async fn await_password_reset_code(harness: &Harness) -> Option<String> {
+        await_password_reset_code_within(harness, 40).await
+    }
+
     pub(crate) fn harness(cfg: AuthConfig, hooks: Option<Arc<dyn AuthHooks>>) -> Option<Harness> {
         let users = Arc::new(InMemoryUserRepository::new());
         let stores = Arc::new(InMemoryStores::new());
+        let emails = Arc::new(CapturingEmails::default());
         let mut builder = AuthEngine::builder()
             .config(cfg)
             .environment(Environment::Test)
             .user_repository(users.clone())
+            .email_provider(emails.clone())
             .redis_stores(stores.clone());
         if let Some(hooks) = hooks {
             builder = builder.hooks(hooks);
@@ -516,6 +663,7 @@ pub(crate) mod test_support {
             engine,
             users,
             stores,
+            emails,
         })
     }
 }
@@ -669,6 +817,92 @@ mod tests {
             h.engine.resolve_tenant(None, &ctx).await,
             Ok(t) if t == "resolved-tenant"
         ));
+    }
+
+    #[tokio::test]
+    async fn the_mail_poll_gives_up_rather_than_hanging() {
+        // The deadline arm, driven with a tiny attempt count against a mailbox nothing ever
+        // wrote to. It exists so a caller that loses the race asserts and fails instead of
+        // blocking a CI run forever, and it is only reachable — and only testable — through the
+        // parameterized form, exactly as `await_rehash_within` is.
+        let cfg = test_support::base_config();
+        let Some(h) = test_support::harness(cfg, None) else { return };
+        assert!(
+            test_support::await_verification_code_within(&h, 1)
+                .await
+                .is_none()
+        );
+        assert!(
+            test_support::await_password_reset_code_within(&h, 1)
+                .await
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn the_capturing_mailer_records_the_codes_and_ignores_the_rest() {
+        // The harness's double keeps the two codes a flow has to submit back, and no-ops the
+        // other sends. Exercised end to end here so the object-safe impl is covered and so the
+        // recording halves are asserted rather than assumed: a double that quietly kept nothing
+        // would make every test that reads a code from it skip its own assertions.
+        let mailer = test_support::CapturingEmails::default();
+        assert!(mailer.verification_code().is_none());
+        assert!(mailer.password_reset_code().is_none());
+
+        let provider: &dyn crate::traits::EmailProvider = &mailer;
+        assert!(
+            provider
+                .send_email_verification_otp("t1", "u@example.com", "123456", None)
+                .await
+                .is_ok()
+        );
+        assert!(
+            provider
+                .send_password_reset_otp("t1", "u@example.com", "654321", Some("pt-BR"))
+                .await
+                .is_ok()
+        );
+        assert_eq!(mailer.verification_code().as_deref(), Some("123456"));
+        assert_eq!(mailer.password_reset_code().as_deref(), Some("654321"));
+
+        // The rest carry no code a test submits back, so they are no-ops — driven here so the
+        // impl is fully covered.
+        assert!(
+            provider
+                .send_password_reset_token("t1", "u@example.com", "tok", None)
+                .await
+                .is_ok()
+        );
+        assert!(
+            provider
+                .send_email_change_verification("t1", "new@example.com", "tok", None)
+                .await
+                .is_ok()
+        );
+        assert!(
+            provider
+                .send_mfa_enabled("t1", "u@example.com", None)
+                .await
+                .is_ok()
+        );
+        assert!(
+            provider
+                .send_mfa_disabled("t1", "u@example.com", None)
+                .await
+                .is_ok()
+        );
+        let invite = crate::traits::InviteData {
+            inviter_name: "Owner".to_owned(),
+            tenant_name: "Acme".to_owned(),
+            invite_token: "0".repeat(64),
+            expires_at: time::OffsetDateTime::UNIX_EPOCH,
+        };
+        assert!(
+            provider
+                .send_invitation("t1", "u@example.com", &invite, None)
+                .await
+                .is_ok()
+        );
     }
 
     #[tokio::test]

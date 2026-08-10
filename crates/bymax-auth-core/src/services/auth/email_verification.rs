@@ -214,11 +214,20 @@ mod tests {
                 .await
                 .is_ok()
         );
-        let identifier = h.engine.hashed_identifier("t1", "v@example.com");
-        let stored = h
-            .stores
-            .peek_otp(OtpPurpose::EmailVerification, &identifier);
-        let Some(code) = stored else { return };
+        // From the mail the engine sent, not from the store: the `otp:` record holds a keyed
+        // fingerprint of the code, which is what keeps a Redis dump from handing over a
+        // six-digit keyspace. The recipient's mailbox is where the code is.
+        //
+        // Awaited, and then ASSERTED before it is unwrapped. The send is detached, so reading
+        // the mailbox immediately is a race — and an `else { return }` on a lost race is a test
+        // that skips itself and reports success. That is exactly what happened here before the
+        // coverage gate caught the whole flow going unexercised.
+        let mailed = crate::services::auth::test_support::await_verification_code(&h).await;
+        assert!(
+            mailed.is_some(),
+            "the verification mail never carried a code"
+        );
+        let Some(code) = mailed else { return };
         // Captured so the event's fields are actually rendered: `log_safe` is the second lock on
         // a host-supplied tenant reaching a log line, and with no subscriber installed the call
         // never runs, which leaves the sanitization unfalsifiable from a test.
@@ -270,6 +279,17 @@ mod tests {
                 .await,
             Err(AuthError::OtpInvalid)
         ));
+        // Drain the first account's mail before the ghost's is sent. The read is consuming, but
+        // nothing has consumed this one yet — so without draining, the poll below answers
+        // instantly with the WRONG account's code, the submission fails the OTP check, and the
+        // assertion passes without ever reaching the vanished-account arm it exists for.
+        assert!(
+            crate::services::auth::test_support::await_verification_code(&h)
+                .await
+                .is_some(),
+            "the seeded account's verification mail never arrived"
+        );
+
         // An OTP stored for an email with no backing user collapses to OtpInvalid on success.
         assert!(
             h.engine
@@ -277,11 +297,16 @@ mod tests {
                 .await
                 .is_ok()
         );
-        let identifier = h.engine.hashed_identifier("t1", "ghost@example.com");
-        let stored = h
-            .stores
-            .peek_otp(OtpPurpose::EmailVerification, &identifier);
-        let Some(code) = stored else { return };
+        // From the mail: the record holds a keyed fingerprint, so submitting the stored value
+        // would fail the OTP check itself and this assertion would pass for the wrong reason —
+        // reporting "no such account" where the code simply did not match, and never reaching
+        // the vanished-account arm this test exists for.
+        let mailed = crate::services::auth::test_support::await_verification_code(&h).await;
+        assert!(
+            mailed.is_some(),
+            "no verification code was mailed for the ghost"
+        );
+        let Some(code) = mailed else { return };
         assert!(matches!(
             h.engine
                 .verify_email(Some("t1"), "ghost@example.com", &code, &ctx())

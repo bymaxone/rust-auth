@@ -2225,7 +2225,6 @@ async fn invitation_create_with_an_unknown_role_hits_the_error_arm() {
 async fn password_reset_otp_two_step_success_flow() {
     // forgot-password mints an OTP; verify-otp exchanges it for a verified token (success arm);
     // reset-password with that token succeeds (204). Uses the in-memory OTP peek.
-    use bymax_auth_core::traits::OtpPurpose;
     let Some(h) = build(EngineSpec::default()) else { return };
     let app = router(&h);
     seed_user(&h, "pw@e.com", "glidingwalnut42", "USER").await;
@@ -2236,12 +2235,20 @@ async fn password_reset_otp_two_step_success_flow() {
         .send(&app)
         .await;
 
-    // Recover the OTP from the in-memory store (the engine derives the identifier internally).
-    // Asserted rather than skipped: the OTP existing is what proves the route reached the
+    // Recovered from the mail the engine actually sent, which is where the code is. The stored
+    // record holds a keyed fingerprint, not the code, so reading the store back would hand the
+    // test the wrong string — and a leaked Redis dump would hand an attacker nothing, which is
+    // the point of storing it that way.
+    //
+    // Asserted rather than skipped: the code existing is what proves the route reached the
     // engine at all, and a skip here would pass just as happily against a handler that did
     // nothing but answer 200.
-    let otp = common::peek_otp(&h, OtpPurpose::PasswordReset, "pw@e.com").unwrap_or_default();
-    assert!(!otp.is_empty(), "forgot-password minted no reset OTP");
+    let otp = h
+        .emails
+        .await_password_reset_code()
+        .await
+        .unwrap_or_default();
+    assert!(!otp.is_empty(), "forgot-password mailed no reset OTP");
 
     let verify = Req::post("/auth/password/verify-otp")
         .json(serde_json::json!({ "email": "pw@e.com", "otp": otp, "tenantId": TENANT }))
@@ -2650,7 +2657,6 @@ async fn oauth_callback_mfa_branch_without_redirect_returns_json() {
 #[tokio::test]
 async fn verify_email_success_with_a_live_otp() {
     // The verify-email happy path: a registered user with a real verification OTP verifies (204).
-    use bymax_auth_core::traits::OtpPurpose;
     let Some(h) = build(EngineSpec {
         verification_required: true,
         ..EngineSpec::default()
@@ -2665,9 +2671,12 @@ async fn verify_email_success_with_a_live_otp() {
         }))
         .send(&app)
         .await;
-    let Some(otp) = common::peek_otp(&h, OtpPurpose::EmailVerification, "vfy@e.com") else {
-        return;
-    };
+    // From the mail, not the store: the record holds a keyed fingerprint of the code. Awaited
+    // and asserted — the send is detached, and an `else { return }` on a lost race is a test
+    // that skips itself and reports success.
+    let mailed = h.emails.await_verification_code().await;
+    assert!(mailed.is_some(), "register mailed no verification code");
+    let Some(otp) = mailed else { return };
     let verify = Req::post("/auth/verify-email")
         .json(serde_json::json!({ "email": "vfy@e.com", "otp": otp, "tenantId": TENANT }))
         .send(&app)
@@ -3632,4 +3641,72 @@ async fn mfa_management_error_arms_with_a_real_account() {
         );
         assert_eq!(resp.json()["error"]["code"], code, "{path}");
     }
+}
+
+#[tokio::test]
+async fn the_capturing_mailer_records_the_codes_and_ignores_the_rest() {
+    // The harness's double keeps the two codes a flow has to submit back — the OTP record holds
+    // a keyed fingerprint, so the mailbox is the only place the plaintext exists — and no-ops
+    // the rest. Driven end to end so the object-safe impl is covered, and so the recording
+    // halves are asserted rather than assumed: a double that quietly kept nothing would make
+    // every test reading a code from it skip its own assertions and still pass.
+    use bymax_auth_core::traits::EmailProvider;
+
+    let mailer = common::CapturingEmails::default();
+    assert!(mailer.verification_code().is_none());
+    assert!(mailer.password_reset_code().is_none());
+
+    let provider: &dyn EmailProvider = &mailer;
+    assert!(
+        provider
+            .send_email_verification_otp("t1", "u@e.com", "123456", None)
+            .await
+            .is_ok()
+    );
+    assert!(
+        provider
+            .send_password_reset_otp("t1", "u@e.com", "654321", Some("pt-BR"))
+            .await
+            .is_ok()
+    );
+    assert_eq!(mailer.verification_code().as_deref(), Some("123456"));
+    assert_eq!(mailer.password_reset_code().as_deref(), Some("654321"));
+
+    // The rest carry nothing a test submits back, so they are no-ops.
+    assert!(
+        provider
+            .send_password_reset_token("t1", "u@e.com", "tok", None)
+            .await
+            .is_ok()
+    );
+    assert!(
+        provider
+            .send_email_change_verification("t1", "new@e.com", "tok", None)
+            .await
+            .is_ok()
+    );
+    assert!(
+        provider
+            .send_mfa_enabled("t1", "u@e.com", None)
+            .await
+            .is_ok()
+    );
+    assert!(
+        provider
+            .send_mfa_disabled("t1", "u@e.com", None)
+            .await
+            .is_ok()
+    );
+    let invite = bymax_auth_core::traits::InviteData {
+        inviter_name: "Owner".to_owned(),
+        tenant_name: "Acme".to_owned(),
+        invite_token: "0".repeat(64),
+        expires_at: time::OffsetDateTime::UNIX_EPOCH,
+    };
+    assert!(
+        provider
+            .send_invitation("t1", "u@e.com", &invite, None)
+            .await
+            .is_ok()
+    );
 }
