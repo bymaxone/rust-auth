@@ -26,7 +26,49 @@ where
     async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
         let auth_state = AuthState::from_ref(state);
         let claims = verified_dashboard_claims(parts, &auth_state).await?;
-        auth_state.engine().assert_user_active(&claims.sub).await?;
+        // The tenant comes from the verified token, never from the request: a repository id is
+        // unique only within a tenant, so an unscoped lookup can resolve someone else's account.
+        auth_state
+            .engine()
+            .assert_user_active(&claims.sub, Some(&claims.tenant_id))
+            .await?;
+        Ok(Self(claims))
+    }
+}
+
+/// Requires everything [`UserStatus`] does **and** that the account's address is verified.
+///
+/// Separate from [`UserStatus`] rather than folded into it, because the two gates protect
+/// different things and the routes that want them differ. `UserStatus` guards operations a
+/// signed-in account may perform regardless of whether its address is proven — listing its own
+/// sessions, changing its password, opening a socket. This one guards the operations that must
+/// not be reachable from an address nobody has proven, MFA enrolment above all: enrolling a
+/// second factor on an unverified account binds it to a mailbox that was never shown to belong
+/// to the person, and the recovery path for that factor runs back through the same address.
+///
+/// `GET /auth/me` deliberately takes neither: a pending or suspended client still has to be able
+/// to read its own profile to render the "verify your email" or "suspended" screen, and
+/// `SafeAuthUser` carries `status` and `email_verified` for exactly that.
+///
+/// The verified half is conditional on `email_verification.required`; see
+/// `AuthEngine::assert_user_active_and_verified`.
+#[derive(Debug, Clone)]
+pub struct VerifiedUser(pub DashboardClaims);
+
+impl<S> FromRequestParts<S> for VerifiedUser
+where
+    AuthState: FromRef<S>,
+    S: Send + Sync,
+{
+    type Rejection = AuthRejection;
+
+    async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
+        let auth_state = AuthState::from_ref(state);
+        let claims = verified_dashboard_claims(parts, &auth_state).await?;
+        auth_state
+            .engine()
+            .assert_user_active_and_verified(&claims.sub, Some(&claims.tenant_id))
+            .await?;
         Ok(Self(claims))
     }
 }
@@ -57,6 +99,71 @@ mod tests {
         assert!(matches!(
             denied,
             Err(AuthRejection(AuthError::AccountBanned))
+        ));
+    }
+
+    #[tokio::test]
+    async fn the_status_lookup_is_scoped_to_the_token_tenant() {
+        // A repository id is unique only WITHIN a tenant, and the repository contract says to
+        // pass `None` only for internal admin flows. This gate used to pass `None`, so a host
+        // whose ids are per-tenant serials could have it resolve a different tenant's row and
+        // decide on that account's status. The in-memory repository honours the tenant argument,
+        // so a token whose tenant does not hold the id must be refused rather than silently
+        // answered by whatever row shares the id.
+        let Some(s) = scaffold(TokenDelivery::Cookie) else { return };
+        let id = seed(&s.users, "scoped@e.com", "USER").await;
+        let token = dashboard_token(&s, &id).await;
+
+        // The seeded account lives in `t1`, and the token says `t1`: it resolves.
+        let mut parts = parts_with_cookie(&token);
+        assert!(matches!(
+            UserStatus::from_request_parts(&mut parts, &s.state).await,
+            Ok(UserStatus(_))
+        ));
+
+        // Asking the same id under another tenant finds nothing, which is the whole point: the
+        // engine call the extractor makes must be the tenant-scoped one.
+        let cross = s
+            .state
+            .engine()
+            .assert_user_active(&id, Some("other"))
+            .await;
+        assert!(
+            matches!(cross, Err(AuthError::TokenInvalid)),
+            "the status gate answered for an id outside the tenant: {cross:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn verified_user_refuses_an_unproven_address_and_passes_a_proven_one() {
+        // The MFA-management gate. `seed` creates verified accounts, so the pass arm is the
+        // seeded one; flipping the flag off is what proves the check is load-bearing rather
+        // than a status gate wearing a different name.
+        let Some(s) = scaffold(TokenDelivery::Cookie) else { return };
+        let id = seed(&s.users, "vfy@e.com", "USER").await;
+        let token = dashboard_token(&s, &id).await;
+
+        let mut parts = parts_with_cookie(&token);
+        assert!(matches!(
+            VerifiedUser::from_request_parts(&mut parts, &s.state).await,
+            Ok(VerifiedUser(_))
+        ));
+
+        let _ = s.users.update_email_verified(&id, false).await;
+        let mut parts = parts_with_cookie(&token);
+        let denied = VerifiedUser::from_request_parts(&mut parts, &s.state).await;
+        assert!(
+            matches!(denied, Err(AuthRejection(AuthError::EmailNotVerified))),
+            "an unverified address reached an MFA-management route: {denied:?}"
+        );
+
+        // The status half still applies, so the two gates compose rather than replace.
+        let _ = s.users.update_email_verified(&id, true).await;
+        let _ = s.users.update_status(&id, "SUSPENDED").await;
+        let mut parts = parts_with_cookie(&token);
+        assert!(matches!(
+            VerifiedUser::from_request_parts(&mut parts, &s.state).await,
+            Err(AuthRejection(AuthError::AccountSuspended))
         ));
     }
 }

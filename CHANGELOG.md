@@ -12,6 +12,37 @@ version bump.
 
 ### Security
 
+- **The account-status gate is scoped to the token's tenant.** `AuthEngine::assert_user_active`
+  resolved the account with `find_by_id(sub, None)` — and `UserRepository` says in as many words
+  that `None` is for "internal admin flows where cross-tenant access is intentional". A status
+  gate on a request path is not one of those. A repository id is unique only *within* a tenant,
+  so with a host whose ids are per-tenant serials the gate could resolve a **different tenant's**
+  account and decide on that account's status: admitting a caller whose own account is banned, or
+  refusing one who is fine. The verified token carries `tenant_id`, so there was nothing to guess.
+  `assert_user_active` now takes the tenant and the `UserStatus` extractor passes it.
+
+- **MFA management now requires a verified address, not just a live token.** `POST /auth/mfa/setup`,
+  `/verify-enable`, `/disable` and `/recovery-codes` took `AuthUser` — a valid token and nothing
+  else — so an account whose address nobody had proven could enrol, remove or re-roll a second
+  factor. Binding a factor to an unproven address binds it, and the recovery path that runs back
+  through that same address, to a mailbox that may not be the holder's. They now take a new
+  `VerifiedUser` extractor: account status **and** address verification.
+
+  `POST /auth/mfa/challenge` is deliberately **not** gated — it is part of signing in, not of
+  managing the factor. `GET /auth/me` is deliberately left on `AuthUser` alone: a pending,
+  suspended or unverified client still has to read its own profile to render the "verify your
+  email" or "suspended" screen, and `SafeAuthUser` carries `status` and `emailVerified` for
+  exactly that. Gating it would leave that client a 403 and nothing to render.
+
+  The verification half is conditional on `email_verification.required`, exactly as the login
+  path is: a deployment that does not ask for verification never marks anyone verified, so an
+  unconditional gate would make these routes permanently unreachable there.
+
+  `UserStatus` is unchanged and still gates status alone — ws-ticket, password change and the
+  session routes keep their current behaviour rather than silently acquiring a second gate.
+
+### Security
+
 - **A delivery failure no longer logs the catalogue's subject.** `DefaultAuthEmailProvider`
   reported a failed send with the rendered subject line, and the subject comes from
   `AuthEmailCatalogue` — which is the host's. Putting the code in the subject is an ordinary
