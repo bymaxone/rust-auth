@@ -90,19 +90,66 @@ impl AuthEngine {
     /// uses (`banned → AccountBanned`, etc.). A subject that no longer exists is treated as an
     /// invalid token (no enumeration oracle).
     ///
+    /// `tenant_id` scopes the lookup and callers on the request path must supply it. A
+    /// repository id is unique only *within* a tenant — [`crate::traits::UserRepository`] says
+    /// so, and adds that `None` is for "internal admin flows where cross-tenant access is
+    /// intentional". A status gate is not one of those: this call used to pass `None`, so with
+    /// a host whose ids are per-tenant serials it could resolve a DIFFERENT tenant's account
+    /// and decide on that account's status — admitting a caller whose own account is banned,
+    /// or refusing one who is fine. The token carries the tenant, so there is nothing to guess.
+    ///
     /// # Errors
     ///
     /// Returns the status-specific [`AuthError`] (`AccountBanned`/`AccountInactive`/
     /// `AccountSuspended`/`PendingApproval`) for a blocked account, [`AuthError::TokenInvalid`]
     /// for an unknown subject, or a store [`AuthError`] on a repository failure.
-    pub async fn assert_user_active(&self, sub: &str) -> Result<(), AuthError> {
+    pub async fn assert_user_active(
+        &self,
+        sub: &str,
+        tenant_id: Option<&str>,
+    ) -> Result<(), AuthError> {
+        self.gated_user(sub, tenant_id).await.map(|_| ())
+    }
+
+    /// As [`Self::assert_user_active`], and additionally refuse an account whose address is
+    /// still unproven — the gate for operations that must not be reachable before the address
+    /// is verified.
+    ///
+    /// Conditional on `email_verification.required`, exactly as the login path is: a deployment
+    /// that does not ask for verification never marks anyone verified, so gating on it
+    /// unconditionally would make the guarded routes permanently unreachable there.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::assert_user_active`], plus [`AuthError::EmailNotVerified`] when the
+    /// deployment requires verification and this account has none.
+    pub async fn assert_user_active_and_verified(
+        &self,
+        sub: &str,
+        tenant_id: Option<&str>,
+    ) -> Result<(), AuthError> {
+        let user = self.gated_user(sub, tenant_id).await?;
+        if self.config().config().email_verification.required && !user.email_verified {
+            return Err(AuthError::EmailNotVerified);
+        }
+        Ok(())
+    }
+
+    /// Fetch the account behind `sub` within `tenant_id` and apply the status gate, returning
+    /// it so a caller can apply further gates without a second repository round-trip.
+    async fn gated_user(
+        &self,
+        sub: &str,
+        tenant_id: Option<&str>,
+    ) -> Result<bymax_auth_types::AuthUser, AuthError> {
         let user = self
             .user_repository()
-            .find_by_id(sub, None)
+            .find_by_id(sub, tenant_id)
             .await
             .map_err(map_repository_error)?
             .ok_or(AuthError::TokenInvalid)?;
-        self.assert_user_not_blocked(&user.status)
+        self.assert_user_not_blocked(&user.status)?;
+        Ok(user)
     }
 
     /// List the caller's active sessions for the HTTP `GET /auth/sessions` route. The current
@@ -297,11 +344,12 @@ impl AuthEngine {
         &self,
         user_id: &str,
         ctx: MfaContext,
+        tenant_id: Option<&str>,
         password: Option<&str>,
     ) -> Result<MfaSetupResult, AuthError> {
         self.mfa()
             .ok_or(AuthError::MfaNotEnabled)?
-            .setup(user_id, ctx, password)
+            .setup(user_id, ctx, tenant_id, password)
             .await
     }
 
@@ -319,10 +367,11 @@ impl AuthEngine {
         ip: &str,
         user_agent: &str,
         ctx: MfaContext,
+        tenant_id: Option<&str>,
     ) -> Result<(), AuthError> {
         self.mfa()
             .ok_or(AuthError::MfaNotEnabled)?
-            .verify_and_enable(user_id, code, ip, user_agent, ctx)
+            .verify_and_enable(user_id, code, ip, user_agent, ctx, tenant_id)
             .await
     }
 
@@ -408,10 +457,11 @@ impl AuthEngine {
         ip: &str,
         user_agent: &str,
         ctx: MfaContext,
+        tenant_id: Option<&str>,
     ) -> Result<(), AuthError> {
         self.mfa()
             .ok_or(AuthError::MfaNotEnabled)?
-            .disable(user_id, code, ip, user_agent, ctx)
+            .disable(user_id, code, ip, user_agent, ctx, tenant_id)
             .await
     }
 
@@ -429,10 +479,11 @@ impl AuthEngine {
         ip: &str,
         user_agent: &str,
         ctx: MfaContext,
+        tenant_id: Option<&str>,
     ) -> Result<Vec<String>, AuthError> {
         self.mfa()
             .ok_or(AuthError::MfaNotEnabled)?
-            .regenerate_recovery_codes(user_id, code, ip, user_agent, ctx)
+            .regenerate_recovery_codes(user_id, code, ip, user_agent, ctx, tenant_id)
             .await
     }
 
@@ -655,7 +706,7 @@ mod tests {
         assert!(matches!(verified, Ok(claims) if claims.sub == sub));
 
         // An active account passes the status gate; a garbage token fails verification.
-        assert!(h.engine.assert_user_active(&sub).await.is_ok());
+        assert!(h.engine.assert_user_active(&sub, Some("t1")).await.is_ok());
         assert!(matches!(
             h.engine.verify_access_token("not-a-jwt").await,
             Err(AuthError::TokenInvalid)
@@ -665,7 +716,9 @@ mod tests {
         // are both rejected. Asserting only the admitting side would pass against a gate
         // that admitted everything — which is the whole failure this guards.
         assert!(matches!(
-            h.engine.assert_user_active("no-such-user").await,
+            h.engine
+                .assert_user_active("no-such-user", Some("t1"))
+                .await,
             Err(AuthError::TokenInvalid)
         ));
         let banned = h
@@ -676,7 +729,7 @@ mod tests {
             })
             .await;
         assert!(matches!(
-            h.engine.assert_user_active(&banned).await,
+            h.engine.assert_user_active(&banned, Some("t1")).await,
             Err(AuthError::AccountBanned)
         ));
 
@@ -870,7 +923,10 @@ mod tests {
         let claims = seeded_claims(&h).await;
 
         h.users.fail_next_reads(1);
-        let gated = h.engine.assert_user_active(&claims.sub).await;
+        let gated = h
+            .engine
+            .assert_user_active(&claims.sub, Some(&claims.tenant_id))
+            .await;
         let matched = matches!(gated, Err(AuthError::Internal(_)));
         assert!(
             matched,
@@ -1084,12 +1140,14 @@ mod tests {
         use bymax_auth_types::MfaContext;
         let Some(h) = harness(base_config(), None) else { return };
         assert!(matches!(
-            h.engine.mfa_setup("u", MfaContext::Dashboard, None).await,
+            h.engine
+                .mfa_setup("u", MfaContext::Dashboard, Some("t1"), None)
+                .await,
             Err(AuthError::MfaNotEnabled)
         ));
         assert!(matches!(
             h.engine
-                .mfa_verify_enable("u", "000000", "ip", "ua", MfaContext::Dashboard)
+                .mfa_verify_enable("u", "000000", "ip", "ua", MfaContext::Dashboard, Some("t1"))
                 .await,
             Err(AuthError::MfaNotEnabled)
         ));
@@ -1099,13 +1157,20 @@ mod tests {
         ));
         assert!(matches!(
             h.engine
-                .mfa_disable("u", "000000", "ip", "ua", MfaContext::Dashboard)
+                .mfa_disable("u", "000000", "ip", "ua", MfaContext::Dashboard, Some("t1"))
                 .await,
             Err(AuthError::MfaNotEnabled)
         ));
         assert!(matches!(
             h.engine
-                .mfa_regenerate_recovery_codes("u", "000000", "ip", "ua", MfaContext::Dashboard)
+                .mfa_regenerate_recovery_codes(
+                    "u",
+                    "000000",
+                    "ip",
+                    "ua",
+                    MfaContext::Dashboard,
+                    Some("t1")
+                )
                 .await,
             Err(AuthError::MfaNotEnabled)
         ));

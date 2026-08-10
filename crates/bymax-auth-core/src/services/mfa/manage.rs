@@ -27,13 +27,14 @@ impl MfaService {
         ip: &str,
         user_agent: &str,
         ctx: MfaContext,
+        tenant_id: Option<&str>,
     ) -> Result<(), AuthError> {
-        let view = self.fetch_user_mfa(user_id, ctx).await?;
+        let view = self.fetch_user_mfa(user_id, ctx, tenant_id).await?;
         self.reauth_gate(ctx, user_id, code, &view).await?;
         // The TOTP code verified; clear MFA, revoke sessions, and notify. Serialized against
         // every other MFA transition so a challenge that read the record a moment earlier
         // cannot splice `mfa_enabled: true` and the old secret back on top of this.
-        self.transition_mfa_record(user_id, ctx, |_| Some((false, None, None)))
+        self.transition_mfa_record(user_id, ctx, tenant_id, |_| Some((false, None, None)))
             .await?;
         // Revoke every refresh session AND advance the token epoch: an auth-state change
         // revokes everything issued under the previous state, in both directions — the same
@@ -84,8 +85,13 @@ impl MfaService {
     /// Returns [`AuthError::MfaNotEnabled`] if no user with that id exists in the given plane
     /// (the same answer the rest of this service gives for an unresolvable subject), or an
     /// internal/store [`AuthError`].
-    pub async fn reset_mfa(&self, user_id: &str, ctx: MfaContext) -> Result<(), AuthError> {
-        let view = self.fetch_user_mfa(user_id, ctx).await?;
+    pub async fn reset_mfa(
+        &self,
+        user_id: &str,
+        ctx: MfaContext,
+        tenant_id: Option<&str>,
+    ) -> Result<(), AuthError> {
+        let view = self.fetch_user_mfa(user_id, ctx, tenant_id).await?;
         if !view.mfa_enabled {
             tracing::info!(
                 target: "bymax_auth::mfa",
@@ -93,7 +99,7 @@ impl MfaService {
             );
             return Ok(());
         }
-        self.transition_mfa_record(user_id, ctx, |_| Some((false, None, None)))
+        self.transition_mfa_record(user_id, ctx, tenant_id, |_| Some((false, None, None)))
             .await?;
         self.session_store
             .revoke_all(session_kind(ctx), user_id)
@@ -130,8 +136,9 @@ impl MfaService {
         ip: &str,
         user_agent: &str,
         ctx: MfaContext,
+        tenant_id: Option<&str>,
     ) -> Result<Vec<String>, AuthError> {
-        let view = self.fetch_user_mfa(user_id, ctx).await?;
+        let view = self.fetch_user_mfa(user_id, ctx, tenant_id).await?;
         self.reauth_gate(ctx, user_id, totp_code, &view).await?;
         // Generate a fresh set with the same entropy/format as setup; persist only the digests.
         let plain_codes: Vec<String> = (0..self.recovery_code_count)
@@ -148,7 +155,7 @@ impl MfaService {
         // list spliced it back on top of this write. The secret is taken from the record as it
         // stands INSIDE the lock rather than the copy read above, for the same reason.
         let replaced = self
-            .transition_mfa_record(user_id, ctx, |current| {
+            .transition_mfa_record(user_id, ctx, tenant_id, |current| {
                 // MFA was disabled while the new codes were being derived. Writing them would
                 // re-enable it with the pre-disable secret, so the transition is abandoned.
                 if !current.mfa_enabled {

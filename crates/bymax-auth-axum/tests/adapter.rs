@@ -1137,7 +1137,8 @@ async fn mfa_setup_verify_enable_and_challenge_error_arms() {
         .json(serde_json::json!({ "code": "000000" }))
         .send(&app)
         .await;
-    assert_ne!(recov.status, StatusCode::OK);
+    assert_eq!(recov.status, StatusCode::UNAUTHORIZED);
+    assert_eq!(recov.json()["error"]["code"], "auth.token_invalid");
 }
 
 #[tokio::test]
@@ -2751,9 +2752,18 @@ async fn dashboard_mfa_disable_and_recovery_success() {
 }
 
 #[tokio::test]
-async fn mfa_handler_error_arms_with_a_ghost_subject() {
-    // A token for a non-existent subject drives the mfa setup/verify error arms (the engine
-    // fetches the user and errors).
+async fn a_ghost_subject_is_turned_away_before_any_mfa_handler_runs() {
+    // Renamed from "...error_arms_with_a_ghost_subject": it no longer drives those arms, and a
+    // test whose name outlives what it proves is how a gap gets recorded as covered. The status
+    // gate on these routes resolves the account BEFORE the handler, so a token minted for a
+    // subject no repository row backs is refused at the door rather than reaching the engine.
+    // What this pins now is that refusal. The handlers' error arms are driven by a real account
+    // in `mfa_management_error_arms_with_a_real_account`.
+    //
+    // The assertions pin the exact refusal. `assert_ne!(status, <success>)` would not have
+    // distinguished a gate rejection from an engine error — the handlers refuse a ghost too, so
+    // the test would stay green with the gate removed, which is precisely the claim it is here
+    // to make.
     let Some(h) = build(EngineSpec {
         mfa: true,
         ..EngineSpec::default()
@@ -2767,21 +2777,24 @@ async fn mfa_handler_error_arms_with_a_ghost_subject() {
         .cookie("access_token", &ghost)
         .send(&app)
         .await;
-    assert_ne!(setup.status, StatusCode::CREATED);
+    assert_eq!(setup.status, StatusCode::UNAUTHORIZED);
+    assert_eq!(setup.json()["error"]["code"], "auth.token_invalid");
 
     let verify = Req::post("/auth/mfa/verify-enable")
         .cookie("access_token", &ghost)
         .json(serde_json::json!({ "code": "000000" }))
         .send(&app)
         .await;
-    assert_ne!(verify.status, StatusCode::NO_CONTENT);
+    assert_eq!(verify.status, StatusCode::UNAUTHORIZED);
+    assert_eq!(verify.json()["error"]["code"], "auth.token_invalid");
 
     let disable = Req::post("/auth/mfa/disable")
         .cookie("access_token", &ghost)
         .json(serde_json::json!({ "code": "000000" }))
         .send(&app)
         .await;
-    assert_ne!(disable.status, StatusCode::NO_CONTENT);
+    assert_eq!(disable.status, StatusCode::UNAUTHORIZED);
+    assert_eq!(disable.json()["error"]["code"], "auth.token_invalid");
 
     let recov = Req::post("/auth/mfa/recovery-codes")
         .cookie("access_token", &ghost)
@@ -3566,4 +3579,57 @@ async fn each_route_is_served_under_the_limit_it_declares() {
         !trips_on_second_call(&app, || Req::post("/auth/mfa/recovery-codes")).await,
         "recovery-codes must NOT be served under the `mfa_setup` limit"
     );
+}
+
+#[tokio::test]
+async fn mfa_management_error_arms_with_a_real_account() {
+    // The handlers' error arms, driven by an account that PASSES every gate and simply asks for
+    // something the engine refuses. The suite used to reach them with a "ghost" token — one
+    // minted for an id no repository row backs — but the status gate now resolves the account
+    // before the handler runs, so a ghost is turned away at the door. That is the better
+    // behaviour and it is why these need a real subject: an error arm only proves it renders the
+    // envelope if the request actually reaches it.
+    let Some(h) = build(EngineSpec {
+        mfa: true,
+        ..EngineSpec::default()
+    }) else {
+        return;
+    };
+    let app = router(&h);
+    let reg = Req::post("/auth/register")
+        .json(serde_json::json!({
+            "email": "arms@e.com", "password": "glidingwalnut42", "name": "Arms", "tenantId": TENANT
+        }))
+        .send(&app)
+        .await;
+    let access = reg.cookie_value("access_token").unwrap_or_default();
+    assert!(!access.is_empty());
+
+    // Enrolment re-proves the password, so a wrong one is refused — by the handler, not the gate.
+    let setup = Req::post("/auth/mfa/setup")
+        .cookie("access_token", &access)
+        .json(serde_json::json!({ "password": "not-the-password" }))
+        .send(&app)
+        .await;
+    assert_eq!(setup.status, StatusCode::UNAUTHORIZED);
+    assert_eq!(setup.json()["error"]["code"], "auth.invalid_credentials");
+
+    // The remaining three act on a second factor this account has never enrolled.
+    for (path, code) in [
+        ("/auth/mfa/verify-enable", "auth.mfa_setup_required"),
+        ("/auth/mfa/disable", "auth.mfa_not_enabled"),
+        ("/auth/mfa/recovery-codes", "auth.mfa_not_enabled"),
+    ] {
+        let resp = Req::post(path)
+            .cookie("access_token", &access)
+            .json(serde_json::json!({ "code": "000000" }))
+            .send(&app)
+            .await;
+        assert_ne!(
+            resp.status,
+            StatusCode::FORBIDDEN,
+            "{path} was stopped by the gate, so its error arm never ran"
+        );
+        assert_eq!(resp.json()["error"]["code"], code, "{path}");
+    }
 }

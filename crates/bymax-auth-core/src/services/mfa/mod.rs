@@ -550,16 +550,22 @@ impl MfaService {
     /// Returns [`AuthError::MfaNotEnabled`] for a misconfigured platform context or a missing
     /// account, the status error when the account is blocked, or a repository
     /// [`AuthError::Internal`] on a backend failure.
+    ///
+    /// `tenant_id` scopes the dashboard lookup and the caller supplies the one carried by the
+    /// verified token. A repository id is unique only *within* a tenant, so an unscoped read
+    /// here would let an operation authorized against one tenant read — and then mutate — the
+    /// same id in another. The platform arm passes nothing: an operator is not tenant-scoped.
     async fn fetch_user_mfa(
         &self,
         user_id: &str,
         ctx: MfaContext,
+        tenant_id: Option<&str>,
     ) -> Result<MfaUserView, AuthError> {
         match ctx {
             MfaContext::Dashboard => {
                 let user = self
                     .user_repo
-                    .find_by_id(user_id, None)
+                    .find_by_id(user_id, tenant_id)
                     .await
                     .map_err(repository_error)?
                     .ok_or(AuthError::MfaNotEnabled)?;
@@ -645,6 +651,7 @@ impl MfaService {
         &self,
         user_id: &str,
         ctx: MfaContext,
+        tenant_id: Option<&str>,
         mutate: F,
     ) -> Result<bool, AuthError>
     where
@@ -664,7 +671,9 @@ impl MfaService {
         {
             return Err(AuthError::MfaStateConflict);
         }
-        let outcome = self.transition_locked(user_id, ctx, mutate).await;
+        let outcome = self
+            .transition_locked(user_id, ctx, tenant_id, mutate)
+            .await;
         // Released on every exit, including the error one: a failed transition must not leave
         // the account unchangeable for the lock's whole TTL.
         self.mfa_store
@@ -679,6 +688,7 @@ impl MfaService {
         &self,
         user_id: &str,
         ctx: MfaContext,
+        tenant_id: Option<&str>,
         mutate: F,
     ) -> Result<bool, AuthError>
     where
@@ -686,7 +696,7 @@ impl MfaService {
     {
         // Re-read inside the lock. The caller's copy was read before the lock existed and may
         // already be stale — reusing it would leave exactly the window this closes.
-        let current = self.fetch_user_mfa(user_id, ctx).await?;
+        let current = self.fetch_user_mfa(user_id, ctx, tenant_id).await?;
         let Some((enabled, secret, codes)) = mutate(&current) else {
             return Ok(false);
         };

@@ -48,7 +48,7 @@ pub use dto::{
 };
 pub use extractors::{
     AdminRole, AuthUser, CurrentUser, MfaSatisfied, OptionalAuthUser, RequireRole, Role,
-    SelfOrAdmin, UserStatus,
+    SelfOrAdmin, UserStatus, VerifiedUser,
 };
 pub use rate_limit::{RateLimit, RateLimitConfig};
 pub use response::{AuthRejection, error_response};

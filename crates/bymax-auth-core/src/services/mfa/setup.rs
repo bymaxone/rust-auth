@@ -24,9 +24,10 @@ impl MfaService {
         &self,
         user_id: &str,
         ctx: MfaContext,
+        tenant_id: Option<&str>,
         password: Option<&str>,
     ) -> Result<MfaSetupResult, AuthError> {
-        let view = self.fetch_user_mfa(user_id, ctx).await?;
+        let view = self.fetch_user_mfa(user_id, ctx, tenant_id).await?;
         if view.mfa_enabled {
             return Err(AuthError::MfaAlreadyEnabled);
         }
@@ -100,8 +101,9 @@ impl MfaService {
         ip: &str,
         user_agent: &str,
         ctx: MfaContext,
+        tenant_id: Option<&str>,
     ) -> Result<(), AuthError> {
-        let view = self.fetch_user_mfa(user_id, ctx).await?;
+        let view = self.fetch_user_mfa(user_id, ctx, tenant_id).await?;
         if view.mfa_enabled {
             return Err(AuthError::MfaAlreadyEnabled);
         }
@@ -144,7 +146,7 @@ impl MfaService {
         // already makes the enable one-per-record among concurrent verify calls; this puts it
         // in the same queue as `disable` and the challenge splice, which write the same three
         // fields over the same record.
-        self.transition_mfa_record(user_id, ctx, |_| {
+        self.transition_mfa_record(user_id, ctx, tenant_id, |_| {
             Some((true, Some(data.encrypted_secret), Some(data.hashed_codes)))
         })
         .await?;

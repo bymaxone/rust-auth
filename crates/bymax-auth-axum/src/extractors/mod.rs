@@ -24,7 +24,7 @@ pub use mfa::MfaSatisfied;
 pub use optional::OptionalAuthUser;
 pub use role::{RequireRole, Role};
 pub use self_or_admin::{AdminRole, SelfOrAdmin};
-pub use status::UserStatus;
+pub use status::{UserStatus, VerifiedUser};
 
 #[cfg(feature = "platform")]
 pub use platform::{PlatformRole, PlatformUser, RequirePlatformRole};

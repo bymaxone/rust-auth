@@ -21,7 +21,7 @@ use crate::delivery::TokenDelivery;
 use crate::dto::{
     MfaChallengeDto, MfaDisableDto, MfaRegenerateRecoveryCodesDto, MfaSetupDto, MfaVerifyDto,
 };
-use crate::extractors::AuthUser;
+use crate::extractors::{AuthUser, VerifiedUser};
 use crate::response::error_response;
 use crate::routes::{CookieDomains, RequestMeta};
 use crate::state::{AuthState, AxumAuthConfig, ClientIpSource};
@@ -69,6 +69,11 @@ pub(crate) fn routes(config: &AxumAuthConfig, ip_source: ClientIpSource) -> Rout
 async fn setup(
     State(state): State<AuthState>,
     user: AuthUser,
+    // Status + email-verified, alongside the token: enrolling or removing a second factor on an
+    // account whose address nobody has proven binds the factor — and its recovery path — to a
+    // mailbox that may not be the holder's. `challenge` below is deliberately NOT gated: it is
+    // part of signing in, not of managing the factor.
+    _gate: VerifiedUser,
     headers: http::HeaderMap,
     body: axum::body::Bytes,
 ) -> Response {
@@ -81,7 +86,16 @@ async fn setup(
     };
     match state
         .engine()
-        .mfa_setup(&user.0.sub, MfaContext::Dashboard, dto.password.as_deref())
+        .mfa_setup(
+            &user.0.sub,
+            MfaContext::Dashboard,
+            // The operation targets the account named by the VERIFIED token, in the tenant that
+            // token names. Without it the read and the writes behind it resolve by bare id,
+            // which the gate above no longer does — leaving the gate checking one account and
+            // the operation touching another.
+            Some(user.0.tenant_id.as_str()),
+            dto.password.as_deref(),
+        )
         .await
     {
         Ok(result) => (
@@ -101,6 +115,11 @@ async fn setup(
 async fn verify_enable(
     State(state): State<AuthState>,
     user: AuthUser,
+    // Status + email-verified, alongside the token: enrolling or removing a second factor on an
+    // account whose address nobody has proven binds the factor — and its recovery path — to a
+    // mailbox that may not be the holder's. `challenge` below is deliberately NOT gated: it is
+    // part of signing in, not of managing the factor.
+    _gate: VerifiedUser,
     RequestMeta(ctx): RequestMeta,
     ValidatedJson(dto): ValidatedJson<MfaVerifyDto>,
 ) -> Response {
@@ -112,6 +131,7 @@ async fn verify_enable(
             &ctx.ip,
             &ctx.user_agent,
             MfaContext::Dashboard,
+            Some(user.0.tenant_id.as_str()),
         )
         .await
     {
@@ -183,6 +203,11 @@ fn mfa_temp_cookie(cookies: &tower_cookies::Cookies) -> Option<String> {
 async fn disable(
     State(state): State<AuthState>,
     user: AuthUser,
+    // Status + email-verified, alongside the token: enrolling or removing a second factor on an
+    // account whose address nobody has proven binds the factor — and its recovery path — to a
+    // mailbox that may not be the holder's. `challenge` below is deliberately NOT gated: it is
+    // part of signing in, not of managing the factor.
+    _gate: VerifiedUser,
     RequestMeta(ctx): RequestMeta,
     ValidatedJson(dto): ValidatedJson<MfaDisableDto>,
 ) -> Response {
@@ -194,6 +219,7 @@ async fn disable(
             &ctx.ip,
             &ctx.user_agent,
             MfaContext::Dashboard,
+            Some(user.0.tenant_id.as_str()),
         )
         .await
     {
@@ -207,6 +233,11 @@ async fn disable(
 async fn recovery_codes(
     State(state): State<AuthState>,
     user: AuthUser,
+    // Status + email-verified, alongside the token: enrolling or removing a second factor on an
+    // account whose address nobody has proven binds the factor — and its recovery path — to a
+    // mailbox that may not be the holder's. `challenge` below is deliberately NOT gated: it is
+    // part of signing in, not of managing the factor.
+    _gate: VerifiedUser,
     RequestMeta(ctx): RequestMeta,
     ValidatedJson(dto): ValidatedJson<MfaRegenerateRecoveryCodesDto>,
 ) -> Response {
@@ -218,6 +249,7 @@ async fn recovery_codes(
             &ctx.ip,
             &ctx.user_agent,
             MfaContext::Dashboard,
+            Some(user.0.tenant_id.as_str()),
         )
         .await
     {
