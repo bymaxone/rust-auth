@@ -63,18 +63,51 @@ impl MfaService {
         ip: &str,
         user_agent: &str,
     ) -> Result<LoginResultMfa, AuthError> {
-        let MfaTempVerified { user_id, jti, .. } = verified;
-        let bf_id = self.challenge_bf_id(MfaContext::Dashboard, &user_id);
+        let MfaTempVerified {
+            user_id,
+            jti,
+            tenant_id,
+            ..
+        } = verified;
+        // Always `Some` on this plane — `verify_mfa_temp_token` refuses a dashboard token
+        // without it rather than resolving the account by id alone.
+        let tenant_id = tenant_id.as_deref();
+        let bf_id = self.challenge_bf_id(MfaContext::Dashboard, tenant_id, &user_id);
         self.assert_not_locked("challenge", &user_id, &bf_id)
             .await?;
 
         // Fetch the dashboard user concretely; the combined guard rejects both a missing user
-        // and one without MFA configured.
-        let user = self
+        // and one without MFA configured. Scoped by `(id, tenant)`, never by id alone. Passing `None` here resolved the account
+        // by id across every tenant, and everything below runs on what came back: the status
+        // gate, `mfa_enabled`, the secret that gets decrypted, the recovery digests that get
+        // scanned, and the account the session is finally minted for. Under a host schema that
+        // numbers users per tenant, every tenant has a user `1`.
+        let answer = self
             .user_repo
-            .find_by_id(&user_id, None)
+            .find_by_id(&user_id, tenant_id)
             .await
-            .map_err(repository_error)?
+            .map_err(repository_error)?;
+
+        // The tenant the repository ANSWERED with must be the tenant that was asked for.
+        // Passing the argument is a request, not an enforcement: the repository is the host's,
+        // and a single-tenant host writing `find_by_id` that ignores its second argument is the
+        // shape nobody notices — which is exactly the deployment where ids collide across
+        // tenants and this whole change matters. `login` already refuses such an answer
+        // (services/auth/login.rs), for the same reason and with the same wording; the challenge
+        // is the other door into the same account and had no such check. Without it, everything
+        // below — the status gate, `mfa_enabled`, the secret, the recovery digests, the account
+        // the session is minted for — still runs on a row from another tenant.
+        if answer
+            .as_ref()
+            .is_some_and(|candidate| Some(candidate.tenant_id.as_str()) != tenant_id)
+        {
+            tracing::warn!(
+                "mfa challenge: repository returned an account outside the token's tenant — \
+                 check that UserRepository::find_by_id scopes by its tenant_id argument"
+            );
+        }
+        let user = answer
+            .filter(|candidate| Some(candidate.tenant_id.as_str()) == tenant_id)
             .ok_or(AuthError::MfaNotEnabled)?;
 
         // Re-check the account status. Login gated it before minting the temp token, but that
@@ -99,7 +132,14 @@ impl MfaService {
         // (retryable within its TTL) and only the failure counter advances.
         let recovery_index = if is_totp_code(code) {
             if !self
-                .accept_totp(MfaContext::Dashboard, &user_id, &raw_secret, code, &jti)
+                .accept_totp(
+                    MfaContext::Dashboard,
+                    tenant_id,
+                    &user_id,
+                    &raw_secret,
+                    code,
+                    &jti,
+                )
                 .await?
             {
                 return self.reject_code("challenge", &user_id, &bf_id).await;
@@ -191,7 +231,7 @@ impl MfaService {
         user_agent: &str,
     ) -> Result<LoginResultMfa, AuthError> {
         let MfaTempVerified { user_id, jti, .. } = verified;
-        let bf_id = self.challenge_bf_id(MfaContext::Platform, &user_id);
+        let bf_id = self.challenge_bf_id(MfaContext::Platform, None, &user_id);
         self.assert_not_locked("platform challenge", &user_id, &bf_id)
             .await?;
 
@@ -228,7 +268,14 @@ impl MfaService {
         let recovery_codes = admin.mfa_recovery_codes.clone().unwrap_or_default();
         let recovery_index = if is_totp_code(code) {
             if !self
-                .accept_totp(MfaContext::Platform, &user_id, &raw_secret, code, &jti)
+                .accept_totp(
+                    MfaContext::Platform,
+                    None,
+                    &user_id,
+                    &raw_secret,
+                    code,
+                    &jti,
+                )
                 .await?
             {
                 return self
@@ -299,6 +346,7 @@ impl MfaService {
     async fn accept_totp(
         &self,
         ctx: MfaContext,
+        tenant_id: Option<&str>,
         user_id: &str,
         raw_secret: &[u8],
         code: &str,
@@ -317,7 +365,7 @@ impl MfaService {
         // (same marker already present) or a different still-valid code (its marker is fresh but
         // the temp token is already gone) — is rejected, so exactly one session is issued. The
         // anti-replay TTL is derived from the configured window so the marker outlives the code.
-        let replay = self.replay_id(ctx, user_id, code);
+        let replay = self.replay_id(ctx, tenant_id, user_id, code);
         let jti_marker = to_hex(&bymax_auth_crypto::mac::sha256(jti.as_bytes()));
         self.mfa_store
             .challenge_consume(&replay, &jti_marker, self.anti_replay_ttl_seconds())
@@ -343,7 +391,13 @@ impl MfaService {
         // minting two sessions, the one property a recovery code has. The engine cannot make
         // that repository atomic; it can be atomic in the store it owns. The loser reads as an
         // invalid code, which is what a code already spent is.
-        if !self.claim_recovery_code(ctx, &user.id, code).await? {
+        // The tenant comes from the fetched account rather than being threaded in: the lookup
+        // above is now scoped by `(id, tenant)`, so this IS the token's tenant, and reading it
+        // off the account leaves no second value that could disagree with the first.
+        if !self
+            .claim_recovery_code(ctx, Some(user.tenant_id.as_str()), &user.id, code)
+            .await?
+        {
             return Ok(None);
         }
         Ok(Some(index))
@@ -368,7 +422,8 @@ impl MfaService {
         else {
             return Ok(None);
         };
-        if !self.claim_recovery_code(ctx, user_id, code).await? {
+        // Platform-plane only: its admins are cross-tenant and carry no tenant.
+        if !self.claim_recovery_code(ctx, None, user_id, code).await? {
             return Ok(None);
         }
         Ok(Some(index))
@@ -387,12 +442,13 @@ impl MfaService {
     async fn claim_recovery_code(
         &self,
         ctx: MfaContext,
+        tenant_id: Option<&str>,
         user_id: &str,
         code: &str,
     ) -> Result<bool, AuthError> {
         self.mfa_store
             .claim_recovery_code(
-                &self.replay_id(ctx, user_id, code),
+                &self.replay_id(ctx, tenant_id, user_id, code),
                 super::RECOVERY_CODE_CLAIM_TTL_SECONDS,
             )
             .await

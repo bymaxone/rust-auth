@@ -182,7 +182,9 @@ impl PlatformAuthService {
             }
             let mfa_temp_token = self
                 .tokens
-                .issue_mfa_temp_token(&admin.id, MfaContext::Platform)
+                // Platform admins are cross-tenant and carry no tenant; `None` here is the
+                // asserted absence the verifier requires, not a missing value.
+                .issue_mfa_temp_token(&admin.id, MfaContext::Platform, None)
                 .await?;
             tracing::info!(admin_id = %admin.id, "platform login: MFA challenge issued");
             return Ok(PlatformLoginResult::MfaChallenge(MfaChallengeResult {

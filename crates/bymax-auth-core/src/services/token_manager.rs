@@ -52,6 +52,9 @@ pub struct MfaTempVerified {
     pub user_id: String,
     /// The identity domain the challenge targets (selects the repository downstream).
     pub context: MfaContext,
+    /// The tenant the challenge belongs to: always `Some` on the dashboard plane — a token
+    /// without it does not verify — and always `None` on the platform plane.
+    pub tenant_id: Option<String>,
     /// The token id, used to consume the `mfa:` marker after the code is confirmed valid.
     pub jti: String,
 }
@@ -983,6 +986,7 @@ impl TokenManagerService {
         &self,
         user_id: &str,
         context: MfaContext,
+        tenant_id: Option<&str>,
         epoch: u64,
     ) -> Result<(String, String), AuthError> {
         let now = now_unix();
@@ -994,6 +998,7 @@ impl TokenManagerService {
             jti: jti.clone(),
             token_type: MfaTempType::MfaChallenge,
             context,
+            tenant_id: tenant_id.map(ToOwned::to_owned),
             epoch,
             iat: now,
             exp: now.saturating_add(MFA_TEMP_TOKEN_TTL_SECONDS),
@@ -1023,8 +1028,9 @@ impl TokenManagerService {
         &self,
         user_id: &str,
         context: MfaContext,
+        tenant_id: Option<&str>,
     ) -> Result<String, AuthError> {
-        let _ = context;
+        let _ = (context, tenant_id);
         tracing::error!(
             %user_id,
             "mfa challenge requested, but this build has no MFA surface — enable the `mfa` \
@@ -1057,14 +1063,36 @@ impl TokenManagerService {
         &self,
         user_id: &str,
         context: MfaContext,
+        tenant_id: Option<&str>,
     ) -> Result<String, AuthError> {
+        // Refuse a malformed (plane, tenant) pair BEFORE signing anything. Verification applies
+        // the same predicate, and when only verification applied it this method happily returned
+        // `Ok` — and planted the single-use `mfa:` marker — for a shape that could never be
+        // redeemed. A host calling the public core API got a signed credential that was dead on
+        // arrival, and found out one round-trip later at the second factor, as an opaque invalid
+        // token. Same predicate, so the two cannot drift.
+        if !crate::services::mfa::plane_tenant_is_well_formed(context, tenant_id) {
+            // Bound first so the field expression shares a line with the macro: a `tracing`
+            // field on its own line is only evaluated when a subscriber is listening, so it
+            // reads as uncovered in every run that does not install one.
+            let plane = context.as_str();
+            tracing::warn!(plane, "mfa challenge refused at issuance");
+            return Err(AuthError::Validation {
+                details: vec![bymax_auth_types::FieldError {
+                    field: "tenantId".to_owned(),
+                    message: "a dashboard MFA challenge requires a non-empty tenantId, and a \
+                              platform one requires none"
+                        .to_owned(),
+                }],
+            });
+        }
         // Stamped so the challenge token dies with the rest of the account's credentials. See
         // the claim's own documentation for what it was surviving.
         let epoch = self
             .session_store
             .current_epoch(crate::services::mfa::session_kind(context), user_id)
             .await?;
-        let (token, jti) = self.build_mfa_temp_token(user_id, context, epoch)?;
+        let (token, jti) = self.build_mfa_temp_token(user_id, context, tenant_id, epoch)?;
         if let Some(support) = &self.mfa {
             support
                 .store
@@ -1129,9 +1157,35 @@ impl TokenManagerService {
         {
             return Err(AuthError::MfaTempTokenInvalid);
         }
+        // A dashboard challenge without a tenant is refused rather than resolved. Everything the
+        // challenge decides — the status gate, `mfa_enabled`, the secret it decrypts, the
+        // recovery digests it scans, and the account the session is finally minted for — comes
+        // from a lookup that needs this value; the alternative to refusing is looking the account
+        // up by id alone, which under a host schema that numbers users per tenant resolves to
+        // whichever row the repository happens to return. Accepting the token and falling back
+        // would leave that derivation reachable by omitting one optional field, so the claim is
+        // optional on the wire and mandatory in effect.
+        //
+        // The platform plane is the exact inverse: its admins are cross-tenant and carry no
+        // tenant at all, so a value here would have to be invented, and an invented one becomes
+        // a lookup key. Both directions are refused for the same reason — the tenant a token
+        // asserts must be the tenant the account actually belongs to.
+        // The same predicate issuance applies, so a shape accepted there is redeemable here and
+        // one rejected there can never arrive. The error differs by design: a caller ASKING for
+        // a malformed challenge gets a validation error naming the field, while a caller
+        // PRESENTING one gets the opaque invalid-token every other bad temp token gets — a
+        // holder must not learn which part of a forged claim set was wrong.
+        if !crate::services::mfa::plane_tenant_is_well_formed(
+            claims.context,
+            claims.tenant_id.as_deref(),
+        ) {
+            return Err(AuthError::MfaTempTokenInvalid);
+        }
+        let tenant_id = claims.tenant_id;
         Ok(MfaTempVerified {
             user_id: claims.sub,
             context: claims.context,
+            tenant_id,
             jti: claims.jti,
         })
     }
@@ -2155,7 +2209,9 @@ mod tests {
         // this is the sign-only path a build without a single-use store falls back to.
         let store = Arc::new(InMemoryStores::new());
         let svc = service(store);
-        let issued = svc.issue_mfa_temp_token("u1", MfaContext::Dashboard).await;
+        let issued = svc
+            .issue_mfa_temp_token("u1", MfaContext::Dashboard, Some("t1"))
+            .await;
         assert!(matches!(&issued, Ok(t) if t.matches('.').count() == 2));
     }
 
@@ -2185,7 +2241,10 @@ mod tests {
         // consume then deletes the marker (idempotently), after which verify fails.
         let store = Arc::new(InMemoryStores::new());
         let svc = service_with_mfa(store);
-        let Ok(token) = svc.issue_mfa_temp_token("u1", MfaContext::Dashboard).await else { return };
+        let issued = svc
+            .issue_mfa_temp_token("u1", MfaContext::Dashboard, Some("t1"))
+            .await;
+        let Ok(token) = issued else { return };
         let first = svc.verify_mfa_temp_token(&token).await;
         assert!(matches!(&first, Ok(v) if v.user_id == "u1"
             && v.context == MfaContext::Dashboard && v.jti.len() == 36));
@@ -2204,6 +2263,112 @@ mod tests {
 
     #[cfg(feature = "mfa")]
     #[tokio::test]
+    async fn issuance_refuses_the_shapes_verification_would_reject() {
+        // Issuance and verification apply the SAME predicate. When only verification applied it,
+        // this method returned `Ok` — and planted the single-use `mfa:` marker — for a shape that
+        // could never be redeemed: a host calling the public core API got back a signed
+        // credential that was dead on arrival and found out one round-trip later, at the second
+        // factor, as an opaque invalid-token. Refusing here turns that into a validation error
+        // naming the field, at the call that got it wrong.
+        let store = Arc::new(InMemoryStores::new());
+        let svc = service_with_mfa(store);
+
+        for (label, ctx, tenant) in [
+            ("dashboard without a tenant", MfaContext::Dashboard, None),
+            (
+                "dashboard with a blank tenant",
+                MfaContext::Dashboard,
+                Some(""),
+            ),
+            ("platform with a tenant", MfaContext::Platform, Some("t1")),
+        ] {
+            let issued = svc.issue_mfa_temp_token("u1", ctx, tenant).await;
+            assert!(
+                matches!(issued, Err(AuthError::Validation { ref details })
+                    if details.iter().any(|d| d.field == "tenantId")),
+                "{label} must be refused at issuance, naming the field — got {issued:?}"
+            );
+        }
+
+        // The two well-formed shapes still issue, so the guard rejects a shape rather than
+        // everything.
+        assert!(
+            svc.issue_mfa_temp_token("u1", MfaContext::Dashboard, Some("t1"))
+                .await
+                .is_ok()
+        );
+        assert!(
+            svc.issue_mfa_temp_token("p1", MfaContext::Platform, None)
+                .await
+                .is_ok()
+        );
+    }
+
+    #[cfg(feature = "mfa")]
+    #[tokio::test]
+    async fn verify_refuses_a_challenge_token_whose_tenant_does_not_match_its_plane() {
+        // The tenant claim is optional ON THE WIRE and mandatory IN EFFECT. Falling back when it
+        // is absent would leave the tenant-blind derivation reachable by omitting one field —
+        // the attacker picks the old path — so absent is refused instead, which is the pattern
+        // RFC 8725 §3.9 sets for a missing audience and §3.12 asks for as mutually exclusive
+        // validation rules per token kind. ASVS 5.0 6.6.2 is the requirement underneath: the
+        // out-of-band token must be BOUND to the authentication request that generated it, and a
+        // challenge token with no tenant is bound to nothing but an id.
+        let store = Arc::new(InMemoryStores::new());
+        let svc = service_with_mfa(store.clone());
+        let mfa_store: Arc<dyn crate::traits::MfaStore> = store;
+
+        // A dashboard challenge with NO tenant: refused, not resolved by id alone.
+        let built = svc.build_mfa_temp_token("u1", MfaContext::Dashboard, None, 0);
+        let Ok((token, jti)) = built else { return };
+        assert!(mfa_store.put_temp(&jti_hash(&jti), "u1", 300).await.is_ok());
+        let refused = svc.verify_mfa_temp_token(&token).await;
+        assert!(
+            matches!(refused, Err(AuthError::MfaTempTokenInvalid)),
+            "a dashboard challenge token without a tenant must be refused, never defaulted"
+        );
+
+        // An EMPTY tenant is the same refusal: it is a present-but-meaningless value that would
+        // otherwise build `dashboard::{userId}` — a third preimage neither side derives.
+        let built = svc.build_mfa_temp_token("u1", MfaContext::Dashboard, Some(""), 0);
+        let Ok((token, jti)) = built else { return };
+        assert!(mfa_store.put_temp(&jti_hash(&jti), "u1", 300).await.is_ok());
+        assert!(matches!(
+            svc.verify_mfa_temp_token(&token).await,
+            Err(AuthError::MfaTempTokenInvalid)
+        ));
+
+        // And the inverse: a platform admin is cross-tenant and carries none, so a tenant here
+        // is an assertion the account cannot satisfy. Refused rather than ignored — ignoring it
+        // would accept a token that claims something false about the identity it names.
+        let built = svc.build_mfa_temp_token("p1", MfaContext::Platform, Some("t1"), 0);
+        let Ok((token, jti)) = built else { return };
+        assert!(mfa_store.put_temp(&jti_hash(&jti), "p1", 300).await.is_ok());
+        assert!(matches!(
+            svc.verify_mfa_temp_token(&token).await,
+            Err(AuthError::MfaTempTokenInvalid)
+        ));
+
+        // The two well-formed shapes still verify, and carry the tenant through to the caller —
+        // otherwise this test would pass just as well against a verify that refuses everything.
+        let built = svc.build_mfa_temp_token("u1", MfaContext::Dashboard, Some("t1"), 0);
+        let Ok((token, jti)) = built else { return };
+        assert!(mfa_store.put_temp(&jti_hash(&jti), "u1", 300).await.is_ok());
+        let verified = svc.verify_mfa_temp_token(&token).await;
+        assert!(matches!(
+            verified,
+            Ok(ref v) if v.tenant_id.as_deref() == Some("t1")
+        ));
+
+        let built = svc.build_mfa_temp_token("p1", MfaContext::Platform, None, 0);
+        let Ok((token, jti)) = built else { return };
+        assert!(mfa_store.put_temp(&jti_hash(&jti), "p1", 300).await.is_ok());
+        let verified = svc.verify_mfa_temp_token(&token).await;
+        assert!(matches!(verified, Ok(ref v) if v.tenant_id.is_none()));
+    }
+
+    #[cfg(feature = "mfa")]
+    #[tokio::test]
     async fn store_backed_verify_rejects_garbage_and_a_subject_mismatch() {
         // A malformed token is rejected before any store read; a marker naming a different
         // user than the token subject fails the constant-time cross-check.
@@ -2214,7 +2379,7 @@ mod tests {
             Err(AuthError::MfaTempTokenInvalid)
         ));
         // Mint a token for "u1" but point its marker at "intruder": the cross-check rejects it.
-        let built = svc.build_mfa_temp_token("u1", MfaContext::Dashboard, 0);
+        let built = svc.build_mfa_temp_token("u1", MfaContext::Dashboard, Some("t1"), 0);
         let Ok((token, jti)) = built else { return };
         let mfa_store: Arc<dyn crate::traits::MfaStore> = store;
         assert!(
@@ -2236,7 +2401,10 @@ mod tests {
         // and verify/consume fail closed as `MfaTempTokenInvalid` rather than panicking.
         let store = Arc::new(InMemoryStores::new());
         let svc = service(store); // `service` leaves the MFA support unset.
-        let Ok(token) = svc.issue_mfa_temp_token("u1", MfaContext::Dashboard).await else { return };
+        let issued = svc
+            .issue_mfa_temp_token("u1", MfaContext::Dashboard, Some("t1"))
+            .await;
+        let Ok(token) = issued else { return };
         assert!(matches!(
             svc.verify_mfa_temp_token(&token).await,
             Err(AuthError::MfaTempTokenInvalid)
@@ -2262,7 +2430,9 @@ mod tests {
         let store = Arc::new(InMemoryStores::new());
         let svc = service_with_mfa(store);
 
-        let issued = svc.issue_mfa_temp_token("u1", MfaContext::Dashboard).await;
+        let issued = svc
+            .issue_mfa_temp_token("u1", MfaContext::Dashboard, Some("t1"))
+            .await;
         let Ok(token) = issued else { return };
         let verified = svc.verify_mfa_temp_token(&token).await;
         let Ok(claims) = verified else { return };
@@ -2313,7 +2483,7 @@ mod tests {
         assert!(matches!(bf.is_locked(&disable_id, 5).await, Ok(true)));
         // Issuing a token leaves BOTH counters standing.
         assert!(
-            svc.issue_mfa_temp_token("u1", MfaContext::Dashboard)
+            svc.issue_mfa_temp_token("u1", MfaContext::Dashboard, Some("t1"))
                 .await
                 .is_ok()
         );
@@ -2555,7 +2725,7 @@ mod tests {
         });
 
         let issued = svc
-            .issue_mfa_temp_token("user-1", MfaContext::Dashboard)
+            .issue_mfa_temp_token("user-1", MfaContext::Dashboard, Some("t1"))
             .await;
         assert!(
             issued.is_ok(),
@@ -2697,7 +2867,9 @@ mod tests {
         let store = Arc::new(InMemoryStores::new());
         let svc = service_with_mfa(store.clone());
 
-        let issued = svc.issue_mfa_temp_token("u1", MfaContext::Dashboard).await;
+        let issued = svc
+            .issue_mfa_temp_token("u1", MfaContext::Dashboard, Some("t1"))
+            .await;
         let Ok(temp) = issued else { return };
 
         // Before the bump it verifies.

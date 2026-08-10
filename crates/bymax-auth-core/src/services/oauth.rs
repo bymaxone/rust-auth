@@ -426,7 +426,7 @@ impl AuthEngine {
         if user.mfa_enabled {
             let mfa_temp_token = self
                 .tokens()
-                .issue_mfa_temp_token(&user.id, MfaContext::Dashboard)
+                .issue_mfa_temp_token(&user.id, MfaContext::Dashboard, Some(&user.tenant_id))
                 .await?;
             return Ok(OAuthOutcome::MfaChallenge(MfaChallengeResult {
                 mfa_required: true,
@@ -801,6 +801,7 @@ mod tests {
             let _ = users
                 .update_mfa(
                     &user.id,
+                    None,
                     UpdateMfaData {
                         mfa_enabled: true,
                         mfa_secret: Some("enc".to_owned()),

@@ -162,6 +162,92 @@ impl MfaUserView {
     }
 }
 
+/// The subject every MFA store key and brute-force counter in this module is derived from:
+/// `dashboard:{tenant_id}:{user_id}`, or `platform:{user_id}` on the plane whose admins are
+/// cross-tenant and carry no tenant at all.
+///
+/// One definition rather than eight copies. Eight keys derive from this shape — the transition
+/// lock, the pending-enrolment record, the recent-auth marker, the TOTP anti-replay marker, the
+/// recovery-code claim, and the challenge/disable/reauth failure counters — and a copy that
+/// drifts is a key that silently stops agreeing with the one nest-auth derives from the same
+/// preimage.
+///
+/// The tenant belongs in it for the reason OWASP's multi-tenant guidance gives for cache keys
+/// and composite lookups: a key built from a resource id alone is shared by every tenant that
+/// hands out that id, and a library cannot assume the host's ids are unique across tenants —
+/// `find_by_id` takes a tenant precisely because they may not be. Without it the failure
+/// counters were the worst of the eight: two accounts sharing an id shared a lockout budget, so
+/// failures in one tenant locked an account in another and a success in one cleared the other's
+/// — a credential-free cross-tenant lockout, against NIST SP 800-63B's requirement that
+/// rate-limiting bound failures on *the subscriber account*.
+///
+/// `MfaContext::as_str` rather than a literal: the plane's wire name has exactly one definition
+/// and this preimage has to agree byte-for-byte with nest-auth's.
+/// The PLANE decides the shape, not whether a tenant happened to be supplied. A platform
+/// caller that passes one — a host reusing a dashboard code path, a test fixture — must not be
+/// able to move the platform preimage off `platform:{user_id}`: that shape is half of a
+/// cross-implementation agreement, and a key that changes with an argument nobody meant to pass
+/// is a key that silently stops matching the one nest-auth derives. So the platform arm ignores
+/// the value rather than trusting the call site to have withheld it.
+fn scoped_subject(ctx: MfaContext, tenant_id: Option<&str>, user_id: &str) -> String {
+    match (ctx, tenant_id) {
+        (MfaContext::Dashboard, Some(tenant)) => {
+            format!("{}:{tenant}:{user_id}", ctx.as_str())
+        }
+        _ => format!("{}:{user_id}", ctx.as_str()),
+    }
+}
+
+/// Whether a `(plane, tenant)` pair is one this library will act on: the dashboard plane needs
+/// a non-empty tenant, and the platform plane must carry none.
+///
+/// THE single definition of that shape. It is consulted at three points that must agree — the
+/// public MFA entry points, the issuance of a challenge token, and its verification — and they
+/// must agree for a reason stronger than tidiness: when issuance accepted a shape verification
+/// rejects, a host calling the public core API got back a signed credential (and a planted store
+/// marker) that could never be redeemed, and the failure surfaced one round-trip later, at the
+/// second factor, as an opaque invalid-token. A second copy of this predicate is a second thing
+/// to keep in step, and the symptom of them drifting is a token that verifies on one path and
+/// not the other.
+///
+/// The empty string is refused, not treated as a tenant. `Some("")` is a present-but-meaningless
+/// value that would otherwise build the preimage `dashboard::{userId}` — a third keyspace that
+/// neither this library nor nest-auth derives anywhere else, reachable only by a caller passing
+/// a blank. Rejecting it here is what makes [`scoped_subject`]'s dashboard arm total in practice.
+pub(crate) const fn plane_tenant_is_well_formed(ctx: MfaContext, tenant_id: Option<&str>) -> bool {
+    match (ctx, tenant_id) {
+        (MfaContext::Dashboard, Some(tenant)) => !tenant.is_empty(),
+        (MfaContext::Platform, None) => true,
+        _ => false,
+    }
+}
+
+/// Refuse a malformed `(plane, tenant)` pair at a public entry point, before any key is derived.
+///
+/// [`scoped_subject`] is total — it has to be, because the platform plane legitimately has no
+/// tenant — so on its own a `None` slipping in on the dashboard plane would silently rebuild the
+/// old unscoped preimage: the vulnerable derivation, reachable by omitting an argument. This is
+/// the guard that makes that unreachable, and it fails closed at the entry point rather than
+/// deep inside a key derivation where the wrong key is indistinguishable from the right one.
+///
+/// The public MFA methods take `Option<&str>` because one signature serves both planes; the
+/// axum layer always supplies the tenant from verified claims, but the core API is public and a
+/// host calling it directly can pass anything.
+fn require_plane_tenant(ctx: MfaContext, tenant_id: Option<&str>) -> Result<(), AuthError> {
+    if plane_tenant_is_well_formed(ctx, tenant_id) {
+        return Ok(());
+    }
+    tracing::warn!(plane = ctx.as_str(), "mfa: tenant does not match the plane");
+    Err(AuthError::Validation {
+        details: vec![bymax_auth_types::FieldError {
+            field: "tenantId".to_owned(),
+            message: "a dashboard MFA operation requires a non-empty tenantId, and a platform \
+                      one requires none"
+                .to_owned(),
+        }],
+    })
+}
+
 /// The MFA lifecycle service. Constructed by the engine builder only when `config.mfa` is
 /// present; the collaborators it shares with the engine (token manager, session service,
 /// brute-force service) are held as `Arc` handles.
@@ -263,6 +349,7 @@ impl MfaService {
     async fn assert_reauthenticated(
         &self,
         ctx: MfaContext,
+        tenant_id: Option<&str>,
         user_id: &str,
         password_hash: Option<&str>,
         password: Option<&str>,
@@ -293,7 +380,7 @@ impl MfaService {
             // admin's `password_hash` is non-optional and so never takes this branch.
             let marker = to_hex(&hmac_sha256(
                 self.identifier_key.as_ref(),
-                format!("{}:{user_id}", ctx.as_str()).as_bytes(),
+                scoped_subject(ctx, tenant_id, user_id).as_bytes(),
             ));
             if !self.session_store.has_recent_auth(&marker).await? {
                 tracing::warn!(%user_id, "mfa setup: no recent authentication");
@@ -308,7 +395,7 @@ impl MfaService {
         // in-process and per-instance, so a distributed caller sidesteps it entirely — and
         // winning the guess buys the whole account: enrol a factor, change the password, move
         // the address. The check runs BEFORE the KDF, so a locked account is not an amplifier.
-        let bf_id = self.reauth_bf_id(ctx, user_id);
+        let bf_id = self.reauth_bf_id(ctx, tenant_id, user_id);
         self.assert_not_locked("reauthenticate", user_id, &bf_id)
             .await?;
 
@@ -324,28 +411,33 @@ impl MfaService {
         }
     }
 
-    /// The `mfa_setup:` key suffix for a user (`hmac_sha256("{plane}:{user_id}")`, hex). The
+    /// The `mfa_setup:` key suffix for a user (`hmac_sha256(scoped_subject)`, hex). The
     /// low-entropy id is keyed, never used raw, so no PII reaches a store key.
-    ///
-    /// The plane is part of the input because the two identity domains draw their ids from
-    /// different consumer repositories, which may hand out the same string. Keyed on the id
-    /// alone, an admin's pending enrolment and a user's shared one record: the second party to
-    /// call `verify_and_enable` would adopt the first party's secret and recovery digests.
-    fn setup_key(&self, ctx: MfaContext, user_id: &str) -> String {
+    fn setup_key(&self, ctx: MfaContext, tenant_id: Option<&str>, user_id: &str) -> String {
         to_hex(&hmac_sha256(
             self.identifier_key.as_ref(),
-            format!("{}:{user_id}", ctx.as_str()).as_bytes(),
+            scoped_subject(ctx, tenant_id, user_id).as_bytes(),
         ))
     }
 
-    /// The `tu:` anti-replay key suffix for a `(plane, user_id, code)` triple
-    /// (`hmac_sha256("{plane}:{user_id}:{code}")`, hex) — ties the marker to the plane, the
-    /// user and the code value, with no plaintext code in the store and no cross-user or
-    /// cross-plane replay.
-    fn replay_id(&self, ctx: MfaContext, user_id: &str, code: &str) -> String {
+    /// The `tu:` anti-replay key suffix for a `(plane, tenant, user_id, code)` tuple
+    /// (`hmac_sha256("{scoped_subject}:{code}")`, hex) — ties the marker to the plane, the
+    /// tenant, the user and the code value, with no plaintext code in the store and no
+    /// cross-user, cross-tenant or cross-plane replay.
+    ///
+    /// Also serves the `rcu:` recovery-code claim, which needs the identical binding; the two
+    /// are separated by their key prefix, not by their preimage, and nest-auth derives both the
+    /// same way from the same string.
+    fn replay_id(
+        &self,
+        ctx: MfaContext,
+        tenant_id: Option<&str>,
+        user_id: &str,
+        code: &str,
+    ) -> String {
         to_hex(&hmac_sha256(
             self.identifier_key.as_ref(),
-            format!("{}:{user_id}:{code}", ctx.as_str()).as_bytes(),
+            format!("{}:{code}", scoped_subject(ctx, tenant_id, user_id)).as_bytes(),
         ))
     }
 
@@ -375,20 +467,20 @@ impl MfaService {
     /// (`hmac_sha256("challenge:{plane}:{user_id}")`, hex), isolated from the `disable:`
     /// namespace and from the other identity plane — otherwise a colliding id lets either
     /// party exhaust the other's lockout budget.
-    fn challenge_bf_id(&self, ctx: MfaContext, user_id: &str) -> String {
+    fn challenge_bf_id(&self, ctx: MfaContext, tenant_id: Option<&str>, user_id: &str) -> String {
         to_hex(&hmac_sha256(
             self.identifier_key.as_ref(),
-            format!("challenge:{}:{user_id}", ctx.as_str()).as_bytes(),
+            format!("challenge:{}", scoped_subject(ctx, tenant_id, user_id)).as_bytes(),
         ))
     }
 
     /// The hashed brute-force identifier for the authenticated management counter
     /// (`hmac_sha256("disable:{user_id}")`, hex), shared by `disable` and `regenerate` and
     /// isolated from the `challenge:` namespace.
-    fn disable_bf_id(&self, ctx: MfaContext, user_id: &str) -> String {
+    fn disable_bf_id(&self, ctx: MfaContext, tenant_id: Option<&str>, user_id: &str) -> String {
         to_hex(&hmac_sha256(
             self.identifier_key.as_ref(),
-            format!("disable:{}:{user_id}", ctx.as_str()).as_bytes(),
+            format!("disable:{}", scoped_subject(ctx, tenant_id, user_id)).as_bytes(),
         ))
     }
 
@@ -398,10 +490,10 @@ impl MfaService {
     /// counter with `login` would let an authenticated caller lock the owner out of their own
     /// sign-in; sharing it across planes would let a dashboard user and a platform admin holding
     /// the same id exhaust each other's budget.
-    fn reauth_bf_id(&self, ctx: MfaContext, user_id: &str) -> String {
+    fn reauth_bf_id(&self, ctx: MfaContext, tenant_id: Option<&str>, user_id: &str) -> String {
         to_hex(&hmac_sha256(
             self.identifier_key.as_ref(),
-            format!("reauth:{}:{user_id}", ctx.as_str()).as_bytes(),
+            format!("reauth:{}", scoped_subject(ctx, tenant_id, user_id)).as_bytes(),
         ))
     }
 
@@ -509,6 +601,7 @@ impl MfaService {
     async fn verify_totp_with_anti_replay(
         &self,
         ctx: MfaContext,
+        tenant_id: Option<&str>,
         user_id: &str,
         secret: &[u8],
         code: &str,
@@ -520,7 +613,7 @@ impl MfaService {
         // newly created — `false` means the code was already seen, i.e. a replay.
         self.mfa_store
             .mark_totp_used(
-                &self.replay_id(ctx, user_id, code),
+                &self.replay_id(ctx, tenant_id, user_id, code),
                 self.anti_replay_ttl_seconds(),
             )
             .await
@@ -607,10 +700,10 @@ impl MfaService {
     /// derive it identically — the preimage is pinned by `conformance/wire-contract.json`, and
     /// two halves of one deployment serializing against different locks would lose the
     /// property entirely.
-    fn mfa_lock_id(&self, ctx: MfaContext, user_id: &str) -> String {
+    fn mfa_lock_id(&self, ctx: MfaContext, tenant_id: Option<&str>, user_id: &str) -> String {
         to_hex(&hmac_sha256(
             self.identifier_key.as_ref(),
-            format!("{}:{user_id}", ctx.as_str()).as_bytes(),
+            scoped_subject(ctx, tenant_id, user_id).as_bytes(),
         ))
     }
 
@@ -657,7 +750,7 @@ impl MfaService {
     where
         F: FnOnce(&MfaUserView) -> Option<(bool, Option<String>, Option<Vec<String>>)> + Send,
     {
-        let lock_id = self.mfa_lock_id(ctx, user_id);
+        let lock_id = self.mfa_lock_id(ctx, tenant_id, user_id);
         // A per-call nonce, so the release below can only remove the lock this call took. With
         // a fixed value it could not tell them apart: the TTL is short and the transition calls
         // into the consumer's repository twice, so an overrunning run has already lost the lock
@@ -700,7 +793,7 @@ impl MfaService {
         let Some((enabled, secret, codes)) = mutate(&current) else {
             return Ok(false);
         };
-        self.persist_mfa(user_id, ctx, enabled, secret, codes)
+        self.persist_mfa(user_id, ctx, tenant_id, enabled, secret, codes)
             .await?;
         Ok(true)
     }
@@ -716,6 +809,7 @@ impl MfaService {
         &self,
         user_id: &str,
         ctx: MfaContext,
+        tenant_id: Option<&str>,
         enabled: bool,
         secret: Option<String>,
         codes: Option<Vec<String>>,
@@ -725,6 +819,7 @@ impl MfaService {
                 .user_repo
                 .update_mfa(
                     user_id,
+                    tenant_id,
                     bymax_auth_types::UpdateMfaData {
                         mfa_enabled: enabled,
                         mfa_secret: secret,

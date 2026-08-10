@@ -347,6 +347,7 @@ mod tests {
             jti: "j".to_owned(),
             token_type: bymax_auth_types::MfaTempType::MfaChallenge,
             context: bymax_auth_types::MfaContext::Dashboard,
+            tenant_id: Some("t".to_owned()),
             epoch: 0,
             iat: 12,
             exp: 22,

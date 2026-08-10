@@ -821,7 +821,7 @@ async fn challenge_rejects_a_bad_temp_token_and_a_platform_context() {
     let Ok(temp) = h
         .engine
         .tokens()
-        .issue_mfa_temp_token(&uid, MfaContext::Platform)
+        .issue_mfa_temp_token(&uid, MfaContext::Platform, None)
         .await
     else {
         return;
@@ -842,7 +842,7 @@ async fn challenge_rejects_when_mfa_is_not_enabled() {
     let Ok(temp) = h
         .engine
         .tokens()
-        .issue_mfa_temp_token(&uid, MfaContext::Dashboard)
+        .issue_mfa_temp_token(&uid, MfaContext::Dashboard, Some(TENANT))
         .await
     else {
         return;
@@ -869,7 +869,7 @@ async fn challenge_rejects_an_account_blocked_after_the_temp_token_was_issued() 
     let Ok(temp) = h
         .engine
         .tokens()
-        .issue_mfa_temp_token(&uid, MfaContext::Dashboard)
+        .issue_mfa_temp_token(&uid, MfaContext::Dashboard, Some(TENANT))
         .await
     else {
         return;
@@ -1248,7 +1248,7 @@ async fn the_platform_recovery_splice_abandons_when_mfa_vanished_under_the_lock(
     let Ok(temp) = h
         .engine
         .tokens()
-        .issue_mfa_temp_token("p-abandon", MfaContext::Platform)
+        .issue_mfa_temp_token("p-abandon", MfaContext::Platform, None)
         .await
     else {
         return;
@@ -1382,7 +1382,10 @@ async fn platform_challenge_exchanges_a_temp_token_for_a_full_platform_session()
             "1.2.3.4",
             "ua",
             MfaContext::Platform,
-            Some("t1")
+            // `None`: platform admins are cross-tenant and carry none. This fixture said
+            // `Some("t1")` and the call succeeded, because nothing checked the pair — the
+            // tenant was simply ignored downstream. It is refused now, which is the point.
+            None
         )
         .await
         .is_ok()
@@ -1394,7 +1397,7 @@ async fn platform_challenge_exchanges_a_temp_token_for_a_full_platform_session()
     let Ok(temp) = h
         .engine
         .tokens()
-        .issue_mfa_temp_token("p1", MfaContext::Platform)
+        .issue_mfa_temp_token("p1", MfaContext::Platform, None)
         .await
     else {
         return;
@@ -1430,7 +1433,7 @@ async fn platform_challenge_exchanges_a_temp_token_for_a_full_platform_session()
     let Ok(temp2) = h
         .engine
         .tokens()
-        .issue_mfa_temp_token("p1", MfaContext::Platform)
+        .issue_mfa_temp_token("p1", MfaContext::Platform, None)
         .await
     else {
         return;
@@ -1442,7 +1445,7 @@ async fn platform_challenge_exchanges_a_temp_token_for_a_full_platform_session()
     let Ok(temp3) = h
         .engine
         .tokens()
-        .issue_mfa_temp_token("p1", MfaContext::Platform)
+        .issue_mfa_temp_token("p1", MfaContext::Platform, None)
         .await
     else {
         return;
@@ -1497,7 +1500,7 @@ async fn platform_challenge_rejects_a_wrong_code_and_keeps_the_temp_token_alive(
     let Ok(temp) = h
         .engine
         .tokens()
-        .issue_mfa_temp_token("p2", MfaContext::Platform)
+        .issue_mfa_temp_token("p2", MfaContext::Platform, None)
         .await
     else {
         return;
@@ -1543,7 +1546,7 @@ async fn platform_challenge_rejects_an_admin_without_enabled_mfa_or_a_secret() {
     let Ok(temp) = h
         .engine
         .tokens()
-        .issue_mfa_temp_token("p-no", MfaContext::Platform)
+        .issue_mfa_temp_token("p-no", MfaContext::Platform, None)
         .await
     else {
         return;
@@ -1556,7 +1559,7 @@ async fn platform_challenge_rejects_an_admin_without_enabled_mfa_or_a_secret() {
     let Ok(ghost_temp) = h
         .engine
         .tokens()
-        .issue_mfa_temp_token("ghost", MfaContext::Platform)
+        .issue_mfa_temp_token("ghost", MfaContext::Platform, None)
         .await
     else {
         return;
@@ -1593,7 +1596,7 @@ async fn platform_challenge_with_an_undecryptable_secret_is_an_opaque_failure() 
     let Ok(temp) = h
         .engine
         .tokens()
-        .issue_mfa_temp_token("p-corrupt", MfaContext::Platform)
+        .issue_mfa_temp_token("p-corrupt", MfaContext::Platform, None)
         .await
     else {
         return;
@@ -1952,6 +1955,7 @@ impl MfaStore for DisableOnLockMfaStore {
                 .users
                 .update_mfa(
                     &self.user_id,
+                    None,
                     bymax_auth_types::UpdateMfaData {
                         mfa_enabled: false,
                         mfa_secret: None,
@@ -2051,6 +2055,109 @@ impl MfaStore for RecordingLockMfaStore {
 /// need two challenges genuinely in flight at once. Forcing it is what exercises the refusal,
 /// and counting the releases is what proves a failed transition does not strand the account
 /// for the lock's whole TTL.
+/// A user repository that ANSWERS `find_by_id` from the id alone, ignoring the tenant it was
+/// asked to scope by — everything else delegates.
+///
+/// It models the host implementation the trait cannot prevent: a single-tenant deployment whose
+/// `find_by_id` never grew a tenant predicate, or one that added the parameter and forgot to use
+/// it. Both compile, both pass a single-tenant test suite, and both hand back another tenant's
+/// row the day ids collide. The library cannot fix such a repository; it can refuse its answer,
+/// which is what this fixture exists to prove it does.
+struct TenantBlindUsers {
+    inner: Arc<InMemoryUserRepository>,
+}
+
+#[async_trait::async_trait]
+impl crate::traits::UserRepository for TenantBlindUsers {
+    async fn find_by_id(
+        &self,
+        id: &str,
+        _tenant_id: Option<&str>,
+    ) -> Result<Option<bymax_auth_types::AuthUser>, crate::RepositoryError> {
+        // The whole point: the argument is dropped.
+        self.inner.find_by_id(id, None).await
+    }
+
+    async fn find_by_email(
+        &self,
+        email: &str,
+        tenant_id: &str,
+    ) -> Result<Option<bymax_auth_types::AuthUser>, crate::RepositoryError> {
+        self.inner.find_by_email(email, tenant_id).await
+    }
+
+    async fn create(
+        &self,
+        data: bymax_auth_types::CreateUserData,
+    ) -> Result<bymax_auth_types::AuthUser, crate::RepositoryError> {
+        self.inner.create(data).await
+    }
+
+    async fn update_password(
+        &self,
+        id: &str,
+        password_hash: &str,
+    ) -> Result<(), crate::RepositoryError> {
+        self.inner.update_password(id, password_hash).await
+    }
+
+    async fn update_mfa(
+        &self,
+        id: &str,
+        tenant_id: Option<&str>,
+        data: bymax_auth_types::UpdateMfaData,
+    ) -> Result<(), crate::RepositoryError> {
+        self.inner.update_mfa(id, tenant_id, data).await
+    }
+
+    async fn update_last_login(&self, id: &str) -> Result<(), crate::RepositoryError> {
+        self.inner.update_last_login(id).await
+    }
+
+    async fn update_status(&self, id: &str, status: &str) -> Result<(), crate::RepositoryError> {
+        self.inner.update_status(id, status).await
+    }
+
+    async fn update_email_verified(
+        &self,
+        id: &str,
+        verified: bool,
+    ) -> Result<(), crate::RepositoryError> {
+        self.inner.update_email_verified(id, verified).await
+    }
+
+    async fn update_email(&self, id: &str, email: &str) -> Result<(), crate::RepositoryError> {
+        self.inner.update_email(id, email).await
+    }
+
+    async fn find_by_oauth_id(
+        &self,
+        provider: &str,
+        provider_id: &str,
+        tenant_id: &str,
+    ) -> Result<Option<bymax_auth_types::AuthUser>, crate::RepositoryError> {
+        self.inner
+            .find_by_oauth_id(provider, provider_id, tenant_id)
+            .await
+    }
+
+    async fn link_oauth(
+        &self,
+        user_id: &str,
+        provider: &str,
+        provider_id: &str,
+    ) -> Result<(), crate::RepositoryError> {
+        self.inner.link_oauth(user_id, provider, provider_id).await
+    }
+
+    async fn create_with_oauth(
+        &self,
+        data: bymax_auth_types::CreateWithOAuthData,
+    ) -> Result<bymax_auth_types::AuthUser, crate::RepositoryError> {
+        self.inner.create_with_oauth(data).await
+    }
+}
+
 struct ContendedLockMfaStore {
     inner: Arc<InMemoryStores>,
     releases: Arc<Mutex<usize>>,
@@ -2220,7 +2327,7 @@ fn service_with_previous_keys(
     MfaService::new(deps)
 }
 
-fn service_deps(store: Arc<dyn MfaStore>, users: Arc<InMemoryUserRepository>) -> MfaServiceDeps {
+fn service_deps(store: Arc<dyn MfaStore>, users: Arc<dyn UserRepository>) -> MfaServiceDeps {
     let inmem = Arc::new(InMemoryStores::new());
     let session_store: Arc<dyn SessionStore> = inmem.clone();
     let brute_force_store: Arc<dyn BruteForceStore> = inmem;
@@ -2273,7 +2380,7 @@ fn service_deps(store: Arc<dyn MfaStore>, users: Arc<InMemoryUserRepository>) ->
     }
 }
 
-fn service_over(store: Arc<dyn MfaStore>, users: Arc<InMemoryUserRepository>) -> MfaService {
+fn service_over(store: Arc<dyn MfaStore>, users: Arc<dyn UserRepository>) -> MfaService {
     MfaService::new(service_deps(store, users))
 }
 
@@ -2281,14 +2388,16 @@ fn service_over(store: Arc<dyn MfaStore>, users: Arc<InMemoryUserRepository>) ->
 ///
 /// `seed_user` creates accounts with no local password, so enrolment now takes the temporal
 /// proof rather than the password one. Tests that are about the setup RECORD, not about the
-/// gate, arrange the proof here and stay focused on what they came to assert. The key must be
-/// derived exactly as the service derives it — `hmac_sha256("{plane}:{userId}")` under the same
-/// identifier key the fixture wires — which is also a small conformance check: a change to
-/// either side breaks these tests rather than silently splitting the keyspace.
+/// gate, arrange the proof here and stay focused on what they came to assert. The key is
+/// derived BY HAND — `hmac_sha256("dashboard:{tenantId}:{userId}")` under the same identifier
+/// key the fixture wires — rather than by calling the service's own helper, which is the point:
+/// a hand-written copy is an independent check that breaks loudly when the derivation moves,
+/// instead of following it and asserting nothing. It has already earned that once, catching the
+/// tenant scoping of the recent-auth marker.
 async fn plant_recent_auth(service: &MfaService, user_id: &str) {
     let hash = crate::services::to_hex(&bymax_auth_crypto::mac::hmac_sha256(
         &[9u8; 64],
-        format!("dashboard:{user_id}").as_bytes(),
+        format!("dashboard:{TENANT}:{user_id}").as_bytes(),
     ));
     let _ = service.session_store.mark_recent_auth(&hash, 300).await;
 }
@@ -2608,6 +2717,7 @@ async fn challenge_collapses_an_undecryptable_secret_to_an_opaque_error() {
         .users
         .update_mfa(
             &uid,
+            None,
             bymax_auth_types::UpdateMfaData {
                 mfa_enabled: true,
                 mfa_secret: Some("not-a-valid-wire".to_owned()),
@@ -2822,6 +2932,89 @@ fn repository_error_maps_both_variants_to_internal() {
         super::repository_error(crate::RepositoryError::Backend("y".into())),
         AuthError::Internal(_)
     ));
+}
+
+/// Read a top-level section from the shared cross-implementation wire contract.
+fn contract_section(name: &str) -> serde_json::Value {
+    let path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../conformance/wire-contract.json"
+    );
+    let raw = std::fs::read_to_string(path).unwrap_or_default();
+    let root: serde_json::Value = serde_json::from_str(&raw).unwrap_or(serde_json::Value::Null);
+    let section = root.get(name).cloned().unwrap_or(serde_json::Value::Null);
+    assert!(
+        !section.is_null(),
+        "the wire contract declared no `{name}` — it did not load"
+    );
+    section
+}
+
+#[test]
+fn the_mfa_subject_preimages_match_the_shared_contract() {
+    // The contract file is only a drift DETECTOR if something enforces it. Without this test the
+    // two `mfaSubjectPreimages` lines are prose: nest-auth could move its derivation, this file
+    // could be updated to match, and rust-auth would keep hashing the old string with every test
+    // still green. That is exactly how the OTP stored value drifted — the contract was silent on
+    // the one field that moved, so silence read as agreement.
+    //
+    // Asserted against the SINGLE definition all eight keys derive from, so pinning it here pins
+    // all eight at once.
+    let subjects = contract_section("mfaSubjectPreimages");
+    let dashboard = subjects
+        .get("dashboard")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default();
+    let platform = subjects
+        .get("platform")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default();
+
+    // The contract states the SHAPE with placeholders; substitute and compare against what the
+    // code actually builds, rather than eyeballing two strings for equality.
+    let expected_dashboard = dashboard
+        .replace("{tenantId}", "t1")
+        .replace("{userId}", "u1");
+    let expected_platform = platform.replace("{userId}", "u1");
+
+    assert_eq!(
+        super::scoped_subject(MfaContext::Dashboard, Some("t1"), "u1"),
+        expected_dashboard,
+        "the dashboard MFA subject drifted from `mfaSubjectPreimages.dashboard`"
+    );
+    assert_eq!(
+        super::scoped_subject(MfaContext::Platform, None, "u1"),
+        expected_platform,
+        "the platform MFA subject drifted from `mfaSubjectPreimages.platform`"
+    );
+
+    // The platform arm must carry no tenant segment at all — a contract line that grew one
+    // would mean the two implementations had agreed to break the cross-tenant admin plane.
+    assert!(
+        !platform.contains("{tenantId}"),
+        "the platform arm must not carry a tenant: its admins are cross-tenant and have none"
+    );
+
+    // And the six keys that were in the blind spot are now named. This asserts the ENTRIES
+    // exist, which is the property that was missing — six of eight derivations were unpinned,
+    // so a drift in any of them would have gone undetected the way the OTP one did.
+    let derived = contract_section("mfaSubjectDerivedKeys");
+    for key in [
+        "mfaSetupRecord",
+        "recentAuthMarker",
+        "totpAntiReplay",
+        "challengeFailureCounter",
+        "disableFailureCounter",
+        "reauthFailureCounter",
+    ] {
+        assert!(
+            derived
+                .get(key)
+                .and_then(serde_json::Value::as_str)
+                .is_some(),
+            "`mfaSubjectDerivedKeys.{key}` is missing — an unpinned derivation is an undetectable drift"
+        );
+    }
 }
 
 /// Read `credentialFormats.{key}` from the shared cross-implementation wire contract.
@@ -3076,6 +3269,7 @@ async fn a_totp_challenge_rewrites_a_secret_stored_under_a_retired_key() {
         h.users
             .update_mfa(
                 &uid,
+                None,
                 bymax_auth_types::UpdateMfaData {
                     mfa_enabled: true,
                     mfa_secret: Some(stored_under_retired.clone()),
@@ -3139,6 +3333,7 @@ async fn the_retired_key_rewrite_abandons_when_mfa_vanished_under_the_lock() {
         h.users
             .update_mfa(
                 &uid,
+                None,
                 bymax_auth_types::UpdateMfaData {
                     mfa_enabled: true,
                     mfa_secret: Some(stored_under_retired.clone()),
@@ -3273,6 +3468,158 @@ async fn an_mfa_state_change_kills_the_outstanding_access_tokens() {
 }
 
 #[tokio::test]
+async fn a_spent_recovery_code_is_written_out_of_the_right_tenants_row() {
+    // Scoping the READ was not enough: the write-back went through `update_mfa(id, data)`, which
+    // carried no tenant, so under a schema that numbers users per tenant the repository could
+    // not know which row to update. Two silent failures — it lands on another tenant's row and
+    // corrupts its MFA state, or the row this flow read is not the row it wrote and the spent
+    // code is never spliced out.
+    //
+    // The existing single-use test does NOT catch that second one, which is why this exists.
+    // A second challenge with the same code is refused by the `rcu:` claim, which is planted
+    // before the splice and lives 300 s — so the code reads as spent for the whole window
+    // whether or not the write landed, and only becomes usable again after the claim expires.
+    // Asserting the PERSISTED list is what distinguishes "refused by the claim" from "actually
+    // spent", and it is the property a recovery code exists to have (ASVS 5.0 6.5.1).
+    let Some(h) = build(false, false) else { return };
+    let Some(uid) = register(&h.engine, "splice@example.com").await else {
+        return;
+    };
+    let Some(mfa) = h.engine.mfa() else { return };
+    let Ok(setup) = mfa
+        .setup(&uid, MfaContext::Dashboard, Some(TENANT), Some(PASSWORD))
+        .await
+    else {
+        return;
+    };
+    let base = now_secs();
+    assert!(
+        mfa.verify_and_enable(
+            &uid,
+            &code_at(&setup.secret, base),
+            "1.2.3.4",
+            "ua",
+            MfaContext::Dashboard,
+            Some(TENANT),
+        )
+        .await
+        .is_ok()
+    );
+
+    let before = h.users.find_by_id(&uid, Some(TENANT)).await;
+    let Ok(Some(before)) = before else { return };
+    let stored_before = before.mfa_recovery_codes.unwrap_or_default().len();
+    assert!(
+        stored_before > 0,
+        "the fixture must hold recovery codes, or the shrink below proves nothing"
+    );
+
+    let recovery = setup.recovery_codes[0].clone();
+    let Some(temp) = login_temp_token(&h.engine, "splice@example.com").await else {
+        return;
+    };
+    let challenged = mfa.challenge(&temp, &recovery, "1.2.3.4", "ua").await;
+    assert!(
+        matches!(challenged, Ok(LoginResultMfa::Dashboard(_))),
+        "the recovery challenge must succeed, got {challenged:?}"
+    );
+
+    // The durable spend: one digest fewer, in THIS tenant's row. If the write were unscoped and
+    // landed elsewhere — or were filtered away as a cross-tenant write — this row would still
+    // carry the full set and the code would come back the moment the `rcu:` claim lapsed.
+    let after = h.users.find_by_id(&uid, Some(TENANT)).await;
+    let Ok(Some(after)) = after else { return };
+    let stored_after = after.mfa_recovery_codes.unwrap_or_default().len();
+    assert_eq!(
+        stored_after,
+        stored_before - 1,
+        "the spent recovery code must be spliced out of the tenant's own row"
+    );
+}
+
+#[tokio::test]
+async fn a_challenge_token_cannot_reach_an_account_in_another_tenant() {
+    // The reason the temp token carries a tenant at all. The challenge used to resolve its
+    // subject with `find_by_id(sub, None)` — by id, across every tenant — and then run the whole
+    // flow against whatever row came back: the status gate, `mfa_enabled`, the secret it
+    // decrypts, the recovery digests it scans, and the account the session is finally minted
+    // for. A library cannot assume the host's ids are unique across tenants; `find_by_id` takes
+    // a tenant precisely because they may not be, and a host that numbers users per tenant gives
+    // every tenant a user `1`.
+    //
+    // The in-memory repository scopes its read the way a correct host does, so a token naming
+    // the wrong tenant now finds nothing. Before the fix the same call found the account and
+    // proceeded.
+    let Some(h) = build(false, false) else { return };
+    let Some(uid) = register(&h.engine, "crosstenant@example.com").await else {
+        return;
+    };
+    let Some(mfa) = h.engine.mfa() else { return };
+    let Ok(setup) = mfa
+        .setup(&uid, MfaContext::Dashboard, Some(TENANT), Some(PASSWORD))
+        .await
+    else {
+        return;
+    };
+    let base = now_secs();
+    assert!(
+        mfa.verify_and_enable(
+            &uid,
+            &code_at(&setup.secret, base),
+            "1.2.3.4",
+            "ua",
+            MfaContext::Dashboard,
+            Some(TENANT),
+        )
+        .await
+        .is_ok(),
+        "the fixture must reach an MFA-enabled account, or the assertions below prove nothing"
+    );
+
+    // A challenge token naming a DIFFERENT tenant, holding a code that is genuinely valid for
+    // this account's secret. The code being correct is the point: the refusal must come from the
+    // tenant scoping, not from a wrong code, so this fails for the reason under test.
+    let Ok(foreign) = h
+        .engine
+        .tokens()
+        .issue_mfa_temp_token(&uid, MfaContext::Dashboard, Some("other-tenant"))
+        .await
+    else {
+        return;
+    };
+    let outcome = mfa
+        .challenge(
+            &foreign,
+            &code_at(&setup.secret, base + 30),
+            "1.2.3.4",
+            "ua",
+        )
+        .await;
+    assert!(
+        matches!(outcome, Err(AuthError::MfaNotEnabled)),
+        "a challenge token from another tenant must not resolve this account, got {outcome:?}"
+    );
+
+    // The control: the SAME account, the same kind of code, a token naming its own tenant.
+    // Without this the test would pass just as well against a challenge that refuses everything.
+    let Ok(own) = h
+        .engine
+        .tokens()
+        .issue_mfa_temp_token(&uid, MfaContext::Dashboard, Some(TENANT))
+        .await
+    else {
+        return;
+    };
+    let allowed = mfa
+        .challenge(&own, &code_at(&setup.secret, base + 60), "1.2.3.4", "ua")
+        .await;
+    assert!(
+        allowed.is_ok(),
+        "the account's own tenant must still complete the challenge, got {allowed:?}"
+    );
+}
+
+#[tokio::test]
 async fn a_recovery_challenge_that_loses_the_temp_token_consume_issues_no_session() {
     // The gate that keeps ONE recovery code and ONE temp token from minting TWO sessions. The
     // recovery path has no `tu:` marker to fuse against (unlike TOTP), so it consumes the temp
@@ -3330,6 +3677,7 @@ async fn a_recovery_challenge_that_loses_the_temp_token_consume_issues_no_sessio
         users
             .update_mfa(
                 &user.id,
+                None,
                 bymax_auth_types::UpdateMfaData {
                     mfa_enabled: true,
                     mfa_secret: Some(data.encrypted_secret),
@@ -3342,7 +3690,7 @@ async fn a_recovery_challenge_that_loses_the_temp_token_consume_issues_no_sessio
 
     let issued = service
         .tokens
-        .issue_mfa_temp_token(&user.id, MfaContext::Dashboard)
+        .issue_mfa_temp_token(&user.id, MfaContext::Dashboard, Some(TENANT))
         .await;
     let Ok(temp) = issued else { return };
 
@@ -3409,6 +3757,7 @@ async fn one_recovery_code_cannot_be_spent_twice_even_with_two_temp_tokens() {
         users
             .update_mfa(
                 &user.id,
+                None,
                 bymax_auth_types::UpdateMfaData {
                     mfa_enabled: true,
                     mfa_secret: Some(data.encrypted_secret),
@@ -3422,14 +3771,14 @@ async fn one_recovery_code_cannot_be_spent_twice_even_with_two_temp_tokens() {
     // Two temp tokens: two independent logins, so the per-token consume gate does not apply.
     let Ok(first_token) = service
         .tokens
-        .issue_mfa_temp_token(&user.id, MfaContext::Dashboard)
+        .issue_mfa_temp_token(&user.id, MfaContext::Dashboard, Some(TENANT))
         .await
     else {
         return;
     };
     let Ok(second_token) = service
         .tokens
-        .issue_mfa_temp_token(&user.id, MfaContext::Dashboard)
+        .issue_mfa_temp_token(&user.id, MfaContext::Dashboard, Some(TENANT))
         .await
     else {
         return;
@@ -3464,25 +3813,26 @@ fn every_mfa_key_is_namespaced_by_identity_plane() {
     let users = Arc::new(InMemoryUserRepository::new());
     let service = service_over(Arc::new(InMemoryStores::new()), users);
     let id = "1";
+    let t = Some(TENANT);
 
     assert_ne!(
-        service.setup_key(MfaContext::Dashboard, id),
-        service.setup_key(MfaContext::Platform, id),
+        service.setup_key(MfaContext::Dashboard, t, id),
+        service.setup_key(MfaContext::Platform, None, id),
         "a shared pending-enrolment record lets one plane adopt the other's secret"
     );
     assert_ne!(
-        service.replay_id(MfaContext::Dashboard, id, "123456"),
-        service.replay_id(MfaContext::Platform, id, "123456"),
+        service.replay_id(MfaContext::Dashboard, t, id, "123456"),
+        service.replay_id(MfaContext::Platform, None, id, "123456"),
         "a shared anti-replay marker lets one plane burn the other's code"
     );
     assert_ne!(
-        service.challenge_bf_id(MfaContext::Dashboard, id),
-        service.challenge_bf_id(MfaContext::Platform, id),
+        service.challenge_bf_id(MfaContext::Dashboard, t, id),
+        service.challenge_bf_id(MfaContext::Platform, None, id),
         "a shared challenge counter lets one plane lock the other out"
     );
     assert_ne!(
-        service.disable_bf_id(MfaContext::Dashboard, id),
-        service.disable_bf_id(MfaContext::Platform, id),
+        service.disable_bf_id(MfaContext::Dashboard, t, id),
+        service.disable_bf_id(MfaContext::Platform, None, id),
         "a shared disable counter lets one plane lock the other out"
     );
 
@@ -3490,13 +3840,195 @@ fn every_mfa_key_is_namespaced_by_identity_plane() {
     // attacker can drive must not be able to exhaust the authenticated user's management
     // budget.
     assert_ne!(
-        service.challenge_bf_id(MfaContext::Dashboard, id),
-        service.disable_bf_id(MfaContext::Dashboard, id)
+        service.challenge_bf_id(MfaContext::Dashboard, t, id),
+        service.disable_bf_id(MfaContext::Dashboard, t, id)
     );
 
     // And the plane component is the wire name, so nest-auth derives the same key.
     assert_eq!(MfaContext::Dashboard.as_str(), "dashboard");
     assert_eq!(MfaContext::Platform.as_str(), "platform");
+}
+
+#[test]
+fn every_dashboard_mfa_key_is_namespaced_by_tenant() {
+    // The sibling of the plane separation above, one level down and strictly worse. Within the
+    // dashboard plane the ids come from ONE consumer repository — but a library cannot assume
+    // that repository makes them unique ACROSS tenants: `find_by_id` takes a tenant precisely
+    // because it may not, and a host that numbers users per tenant gives every tenant a user
+    // `1`. Keyed on `{plane}:{id}` alone, two tenants' accounts shared all five store keys and
+    // all three counters.
+    //
+    // The counters were the worst of the eight and it is not close. The other five cost a
+    // collision between two accounts that happen to share an id; the counters cost a
+    // CREDENTIAL-FREE CROSS-TENANT LOCKOUT — failures against tenant A's user spend tenant B's
+    // budget, and a success on either side clears the other's — which is not the per-subscriber
+    // rate limiting NIST SP 800-63B requires, nor the per-tenant isolation OWASP's multi-tenant
+    // guidance asks of any key in a shared datastore.
+    let users = Arc::new(InMemoryUserRepository::new());
+    let service = service_over(Arc::new(InMemoryStores::new()), users);
+    let id = "1";
+    let (a, b) = (Some("tenant-a"), Some("tenant-b"));
+
+    assert_ne!(
+        service.setup_key(MfaContext::Dashboard, a, id),
+        service.setup_key(MfaContext::Dashboard, b, id),
+        "a shared pending-enrolment record lets one tenant adopt another's secret"
+    );
+    assert_ne!(
+        service.mfa_lock_id(MfaContext::Dashboard, a, id),
+        service.mfa_lock_id(MfaContext::Dashboard, b, id),
+        "a shared transition lock serializes unrelated tenants against each other"
+    );
+    assert_ne!(
+        service.replay_id(MfaContext::Dashboard, a, id, "123456"),
+        service.replay_id(MfaContext::Dashboard, b, id, "123456"),
+        "a shared anti-replay marker lets one tenant burn another's code — and serves `rcu:` \
+         too, so it is also the recovery-code claim"
+    );
+    assert_ne!(
+        service.challenge_bf_id(MfaContext::Dashboard, a, id),
+        service.challenge_bf_id(MfaContext::Dashboard, b, id),
+        "a shared challenge counter is a cross-tenant lockout"
+    );
+    assert_ne!(
+        service.disable_bf_id(MfaContext::Dashboard, a, id),
+        service.disable_bf_id(MfaContext::Dashboard, b, id),
+        "a shared disable counter is a cross-tenant lockout"
+    );
+    assert_ne!(
+        service.reauth_bf_id(MfaContext::Dashboard, a, id),
+        service.reauth_bf_id(MfaContext::Dashboard, b, id),
+        "a shared reauth counter is a cross-tenant lockout"
+    );
+
+    // The platform arm is deliberately UNCHANGED: its admins are cross-tenant and carry no
+    // tenant, so there is no value to add and an invented one would become a lookup key.
+    assert_eq!(
+        service.setup_key(MfaContext::Platform, None, id),
+        service.setup_key(MfaContext::Platform, None, id)
+    );
+}
+
+#[test]
+fn the_scoped_subject_is_the_single_preimage_definition() {
+    // Eight keys derive from this one string, and it has to agree byte-for-byte with the
+    // preimage nest-auth builds — so it is pinned here as literal text rather than left to be
+    // re-derived by whatever reads the code next. `conformance/wire-contract.json` carries the
+    // same two shapes; this is the assertion that the code still matches the file.
+    assert_eq!(
+        super::scoped_subject(MfaContext::Dashboard, Some("t1"), "u1"),
+        "dashboard:t1:u1"
+    );
+    assert_eq!(
+        super::scoped_subject(MfaContext::Platform, None, "u1"),
+        "platform:u1"
+    );
+    // The platform arm is driven by the PLANE, not by whether a tenant was supplied. A caller
+    // that passes one anyway — a host reusing a dashboard path, a sloppy fixture — must not be
+    // able to move the platform preimage: that shape is half of an agreement with nest-auth,
+    // and a key that shifts with an argument nobody meant to pass is a key that silently stops
+    // matching. This is the assertion that the ignoring is deliberate and stays deliberate.
+    assert_eq!(
+        super::scoped_subject(MfaContext::Platform, Some("t1"), "u1"),
+        super::scoped_subject(MfaContext::Platform, None, "u1")
+    );
+}
+
+#[test]
+fn a_dashboard_mfa_operation_without_a_tenant_is_refused_before_any_key_is_derived() {
+    // `scoped_subject` is total because the platform plane legitimately has no tenant, so a
+    // `None` arriving on the dashboard plane would silently rebuild the OLD unscoped preimage:
+    // the vulnerable derivation, reachable by omitting an argument. This guard is what makes
+    // that unreachable, and it fails closed rather than deriving a key that is wrong in a way
+    // nothing downstream can detect.
+    assert!(matches!(
+        super::require_plane_tenant(MfaContext::Dashboard, None),
+        Err(AuthError::Validation { ref details })
+            if details.iter().any(|d| d.field == "tenantId")
+    ));
+    assert!(super::require_plane_tenant(MfaContext::Dashboard, Some("t1")).is_ok());
+    // The platform plane's absence is asserted, not missing.
+    assert!(super::require_plane_tenant(MfaContext::Platform, None).is_ok());
+
+    // An EMPTY tenant is refused too. `Some("")` would otherwise build `dashboard::{userId}` —
+    // a third keyspace neither implementation derives anywhere else, reachable by a caller
+    // passing a blank string, which is what an unset environment variable looks like.
+    assert!(super::require_plane_tenant(MfaContext::Dashboard, Some("")).is_err());
+    // And a tenant on the platform plane: an assertion the account cannot satisfy, refused
+    // rather than ignored.
+    assert!(super::require_plane_tenant(MfaContext::Platform, Some("t1")).is_err());
+
+    // The refusal names the plane in its diagnostic. Without a subscriber installed, `tracing`
+    // never evaluates the field expression at all — so this both asserts the operator-facing
+    // signal and is the only way the field is exercised.
+    let (events, capture) = crate::log_capture::capture_events();
+    let _ = super::require_plane_tenant(MfaContext::Dashboard, None);
+    drop(capture);
+    assert!(
+        events.contains("plane=dashboard"),
+        "the refusal must name the plane it refused, for an operator reading the log"
+    );
+}
+
+#[tokio::test]
+async fn a_repository_that_ignores_the_tenant_argument_is_still_refused() {
+    // The filter Copilot's review asked for, and the reason it is not redundant with passing
+    // the argument: `find_by_id(id, tenant)` is a REQUEST. The repository is the host's, and a
+    // single-tenant host writing an implementation that ignores its second argument is the
+    // shape nobody notices — which is precisely the deployment where ids collide and this whole
+    // change matters. `login` already refuses such an answer; the challenge is the other door
+    // into the same account.
+    //
+    // `TenantBlindUsers` is that non-compliant host: it answers `find_by_id` from the id alone,
+    // whatever tenant was asked for.
+    let inner = Arc::new(InMemoryUserRepository::new());
+    let users = Arc::new(TenantBlindUsers {
+        inner: inner.clone(),
+    });
+    let stores = Arc::new(InMemoryStores::new());
+    let mut deps = service_deps(stores.clone(), users);
+    // The shared fixture leaves the token manager's MFA support unwired, so a temp token never
+    // verifies and the challenge would be refused before reaching the lookup this test is about.
+    // Wiring it here keeps that default untouched for every other test.
+    let mfa_store: Arc<dyn MfaStore> = stores;
+    deps.tokens = Arc::new(
+        TokenManagerService::new(
+            HsKey::from_bytes(b"0123456789abcdef0123456789abcdef"),
+            Vec::new(),
+            deps.session_store.clone(),
+            Duration::from_secs(900),
+            7,
+            Duration::from_secs(30),
+            0,
+        )
+        .with_mfa_support(crate::services::token_manager::MfaTokenSupport::new(
+            mfa_store,
+        )),
+    );
+    let service = MfaService::new(deps);
+    let Some(uid) = seed_user(&inner, "blind@example.com").await else {
+        return;
+    };
+
+    let (events, capture) = crate::log_capture::capture_events();
+    // A challenge token for a tenant this account does not belong to. The repository hands the
+    // row back anyway; the library must still refuse it.
+    let issued = service
+        .tokens
+        .issue_mfa_temp_token(&uid, MfaContext::Dashboard, Some("other-tenant"))
+        .await;
+    let Ok(temp) = issued else { return };
+    let outcome = service.challenge(&temp, "123456", "1.2.3.4", "ua").await;
+    drop(capture);
+
+    assert!(
+        matches!(outcome, Err(AuthError::MfaNotEnabled)),
+        "an out-of-tenant row from a mis-scoped repository must be discarded, got {outcome:?}"
+    );
+    assert!(
+        events.contains("outside the token's tenant"),
+        "and the host must be told its repository is not scoping, or the bug stays invisible"
+    );
 }
 
 #[tokio::test]
@@ -3639,7 +4171,7 @@ async fn a_rotation_cannot_refresh_the_recent_authentication_proof() {
     plant_recent_auth(&service, &uid).await;
     let hash = crate::services::to_hex(&bymax_auth_crypto::mac::hmac_sha256(
         &[9u8; 64],
-        format!("dashboard:{uid}").as_bytes(),
+        format!("dashboard:{TENANT}:{uid}").as_bytes(),
     ));
 
     // The marker is READ, never consumed: two security changes after one sign-in both proceed.
@@ -3712,7 +4244,7 @@ async fn a_platform_recovery_challenge_that_loses_the_consume_issues_no_session(
 
     let issued = service
         .tokens
-        .issue_mfa_temp_token("plose", MfaContext::Platform)
+        .issue_mfa_temp_token("plose", MfaContext::Platform, None)
         .await;
     let Ok(temp) = issued else { return };
 
@@ -3781,7 +4313,7 @@ async fn a_platform_recovery_code_is_claimed_before_it_is_accepted() {
 
     let Ok(first_token) = service
         .tokens
-        .issue_mfa_temp_token("ptwice", MfaContext::Platform)
+        .issue_mfa_temp_token("ptwice", MfaContext::Platform, None)
         .await
     else {
         return;
@@ -3793,7 +4325,7 @@ async fn a_platform_recovery_code_is_claimed_before_it_is_accepted() {
 
     let Ok(second_token) = service
         .tokens
-        .issue_mfa_temp_token("ptwice", MfaContext::Platform)
+        .issue_mfa_temp_token("ptwice", MfaContext::Platform, None)
         .await
     else {
         return;

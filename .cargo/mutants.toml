@@ -65,12 +65,20 @@ additional_cargo_args = ["--all-features"]
 #    drop the compiled twin's mutant, which the suite does kill. If `builder.rs` shifts, the
 #    anchor stops matching and the mutant reappears as a survivor — a loud failure, not a
 #    silent one. Re-anchor it then.
-# 6. `token_manager.rs:632` `issue_mfa_temp_token` — the `cfg(not(feature = "mfa"))` twin of
+# 6. `token_manager.rs:1033` `issue_mfa_temp_token` — the `cfg(not(feature = "mfa"))` twin of
 #    the method below it, anchored for the same reason as 5. Re-anchored from 618 on 2026-07-28
-#    when security logging pushed the method down: the sweep reported both of its mutants as
-#    survivors, which is the loud failure this anchoring was chosen for. Confirm with
-#    `cargo mutants --list --all-features | grep issue_mfa_temp_token` — exactly one line must
-#    remain, and it is the `cfg(feature = "mfa")` twin the suite kills.
+#    when security logging pushed the method down. Re-anchored again from 632 on 2026-08-10,
+#    when the tenant claim was threaded onto the challenge token — and this time the anchor had
+#    ALREADY been stale before that change: the method sat at 1022 on `main` while the anchor
+#    still read 632, so the post-merge sweep had been reporting both of these mutants as
+#    survivors against a floor that is supposed to block a release. The "loud failure" this
+#    line-anchoring was chosen for did fire; what it did not do is stop anyone shipping, because
+#    the sweep runs post-merge and a survivor in the report is not a red PR. Worth knowing when
+#    reading this list: a stale anchor here does not fail closed. Confirm with
+#    `cargo mutants --list | grep issue_mfa_temp_token` — exactly one line must remain, and it
+#    is the `cfg(feature = "mfa")` twin the suite kills. Note the config already supplies
+#    `--all-features`; passing it again on the command line fails the baseline build (see the
+#    `additional_cargo_args` note below).
 # 7. The seven `NoOpEmailProvider` sends — the provider's whole job is to do nothing, and each
 #    body is one `tracing::debug!` line followed by `Ok(())`. Replacing a body with `Ok(())`
 #    removes only that debug line, which no assertion reaches without installing a `tracing`
@@ -122,7 +130,7 @@ exclude_re = [
     'delete match arm "inactive" in assert_not_blocked',
     'replace == with != in validate_password',
     'builder\.rs:212:9: replace AuthEngineBuilder::redis_stores',
-    'token_manager\.rs:632:9: replace TokenManagerService::issue_mfa_temp_token',
+    'token_manager\.rs:1033:9: replace TokenManagerService::issue_mfa_temp_token',
     'replace <impl EmailProvider for NoOpEmailProvider>::\w+ -> Result<\(\), EmailError> with Ok\(\(\)\)',
     'replace AuthHooks::\w+ -> Result<\(\), HookError> with Ok\(\(\)\)',
     'replace < with <= in MfaService::challenge_platform',

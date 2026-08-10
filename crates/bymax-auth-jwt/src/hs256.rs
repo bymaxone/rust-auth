@@ -334,6 +334,7 @@ mod tests {
             token_type: MfaTempType::MfaChallenge,
             epoch: 0,
             context: MfaContext::Platform,
+            tenant_id: None,
             iat: 1_000,
             exp: 2_000,
         };
