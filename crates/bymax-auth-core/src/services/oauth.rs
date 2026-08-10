@@ -426,7 +426,7 @@ impl AuthEngine {
         if user.mfa_enabled {
             let mfa_temp_token = self
                 .tokens()
-                .issue_mfa_temp_token(&user.id, MfaContext::Dashboard)
+                .issue_mfa_temp_token(&user.id, MfaContext::Dashboard, Some(&user.tenant_id))
                 .await?;
             return Ok(OAuthOutcome::MfaChallenge(MfaChallengeResult {
                 mfa_required: true,

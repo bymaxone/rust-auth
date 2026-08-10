@@ -29,8 +29,10 @@ impl MfaService {
         ctx: MfaContext,
         tenant_id: Option<&str>,
     ) -> Result<(), AuthError> {
+        super::require_plane_tenant(ctx, tenant_id)?;
         let view = self.fetch_user_mfa(user_id, ctx, tenant_id).await?;
-        self.reauth_gate(ctx, user_id, code, &view).await?;
+        self.reauth_gate(ctx, tenant_id, user_id, code, &view)
+            .await?;
         // The TOTP code verified; clear MFA, revoke sessions, and notify. Serialized against
         // every other MFA transition so a challenge that read the record a moment earlier
         // cannot splice `mfa_enabled: true` and the old secret back on top of this.
@@ -91,6 +93,7 @@ impl MfaService {
         ctx: MfaContext,
         tenant_id: Option<&str>,
     ) -> Result<(), AuthError> {
+        super::require_plane_tenant(ctx, tenant_id)?;
         let view = self.fetch_user_mfa(user_id, ctx, tenant_id).await?;
         if !view.mfa_enabled {
             tracing::info!(
@@ -138,8 +141,10 @@ impl MfaService {
         ctx: MfaContext,
         tenant_id: Option<&str>,
     ) -> Result<Vec<String>, AuthError> {
+        super::require_plane_tenant(ctx, tenant_id)?;
         let view = self.fetch_user_mfa(user_id, ctx, tenant_id).await?;
-        self.reauth_gate(ctx, user_id, totp_code, &view).await?;
+        self.reauth_gate(ctx, tenant_id, user_id, totp_code, &view)
+            .await?;
         // Generate a fresh set with the same entropy/format as setup; persist only the digests.
         let plain_codes: Vec<String> = (0..self.recovery_code_count)
             .map(|_| generate_recovery_code())
@@ -188,6 +193,7 @@ impl MfaService {
     async fn reauth_gate(
         &self,
         ctx: MfaContext,
+        tenant_id: Option<&str>,
         user_id: &str,
         code: &str,
         view: &MfaUserView,
@@ -195,7 +201,7 @@ impl MfaService {
         if !view.mfa_enabled {
             return Err(AuthError::MfaNotEnabled);
         }
-        let bf_id = self.disable_bf_id(ctx, user_id);
+        let bf_id = self.disable_bf_id(ctx, tenant_id, user_id);
         self.assert_not_locked("disable", user_id, &bf_id).await?;
         // An enabled account with no stored secret is an inconsistency, not a user error.
         let encrypted = view.mfa_secret.clone().ok_or(AuthError::TokenInvalid)?;
@@ -203,7 +209,7 @@ impl MfaService {
             .decrypt_secret(&encrypted)
             .ok_or(AuthError::TokenInvalid)?;
         if !self
-            .verify_totp_with_anti_replay(ctx, user_id, &raw_secret, code)
+            .verify_totp_with_anti_replay(ctx, tenant_id, user_id, &raw_secret, code)
             .await?
         {
             tracing::warn!(%user_id, "mfa disable: invalid code");

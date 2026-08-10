@@ -374,6 +374,7 @@ mod tests {
             token_type: MfaTempType::MfaChallenge,
             epoch: 0,
             context: MfaContext::Platform,
+            tenant_id: None,
             iat: 1_000,
             exp: 2_000,
         };
@@ -502,6 +503,7 @@ mod tests {
                 token_type: MfaTempType::MfaChallenge,
                 epoch: 0,
                 context: MfaContext::Dashboard,
+                tenant_id: Some("t_1".to_owned()),
                 iat: 1_000,
                 exp: 2_000,
             },
@@ -637,6 +639,7 @@ mod tests {
             token_type: MfaTempType::MfaChallenge,
             epoch: 0,
             context: MfaContext::Platform,
+            tenant_id: None,
             iat: 1_000,
             exp: 9_999_999_999,
         }

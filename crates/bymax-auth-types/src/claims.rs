@@ -209,6 +209,23 @@ pub struct MfaTempClaims {
     pub token_type: MfaTempType,
     /// Which identity domain this challenge belongs to.
     pub context: MfaContext,
+    /// The tenant the challenged account belongs to — present on the dashboard plane, absent
+    /// on the platform plane, whose admins are cross-tenant and carry none.
+    ///
+    /// Without it the challenge had no tenant in scope at all, and every decision it makes ran
+    /// on an account resolved by id alone: the user lookup passed `None`, so the status gate,
+    /// `mfa_enabled`, the encrypted secret and the recovery-code digests were all read from
+    /// whichever row the host returned, and the session was minted for that row. Under a host
+    /// schema that numbers users per tenant — which a library cannot rule out — every tenant
+    /// has a user `1`. It also left the pre-fetch challenge counter with nothing to scope by,
+    /// so failures from one tenant spent another tenant's lockout budget.
+    ///
+    /// Optional in the wire format so the claim is additive, but a dashboard challenge token
+    /// WITHOUT it is refused at verification rather than falling back to the unscoped shape —
+    /// a fallback would leave the vulnerable derivation reachable by simply omitting a field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts-export", ts(optional))]
+    pub tenant_id: Option<String>,
     /// The subject's token **epoch** at issuance, in the plane named by [`Self::context`].
     ///
     /// The challenge token is a credential like any other — half of one, held by a caller who
@@ -316,6 +333,35 @@ mod tests {
     }
 
     #[test]
+    fn mfa_temp_claims_serialize_the_tenant_as_the_camel_case_wire_claim() {
+        // The claim NAME is the contract, not the Rust field name. nest-auth signs its payload
+        // keys verbatim and uses `tenantId`; a token whose tenant rides under `tenant_id` would
+        // deserialize as ABSENT on the other side, and absent is refused — so the two halves
+        // would each look correct while agreeing on nothing. Pinned here because `rename_all`
+        // is a struct-level attribute that a later edit can drop without touching this field.
+        let claims = MfaTempClaims {
+            iss: None,
+            aud: None,
+            sub: "u_1".to_owned(),
+            jti: "jti-4".to_owned(),
+            token_type: MfaTempType::MfaChallenge,
+            context: MfaContext::Dashboard,
+            tenant_id: Some("t_1".to_owned()),
+            epoch: 0,
+            iat: 1,
+            exp: 2,
+        };
+        let json = serde_json::to_value(claims).unwrap_or_default();
+        assert_eq!(json["tenantId"], "t_1");
+        assert!(json.get("tenant_id").is_none());
+
+        // And it round-trips from that name: a dashboard token minted by the other half must
+        // arrive here with its tenant intact, not silently defaulted away.
+        let parsed: Result<MfaTempClaims, _> = serde_json::from_value(json);
+        assert!(matches!(parsed, Ok(c) if c.tenant_id.as_deref() == Some("t_1")));
+    }
+
+    #[test]
     fn mfa_temp_claims_carry_the_challenge_discriminator_and_context() {
         // The temp token's `type` is `mfa_challenge` and its `context` routes
         // persistence to the dashboard or platform store downstream.
@@ -326,6 +372,7 @@ mod tests {
             jti: "jti-3".to_owned(),
             token_type: MfaTempType::MfaChallenge,
             context: MfaContext::Platform,
+            tenant_id: None,
             epoch: 7,
             iat: 1,
             exp: 2,
@@ -333,6 +380,9 @@ mod tests {
         let json = serde_json::to_value(claims).unwrap_or_default();
         assert_eq!(json["type"], "mfa_challenge");
         assert_eq!(json["context"], "platform");
+        // The platform arm carries no tenant, and an absent one is absent on the wire rather
+        // than a `null` the other implementation would have to special-case.
+        assert!(json.get("tenantId").is_none());
         // The challenge token carries the epoch so a credential rotation kills it too.
         assert_eq!(json["epoch"], 7);
     }

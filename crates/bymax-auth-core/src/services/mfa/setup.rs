@@ -27,6 +27,7 @@ impl MfaService {
         tenant_id: Option<&str>,
         password: Option<&str>,
     ) -> Result<MfaSetupResult, AuthError> {
+        super::require_plane_tenant(ctx, tenant_id)?;
         let view = self.fetch_user_mfa(user_id, ctx, tenant_id).await?;
         if view.mfa_enabled {
             return Err(AuthError::MfaAlreadyEnabled);
@@ -41,9 +42,15 @@ impl MfaService {
         // before an authentication factor changes; `disable` already demands a TOTP code.
         // Gating `setup` rather than `verify_and_enable` means the attacker cannot even obtain
         // a secret they control, and it costs the user one prompt at the natural moment.
-        self.assert_reauthenticated(ctx, user_id, view.password_hash.as_deref(), password)
-            .await?;
-        let key = self.setup_key(ctx, user_id);
+        self.assert_reauthenticated(
+            ctx,
+            tenant_id,
+            user_id,
+            view.password_hash.as_deref(),
+            password,
+        )
+        .await?;
+        let key = self.setup_key(ctx, tenant_id, user_id);
 
         // Fast-path idempotency: an existing pending record is re-returned verbatim, so a user
         // who refreshes the setup page sees the same secret/QR/codes they may already be
@@ -103,11 +110,12 @@ impl MfaService {
         ctx: MfaContext,
         tenant_id: Option<&str>,
     ) -> Result<(), AuthError> {
+        super::require_plane_tenant(ctx, tenant_id)?;
         let view = self.fetch_user_mfa(user_id, ctx, tenant_id).await?;
         if view.mfa_enabled {
             return Err(AuthError::MfaAlreadyEnabled);
         }
-        let key = self.setup_key(ctx, user_id);
+        let key = self.setup_key(ctx, tenant_id, user_id);
 
         // Load and decrypt the pending record. A missing record, a record that will not parse,
         // and a secret that will not decrypt all collapse to the same opaque `MfaSetupRequired`
@@ -126,7 +134,7 @@ impl MfaService {
         // Verify the code with anti-replay before the completion gate, so an invalid code never
         // consumes the pending record.
         if !self
-            .verify_totp_with_anti_replay(ctx, user_id, &raw_secret, code)
+            .verify_totp_with_anti_replay(ctx, tenant_id, user_id, &raw_secret, code)
             .await?
         {
             tracing::warn!(%user_id, "mfa setup: invalid TOTP code");

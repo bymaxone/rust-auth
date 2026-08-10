@@ -122,8 +122,42 @@
     "refusedError": "auth.refresh_token_invalid"
   },
 
+  "mfaSubjectPreimages": {
+    "dashboard": "dashboard:{tenantId}:{userId}",
+    "platform": "platform:{userId}",
+    "$comment": [
+      "The subject EVERY MFA store key and MFA failure counter below is derived from. One",
+      "definition rather than eight copies: eight keys share this shape, and a copy that drifts is",
+      "a key that silently stops matching the one the other implementation derives.",
+      "",
+      "The tenant is part of the dashboard arm because neither library may assume the consumer's",
+      "user ids are unique ACROSS tenants — `findById` takes a tenant precisely because they may",
+      "not be, and a host that numbers users per tenant gives every tenant a user `1`. Keyed on",
+      "`{plane}:{userId}` alone, two tenants' accounts shared all five store keys and all three",
+      "failure counters. The counters were the worst of the eight and it is not close: the other",
+      "five cost a collision between two accounts that happen to share an id, while the counters",
+      "cost a CREDENTIAL-FREE CROSS-TENANT LOCKOUT — failures against one tenant's user spent",
+      "another tenant's budget and a success on either side cleared the other's. That is not the",
+      "per-subscriber-account rate limiting NIST SP 800-63B requires, and it is the same bug the",
+      "`identifierPreimages` block below already documents one level up, where a tenant literally",
+      "named `platform` collided with the platform plane and locked an operator out of the console.",
+      "That fix landed for the login counter and stopped there.",
+      "",
+      "The platform arm carries NO tenant segment: its admins are cross-tenant and have none, and",
+      "an invented value would become a lookup key. Both implementations derive the shape from the",
+      "PLANE, not from whether a tenant was supplied, so a caller that passes one on the platform",
+      "plane cannot move the preimage off `platform:{userId}`.",
+      "",
+      "The dashboard MFA temp token carries `tenantId` for this reason. A challenge token without",
+      "it is REFUSED, not defaulted: RFC 8725 §3.9 sets the absent-means-reject pattern, §3.12",
+      "requires validation rules that reject a token of the wrong kind, and ASVS 5.0 6.6.2 requires",
+      "the out-of-band token be bound to the authentication request that generated it. Falling back",
+      "would leave the unscoped derivation reachable by omitting one optional field."
+    ]
+  },
+
   "mfaTransitionLock": {
-    "key": "mfalock:{hmac_sha256(hmacKey, '{plane}:{userId}')}",
+    "key": "mfalock:{hmac_sha256(hmacKey, mfaSubject)}",
     "value": "a per-call nonce (16 CSPRNG bytes, hex) — the release compares against it",
     "ttlSeconds": 10,
     "$comment": [
@@ -153,7 +187,7 @@
   },
 
   "recoveryCodeClaim": {
-    "key": "rcu:{hmac_sha256(hmacKey, '{plane}:{userId}:{code}')}",
+    "key": "rcu:{hmac_sha256(hmacKey, '{mfaSubject}:{code}')}",
     "value": "'1' — presence is the whole meaning",
     "ttlSeconds": 300,
     "$comment": [
@@ -168,6 +202,32 @@
       "burning each other's codes. Deliberately short-lived — it serializes a race, it is not the",
       "durable record of consumption, and outliving the repository write would turn a failed write",
       "into a code the account can see but can never use."
+    ]
+  },
+
+  "mfaSubjectDerivedKeys": {
+    "mfaSetupRecord": "mfa_setup:{hmac_sha256(hmacKey, mfaSubject)}",
+    "recentAuthMarker": "ra:{hmac_sha256(hmacKey, mfaSubject)}",
+    "totpAntiReplay": "tu:{hmac_sha256(hmacKey, '{mfaSubject}:{code}')}",
+    "challengeFailureCounter": "lf:{hmac_sha256(hmacKey, 'challenge:{mfaSubject}')}",
+    "disableFailureCounter": "lf:{hmac_sha256(hmacKey, 'disable:{mfaSubject}')}",
+    "reauthFailureCounter": "lf:{hmac_sha256(hmacKey, 'reauth:{mfaSubject}')}",
+    "$comment": [
+      "The six keys that derive from `mfaSubjectPreimages` and were NOT pinned here before. They",
+      "drifted apart silently for exactly as long as nothing named them: a contract detects drift",
+      "only in what it lists, which is how the OTP stored value moved without this file noticing.",
+      "Six of the eight MFA subject-derived keys were in that blind spot.",
+      "",
+      "`totpAntiReplay` and `recoveryCodeClaim` share ONE preimage and are separated only by their",
+      "key prefix — both implementations derive them from the same string, so the two entries are",
+      "one derivation described twice, not two derivations that happen to look alike.",
+      "",
+      "The three failure counters live under the `lf:` prefix alongside the LOGIN counter that",
+      "`identifierPreimages` describes, which is why that block looked like it covered them and",
+      "did not: it defines the email-keyed login preimage, these are user-id-keyed MFA preimages.",
+      "The `challenge:` / `disable:` / `reauth:` segments keep the three isolated from each other,",
+      "so the pre-auth counter an attacker can drive cannot exhaust the authenticated user's",
+      "management budget, nor the password re-proof that gates enrolment."
     ]
   },
 

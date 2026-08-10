@@ -197,7 +197,11 @@ impl AuthEngine {
         if user.mfa_enabled {
             let mfa_temp_token = self
                 .tokens()
-                .issue_mfa_temp_token(&user.id, MfaContext::Dashboard)
+                // The tenant comes from the AUTHENTICATED account, never from the request that
+                // named it: the challenge resolves the account by `(id, tenant)`, so a
+                // caller-supplied value here would let the second step be pointed at a
+                // different tenant's row than the password step authenticated.
+                .issue_mfa_temp_token(&user.id, MfaContext::Dashboard, Some(&user.tenant_id))
                 .await?;
             let tenant = log_safe(&tenant_id);
             tracing::info!(user_id = %user.id, tenant_id = %tenant, "login: MFA challenge issued");

@@ -109,6 +109,23 @@ type: MfaTempType,
  */
 context: MfaContext, 
 /**
+ * The tenant the challenged account belongs to — present on the dashboard plane, absent
+ * on the platform plane, whose admins are cross-tenant and carry none.
+ *
+ * Without it the challenge had no tenant in scope at all, and every decision it makes ran
+ * on an account resolved by id alone: the user lookup passed `None`, so the status gate,
+ * `mfa_enabled`, the encrypted secret and the recovery-code digests were all read from
+ * whichever row the host returned, and the session was minted for that row. Under a host
+ * schema that numbers users per tenant — which a library cannot rule out — every tenant
+ * has a user `1`. It also left the pre-fetch challenge counter with nothing to scope by,
+ * so failures from one tenant spent another tenant's lockout budget.
+ *
+ * Optional in the wire format so the claim is additive, but a dashboard challenge token
+ * WITHOUT it is refused at verification rather than falling back to the unscoped shape —
+ * a fallback would leave the vulnerable derivation reachable by simply omitting a field.
+ */
+tenantId?: string, 
+/**
  * The subject's token **epoch** at issuance, in the plane named by [`Self::context`].
  *
  * The challenge token is a credential like any other — half of one, held by a caller who
