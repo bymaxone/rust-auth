@@ -1382,7 +1382,10 @@ async fn platform_challenge_exchanges_a_temp_token_for_a_full_platform_session()
             "1.2.3.4",
             "ua",
             MfaContext::Platform,
-            Some("t1")
+            // `None`: platform admins are cross-tenant and carry none. This fixture said
+            // `Some("t1")` and the call succeeded, because nothing checked the pair — the
+            // tenant was simply ignored downstream. It is refused now, which is the point.
+            None
         )
         .await
         .is_ok()
@@ -1952,6 +1955,7 @@ impl MfaStore for DisableOnLockMfaStore {
                 .users
                 .update_mfa(
                     &self.user_id,
+                    None,
                     bymax_auth_types::UpdateMfaData {
                         mfa_enabled: false,
                         mfa_secret: None,
@@ -2051,6 +2055,109 @@ impl MfaStore for RecordingLockMfaStore {
 /// need two challenges genuinely in flight at once. Forcing it is what exercises the refusal,
 /// and counting the releases is what proves a failed transition does not strand the account
 /// for the lock's whole TTL.
+/// A user repository that ANSWERS `find_by_id` from the id alone, ignoring the tenant it was
+/// asked to scope by — everything else delegates.
+///
+/// It models the host implementation the trait cannot prevent: a single-tenant deployment whose
+/// `find_by_id` never grew a tenant predicate, or one that added the parameter and forgot to use
+/// it. Both compile, both pass a single-tenant test suite, and both hand back another tenant's
+/// row the day ids collide. The library cannot fix such a repository; it can refuse its answer,
+/// which is what this fixture exists to prove it does.
+struct TenantBlindUsers {
+    inner: Arc<InMemoryUserRepository>,
+}
+
+#[async_trait::async_trait]
+impl crate::traits::UserRepository for TenantBlindUsers {
+    async fn find_by_id(
+        &self,
+        id: &str,
+        _tenant_id: Option<&str>,
+    ) -> Result<Option<bymax_auth_types::AuthUser>, crate::RepositoryError> {
+        // The whole point: the argument is dropped.
+        self.inner.find_by_id(id, None).await
+    }
+
+    async fn find_by_email(
+        &self,
+        email: &str,
+        tenant_id: &str,
+    ) -> Result<Option<bymax_auth_types::AuthUser>, crate::RepositoryError> {
+        self.inner.find_by_email(email, tenant_id).await
+    }
+
+    async fn create(
+        &self,
+        data: bymax_auth_types::CreateUserData,
+    ) -> Result<bymax_auth_types::AuthUser, crate::RepositoryError> {
+        self.inner.create(data).await
+    }
+
+    async fn update_password(
+        &self,
+        id: &str,
+        password_hash: &str,
+    ) -> Result<(), crate::RepositoryError> {
+        self.inner.update_password(id, password_hash).await
+    }
+
+    async fn update_mfa(
+        &self,
+        id: &str,
+        tenant_id: Option<&str>,
+        data: bymax_auth_types::UpdateMfaData,
+    ) -> Result<(), crate::RepositoryError> {
+        self.inner.update_mfa(id, tenant_id, data).await
+    }
+
+    async fn update_last_login(&self, id: &str) -> Result<(), crate::RepositoryError> {
+        self.inner.update_last_login(id).await
+    }
+
+    async fn update_status(&self, id: &str, status: &str) -> Result<(), crate::RepositoryError> {
+        self.inner.update_status(id, status).await
+    }
+
+    async fn update_email_verified(
+        &self,
+        id: &str,
+        verified: bool,
+    ) -> Result<(), crate::RepositoryError> {
+        self.inner.update_email_verified(id, verified).await
+    }
+
+    async fn update_email(&self, id: &str, email: &str) -> Result<(), crate::RepositoryError> {
+        self.inner.update_email(id, email).await
+    }
+
+    async fn find_by_oauth_id(
+        &self,
+        provider: &str,
+        provider_id: &str,
+        tenant_id: &str,
+    ) -> Result<Option<bymax_auth_types::AuthUser>, crate::RepositoryError> {
+        self.inner
+            .find_by_oauth_id(provider, provider_id, tenant_id)
+            .await
+    }
+
+    async fn link_oauth(
+        &self,
+        user_id: &str,
+        provider: &str,
+        provider_id: &str,
+    ) -> Result<(), crate::RepositoryError> {
+        self.inner.link_oauth(user_id, provider, provider_id).await
+    }
+
+    async fn create_with_oauth(
+        &self,
+        data: bymax_auth_types::CreateWithOAuthData,
+    ) -> Result<bymax_auth_types::AuthUser, crate::RepositoryError> {
+        self.inner.create_with_oauth(data).await
+    }
+}
+
 struct ContendedLockMfaStore {
     inner: Arc<InMemoryStores>,
     releases: Arc<Mutex<usize>>,
@@ -2220,7 +2327,7 @@ fn service_with_previous_keys(
     MfaService::new(deps)
 }
 
-fn service_deps(store: Arc<dyn MfaStore>, users: Arc<InMemoryUserRepository>) -> MfaServiceDeps {
+fn service_deps(store: Arc<dyn MfaStore>, users: Arc<dyn UserRepository>) -> MfaServiceDeps {
     let inmem = Arc::new(InMemoryStores::new());
     let session_store: Arc<dyn SessionStore> = inmem.clone();
     let brute_force_store: Arc<dyn BruteForceStore> = inmem;
@@ -2273,7 +2380,7 @@ fn service_deps(store: Arc<dyn MfaStore>, users: Arc<InMemoryUserRepository>) ->
     }
 }
 
-fn service_over(store: Arc<dyn MfaStore>, users: Arc<InMemoryUserRepository>) -> MfaService {
+fn service_over(store: Arc<dyn MfaStore>, users: Arc<dyn UserRepository>) -> MfaService {
     MfaService::new(service_deps(store, users))
 }
 
@@ -2610,6 +2717,7 @@ async fn challenge_collapses_an_undecryptable_secret_to_an_opaque_error() {
         .users
         .update_mfa(
             &uid,
+            None,
             bymax_auth_types::UpdateMfaData {
                 mfa_enabled: true,
                 mfa_secret: Some("not-a-valid-wire".to_owned()),
@@ -3161,6 +3269,7 @@ async fn a_totp_challenge_rewrites_a_secret_stored_under_a_retired_key() {
         h.users
             .update_mfa(
                 &uid,
+                None,
                 bymax_auth_types::UpdateMfaData {
                     mfa_enabled: true,
                     mfa_secret: Some(stored_under_retired.clone()),
@@ -3224,6 +3333,7 @@ async fn the_retired_key_rewrite_abandons_when_mfa_vanished_under_the_lock() {
         h.users
             .update_mfa(
                 &uid,
+                None,
                 bymax_auth_types::UpdateMfaData {
                     mfa_enabled: true,
                     mfa_secret: Some(stored_under_retired.clone()),
@@ -3354,6 +3464,76 @@ async fn an_mfa_state_change_kills_the_outstanding_access_tokens() {
             .verify_access(&post_enable.access_token)
             .await
             .is_err()
+    );
+}
+
+#[tokio::test]
+async fn a_spent_recovery_code_is_written_out_of_the_right_tenants_row() {
+    // Scoping the READ was not enough: the write-back went through `update_mfa(id, data)`, which
+    // carried no tenant, so under a schema that numbers users per tenant the repository could
+    // not know which row to update. Two silent failures — it lands on another tenant's row and
+    // corrupts its MFA state, or the row this flow read is not the row it wrote and the spent
+    // code is never spliced out.
+    //
+    // The existing single-use test does NOT catch that second one, which is why this exists.
+    // A second challenge with the same code is refused by the `rcu:` claim, which is planted
+    // before the splice and lives 300 s — so the code reads as spent for the whole window
+    // whether or not the write landed, and only becomes usable again after the claim expires.
+    // Asserting the PERSISTED list is what distinguishes "refused by the claim" from "actually
+    // spent", and it is the property a recovery code exists to have (ASVS 5.0 6.5.1).
+    let Some(h) = build(false, false) else { return };
+    let Some(uid) = register(&h.engine, "splice@example.com").await else {
+        return;
+    };
+    let Some(mfa) = h.engine.mfa() else { return };
+    let Ok(setup) = mfa
+        .setup(&uid, MfaContext::Dashboard, Some(TENANT), Some(PASSWORD))
+        .await
+    else {
+        return;
+    };
+    let base = now_secs();
+    assert!(
+        mfa.verify_and_enable(
+            &uid,
+            &code_at(&setup.secret, base),
+            "1.2.3.4",
+            "ua",
+            MfaContext::Dashboard,
+            Some(TENANT),
+        )
+        .await
+        .is_ok()
+    );
+
+    let before = h.users.find_by_id(&uid, Some(TENANT)).await;
+    let Ok(Some(before)) = before else { return };
+    let stored_before = before.mfa_recovery_codes.unwrap_or_default().len();
+    assert!(
+        stored_before > 0,
+        "the fixture must hold recovery codes, or the shrink below proves nothing"
+    );
+
+    let recovery = setup.recovery_codes[0].clone();
+    let Some(temp) = login_temp_token(&h.engine, "splice@example.com").await else {
+        return;
+    };
+    let challenged = mfa.challenge(&temp, &recovery, "1.2.3.4", "ua").await;
+    assert!(
+        matches!(challenged, Ok(LoginResultMfa::Dashboard(_))),
+        "the recovery challenge must succeed, got {challenged:?}"
+    );
+
+    // The durable spend: one digest fewer, in THIS tenant's row. If the write were unscoped and
+    // landed elsewhere — or were filtered away as a cross-tenant write — this row would still
+    // carry the full set and the code would come back the moment the `rcu:` claim lapsed.
+    let after = h.users.find_by_id(&uid, Some(TENANT)).await;
+    let Ok(Some(after)) = after else { return };
+    let stored_after = after.mfa_recovery_codes.unwrap_or_default().len();
+    assert_eq!(
+        stored_after,
+        stored_before - 1,
+        "the spent recovery code must be spliced out of the tenant's own row"
     );
 }
 
@@ -3497,6 +3677,7 @@ async fn a_recovery_challenge_that_loses_the_temp_token_consume_issues_no_sessio
         users
             .update_mfa(
                 &user.id,
+                None,
                 bymax_auth_types::UpdateMfaData {
                     mfa_enabled: true,
                     mfa_secret: Some(data.encrypted_secret),
@@ -3576,6 +3757,7 @@ async fn one_recovery_code_cannot_be_spent_twice_even_with_two_temp_tokens() {
         users
             .update_mfa(
                 &user.id,
+                None,
                 bymax_auth_types::UpdateMfaData {
                     mfa_enabled: true,
                     mfa_secret: Some(data.encrypted_secret),
@@ -3767,6 +3949,86 @@ fn a_dashboard_mfa_operation_without_a_tenant_is_refused_before_any_key_is_deriv
     assert!(super::require_plane_tenant(MfaContext::Dashboard, Some("t1")).is_ok());
     // The platform plane's absence is asserted, not missing.
     assert!(super::require_plane_tenant(MfaContext::Platform, None).is_ok());
+
+    // An EMPTY tenant is refused too. `Some("")` would otherwise build `dashboard::{userId}` —
+    // a third keyspace neither implementation derives anywhere else, reachable by a caller
+    // passing a blank string, which is what an unset environment variable looks like.
+    assert!(super::require_plane_tenant(MfaContext::Dashboard, Some("")).is_err());
+    // And a tenant on the platform plane: an assertion the account cannot satisfy, refused
+    // rather than ignored.
+    assert!(super::require_plane_tenant(MfaContext::Platform, Some("t1")).is_err());
+
+    // The refusal names the plane in its diagnostic. Without a subscriber installed, `tracing`
+    // never evaluates the field expression at all — so this both asserts the operator-facing
+    // signal and is the only way the field is exercised.
+    let (events, capture) = crate::log_capture::capture_events();
+    let _ = super::require_plane_tenant(MfaContext::Dashboard, None);
+    drop(capture);
+    assert!(
+        events.contains("plane=dashboard"),
+        "the refusal must name the plane it refused, for an operator reading the log"
+    );
+}
+
+#[tokio::test]
+async fn a_repository_that_ignores_the_tenant_argument_is_still_refused() {
+    // The filter Copilot's review asked for, and the reason it is not redundant with passing
+    // the argument: `find_by_id(id, tenant)` is a REQUEST. The repository is the host's, and a
+    // single-tenant host writing an implementation that ignores its second argument is the
+    // shape nobody notices — which is precisely the deployment where ids collide and this whole
+    // change matters. `login` already refuses such an answer; the challenge is the other door
+    // into the same account.
+    //
+    // `TenantBlindUsers` is that non-compliant host: it answers `find_by_id` from the id alone,
+    // whatever tenant was asked for.
+    let inner = Arc::new(InMemoryUserRepository::new());
+    let users = Arc::new(TenantBlindUsers {
+        inner: inner.clone(),
+    });
+    let stores = Arc::new(InMemoryStores::new());
+    let mut deps = service_deps(stores.clone(), users);
+    // The shared fixture leaves the token manager's MFA support unwired, so a temp token never
+    // verifies and the challenge would be refused before reaching the lookup this test is about.
+    // Wiring it here keeps that default untouched for every other test.
+    let mfa_store: Arc<dyn MfaStore> = stores;
+    deps.tokens = Arc::new(
+        TokenManagerService::new(
+            HsKey::from_bytes(b"0123456789abcdef0123456789abcdef"),
+            Vec::new(),
+            deps.session_store.clone(),
+            Duration::from_secs(900),
+            7,
+            Duration::from_secs(30),
+            0,
+        )
+        .with_mfa_support(crate::services::token_manager::MfaTokenSupport::new(
+            mfa_store,
+        )),
+    );
+    let service = MfaService::new(deps);
+    let Some(uid) = seed_user(&inner, "blind@example.com").await else {
+        return;
+    };
+
+    let (events, capture) = crate::log_capture::capture_events();
+    // A challenge token for a tenant this account does not belong to. The repository hands the
+    // row back anyway; the library must still refuse it.
+    let issued = service
+        .tokens
+        .issue_mfa_temp_token(&uid, MfaContext::Dashboard, Some("other-tenant"))
+        .await;
+    let Ok(temp) = issued else { return };
+    let outcome = service.challenge(&temp, "123456", "1.2.3.4", "ua").await;
+    drop(capture);
+
+    assert!(
+        matches!(outcome, Err(AuthError::MfaNotEnabled)),
+        "an out-of-tenant row from a mis-scoped repository must be discarded, got {outcome:?}"
+    );
+    assert!(
+        events.contains("outside the token's tenant"),
+        "and the host must be told its repository is not scoping, or the bug stays invisible"
+    );
 }
 
 #[tokio::test]

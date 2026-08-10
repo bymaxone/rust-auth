@@ -801,6 +801,7 @@ mod tests {
             let _ = users
                 .update_mfa(
                     &user.id,
+                    None,
                     UpdateMfaData {
                         mfa_enabled: true,
                         mfa_secret: Some("enc".to_owned()),

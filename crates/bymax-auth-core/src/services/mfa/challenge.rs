@@ -82,11 +82,32 @@ impl MfaService {
         // gate, `mfa_enabled`, the secret that gets decrypted, the recovery digests that get
         // scanned, and the account the session is finally minted for. Under a host schema that
         // numbers users per tenant, every tenant has a user `1`.
-        let user = self
+        let answer = self
             .user_repo
             .find_by_id(&user_id, tenant_id)
             .await
-            .map_err(repository_error)?
+            .map_err(repository_error)?;
+
+        // The tenant the repository ANSWERED with must be the tenant that was asked for.
+        // Passing the argument is a request, not an enforcement: the repository is the host's,
+        // and a single-tenant host writing `find_by_id` that ignores its second argument is the
+        // shape nobody notices — which is exactly the deployment where ids collide across
+        // tenants and this whole change matters. `login` already refuses such an answer
+        // (services/auth/login.rs), for the same reason and with the same wording; the challenge
+        // is the other door into the same account and had no such check. Without it, everything
+        // below — the status gate, `mfa_enabled`, the secret, the recovery digests, the account
+        // the session is minted for — still runs on a row from another tenant.
+        if answer
+            .as_ref()
+            .is_some_and(|candidate| Some(candidate.tenant_id.as_str()) != tenant_id)
+        {
+            tracing::warn!(
+                "mfa challenge: repository returned an account outside the token's tenant — \
+                 check that UserRepository::find_by_id scopes by its tenant_id argument"
+            );
+        }
+        let user = answer
+            .filter(|candidate| Some(candidate.tenant_id.as_str()) == tenant_id)
             .ok_or(AuthError::MfaNotEnabled)?;
 
         // Re-check the account status. Login gated it before minting the temp token, but that

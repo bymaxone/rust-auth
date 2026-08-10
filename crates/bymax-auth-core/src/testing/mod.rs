@@ -226,8 +226,20 @@ impl UserRepository for InMemoryUserRepository {
         Ok(())
     }
 
-    async fn update_mfa(&self, id: &str, data: UpdateMfaData) -> Result<(), RepositoryError> {
-        if let Some(user) = lock(&self.users).get_mut(id) {
+    async fn update_mfa(
+        &self,
+        id: &str,
+        tenant_id: Option<&str>,
+        data: UpdateMfaData,
+    ) -> Result<(), RepositoryError> {
+        // Scoped like `find_by_id`, and deliberately so: a fixture repository that honoured the
+        // tenant on reads but ignored it on writes would let a cross-tenant write test pass
+        // while the property it asserts does not hold. The fixture has to be at least as strict
+        // as the contract the trait states, or it tests the fixture instead of the library.
+        if let Some(user) = lock(&self.users)
+            .get_mut(id)
+            .filter(|user| tenant_id.is_none_or(|scope| user.tenant_id == scope))
+        {
             user.mfa_enabled = data.mfa_enabled;
             user.mfa_secret = data.mfa_secret;
             user.mfa_recovery_codes = data.mfa_recovery_codes;
@@ -1459,6 +1471,7 @@ mod tests {
         assert!(
             repo.update_mfa(
                 &user.id,
+                None,
                 UpdateMfaData {
                     mfa_enabled: true,
                     mfa_secret: Some("enc".into()),
@@ -1477,6 +1490,7 @@ mod tests {
         assert!(
             repo.update_mfa(
                 "missing",
+                None,
                 UpdateMfaData {
                     mfa_enabled: false,
                     mfa_secret: None,

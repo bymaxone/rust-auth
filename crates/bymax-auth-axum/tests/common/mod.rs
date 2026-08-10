@@ -1118,6 +1118,7 @@ pub async fn enable_mfa_flag(harness: &Harness, user_id: &str) {
         .users
         .update_mfa(
             user_id,
+            None,
             UpdateMfaData {
                 mfa_enabled: true,
                 mfa_secret: Some("encrypted-secret".to_owned()),

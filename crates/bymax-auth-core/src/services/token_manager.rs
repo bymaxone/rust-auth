@@ -1065,6 +1065,27 @@ impl TokenManagerService {
         context: MfaContext,
         tenant_id: Option<&str>,
     ) -> Result<String, AuthError> {
+        // Refuse a malformed (plane, tenant) pair BEFORE signing anything. Verification applies
+        // the same predicate, and when only verification applied it this method happily returned
+        // `Ok` — and planted the single-use `mfa:` marker — for a shape that could never be
+        // redeemed. A host calling the public core API got a signed credential that was dead on
+        // arrival, and found out one round-trip later at the second factor, as an opaque invalid
+        // token. Same predicate, so the two cannot drift.
+        if !crate::services::mfa::plane_tenant_is_well_formed(context, tenant_id) {
+            // Bound first so the field expression shares a line with the macro: a `tracing`
+            // field on its own line is only evaluated when a subscriber is listening, so it
+            // reads as uncovered in every run that does not install one.
+            let plane = context.as_str();
+            tracing::warn!(plane, "mfa challenge refused at issuance");
+            return Err(AuthError::Validation {
+                details: vec![bymax_auth_types::FieldError {
+                    field: "tenantId".to_owned(),
+                    message: "a dashboard MFA challenge requires a non-empty tenantId, and a \
+                              platform one requires none"
+                        .to_owned(),
+                }],
+            });
+        }
         // Stamped so the challenge token dies with the rest of the account's credentials. See
         // the claim's own documentation for what it was surviving.
         let epoch = self
@@ -1149,11 +1170,18 @@ impl TokenManagerService {
         // tenant at all, so a value here would have to be invented, and an invented one becomes
         // a lookup key. Both directions are refused for the same reason — the tenant a token
         // asserts must be the tenant the account actually belongs to.
-        let tenant_id = match (claims.context, claims.tenant_id) {
-            (MfaContext::Dashboard, Some(tenant)) if !tenant.is_empty() => Some(tenant),
-            (MfaContext::Platform, None) => None,
-            _ => return Err(AuthError::MfaTempTokenInvalid),
-        };
+        // The same predicate issuance applies, so a shape accepted there is redeemable here and
+        // one rejected there can never arrive. The error differs by design: a caller ASKING for
+        // a malformed challenge gets a validation error naming the field, while a caller
+        // PRESENTING one gets the opaque invalid-token every other bad temp token gets — a
+        // holder must not learn which part of a forged claim set was wrong.
+        if !crate::services::mfa::plane_tenant_is_well_formed(
+            claims.context,
+            claims.tenant_id.as_deref(),
+        ) {
+            return Err(AuthError::MfaTempTokenInvalid);
+        }
+        let tenant_id = claims.tenant_id;
         Ok(MfaTempVerified {
             user_id: claims.sub,
             context: claims.context,
@@ -2231,6 +2259,49 @@ mod tests {
             svc.verify_mfa_temp_token(&token).await,
             Err(AuthError::MfaTempTokenInvalid)
         ));
+    }
+
+    #[cfg(feature = "mfa")]
+    #[tokio::test]
+    async fn issuance_refuses_the_shapes_verification_would_reject() {
+        // Issuance and verification apply the SAME predicate. When only verification applied it,
+        // this method returned `Ok` — and planted the single-use `mfa:` marker — for a shape that
+        // could never be redeemed: a host calling the public core API got back a signed
+        // credential that was dead on arrival and found out one round-trip later, at the second
+        // factor, as an opaque invalid-token. Refusing here turns that into a validation error
+        // naming the field, at the call that got it wrong.
+        let store = Arc::new(InMemoryStores::new());
+        let svc = service_with_mfa(store);
+
+        for (label, ctx, tenant) in [
+            ("dashboard without a tenant", MfaContext::Dashboard, None),
+            (
+                "dashboard with a blank tenant",
+                MfaContext::Dashboard,
+                Some(""),
+            ),
+            ("platform with a tenant", MfaContext::Platform, Some("t1")),
+        ] {
+            let issued = svc.issue_mfa_temp_token("u1", ctx, tenant).await;
+            assert!(
+                matches!(issued, Err(AuthError::Validation { ref details })
+                    if details.iter().any(|d| d.field == "tenantId")),
+                "{label} must be refused at issuance, naming the field — got {issued:?}"
+            );
+        }
+
+        // The two well-formed shapes still issue, so the guard rejects a shape rather than
+        // everything.
+        assert!(
+            svc.issue_mfa_temp_token("u1", MfaContext::Dashboard, Some("t1"))
+                .await
+                .is_ok()
+        );
+        assert!(
+            svc.issue_mfa_temp_token("p1", MfaContext::Platform, None)
+                .await
+                .is_ok()
+        );
     }
 
     #[cfg(feature = "mfa")]

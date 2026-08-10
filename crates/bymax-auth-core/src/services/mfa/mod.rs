@@ -198,7 +198,31 @@ fn scoped_subject(ctx: MfaContext, tenant_id: Option<&str>, user_id: &str) -> St
     }
 }
 
-/// Refuse a dashboard operation carrying no tenant, before any key is derived from it.
+/// Whether a `(plane, tenant)` pair is one this library will act on: the dashboard plane needs
+/// a non-empty tenant, and the platform plane must carry none.
+///
+/// THE single definition of that shape. It is consulted at three points that must agree — the
+/// public MFA entry points, the issuance of a challenge token, and its verification — and they
+/// must agree for a reason stronger than tidiness: when issuance accepted a shape verification
+/// rejects, a host calling the public core API got back a signed credential (and a planted store
+/// marker) that could never be redeemed, and the failure surfaced one round-trip later, at the
+/// second factor, as an opaque invalid-token. A second copy of this predicate is a second thing
+/// to keep in step, and the symptom of them drifting is a token that verifies on one path and
+/// not the other.
+///
+/// The empty string is refused, not treated as a tenant. `Some("")` is a present-but-meaningless
+/// value that would otherwise build the preimage `dashboard::{userId}` — a third keyspace that
+/// neither this library nor nest-auth derives anywhere else, reachable only by a caller passing
+/// a blank. Rejecting it here is what makes [`scoped_subject`]'s dashboard arm total in practice.
+pub(crate) const fn plane_tenant_is_well_formed(ctx: MfaContext, tenant_id: Option<&str>) -> bool {
+    match (ctx, tenant_id) {
+        (MfaContext::Dashboard, Some(tenant)) => !tenant.is_empty(),
+        (MfaContext::Platform, None) => true,
+        _ => false,
+    }
+}
+
+/// Refuse a malformed `(plane, tenant)` pair at a public entry point, before any key is derived.
 ///
 /// [`scoped_subject`] is total — it has to be, because the platform plane legitimately has no
 /// tenant — so on its own a `None` slipping in on the dashboard plane would silently rebuild the
@@ -208,20 +232,20 @@ fn scoped_subject(ctx: MfaContext, tenant_id: Option<&str>, user_id: &str) -> St
 ///
 /// The public MFA methods take `Option<&str>` because one signature serves both planes; the
 /// axum layer always supplies the tenant from verified claims, but the core API is public and a
-/// host calling it directly can pass `None`.
+/// host calling it directly can pass anything.
 fn require_plane_tenant(ctx: MfaContext, tenant_id: Option<&str>) -> Result<(), AuthError> {
-    match (ctx, tenant_id) {
-        (MfaContext::Dashboard, None) => {
-            tracing::warn!("mfa: dashboard operation refused — no tenant in scope");
-            Err(AuthError::Validation {
-                details: vec![bymax_auth_types::FieldError {
-                    field: "tenantId".to_owned(),
-                    message: "tenantId is required for a dashboard MFA operation".to_owned(),
-                }],
-            })
-        }
-        _ => Ok(()),
+    if plane_tenant_is_well_formed(ctx, tenant_id) {
+        return Ok(());
     }
+    tracing::warn!(plane = ctx.as_str(), "mfa: tenant does not match the plane");
+    Err(AuthError::Validation {
+        details: vec![bymax_auth_types::FieldError {
+            field: "tenantId".to_owned(),
+            message: "a dashboard MFA operation requires a non-empty tenantId, and a platform \
+                      one requires none"
+                .to_owned(),
+        }],
+    })
 }
 
 /// The MFA lifecycle service. Constructed by the engine builder only when `config.mfa` is
@@ -769,7 +793,7 @@ impl MfaService {
         let Some((enabled, secret, codes)) = mutate(&current) else {
             return Ok(false);
         };
-        self.persist_mfa(user_id, ctx, enabled, secret, codes)
+        self.persist_mfa(user_id, ctx, tenant_id, enabled, secret, codes)
             .await?;
         Ok(true)
     }
@@ -785,6 +809,7 @@ impl MfaService {
         &self,
         user_id: &str,
         ctx: MfaContext,
+        tenant_id: Option<&str>,
         enabled: bool,
         secret: Option<String>,
         codes: Option<Vec<String>>,
@@ -794,6 +819,7 @@ impl MfaService {
                 .user_repo
                 .update_mfa(
                     user_id,
+                    tenant_id,
                     bymax_auth_types::UpdateMfaData {
                         mfa_enabled: enabled,
                         mfa_secret: secret,

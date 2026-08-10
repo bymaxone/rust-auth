@@ -51,8 +51,28 @@ pub trait UserRepository: Send + Sync {
     /// plaintext.
     async fn update_password(&self, id: &str, password_hash: &str) -> Result<(), RepositoryError>;
 
-    /// Apply a new TOTP MFA configuration (enable / disable / clear).
-    async fn update_mfa(&self, id: &str, data: UpdateMfaData) -> Result<(), RepositoryError>;
+    /// Apply a new TOTP MFA configuration (enable / disable / clear), scoped to a tenant.
+    ///
+    /// `tenant_id` carries the same contract as [`UserRepository::find_by_id`]'s: implementations
+    /// MUST restrict the write to that tenant, and `None` is reserved for internal admin flows
+    /// that legitimately span tenants.
+    ///
+    /// It is here because a write keyed on `id` alone cannot be correct under a schema that
+    /// numbers users per tenant, and this is the write every MFA transition performs. Two
+    /// failures, both silent: the update lands on ANOTHER tenant's row and corrupts its MFA
+    /// state; or the row this flow read is not the row it wrote, so a recovery code spent by a
+    /// successful challenge is never spliced out and becomes usable again the moment the
+    /// short-lived `rcu:` claim expires — which is the single-use property recovery codes exist
+    /// to have (ASVS 5.0 6.5.1, NIST SP 800-63B).
+    ///
+    /// The read side was scoped first and on its own it is not enough: scoping the lookup
+    /// guarantees the flow REASONS about the right account, not that it WRITES to it.
+    async fn update_mfa(
+        &self,
+        id: &str,
+        tenant_id: Option<&str>,
+        data: UpdateMfaData,
+    ) -> Result<(), RepositoryError>;
 
     /// Stamp the current time as the user's last successful login.
     async fn update_last_login(&self, id: &str) -> Result<(), RepositoryError>;
@@ -180,7 +200,12 @@ mod tests {
         ) -> Result<(), RepositoryError> {
             Ok(())
         }
-        async fn update_mfa(&self, _id: &str, _data: UpdateMfaData) -> Result<(), RepositoryError> {
+        async fn update_mfa(
+            &self,
+            _id: &str,
+            _tenant_id: Option<&str>,
+            _data: UpdateMfaData,
+        ) -> Result<(), RepositoryError> {
             Ok(())
         }
         async fn update_last_login(&self, _id: &str) -> Result<(), RepositoryError> {
@@ -267,6 +292,7 @@ mod tests {
             users
                 .update_mfa(
                     "x",
+                    None,
                     UpdateMfaData {
                         mfa_enabled: false,
                         mfa_secret: None,
