@@ -86,7 +86,16 @@ async fn setup(
     };
     match state
         .engine()
-        .mfa_setup(&user.0.sub, MfaContext::Dashboard, dto.password.as_deref())
+        .mfa_setup(
+            &user.0.sub,
+            MfaContext::Dashboard,
+            // The operation targets the account named by the VERIFIED token, in the tenant that
+            // token names. Without it the read and the writes behind it resolve by bare id,
+            // which the gate above no longer does — leaving the gate checking one account and
+            // the operation touching another.
+            Some(user.0.tenant_id.as_str()),
+            dto.password.as_deref(),
+        )
         .await
     {
         Ok(result) => (
@@ -122,6 +131,7 @@ async fn verify_enable(
             &ctx.ip,
             &ctx.user_agent,
             MfaContext::Dashboard,
+            Some(user.0.tenant_id.as_str()),
         )
         .await
     {
@@ -209,6 +219,7 @@ async fn disable(
             &ctx.ip,
             &ctx.user_agent,
             MfaContext::Dashboard,
+            Some(user.0.tenant_id.as_str()),
         )
         .await
     {
@@ -238,6 +249,7 @@ async fn recovery_codes(
             &ctx.ip,
             &ctx.user_agent,
             MfaContext::Dashboard,
+            Some(user.0.tenant_id.as_str()),
         )
         .await
     {

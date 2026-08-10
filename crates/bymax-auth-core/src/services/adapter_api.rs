@@ -344,11 +344,12 @@ impl AuthEngine {
         &self,
         user_id: &str,
         ctx: MfaContext,
+        tenant_id: Option<&str>,
         password: Option<&str>,
     ) -> Result<MfaSetupResult, AuthError> {
         self.mfa()
             .ok_or(AuthError::MfaNotEnabled)?
-            .setup(user_id, ctx, password)
+            .setup(user_id, ctx, tenant_id, password)
             .await
     }
 
@@ -366,10 +367,11 @@ impl AuthEngine {
         ip: &str,
         user_agent: &str,
         ctx: MfaContext,
+        tenant_id: Option<&str>,
     ) -> Result<(), AuthError> {
         self.mfa()
             .ok_or(AuthError::MfaNotEnabled)?
-            .verify_and_enable(user_id, code, ip, user_agent, ctx)
+            .verify_and_enable(user_id, code, ip, user_agent, ctx, tenant_id)
             .await
     }
 
@@ -455,10 +457,11 @@ impl AuthEngine {
         ip: &str,
         user_agent: &str,
         ctx: MfaContext,
+        tenant_id: Option<&str>,
     ) -> Result<(), AuthError> {
         self.mfa()
             .ok_or(AuthError::MfaNotEnabled)?
-            .disable(user_id, code, ip, user_agent, ctx)
+            .disable(user_id, code, ip, user_agent, ctx, tenant_id)
             .await
     }
 
@@ -476,10 +479,11 @@ impl AuthEngine {
         ip: &str,
         user_agent: &str,
         ctx: MfaContext,
+        tenant_id: Option<&str>,
     ) -> Result<Vec<String>, AuthError> {
         self.mfa()
             .ok_or(AuthError::MfaNotEnabled)?
-            .regenerate_recovery_codes(user_id, code, ip, user_agent, ctx)
+            .regenerate_recovery_codes(user_id, code, ip, user_agent, ctx, tenant_id)
             .await
     }
 
@@ -1136,12 +1140,14 @@ mod tests {
         use bymax_auth_types::MfaContext;
         let Some(h) = harness(base_config(), None) else { return };
         assert!(matches!(
-            h.engine.mfa_setup("u", MfaContext::Dashboard, None).await,
+            h.engine
+                .mfa_setup("u", MfaContext::Dashboard, Some("t1"), None)
+                .await,
             Err(AuthError::MfaNotEnabled)
         ));
         assert!(matches!(
             h.engine
-                .mfa_verify_enable("u", "000000", "ip", "ua", MfaContext::Dashboard)
+                .mfa_verify_enable("u", "000000", "ip", "ua", MfaContext::Dashboard, Some("t1"))
                 .await,
             Err(AuthError::MfaNotEnabled)
         ));
@@ -1151,13 +1157,20 @@ mod tests {
         ));
         assert!(matches!(
             h.engine
-                .mfa_disable("u", "000000", "ip", "ua", MfaContext::Dashboard)
+                .mfa_disable("u", "000000", "ip", "ua", MfaContext::Dashboard, Some("t1"))
                 .await,
             Err(AuthError::MfaNotEnabled)
         ));
         assert!(matches!(
             h.engine
-                .mfa_regenerate_recovery_codes("u", "000000", "ip", "ua", MfaContext::Dashboard)
+                .mfa_regenerate_recovery_codes(
+                    "u",
+                    "000000",
+                    "ip",
+                    "ua",
+                    MfaContext::Dashboard,
+                    Some("t1")
+                )
                 .await,
             Err(AuthError::MfaNotEnabled)
         ));

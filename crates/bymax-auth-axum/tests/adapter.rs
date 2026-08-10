@@ -1137,7 +1137,8 @@ async fn mfa_setup_verify_enable_and_challenge_error_arms() {
         .json(serde_json::json!({ "code": "000000" }))
         .send(&app)
         .await;
-    assert_ne!(recov.status, StatusCode::OK);
+    assert_eq!(recov.status, StatusCode::UNAUTHORIZED);
+    assert_eq!(recov.json()["error"]["code"], "auth.token_invalid");
 }
 
 #[tokio::test]
@@ -2759,8 +2760,10 @@ async fn a_ghost_subject_is_turned_away_before_any_mfa_handler_runs() {
     // What this pins now is that refusal. The handlers' error arms are driven by a real account
     // in `mfa_management_error_arms_with_a_real_account`.
     //
-    // The assertions stay `assert_ne!` on purpose: which refusal a ghost earns is not the point,
-    // and pinning an exact code here would couple this test to the gate's internals.
+    // The assertions pin the exact refusal. `assert_ne!(status, <success>)` would not have
+    // distinguished a gate rejection from an engine error — the handlers refuse a ghost too, so
+    // the test would stay green with the gate removed, which is precisely the claim it is here
+    // to make.
     let Some(h) = build(EngineSpec {
         mfa: true,
         ..EngineSpec::default()
@@ -2774,21 +2777,24 @@ async fn a_ghost_subject_is_turned_away_before_any_mfa_handler_runs() {
         .cookie("access_token", &ghost)
         .send(&app)
         .await;
-    assert_ne!(setup.status, StatusCode::CREATED);
+    assert_eq!(setup.status, StatusCode::UNAUTHORIZED);
+    assert_eq!(setup.json()["error"]["code"], "auth.token_invalid");
 
     let verify = Req::post("/auth/mfa/verify-enable")
         .cookie("access_token", &ghost)
         .json(serde_json::json!({ "code": "000000" }))
         .send(&app)
         .await;
-    assert_ne!(verify.status, StatusCode::NO_CONTENT);
+    assert_eq!(verify.status, StatusCode::UNAUTHORIZED);
+    assert_eq!(verify.json()["error"]["code"], "auth.token_invalid");
 
     let disable = Req::post("/auth/mfa/disable")
         .cookie("access_token", &ghost)
         .json(serde_json::json!({ "code": "000000" }))
         .send(&app)
         .await;
-    assert_ne!(disable.status, StatusCode::NO_CONTENT);
+    assert_eq!(disable.status, StatusCode::UNAUTHORIZED);
+    assert_eq!(disable.json()["error"]["code"], "auth.token_invalid");
 
     let recov = Req::post("/auth/mfa/recovery-codes")
         .cookie("access_token", &ghost)

@@ -132,7 +132,12 @@ async fn full_lifecycle_against_real_redis() {
 
     // setup → enable. Compute the lifecycle's distinct TOTP codes from one captured base
     // (steps s, s+1, s+2, s-1), so they never collide as the clock advances mid-test.
-    let Ok(setup) = mfa.setup(&uid, MfaContext::Dashboard, None).await else { return };
+    let Ok(setup) = mfa
+        .setup(&uid, MfaContext::Dashboard, Some("t1"), None)
+        .await
+    else {
+        return;
+    };
     assert_eq!(setup.recovery_codes.len(), 8);
     let base = now_secs();
     let enable_code = code_at(&setup.secret, base);
@@ -140,9 +145,16 @@ async fn full_lifecycle_against_real_redis() {
     let regen_code = code_at(&setup.secret, base + 60);
     let disable_code = code_at(&setup.secret, base - 30);
     assert!(
-        mfa.verify_and_enable(&uid, &enable_code, "1.2.3.4", "ua", MfaContext::Dashboard)
-            .await
-            .is_ok()
+        mfa.verify_and_enable(
+            &uid,
+            &enable_code,
+            "1.2.3.4",
+            "ua",
+            MfaContext::Dashboard,
+            Some("t1")
+        )
+        .await
+        .is_ok()
     );
 
     // challenge via TOTP (a fresh step so the anti-replay marker is new).
@@ -175,7 +187,14 @@ async fn full_lifecycle_against_real_redis() {
 
     // Regenerate atomically: the old codes are invalidated wholesale.
     let Ok(fresh) = mfa
-        .regenerate_recovery_codes(&uid, &regen_code, "1.2.3.4", "ua", MfaContext::Dashboard)
+        .regenerate_recovery_codes(
+            &uid,
+            &regen_code,
+            "1.2.3.4",
+            "ua",
+            MfaContext::Dashboard,
+            Some("t1"),
+        )
         .await
     else {
         return;
@@ -191,9 +210,16 @@ async fn full_lifecycle_against_real_redis() {
 
     // disable.
     assert!(
-        mfa.disable(&uid, &disable_code, "1.2.3.4", "ua", MfaContext::Dashboard)
-            .await
-            .is_ok()
+        mfa.disable(
+            &uid,
+            &disable_code,
+            "1.2.3.4",
+            "ua",
+            MfaContext::Dashboard,
+            Some("t1")
+        )
+        .await
+        .is_ok()
     );
     // A subsequent login no longer challenges (MFA is off): it succeeds outright.
     let input = LoginInput {
@@ -217,7 +243,12 @@ async fn concurrent_correct_totp_yields_one_session() {
     let secret;
     {
         let Some(mfa) = engine.mfa() else { return };
-        let Ok(setup) = mfa.setup(&uid, MfaContext::Dashboard, None).await else { return };
+        let Ok(setup) = mfa
+            .setup(&uid, MfaContext::Dashboard, Some("t1"), None)
+            .await
+        else {
+            return;
+        };
         if mfa
             .verify_and_enable(
                 &uid,
@@ -225,6 +256,7 @@ async fn concurrent_correct_totp_yields_one_session() {
                 "1.2.3.4",
                 "ua",
                 MfaContext::Dashboard,
+                Some("t1"),
             )
             .await
             .is_err()
@@ -279,7 +311,12 @@ async fn concurrent_distinct_valid_codes_yield_one_session() {
     let secret;
     {
         let Some(mfa) = engine.mfa() else { return };
-        let Ok(setup) = mfa.setup(&uid, MfaContext::Dashboard, None).await else { return };
+        let Ok(setup) = mfa
+            .setup(&uid, MfaContext::Dashboard, Some("t1"), None)
+            .await
+        else {
+            return;
+        };
         if mfa
             .verify_and_enable(
                 &uid,
@@ -287,6 +324,7 @@ async fn concurrent_distinct_valid_codes_yield_one_session() {
                 "1.2.3.4",
                 "ua",
                 MfaContext::Dashboard,
+                Some("t1"),
             )
             .await
             .is_err()

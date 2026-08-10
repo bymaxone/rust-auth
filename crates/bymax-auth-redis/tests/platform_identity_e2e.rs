@@ -304,7 +304,9 @@ async fn platform_mfa_challenge_exchange_issues_a_full_session_against_redis() {
     let base = now_secs();
     // Enrolment re-authenticates: this admin has a password, so it must be re-proved
     // before a factor is minted.
-    let setup_result = mfa.setup(&id, MfaContext::Platform, Some(PASSWORD)).await;
+    let setup_result = mfa
+        .setup(&id, MfaContext::Platform, None, Some(PASSWORD))
+        .await;
     assert!(
         setup_result.is_ok(),
         "platform MFA setup must succeed: {setup_result:?}"
@@ -318,7 +320,8 @@ async fn platform_mfa_challenge_exchange_issues_a_full_session_against_redis() {
             &code_at(&setup.secret, base),
             "1.2.3.4",
             "ua",
-            MfaContext::Platform
+            MfaContext::Platform,
+            None,
         )
         .await
         .is_ok()

@@ -77,7 +77,7 @@ where
 mod tests {
     use super::*;
     use crate::response::AuthRejection;
-    use crate::test_support::{dashboard_token, parts_with_cookie, scaffold, seed};
+    use crate::test_support::{dashboard_token, mint_token, parts_with_cookie, scaffold, seed};
     use bymax_auth_core::config::TokenDelivery;
     use bymax_auth_core::traits::UserRepository;
     use bymax_auth_types::AuthError;
@@ -121,16 +121,34 @@ mod tests {
             Ok(UserStatus(_))
         ));
 
-        // Asking the same id under another tenant finds nothing, which is the whole point: the
-        // engine call the extractor makes must be the tenant-scoped one.
-        let cross = s
-            .state
-            .engine()
-            .assert_user_active(&id, Some("other"))
-            .await;
+        // The regression this guards against is the EXTRACTOR passing `None`, so it has to be
+        // driven through the extractor. Calling the engine directly with another tenant would
+        // only prove the engine scopes — and would keep passing if the extractor stopped
+        // sending the tenant at all, which is exactly the bug.
+        //
+        // A token is minted whose claims name a tenant the account does not belong to. Scoped,
+        // the lookup finds nothing and the gate refuses; unscoped, it finds the row by bare id
+        // and lets the request through.
+        let elsewhere = DashboardClaims {
+            iss: None,
+            aud: None,
+            sub: id.clone(),
+            jti: "jti-other-tenant".to_owned(),
+            tenant_id: "some-other-tenant".to_owned(),
+            role: "USER".to_owned(),
+            token_type: bymax_auth_types::DashboardType::Dashboard,
+            status: "ACTIVE".to_owned(),
+            mfa_enabled: false,
+            mfa_verified: false,
+            iat: 1_700_000_000,
+            exp: 4_102_444_800,
+            epoch: 0,
+        };
+        let mut parts = parts_with_cookie(&mint_token(&elsewhere));
+        let refused = UserStatus::from_request_parts(&mut parts, &s.state).await;
         assert!(
-            matches!(cross, Err(AuthError::TokenInvalid)),
-            "the status gate answered for an id outside the tenant: {cross:?}"
+            matches!(refused, Err(AuthRejection(AuthError::TokenInvalid))),
+            "the gate resolved an id outside the token's tenant: {refused:?}"
         );
     }
 

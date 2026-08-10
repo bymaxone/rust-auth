@@ -41,8 +41,6 @@ version bump.
   `UserStatus` is unchanged and still gates status alone — ws-ticket, password change and the
   session routes keep their current behaviour rather than silently acquiring a second gate.
 
-### Security
-
 - **A delivery failure no longer logs the catalogue's subject.** `DefaultAuthEmailProvider`
   reported a failed send with the rendered subject line, and the subject comes from
   `AuthEmailCatalogue` — which is the host's. Putting the code in the subject is an ordinary

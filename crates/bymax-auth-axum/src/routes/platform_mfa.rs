@@ -61,7 +61,13 @@ async fn setup(
         };
     match state
         .engine()
-        .mfa_setup(&user.0.sub, MfaContext::Platform, dto.password.as_deref())
+        .mfa_setup(
+            &user.0.sub,
+            MfaContext::Platform,
+            // A platform admin is cross-tenant by definition, so there is no tenant to scope by.
+            None,
+            dto.password.as_deref(),
+        )
         .await
     {
         Ok(result) => (
@@ -92,6 +98,8 @@ async fn verify_enable(
             &ctx.ip,
             &ctx.user_agent,
             MfaContext::Platform,
+            // A platform admin is cross-tenant by definition, so there is no tenant to scope by.
+            None,
         )
         .await
     {
@@ -115,6 +123,8 @@ async fn disable(
             &ctx.ip,
             &ctx.user_agent,
             MfaContext::Platform,
+            // A platform admin is cross-tenant by definition, so there is no tenant to scope by.
+            None,
         )
         .await
     {
@@ -138,6 +148,8 @@ async fn recovery_codes(
             &ctx.ip,
             &ctx.user_agent,
             MfaContext::Platform,
+            // A platform admin is cross-tenant by definition, so there is no tenant to scope by.
+            None,
         )
         .await
     {
