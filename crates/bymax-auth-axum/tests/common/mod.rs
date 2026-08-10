@@ -124,7 +124,6 @@ pub fn hash_password(plain: &str) -> String {
     bymax_auth_crypto::password::hash(plain.as_bytes(), &params).unwrap_or_default()
 }
 
-/// The built engine plus the concrete in-memory collaborators a test seeds/inspects.
 /// An email provider that keeps the codes it was asked to send.
 ///
 /// The OTP record no longer holds the plaintext code — it holds a keyed fingerprint, so a test
@@ -255,6 +254,7 @@ impl bymax_auth_core::traits::EmailProvider for CapturingEmails {
     }
 }
 
+/// The built engine plus the concrete in-memory collaborators a test seeds/inspects.
 pub struct Harness {
     pub engine: Arc<AuthEngine>,
     pub users: Arc<InMemoryUserRepository>,

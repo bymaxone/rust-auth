@@ -1118,8 +1118,13 @@ mod tests {
                 .await
                 .is_ok()
         );
-        // From the mail; the stored record is a keyed fingerprint, not the code.
-        let Some(code) = h.emails.password_reset_code() else { return };
+        // From the mail; the stored record is a keyed fingerprint, not the code. Awaited and
+        // asserted like the second issuance below: the send is detached, so an immediate read
+        // races it, and `else { return }` would turn a lost race into a test that exercises
+        // neither reset path and still reports success.
+        let mailed = crate::services::auth::test_support::await_password_reset_code(&h).await;
+        assert!(mailed.is_some(), "the reset mail never carried a code");
+        let Some(code) = mailed else { return };
         let reset = ResetPasswordInput {
             email: "otp@example.com".to_owned(),
             tenant_id: Some("t1".to_owned()),
