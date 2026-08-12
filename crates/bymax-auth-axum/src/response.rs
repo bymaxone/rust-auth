@@ -32,10 +32,15 @@ impl IntoResponse for AuthRejection {
     }
 }
 
-/// Build the canonical HTTP response for an [`AuthError`]: the JSON envelope, the mapped
-/// status, and — for the lockout / OTP-cap / rate-limit codes — a `Retry-After` header
-/// computed from the error's `retry_after_seconds`. An [`AuthError::Internal`] logs its
-/// cause via `tracing` and renders only the generic 500 envelope, never the cause.
+/// Build the canonical HTTP response for an [`AuthError`]: the JSON envelope, the status
+/// the shared contract pins for the wire code, and — for the lockout and rate-limit codes —
+/// a `Retry-After` header computed from the error's `retry_after_seconds`. An
+/// [`AuthError::Internal`] logs its cause via `tracing` and renders only the generic 500
+/// envelope, never the cause.
+///
+/// The OTP cap is deliberately absent from that list: it reaches the client as
+/// `auth.otp_invalid`, so a `Retry-After` would hand back through a header exactly what the
+/// code collapse withholds — only a record that exists can reach an attempt ceiling.
 #[must_use]
 pub fn error_response(error: &AuthError) -> Response {
     if let AuthError::Internal(cause) = error {
