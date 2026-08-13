@@ -4,20 +4,29 @@
 //!
 //! # Parity & security
 //!
-//! Every code string and HTTP status is byte-identical to `@bymax-one/nest-auth`, so
-//! existing clients decode `rust-auth` errors unchanged. Three internal-only codes —
-//! [`AuthErrorCode::TokenExpired`], [`AuthErrorCode::TokenRevoked`], and the
-//! [`AuthErrorCode::TokenMissing`] sentinel — must never reach a client: they exist
-//! for internal control flow and logs and are collapsed to
-//! [`AuthErrorCode::TokenInvalid`] at the HTTP boundary (via [`AuthErrorCode::to_wire`]),
-//! denying an attacker an oracle that distinguishes "expired" from "revoked" from
-//! "garbage".
+//! Every code string, and the HTTP status behind it, is pinned by
+//! `conformance/wire-contract.json` — the artifact `@bymax-one/nest-auth` holds
+//! byte-identical — so existing clients decode `rust-auth` errors unchanged. That file is
+//! the source of truth for both, and `tests/error_catalog.rs` reads it rather than
+//! restating it: a table restated per implementation is how thirteen codes came to answer
+//! a different status on each side while both suites stayed green.
+//!
+//! Five internal-only codes must never reach a client; they exist for internal control
+//! flow and logs, and are collapsed at the HTTP boundary via [`AuthErrorCode::to_wire`].
+//! The three token sentinels — [`AuthErrorCode::TokenExpired`],
+//! [`AuthErrorCode::TokenRevoked`], [`AuthErrorCode::TokenMissing`] — become
+//! [`AuthErrorCode::TokenInvalid`], denying an attacker an oracle that distinguishes
+//! "expired" from "revoked" from "garbage". The two OTP sentinels —
+//! [`AuthErrorCode::OtpExpired`], [`AuthErrorCode::OtpMaxAttempts`] — become
+//! [`AuthErrorCode::OtpInvalid`], which is what keeps `forgot_password` answering
+//! uniformly for an address that has no account.
 
 use serde::{Deserialize, Serialize};
 
 /// Stable, serializable error code. Each variant serializes to its exact `auth.*`
-/// string literal, byte-identical to nest-auth's `AUTH_ERROR_CODES`, and maps to a
-/// fixed HTTP status via [`AuthErrorCode::http_status`].
+/// string literal, byte-identical to nest-auth's `AUTH_ERROR_CODES`, and maps to a fixed
+/// HTTP status via [`AuthErrorCode::http_status`]. Both the string and the status are
+/// pinned by `errorCatalog` in `conformance/wire-contract.json`, not by this file.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts-export", derive(ts_rs::TS))]
 #[cfg_attr(feature = "ts-export", ts(export_to = "error-codes.ts"))]
@@ -187,7 +196,18 @@ pub enum AuthErrorCode {
 }
 
 impl AuthErrorCode {
-    /// The fixed HTTP status for this code, identical to nest-auth's catalog.
+    /// The fixed HTTP status for this code, **before** the internal-only remap.
+    ///
+    /// For a public code this is the status a caller receives, and it is the value
+    /// `errorCatalog.statuses` pins in the shared contract. For an internal-only code it is
+    /// not: what a caller receives is the status of the public code it collapses onto, which
+    /// is what [`AuthError::http_status`] returns and what the contract pins.
+    ///
+    /// [`AuthErrorCode::OtpMaxAttempts`] is the only code where the two differ — 429 here, 401
+    /// on the wire. Only a record that exists can reach an attempt ceiling, so answering 429
+    /// would say through the status line exactly what [`AuthErrorCode::to_wire`] removes from
+    /// the body. Prefer [`AuthError::http_status`] unless you specifically want the pre-wire
+    /// value, which is for logs.
     #[must_use]
     pub fn http_status(self) -> u16 {
         match self {
@@ -565,7 +585,8 @@ impl AuthError {
         }
     }
 
-    /// The HTTP status for this error (from its code).
+    /// The HTTP status a caller receives for this error — the value `errorCatalog.statuses`
+    /// pins in the shared contract, which both implementations are checked against.
     #[must_use]
     pub fn http_status(&self) -> u16 {
         // The WIRE code decides the status, because the status is part of the answer. Reading
@@ -584,6 +605,13 @@ impl AuthError {
 
     /// Whether this error's code is internal-only and must be remapped before it
     /// reaches a client.
+    ///
+    /// This is a predicate for a host's own logging and control flow. It is **not** what
+    /// performs the collapse, and nothing in this library branches on it:
+    /// [`AuthError::http_status`], [`AuthError::to_envelope`] and [`AuthError::to_response`]
+    /// each resolve the wire code through [`AuthErrorCode::to_wire`] before reading anything,
+    /// so a rendering path cannot forget to ask. Making the collapse conditional on this
+    /// method would put the guarantee back into a caller's hands.
     #[must_use]
     pub fn is_internal_only(&self) -> bool {
         self.code().is_internal_only()

@@ -757,24 +757,30 @@ async fn validation_rejects_unknown_fields_and_bad_fields() {
     assert_eq!(unknown.json()["error"]["code"], "auth.validation");
     assert!(unknown.json()["error"]["details"].is_array());
 
-    // A bad email fails the `garde(email)` rule.
+    // A bad email fails the `garde(email)` rule. Every other field is deliberately VALID, and
+    // the offending field is named in the assertion: both requests used `"name": "X"`, which
+    // fails the two-character minimum on its own, so each would have gone on answering 400
+    // `auth.validation` with the rule it is named for deleted.
     let bad_email = Req::post("/auth/register")
         .json(serde_json::json!({
-            "email": "not-an-email", "password": "glidingwalnut42", "name": "X", "tenantId": TENANT
+            "email": "not-an-email", "password": "glidingwalnut42", "name": "Xan", "tenantId": TENANT
         }))
         .send(&app)
         .await;
     assert_eq!(bad_email.status, StatusCode::BAD_REQUEST);
     assert_eq!(bad_email.json()["error"]["code"], "auth.validation");
+    assert_eq!(bad_email.json()["error"]["details"][0]["field"], "email");
 
     // A too-short password fails the length rule.
     let short_pw = Req::post("/auth/register")
         .json(serde_json::json!({
-            "email": "ok@e.com", "password": "short", "name": "X", "tenantId": TENANT
+            "email": "ok@e.com", "password": "short", "name": "Xan", "tenantId": TENANT
         }))
         .send(&app)
         .await;
     assert_eq!(short_pw.status, StatusCode::BAD_REQUEST);
+    assert_eq!(short_pw.json()["error"]["code"], "auth.validation");
+    assert_eq!(short_pw.json()["error"]["details"][0]["field"], "password");
 }
 
 // ----------------------------------------------------------------------------------------
@@ -805,6 +811,19 @@ async fn auth_user_rejects_missing_invalid_and_revoked_tokens() {
     let login_resp = login(&app, "tok@e.com", "glidingwalnut42").await;
     let refresh_value = login_resp.cookie_value("refresh_token").unwrap_or_default();
     let access2 = login_resp.cookie_value("access_token").unwrap_or_default();
+    // The fixture is pinned before it is relied on. `unwrap_or_default()` turns an absent cookie
+    // into the empty string, and an empty token answers the same `401 auth.token_invalid` this
+    // test asserts below — so a login that quietly failed would satisfy the revoked-token check
+    // without a token ever having been revoked. Asserting the logout response would not catch
+    // it: logout answers 204 whether or not it was given a valid token.
+    assert!(
+        !access2.is_empty(),
+        "the login fixture issued no access token"
+    );
+    assert!(
+        !refresh_value.is_empty(),
+        "the login fixture issued no refresh token"
+    );
     let _ = Req::post("/auth/logout")
         .cookie("access_token", &access2)
         .cookie("refresh_token", &refresh_value)
@@ -1123,13 +1142,18 @@ async fn mfa_setup_verify_enable_and_challenge_error_arms() {
         .await;
     assert_eq!(challenge.status, StatusCode::UNAUTHORIZED);
 
-    // disable with a wrong code is rejected (not 204).
+    // `disable` carries the PRE-enable token, which the successful `verify-enable` above
+    // invalidated by bumping the plane's token epoch. So what this pins is the epoch sweep, not
+    // the wrong-code arm — the same refusal the `recovery-codes` call below already asserts
+    // exactly. `assert_ne!(status, 204)` was true of both and distinguished neither, which is
+    // how the comment here came to describe a wrong-code rejection that never runs.
     let disable = Req::post("/auth/mfa/disable")
         .cookie("access_token", &access)
         .json(serde_json::json!({ "code": "000000" }))
         .send(&app)
         .await;
-    assert_ne!(disable.status, StatusCode::NO_CONTENT);
+    assert_eq!(disable.status, StatusCode::UNAUTHORIZED);
+    assert_eq!(disable.json()["error"]["code"], "auth.token_invalid");
 
     // recovery-codes with a wrong code is rejected.
     let recov = Req::post("/auth/mfa/recovery-codes")
@@ -1509,13 +1533,16 @@ async fn exceeding_the_login_limit_returns_a_429_envelope_with_retry_after() {
     assert!(resp.retry_after().is_some());
 
     // A different route's limit is independent (register is not throttled by login attempts).
+    // Asserted as the 201 it actually answers rather than as "not 429": the negation was also
+    // satisfied by a 500 that never reached the limiter, so it could not tell an independent
+    // limit from a broken route.
     let register = Req::new(Method::POST, "/auth/register")
         .json(serde_json::json!({
             "email": "fresh@e.com", "password": "glidingwalnut42", "name": "Fresh", "tenantId": TENANT
         }))
         .send(&app)
         .await;
-    assert_ne!(register.status, StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(register.status, StatusCode::CREATED);
 }
 
 #[tokio::test]
@@ -1536,11 +1563,15 @@ async fn a_custom_rate_limit_override_changes_the_threshold() {
     };
     let app = AuthRouter::from_engine(h.engine.clone(), config).into_router();
 
+    // The first attempt is under the override's threshold, so it is refused on its merits.
+    // Pinned as that exact refusal rather than as "not 429": the negation passed on any failure
+    // at all, including one that never reached the limiter.
     let first = Req::post("/auth/login")
         .json(serde_json::json!({ "email": "ov@e.com", "password": "wrong", "tenantId": TENANT }))
         .send(&app)
         .await;
-    assert_ne!(first.status, StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(first.status, StatusCode::UNAUTHORIZED);
+    assert_eq!(first.json()["error"]["code"], "auth.invalid_credentials");
     let second = Req::post("/auth/login")
         .json(serde_json::json!({ "email": "ov@e.com", "password": "wrong", "tenantId": TENANT }))
         .send(&app)
@@ -1947,7 +1978,7 @@ async fn mfa_challenge_temp_token_sourcing_precedence_and_clearing_policy() {
         .json(serde_json::json!({ "code": "000000" }))
         .send(&app)
         .await;
-    assert_ne!(wrong_code.status, StatusCode::OK);
+    assert_eq!(wrong_code.status, StatusCode::UNAUTHORIZED);
     assert_eq!(
         wrong_code.json()["error"]["code"],
         "auth.mfa_invalid_code",
@@ -2524,8 +2555,16 @@ async fn platform_me_and_revoke_error_arms_with_a_ghost_admin() {
 }
 
 #[tokio::test]
-async fn mfa_setup_error_arm_when_already_enabled() {
-    // Calling setup twice (after enrolment) triggers the mfa setup error arm (already enabled).
+async fn mfa_setup_after_enrolment_is_refused_with_the_stale_pre_enable_token() {
+    // Renamed from `mfa_setup_error_arm_when_already_enabled`, which is not what it does — and
+    // `assert_ne!(status, 201)` is why nobody noticed. Enrolment bumps the plane's token epoch,
+    // so the pre-enable cookie this test keeps using is dead by the time `setup` is called
+    // again: the request is refused at the gate with `auth.token_invalid` and never reaches the
+    // already-enabled arm. The negation was satisfied by both outcomes.
+    //
+    // What it pins now is real and worth keeping — the epoch sweep is enforced at the HTTP
+    // boundary — but the already-enabled arm is NOT covered here. Reaching it needs a token
+    // minted after enrolment.
     let Some(h) = build(EngineSpec {
         mfa: true,
         ..EngineSpec::default()
@@ -2535,7 +2574,7 @@ async fn mfa_setup_error_arm_when_already_enabled() {
     let app = router(&h);
     let reg = Req::post("/auth/register")
         .json(serde_json::json!({
-            "email": "me2@e.com", "password": "glidingwalnut42", "name": "M", "tenantId": TENANT
+            "email": "me2@e.com", "password": "glidingwalnut42", "name": "Mia", "tenantId": TENANT
         }))
         .send(&app)
         .await;
@@ -2545,25 +2584,37 @@ async fn mfa_setup_error_arm_when_already_enabled() {
         .json(serde_json::json!({ "password": "glidingwalnut42" }))
         .send(&app)
         .await;
+    assert_eq!(setup.status, StatusCode::CREATED);
     let secret = setup.json()["secret"].as_str().unwrap_or("").to_owned();
-    let _ = Req::post("/auth/mfa/verify-enable")
+    // Asserted rather than discarded: the refusal below only means what the name says if
+    // enrolment actually happened. A discarded result let the whole fixture fail silently and
+    // still produce the 401 the test was looking for.
+    let enable = Req::post("/auth/mfa/verify-enable")
         .cookie("access_token", &access)
         .json(serde_json::json!({ "code": current_totp(&secret) }))
         .send(&app)
         .await;
-    // setup again now hits the setup error arm; the exact status depends on the engine's
-    // re-enrolment policy, so assert only that it is no longer the 201 success.
+    assert_eq!(enable.status, StatusCode::NO_CONTENT);
     let again = Req::post("/auth/mfa/setup")
         .cookie("access_token", &access)
         .json(serde_json::json!({ "password": "glidingwalnut42" }))
         .send(&app)
         .await;
-    assert_ne!(again.status, StatusCode::CREATED);
+    assert_eq!(again.status, StatusCode::UNAUTHORIZED);
+    assert_eq!(again.json()["error"]["code"], "auth.token_invalid");
 }
 
 #[tokio::test]
 async fn mfa_verify_enable_error_arm_with_a_wrong_code() {
     // verify-enable with a wrong code triggers the verify-enable error arm.
+    //
+    // It did not, until the fixture below was repaired: the registration sent `"name": "V"`,
+    // which fails the two-character minimum, so it answered 400, no cookie was set, `access` was
+    // the empty string, and every later request was simply unauthenticated. The test asserted
+    // `assert_ne!(status, 204)` and a 401 satisfied that as readily as the 400 it was after — so
+    // a test that never created a user, never ran setup, and never reached the arm it is named
+    // for reported green. Both halves were needed to hide it: a fixture that fails without
+    // asserting, and an assertion loose enough not to care.
     let Some(h) = build(EngineSpec {
         mfa: true,
         ..EngineSpec::default()
@@ -2573,7 +2624,7 @@ async fn mfa_verify_enable_error_arm_with_a_wrong_code() {
     let app = router(&h);
     let reg = Req::post("/auth/register")
         .json(serde_json::json!({
-            "email": "ve@e.com", "password": "glidingwalnut42", "name": "V", "tenantId": TENANT
+            "email": "ve@e.com", "password": "glidingwalnut42", "name": "Vee", "tenantId": TENANT
         }))
         .send(&app)
         .await;
@@ -2588,7 +2639,8 @@ async fn mfa_verify_enable_error_arm_with_a_wrong_code() {
         .json(serde_json::json!({ "code": "000000" }))
         .send(&app)
         .await;
-    assert_ne!(resp.status, StatusCode::NO_CONTENT);
+    assert_eq!(resp.status, StatusCode::UNAUTHORIZED);
+    assert_eq!(resp.json()["error"]["code"], "auth.mfa_invalid_code");
 }
 
 #[tokio::test]
@@ -2810,12 +2862,20 @@ async fn a_ghost_subject_is_turned_away_before_any_mfa_handler_runs() {
         .json(serde_json::json!({ "code": "000000" }))
         .send(&app)
         .await;
-    assert_ne!(recov.status, StatusCode::OK);
+    assert_eq!(recov.status, StatusCode::UNAUTHORIZED);
+    assert_eq!(recov.json()["error"]["code"], "auth.token_invalid");
 }
 
 #[tokio::test]
 async fn platform_mfa_handler_error_arms_with_a_ghost_admin() {
     // A platform token for a non-existent admin drives the platform_mfa handler error arms.
+    //
+    // Unlike the dashboard twin above, these DO reach the handlers: the platform routes have no
+    // account-resolving gate in front of them, so the ghost gets `auth.mfa_not_enabled` from the
+    // engine rather than `auth.token_invalid` from a door. That difference is the whole point of
+    // having both tests, and the four `assert_ne!(status, <success>)` this test used to carry
+    // could not express it — they were equally true of either answer, which is exactly what the
+    // twin's own comment warns about.
     let Some(h) = build(EngineSpec {
         platform: true,
         mfa: true,
@@ -2830,25 +2890,29 @@ async fn platform_mfa_handler_error_arms_with_a_ghost_admin() {
         .bearer(&ghost)
         .send(&app)
         .await;
-    assert_ne!(setup.status, StatusCode::CREATED);
+    assert_eq!(setup.status, StatusCode::BAD_REQUEST);
+    assert_eq!(setup.json()["error"]["code"], "auth.mfa_not_enabled");
     let verify = Req::post("/auth/platform/mfa/verify-enable")
         .bearer(&ghost)
         .json(serde_json::json!({ "code": "000000" }))
         .send(&app)
         .await;
-    assert_ne!(verify.status, StatusCode::NO_CONTENT);
+    assert_eq!(verify.status, StatusCode::BAD_REQUEST);
+    assert_eq!(verify.json()["error"]["code"], "auth.mfa_not_enabled");
     let disable = Req::post("/auth/platform/mfa/disable")
         .bearer(&ghost)
         .json(serde_json::json!({ "code": "000000" }))
         .send(&app)
         .await;
-    assert_ne!(disable.status, StatusCode::NO_CONTENT);
+    assert_eq!(disable.status, StatusCode::BAD_REQUEST);
+    assert_eq!(disable.json()["error"]["code"], "auth.mfa_not_enabled");
     let recov = Req::post("/auth/platform/mfa/recovery-codes")
         .bearer(&ghost)
         .json(serde_json::json!({ "code": "000000" }))
         .send(&app)
         .await;
-    assert_ne!(recov.status, StatusCode::OK);
+    assert_eq!(recov.status, StatusCode::BAD_REQUEST);
+    assert_eq!(recov.json()["error"]["code"], "auth.mfa_not_enabled");
 }
 
 #[tokio::test]
@@ -3170,7 +3234,9 @@ async fn the_cross_site_check_admits_what_it_should() {
         .json(serde_json::json!({ "refreshToken": "r".repeat(64) }))
         .send(&app)
         .await;
-    assert_ne!(bearer.status, StatusCode::FORBIDDEN);
+    // The 204 it actually answers, not "anything but 403": the negation also passed on a 500,
+    // so it could not tell an admitted request from a broken one.
+    assert_eq!(bearer.status, StatusCode::NO_CONTENT);
 
     // Origin casing: scheme and host are case-insensitive (RFC 6454 §4), so an origin that
     // differs from the listed one only in case IS the listed origin and must be admitted.
@@ -3624,21 +3690,34 @@ async fn mfa_management_error_arms_with_a_real_account() {
     assert_eq!(setup.json()["error"]["code"], "auth.invalid_credentials");
 
     // The remaining three act on a second factor this account has never enrolled.
-    for (path, code) in [
-        ("/auth/mfa/verify-enable", "auth.mfa_setup_required"),
-        ("/auth/mfa/disable", "auth.mfa_not_enabled"),
-        ("/auth/mfa/recovery-codes", "auth.mfa_not_enabled"),
+    for (path, code, status) in [
+        (
+            "/auth/mfa/verify-enable",
+            "auth.mfa_setup_required",
+            StatusCode::BAD_REQUEST,
+        ),
+        (
+            "/auth/mfa/disable",
+            "auth.mfa_not_enabled",
+            StatusCode::BAD_REQUEST,
+        ),
+        (
+            "/auth/mfa/recovery-codes",
+            "auth.mfa_not_enabled",
+            StatusCode::BAD_REQUEST,
+        ),
     ] {
         let resp = Req::post(path)
             .cookie("access_token", &access)
             .json(serde_json::json!({ "code": "000000" }))
             .send(&app)
             .await;
-        assert_ne!(
-            resp.status,
-            StatusCode::FORBIDDEN,
-            "{path} was stopped by the gate, so its error arm never ran"
-        );
+        // The exact status, not merely "not 403". A 403 would mean the gate answered and the
+        // error arm never ran, which is what this assertion was originally for — but an
+        // assertion that only rules one status out accepts every wrong answer as contentedly
+        // as the right one, and that is the shape that let thirteen statuses drift unnoticed
+        // across the two implementations.
+        assert_eq!(resp.status, status, "{path}");
         assert_eq!(resp.json()["error"]["code"], code, "{path}");
     }
 }

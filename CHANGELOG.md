@@ -10,6 +10,41 @@ version bump.
 
 ## [Unreleased]
 
+### Fixed
+
+- **The error-catalog parity test now reads the shared contract's status table instead of one
+  written down beside it.** `conformance/wire-contract.json` pinned the code vocabulary but never
+  the HTTP status per code, and what is not in the shared artifact has no gate: thirteen codes
+  answered a different status on each implementation, with nest-auth the outlier in all thirteen
+  and both suites green throughout — each side was self-consistent, and neither read the other.
+  `tests/error_catalog.rs` carried a hand-written `(variant, string, status)` table under a doc
+  comment claiming that "a code whose serialization or status drifts from nest-auth breaks parity
+  and fails here"; it checked rust-auth against itself. A parity test that reads only its own side
+  is not a parity test.
+
+  The contract gains `errorCatalog.statuses` (and a `$statusesComment` recording the incident),
+  copied byte-identical from nest-auth. The status column is gone from the test, which now asserts
+  `code.to_wire().http_status()` against the contract's value for every code, plus exact set
+  equality between the contract's statuses, the contract's codes, and the enum's variants — a code
+  with no status and a status with no code both fail. An exhaustive match anchors the table to the
+  enum, so a variant added without a row stops the build.
+
+  **No status rust-auth answers changed**, and none needed to: rust-auth's table was the
+  semantically correct side in all thirteen, and nest-auth moved to it. The contract pins **wire**
+  statuses, so `auth.otp_max_attempts` is 401 there — the status of the `auth.otp_invalid` it
+  collapses onto — while the variant keeps 429 pre-remap for logs. `AuthError::http_status()`
+  already resolved the wire code before reading the status, which is why answering the 429 was
+  never reachable: only a record that exists can reach an attempt ceiling, so a 429 would say
+  through the status line exactly what the collapse withholds from the body.
+
+- **Three documents describing that collapse were wrong about it.** §8.6 of the technical
+  specification carried a second, stale copy of the status map — naming five variants the engine
+  does not have — and claimed to be authoritative; it now points at §15.3 and the contract. §8.6
+  and the `error_response` rustdoc both said the OTP cap emits a `Retry-After` header. The code
+  never did, and must not: on a response that reads `auth.otp_invalid`, that header hands back
+  through the headers exactly what the code collapse withholds. §15.5 listed three internal-only
+  codes when there are five, and `error.rs` said the same in its module doc.
+
 ### Security
 
 - **The account-status gate is scoped to the token's tenant.** `AuthEngine::assert_user_active`

@@ -5,9 +5,12 @@
 //! adapter returns from every extractor rejection and handler `Result`, and
 //! [`error_response`] builds the response: the `{ "error": { code, message, details } }`
 //! envelope (already remapped past any internal-only sentinel by
-//! [`bymax_auth_types::AuthError::to_envelope`]), the status from the §8.6 map, and a
-//! `Retry-After` header for the lockout / OTP-cap / rate-limit codes. The underlying cause
-//! of an [`AuthError::Internal`] is logged but **never** serialized into the body (§15.1).
+//! [`bymax_auth_types::AuthError::to_envelope`]), the status `errorCatalog.statuses` pins in
+//! `conformance/wire-contract.json` for that remapped code, and a `Retry-After` header for
+//! the per-account lockout and the edge rate-limit rejection. The OTP attempt cap is
+//! deliberately not among them — it reaches the client as `auth.otp_invalid`, so the header
+//! would restore what the collapse removes. The underlying cause of an
+//! [`AuthError::Internal`] is logged but **never** serialized into the body (§15.1).
 
 use axum::Json;
 use axum::response::{IntoResponse, Response};
@@ -32,10 +35,15 @@ impl IntoResponse for AuthRejection {
     }
 }
 
-/// Build the canonical HTTP response for an [`AuthError`]: the JSON envelope, the mapped
-/// status, and — for the lockout / OTP-cap / rate-limit codes — a `Retry-After` header
-/// computed from the error's `retry_after_seconds`. An [`AuthError::Internal`] logs its
-/// cause via `tracing` and renders only the generic 500 envelope, never the cause.
+/// Build the canonical HTTP response for an [`AuthError`]: the JSON envelope, the status
+/// the shared contract pins for the wire code, and — for the lockout and rate-limit codes —
+/// a `Retry-After` header computed from the error's `retry_after_seconds`. An
+/// [`AuthError::Internal`] logs its cause via `tracing` and renders only the generic 500
+/// envelope, never the cause.
+///
+/// The OTP cap is deliberately absent from that list: it reaches the client as
+/// `auth.otp_invalid`, so a `Retry-After` would hand back through a header exactly what the
+/// code collapse withholds — only a record that exists can reach an attempt ceiling.
 #[must_use]
 pub fn error_response(error: &AuthError) -> Response {
     if let AuthError::Internal(cause) = error {
@@ -83,10 +91,15 @@ pub fn anti_enumerating_outcome(outcome: &Result<(), AuthError>, uniform: Respon
     }
 }
 
-/// The `Retry-After` value (seconds) for the codes that carry one — the per-account
-/// lockout, the OTP attempt cap, and the edge rate-limit rejection — or `None` for every
-/// other code. `AccountLocked`/`TooManyRequests` carry an explicit value; `OtpMaxAttempts`
-/// has no engine-supplied window here, so it emits no header (the body still 429s).
+/// The `Retry-After` value (seconds) for the two codes that carry one — the per-account
+/// lockout and the edge rate-limit rejection — or `None` for every other code.
+///
+/// `OtpMaxAttempts` is deliberately **not** among them, and this doc comment used to say the
+/// opposite twice over: it listed the cap as carrying a header, then explained the absence by
+/// claiming "the body still 429s". The body does not. The cap is internal-only and reaches a
+/// caller as `auth.otp_invalid` with that code's 401, so a `Retry-After` would hand back
+/// through a header exactly what the collapse withholds — only a record that exists can reach
+/// an attempt ceiling. The 429 the variant carries pre-remap is for logs and never ships.
 fn retry_after_seconds(error: &AuthError) -> Option<u64> {
     match error {
         AuthError::AccountLocked {

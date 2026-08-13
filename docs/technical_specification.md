@@ -3136,50 +3136,24 @@ impl IntoResponse for AuthError {
 }
 ```
 
-The status map is authoritative and identical to §15.3 of the nest-auth spec:
+The status a caller receives is the one `errorCatalog.statuses` pins in
+`conformance/wire-contract.json` — the shared artifact nest-auth holds
+byte-identical — and it is catalogued per code in §15.3. It is deliberately **not**
+restated here. This section used to carry its own copy of the table; the copy
+drifted, naming five variants the engine does not have, and a status written down
+in three places is a status checked against none of them.
 
-| `AuthError` variant            | code                                  | HTTP |
-| ------------------------------ | ------------------------------------- | ---- |
-| `InvalidCredentials`           | `auth.invalid_credentials`            | 401  |
-| `AccountLocked`                | `auth.account_locked`                 | 429  |
-| `AccountInactive`              | `auth.account_inactive`               | 403  |
-| `AccountSuspended`             | `auth.account_suspended`              | 403  |
-| `AccountBanned`                | `auth.account_banned`                 | 403  |
-| `PendingApproval`              | `auth.pending_approval`               | 403  |
-| `TokenExpired`                 | `auth.token_expired`                  | 401  |
-| `TokenRevoked`                 | `auth.token_revoked`                  | 401  |
-| `TokenInvalid`                 | `auth.token_invalid`                  | 401  |
-| `RefreshTokenInvalid`          | `auth.refresh_token_invalid`          | 401  |
-| `SessionExpired`               | `auth.session_expired`                | 401  |
-| `SessionLimitReached`          | `auth.session_limit_reached`          | 409  |
-| `SessionNotFound`              | `auth.session_not_found`              | 404  |
-| `EmailAlreadyExists`           | `auth.email_already_exists`           | 409  |
-| `EmailNotVerified`             | `auth.email_not_verified`             | 403  |
-| `MfaRequired`                  | `auth.mfa_required`                   | 403  |
-| `MfaInvalidCode`               | `auth.mfa_invalid_code`               | 401  |
-| `MfaAlreadyEnabled`            | `auth.mfa_already_enabled`            | 409  |
-| `MfaNotEnabled`                | `auth.mfa_not_enabled`                | 400  |
-| `MfaSetupRequired`             | `auth.mfa_setup_required`             | 400  |
-| `MfaTempTokenInvalid`          | `auth.mfa_temp_token_invalid`         | 401  |
-| `RecoveryCodeInvalid`          | `auth.recovery_code_invalid`          | 401  |
-| `PasswordTooWeak`              | `auth.password_too_weak`              | 400  |
-| `PasswordResetTokenInvalid`    | `auth.password_reset_token_invalid`   | 400  |
-| `PasswordResetTokenExpired`    | `auth.password_reset_token_expired`   | 400  |
-| `OtpInvalid`                   | `auth.otp_invalid`                    | 401  |
-| `OtpExpired`                   | `auth.otp_expired`                    | 401  |
-| `OtpMaxAttempts`               | `auth.otp_max_attempts`               | 429  |
-| `InsufficientRole`             | `auth.insufficient_role`              | 403  |
-| `Forbidden`                    | `auth.forbidden`                      | 403  |
-| `InvalidInvitationToken`       | `auth.invalid_invitation_token`       | 400  |
-| `OAuthFailed`                  | `auth.oauth_failed`                   | 401  |
-| `OAuthEmailMismatch`           | `auth.oauth_email_mismatch`           | 409  |
-| `PlatformAuthRequired`         | `auth.platform_auth_required`         | 401  |
-| `Validation`                   | `auth.validation` (field details)     | 400  |
+`error_response` reads it through `AuthError::http_status()`, which resolves the
+wire code before reading the status, so an internal-only variant answers under its
+public form (§15.5).
 
 `Validation` is the adapter-level variant produced by `ValidatedJson`/
 `ValidatedQuery`; its `details` field carries the per-field messages from
-`garde`. `AccountLocked` and `OtpMaxAttempts` additionally emit a `Retry-After`
-header computed from the engine's remaining lockout/window TTL.
+`garde`. `AccountLocked` and `TooManyRequests` additionally emit a `Retry-After`
+header computed from the engine's remaining lockout/window TTL. `OtpMaxAttempts`
+deliberately does **not**: it reaches the client as `auth.otp_invalid`, and a
+`Retry-After` on that response would hand back through a header exactly what the
+code collapse withholds — only a record that exists can reach an attempt ceiling.
 
 ---
 
@@ -4833,7 +4807,11 @@ The `Display` impl (`#[error(...)]`) is for logs/`tracing` only — it is never 
 
 ### 15.3 Complete error-code catalog
 
-All codes, grouped by domain, with HTTP status, trigger, and client-facing English message. Statuses are identical to nest-auth.
+All codes, grouped by domain, with the HTTP status a caller receives, the trigger, and the client-facing English message.
+
+**The status column is a transcription, not the source of truth.** `errorCatalog.statuses` in `conformance/wire-contract.json` is — the file both implementations hold byte-identical and are both checked against, by `crates/bymax-auth-types/tests/error_catalog.rs` here and by the equivalent assertion in nest-auth. Until 2026-08-11 that file pinned the code vocabulary but not the status, and thirteen codes answered a different status on each implementation while both suites stayed green: each side was self-consistent, and neither read the other. If this table and the contract disagree, the contract is right and this table is the bug.
+
+The statuses below are **wire** statuses — what a caller actually receives. An internal-only code (§15.5) is therefore listed at the status of the public code it collapses onto. `auth.otp_max_attempts` is the only code where that differs from the value `AuthErrorCode::http_status()` returns before the remap (429, kept for logs and never reachable by a client).
 
 #### Credentials & account state
 
@@ -4889,9 +4867,9 @@ All codes, grouped by domain, with HTTP status, trigger, and client-facing Engli
 
 | Code | HTTP | When raised | Client message |
 | --- | --- | --- | --- |
-| `auth.otp_invalid` | 401 | OTP code mismatch (attempts counter bumped, §12.5.4). | Invalid OTP code |
-| `auth.otp_expired` | 401 | OTP record absent (TTL elapsed). | Expired OTP code |
-| `auth.otp_max_attempts` | 429 | > 5 failed OTP attempts; record locked/consumed. | Maximum number of attempts exceeded |
+| `auth.otp_invalid` | 401 | OTP code mismatch (attempts counter bumped, §12.5.4). The single public OTP-failure code. | Invalid OTP code |
+| `auth.otp_expired` | 401 | **Internal only** — OTP record absent (TTL elapsed). Never surfaced publicly; remapped to `auth.otp_invalid`. | Expired OTP code |
+| `auth.otp_max_attempts` | 401 | **Internal only** — > 5 failed OTP attempts; record locked/consumed. Never surfaced publicly; remapped to `auth.otp_invalid`, and the 401 is that code's status. The variant itself carries 429 pre-remap, for logs: a client that received it could tell a record that exists from one that was never written, since only a record that exists can reach a ceiling. No `Retry-After` accompanies it, for the same reason (§8.6). | Maximum number of attempts exceeded |
 
 #### Authorization
 
@@ -4940,7 +4918,7 @@ All codes, grouped by domain, with HTTP status, trigger, and client-facing Engli
 ### 15.5 Security principles
 
 1. **Generic credential failure (anti-enumeration).** A missing email and a wrong password both raise `auth.invalid_credentials` with the identical message and 401. The login path also normalizes timing: a password verify is **always** run — against a **startup-loaded sentinel hash** when the user is absent — using the constant-time verifier (§7.1.2 / §17), so response latency never leaks account existence.
-2. **Internal-only codes never leak.** `auth.token_expired`, `auth.token_revoked`, and the `TOKEN_MISSING` sentinel exist for internal control flow and logs only. Public guards collapse all of them into `auth.token_invalid`, denying an attacker an oracle that distinguishes "well-formed but expired" from "revoked" from "garbage." `AuthError::is_internal_only()` gates this remapping in the HTTP boundary layer.
+2. **Internal-only codes never leak.** Five codes exist for internal control flow and logs only. The collapse is performed by `AuthErrorCode::to_wire()`, which `AuthError::http_status()`, `to_envelope()` and `to_response()` each call *before* they read anything — so the boundary layer cannot forget to ask, and there is no code path that renders an error without going through one of the three. `AuthError::is_internal_only()` is a predicate available to a host for logging; nothing in the library branches on it, and it is deliberately not the mechanism. `auth.token_expired`, `auth.token_revoked` and the `TOKEN_MISSING` sentinel collapse into `auth.token_invalid`, denying an attacker an oracle that distinguishes "well-formed but expired" from "revoked" from "garbage." `auth.otp_expired` and `auth.otp_max_attempts` collapse into `auth.otp_invalid`, which is what keeps principle 3 below true for `forgot-password`: that endpoint answers uniformly whether or not the address exists, but it only writes an OTP record when it does, so an absent record answering differently from a wrong code would turn one extra request into a definitive answer. The collapse covers the **status** as well as the code — the remap is applied before the status is read (§8.6), or the oracle survives as 429-vs-401 — and, for the same reason, no `Retry-After` accompanies the OTP cap.
 3. **Anti-enumeration endpoints return uniform results.** `verify-email`, `resend-verification`, `forgot-password`, and `resend-otp` return the **same status and body regardless of whether the email exists**, with normalized timing; a code/token error appears only when a code/token is actually submitted and wrong. The one accepted exception is `register` (409 on duplicate email), mitigated by aggressive host-side rate limiting.
 4. **No PII in logs.** Emails and tokens are never logged in clear; references use `sha256(email)[..8]` or the `jti`. The error `Display`/`tracing` output carries codes and hashes, never secrets.
 5. **Consistent envelope.** Every error — including the internal `500` (`AuthError::Internal`, generic message, cause logged but never serialized) — uses the same `{ error: { code, message, details } }` shape, frustrating response-fingerprinting.
