@@ -78,7 +78,7 @@
     "server-only": "^0.0.1"
   },
   "peerDependencies": {
-    "next": "^16.2.11",
+    "next": "^16.3.0",
     "react": "^19.0.0"
   },
   "peerDependenciesMeta": {
@@ -101,7 +101,7 @@
     "eslint": "^10.8.0",
     "eslint-plugin-security": "^4.0.1",
     "jsdom": "^30.0.1",
-    "next": "^16.2.11",
+    "next": "^16.3.0",
     "prettier": "^3.9.6",
     "react": "^19.2.8",
     "react-dom": "^19.2.8",
