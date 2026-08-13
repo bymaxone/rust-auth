@@ -71,7 +71,7 @@ bymax-auth-redis = { workspace = true, features = ["mfa", "oauth", "platform"] }
 testcontainers = { version = "0.27", default-features = false }
 testcontainers-modules = { version = "0.15", default-features = false, features = ["redis"] }
 redis = { version = "1", default-features = false, features = ["tokio-comp"] }
-base64 = "0.22"
+base64 = "0.23"
 # The MFA-gated crypto surface (TOTP + Base32) so the E2E tests can compute a valid TOTP from
 # a freshly enrolled secret and exercise the verify-enable / challenge / disable happy paths.
 bymax-auth-crypto = { workspace = true, features = ["mfa"] }

@@ -73,7 +73,7 @@ secrecy = "0.10"
 # The MFA lifecycle e2e test computes valid TOTP codes from a setup secret (Base32 decode +
 # RFC 6238) and builds a 32-byte AES key, so it reaches for the MFA crypto + a base64 codec.
 bymax-auth-crypto = { workspace = true, features = ["mfa"] }
-base64 = "0.22"
+base64 = "0.23"
 
 [lints]
 workspace = true

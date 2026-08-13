@@ -16,7 +16,7 @@ bymax-auth-crypto = { workspace = true }
 # `ring`/`jsonwebtoken`: those pull C/assembly and break the wasm32 edge build.
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-base64 = "0.22"
+base64 = "0.23"
 # Zeroize the in-memory signing secret and the raw refresh token on drop.
 zeroize = "1.9"
 thiserror = "2"

@@ -38,7 +38,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 # Base64url decoding for the decode-only header+payload projection. Same major the JWT
 # codec already uses, so no new dependency major enters the graph.
-base64 = "0.22"
+base64 = "0.23"
 # The typed edge error category (mirrors the JWT codec's opaque error posture).
 thiserror = "2"
 
