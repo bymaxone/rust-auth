@@ -1260,7 +1260,7 @@ For consumers using the framework-agnostic core directly (no Axum), the toggles 
 
 Multi-tenant deployments derive tenant scope from the request context, never from client-controlled input. The rules:
 
-- **The `TenantIdResolver` is authoritative.** When a resolver is configured (§5.1, §5.2), the tenant id it returns from `RequestParts` (host/subdomain, a verified JWT claim, a header, …) is the **only** tenant id the engine uses for that request. **Any `tenant_id` present in the request body is ignored** — it is never read, merged, or used as a fallback. This is the anti-spoofing guarantee: a caller cannot widen or cross tenant scope by editing a JSON field. A resolver that returns an empty string is treated as misconfiguration and the request is rejected; it never silently degrades to "no tenant".
+- **The `TenantIdResolver` is authoritative.** When a resolver is configured (§5.1, §5.2), the tenant id it returns from `RequestParts` (host/subdomain, a verified JWT claim, a header, …) is the **only** tenant id the engine uses for that request. **A request that names a `tenant_id` of its own is refused with `AuthError::Validation` on the `tenantId` field** — the value is never read, merged, or used as a fallback, and it is not discarded either. This is the anti-spoofing guarantee: a caller cannot widen or cross tenant scope by editing a JSON field, and it is told so rather than being answered `201` while the account lands elsewhere. `null` and an absent field are accepted — they assert nothing to contradict — and the refusal is evaluated **before** the resolver runs, so the two failure modes are not distinguishable from outside. A resolver that returns an empty string is treated as misconfiguration and the request is rejected; it never silently degrades to "no tenant".
 
 - **Single-tenant deployments may omit the resolver.** With no resolver configured, the engine operates under a single, static tenant scope (the default tenant) — the correct mode for single-tenant apps. **Multi-tenant deployments must configure a resolver** so that scope comes from the request context rather than the body; this is a coherence expectation, not a convention left to discipline.
 
@@ -1555,7 +1555,7 @@ pub trait PlatformUserRepository: Send + Sync {
 These traits are DB-agnostic by design. A consumer implements them with whatever async data layer they already use — `sqlx` (Postgres/MySQL/SQLite), SeaORM, or Diesel via `diesel-async`. The engine has no compile-time or runtime dependency on any of them; it depends only on the trait.
 
 - **Mapping rows to structs.** The implementation owns the table shape. Map each column to the corresponding `AuthUser` / `AuthPlatformUser` field. Store `password_hash` as a single text column (the PHC string round-trips either scrypt or argon2id, so no schema change is needed when the active algorithm differs from a stored hash). Store `mfa_secret` as the AES-256-GCM ciphertext string and `mfa_recovery_codes` as the HMAC-SHA-256 keyed hashes (e.g. a text array or a child table) — never the plaintext secret or raw codes.
-- **Tenant scoping.** Implement `tenant_id` as a mandatory predicate on every tenant-scoped query. `find_by_id(id, Some(tenant))` must not return a row from another tenant; return `Ok(None)` instead. This keeps isolation in the storage layer where the consumer can also enforce row-level security if the database supports it. The `tenant_id` the engine passes is always the value resolved from the request context by the `TenantIdResolver` (or the static default tenant) — never a value read from the request body, which the engine ignores (§5.7) — so the implementation may treat the supplied `tenant_id` as trusted scope and must apply it to **every** read and write.
+- **Tenant scoping.** Implement `tenant_id` as a mandatory predicate on every tenant-scoped query. `find_by_id(id, Some(tenant))` must not return a row from another tenant; return `Ok(None)` instead. This keeps isolation in the storage layer where the consumer can also enforce row-level security if the database supports it. The `tenant_id` the engine passes is always the value resolved from the request context by the `TenantIdResolver` (or the static default tenant) — never a value read from the request body, which the engine refuses outright under a resolver (§5.7) — so the implementation may treat the supplied `tenant_id` as trusted scope and must apply it to **every** read and write.
 - **Errors.** Translate "row not found" to `Ok(None)`, not an error — the engine distinguishes "no such user" (a normal control-flow outcome) from "the database failed" (a `RepositoryError`). Map unique-constraint violations on email to `RepositoryError::Conflict` so the engine can surface the correct `auth.email_already_exists`; map everything else (connection loss, timeouts, serialization failures) to `RepositoryError::Backend`.
 - **Idempotency of writes.** `update_*` methods target a single row by id and should be safe to call repeatedly. `create` / `create_with_oauth` should rely on a database unique constraint (email per tenant) rather than a read-then-write check, to avoid a race under concurrent registration.
 
@@ -1691,7 +1691,7 @@ A module-level constant `ANTI_ENUM_MIN_MS: u64 = 300` governs timing normalizati
 Purpose: create a new local (email + password) tenant user, optionally send an email-verification OTP, and issue a full session. Registration **always** issues tokens, even when `email_verification.required` is true, so the host can render a "verify your email" screen for an authenticated user; the *next* login after the access token expires is blocked with `EMAIL_NOT_VERIFIED`.
 
 Algorithm:
-1. Resolve `tenant_id` via `config.tenant_id_resolver` if present, else use `dto.tenant_id` — which is optional, and whose absence with no resolver configured is refused with `AuthError::Validation` naming `tenantId`, never defaulted.
+1. Resolve `tenant_id` via `config.tenant_id_resolver` if present — in which case a `dto.tenant_id` the caller named is refused with `AuthError::Validation` naming `tenantId`, before the resolver runs — else use `dto.tenant_id`, which is optional, and whose absence with no resolver configured is refused with the same error, never defaulted.
 2. Build `HookContext` from `ctx` + `tenant_id` + `dto.email`.
 3. If `before_register` hook is set, await it. If it returns `allowed = false`, return `AuthError::Forbidden`. If it returns `modified_data`, merge `role` / `status` / `email_verified` overrides **immutably** into a working copy of the create-data (never mutate the validated DTO).
 4. `user_repo.find_by_email(email, tenant_id)`. If `Some`, return `EmailAlreadyExists` (uniqueness check precedes hashing — cheaper than wasting an Argon2/scrypt derivation on conflict).
@@ -7095,11 +7095,14 @@ sign-off — never a silent edit.
    principles), §17.2 (user-enumeration row) — anti-enumeration tests assert
    byte-identical responses across present/absent accounts.
 
-8. **A configured `TenantIdResolver` always overrides the request body.** When a
-   resolver is supplied, the request's `tenant_id` is taken from it and the
-   body-supplied `tenant_id` is ignored — a request cannot spoof its tenant by
-   setting a field. *Enforced in:* §7.1.1 (`register` step 1: resolver-first),
-   §5 (the `TenantIdResolver` trait + anti-spoofing note).
+8. **A configured `TenantIdResolver` decides the tenant, and a request that names
+   one of its own is refused.** When a resolver is supplied, the request's
+   `tenant_id` is taken from it; a caller-supplied `tenant_id` is answered
+   `AuthError::Validation` on the `tenantId` field rather than discarded, so a
+   request cannot spoof its tenant by setting a field and cannot be told it
+   succeeded at doing so either. `null` and an absent field are accepted.
+   *Enforced in:* §7.1.1 (`register` step 1: resolver-first), §5 (the
+   `TenantIdResolver` trait + anti-spoofing note).
 
 9. **Redis keys never expose sensitive PII.** Identifiers in keys are hashed/
    HMACed (e.g. `sha256(email)`-derived, `tenant:email` scoped via keyed hash);

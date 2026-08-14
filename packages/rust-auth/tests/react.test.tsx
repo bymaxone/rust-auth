@@ -76,6 +76,21 @@ function LoginProbe(): React.ReactNode {
   );
 }
 
+/** A probe that calls `useAuth().forgotPassword` with no explicit tenant. */
+function ForgotPasswordProbe(): React.ReactNode {
+  const { forgotPassword } = useAuth();
+  return (
+    <button
+      type="button"
+      onClick={() => {
+        void forgotPassword("a@b.c");
+      }}
+    >
+      forgot
+    </button>
+  );
+}
+
 afterEach(() => {
   cleanup();
   vi.restoreAllMocks();
@@ -123,7 +138,13 @@ describe("AuthProvider + useSession + useAuthStatus", () => {
 });
 
 describe("useAuth", () => {
-  it("defaults the tenantId to 'default' on login", async () => {
+  it("omits the tenantId on login when the caller names none", async () => {
+    // The hook used to substitute `'default'` here. A backend configuring a
+    // `TenantIdResolver` refuses a body that names a tenant outright, so the invented value
+    // turned every login through this hook into a `400` there — and on a backend without a
+    // resolver it silently signed the caller into a tenant they never chose. Which of the two
+    // shapes is correct is the deployment's decision; the hook passes through what it is given
+    // and nothing else.
     const client = makeFakeClient();
 
     render(
@@ -135,11 +156,26 @@ describe("useAuth", () => {
     fireEvent.click(screen.getByText("sign in"));
 
     await waitFor(() => expect(client.login).toHaveBeenCalledTimes(1));
-    expect(client.login).toHaveBeenCalledWith({
-      email: "a@b.c",
-      password: "pw",
-      tenantId: "default",
-    });
+    expect(client.login).toHaveBeenCalledWith({ email: "a@b.c", password: "pw" });
+  });
+
+  it("passes the tenantId through as-is on forgotPassword when the caller names none", async () => {
+    // The same substitution lived here, and it fails the same two ways: `'default'` is a body
+    // a resolver-configured backend refuses, and a tenant nobody chose on one without a
+    // resolver. Asserted separately from `login` because the two are separate callbacks — a
+    // regression to `?? 'default'` in one of them leaves the other's test green.
+    const client = makeFakeClient();
+
+    render(
+      <AuthProvider client={client} revalidateInterval={0}>
+        <ForgotPasswordProbe />
+      </AuthProvider>,
+    );
+
+    fireEvent.click(screen.getByText("forgot"));
+
+    await waitFor(() => expect(client.forgotPassword).toHaveBeenCalledTimes(1));
+    expect(client.forgotPassword).toHaveBeenCalledWith("a@b.c", undefined);
   });
 });
 
