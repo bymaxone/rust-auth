@@ -1087,7 +1087,66 @@ mod tests {
             Err(AuthError::Forbidden)
         ));
 
-        // `oauth_initiate` is the eighth tenant-scoped flow and belongs on this list, but it
+        // The three flows a caller actually authenticates through. They are the reason this test
+        // asserts at FLOW level rather than trusting the `resolve_tenant` helper test: each one
+        // forwards its own `input.tenant_id` to the helper, and a call site that stopped
+        // forwarding it — passing `None`, or reading some other field — would leave the helper
+        // test green while that flow silently accepted a caller-named tenant again. `register`
+        // is where the audit found the divergence in the first place.
+        let register = |tenant: Option<&str>| crate::services::auth::RegisterInput {
+            email: "x@example.com".to_owned(),
+            name: "X".to_owned(),
+            password: "glidingwalnut42".to_owned(),
+            tenant_id: tenant.map(str::to_owned),
+        };
+        assert!(refused(
+            h.engine
+                .register(register(Some("body-tenant")), &empty)
+                .await
+                .map(|_| ())
+        ));
+        assert!(matches!(
+            h.engine.register(register(None), &empty).await,
+            Err(AuthError::Forbidden)
+        ));
+
+        let login = |tenant: Option<&str>| crate::services::auth::LoginInput {
+            email: "x@example.com".to_owned(),
+            password: "glidingwalnut42".to_owned(),
+            tenant_id: tenant.map(str::to_owned),
+        };
+        assert!(refused(
+            h.engine
+                .login(login(Some("body-tenant")), &empty)
+                .await
+                .map(|_| ())
+        ));
+        assert!(matches!(
+            h.engine.login(login(None), &empty).await,
+            Err(AuthError::Forbidden)
+        ));
+
+        // The confirm step, separate from the three initiate-side reset flows above: it resolves
+        // the tenant again to re-bind the stored proof context, so it is its own call site.
+        let confirm = |tenant: Option<&str>| crate::services::auth::ResetPasswordInput {
+            email: "x@example.com".to_owned(),
+            tenant_id: tenant.map(str::to_owned),
+            new_password: "glidingwalnut42".to_owned(),
+            token: None,
+            otp: Some("123456".to_owned()),
+            verified_token: None,
+        };
+        assert!(refused(
+            h.engine
+                .reset_password(confirm(Some("body-tenant")), &empty)
+                .await
+        ));
+        assert!(matches!(
+            h.engine.reset_password(confirm(None), &empty).await,
+            Err(AuthError::Forbidden)
+        ));
+
+        // `oauth_initiate` is the ninth tenant-scoped flow and belongs on this list, but it
         // needs a configured provider to reach the resolver at all (the provider is resolved
         // first, so an unknown one fails before any consumer code runs). It is asserted in
         // `services::oauth::tests::oauth_initiate_honours_the_tenant_resolver`, against a
