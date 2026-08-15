@@ -97,8 +97,8 @@ pub mod routes {
     // SessionController — `sessions` feature
     /// `GET` — list the caller's sessions.
     pub const SESSIONS_LIST: &str = "/auth/sessions";
-    /// `DELETE` — revoke every session.
-    pub const SESSIONS_REVOKE_ALL: &str = "/auth/sessions/all";
+    /// `POST` — revoke every session.
+    pub const SESSIONS_REVOKE_ALL: &str = "/auth/sessions/revoke-all";
     /// `DELETE` — revoke one session by its hash (`/auth/sessions/{id}`).
     pub const SESSIONS_REVOKE_ONE: &str = "/auth/sessions/{id}";
 

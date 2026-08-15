@@ -1,13 +1,20 @@
 //! The `sessions` route group (§8.2.4), gated behind the `sessions` feature: list / revoke-all
 //! / revoke-by-id. All three require [`AuthUser`] + [`UserStatus`]. Axum 0.8 uses brace path
-//! syntax (`/{id}`); the static `all` segment wins over the `{id}` capture (static beats
+//! syntax (`/{id}`); the static `revoke-all` segment wins over the `{id}` capture (static beats
 //! capture in axum 0.8, regardless of declaration order).
+//!
+//! Bulk revocation is a `POST`, not a `DELETE`, and the verb is load-bearing. The handler needs
+//! the refresh token naming the caller's own session — the one session it must NOT revoke — and
+//! a bearer-mode deployment carries that token in the request body. RFC 7231 gives a payload on
+//! `DELETE` no defined semantics, so an OpenAPI generator drops it: the generated client sends
+//! no body, the handler cannot identify the current session, and every call answers
+//! `session_not_found`. Held identical to nest-auth's `POST {prefix}/sessions/revoke-all`.
 
 use axum::Json;
 use axum::Router;
 use axum::extract::{Path, State};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{delete, get};
+use axum::routing::{delete, get, post};
 use bymax_auth_core::services::session::SessionInfo;
 use http::StatusCode;
 use serde_json::{Value, json};
@@ -29,8 +36,8 @@ pub(crate) fn routes(config: &AxumAuthConfig, ip_source: ClientIpSource) -> Rout
             crate::router::throttled(get(list), limits.list_sessions, ip_source),
         )
         .route(
-            "/sessions/all",
-            crate::router::throttled(delete(revoke_all), limits.revoke_all_sessions, ip_source),
+            "/sessions/revoke-all",
+            crate::router::throttled(post(revoke_all), limits.revoke_all_sessions, ip_source),
         )
         .route(
             "/sessions/{id}",
@@ -60,7 +67,7 @@ async fn list(
     }
 }
 
-/// `DELETE /auth/sessions/all` (204). Requires [`AuthUser`] + [`UserStatus`]. Revokes every
+/// `POST /auth/sessions/revoke-all` (204). Requires [`AuthUser`] + [`UserStatus`]. Revokes every
 /// session except the caller's current one.
 async fn revoke_all(
     State(state): State<AuthState>,

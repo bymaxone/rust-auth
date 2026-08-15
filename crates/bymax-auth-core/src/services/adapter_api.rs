@@ -208,14 +208,18 @@ impl AuthEngine {
         Ok(())
     }
 
-    /// Revoke every session for the caller except the current one (`DELETE /auth/sessions/all`).
-    /// The current session is identified by the request's raw refresh token; when none is
-    /// present the caller's session cannot be excluded, so this is a no-op rather than wiping
-    /// the live session out from under the request.
+    /// Revoke every session for the caller except the current one
+    /// (`POST /auth/sessions/revoke-all`).
+    ///
+    /// The current session is identified by the request's raw refresh token. Without it there is
+    /// no way to tell which session to keep, and the call is **refused** rather than treated as
+    /// a no-op: answering success having done nothing is the failure mode this route exists to
+    /// avoid, since the caller reaching for it believes a device is compromised right now.
     ///
     /// # Errors
     ///
-    /// Returns a store [`AuthError`] on an infrastructure failure.
+    /// Returns [`AuthError::SessionNotFound`] when no usable refresh token names the caller's
+    /// current session, or a store [`AuthError`] on an infrastructure failure.
     pub async fn revoke_other_user_sessions(
         &self,
         user_id: &str,
