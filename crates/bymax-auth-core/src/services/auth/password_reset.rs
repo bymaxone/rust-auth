@@ -139,8 +139,8 @@ impl AuthEngine {
         // spelling, or a reset started under one casing cannot be completed under another.
         //
         // The tenant goes through the resolver for the same reason `login` and `register` do:
-        // when one is configured it is authoritative and the body value is ignored, which is
-        // the whole anti-spoofing promise. Without it a caller on one tenant could drive
+        // when one is configured it is authoritative and a body that names a tenant is refused,
+        // which is the whole anti-spoofing promise. Without it a caller on one tenant could drive
         // reset mail at accounts in another — and a reset started under the resolved tenant
         // could never be completed, because the stored context and the confirm step would
         // disagree about which tenant it belonged to.
@@ -224,7 +224,7 @@ impl AuthEngine {
         // and the reset context written for the confirm step) must derive from one
         // spelling, or a reset started under one casing cannot be completed under another.
         // The tenant goes through the resolver, exactly as `login` and `register` do: when one
-        // is configured it is authoritative and the body value is ignored. That is the
+        // is configured it is authoritative and a body that names a tenant is refused. That is the
         // anti-spoofing promise, and it also keeps this step reading the same tenant the
         // initiate step wrote under.
         let tenant_id = self.resolve_tenant(input.tenant_id.as_deref(), ctx).await?;
@@ -381,7 +381,7 @@ impl AuthEngine {
         // and the reset context written for the confirm step) must derive from one
         // spelling, or a reset started under one casing cannot be completed under another.
         // The tenant goes through the resolver, exactly as `login` and `register` do: when one
-        // is configured it is authoritative and the body value is ignored. That is the
+        // is configured it is authoritative and a body that names a tenant is refused. That is the
         // anti-spoofing promise, and it also keeps this step reading the same tenant the
         // initiate step wrote under.
         let tenant_id = self.resolve_tenant(input.tenant_id.as_deref(), ctx).await?;
@@ -439,7 +439,7 @@ impl AuthEngine {
         // and the reset context written for the confirm step) must derive from one
         // spelling, or a reset started under one casing cannot be completed under another.
         // The tenant goes through the resolver, exactly as `login` and `register` do: when one
-        // is configured it is authoritative and the body value is ignored. That is the
+        // is configured it is authoritative and a body that names a tenant is refused. That is the
         // anti-spoofing promise, and it also keeps this step reading the same tenant the
         // initiate step wrote under.
         let tenant_id = self.resolve_tenant(input.tenant_id.as_deref(), ctx).await?;

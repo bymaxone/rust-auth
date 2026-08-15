@@ -43,8 +43,9 @@ impl AuthEngine {
         let email = normalize_email(email);
         let email = email.as_str();
         // The tenant goes through the resolver, exactly as `login` and `register` do: when one
-        // is configured it is authoritative and the body value is ignored. Without it a caller
-        // on one tenant could drive verification mail at, or probe for, accounts in another.
+        // is configured it is authoritative and a body that names a tenant is refused. Without
+        // it a caller on one tenant could drive verification mail at, or probe for, accounts in
+        // another.
         let tenant_id = self.resolve_tenant(tenant_id, ctx).await?;
         let tenant_id = tenant_id.as_str();
         let identifier = self.hashed_identifier(tenant_id, email);
@@ -101,8 +102,9 @@ impl AuthEngine {
         let email = email.as_str();
         let started = Instant::now();
         // The tenant goes through the resolver, exactly as `login` and `register` do: when one
-        // is configured it is authoritative and the body value is ignored. Without it a caller
-        // on one tenant could drive verification mail at, or probe for, accounts in another.
+        // is configured it is authoritative and a body that names a tenant is refused. Without
+        // it a caller on one tenant could drive verification mail at, or probe for, accounts in
+        // another.
         let tenant_id = self.resolve_tenant(tenant_id, ctx).await?;
         let tenant_id = tenant_id.as_str();
         let identifier = self.hashed_identifier(tenant_id, email);

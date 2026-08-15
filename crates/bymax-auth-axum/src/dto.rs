@@ -47,7 +47,7 @@ pub struct RegisterDto {
     #[garde(length(min = 2, max = 128))]
     pub name: String,
     /// The tenant scope. Optional: a deployment that configures a `TenantIdResolver`
-    /// ignores this value, so a client there may omit it. With no resolver configured it is
+    /// refuses this value, so a client there must omit it. With no resolver configured it is
     /// the only thing that can scope the request, and omitting it is refused rather than
     /// defaulted (`auth.validation`) — see `AuthEngine::resolve_tenant`.
     #[garde(
@@ -74,7 +74,7 @@ pub struct LoginDto {
     #[garde(length(min = 1, max = 128))]
     pub password: String,
     /// The tenant scope. Optional: a deployment that configures a `TenantIdResolver`
-    /// ignores this value, so a client there may omit it. With no resolver configured it is
+    /// refuses this value, so a client there must omit it. With no resolver configured it is
     /// the only thing that can scope the request, and omitting it is refused rather than
     /// defaulted (`auth.validation`) — see `AuthEngine::resolve_tenant`.
     #[garde(
@@ -92,7 +92,7 @@ pub struct ForgotPasswordDto {
     #[garde(email, length(max = 255))]
     pub email: String,
     /// The tenant scope. Optional: a deployment that configures a `TenantIdResolver`
-    /// ignores this value, so a client there may omit it. With no resolver configured it is
+    /// refuses this value, so a client there must omit it. With no resolver configured it is
     /// the only thing that can scope the request, and omitting it is refused rather than
     /// defaulted (`auth.validation`) — see `AuthEngine::resolve_tenant`.
     #[garde(
@@ -161,7 +161,7 @@ pub struct ResetPasswordDto {
     #[garde(inner(length(min = 64, max = 64)))]
     pub verified_token: Option<String>,
     /// The tenant scope. Optional: a deployment that configures a `TenantIdResolver`
-    /// ignores this value, so a client there may omit it. With no resolver configured it is
+    /// refuses this value, so a client there must omit it. With no resolver configured it is
     /// the only thing that can scope the request, and omitting it is refused rather than
     /// defaulted (`auth.validation`) — see `AuthEngine::resolve_tenant`.
     #[garde(
@@ -182,7 +182,7 @@ pub struct VerifyOtpDto {
     #[garde(length(min = 4, max = 8))]
     pub otp: String,
     /// The tenant scope. Optional: a deployment that configures a `TenantIdResolver`
-    /// ignores this value, so a client there may omit it. With no resolver configured it is
+    /// refuses this value, so a client there must omit it. With no resolver configured it is
     /// the only thing that can scope the request, and omitting it is refused rather than
     /// defaulted (`auth.validation`) — see `AuthEngine::resolve_tenant`.
     #[garde(
@@ -200,7 +200,7 @@ pub struct ResendOtpDto {
     #[garde(email, length(max = 255))]
     pub email: String,
     /// The tenant scope. Optional: a deployment that configures a `TenantIdResolver`
-    /// ignores this value, so a client there may omit it. With no resolver configured it is
+    /// refuses this value, so a client there must omit it. With no resolver configured it is
     /// the only thing that can scope the request, and omitting it is refused rather than
     /// defaulted (`auth.validation`) — see `AuthEngine::resolve_tenant`.
     #[garde(
@@ -226,7 +226,7 @@ pub struct VerifyEmailDto {
     #[garde(length(min = 6, max = 6))]
     pub otp: String,
     /// The tenant scope. Optional: a deployment that configures a `TenantIdResolver`
-    /// ignores this value, so a client there may omit it. With no resolver configured it is
+    /// refuses this value, so a client there must omit it. With no resolver configured it is
     /// the only thing that can scope the request, and omitting it is refused rather than
     /// defaulted (`auth.validation`) — see `AuthEngine::resolve_tenant`.
     #[garde(
@@ -244,7 +244,7 @@ pub struct ResendVerificationDto {
     #[garde(email, length(max = 255))]
     pub email: String,
     /// The tenant scope. Optional: a deployment that configures a `TenantIdResolver`
-    /// ignores this value, so a client there may omit it. With no resolver configured it is
+    /// refuses this value, so a client there must omit it. With no resolver configured it is
     /// the only thing that can scope the request, and omitting it is refused rather than
     /// defaulted (`auth.validation`) — see `AuthEngine::resolve_tenant`.
     #[garde(
@@ -442,8 +442,11 @@ pub struct OAuthInitiateQuery {
     /// alone admitted a caller into any tenant they named, on the one flow that decides which
     /// tenant an account is PROVISIONED into.
     ///
-    /// Optional for the same reason the body DTOs' is: a resolver makes it dead weight, and
-    /// with no resolver its absence is refused rather than defaulted.
+    /// Optional for the same reason the body DTOs' is, and refused on the same terms: with a
+    /// resolver configured, a query that names a tenant is answered `auth.validation` on
+    /// `tenantId` — so a client there must leave it off the URL, which is the change to make
+    /// here rather than dropping a body field. With no resolver its absence is refused rather
+    /// than defaulted.
     #[garde(
         inner(length(min = 1, max = 128)),
         inner(custom(no_control_characters))
