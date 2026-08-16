@@ -2636,8 +2636,11 @@ their ordering reproduces the NestJS guard pipeline.
 
 > `{id}` is the full 64-char SHA-256 session hash from `GET /auth/sessions`.
 > Axum 0.8 path syntax uses braces (`/{id}`), not the colon form. The static
-> `all` segment is registered and matched ahead of the `{id}` capture; in Axum
-> 0.8 static segments win over captures, so declaration order is irrelevant.
+> `revoke-all` segment is registered and matched ahead of the `{id}` capture;
+> in Axum 0.8 static segments win over captures, so declaration order is
+> irrelevant. There is **no** static `all` segment: the retired
+> `DELETE /auth/sessions/all` reaches the `{id}` capture as `id = "all"`,
+> which is not a session hash, so it answers `404 auth.session_not_found`.
 
 #### 8.2.5 PlatformAuthController — group `platform` (feature `platform`)
 

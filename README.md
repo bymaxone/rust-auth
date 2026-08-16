@@ -776,7 +776,7 @@ Route groups mount only when their feature **and** runtime toggle are enabled, s
 | POST   | `/auth/mfa/disable`           | `AuthUser`                      | Disable MFA                                          |
 | POST   | `/auth/mfa/recovery-codes`    | `AuthUser`                      | Regenerate recovery codes (TOTP-gated)               |
 | GET    | `/auth/sessions`              | `AuthUser`, `UserStatus`        | List active sessions                                 |
-| POST   | `/auth/sessions/revoke-all`   | `AuthUser`, `UserStatus`        | Revoke all sessions                                  |
+| POST   | `/auth/sessions/revoke-all`   | `AuthUser`, `UserStatus`        | Revoke every session except the caller's own         |
 | DELETE | `/auth/sessions/:id`          | `AuthUser`, `UserStatus`        | Revoke a specific session (ownership-checked)        |
 | POST   | `/auth/invitations`           | `AuthUser`                      | Create a tenant invitation                           |
 | POST   | `/auth/invitations/accept`    | Public                          | Accept an invitation and create the user             |
