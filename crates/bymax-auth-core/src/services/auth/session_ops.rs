@@ -504,22 +504,27 @@ mod tests {
         let Some((id, auth)) = logged_in(&h, "moved@e.com", "pw123456").await else { return };
         assert!(h.users.set_authority(&id, None, Some("tenant-b")));
 
+        // Awaited into a binding rather than inside the `matches!` scrutinee: an `.await` there
+        // splits the expression across the suspend point and leaves the resumption region on a
+        // line of its own, which the 100% line gate reads as uncovered. `services::oauth`'s
+        // resolver test carries the same note for the same reason.
+        let moved = h
+            .engine
+            .refresh(&auth.refresh_token, "1.2.3.4", "agent")
+            .await;
         assert!(
-            matches!(
-                h.engine
-                    .refresh(&auth.refresh_token, "1.2.3.4", "agent")
-                    .await,
-                Err(AuthError::TokenInvalid)
-            ),
+            matches!(moved, Err(AuthError::TokenInvalid)),
             "a session whose account left the tenant must end, not follow the account"
         );
 
         // And it ends totally: the compensation revokes every session the account holds, so the
         // refresh token cannot be replayed into a second attempt.
+        let replayed = h
+            .engine
+            .refresh(&auth.refresh_token, "1.2.3.4", "agent")
+            .await;
         assert!(matches!(
-            h.engine
-                .refresh(&auth.refresh_token, "1.2.3.4", "agent")
-                .await,
+            replayed,
             Err(AuthError::RefreshTokenInvalid | AuthError::TokenInvalid)
         ));
     }

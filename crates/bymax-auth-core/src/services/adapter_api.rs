@@ -1003,6 +1003,31 @@ mod tests {
         ));
     }
 
+    #[tokio::test]
+    async fn ws_ticket_refuses_claims_naming_another_tenant() {
+        // The account read behind the mint is scoped by the token's tenant. Without that scope
+        // a host whose repository ids are per-tenant serials could resolve a DIFFERENT tenant's
+        // account and snapshot its role and status into the ticket — and a ticket authorizes a
+        // socket for the connection's whole lifetime with no per-request gate behind it, so the
+        // wrong snapshot outlives every other check in the system.
+        //
+        // Asserted with an id that genuinely EXISTS under `t1` and claims naming `tenant-b`:
+        // a subject that does not exist would fail on the unscoped path too, and prove nothing
+        // about the predicate. The sibling `me` test is built the same way, and this one exists
+        // because none of the other ws-ticket tests would fail if the scope were removed.
+        let Some(h) = harness(base_config(), None) else { return };
+        let claims = DashboardClaims {
+            tenant_id: "tenant-b".to_owned(),
+            ..seeded_claims(&h).await
+        };
+
+        let minted = h.engine.issue_ws_ticket(&claims).await;
+        assert!(
+            matches!(minted, Err(AuthError::TokenInvalid)),
+            "claims naming another tenant must mint no ticket"
+        );
+    }
+
     /// A WS-ticket store whose backend always fails, to exercise the store-error propagation
     /// arms of `issue_ws_ticket` (after the store is present) and `redeem_ws_ticket` (distinct
     /// from the `Ok(None)` not-found arm).
