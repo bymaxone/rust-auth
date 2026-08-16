@@ -10,6 +10,30 @@ version bump.
 
 ## [Unreleased]
 
+### Changed
+
+- **BREAKING: bulk session revocation moved from `DELETE /auth/sessions/all` to
+  `POST /auth/sessions/revoke-all`.** Guards, rate limit (5/60), `204` and error codes are
+  unchanged; only the method and the last path segment moved. `AUTH_ROUTES.SESSIONS_REVOKE_ALL`
+  in the npm client carries the new path.
+
+  **The verb was the defect.** The handler needs the refresh token naming the caller's own
+  session — the one session it must *not* revoke — and a bearer-mode deployment carries that
+  token in the request body. RFC 7231 gives a payload on `DELETE` no defined semantics, so an
+  OpenAPI generator drops it: the generated client sends no body, the handler cannot identify
+  the current session, and every call answers `auth.session_not_found`. A `DELETE` that needs a
+  body is a `DELETE` a generated client cannot call.
+
+  Paired with nest-auth's `POST {prefix}/sessions/revoke-all`, so one generated client drives
+  both servers instead of needing a per-implementation branch.
+
+  `DELETE /auth/platform/sessions` is deliberately **not** moved: it revokes every platform
+  session including the caller's, reads no body at all, and so carries none of the defect.
+
+  **Apply:** change the method to `POST` and the path's last segment to `revoke-all`. A caller
+  still on `DELETE /auth/sessions/all` now falls through to the `{id}` capture and gets
+  `404 auth.session_not_found`, the same answer a malformed session hash has always produced.
+
 ### Fixed
 
 - **The error-catalog parity test now reads the shared contract's status table instead of one

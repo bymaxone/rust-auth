@@ -250,15 +250,28 @@ async fn revoke_all_sessions_works_in_bearer_mode_and_never_reports_a_silent_suc
     );
 
     // No body-supplied token: the route cannot tell which session to keep, and says so.
-    let blind = Req::delete("/auth/sessions/all")
+    let blind = Req::post("/auth/sessions/revoke-all")
         .bearer(&access)
         .send(&app)
         .await;
     assert_eq!(blind.status, StatusCode::NOT_FOUND);
     assert_eq!(blind.json()["error"]["code"], "auth.session_not_found");
 
+    // The old verb and path are GONE, not merely discouraged. `DELETE /auth/sessions/all` now
+    // falls through to the `{id}` capture, where `all` is not a session hash — so a caller that
+    // was never updated is refused rather than quietly revoking nothing under a `204`. Asserted
+    // because the removal is the breaking half of the change: a route that answered the old
+    // shape would make the move invisible to exactly the callers it is meant to reach.
+    let old_shape = Req::delete("/auth/sessions/all")
+        .bearer(&access)
+        .json(serde_json::json!({ "refreshToken": refresh }))
+        .send(&app)
+        .await;
+    assert_eq!(old_shape.status, StatusCode::NOT_FOUND);
+    assert_eq!(old_shape.json()["error"]["code"], "auth.session_not_found");
+
     // With the token in the body — the channel a bearer client actually has — it works.
-    let revoked = Req::delete("/auth/sessions/all")
+    let revoked = Req::post("/auth/sessions/revoke-all")
         .bearer(&access)
         .json(serde_json::json!({ "refreshToken": refresh }))
         .send(&app)
@@ -961,8 +974,11 @@ async fn sessions_list_revoke_one_and_revoke_all() {
     assert_eq!(sessions[0]["isCurrent"], true);
     let hash = sessions[0]["sessionHash"].as_str().unwrap_or("").to_owned();
 
-    // The static `all` segment wins over the `{id}` capture.
-    let revoke_all = Req::delete("/auth/sessions/all")
+    // Cookie mode: the jar carries the refresh token, so the caller's own session is
+    // identifiable without a body. (Path precedence against the `{id}` capture is not what this
+    // exercises — `{id}` is registered for DELETE only, so a POST could never reach it; the
+    // bearer-mode test covers that by sending the old DELETE shape.)
+    let revoke_all = Req::post("/auth/sessions/revoke-all")
         .cookie("access_token", &access)
         .cookie("refresh_token", &refresh)
         .send(&app)
@@ -3002,7 +3018,7 @@ async fn sessions_list_and_revoke_all_store_failure_arms() {
     assert_eq!(list.status, StatusCode::INTERNAL_SERVER_ERROR);
 
     // `revoke_all` fails in the store → the revoke-all handler error arm renders a 500.
-    let revoke = Req::delete("/auth/sessions/all")
+    let revoke = Req::post("/auth/sessions/revoke-all")
         .cookie("access_token", &access)
         .cookie("refresh_token", &refresh)
         .send(&app)

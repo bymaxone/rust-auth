@@ -97,8 +97,11 @@ pub mod routes {
     // SessionController — `sessions` feature
     /// `GET` — list the caller's sessions.
     pub const SESSIONS_LIST: &str = "/auth/sessions";
-    /// `DELETE` — revoke every session.
-    pub const SESSIONS_REVOKE_ALL: &str = "/auth/sessions/all";
+    /// `POST` — revoke every session **except the caller's own**, which is why the request
+    /// carries the caller's refresh token: it names the one session to keep. The constant is
+    /// named for the path, not for a full sign-out — for that, the account's own sessions are
+    /// swept by the flows that change a credential (password reset, MFA disable).
+    pub const SESSIONS_REVOKE_ALL: &str = "/auth/sessions/revoke-all";
     /// `DELETE` — revoke one session by its hash (`/auth/sessions/{id}`).
     pub const SESSIONS_REVOKE_ONE: &str = "/auth/sessions/{id}";
 
