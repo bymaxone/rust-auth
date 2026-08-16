@@ -264,11 +264,19 @@ impl AuthEngine {
         // status at all and the socket ran with a blank authorization field for as long as it
         // stayed open. Re-reading also supplies the status gate this path never had — a banned
         // account holding a live access token could mint a ticket, and nothing downstream
-        // would notice — and gives the socket the role and tenant the account holds now rather
-        // than the ones its login did.
+        // would notice — and gives the socket the role the account holds now rather than the
+        // one its login did.
+        //
+        // Scoped by the TOKEN's tenant, not read without one. A repository id is unique only
+        // within a tenant (`UserRepository::find_by_id`), so an unscoped read on a host with
+        // per-tenant serial ids could resolve another tenant's account and hand its role,
+        // status and tenant to the socket — a ticket authorizing a long-lived connection as
+        // somebody else. That also means the snapshot's tenant is now the token's tenant by
+        // construction: an account moved to another tenant no longer resolves here at all, and
+        // mints no ticket, which is the same answer every other request-path read gives it.
         let user = self
             .user_repository()
-            .find_by_id(&claims.sub, None)
+            .find_by_id(&claims.sub, Some(&claims.tenant_id))
             .await
             .map_err(crate::services::auth::map_repository_error)?
             .ok_or(AuthError::TokenInvalid)?;
