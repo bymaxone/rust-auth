@@ -264,11 +264,19 @@ impl AuthEngine {
         // status at all and the socket ran with a blank authorization field for as long as it
         // stayed open. Re-reading also supplies the status gate this path never had — a banned
         // account holding a live access token could mint a ticket, and nothing downstream
-        // would notice — and gives the socket the role and tenant the account holds now rather
-        // than the ones its login did.
+        // would notice — and gives the socket the role the account holds now rather than the
+        // one its login did.
+        //
+        // Scoped by the TOKEN's tenant, not read without one. A repository id is unique only
+        // within a tenant (`UserRepository::find_by_id`), so an unscoped read on a host with
+        // per-tenant serial ids could resolve another tenant's account and hand its role,
+        // status and tenant to the socket — a ticket authorizing a long-lived connection as
+        // somebody else. That also means the snapshot's tenant is now the token's tenant by
+        // construction: an account moved to another tenant no longer resolves here at all, and
+        // mints no ticket, which is the same answer every other request-path read gives it.
         let user = self
             .user_repository()
-            .find_by_id(&claims.sub, None)
+            .find_by_id(&claims.sub, Some(&claims.tenant_id))
             .await
             .map_err(crate::services::auth::map_repository_error)?
             .ok_or(AuthError::TokenInvalid)?;
@@ -993,6 +1001,31 @@ mod tests {
             h.engine.redeem_ws_ticket(&"a1".repeat(32)).await,
             Err(AuthError::TokenInvalid)
         ));
+    }
+
+    #[tokio::test]
+    async fn ws_ticket_refuses_claims_naming_another_tenant() {
+        // The account read behind the mint is scoped by the token's tenant. Without that scope
+        // a host whose repository ids are per-tenant serials could resolve a DIFFERENT tenant's
+        // account and snapshot its role and status into the ticket — and a ticket authorizes a
+        // socket for the connection's whole lifetime with no per-request gate behind it, so the
+        // wrong snapshot outlives every other check in the system.
+        //
+        // Asserted with an id that genuinely EXISTS under `t1` and claims naming `tenant-b`:
+        // a subject that does not exist would fail on the unscoped path too, and prove nothing
+        // about the predicate. The sibling `me` test is built the same way, and this one exists
+        // because none of the other ws-ticket tests would fail if the scope were removed.
+        let Some(h) = harness(base_config(), None) else { return };
+        let claims = DashboardClaims {
+            tenant_id: "tenant-b".to_owned(),
+            ..seeded_claims(&h).await
+        };
+
+        let minted = h.engine.issue_ws_ticket(&claims).await;
+        assert!(
+            matches!(minted, Err(AuthError::TokenInvalid)),
+            "claims naming another tenant must mint no ticket"
+        );
     }
 
     /// A WS-ticket store whose backend always fails, to exercise the store-error propagation
