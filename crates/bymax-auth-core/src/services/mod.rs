@@ -39,7 +39,7 @@ pub mod platform;
 pub mod session;
 pub mod token_manager;
 
-use bymax_auth_types::AuthError;
+use bymax_auth_types::{AuthError, MfaContext};
 use time::OffsetDateTime;
 
 /// Lower-case hexadecimal alphabet, indexed by nibble value.
@@ -85,6 +85,66 @@ pub(crate) fn to_hex(bytes: &[u8]) -> String {
         out.push(HEX_ALPHABET[usize::from(byte & 0x0f)] as char);
     }
     out
+}
+
+/// The subject every per-account store key in this library derives from:
+/// `dashboard:{utf8_byte_len(tenant_id)}:{tenant_id}:{user_id}`, or `platform:{user_id}` on the
+/// plane whose admins are cross-tenant and carry no tenant at all.
+///
+/// The shared contract calls this the `userSubject` and lists what derives from it under
+/// `userSubjectDerivedKeys`: the MFA setup record, the recent-authentication marker, the TOTP
+/// anti-replay marker, the recovery-code claim, the three MFA failure counters, and — since the
+/// keyspace was scoped — the dashboard/platform **session index** and **token epoch**. It
+/// outgrew MFA, which is why it no longer carries that name.
+///
+/// # The length prefix is load-bearing
+///
+/// Without it the dashboard preimage is not injective. Both components may contain `:` — a
+/// `tenant_id` is validated for length and control characters only, and a user id is whatever
+/// the host's repository assigns — so two unrelated pairs collapse onto one preimage:
+///
+/// ```text
+/// tenant "acme:prod" + user "u1"      -> dashboard:acme:prod:u1
+/// tenant "acme"      + user "prod:u1" -> dashboard:acme:prod:u1
+/// ```
+///
+/// Everything derived from it collided there, `rcu:` included — the marker that stops one
+/// recovery code being spent twice. Prefixing the tenant's length makes the parse unambiguous:
+/// `dashboard:9:acme:prod:u1` against `dashboard:4:acme:prod:u1`.
+///
+/// `str::len()` counts UTF-8 **bytes**, which is what this must be. The symmetric mistake on the
+/// TypeScript side is `String.length`, which counts UTF-16 units: the two agree on ASCII and
+/// derive different keys for the first accented tenant id — a split that surfaces only in
+/// production, and only in some locales.
+///
+/// The platform arm takes no length prefix and no tenant: one component after the plane, nothing
+/// to disambiguate. The PLANE decides the shape, never whether a tenant happened to be supplied,
+/// so a platform caller that passes one cannot move the preimage off `platform:{user_id}`.
+pub(crate) fn user_subject(plane: MfaContext, tenant_id: Option<&str>, user_id: &str) -> String {
+    match (plane, tenant_id) {
+        (MfaContext::Dashboard, Some(tenant)) => {
+            format!("{}:{}:{tenant}:{user_id}", plane.as_str(), tenant.len())
+        }
+        _ => format!("{}:{user_id}", plane.as_str()),
+    }
+}
+
+/// The store-key suffix for a subject: `hmac_sha256(identifier_key, user_subject)` in lower-case
+/// hex.
+///
+/// Keyed, never a bare digest, and never the raw id: a user id is low-entropy enough to reverse
+/// out of a plain SHA-256, and a key carrying it in the clear turns anyone with store access into
+/// a reader of account identifiers. The same reasoning the `lf:` login counter already applies.
+pub(crate) fn user_subject_hash(
+    identifier_key: &[u8; 64],
+    plane: MfaContext,
+    tenant_id: Option<&str>,
+    user_id: &str,
+) -> String {
+    to_hex(&bymax_auth_crypto::mac::hmac_sha256(
+        identifier_key,
+        user_subject(plane, tenant_id, user_id).as_bytes(),
+    ))
 }
 
 /// Mint a fresh RFC 4122 version-4 UUID from the CSPRNG, hyphenated and lower-case. Used
