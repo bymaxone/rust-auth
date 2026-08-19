@@ -14,7 +14,6 @@
     "the same change, and only with a migration story for data already written in the old form."
   ],
   "version": 1,
-
   "hmacKeyDerivation": {
     "$comment": [
       "The identifier-hashing key both sides derive from the JWT secret, and one identifier",
@@ -42,7 +41,6 @@
       }
     ]
   },
-
   "redisKeyPrefixes": {
     "$comment": [
       "The prefix each keyspace uses, under the configured namespace: {namespace}:{prefix}:{id}.",
@@ -93,7 +91,6 @@
     "otpResendCooldown": "resend",
     "invitationIndex": "invidx"
   },
-
   "graceRecoveryWrite": {
     "$comment": [
       "The session a grace recovery produces is written in ONE atomic step, gated on the",
@@ -117,15 +114,38 @@
       "must obey. Both implementations must gate on the same witness, or one of them keeps the",
       "window the other closed."
     ],
-    "gate": "EXISTS {sessionIndex}:{userId}, and EXISTS {familyIndex}:{familyId} when the record names a family",
-    "writes": ["refreshSession", "sessionIndex", "sessionDetail", "familyIndex"],
+    "gate": "EXISTS {sessionIndex}, and EXISTS {familyIndex}:{familyId} when the record names a family",
+    "writes": [
+      "refreshSession",
+      "sessionIndex",
+      "sessionDetail",
+      "familyIndex"
+    ],
     "refusedError": "auth.refresh_token_invalid"
   },
-
-  "mfaSubjectPreimages": {
-    "dashboard": "dashboard:{tenantId}:{userId}",
+  "userSubjectPreimages": {
+    "dashboard": "dashboard:{utf8ByteLength(tenantId)}:{tenantId}:{userId}",
     "platform": "platform:{userId}",
     "$comment": [
+      "The dashboard arm carries a LENGTH PREFIX because a bare `:` between two free-form",
+      "components is not injective. Both halves may legitimately contain the delimiter — the DTO",
+      "charset deliberately admits a tenant id like `acme.eu-west-1:prod`, and a composite",
+      "`tenant:user` subject is a documented shape — so without the prefix",
+      "(tenantId 'acme:prod', userId 'u1') and (tenantId 'acme', userId 'prod:u1') both render",
+      "`dashboard:acme:prod:u1`. Two unrelated tenants would then share ONE session index, ONE",
+      "token epoch, one set of MFA store keys and one recovery-code single-use claim: the",
+      "cross-tenant revocation this contract exists to prevent, reintroduced through the",
+      "delimiter, plus one tenant able to spend another's recovery code.",
+      "",
+      "The prefix counts UTF-8 BYTES, not characters. JavaScript's String.length counts UTF-16",
+      "code units and Rust's str::len() counts bytes: `açaí` is 4 by one measure and 6 by the",
+      "other, so a character count would agree across the two implementations for ASCII and",
+      "derive different keys on the first accented tenant id. Rust uses `tenant_id.len()`,",
+      "TypeScript uses `Buffer.byteLength(tenantId, 'utf8')`.",
+      "",
+      "The platform arm has one component after the plane and nothing to disambiguate, so it is",
+      "left unprefixed — changing it would move a keyspace for no gain.",
+      "",
       "The subject EVERY MFA store key and MFA failure counter below is derived from. One",
       "definition rather than eight copies: eight keys share this shape, and a copy that drifts is",
       "a key that silently stops matching the one the other implementation derives.",
@@ -155,9 +175,8 @@
       "would leave the unscoped derivation reachable by omitting one optional field."
     ]
   },
-
   "mfaTransitionLock": {
-    "key": "mfalock:{hmac_sha256(hmacKey, mfaSubject)}",
+    "key": "mfalock:{hmac_sha256(hmacKey, userSubject)}",
     "value": "a per-call nonce (16 CSPRNG bytes, hex) — the release compares against it",
     "ttlSeconds": 10,
     "$comment": [
@@ -185,9 +204,8 @@
       "serialize against different locks and the property is lost."
     ]
   },
-
   "recoveryCodeClaim": {
-    "key": "rcu:{hmac_sha256(hmacKey, '{mfaSubject}:{code}')}",
+    "key": "rcu:{hmac_sha256(hmacKey, '{userSubject}:{code}')}",
     "value": "'1' — presence is the whole meaning",
     "ttlSeconds": 300,
     "$comment": [
@@ -204,33 +222,92 @@
       "into a code the account can see but can never use."
     ]
   },
-
-  "mfaSubjectDerivedKeys": {
-    "mfaSetupRecord": "mfa_setup:{hmac_sha256(hmacKey, mfaSubject)}",
-    "recentAuthMarker": "ra:{hmac_sha256(hmacKey, mfaSubject)}",
-    "totpAntiReplay": "tu:{hmac_sha256(hmacKey, '{mfaSubject}:{code}')}",
-    "challengeFailureCounter": "lf:{hmac_sha256(hmacKey, 'challenge:{mfaSubject}')}",
-    "disableFailureCounter": "lf:{hmac_sha256(hmacKey, 'disable:{mfaSubject}')}",
-    "reauthFailureCounter": "lf:{hmac_sha256(hmacKey, 'reauth:{mfaSubject}')}",
+  "userSubjectDerivedKeys": {
+    "mfaSetupRecord": "mfa_setup:{hmac_sha256(hmacKey, userSubject)}",
+    "recentAuthMarker": "ra:{hmac_sha256(hmacKey, userSubject)}",
+    "totpAntiReplay": "tu:{hmac_sha256(hmacKey, '{userSubject}:{code}')}",
+    "challengeFailureCounter": "lf:{hmac_sha256(hmacKey, 'challenge:{userSubject}')}",
+    "disableFailureCounter": "lf:{hmac_sha256(hmacKey, 'disable:{userSubject}')}",
+    "reauthFailureCounter": "lf:{hmac_sha256(hmacKey, 'reauth:{userSubject}')}",
+    "sessionIndex": "{sess|psess}:{hmac_sha256(hmacKey, userSubject)}",
+    "tokenEpoch": "{ep|pep}:{hmac_sha256(hmacKey, userSubject)}",
     "$comment": [
-      "The six keys that derive from `mfaSubjectPreimages` and were NOT pinned here before. They",
-      "drifted apart silently for exactly as long as nothing named them: a contract detects drift",
-      "only in what it lists, which is how the OTP stored value moved without this file noticing.",
-      "Six of the eight MFA subject-derived keys were in that blind spot.",
+      "The keys that derive from `userSubjectPreimages`. A contract detects drift only in what it",
+      "lists, so every key that names an ACCOUNT rather than a token belongs here.",
       "",
-      "`totpAntiReplay` and `recoveryCodeClaim` share ONE preimage and are separated only by their",
-      "key prefix — both implementations derive them from the same string, so the two entries are",
-      "one derivation described twice, not two derivations that happen to look alike.",
+      "`sessionIndex` and `tokenEpoch` were the last two to join, and they were the two that made",
+      "the preimage's own argument concrete. They were keyed on the BARE user id: `sess:{userId}`",
+      "and `ep:{userId}`. Neither library may assume the consumer's user ids are unique across",
+      "tenants — `findById` takes a tenant precisely because they may not be — so on a deployment",
+      "that numbers users per tenant, suspending or deleting `t1/u1` swept the sessions and bumped",
+      "the token epoch of `t2/u1`. A credential-free cross-tenant revocation, reachable by anyone",
+      "who can get an account suspended in their own tenant.",
       "",
-      "The three failure counters live under the `lf:` prefix alongside the LOGIN counter that",
-      "`identifierPreimages` describes, which is why that block looked like it covered them and",
-      "did not: it defines the email-keyed login preimage, these are user-id-keyed MFA preimages.",
-      "The `challenge:` / `disable:` / `reauth:` segments keep the three isolated from each other,",
-      "so the pre-auth counter an attacker can drive cannot exhaust the authenticated user's",
-      "management budget, nor the password re-proof that gates enrolment."
+      "The bare id was also an account identifier in the clear in a store both libraries read,",
+      "which is the second reason every key here is an HMAC and not a bare digest: a user id",
+      "carries too little entropy for a plain hash to hide it, exactly as an address does.",
+      "",
+      "The platform arm keeps no tenant segment, because `userSubject` drops it there — its admins",
+      "are cross-tenant and have none.",
+      "",
+      "**This change has no compatibility path and needs both libraries in the same release.** A",
+      "backend on the old shape writes `sess:{userId}` while one on the new shape reads",
+      "`sess:{hmac}`: sessions stay alive and unswept, and a revoke-all misses them.",
+      "",
+      "**That also forbids a ROLLING deploy of one library against itself.** Drain the pods on the",
+      "old release before the new ones serve. The MFA keyspace is where this bites rather than the",
+      "session one: the transition lock that serializes a read-modify-write on the recovery-code",
+      "list is keyed by this same subject, so two pods that disagree about the subject take",
+      "different locks and do not exclude each other at all. The `rcu:` claim is keyed by it too,",
+      "so the same recovery code can be claimed once on each side and then spent by two",
+      "unserialized writes. Neither library carries a fallback for the previous tenant-scoped",
+      "preimage: a deliberate choice, because a fallback is compatibility weight for a deployment",
+      "that a cutover removes the need for, and the cutover is the stronger position.",
+      "",
+      "**A live keyspace must be MIGRATED, not dropped.** Deleting the old keys is unsafe in both",
+      "directions, and each direction is a hole rather than an inconvenience.",
+      "",
+      "**The dashboard migration is a FAN-OUT, not a rename: one old key becomes N new ones.** The",
+      "old keys are tenant-blind — `ep:{userId}` and `sess:{userId}` name a bare user id — which is",
+      "the very defect this change removes, so a single old key served EVERY tenant that has a user",
+      "with that id. Each of those pairs derives its own key now. An operator who copies an old key",
+      "to one derived key and drops it has migrated one tenant and silently reset all the others,",
+      "which is the hole described below rather than a partial migration. Enumerate the tenants",
+      "that user id appears in and write every one of them. On the PLATFORM plane the mapping is",
+      "1:1 — its subject carries no tenant — so the fan-out is a dashboard-only obligation.",
+      "",
+      "Deleting an old `ep:{userId}` does not expire the tokens it revoked. The reader answers 0",
+      "for an absent key, and under 0 the `stamped < epoch` test is false for EVERY token — so a",
+      "password reset, an MFA reset or a sign-out-everywhere that had already invalidated an",
+      "access token is undone, and that token works again for the rest of its lifetime. Epochs",
+      "must be COPIED to EVERY derived key the old one served — each with at least the old value",
+      "and at least the remainder of its TTL — and only then dropped. Missing one tenant is not a",
+      "smaller version of dropping the key: for that tenant it IS dropping the key. An epoch may",
+      "never move backwards.",
+      "",
+      "Deleting an old `sess:{userId}` does not end the sessions it listed. Its `rt:`/`rp:` members",
+      "outlive it and become unreachable: a later revoke-all reads the new, empty index, finds",
+      "nothing to delete and reports success while those refresh tokens keep rotating. Either",
+      "re-add the members under the derived index keys, or delete the member keys and their detail",
+      "records BEFORE dropping the index. The second costs a forced re-login and is the safer of",
+      "the two; the first preserves sessions and must be done atomically per user.",
+      "",
+      "Re-adding is where the fan-out bites hardest, because the old index MIXES tenants: its",
+      "members are the sessions of every tenant's user with that id, and dropping them all into one",
+      "derived index would hand one tenant another's live sessions — a worse outcome than the",
+      "collision being fixed, since it is now a listable, revocable cross-tenant handle. Partition",
+      "instead: each member names an `rt:`/`rp:` record that carries its OWN `tenantId`, so read the",
+      "record, derive that pair's index, and place the member there. A member whose record is gone",
+      "is already dead and is dropped rather than guessed at.",
+      "",
+      "**Both obligations apply to the PLATFORM twins, `pep:{userId}` and `psess:{userId}`**, which",
+      "this change relocates identically. They are the easier pair to forget and the worse pair to",
+      "get wrong: a platform epoch left behind revalidates previously revoked ADMIN tokens, and a",
+      "platform index left behind hides an admin's live refresh sessions from revoke-all. The",
+      "platform subject carries no tenant segment, but the HMAC relocates the key all the same, so",
+      "an operator with no tenants still owes both steps on both planes."
     ]
   },
-
   "identifierPreimages": {
     "$comment": [
       "The preimage each plane HMACs into its `lf:` counter key. The identity PLANE is part of",
@@ -254,7 +331,6 @@
     "otpRecord": "hmac_sha256(hmacKey, '{tenantId}:{email}')",
     "inviteeIndex": "hmac_sha256(hmacKey, '{email}')"
   },
-
   "requestFieldBounds": {
     "$comment": [
       "The length bounds every request DTO applies to a shared field, held identical by both",
@@ -269,18 +345,53 @@
       "legitimate holder with a validation error while telling an unauthenticated caller what the",
       "policy is, before any key derivation runs."
     ],
-    "email": { "max": 255 },
-    "newPassword": { "min": 8, "max": 128 },
-    "provenPassword": { "min": 1, "max": 128 },
-    "tenantId": { "min": 1, "max": 128 },
-    "displayName": { "min": 2, "max": 128 },
-    "invitationDisplayName": { "min": 2, "max": 100 },
-    "singleUseToken": { "min": 64, "max": 64 },
-    "resetOtp": { "min": 4, "max": 8 },
-    "verificationOtp": { "min": 6, "max": 6 },
-    "totpCode": { "min": 6, "max": 6 },
-    "role": { "min": 1, "max": 64 },
-    "opaqueToken": { "min": 1, "max": 2048 }
+    "email": {
+      "max": 255
+    },
+    "newPassword": {
+      "min": 8,
+      "max": 128
+    },
+    "provenPassword": {
+      "min": 1,
+      "max": 128
+    },
+    "tenantId": {
+      "min": 1,
+      "max": 128
+    },
+    "displayName": {
+      "min": 2,
+      "max": 128
+    },
+    "invitationDisplayName": {
+      "min": 2,
+      "max": 100
+    },
+    "singleUseToken": {
+      "min": 64,
+      "max": 64
+    },
+    "resetOtp": {
+      "min": 4,
+      "max": 8
+    },
+    "verificationOtp": {
+      "min": 6,
+      "max": 6
+    },
+    "totpCode": {
+      "min": 6,
+      "max": 6
+    },
+    "role": {
+      "min": 1,
+      "max": 64
+    },
+    "opaqueToken": {
+      "min": 1,
+      "max": 2048
+    }
   },
   "sessionIndexMembers": {
     "$comment": [
@@ -299,7 +410,6 @@
     "platformLive": "prt:{sha256(refreshToken)}",
     "platformGrace": "prp:{sha256(supersededToken)}"
   },
-
   "familyIndexMembers": {
     "$comment": [
       "A refresh-token FAMILY is one login lineage: minted at login, inherited unchanged by",
@@ -310,7 +420,6 @@
     "dashboardLive": "{sha256(refreshToken)}",
     "platformLive": "{sha256(refreshToken)}"
   },
-
   "rotationSemantics": {
     "$comment": [
       "What a presented refresh token can be, and what each outcome does. These are behaviours",
@@ -324,7 +433,6 @@
     "reuseReaction": "revoke the whole family (every live descendant of that login) and reject the request; the user's other logins are untouched",
     "legacySessionWithoutFamily": "skips all family bookkeeping and can never trip reuse detection"
   },
-
   "recordEncodings": {
     "$comment": [
       "Timestamp encoding differs per record and is NOT uniform — this is the trap. The session",
@@ -351,13 +459,24 @@
     },
     "sessionDetail": {
       "key": "{sd|psd}:{sha256(refreshToken)}",
-      "fields": ["device", "ip", "createdAt", "lastActivityAt"],
+      "fields": [
+        "device",
+        "ip",
+        "createdAt",
+        "lastActivityAt"
+      ],
       "createdAt": "unix-milliseconds-number",
       "lastActivityAt": "unix-milliseconds-number"
     },
     "invitation": {
       "key": "inv:{sha256(token)}",
-      "fields": ["email", "role", "tenantId", "inviterUserId", "createdAt"],
+      "fields": [
+        "email",
+        "role",
+        "tenantId",
+        "inviterUserId",
+        "createdAt"
+      ],
       "createdAt": "iso8601-string",
       "$comment": "Consumption is a single-use GETDEL, so a record the reader rejects is destroyed rather than retried — a missing field loses the invitation outright."
     },
@@ -380,13 +499,25 @@
     },
     "wsTicket": {
       "key": "wst:{sha256(ticket)}",
-      "fields": ["sub", "tenantId", "role", "status", "mfaEnabled", "mfaVerified"],
+      "fields": [
+        "sub",
+        "tenantId",
+        "role",
+        "status",
+        "mfaEnabled",
+        "mfaVerified"
+      ],
       "tenantId": "omitted from the record entirely when the ticket is not tenant-scoped",
       "$comment": "A verified-identity SNAPSHOT, never a token: no jti, no signature, no expiry of its own. The socket it authorizes cannot be turned back into a session. Redemption is a single-use GETDEL, so a captured upgrade URL is worthless once the socket opens."
     },
     "emailChangeContext": {
       "key": "ec:{sha256(token)}",
-      "fields": ["userId", "newEmail", "tenantId", "passwordFingerprint"],
+      "fields": [
+        "userId",
+        "newEmail",
+        "tenantId",
+        "passwordFingerprint"
+      ],
       "$comment": [
         "The pending address change, held under a token that is mailed to the NEW address and",
         "nowhere else — proving the requester controls it before it becomes the account's",
@@ -405,14 +536,17 @@
       ],
       "passwordFingerprint": "sha256 of the account's password hash when the token was minted, or the empty string when the account had none."
     },
-
     "passwordResetContext": {
       "key": "pw_reset:{sha256(token)}",
-      "fields": ["userId", "email", "tenantId", "passwordFingerprint"],
+      "fields": [
+        "userId",
+        "email",
+        "tenantId",
+        "passwordFingerprint"
+      ],
       "passwordFingerprint": "sha256 of the account's password hash at the moment the token was minted, or the empty string when the account had none. Several reset tokens can be alive at once, and completing one used to leave the rest valid — the wrong end state exactly when it matters, since a victim resetting BECAUSE an attacker read a link from their mailbox had not closed the link the attacker read. The binding makes the first completed reset invalidate all of them, with no per-user index to keep in step. An ABSENT field is read as 'no binding' and accepted, so a rolling deploy does not break the resets already in flight."
     }
   },
-
   "credentialFormats": {
     "$comment": [
       "The shapes of the credentials themselves. Both sides must mint and accept the same ones",
@@ -425,7 +559,6 @@
     "otpRecordCode": "hex hmac-sha256 of `{identifier}:{code}` under the derived identifier key",
     "wsTicket": "64 lowercase hex characters (32 CSPRNG bytes), single-use, 30 s lifetime"
   },
-
   "passwordHashFormat": {
     "$comment": [
       "The stored password hash, pinned by known-answer vector rather than by description.",
@@ -466,7 +599,6 @@
       }
     ]
   },
-
   "rateLimits": {
     "$comment": [
       "The per-IP limit each auth route is served under, as `requests/windowSeconds`. Both",
@@ -507,7 +639,6 @@
     "oauthInitiate": "10/60",
     "oauthCallback": "10/60"
   },
-
   "accessTokenClaims": {
     "$comment": [
       "Claims both sides stamp and both sides check. `epoch` is the per-user generation counter",
@@ -516,9 +647,11 @@
       "inert until the user's first bump. Absent from the MFA challenge token, which grants no",
       "resource access on its own."
     ],
-
     "issuerAndAudience": {
-      "claims": ["iss", "aud"],
+      "claims": [
+        "iss",
+        "aud"
+      ],
       "type": "string, or absent",
       "configuredBy": "jwt.issuer / jwt.audience",
       "$comment": [
@@ -545,7 +678,6 @@
       "rejectWhen": "stampedEpoch < storedEpoch"
     }
   },
-
   "responseBodies": {
     "$comment": [
       "The client-facing payloads. These are what a consumer's TypeScript describes, so a",
@@ -554,32 +686,47 @@
       "the account rides under `admin`, not `user`, on both sides."
     ],
     "login": {
-      "cookie": ["user"],
-      "bearer": ["user", "accessToken", "refreshToken"],
+      "cookie": [
+        "user"
+      ],
+      "bearer": [
+        "user",
+        "accessToken",
+        "refreshToken"
+      ],
       "$comment": "In cookie mode the tokens are in Set-Cookie and MUST NOT also be in the body: a refresh token in a JSON payload is one an XSS can read, which is the whole reason the cookie is HttpOnly."
     },
     "platformLogin": {
-      "bearer": ["admin", "accessToken", "refreshToken"],
+      "bearer": [
+        "admin",
+        "accessToken",
+        "refreshToken"
+      ],
       "$comment": "Always bearer — a platform admin console is not a browser session — and the account key is `admin`."
     },
     "me": {
       "envelope": "none",
       "$comment": "GET /auth/me answers with the BARE user object — no `{ user }` wrapper. Pinned because its absence from this table is what let one side change shape while the other kept unwrapping a key that was no longer there: the client returned `undefined` while every other signal said authenticated, and the test that should have caught it mocked the old envelope."
     },
-    "mfaChallenge": ["mfaRequired", "mfaTempToken"],
-    "wsTicket": ["ticket", "expiresIn"]
+    "mfaChallenge": [
+      "mfaRequired",
+      "mfaTempToken"
+    ],
+    "wsTicket": [
+      "ticket",
+      "expiresIn"
+    ]
   },
-
   "errorCatalog": {
     "$comment": [
       "Every `auth.*` code either implementation can name, in the order the catalog declares them.",
       "The two libraries can back the same deployment, so a client switching on `error.code` must",
-      "see one vocabulary \u2014 a code present on one side only is a branch that never fires against",
+      "see one vocabulary — a code present on one side only is a branch that never fires against",
       "the other, and a code neither side emits is a branch that never fires at all.",
       "",
       "`internalOnly` names the codes that must never reach a client. Each collapses onto a public",
-      "one \u2014 the token sentinels onto `auth.token_invalid`, the OTP sentinels onto",
-      "`auth.otp_invalid` \u2014 so a caller cannot tell 'valid until revoked' from 'never valid', or",
+      "one — the token sentinels onto `auth.token_invalid`, the OTP sentinels onto",
+      "`auth.otp_invalid` — so a caller cannot tell 'valid until revoked' from 'never valid', or",
       "'no record was ever written here' from 'wrong code'. They stay in the catalog because they",
       "are real internal outcomes worth logging, and the status must collapse with the code."
     ],
@@ -630,7 +777,6 @@
       "auth.otp_expired",
       "auth.otp_max_attempts"
     ],
-
     "$statusesComment": [
       "The HTTP status each code answers with. A client switching on `error.code` switches on",
       "the status line first — a 4xx it retries, a 429 it backs off on, a 409 it resolves — so",
@@ -702,6 +848,12 @@
   },
   "errorEnvelope": {
     "$comment": "The body shape every auth error serializes to. `details` is present and null when the thrower supplied none.",
-    "shape": { "error": { "code": "string", "message": "string", "details": "object|null" } }
+    "shape": {
+      "error": {
+        "code": "string",
+        "message": "string",
+        "details": "object|null"
+      }
+    }
   }
 }

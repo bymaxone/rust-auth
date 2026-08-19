@@ -2389,7 +2389,8 @@ fn service_over(store: Arc<dyn MfaStore>, users: Arc<dyn UserRepository>) -> Mfa
 /// `seed_user` creates accounts with no local password, so enrolment now takes the temporal
 /// proof rather than the password one. Tests that are about the setup RECORD, not about the
 /// gate, arrange the proof here and stay focused on what they came to assert. The key is
-/// derived BY HAND — `hmac_sha256("dashboard:{tenantId}:{userId}")` under the same identifier
+/// derived BY HAND — `hmac_sha256("dashboard:{utf8ByteLength(tenantId)}:{tenantId}:{userId}")`
+/// under the same identifier
 /// key the fixture wires — rather than by calling the service's own helper, which is the point:
 /// a hand-written copy is an independent check that breaks loudly when the derivation moves,
 /// instead of following it and asserting nothing. It has already earned that once, catching the
@@ -2397,7 +2398,7 @@ fn service_over(store: Arc<dyn MfaStore>, users: Arc<dyn UserRepository>) -> Mfa
 async fn plant_recent_auth(service: &MfaService, user_id: &str) {
     let hash = crate::services::to_hex(&bymax_auth_crypto::mac::hmac_sha256(
         &[9u8; 64],
-        format!("dashboard:{TENANT}:{user_id}").as_bytes(),
+        format!("dashboard:{}:{TENANT}:{user_id}", TENANT.len()).as_bytes(),
     ));
     let _ = service.session_store.mark_recent_auth(&hash, 300).await;
 }
@@ -2953,14 +2954,14 @@ fn contract_section(name: &str) -> serde_json::Value {
 #[test]
 fn the_mfa_subject_preimages_match_the_shared_contract() {
     // The contract file is only a drift DETECTOR if something enforces it. Without this test the
-    // two `mfaSubjectPreimages` lines are prose: nest-auth could move its derivation, this file
+    // two `userSubjectPreimages` lines are prose: nest-auth could move its derivation, this file
     // could be updated to match, and rust-auth would keep hashing the old string with every test
     // still green. That is exactly how the OTP stored value drifted — the contract was silent on
     // the one field that moved, so silence read as agreement.
     //
     // Asserted against the SINGLE definition all eight keys derive from, so pinning it here pins
     // all eight at once.
-    let subjects = contract_section("mfaSubjectPreimages");
+    let subjects = contract_section("userSubjectPreimages");
     let dashboard = subjects
         .get("dashboard")
         .and_then(serde_json::Value::as_str)
@@ -2972,20 +2973,24 @@ fn the_mfa_subject_preimages_match_the_shared_contract() {
 
     // The contract states the SHAPE with placeholders; substitute and compare against what the
     // code actually builds, rather than eyeballing two strings for equality.
+    // `{utf8ByteLength(tenantId)}` is substituted with the BYTE length, which is what the
+    // contract names and what `str::len()` returns — spelling it out here so the test fails if
+    // the code ever counts characters instead.
     let expected_dashboard = dashboard
+        .replace("{utf8ByteLength(tenantId)}", &"t1".len().to_string())
         .replace("{tenantId}", "t1")
         .replace("{userId}", "u1");
     let expected_platform = platform.replace("{userId}", "u1");
 
     assert_eq!(
-        super::scoped_subject(MfaContext::Dashboard, Some("t1"), "u1"),
+        crate::services::user_subject(MfaContext::Dashboard, Some("t1"), "u1"),
         expected_dashboard,
-        "the dashboard MFA subject drifted from `mfaSubjectPreimages.dashboard`"
+        "the dashboard MFA subject drifted from `userSubjectPreimages.dashboard`"
     );
     assert_eq!(
-        super::scoped_subject(MfaContext::Platform, None, "u1"),
+        crate::services::user_subject(MfaContext::Platform, None, "u1"),
         expected_platform,
-        "the platform MFA subject drifted from `mfaSubjectPreimages.platform`"
+        "the platform MFA subject drifted from `userSubjectPreimages.platform`"
     );
 
     // The platform arm must carry no tenant segment at all — a contract line that grew one
@@ -2998,7 +3003,7 @@ fn the_mfa_subject_preimages_match_the_shared_contract() {
     // And the six keys that were in the blind spot are now named. This asserts the ENTRIES
     // exist, which is the property that was missing — six of eight derivations were unpinned,
     // so a drift in any of them would have gone undetected the way the OTP one did.
-    let derived = contract_section("mfaSubjectDerivedKeys");
+    let derived = contract_section("userSubjectDerivedKeys");
     for key in [
         "mfaSetupRecord",
         "recentAuthMarker",
@@ -3012,7 +3017,7 @@ fn the_mfa_subject_preimages_match_the_shared_contract() {
                 .get(key)
                 .and_then(serde_json::Value::as_str)
                 .is_some(),
-            "`mfaSubjectDerivedKeys.{key}` is missing — an unpinned derivation is an undetectable drift"
+            "`userSubjectDerivedKeys.{key}` is missing — an unpinned derivation is an undetectable drift"
         );
     }
 }
@@ -3910,17 +3915,37 @@ fn every_dashboard_mfa_key_is_namespaced_by_tenant() {
 }
 
 #[test]
-fn the_scoped_subject_is_the_single_preimage_definition() {
+fn the_user_subject_is_the_single_preimage_definition() {
     // Eight keys derive from this one string, and it has to agree byte-for-byte with the
     // preimage nest-auth builds — so it is pinned here as literal text rather than left to be
     // re-derived by whatever reads the code next. `conformance/wire-contract.json` carries the
     // same two shapes; this is the assertion that the code still matches the file.
     assert_eq!(
-        super::scoped_subject(MfaContext::Dashboard, Some("t1"), "u1"),
-        "dashboard:t1:u1"
+        crate::services::user_subject(MfaContext::Dashboard, Some("t1"), "u1"),
+        "dashboard:2:t1:u1"
+    );
+
+    // The length prefix is what makes the preimage injective, so the assertion that matters is
+    // not "it has a number in it" but that two pairs which USED to collide no longer do. Both
+    // spell `dashboard:acme:prod:u1` under the old shape.
+    assert_ne!(
+        crate::services::user_subject(MfaContext::Dashboard, Some("acme:prod"), "u1"),
+        crate::services::user_subject(MfaContext::Dashboard, Some("acme"), "prod:u1")
     );
     assert_eq!(
-        super::scoped_subject(MfaContext::Platform, None, "u1"),
+        crate::services::user_subject(MfaContext::Dashboard, Some("acme:prod"), "u1"),
+        "dashboard:9:acme:prod:u1"
+    );
+
+    // BYTES, not characters. `açaí` is 4 characters and 6 UTF-8 bytes; a port that counted
+    // characters would agree with this one on every ASCII tenant id and derive a different key
+    // for the first accented one — the split that only shows up in production, in one locale.
+    assert_eq!(
+        crate::services::user_subject(MfaContext::Dashboard, Some("açaí"), "u1"),
+        "dashboard:6:açaí:u1"
+    );
+    assert_eq!(
+        crate::services::user_subject(MfaContext::Platform, None, "u1"),
         "platform:u1"
     );
     // The platform arm is driven by the PLANE, not by whether a tenant was supplied. A caller
@@ -3929,14 +3954,14 @@ fn the_scoped_subject_is_the_single_preimage_definition() {
     // and a key that shifts with an argument nobody meant to pass is a key that silently stops
     // matching. This is the assertion that the ignoring is deliberate and stays deliberate.
     assert_eq!(
-        super::scoped_subject(MfaContext::Platform, Some("t1"), "u1"),
-        super::scoped_subject(MfaContext::Platform, None, "u1")
+        crate::services::user_subject(MfaContext::Platform, Some("t1"), "u1"),
+        crate::services::user_subject(MfaContext::Platform, None, "u1")
     );
 }
 
 #[test]
 fn a_dashboard_mfa_operation_without_a_tenant_is_refused_before_any_key_is_derived() {
-    // `scoped_subject` is total because the platform plane legitimately has no tenant, so a
+    // `user_subject` is total because the platform plane legitimately has no tenant, so a
     // `None` arriving on the dashboard plane would silently rebuild the OLD unscoped preimage:
     // the vulnerable derivation, reachable by omitting an argument. This guard is what makes
     // that unreachable, and it fails closed rather than deriving a key that is wrong in a way
@@ -4171,7 +4196,7 @@ async fn a_rotation_cannot_refresh_the_recent_authentication_proof() {
     plant_recent_auth(&service, &uid).await;
     let hash = crate::services::to_hex(&bymax_auth_crypto::mac::hmac_sha256(
         &[9u8; 64],
-        format!("dashboard:{TENANT}:{uid}").as_bytes(),
+        format!("dashboard:{}:{TENANT}:{uid}", TENANT.len()).as_bytes(),
     ));
 
     // The marker is READ, never consumed: two security changes after one sign-in both proceed.
