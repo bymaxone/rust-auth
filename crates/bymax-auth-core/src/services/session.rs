@@ -58,6 +58,11 @@ pub struct SessionService {
     hooks: Arc<dyn AuthHooks>,
     config: SessionConfig,
     refresh_ttl_secs: u64,
+    /// The engine's identifier-hashing key, which derives the session subject every key this
+    /// service touches is suffixed with. Required, never optional: a service that derived a
+    /// subject under a different key would list, evict and revoke in a keyspace no other
+    /// component reads.
+    identifier_key: zeroize::Zeroizing<[u8; 64]>,
 }
 
 impl SessionService {
@@ -70,6 +75,7 @@ impl SessionService {
         hooks: Arc<dyn AuthHooks>,
         config: SessionConfig,
         refresh_ttl_secs: u64,
+        identifier_key: zeroize::Zeroizing<[u8; 64]>,
     ) -> Self {
         Self {
             store,
@@ -77,7 +83,32 @@ impl SessionService {
             hooks,
             config,
             refresh_ttl_secs,
+            identifier_key,
         }
+    }
+
+    /// The dashboard session subject for one account: `hmac_sha256(identifier_key,
+    /// "dashboard:{len(tenant)}:{tenant}:{user}")` in lower-case hex.
+    ///
+    /// This service is dashboard-only — every store call it makes names
+    /// [`SessionKind::Dashboard`] — so the plane is fixed and only the tenant has to be
+    /// supplied. Taking the tenant rather than resolving it is deliberate: resolving would mean
+    /// `find_by_id(user_id, None)`, the cross-tenant lookup whose ambiguity is the whole reason
+    /// these keys moved.
+    ///
+    /// `Option`, not `&str`, so a record whose `tenant_id` is absent derives the same subject
+    /// here as it does in `TokenManagerService`, which reads the field straight off the record.
+    /// Coercing `None` to `""` looks harmless and is not: it takes the tenant-bearing arm of the
+    /// preimage with a zero-length tenant (`dashboard:0::{userId}`) where the writer took the
+    /// tenant-less one (`dashboard:{userId}`), so the session this service lists is not the
+    /// session the token manager wrote.
+    fn subject(&self, tenant_id: Option<&str>, user_id: &str) -> String {
+        crate::services::session_subject_hash(
+            &self.identifier_key,
+            SessionKind::Dashboard,
+            tenant_id,
+            user_id,
+        )
     }
 
     /// Enforce the per-user session cap after a fresh session was already created, then fire
@@ -121,9 +152,12 @@ impl SessionService {
         ctx: &HookContext,
     ) -> Result<(), AuthError> {
         let user_id = &record.user_id;
+        // The record's own tenant, not a re-resolved one: this is the session that was just
+        // written, so it names the account the cap is being enforced for.
+        let subject = self.subject(record.tenant_id.as_deref(), user_id);
         let mut sessions = self
             .store
-            .list_sessions(SessionKind::Dashboard, user_id)
+            .list_sessions(SessionKind::Dashboard, &subject)
             .await?;
         // Clamp the resolved cap to at least 1. A cap of 0 is unenforceable here: eviction
         // always excludes the just-created session, so a literal 0 would leave the user one
@@ -154,7 +188,7 @@ impl SessionService {
             // so eviction must never fail the operation that scheduled it.
             if let Err(error) = self
                 .store
-                .revoke_session(SessionKind::Dashboard, user_id, &victim.session_hash)
+                .revoke_session(SessionKind::Dashboard, &subject, &victim.session_hash)
                 .await
                 && !matches!(error, AuthError::SessionNotFound)
             {
@@ -191,13 +225,17 @@ impl SessionService {
     /// Returns a store [`AuthError`] if the sessions cannot be listed.
     pub async fn list_sessions(
         &self,
+        tenant_id: &str,
         user_id: &str,
         current_hash: Option<&str>,
     ) -> Result<Vec<SessionInfo>, AuthError> {
         let current = current_hash.unwrap_or("");
         let mut sessions = self
             .store
-            .list_sessions(SessionKind::Dashboard, user_id)
+            .list_sessions(
+                SessionKind::Dashboard,
+                &self.subject(Some(tenant_id), user_id),
+            )
             .await?;
         sessions.sort_by_key(|detail| std::cmp::Reverse(detail.created_at));
         Ok(sessions
@@ -215,12 +253,21 @@ impl SessionService {
     ///
     /// Returns [`AuthError::SessionNotFound`] when the hash is malformed or not owned by the
     /// user, or a store [`AuthError`] on an infrastructure failure.
-    pub async fn revoke_session(&self, user_id: &str, session_hash: &str) -> Result<(), AuthError> {
+    pub async fn revoke_session(
+        &self,
+        tenant_id: &str,
+        user_id: &str,
+        session_hash: &str,
+    ) -> Result<(), AuthError> {
         if !is_session_hash(session_hash) {
             return Err(AuthError::SessionNotFound);
         }
         self.store
-            .revoke_session(SessionKind::Dashboard, user_id, session_hash)
+            .revoke_session(
+                SessionKind::Dashboard,
+                &self.subject(Some(tenant_id), user_id),
+                session_hash,
+            )
             .await
     }
 
@@ -246,15 +293,17 @@ impl SessionService {
     /// [`AuthError`] on an infrastructure failure listing or revoking a session.
     pub async fn revoke_all_except_current(
         &self,
+        tenant_id: &str,
         user_id: &str,
         current_hash: &str,
     ) -> Result<(), AuthError> {
         if !is_session_hash(current_hash) {
             return Err(AuthError::SessionNotFound);
         }
+        let subject = self.subject(Some(tenant_id), user_id);
         let sessions = self
             .store
-            .list_sessions(SessionKind::Dashboard, user_id)
+            .list_sessions(SessionKind::Dashboard, &subject)
             .await?;
         for detail in sessions {
             // Skip the caller's own session (constant-time compare on the fixed-length hashes).
@@ -263,7 +312,7 @@ impl SessionService {
             }
             match self
                 .store
-                .revoke_session(SessionKind::Dashboard, user_id, &detail.session_hash)
+                .revoke_session(SessionKind::Dashboard, &subject, &detail.session_hash)
                 .await
             {
                 Ok(()) | Err(AuthError::SessionNotFound) => {}
@@ -277,13 +326,13 @@ impl SessionService {
         // recover through the grace window into a brand-new full-lifetime session. The epoch
         // bump below does not close that: a recovered session signs from the current epoch.
         self.store
-            .sweep_grace_pointers(SessionKind::Dashboard, user_id)
+            .sweep_grace_pointers(SessionKind::Dashboard, &subject)
             .await?;
 
         // Last, and only once every victim is gone: a failure above leaves the epoch untouched
         // rather than signing the caller out of a device the loop never got to revoke.
         self.store
-            .bump_epoch(SessionKind::Dashboard, user_id)
+            .bump_epoch(SessionKind::Dashboard, &subject)
             .await?;
         tracing::info!(%user_id, "sessions: revoked all other devices, token epoch advanced");
         Ok(())
@@ -319,6 +368,7 @@ impl SessionService {
             new_hash: new_hash.to_owned(),
             new_raw: String::new(),
             new_record: record.clone(),
+            subject_hash: self.subject(record.tenant_id.as_deref(), &record.user_id),
             refresh_ttl: self.refresh_ttl_secs,
             grace_ttl: 0,
         };
@@ -475,6 +525,10 @@ fn detect_os(ua: &str) -> &'static str {
 
 #[cfg(test)]
 mod tests {
+    /// The identifier-hashing key these fixtures derive the session subject under. Fixed so a
+    /// test can recompute the subject and name the exact index a flow wrote to.
+    const TEST_IDENTIFIER_KEY: [u8; 64] = [9u8; 64];
+
     use super::*;
     use crate::config::resolvers::MaxSessionsResolver;
     use crate::config::{AuthConfig, EvictionStrategy};
@@ -576,6 +630,23 @@ mod tests {
         }
     }
 
+    /// The session subject `SessionService` derives for a fixture account — the index a seeded
+    /// session has to live under for the service to see it. Recomputed here rather than
+    /// hard-coded, so a change to the derivation moves the fixtures with it.
+    fn subject(user: &str) -> String {
+        subject_in("t1", user)
+    }
+
+    /// The same, for an explicit tenant — the two-tenant regression test needs both.
+    fn subject_in(tenant: &str, user: &str) -> String {
+        crate::services::session_subject_hash(
+            &TEST_IDENTIFIER_KEY,
+            SessionKind::Dashboard,
+            Some(tenant),
+            user,
+        )
+    }
+
     fn ctx() -> HookContext {
         HookContext {
             user_id: Some("u1".to_owned()),
@@ -618,7 +689,105 @@ mod tests {
         hooks: Arc<dyn AuthHooks>,
         cfg: SessionConfig,
     ) -> SessionService {
-        SessionService::new(store, users, hooks, cfg, 3600)
+        SessionService::new(
+            store,
+            users,
+            hooks,
+            cfg,
+            3600,
+            zeroize::Zeroizing::new(TEST_IDENTIFIER_KEY),
+        )
+    }
+
+    #[tokio::test]
+    async fn one_tenants_revocation_cannot_reach_another_tenants_account_of_the_same_id() {
+        // THE defect this keyspace moved for. `UserRepository::find_by_id` takes a tenant
+        // precisely because a repository id may not be unique across tenants, so on a host that
+        // numbers users per tenant, `t1/u1` and `t2/u1` are two unrelated accounts. Keyed on the
+        // bare id they shared one `sess:` index and one `ep:` counter, and suspending the first
+        // swept the sessions and bumped the token epoch of the second — a credential-free
+        // cross-tenant revocation, reachable by anyone who could get an account suspended in
+        // their own tenant.
+        //
+        // Asserted through the SERVICE rather than the derivation, because a test that only
+        // compared two hashes would still pass if a call site stopped passing the tenant.
+        let store = Arc::new(InMemoryStores::new());
+        let users = Arc::new(InMemoryUserRepository::new());
+        let hooks = Arc::new(CountingHooks::default());
+        let shared_id = "u1";
+        let base = OffsetDateTime::UNIX_EPOCH;
+
+        let theirs = hash("bbbb");
+        let mine = hash("aaaa");
+        assert!(
+            store
+                .create_session(
+                    SessionKind::Dashboard,
+                    &subject_in("t1", shared_id),
+                    &mine,
+                    &record(shared_id, base),
+                    3600,
+                )
+                .await
+                .is_ok()
+        );
+        assert!(
+            store
+                .create_session(
+                    SessionKind::Dashboard,
+                    &subject_in("t2", shared_id),
+                    &theirs,
+                    &SessionRecord {
+                        tenant_id: Some("t2".to_owned()),
+                        ..record(shared_id, base)
+                    },
+                    3600,
+                )
+                .await
+                .is_ok()
+        );
+
+        let svc = service(store.clone(), users, hooks, config(5, None));
+
+        // `t1` cannot revoke a session it does not own, even though the ids match exactly.
+        assert!(
+            matches!(
+                svc.revoke_session("t1", shared_id, &theirs).await,
+                Err(AuthError::SessionNotFound)
+            ),
+            "a tenant revoked another tenant's session by sharing a user id"
+        );
+
+        // …nor sweep it. "Sign out my other devices" in `t1` is total within `t1`.
+        assert!(
+            svc.revoke_all_except_current("t1", shared_id, &mine)
+                .await
+                .is_ok()
+        );
+        assert!(
+            matches!(svc.list_sessions("t2", shared_id, None).await, Ok(v) if v.len() == 1),
+            "a revoke-all in one tenant swept another tenant's sessions"
+        );
+
+        // …and the epoch bump that call performs stays inside `t1`. This is the half that does
+        // not announce itself: a bumped epoch silently invalidates every access token the
+        // account holds, so a leak here signs a stranger out of a live session with no error
+        // anywhere.
+        assert!(matches!(
+            store
+                .current_epoch(SessionKind::Dashboard, &subject_in("t1", shared_id))
+                .await,
+            Ok(epoch) if epoch > 0
+        ));
+        assert!(
+            matches!(
+                store
+                    .current_epoch(SessionKind::Dashboard, &subject_in("t2", shared_id))
+                    .await,
+                Ok(0)
+            ),
+            "a token-epoch bump in one tenant revoked another tenant's access tokens"
+        );
     }
 
     #[tokio::test]
@@ -636,7 +805,13 @@ mod tests {
         let base = OffsetDateTime::UNIX_EPOCH;
         assert!(
             store
-                .create_session(SessionKind::Dashboard, &old, &record(&uid, base), 3600)
+                .create_session(
+                    SessionKind::Dashboard,
+                    &subject(&uid),
+                    &old,
+                    &record(&uid, base),
+                    3600,
+                )
                 .await
                 .is_ok()
         );
@@ -644,9 +819,10 @@ mod tests {
             store
                 .create_session(
                     SessionKind::Dashboard,
+                    &subject(&uid),
                     &mid,
                     &record(&uid, base + time::Duration::seconds(1)),
-                    3600
+                    3600,
                 )
                 .await
                 .is_ok()
@@ -654,7 +830,13 @@ mod tests {
         let new_record = record(&uid, base + time::Duration::seconds(2));
         assert!(
             store
-                .create_session(SessionKind::Dashboard, &new, &new_record, 3600)
+                .create_session(
+                    SessionKind::Dashboard,
+                    &subject(new_record.user_id.as_str()),
+                    &new,
+                    &new_record,
+                    3600,
+                )
                 .await
                 .is_ok()
         );
@@ -667,7 +849,7 @@ mod tests {
         );
 
         // The oldest session was evicted; the newest and the middle remain.
-        let remaining = svc.list_sessions(&uid, Some(&new)).await;
+        let remaining = svc.list_sessions("t1", &uid, Some(&new)).await;
         assert!(matches!(&remaining, Ok(v) if v.len() == 2));
         let Ok(remaining) = remaining else { return };
         assert!(remaining.iter().all(|s| s.session_hash != old));
@@ -691,7 +873,13 @@ mod tests {
         let rec = record(&uid, OffsetDateTime::UNIX_EPOCH);
         assert!(
             store
-                .create_session(SessionKind::Dashboard, &only, &rec, 3600)
+                .create_session(
+                    SessionKind::Dashboard,
+                    &subject(rec.user_id.as_str()),
+                    &only,
+                    &rec,
+                    3600,
+                )
                 .await
                 .is_ok()
         );
@@ -715,14 +903,26 @@ mod tests {
         let base = OffsetDateTime::UNIX_EPOCH;
         assert!(
             store
-                .create_session(SessionKind::Dashboard, &old, &record(&uid, base), 3600)
+                .create_session(
+                    SessionKind::Dashboard,
+                    &subject(&uid),
+                    &old,
+                    &record(&uid, base),
+                    3600,
+                )
                 .await
                 .is_ok()
         );
         let new_record = record(&uid, base + time::Duration::seconds(1));
         assert!(
             store
-                .create_session(SessionKind::Dashboard, &new, &new_record, 3600)
+                .create_session(
+                    SessionKind::Dashboard,
+                    &subject(new_record.user_id.as_str()),
+                    &new,
+                    &new_record,
+                    3600,
+                )
                 .await
                 .is_ok()
         );
@@ -734,7 +934,7 @@ mod tests {
                 .await
                 .is_ok()
         );
-        let remaining = svc.list_sessions(&uid, Some(&new)).await;
+        let remaining = svc.list_sessions("t1", &uid, Some(&new)).await;
         assert!(matches!(&remaining, Ok(v) if v.len() == 1 && v[0].session_hash == new));
         assert_eq!(hooks.evictions.load(Ordering::Relaxed), 1);
         assert_eq!(hooks.new_sessions.load(Ordering::Relaxed), 1);
@@ -757,6 +957,7 @@ mod tests {
                 store
                     .create_session(
                         SessionKind::Dashboard,
+                        &subject(&uid),
                         h,
                         &record(&uid, base + time::Duration::seconds(secs)),
                         3600
@@ -768,7 +969,13 @@ mod tests {
         let new_record = record(&uid, base + time::Duration::seconds(2));
         assert!(
             store
-                .create_session(SessionKind::Dashboard, &new, &new_record, 3600)
+                .create_session(
+                    SessionKind::Dashboard,
+                    &subject(new_record.user_id.as_str()),
+                    &new,
+                    &new_record,
+                    3600,
+                )
                 .await
                 .is_ok()
         );
@@ -779,7 +986,7 @@ mod tests {
                 .await
                 .is_ok()
         );
-        let remaining = svc.list_sessions(&uid, Some(&new)).await;
+        let remaining = svc.list_sessions("t1", &uid, Some(&new)).await;
         assert!(matches!(&remaining, Ok(v) if v.len() == 1 && v[0].session_hash == new));
         assert_eq!(hooks.evictions.load(Ordering::Relaxed), 2);
         assert_eq!(hooks.new_sessions.load(Ordering::Relaxed), 1);
@@ -797,14 +1004,26 @@ mod tests {
         let base = OffsetDateTime::UNIX_EPOCH;
         assert!(
             store
-                .create_session(SessionKind::Dashboard, &old, &record(&uid, base), 3600)
+                .create_session(
+                    SessionKind::Dashboard,
+                    &subject(&uid),
+                    &old,
+                    &record(&uid, base),
+                    3600,
+                )
                 .await
                 .is_ok()
         );
         let new_record = record(&uid, base + time::Duration::seconds(5));
         assert!(
             store
-                .create_session(SessionKind::Dashboard, &new, &new_record, 3600)
+                .create_session(
+                    SessionKind::Dashboard,
+                    &subject(new_record.user_id.as_str()),
+                    &new,
+                    &new_record,
+                    3600,
+                )
                 .await
                 .is_ok()
         );
@@ -814,7 +1033,7 @@ mod tests {
                 .await
                 .is_ok()
         );
-        let remaining = svc.list_sessions(&uid, Some(&new)).await;
+        let remaining = svc.list_sessions("t1", &uid, Some(&new)).await;
         assert!(matches!(&remaining, Ok(v) if v.len() == 1 && v[0].session_hash == new));
     }
 
@@ -829,7 +1048,13 @@ mod tests {
         let rec = record("ghost-user", OffsetDateTime::UNIX_EPOCH);
         assert!(
             store
-                .create_session(SessionKind::Dashboard, &only, &rec, 3600)
+                .create_session(
+                    SessionKind::Dashboard,
+                    &subject(rec.user_id.as_str()),
+                    &only,
+                    &rec,
+                    3600,
+                )
                 .await
                 .is_ok()
         );
@@ -837,7 +1062,7 @@ mod tests {
         // With the default of five and only one session, nothing is evicted even though the
         // resolver would cap at one (the missing user forces the default).
         assert!(svc.after_session_created(&rec, &only, &ctx()).await.is_ok());
-        let remaining = svc.list_sessions("ghost-user", None).await;
+        let remaining = svc.list_sessions("t1", "ghost-user", None).await;
         assert!(matches!(&remaining, Ok(v) if v.len() == 1));
     }
 
@@ -853,26 +1078,27 @@ mod tests {
             store
                 .create_session(
                     SessionKind::Dashboard,
+                    &subject(&uid),
                     &h,
                     &record(&uid, OffsetDateTime::UNIX_EPOCH),
-                    3600
+                    3600,
                 )
                 .await
                 .is_ok()
         );
         let svc = service(store, users, Arc::new(NoOpAuthHooks), config(5, None));
         assert!(matches!(
-            svc.revoke_session(&uid, "not-a-hash").await,
+            svc.revoke_session("t1", &uid, "not-a-hash").await,
             Err(AuthError::SessionNotFound)
         ));
         assert!(matches!(
-            svc.revoke_session("intruder", &h).await,
+            svc.revoke_session("t1", "intruder", &h).await,
             Err(AuthError::SessionNotFound)
         ));
-        assert!(svc.revoke_session(&uid, &h).await.is_ok());
+        assert!(svc.revoke_session("t1", &uid, &h).await.is_ok());
         // A second revoke of the now-gone session is SessionNotFound.
         assert!(matches!(
-            svc.revoke_session(&uid, &h).await,
+            svc.revoke_session("t1", &uid, &h).await,
             Err(AuthError::SessionNotFound)
         ));
     }
@@ -889,26 +1115,46 @@ mod tests {
         let base = OffsetDateTime::UNIX_EPOCH;
         assert!(
             store
-                .create_session(SessionKind::Dashboard, &current, &record(&uid, base), 3600)
+                .create_session(
+                    SessionKind::Dashboard,
+                    &subject(&uid),
+                    &current,
+                    &record(&uid, base),
+                    3600,
+                )
                 .await
                 .is_ok()
         );
         assert!(
             store
-                .create_session(SessionKind::Dashboard, &other, &record(&uid, base), 3600)
+                .create_session(
+                    SessionKind::Dashboard,
+                    &subject(&uid),
+                    &other,
+                    &record(&uid, base),
+                    3600,
+                )
                 .await
                 .is_ok()
         );
         let svc = service(store, users, Arc::new(NoOpAuthHooks), config(5, None));
         assert!(matches!(
-            svc.revoke_all_except_current(&uid, "bad").await,
+            svc.revoke_all_except_current("t1", &uid, "bad").await,
             Err(AuthError::SessionNotFound)
         ));
-        assert!(svc.revoke_all_except_current(&uid, &current).await.is_ok());
-        let remaining = svc.list_sessions(&uid, Some(&current)).await;
+        assert!(
+            svc.revoke_all_except_current("t1", &uid, &current)
+                .await
+                .is_ok()
+        );
+        let remaining = svc.list_sessions("t1", &uid, Some(&current)).await;
         assert!(matches!(&remaining, Ok(v) if v.len() == 1 && v[0].session_hash == current));
         // A repeat is a no-op (only the current session is left).
-        assert!(svc.revoke_all_except_current(&uid, &current).await.is_ok());
+        assert!(
+            svc.revoke_all_except_current("t1", &uid, &current)
+                .await
+                .is_ok()
+        );
     }
 
     #[tokio::test]
@@ -933,9 +1179,10 @@ mod tests {
             store
                 .create_session(
                     SessionKind::Dashboard,
+                    &subject(&uid),
                     &predecessor,
                     &record(&uid, base),
-                    3600
+                    3600,
                 )
                 .await
                 .is_ok()
@@ -949,6 +1196,7 @@ mod tests {
                     new_hash: kept.clone(),
                     new_raw: "new-raw-token".to_owned(),
                     new_record: record(&uid, base),
+                    subject_hash: subject(&uid),
                     refresh_ttl: 3600,
                     grace_ttl: 30,
                 },
@@ -968,6 +1216,7 @@ mod tests {
                     new_hash: hash("9999"),
                     new_raw: "another-raw-token".to_owned(),
                     new_record: record(&uid, base),
+                    subject_hash: subject(&uid),
                     refresh_ttl: 3600,
                     grace_ttl: 30,
                 },
@@ -984,7 +1233,11 @@ mod tests {
             Arc::new(NoOpAuthHooks),
             config(5, None),
         );
-        assert!(svc.revoke_all_except_current(&uid, &kept).await.is_ok());
+        assert!(
+            svc.revoke_all_except_current("t1", &uid, &kept)
+                .await
+                .is_ok()
+        );
 
         // After the sweep the predecessor no longer recovers anything.
         let after = store
@@ -995,6 +1248,7 @@ mod tests {
                     new_hash: hash("aaaa"),
                     new_raw: "third-raw-token".to_owned(),
                     new_record: record(&uid, base),
+                    subject_hash: subject(&uid),
                     refresh_ttl: 3600,
                     grace_ttl: 30,
                 },
@@ -1018,7 +1272,13 @@ mod tests {
         let rec = record(&uid, OffsetDateTime::UNIX_EPOCH);
         assert!(
             store
-                .create_session(SessionKind::Dashboard, &old, &rec, 3600)
+                .create_session(
+                    SessionKind::Dashboard,
+                    &subject(rec.user_id.as_str()),
+                    &old,
+                    &rec,
+                    3600,
+                )
                 .await
                 .is_ok()
         );
@@ -1058,7 +1318,13 @@ mod tests {
         let rec = record("nobody", OffsetDateTime::UNIX_EPOCH);
         assert!(
             store
-                .create_session(SessionKind::Dashboard, &only, &rec, 3600)
+                .create_session(
+                    SessionKind::Dashboard,
+                    &subject(rec.user_id.as_str()),
+                    &only,
+                    &rec,
+                    3600,
+                )
                 .await
                 .is_ok()
         );
@@ -1248,6 +1514,7 @@ mod tests {
         async fn create_session(
             &self,
             _kind: SessionKind,
+            _subject_hash: &str,
             _token_hash: &str,
             _detail: &SessionRecord,
             _ttl_secs: u64,
@@ -1271,7 +1538,7 @@ mod tests {
         async fn list_sessions(
             &self,
             _kind: SessionKind,
-            _user_id: &str,
+            _subject_hash: &str,
         ) -> Result<Vec<SessionDetail>, AuthError> {
             // One session whose hash is not the caller's current, so the service attempts a
             // revoke (which then fails with a backend error).
@@ -1286,7 +1553,7 @@ mod tests {
         async fn revoke_session(
             &self,
             _kind: SessionKind,
-            _user_id: &str,
+            _subject_hash: &str,
             _session_hash: &str,
         ) -> Result<(), AuthError> {
             Err(AuthError::Internal("revoke backend down".into()))
@@ -1301,6 +1568,7 @@ mod tests {
         async fn create_recovered_session(
             &self,
             _kind: SessionKind,
+            _subject_hash: &str,
             _token_hash: &str,
             _detail: &SessionRecord,
             _ttl_secs: u64,
@@ -1310,19 +1578,31 @@ mod tests {
         async fn sweep_grace_pointers(
             &self,
             _kind: SessionKind,
-            _user_id: &str,
+            _subject_hash: &str,
         ) -> Result<(), AuthError> {
             Ok(())
         }
-        async fn revoke_all(&self, _kind: SessionKind, _user_id: &str) -> Result<(), AuthError> {
+        async fn revoke_all(
+            &self,
+            _kind: SessionKind,
+            _subject_hash: &str,
+        ) -> Result<(), AuthError> {
             Ok(())
+        }
+        async fn find_family_owner(
+            &self,
+            _kind: SessionKind,
+            _family_id: &str,
+        ) -> Result<Option<SessionRecord>, AuthError> {
+            Ok(None)
         }
         async fn revoke_family(
             &self,
             _kind: SessionKind,
             _family_id: &str,
-        ) -> Result<Option<String>, AuthError> {
-            Ok(None)
+            _owner_subject_hash: Option<&str>,
+        ) -> Result<(), AuthError> {
+            Ok(())
         }
         async fn blacklist_access(
             &self,
@@ -1337,11 +1617,15 @@ mod tests {
         async fn current_epoch(
             &self,
             _kind: SessionKind,
-            _user_id: &str,
+            _subject_hash: &str,
         ) -> Result<u64, AuthError> {
             Ok(0)
         }
-        async fn bump_epoch(&self, _kind: SessionKind, _user_id: &str) -> Result<u64, AuthError> {
+        async fn bump_epoch(
+            &self,
+            _kind: SessionKind,
+            _subject_hash: &str,
+        ) -> Result<u64, AuthError> {
             Ok(1)
         }
     }
@@ -1366,9 +1650,10 @@ mod tests {
             store
                 .create_session(
                     SessionKind::Dashboard,
+                    &subject(&uid),
                     &predecessor,
                     &record(&uid, base),
-                    3600
+                    3600,
                 )
                 .await
                 .is_ok()
@@ -1381,6 +1666,7 @@ mod tests {
                     new_hash: kept.clone(),
                     new_raw: "raw".to_owned(),
                     new_record: record(&uid, base),
+                    subject_hash: subject(&uid),
                     refresh_ttl: 3600,
                     grace_ttl: 30,
                 },
@@ -1397,7 +1683,11 @@ mod tests {
             Arc::new(NoOpAuthHooks),
             config(5, None),
         );
-        assert!(svc.revoke_all_except_current(&uid, &kept).await.is_ok());
+        assert!(
+            svc.revoke_all_except_current("t1", &uid, &kept)
+                .await
+                .is_ok()
+        );
 
         // The untouched pointer is gone: the predecessor recovers nothing.
         let after = store
@@ -1408,6 +1698,7 @@ mod tests {
                     new_hash: hash("3333"),
                     new_raw: "raw2".to_owned(),
                     new_record: record(&uid, base),
+                    subject_hash: subject(&uid),
                     refresh_ttl: 3600,
                     grace_ttl: 30,
                 },
@@ -1429,9 +1720,11 @@ mod tests {
             Arc::new(NoOpAuthHooks),
             config(5, None),
             3600,
+            zeroize::Zeroizing::new(TEST_IDENTIFIER_KEY),
         );
         assert!(matches!(
-            svc.revoke_all_except_current("u1", &hash("aaaa")).await,
+            svc.revoke_all_except_current("t1", "u1", &hash("aaaa"))
+                .await,
             Err(AuthError::Internal(_))
         ));
 
@@ -1445,7 +1738,7 @@ mod tests {
         let rec = record("u1", OffsetDateTime::UNIX_EPOCH);
         assert!(
             store
-                .create_session(SessionKind::Dashboard, "h", &rec, 60)
+                .create_session(SessionKind::Dashboard, &subject("u1"), "h", &rec, 60)
                 .await
                 .is_ok()
         );
@@ -1454,6 +1747,7 @@ mod tests {
             new_hash: "n".to_owned(),
             new_raw: String::new(),
             new_record: rec,
+            subject_hash: subject("u1"),
             refresh_ttl: 60,
             grace_ttl: 0,
         };
@@ -1473,32 +1767,53 @@ mod tests {
         );
         assert!(
             store
-                .sweep_grace_pointers(SessionKind::Dashboard, "u1")
+                .sweep_grace_pointers(SessionKind::Dashboard, &subject("u1"))
                 .await
                 .is_ok()
         );
         let recovered = record("u1", OffsetDateTime::UNIX_EPOCH);
         assert!(matches!(
             store
-                .create_recovered_session(SessionKind::Dashboard, "h", &recovered, 60)
+                .create_recovered_session(
+                    SessionKind::Dashboard,
+                    &subject("u1"),
+                    "h",
+                    &recovered,
+                    60
+                )
                 .await,
             Ok(true)
         ));
-        assert!(store.revoke_all(SessionKind::Dashboard, "u1").await.is_ok());
         assert!(
             store
-                .revoke_family(SessionKind::Dashboard, "fam-1")
+                .revoke_all(SessionKind::Dashboard, &subject("u1"))
+                .await
+                .is_ok()
+        );
+        assert!(
+            store
+                .find_family_owner(SessionKind::Dashboard, "fam-1")
+                .await
+                .is_ok()
+        );
+        assert!(
+            store
+                .revoke_family(SessionKind::Dashboard, "fam-1", Some(&subject("u1")))
                 .await
                 .is_ok()
         );
         assert!(store.blacklist_access("jti", 60).await.is_ok());
         assert!(matches!(store.is_blacklisted("jti").await, Ok(false)));
         assert!(matches!(
-            store.current_epoch(SessionKind::Dashboard, "u1").await,
+            store
+                .current_epoch(SessionKind::Dashboard, &subject("u1"))
+                .await,
             Ok(0)
         ));
         assert!(matches!(
-            store.bump_epoch(SessionKind::Dashboard, "u1").await,
+            store
+                .bump_epoch(SessionKind::Dashboard, &subject("u1"))
+                .await,
             Ok(1)
         ));
     }
@@ -1519,14 +1834,26 @@ mod tests {
         let base = OffsetDateTime::UNIX_EPOCH;
         assert!(
             store
-                .create_session(SessionKind::Dashboard, &old, &record(&uid, base), 3600)
+                .create_session(
+                    SessionKind::Dashboard,
+                    &subject(&uid),
+                    &old,
+                    &record(&uid, base),
+                    3600,
+                )
                 .await
                 .is_ok()
         );
         let new_record = record(&uid, base + time::Duration::seconds(1));
         assert!(
             store
-                .create_session(SessionKind::Dashboard, &new, &new_record, 3600)
+                .create_session(
+                    SessionKind::Dashboard,
+                    &subject(new_record.user_id.as_str()),
+                    &new,
+                    &new_record,
+                    3600,
+                )
                 .await
                 .is_ok()
         );
@@ -1547,7 +1874,7 @@ mod tests {
 
         // The refused eviction left the over-cap session in place — the outcome the warning
         // exists to make visible.
-        assert!(matches!(svc.list_sessions(&uid, Some(&new)).await, Ok(v) if v.len() == 2));
+        assert!(matches!(svc.list_sessions("t1", &uid, Some(&new)).await, Ok(v) if v.len() == 2));
     }
 
     #[tokio::test]
@@ -1567,14 +1894,26 @@ mod tests {
         let store = Arc::new(InMemoryStores::new());
         assert!(
             store
-                .create_session(SessionKind::Dashboard, &old, &record(&uid, base), 3600)
+                .create_session(
+                    SessionKind::Dashboard,
+                    &subject(&uid),
+                    &old,
+                    &record(&uid, base),
+                    3600,
+                )
                 .await
                 .is_ok()
         );
         let new_record = record(&uid, base + time::Duration::seconds(1));
         assert!(
             store
-                .create_session(SessionKind::Dashboard, &new, &new_record, 3600)
+                .create_session(
+                    SessionKind::Dashboard,
+                    &subject(new_record.user_id.as_str()),
+                    &new,
+                    &new_record,
+                    3600,
+                )
                 .await
                 .is_ok()
         );
@@ -1604,20 +1943,32 @@ mod tests {
         let store = Arc::new(InMemoryStores::new());
         assert!(
             store
-                .create_session(SessionKind::Dashboard, &old, &record(&uid, base), 3600)
+                .create_session(
+                    SessionKind::Dashboard,
+                    &subject(&uid),
+                    &old,
+                    &record(&uid, base),
+                    3600,
+                )
                 .await
                 .is_ok()
         );
         assert!(
             store
-                .create_session(SessionKind::Dashboard, &new, &new_record, 3600)
+                .create_session(
+                    SessionKind::Dashboard,
+                    &subject(new_record.user_id.as_str()),
+                    &new,
+                    &new_record,
+                    3600,
+                )
                 .await
                 .is_ok()
         );
         // Revoke the victim out from under the cap, so the eviction finds it already gone.
         assert!(
             store
-                .revoke_session(SessionKind::Dashboard, &uid, &old)
+                .revoke_session(SessionKind::Dashboard, &subject(&uid), &old)
                 .await
                 .is_ok()
         );
@@ -1655,7 +2006,13 @@ mod tests {
         ] {
             assert!(
                 store
-                    .create_session(SessionKind::Dashboard, h, &record(&uid, at), 3600)
+                    .create_session(
+                        SessionKind::Dashboard,
+                        &subject(&uid),
+                        h,
+                        &record(&uid, at),
+                        3600,
+                    )
                     .await
                     .is_ok()
             );
@@ -1668,20 +2025,28 @@ mod tests {
             config(5, None),
         );
         assert!(matches!(
-            store.current_epoch(SessionKind::Dashboard, &uid).await,
+            store
+                .current_epoch(SessionKind::Dashboard, &subject(&uid))
+                .await,
             Ok(0)
         ));
 
-        assert!(svc.revoke_all_except_current(&uid, &current).await.is_ok());
+        assert!(
+            svc.revoke_all_except_current("t1", &uid, &current)
+                .await
+                .is_ok()
+        );
 
         // The other device is gone, the caller's session survives — and every access token for
         // the account, the caller's included, is now stale. The caller is the only party that
         // can recover: their refresh session is the one still standing.
         assert!(matches!(
-            store.current_epoch(SessionKind::Dashboard, &uid).await,
+            store.current_epoch(SessionKind::Dashboard, &subject(&uid)).await,
             Ok(epoch) if epoch > 0
         ));
-        assert!(matches!(svc.list_sessions(&uid, Some(&current)).await, Ok(v) if v.len() == 1));
+        assert!(
+            matches!(svc.list_sessions("t1", &uid, Some(&current)).await, Ok(v) if v.len() == 1)
+        );
     }
 
     #[tokio::test]
@@ -1700,7 +2065,13 @@ mod tests {
         ] {
             assert!(
                 store
-                    .create_session(SessionKind::Dashboard, h, &record(&uid, at), 3600)
+                    .create_session(
+                        SessionKind::Dashboard,
+                        &subject(&uid),
+                        h,
+                        &record(&uid, at),
+                        3600,
+                    )
                     .await
                     .is_ok()
             );
@@ -1715,11 +2086,13 @@ mod tests {
         );
 
         assert!(matches!(
-            svc.revoke_all_except_current(&uid, &current).await,
+            svc.revoke_all_except_current("t1", &uid, &current).await,
             Err(AuthError::Internal(_))
         ));
         assert!(matches!(
-            store.current_epoch(SessionKind::Dashboard, &uid).await,
+            store
+                .current_epoch(SessionKind::Dashboard, &subject(&uid))
+                .await,
             Ok(0)
         ));
     }

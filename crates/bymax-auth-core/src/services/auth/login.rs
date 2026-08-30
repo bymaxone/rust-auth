@@ -508,7 +508,7 @@ mod tests {
         let listed = h
             .engine
             .sessions()
-            .list_sessions(&id, Some(&second_hash))
+            .list_sessions(&second.user.tenant_id, &id, Some(&second_hash))
             .await;
         assert!(matches!(&listed, Ok(v) if v.len() == 1));
         let Ok(listed) = listed else { return };

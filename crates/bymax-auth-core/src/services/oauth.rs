@@ -1059,7 +1059,7 @@ mod tests {
         let listed = h
             .engine
             .sessions()
-            .list_sessions(&result.user.id, None)
+            .list_sessions(&result.user.tenant_id, &result.user.id, None)
             .await;
         assert!(matches!(listed, Ok(v) if v.len() == 1));
     }

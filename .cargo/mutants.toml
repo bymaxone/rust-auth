@@ -59,12 +59,20 @@ additional_cargo_args = ["--all-features"]
 #    `--all-features`, so the mutated line is never compiled into the suite it is measured
 #    against. It is covered by the `not(feature = "scrypt")` test in the same module, which a
 #    default-feature run exercises.
-# 5. `builder.rs:212` `redis_stores` — the `cfg(not(feature = "mfa"))` twin of the method at
-#    line 237, and only one of the two is compiled. Same reason as 4, but the two twins share
+# 5. `builder.rs:220` `redis_stores` — the `cfg(not(feature = "mfa"))` twin of the method at
+#    line 245, and only one of the two is compiled. Same reason as 4, but the two twins share
 #    a mutant name, so this entry is anchored to the line: excluding by name alone would also
-#    drop the compiled twin's mutant, which the suite does kill. If `builder.rs` shifts, the
-#    anchor stops matching and the mutant reappears as a survivor — a loud failure, not a
-#    silent one. Re-anchor it then.
+#    drop the compiled twin's mutant, which the suite does kill. Tell the twins apart by the
+#    trait bound — the excluded one is the bound WITHOUT `MfaStore`.
+#
+#    Re-anchored from 212 on 2026-08-29. The anchor was already stale before the change that
+#    found it: that branch's earliest edit to `builder.rs` is at line 424, so the 8-line shift
+#    predates it and the post-merge sweep on `main` had been reporting this mutant as a
+#    survivor. That is the SECOND time this has happened (see 6), which is the honest reading
+#    of "a loud failure, not a silent one": the failure is loud in a report nothing blocks on.
+#    Verify after any edit to this file with
+#    `cargo mutants --list | grep redis_stores` — exactly two lines, and the excluded anchor
+#    must be the lower-numbered one.
 # 6. `token_manager.rs:1033` `issue_mfa_temp_token` — the `cfg(not(feature = "mfa"))` twin of
 #    the method below it, anchored for the same reason as 5. Re-anchored from 618 on 2026-07-28
 #    when security logging pushed the method down. Re-anchored again from 632 on 2026-08-10,
@@ -79,6 +87,11 @@ additional_cargo_args = ["--all-features"]
 #    is the `cfg(feature = "mfa")` twin the suite kills. Note the config already supplies
 #    `--all-features`; passing it again on the command line fails the baseline build (see the
 #    `additional_cargo_args` note below).
+#
+#    Re-anchored again from 1033 to 1120 on 2026-08-29, when the session keyspace moved onto the
+#    user subject and pushed the method down. Tell the twins apart by the BODY: the excluded one
+#    opens `let _ = (context, tenant_id); tracing::error!(…)`, the compiled one starts with the
+#    plane/tenant well-formedness refusal.
 # 7. The seven `NoOpEmailProvider` sends — the provider's whole job is to do nothing, and each
 #    body is one `tracing::debug!` line followed by `Ok(())`. Replacing a body with `Ok(())`
 #    removes only that debug line, which no assertion reaches without installing a `tracing`
@@ -129,8 +142,8 @@ exclude_re = [
     'replace AuthEngine::builder -> AuthEngineBuilder with Default::default\(\)',
     'delete match arm "inactive" in assert_not_blocked',
     'replace == with != in validate_password',
-    'builder\.rs:212:9: replace AuthEngineBuilder::redis_stores',
-    'token_manager\.rs:1033:9: replace TokenManagerService::issue_mfa_temp_token',
+    'builder\.rs:220:9: replace AuthEngineBuilder::redis_stores',
+    'token_manager\.rs:1120:9: replace TokenManagerService::issue_mfa_temp_token',
     'replace <impl EmailProvider for NoOpEmailProvider>::\w+ -> Result<\(\), EmailError> with Ok\(\(\)\)',
     'replace AuthHooks::\w+ -> Result<\(\), HookError> with Ok\(\(\)\)',
     'replace < with <= in MfaService::challenge_platform',

@@ -337,15 +337,14 @@ impl MfaService {
             // The marker is planted by `TokenManagerService::issue_tokens` and NOT by
             // `reissue_tokens`, which is what makes it proof of anything: an attacker holding a
             // stolen session can rotate it indefinitely and never make the mark fresh again.
-            // `MfaContext::as_str` rather than a match written here: the plane's wire name has
-            // exactly one definition, and this preimage has to agree byte-for-byte with
-            // nest-auth's `recentAuthKey`. A second copy is a second thing to keep in step —
-            // and the `Platform` arm of that copy was unreachable anyway, since a platform
-            // admin's `password_hash` is non-optional and so never takes this branch.
-            let marker = to_hex(&hmac_sha256(
-                self.identifier_key.as_ref(),
-                user_subject(ctx, tenant_id, user_id).as_bytes(),
-            ));
+            // Through `user_subject_hash`, not a copy of its body written here. The preimage has
+            // to agree byte-for-byte with nest-auth's `recentAuthKey`, and the WRITER of this
+            // marker derived it differently until recently — `hmac_sha256("{plane}:{userId}")`,
+            // with no tenant — so the mark was planted where nothing read it and every
+            // password-less account was refused enrolment. One call, one derivation, is what
+            // stops the two halves drifting apart again.
+            let marker =
+                crate::services::user_subject_hash(&self.identifier_key, ctx, tenant_id, user_id);
             if !self.session_store.has_recent_auth(&marker).await? {
                 tracing::warn!(%user_id, "mfa setup: no recent authentication");
                 return Err(AuthError::ReauthenticationRequired);
@@ -375,13 +374,30 @@ impl MfaService {
         }
     }
 
+    /// The session-index / token-epoch key suffix for a user on the plane `ctx` names.
+    ///
+    /// The same `userSubject` the MFA keys derive from, which is the point: an MFA state change
+    /// revokes every session and bumps the epoch, so the keys it writes and the keys it sweeps
+    /// have to agree on what identifies the account. They did not while `sess:`/`ep:` were keyed
+    /// on the bare id.
+    pub(crate) fn session_subject(
+        &self,
+        ctx: MfaContext,
+        tenant_id: Option<&str>,
+        user_id: &str,
+    ) -> String {
+        crate::services::session_subject_hash(
+            &self.identifier_key,
+            session_kind(ctx),
+            tenant_id,
+            user_id,
+        )
+    }
+
     /// The `mfa_setup:` key suffix for a user (`hmac_sha256(user_subject)`, hex). The
     /// low-entropy id is keyed, never used raw, so no PII reaches a store key.
     fn setup_key(&self, ctx: MfaContext, tenant_id: Option<&str>, user_id: &str) -> String {
-        to_hex(&hmac_sha256(
-            self.identifier_key.as_ref(),
-            user_subject(ctx, tenant_id, user_id).as_bytes(),
-        ))
+        crate::services::user_subject_hash(&self.identifier_key, ctx, tenant_id, user_id)
     }
 
     /// The `tu:` anti-replay key suffix for a `(plane, tenant, user_id, code)` tuple
@@ -665,10 +681,7 @@ impl MfaService {
     /// two halves of one deployment serializing against different locks would lose the
     /// property entirely.
     fn mfa_lock_id(&self, ctx: MfaContext, tenant_id: Option<&str>, user_id: &str) -> String {
-        to_hex(&hmac_sha256(
-            self.identifier_key.as_ref(),
-            user_subject(ctx, tenant_id, user_id).as_bytes(),
-        ))
+        crate::services::user_subject_hash(&self.identifier_key, ctx, tenant_id, user_id)
     }
 
     /// Perform one MFA state transition as a serialized read-modify-write.

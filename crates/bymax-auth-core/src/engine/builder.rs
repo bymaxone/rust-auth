@@ -421,15 +421,15 @@ impl AuthEngineBuilder {
             signing_key,
             previous_keys,
             session_store.clone(),
-            access_ttl,
-            refresh_days,
-            grace_window,
-            absolute_session_lifetime_days,
+            crate::services::token_manager::TokenLifetimes {
+                access_ttl,
+                refresh_expires_in_days: refresh_days,
+                grace_window,
+                absolute_session_lifetime_days,
+            },
+            zeroize::Zeroizing::new(*config.hmac_key()),
         )
         .with_hooks(hooks.clone())
-        // The identifier key that derives the recent-authentication marker. Wired here rather
-        // than in `new` because every unit-test caller builds the manager without one.
-        .with_identifier_key(zeroize::Zeroizing::new(*config.hmac_key()))
         // Empty strings read as unconfigured rather than as "require the empty issuer": a
         // host threading an unset environment variable through must not silently turn the
         // check on and start minting tokens its own verifier rejects.
@@ -472,6 +472,7 @@ impl AuthEngineBuilder {
             hooks.clone(),
             session_config,
             refresh_ttl_secs,
+            zeroize::Zeroizing::new(*config.hmac_key()),
         ));
 
         // The MFA lifecycle service is constructed only when `config.mfa` is present and an MFA
@@ -667,10 +668,13 @@ mod tests {
             HsKey::from_bytes(retired.as_bytes()),
             Vec::new(),
             stores(),
-            std::time::Duration::from_secs(900),
-            7,
-            std::time::Duration::from_secs(30),
-            0,
+            crate::services::token_manager::TokenLifetimes {
+                access_ttl: std::time::Duration::from_secs(900),
+                refresh_expires_in_days: 7,
+                grace_window: std::time::Duration::from_secs(30),
+                absolute_session_lifetime_days: 0,
+            },
+            zeroize::Zeroizing::new([0u8; 64]),
         );
         let issued = minted
             .issue_tokens(
@@ -734,6 +738,11 @@ mod tests {
             stores
                 .create_session(
                     crate::traits::SessionKind::Dashboard,
+                    &engine.session_subject(
+                        crate::traits::SessionKind::Dashboard,
+                        record.tenant_id.as_deref(),
+                        &record.user_id,
+                    ),
                     &old_hash,
                     &record,
                     3600

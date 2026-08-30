@@ -51,7 +51,11 @@ async fn list(
 ) -> Response {
     let refresh = source_refresh_token(&cookies, &state.config().cookies.refresh_name, None);
     let raw = (!refresh.is_empty()).then_some(refresh.as_str());
-    match state.engine().list_user_sessions(&user.0.sub, raw).await {
+    match state
+        .engine()
+        .list_user_sessions(&user.0.tenant_id, &user.0.sub, raw)
+        .await
+    {
         Ok(sessions) => {
             let body: Vec<Value> = sessions.iter().map(session_to_json).collect();
             (StatusCode::OK, Json(body)).into_response()
@@ -84,7 +88,7 @@ async fn revoke_all(
     let raw = (!refresh.is_empty()).then_some(refresh.as_str());
     match state
         .engine()
-        .revoke_other_user_sessions(&user.0.sub, raw)
+        .revoke_other_user_sessions(&user.0.tenant_id, &user.0.sub, raw)
         .await
     {
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
@@ -99,7 +103,11 @@ async fn revoke_one(
     user: AuthUser,
     Path(id): Path<String>,
 ) -> Response {
-    match state.engine().revoke_user_session(&user.0.sub, &id).await {
+    match state
+        .engine()
+        .revoke_user_session(&user.0.tenant_id, &user.0.sub, &id)
+        .await
+    {
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
         Err(error) => error_response(&error),
     }

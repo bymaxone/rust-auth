@@ -162,12 +162,13 @@ impl AuthEngine {
     /// Returns a store [`AuthError`] on an infrastructure failure.
     pub async fn list_user_sessions(
         &self,
+        tenant_id: &str,
         user_id: &str,
         raw_refresh: Option<&str>,
     ) -> Result<Vec<SessionInfo>, AuthError> {
         let current_hash = current_session_hash(raw_refresh);
         self.sessions()
-            .list_sessions(user_id, current_hash.as_deref())
+            .list_sessions(tenant_id, user_id, current_hash.as_deref())
             .await
     }
 
@@ -181,11 +182,12 @@ impl AuthEngine {
     /// [`AuthError`].
     pub async fn revoke_user_session(
         &self,
+        tenant_id: &str,
         user_id: &str,
         session_hash: &str,
     ) -> Result<(), AuthError> {
         self.sessions()
-            .revoke_session(user_id, session_hash)
+            .revoke_session(tenant_id, user_id, session_hash)
             .await?;
         // …and cut the access tokens with it. Deleting the refresh session stops rotation but
         // says nothing about the stateless access token that session's holder is already
@@ -203,7 +205,14 @@ impl AuthEngine {
         // is in fact still alive. `logout` keeps the plain revoke — it blacklists its own `jti`
         // by name, and ending one session must not reach every other device's access token.
         self.session_store()
-            .bump_epoch(crate::traits::SessionKind::Dashboard, user_id)
+            .bump_epoch(
+                crate::traits::SessionKind::Dashboard,
+                &self.session_subject(
+                    crate::traits::SessionKind::Dashboard,
+                    Some(tenant_id),
+                    user_id,
+                ),
+            )
             .await?;
         Ok(())
     }
@@ -218,13 +227,14 @@ impl AuthEngine {
     /// Returns a store [`AuthError`] on an infrastructure failure.
     pub async fn revoke_other_user_sessions(
         &self,
+        tenant_id: &str,
         user_id: &str,
         raw_refresh: Option<&str>,
     ) -> Result<(), AuthError> {
         match current_session_hash(raw_refresh) {
             Some(current) => {
                 self.sessions()
-                    .revoke_all_except_current(user_id, &current)
+                    .revoke_all_except_current(tenant_id, user_id, &current)
                     .await
             }
             // Without the caller's refresh token there is no way to tell which session to
@@ -736,7 +746,7 @@ mod tests {
         // The session lists, with the current session flagged via the presented refresh token.
         let sessions = h
             .engine
-            .list_user_sessions(&sub, Some(&auth.refresh_token))
+            .list_user_sessions("t1", &sub, Some(&auth.refresh_token))
             .await;
         assert!(matches!(&sessions, Ok(list) if list.iter().any(|s| s.is_current)));
 
@@ -757,26 +767,26 @@ mod tests {
         assert!(matches!(&second, Ok(LoginResult::Success(_))));
         let Ok(LoginResult::Success(second)) = second else { return };
         assert!(matches!(
-            h.engine.list_user_sessions(&sub, None).await,
+            h.engine.list_user_sessions("t1", &sub, None).await,
             Ok(list) if list.len() == 2
         ));
         assert!(
             h.engine
-                .revoke_other_user_sessions(&sub, Some(&second.refresh_token))
+                .revoke_other_user_sessions("t1", &sub, Some(&second.refresh_token))
                 .await
                 .is_ok()
         );
         // Only the session that presented the token survives.
         assert!(matches!(
             h.engine
-                .list_user_sessions(&sub, Some(&second.refresh_token))
+                .list_user_sessions("t1", &sub, Some(&second.refresh_token))
                 .await,
             Ok(list) if list.len() == 1 && list[0].is_current
         ));
 
         // A malformed/unowned session hash revokes as not-found (no IDOR oracle).
         assert!(matches!(
-            h.engine.revoke_user_session(&sub, "not-a-hash").await,
+            h.engine.revoke_user_session("t1", &sub, "not-a-hash").await,
             Err(AuthError::SessionNotFound)
         ));
     }
@@ -792,12 +802,12 @@ mod tests {
     async fn revoke_other_user_sessions_without_a_current_hash_refuses() {
         let Some(h) = harness(base_config(), None) else { return };
         assert!(matches!(
-            h.engine.revoke_other_user_sessions("u", None).await,
+            h.engine.revoke_other_user_sessions("t1", "u", None).await,
             Err(AuthError::SessionNotFound)
         ));
         assert!(matches!(
             h.engine
-                .revoke_other_user_sessions("u", Some("not-shaped"))
+                .revoke_other_user_sessions("t1", "u", Some("not-shaped"))
                 .await,
             Err(AuthError::SessionNotFound)
         ));
@@ -866,6 +876,11 @@ mod tests {
             h.stores
                 .create_session(
                     crate::traits::SessionKind::Dashboard,
+                    &h.engine.session_subject(
+                        crate::traits::SessionKind::Dashboard,
+                        Some("t1"),
+                        &id
+                    ),
                     &session_hash,
                     &record,
                     3600
@@ -876,7 +891,7 @@ mod tests {
 
         h.stores.fail_next_epoch_bumps(1);
 
-        let revoked = h.engine.revoke_user_session(&id, &session_hash).await;
+        let revoked = h.engine.revoke_user_session("t1", &id, &session_hash).await;
         assert!(
             revoked.is_err(),
             "a revoke whose epoch bump failed must not report success: {revoked:?}"

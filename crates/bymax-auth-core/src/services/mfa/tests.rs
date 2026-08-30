@@ -24,11 +24,20 @@ use crate::services::token_manager::TokenManagerService;
 use crate::testing::{InMemoryPlatformUserRepository, InMemoryStores, InMemoryUserRepository};
 use crate::traits::{
     AuthHooks, BruteForceStore, EmailProvider, HookContext, MfaStore, NoOpAuthHooks,
-    NoOpEmailProvider, PlatformUserRepository, SessionStore, UserRepository,
+    NoOpEmailProvider, PlatformUserRepository, SessionKind, SessionStore, UserRepository,
 };
+use zeroize::Zeroizing;
 
 const PASSWORD: &str = "correct horse battery staple";
 const TENANT: &str = "t1";
+
+/// The identifier-hashing key every service in these fixtures shares.
+///
+/// One value, deliberately: the MFA keyspace and the session keyspace derive their suffixes
+/// from the same subject under the same key, so a fixture that handed each service its own key
+/// would make an MFA state change revoke sessions in a keyspace nothing else writes — and the
+/// assertions would still pass, because both halves would be wrong together.
+const TEST_IDENTIFIER_KEY: [u8; 64] = [9u8; 64];
 
 /// A 32-byte AES key, base64-encoded for the MFA config.
 fn key_b64() -> String {
@@ -319,7 +328,7 @@ async fn full_dashboard_lifecycle() {
     // This harness has session tracking on, and the session the challenge issued has to be
     // registered under the user — otherwise it is invisible to the session list, to the cap,
     // and to "sign out everywhere". The returned tokens look identical either way.
-    let listed = h.engine.list_user_sessions(&uid, None).await;
+    let listed = h.engine.list_user_sessions(TENANT, &uid, None).await;
     assert!(
         matches!(&listed, Ok(list) if !list.is_empty()),
         "the challenge's session must be registered: {listed:?}"
@@ -2335,10 +2344,13 @@ fn service_deps(store: Arc<dyn MfaStore>, users: Arc<dyn UserRepository>) -> Mfa
         HsKey::from_bytes(b"0123456789abcdef0123456789abcdef"),
         Vec::new(),
         session_store.clone(),
-        Duration::from_secs(900),
-        7,
-        Duration::from_secs(30),
-        0,
+        crate::services::token_manager::TokenLifetimes {
+            access_ttl: Duration::from_secs(900),
+            refresh_expires_in_days: 7,
+            grace_window: Duration::from_secs(30),
+            absolute_session_lifetime_days: 0,
+        },
+        Zeroizing::new(TEST_IDENTIFIER_KEY),
     ));
     let sessions = Arc::new(SessionService::new(
         session_store.clone(),
@@ -2346,6 +2358,7 @@ fn service_deps(store: Arc<dyn MfaStore>, users: Arc<dyn UserRepository>) -> Mfa
         Arc::new(NoOpAuthHooks),
         SessionConfig::default(),
         3600,
+        Zeroizing::new(TEST_IDENTIFIER_KEY),
     ));
     let brute_force = Arc::new(BruteForceService::new(brute_force_store, 5, 900));
     // Enrolment re-authenticates against the account password, so the service needs a real
@@ -2370,7 +2383,7 @@ fn service_deps(store: Arc<dyn MfaStore>, users: Arc<dyn UserRepository>) -> Mfa
         hooks: Arc::new(NoOpAuthHooks),
         encryption_key: zeroize::Zeroizing::new([7u8; 32]),
         previous_encryption_keys: Vec::new(),
-        identifier_key: zeroize::Zeroizing::new([9u8; 64]),
+        identifier_key: zeroize::Zeroizing::new(TEST_IDENTIFIER_KEY),
         previous_identifier_keys: Vec::new(),
         issuer: "Bymax One".to_owned(),
         totp_window: 2,
@@ -3000,26 +3013,98 @@ fn the_mfa_subject_preimages_match_the_shared_contract() {
         "the platform arm must not carry a tenant: its admins are cross-tenant and have none"
     );
 
-    // And the six keys that were in the blind spot are now named. This asserts the ENTRIES
-    // exist, which is the property that was missing — six of eight derivations were unpinned,
-    // so a drift in any of them would have gone undetected the way the OTP one did.
+    // And every key the contract derives from that subject is named here — SET EQUALITY, not a
+    // hand-written subset of the section.
+    //
+    // The subset is how this test went green over a keyspace rust-auth had not moved. It listed
+    // the six keys that were in the blind spot when it was written; `sessionIndex` and
+    // `tokenEpoch` joined the contract afterwards, on the nest-auth side, and nothing extended
+    // the list — so the two keys whose relocation the contract calls mandatory were pinned by
+    // nobody, and `sess:`/`ep:` stayed on the bare user id with the gate reporting agreement. A
+    // contract test that names its own subset detects drift only in what it happens to name.
+    //
+    // Equality in BOTH directions. A key added to the contract now fails here until this list
+    // and the derivation behind it are added, which is the direction that failed; a key removed
+    // from the contract fails until the reason is understood, which stops a stale entry being
+    // quietly dropped to make a build pass.
     let derived = contract_section("userSubjectDerivedKeys");
-    for key in [
+    let derived = derived.as_object().cloned().unwrap_or_default();
+    assert!(
+        !derived.is_empty(),
+        "`userSubjectDerivedKeys` is not a populated object — the contract did not load"
+    );
+    let mut in_contract: Vec<&str> = derived
+        .keys()
+        // `$comment` carries the section's rationale, not a key shape. The `$` prefix is the
+        // contract's own convention for that, so it is filtered by the convention rather than by
+        // name.
+        .filter(|name| !name.starts_with('$'))
+        .map(String::as_str)
+        .collect();
+    in_contract.sort_unstable();
+    let mut implemented = [
         "mfaSetupRecord",
         "recentAuthMarker",
         "totpAntiReplay",
         "challengeFailureCounter",
         "disableFailureCounter",
         "reauthFailureCounter",
-    ] {
+        "sessionIndex",
+        "tokenEpoch",
+    ];
+    implemented.sort_unstable();
+    assert_eq!(
+        in_contract, implemented,
+        "`userSubjectDerivedKeys` and the keys rust-auth derives from the subject disagree — \
+         every key that names an ACCOUNT rather than a token belongs on both sides"
+    );
+
+    // Each entry is an HMAC of the subject, never a bare digest and never the raw id: a user id
+    // carries too little entropy for a plain hash to hide it in a store both libraries read.
+    for key in implemented {
+        let shape = derived
+            .get(key)
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default();
         assert!(
-            derived
-                .get(key)
-                .and_then(serde_json::Value::as_str)
-                .is_some(),
-            "`userSubjectDerivedKeys.{key}` is missing — an unpinned derivation is an undetectable drift"
+            shape.contains("hmac_sha256(hmacKey,"),
+            "`userSubjectDerivedKeys.{key}` is not keyed: `{shape}`"
         );
     }
+
+    // The two that moved last, pinned by shape as well as by presence. Both planes, because the
+    // platform pair is the easier one to forget and the worse one to get wrong: a `pep:` left on
+    // the bare id revalidates admin access tokens a revocation had already killed.
+    assert_eq!(
+        derived
+            .get("sessionIndex")
+            .and_then(serde_json::Value::as_str),
+        Some("{sess|psess}:{hmac_sha256(hmacKey, userSubject)}"),
+        "the session index drifted from the shared contract"
+    );
+    assert_eq!(
+        derived
+            .get("tokenEpoch")
+            .and_then(serde_json::Value::as_str),
+        Some("{ep|pep}:{hmac_sha256(hmacKey, userSubject)}"),
+        "the token epoch drifted from the shared contract"
+    );
+
+    // …and the session keyspace derives that suffix through the SAME function the MFA keyspace
+    // does. One derivation is the whole property: an MFA state change revokes every session and
+    // bumps the epoch, so a second spelling of the subject would have those two writes name
+    // different accounts.
+    let key = [7u8; 64];
+    assert_eq!(
+        crate::services::session_subject_hash(&key, SessionKind::Dashboard, Some("t1"), "u1"),
+        crate::services::user_subject_hash(&key, MfaContext::Dashboard, Some("t1"), "u1"),
+        "the dashboard session subject and the dashboard MFA subject are not the same derivation"
+    );
+    assert_eq!(
+        crate::services::session_subject_hash(&key, SessionKind::Platform, None, "a1"),
+        crate::services::user_subject_hash(&key, MfaContext::Platform, None, "a1"),
+        "the platform session subject and the platform MFA subject are not the same derivation"
+    );
 }
 
 /// Read `credentialFormats.{key}` from the shared cross-implementation wire contract.
@@ -3660,10 +3745,13 @@ async fn a_recovery_challenge_that_loses_the_temp_token_consume_issues_no_sessio
             HsKey::from_bytes(b"0123456789abcdef0123456789abcdef"),
             Vec::new(),
             inner.clone(),
-            Duration::from_secs(900),
-            7,
-            Duration::from_secs(30),
-            0,
+            crate::services::token_manager::TokenLifetimes {
+                access_ttl: Duration::from_secs(900),
+                refresh_expires_in_days: 7,
+                grace_window: Duration::from_secs(30),
+                absolute_session_lifetime_days: 0,
+            },
+            Zeroizing::new(TEST_IDENTIFIER_KEY),
         )
         .with_mfa_support(crate::services::token_manager::MfaTokenSupport::new(
             losing.clone(),
@@ -3738,10 +3826,13 @@ async fn one_recovery_code_cannot_be_spent_twice_even_with_two_temp_tokens() {
             HsKey::from_bytes(b"0123456789abcdef0123456789abcdef"),
             Vec::new(),
             stores.clone(),
-            Duration::from_secs(900),
-            7,
-            Duration::from_secs(30),
-            0,
+            crate::services::token_manager::TokenLifetimes {
+                access_ttl: Duration::from_secs(900),
+                refresh_expires_in_days: 7,
+                grace_window: Duration::from_secs(30),
+                absolute_session_lifetime_days: 0,
+            },
+            Zeroizing::new(TEST_IDENTIFIER_KEY),
         )
         .with_mfa_support(crate::services::token_manager::MfaTokenSupport::new(
             mfa_store,
@@ -4021,10 +4112,13 @@ async fn a_repository_that_ignores_the_tenant_argument_is_still_refused() {
             HsKey::from_bytes(b"0123456789abcdef0123456789abcdef"),
             Vec::new(),
             deps.session_store.clone(),
-            Duration::from_secs(900),
-            7,
-            Duration::from_secs(30),
-            0,
+            crate::services::token_manager::TokenLifetimes {
+                access_ttl: Duration::from_secs(900),
+                refresh_expires_in_days: 7,
+                grace_window: Duration::from_secs(30),
+                absolute_session_lifetime_days: 0,
+            },
+            Zeroizing::new(TEST_IDENTIFIER_KEY),
         )
         .with_mfa_support(crate::services::token_manager::MfaTokenSupport::new(
             mfa_store,
@@ -4238,10 +4332,13 @@ async fn a_platform_recovery_challenge_that_loses_the_consume_issues_no_session(
             HsKey::from_bytes(b"0123456789abcdef0123456789abcdef"),
             Vec::new(),
             inner.clone(),
-            Duration::from_secs(900),
-            7,
-            Duration::from_secs(30),
-            0,
+            crate::services::token_manager::TokenLifetimes {
+                access_ttl: Duration::from_secs(900),
+                refresh_expires_in_days: 7,
+                grace_window: Duration::from_secs(30),
+                absolute_session_lifetime_days: 0,
+            },
+            Zeroizing::new(TEST_IDENTIFIER_KEY),
         )
         .with_mfa_support(crate::services::token_manager::MfaTokenSupport::new(
             losing.clone(),
@@ -4305,10 +4402,13 @@ async fn a_platform_recovery_code_is_claimed_before_it_is_accepted() {
             HsKey::from_bytes(b"0123456789abcdef0123456789abcdef"),
             Vec::new(),
             stores.clone(),
-            Duration::from_secs(900),
-            7,
-            Duration::from_secs(30),
-            0,
+            crate::services::token_manager::TokenLifetimes {
+                access_ttl: Duration::from_secs(900),
+                refresh_expires_in_days: 7,
+                grace_window: Duration::from_secs(30),
+                absolute_session_lifetime_days: 0,
+            },
+            Zeroizing::new(TEST_IDENTIFIER_KEY),
         )
         .with_mfa_support(crate::services::token_manager::MfaTokenSupport::new(
             mfa_store,

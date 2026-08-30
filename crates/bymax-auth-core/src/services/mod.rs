@@ -42,6 +42,8 @@ pub mod token_manager;
 use bymax_auth_types::{AuthError, MfaContext};
 use time::OffsetDateTime;
 
+use crate::traits::SessionKind;
+
 /// Lower-case hexadecimal alphabet, indexed by nibble value.
 const HEX_ALPHABET: &[u8; 16] = b"0123456789abcdef";
 
@@ -145,6 +147,30 @@ pub(crate) fn user_subject_hash(
         identifier_key,
         user_subject(plane, tenant_id, user_id).as_bytes(),
     ))
+}
+
+/// The store-key suffix for one account on one **session** plane, for the keys that name an
+/// account rather than a token: the session index (`sess:`/`psess:`) and the token epoch
+/// (`ep:`/`pep:`).
+///
+/// The same derivation [`user_subject_hash`] gives the MFA keyspace, reached through
+/// [`SessionKind`] instead of [`MfaContext`]. These two keys were the last to move onto it, and
+/// they are the pair that made the subject's argument concrete: keyed on the bare repository id,
+/// they were a credential-free cross-tenant revocation. `UserRepository::find_by_id` takes a
+/// tenant precisely because an id may not be unique across tenants, so on a host that numbers
+/// users per tenant, suspending `t1/u1` swept the sessions and bumped the token epoch of
+/// `t2/u1` — reachable by anyone who could get an account suspended in their own tenant.
+///
+/// The platform arm carries no tenant segment, because its admins are cross-tenant and have
+/// none. It still moves off the bare id: a platform epoch left behind revalidates admin access
+/// tokens a revocation had already killed.
+pub(crate) fn session_subject_hash(
+    identifier_key: &[u8; 64],
+    kind: SessionKind,
+    tenant_id: Option<&str>,
+    user_id: &str,
+) -> String {
+    user_subject_hash(identifier_key, kind.plane(), tenant_id, user_id)
 }
 
 /// Mint a fresh RFC 4122 version-4 UUID from the CSPRNG, hyphenated and lower-case. Used

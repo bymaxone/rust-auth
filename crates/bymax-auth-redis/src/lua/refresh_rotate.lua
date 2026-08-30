@@ -8,7 +8,7 @@
 -- KEYS[3] = rp:{sha256(old)}     the rotation grace pointer for the old token
 -- KEYS[4] = cf:{sha256(old)}     the consumed-family marker for the old token
 -- KEYS[5] = fam:{family}         the family index SET (the presented session's lineage)
--- KEYS[6] = sess:{userId}        the owner's session index SET (touched only on the live path)
+-- KEYS[6] = sess:{subjectHash}   the owner's session index SET (touched only on the live path)
 -- ARGV[1] = new session record JSON (the SessionRecord, never a raw token)
 -- ARGV[2] = refresh TTL in seconds (always > 0)
 -- ARGV[3] = grace TTL in seconds (0 means "no grace pointer": skip it entirely)
