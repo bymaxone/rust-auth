@@ -33,15 +33,15 @@ jobs:
       # Named rather than `inherit`, so the called workflow receives this one
       # secret and not every secret this repository holds.
       #
-      # The mapping is present even while the secret is not, because a reusable
-      # workflow receives no secret it is not passed: adding AGENTS_SYNC_TOKEN
-      # later would otherwise change nothing, and the run would keep using the
+      # The mapping is present whether or not the secret is set, because a reusable
+      # workflow receives no secret it is not passed: without the mapping, setting
+      # AGENTS_SYNC_TOKEN would change nothing and the run would keep using the
       # default token while looking configured. An unset secret evaluates to the
       # empty string, which the called workflow already falls back from.
       #
       # Why it is worth setting: a pull request opened with the default
       # GITHUB_TOKEN starts no workflow runs, and this repository's ruleset
-      # (`rust-auth-pr-and-ci-gates`) requires TWENTY checks — so an unattended
-      # sync pull request cannot merge until somebody pushes to it. The token does
-      # not exist yet, in this repository or at the organisation.
+      # (`rust-auth-pr-and-ci-gates`) requires status checks to pass. Without this
+      # token an unattended sync pull request therefore cannot merge until somebody
+      # pushes to it.
       sync-token: ${{ secrets.AGENTS_SYNC_TOKEN }}
