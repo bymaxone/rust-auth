@@ -750,12 +750,10 @@ mod tests {
         let svc = service(store.clone(), users, hooks, config(5, None));
 
         // `t1` cannot revoke a session it does not own, even though the ids match exactly.
+        let cross_tenant = svc.revoke_session("t1", shared_id, &theirs).await;
         assert!(
-            matches!(
-                svc.revoke_session("t1", shared_id, &theirs).await,
-                Err(AuthError::SessionNotFound)
-            ),
-            "a tenant revoked another tenant's session by sharing a user id"
+            matches!(cross_tenant, Err(AuthError::SessionNotFound)),
+            "a tenant revoked another tenant's session by sharing a user id: {cross_tenant:?}"
         );
 
         // …nor sweep it. "Sign out my other devices" in `t1` is total within `t1`.

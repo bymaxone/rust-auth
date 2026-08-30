@@ -207,7 +207,13 @@ impl MfaService {
         let safe = SafeAuthUser::from(user);
         let result = self
             .tokens
-            .issue_tokens(&safe, ip, user_agent, true)
+            .issue_tokens(
+                &safe,
+                ip,
+                user_agent,
+                true,
+                crate::services::token_manager::CredentialProof::Proved,
+            )
             .await?;
         self.enforce_session_limit(&safe, &email, &result, ip, user_agent)
             .await?;

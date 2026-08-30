@@ -85,6 +85,22 @@ fn jti_hash(jti: &str) -> String {
     crate::services::to_hex(&bymax_auth_crypto::mac::sha256(jti.as_bytes()))
 }
 
+/// Whether this issuance actually verified a credential belonging to the ACCOUNT — the only
+/// question the recent-authentication marker answers.
+///
+/// A `bool` beside `mfa_verified` would be two adjacent booleans at the call site, and this
+/// distinction is too load-bearing to be positional: the marker is the sole proof
+/// `MfaService::assert_reauthenticated` has for an account with no local password, so a caller
+/// that plants it without a proof hands MFA enrolment to whoever holds the session.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CredentialProof {
+    /// A password, a second factor, or an identity provider was verified for THIS issuance.
+    Proved,
+    /// No credential was verified. A workspace switch or an impersonation: the authority is the
+    /// CALLER's, not the account's, so it proves nothing about the account holder being present.
+    Unproven,
+}
+
 /// The four resolved token lifetimes, grouped so the manager's constructor takes one value for
 /// them instead of four adjacent scalars — three of which are durations of different units and
 /// two of which are bare `u32` day counts, which is exactly the argument list a caller silently
@@ -397,6 +413,7 @@ impl TokenManagerService {
         ip: &str,
         user_agent: &str,
         mfa_verified: bool,
+        proof: CredentialProof,
     ) -> Result<AuthResult, AuthError> {
         let refresh = RawRefreshToken::generate();
         let now = now_unix();
@@ -473,9 +490,22 @@ impl TokenManagerService {
         //
         // The old preimage also carried no tenant, so two accounts sharing an id in different
         // tenants shared one marker. Inert only because nothing read that key.
-        self.session_store
-            .mark_recent_auth(&subject, RECENT_AUTH_TTL_SECS)
-            .await?;
+        // Only when a credential was actually proved. `issue_tokens` is shared by the login,
+        // MFA-challenge, OAuth-callback and register paths — which all prove one — AND by
+        // `issue_tokens_for_user_id`, the documented password-less workspace-switch and
+        // impersonation API, which proves nothing about the account holder.
+        //
+        // Planting it unconditionally would be worse than the bug it replaced. For an account
+        // with no local password, `MfaService::assert_reauthenticated` has no password to verify
+        // and relies on this marker alone, so an impersonation session could enrol an
+        // attacker-controlled second factor — and enrolling revokes the owner's sessions and
+        // displays the recovery codes once, to whoever enrolled. That is the takeover the marker
+        // exists to prevent, reached through the one door that never authenticated.
+        if proof == CredentialProof::Proved {
+            self.session_store
+                .mark_recent_auth(&subject, RECENT_AUTH_TTL_SECS)
+                .await?;
+        }
 
         Ok(AuthResult {
             user: user.clone(),
@@ -1534,9 +1564,15 @@ mod tests {
     /// llvm-cov counts. Behind a helper the `else { return }` fits inline, which is the idiom
     /// the rest of the suite uses.
     async fn issued_for(svc: &TokenManagerService) -> Option<AuthResult> {
-        svc.issue_tokens(&user(), "10.0.0.1", "agent/1.0", false)
-            .await
-            .ok()
+        svc.issue_tokens(
+            &user(),
+            "10.0.0.1",
+            "agent/1.0",
+            false,
+            CredentialProof::Proved,
+        )
+        .await
+        .ok()
     }
 
     /// Rotate `refresh` through `svc`, or `None` when it could not.
@@ -1643,7 +1679,13 @@ mod tests {
         let store = Arc::new(InMemoryStores::new());
         let svc = service(store.clone());
         let first = svc
-            .issue_tokens(&user(), "203.0.113.4", "agent/1.0", false)
+            .issue_tokens(
+                &user(),
+                "203.0.113.4",
+                "agent/1.0",
+                false,
+                CredentialProof::Proved,
+            )
             .await;
         assert!(first.is_ok());
         let Ok(first) = first else { return };
@@ -1661,7 +1703,13 @@ mod tests {
         ));
 
         let second = svc
-            .issue_tokens(&user(), "203.0.113.4", "agent/1.0", false)
+            .issue_tokens(
+                &user(),
+                "203.0.113.4",
+                "agent/1.0",
+                false,
+                CredentialProof::Proved,
+            )
             .await;
         let Ok(second) = second else { return };
         let Ok(second_claims) = svc.verify_access(&second.access_token).await else { return };
@@ -1678,7 +1726,13 @@ mod tests {
         let store = Arc::new(InMemoryStores::new());
         let svc = service(store.clone());
         let issued = svc
-            .issue_tokens(&user(), "10.0.0.1", "agent/1.0", false)
+            .issue_tokens(
+                &user(),
+                "10.0.0.1",
+                "agent/1.0",
+                false,
+                CredentialProof::Proved,
+            )
             .await;
         let Ok(issued) = issued else { return };
 
@@ -1725,7 +1779,13 @@ mod tests {
         let store = Arc::new(InMemoryStores::new());
         let svc = service(store.clone());
         let issued = svc
-            .issue_tokens(&user(), "10.0.0.1", "agent/1.0", false)
+            .issue_tokens(
+                &user(),
+                "10.0.0.1",
+                "agent/1.0",
+                false,
+                CredentialProof::Proved,
+            )
             .await;
         let Ok(issued) = issued else { return };
         let old_hash = RawRefreshToken::from_raw(issued.refresh_token.clone()).redis_hash();
@@ -1906,9 +1966,15 @@ mod tests {
 
         assert!(matches!(store.has_recent_auth(&expected).await, Ok(false)));
         assert!(
-            svc.issue_tokens(&user, "10.0.0.1", "agent/1.0", false)
-                .await
-                .is_ok()
+            svc.issue_tokens(
+                &user,
+                "10.0.0.1",
+                "agent/1.0",
+                false,
+                CredentialProof::Proved
+            )
+            .await
+            .is_ok()
         );
         assert!(
             matches!(store.has_recent_auth(&expected).await, Ok(true)),
@@ -1925,6 +1991,67 @@ mod tests {
             matches!(store.has_recent_auth(&old_shape).await, Ok(false)),
             "the tenant-less recent-auth key is still being written"
         );
+    }
+
+    #[tokio::test]
+    async fn an_unproven_issuance_plants_no_recent_auth_marker() {
+        // `issue_tokens` is shared by the paths that verify a credential AND by
+        // `issue_tokens_for_user_id`, the documented password-less workspace-switch and
+        // impersonation API. Only the first kind may plant the recent-authentication marker.
+        //
+        // This is the sharp edge of fixing the marker's key. While the writer and the reader
+        // disagreed, planting it on an unproven issuance was harmless because nothing read that
+        // key. Making them agree turned the same line into a live grant: for an account with no
+        // local password, `MfaService::assert_reauthenticated` has no password to verify and
+        // relies on this marker alone, so an impersonation session could enrol an
+        // attacker-controlled second factor — and enrolling revokes the owner's sessions and
+        // displays the recovery codes once, to whoever enrolled. A fix that opens the door it
+        // was closing is not a fix.
+        let store = Arc::new(InMemoryStores::new());
+        let svc = service(store.clone());
+        let user = user();
+        let marker = crate::services::to_hex(&bymax_auth_crypto::mac::hmac_sha256(
+            &TEST_IDENTIFIER_KEY,
+            format!(
+                "dashboard:{}:{}:{}",
+                user.tenant_id.len(),
+                user.tenant_id,
+                user.id
+            )
+            .as_bytes(),
+        ));
+
+        assert!(
+            svc.issue_tokens(
+                &user,
+                "10.0.0.1",
+                "agent/1.0",
+                false,
+                CredentialProof::Unproven
+            )
+            .await
+            .is_ok(),
+            "the session itself must still be issued — only the proof is withheld"
+        );
+        assert!(
+            matches!(store.has_recent_auth(&marker).await, Ok(false)),
+            "a password-less issuance counted as a recent authentication"
+        );
+
+        // …and the proved path still plants it, so the check above is measuring the flag rather
+        // than a marker that never lands at all.
+        assert!(
+            svc.issue_tokens(
+                &user,
+                "10.0.0.1",
+                "agent/1.0",
+                false,
+                CredentialProof::Proved
+            )
+            .await
+            .is_ok()
+        );
+        assert!(matches!(store.has_recent_auth(&marker).await, Ok(true)));
     }
 
     #[tokio::test]
@@ -2058,7 +2185,13 @@ mod tests {
         let store = Arc::new(InMemoryStores::new());
         let svc = service(store);
         let issued = svc
-            .issue_tokens(&user(), "10.0.0.1", "agent/1.0", false)
+            .issue_tokens(
+                &user(),
+                "10.0.0.1",
+                "agent/1.0",
+                false,
+                CredentialProof::Proved,
+            )
             .await;
         let Ok(issued) = issued else { return };
         let Ok(claims) = svc.verify_access(&issued.access_token).await else { return };
@@ -2078,7 +2211,13 @@ mod tests {
         let store = Arc::new(InMemoryStores::new());
         let svc = service(store.clone());
         let issued = svc
-            .issue_tokens(&user(), "10.0.0.1", "agent/1.0", false)
+            .issue_tokens(
+                &user(),
+                "10.0.0.1",
+                "agent/1.0",
+                false,
+                CredentialProof::Proved,
+            )
             .await;
         let Ok(issued) = issued else { return };
         // Freshly issued: it verifies (stamped at the current epoch 0).
@@ -2096,7 +2235,13 @@ mod tests {
         ));
         // ...while a token issued AFTER the bump carries the new epoch and still verifies.
         let after = svc
-            .issue_tokens(&user(), "10.0.0.1", "agent/1.0", false)
+            .issue_tokens(
+                &user(),
+                "10.0.0.1",
+                "agent/1.0",
+                false,
+                CredentialProof::Proved,
+            )
             .await;
         let Ok(after) = after else { return };
         assert!(svc.verify_access(&after.access_token).await.is_ok());
@@ -2199,7 +2344,13 @@ mod tests {
         };
 
         let issued = svc
-            .issue_tokens(&enrolled, "10.0.0.1", "agent/1.0", true)
+            .issue_tokens(
+                &enrolled,
+                "10.0.0.1",
+                "agent/1.0",
+                true,
+                CredentialProof::Proved,
+            )
             .await;
         let Ok(issued) = issued else { return };
 
@@ -2220,7 +2371,13 @@ mod tests {
         let svc = service(store);
 
         let issued = svc
-            .issue_tokens(&user(), "10.0.0.1", "agent/1.0", false)
+            .issue_tokens(
+                &user(),
+                "10.0.0.1",
+                "agent/1.0",
+                false,
+                CredentialProof::Proved,
+            )
             .await;
         let Ok(issued) = issued else { return };
 
@@ -2317,7 +2474,13 @@ mod tests {
         let store = Arc::new(InMemoryStores::new());
         let svc = service(store);
         let issued_dash = svc
-            .issue_tokens(&user(), "10.0.0.1", "agent/1.0", false)
+            .issue_tokens(
+                &user(),
+                "10.0.0.1",
+                "agent/1.0",
+                false,
+                CredentialProof::Proved,
+            )
             .await;
         let Ok(dash) = issued_dash else { return };
         assert!(matches!(
@@ -2711,7 +2874,7 @@ mod tests {
             Zeroizing::new(TEST_IDENTIFIER_KEY),
         );
         let issued = minted_under_old
-            .issue_tokens(&user(), "1.2.3.4", "agent", false)
+            .issue_tokens(&user(), "1.2.3.4", "agent", false, CredentialProof::Proved)
             .await;
         let Ok(issued) = issued else { return };
         drop(old_manager);
@@ -2751,7 +2914,7 @@ mod tests {
             Zeroizing::new(TEST_IDENTIFIER_KEY),
         );
         let issued = forged
-            .issue_tokens(&user(), "1.2.3.4", "agent", false)
+            .issue_tokens(&user(), "1.2.3.4", "agent", false, CredentialProof::Proved)
             .await;
         let Ok(issued) = issued else { return };
 
@@ -2768,7 +2931,7 @@ mod tests {
         let store = Arc::new(InMemoryStores::new());
         let rotating = service_rotating(store.clone(), vec![retired_key()]);
         let issued = rotating
-            .issue_tokens(&user(), "1.2.3.4", "agent", false)
+            .issue_tokens(&user(), "1.2.3.4", "agent", false, CredentialProof::Proved)
             .await;
         let Ok(issued) = issued else { return };
 

@@ -1928,29 +1928,29 @@ mod tests {
                 .await,
             Ok(RotateOutcome::Reused(family)) if family == "famA"
         ));
+        // Bound before the assertion, not inlined into it: a two-argument `assert!` whose
+        // condition contains the `.await` leaves that region counted only on the FAILING path,
+        // which shows up as an uncovered line under a 100% gate. The same reason the message can
+        // now name the value it saw.
+        let other_account = store
+            .rotate(
+                SessionKind::Dashboard,
+                &grace_replay("b1", "b-replay", "u2", "famB"),
+            )
+            .await;
         assert!(
-            matches!(
-                store
-                    .rotate(
-                        SessionKind::Dashboard,
-                        &grace_replay("b1", "b-replay", "u2", "famB")
-                    )
-                    .await,
-                Ok(RotateOutcome::Grace(_))
-            ),
-            "another account's grace pointer was swept"
+            matches!(other_account, Ok(RotateOutcome::Grace(_))),
+            "another account's grace pointer was swept: {other_account:?}"
         );
+        let other_plane = store
+            .rotate(
+                SessionKind::Platform,
+                &grace_replay("p1", "p-replay", "u1", "famP"),
+            )
+            .await;
         assert!(
-            matches!(
-                store
-                    .rotate(
-                        SessionKind::Platform,
-                        &grace_replay("p1", "p-replay", "u1", "famP")
-                    )
-                    .await,
-                Ok(RotateOutcome::Grace(_))
-            ),
-            "a dashboard sweep reached the platform keyspace"
+            matches!(other_plane, Ok(RotateOutcome::Grace(_))),
+            "a dashboard sweep reached the platform keyspace: {other_plane:?}"
         );
     }
 

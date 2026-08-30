@@ -695,6 +695,7 @@ mod tests {
                 "1.2.3.4",
                 "agent",
                 false,
+                crate::services::token_manager::CredentialProof::Proved,
             )
             .await;
         let Ok(issued) = issued else { return };
@@ -1034,7 +1035,13 @@ mod tests {
 
         let issued = engine
             .tokens()
-            .issue_tokens(&builder_user(), "10.0.0.1", "agent/1.0", false)
+            .issue_tokens(
+                &builder_user(),
+                "10.0.0.1",
+                "agent/1.0",
+                false,
+                crate::services::token_manager::CredentialProof::Proved,
+            )
             .await;
         assert!(issued.is_ok(), "an empty binding must still mint");
         let Ok(issued) = issued else { return };
@@ -1065,7 +1072,13 @@ mod tests {
 
         let issued = engine
             .tokens()
-            .issue_tokens(&builder_user(), "10.0.0.1", "agent/1.0", false)
+            .issue_tokens(
+                &builder_user(),
+                "10.0.0.1",
+                "agent/1.0",
+                false,
+                crate::services::token_manager::CredentialProof::Proved,
+            )
             .await;
         assert!(issued.is_ok(), "a configured binding must mint");
         let Ok(issued) = issued else { return };

@@ -437,7 +437,13 @@ impl AuthEngine {
         let safe = SafeAuthUser::from(user);
         let result = self
             .tokens()
-            .issue_tokens(&safe, &ctx.ip, &ctx.user_agent, false)
+            .issue_tokens(
+                &safe,
+                &ctx.ip,
+                &ctx.user_agent,
+                false,
+                crate::services::token_manager::CredentialProof::Proved,
+            )
             .await?;
         // Enforce the concurrent-session cap and fire the new-session hook (a no-op when
         // session tracking is disabled) before the fire-and-forget bookkeeping.

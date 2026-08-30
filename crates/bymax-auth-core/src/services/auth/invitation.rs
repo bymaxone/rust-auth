@@ -284,7 +284,15 @@ impl AuthEngine {
         let safe = SafeAuthUser::from(user);
         let result = self
             .tokens()
-            .issue_tokens(&safe, ip, user_agent, false)
+            .issue_tokens(
+                &safe,
+                ip,
+                user_agent,
+                false,
+                // The invitee proved BOTH: possession of the emailed token, and a password
+                // they just set. Same standing as register.
+                crate::services::token_manager::CredentialProof::Proved,
+            )
             .await?;
 
         let ctx = RequestContext::new(ip.to_owned(), user_agent.to_owned(), headers);

@@ -490,6 +490,48 @@ async fn rotate_with_zero_grace_writes_no_grace_pointer() {
 }
 
 #[tokio::test]
+async fn a_family_owner_read_skips_members_it_cannot_name() {
+    let Some(redis) = common::try_start().await else {
+        return;
+    };
+    let Some(stores) = redis.stores() else { return };
+    let kind = SessionKind::Dashboard;
+
+    // Each family holds exactly ONE member. `find_family_owner` walks `SMEMBERS`, whose order is
+    // arbitrary, and returns at the first readable owner — so a family that also contained a good
+    // member would let the store return before ever reaching the one under test, and the
+    // assertion would pass without exercising anything.
+
+    // A member whose record cannot be parsed names nobody rather than panicking. Both libraries
+    // write this keyspace, so a shape one side cannot read has to degrade to "keep looking".
+    assert!(redis.sadd("auth:fam:fam-corrupt", "corrupt-hash").await);
+    assert!(redis.set_raw("auth:rt:corrupt-hash", "{not json").await);
+    let corrupt = stores.find_family_owner(kind, "fam-corrupt").await;
+    assert!(
+        matches!(&corrupt, Ok(None)),
+        "an unparseable member was reported as an owner: {corrupt:?}"
+    );
+
+    // A record that parses but carries no user id names nobody either. An event naming the empty
+    // string is worse than no event, because a consumer would act on it — and the revocation
+    // would derive a session-index key from an empty subject and prune a stranger's.
+    let anonymous = SessionRecord {
+        user_id: String::new(),
+        ..record("anon")
+    };
+    let Ok(json) = serde_json::to_string(&anonymous) else {
+        return;
+    };
+    assert!(redis.sadd("auth:fam:fam-anon", "anon-hash").await);
+    assert!(redis.set_raw("auth:rt:anon-hash", &json).await);
+    let anon = stores.find_family_owner(kind, "fam-anon").await;
+    assert!(
+        matches!(&anon, Ok(None)),
+        "a record with no user id was reported as an owner: {anon:?}"
+    );
+}
+
+#[tokio::test]
 async fn reuse_past_grace_is_detected_and_revoke_family_kills_the_lineage() {
     let Some(redis) = common::try_start().await else {
         return;
