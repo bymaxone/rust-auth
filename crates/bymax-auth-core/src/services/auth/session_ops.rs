@@ -56,18 +56,19 @@ impl AuthEngine {
         // when the token is allowed to be absent.
         let session_hash = is_refresh_token_shape(raw_refresh)
             .then(|| RawRefreshToken::from_raw(raw_refresh.to_owned()).redis_hash());
-        let user_id = match &session_hash {
+        // The record, not just its `user_id`: the session index this logout has to prune is
+        // keyed by the TENANT-SCOPED subject, and the record is the only thing on this path
+        // that carries the tenant — the access token is allowed to be absent.
+        let owner = match &session_hash {
             Some(hash) => self
                 .session_store()
                 .find_session(SessionKind::Dashboard, hash)
                 .await
                 .ok()
-                .flatten()
-                .map(|record| record.user_id)
-                .unwrap_or_default(),
-            None => String::new(),
+                .flatten(),
+            None => None,
         };
-        let user_id = user_id.as_str();
+        let user_id = owner.as_ref().map_or("", |record| record.user_id.as_str());
 
         if let Ok(claims) = self.tokens().verify_access_ignoring_expiry(access_token) {
             // Blacklist for the token's residual lifetime only. `try_from` clamps to `0` if
@@ -87,9 +88,16 @@ impl AuthEngine {
         // other store error are swallowed, so logout is idempotent and never blocks. A
         // malformed/oversized token is skipped before hashing — it owns no session anyway.
         if let Some(session_hash) = &session_hash {
+            let subject = self.session_subject(
+                SessionKind::Dashboard,
+                owner
+                    .as_ref()
+                    .and_then(|record| record.tenant_id.as_deref()),
+                user_id,
+            );
             if let Err(error) = self
                 .session_store()
-                .revoke_session(SessionKind::Dashboard, user_id, session_hash)
+                .revoke_session(SessionKind::Dashboard, &subject, session_hash)
                 .await
             {
                 // Swallowed by design, but not silently: an operator seeing repeated cleanup
@@ -188,13 +196,15 @@ impl AuthEngine {
             Some(user) => user,
             None => {
                 // The account is gone and the session record outlived it. End it rather than
-                // hand back a token for a user nobody can look up.
-                self.revoke_all_sessions(&user_id).await?;
+                // hand back a token for a user nobody can look up. The tenant comes from the
+                // token just minted, which is the only place it is available on this path.
+                self.revoke_all_sessions(&claims.tenant_id, &user_id)
+                    .await?;
                 return Err(AuthError::TokenInvalid);
             }
         };
         if let Err(error) = self.assert_user_not_blocked(&user.status) {
-            self.revoke_all_sessions(&user_id).await?;
+            self.revoke_all_sessions(&user.tenant_id, &user_id).await?;
             return Err(error);
         }
         // Refused, but NOT compensated. An unproven address is an unfinished onboarding, not a
@@ -231,10 +241,35 @@ impl AuthEngine {
         //
         // Re-signed only when a claim actually differs, so ordinary rotation costs nothing
         // extra.
-        let rotated = if claims.role == user.role
-            && claims.tenant_id == user.tenant_id
-            && claims.mfa_enabled == user.mfa_enabled
-        {
+        // A TENANT change is not an authority re-stamp; it orphans the session.
+        //
+        // The refresh session is indexed under the subject of the tenant it was created in, and
+        // rotation carries that tenant forward from the stored record. So once the account moves,
+        // every management API — which is called with the account's CURRENT tenant — addresses a
+        // different index and cannot see this session. `revoke_all_sessions(new_tenant, user_id)`
+        // then succeeds, bumps the new tenant's epoch, and leaves the refresh credential alive
+        // under the old one, still able to rotate and still receiving the old, unbumped epoch.
+        // No revocation in either tenant reaches it.
+        //
+        // Re-stamping the claims would paper over that: the token would name the new tenant while
+        // the credential behind it stayed unreachable. So the session ends instead. The account
+        // signs in again and gets a session indexed where its tenant now is. A tenant move is an
+        // administrative event, and ending the sessions established under the previous tenancy is
+        // the coherent outcome — the same reasoning `revoke_all_sessions` already applies to a
+        // status change.
+        if claims.tenant_id != user.tenant_id {
+            tracing::warn!(
+                user_id = %user_id,
+                "refresh: the account changed tenant — ending the sessions held under the previous one"
+            );
+            // Under the OLD tenant, which is the index this session actually lives in. The new
+            // tenant's index does not contain it and sweeping that one would revoke nothing.
+            self.revoke_all_sessions(&claims.tenant_id, &user_id)
+                .await?;
+            return Err(AuthError::TokenInvalid);
+        }
+
+        let rotated = if claims.role == user.role && claims.mfa_enabled == user.mfa_enabled {
             rotated
         } else {
             RotatedTokens {
@@ -272,12 +307,17 @@ impl AuthEngine {
     /// # Errors
     ///
     /// Returns a store [`AuthError`] when the sweep or the epoch bump fails.
-    pub async fn revoke_all_sessions(&self, user_id: &str) -> Result<(), AuthError> {
+    pub async fn revoke_all_sessions(
+        &self,
+        tenant_id: &str,
+        user_id: &str,
+    ) -> Result<(), AuthError> {
+        let subject = self.session_subject(SessionKind::Dashboard, Some(tenant_id), user_id);
         self.session_store()
-            .revoke_all(SessionKind::Dashboard, user_id)
+            .revoke_all(SessionKind::Dashboard, &subject)
             .await?;
         self.session_store()
-            .bump_epoch(SessionKind::Dashboard, user_id)
+            .bump_epoch(SessionKind::Dashboard, &subject)
             .await?;
         Ok(())
     }
@@ -324,7 +364,17 @@ impl AuthEngine {
         let safe = SafeAuthUser::from(user);
         let result = self
             .tokens()
-            .issue_tokens(&safe, ip, user_agent, false)
+            .issue_tokens(
+                &safe,
+                ip,
+                user_agent,
+                false,
+                // No credential was verified: this is the password-less workspace-switch /
+                // impersonation door, and the authority is the CALLER's. Planting the
+                // recent-authentication marker here would let an impersonation session enrol a
+                // second factor on an account with no local password, which has no other proof.
+                crate::services::token_manager::CredentialProof::Unproven,
+            )
             .await?;
 
         let hook_ctx = identity_only_context(
@@ -458,18 +508,50 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn moving_a_user_between_tenants_lands_on_the_next_rotation_too() {
-        // Same freeze, other claim: the tenant scopes every lookup the host performs, so a
-        // stale one reads another tenant's data with a token the engine itself minted.
+    async fn moving_a_user_between_tenants_ends_the_sessions_held_under_the_old_one() {
+        // A tenant move does NOT re-stamp the claims and carry on. It ends the session.
+        //
+        // The refresh session is indexed under the subject of the tenant it was created in, and
+        // rotation carries that tenant forward from the stored record — so once the account
+        // moves, every management API, called with the account's CURRENT tenant, addresses a
+        // different index and cannot see it. `revoke_all_sessions(new_tenant, user_id)` would
+        // then succeed, bump the new tenant's epoch, and leave the refresh credential alive
+        // under the old one, still rotating and still receiving the old, unbumped epoch. No
+        // revocation in either tenant would reach it.
+        //
+        // This test asserted the opposite until the keyspace moved onto the tenant-scoped
+        // subject — that the rotation lands the new tenant in the claims. That behaviour was
+        // only safe while the index was keyed on the bare id, where a move orphaned nothing.
         let mut cfg = base_config();
         cfg.email_verification.required = false;
         let Some(h) = harness(cfg, None) else { return };
         let Some((id, auth)) = logged_in(&h, "moved@e.com", "pw123456").await else { return };
         assert!(h.users.set_authority(&id, None, Some("tenant-b")));
 
-        let Some(rotated) = rotate(&h, &auth.refresh_token).await else { return };
-        let Some(claims) = claims_of(&h, &rotated.tokens.access_token).await else { return };
-        assert_eq!(claims.tenant_id, "tenant-b");
+        let refused = h
+            .engine
+            .refresh(&auth.refresh_token, "1.2.3.4", "agent")
+            .await
+            .err();
+        assert!(
+            matches!(refused, Some(AuthError::TokenInvalid)),
+            "a refresh across a tenant move must not continue the session: {refused:?}"
+        );
+
+        // …and the credential is spent, not merely refused: presenting it again cannot revive
+        // the session the move orphaned.
+        let again = h
+            .engine
+            .refresh(&auth.refresh_token, "1.2.3.4", "agent")
+            .await
+            .err();
+        assert!(
+            matches!(
+                again,
+                Some(AuthError::TokenInvalid | AuthError::RefreshTokenInvalid)
+            ),
+            "the orphaned refresh token survived the revocation: {again:?}"
+        );
     }
 
     #[tokio::test]
@@ -590,7 +672,17 @@ mod tests {
         };
         let seeded = h
             .stores
-            .create_session(SessionKind::Dashboard, &raw.redis_hash(), &record, 3600)
+            .create_session(
+                SessionKind::Dashboard,
+                &h.engine.session_subject(
+                    SessionKind::Dashboard,
+                    record.tenant_id.as_deref(),
+                    &record.user_id,
+                ),
+                &raw.redis_hash(),
+                &record,
+                3600,
+            )
             .await;
         assert!(seeded.is_ok());
 

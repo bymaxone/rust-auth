@@ -12,6 +12,25 @@ version bump.
 
 ### Fixed
 
+- **The contract test read a hand-written subset of the section it was checking, and that is how
+  the session keyspace below stayed unfixed with a green gate.** `userSubjectDerivedKeys` holds
+  eight entries; the assertion listed six, naming them "the six keys that were in the blind spot"
+  — true when it was written. `sessionIndex` and `tokenEpoch` entered this repo's copy of the
+  contract in the length-prefix change below, which adopted nest-auth's file byte for byte; the
+  test's literal list was not extended in that same commit. From that moment the two keys the
+  contract itself calls mandatory were pinned by nobody, and rust-auth kept the pre-relocation
+  shape with the gate reporting agreement.
+
+  The assertion is now exact set equality against the section, in both directions: a key added to
+  the contract fails the build until rust-auth derives it, and a key removed fails until the
+  removal is understood. Each entry is additionally checked to be an HMAC rather than a bare
+  digest, the two that moved are pinned by shape, and the session subject is asserted to be the
+  same derivation as the MFA subject — an MFA state change revokes sessions and bumps the epoch,
+  so a second spelling of the subject would have those two writes name different accounts.
+
+  This is the same failure mode as the error-catalog entry below, one contract section over: a
+  parity test that reads only what it happens to list is not a parity test.
+
 - **The error-catalog parity test now reads the shared contract's status table instead of one
   written down beside it.** `conformance/wire-contract.json` pinned the code vocabulary but never
   the HTTP status per code, and what is not in the shared artifact has no gate: thirteen codes
@@ -46,6 +65,94 @@ version bump.
   codes when there are five, and `error.rs` said the same in its module doc.
 
 ### Security
+
+- **The session index and the token epoch are keyed on the tenant-scoped user subject, not on the
+  bare user id.** `sess:`/`psess:` and `ep:`/`pep:` were built from the repository id alone, and
+  `UserRepository::find_by_id` takes a tenant precisely because an id may not be unique across
+  them. On a host that numbers users per tenant, suspending `t1/u1` swept the sessions and bumped
+  the token epoch of `t2/u1` — a credential-free cross-tenant revocation, reachable by anyone who
+  could get an account suspended in their own tenant. The same root cause as the account-status
+  gate below, in the keyspace rather than in a lookup. The bare id was also an account identifier
+  in the clear in a store both libraries read, which is the second reason every key here is an
+  HMAC and not a bare digest: a user id carries too little entropy for a plain hash to hide it.
+
+  All four now derive `hmac_sha256(hmac_key, user_subject)` in lower-case hex — the same
+  derivation the MFA keyspace already used, reached through the new `SessionKind::plane`. The
+  platform arm carries no tenant segment, because its admins are cross-tenant and have none; it
+  still moves off the bare id, and that pair is the one that matters most: a `pep:` left behind
+  revalidates admin access tokens a revocation had already killed.
+
+  The store seam moved with it. Every `SessionStore` method that names an ACCOUNT now takes a
+  `subject_hash` the engine derives, never a user id — the same shape `mark_recent_auth` and the
+  MFA store already had, and the reason `bymax-auth-redis` still holds no hashing key.
+  `revoke_family` discovered its owner inside the store, so it splits: `find_family_owner` reads
+  the record (which carries the `tenant_id` the subject needs) and the revocation takes the
+  resulting subject, keeping the deletes and the index prune one atomic step. Index MEMBERS are
+  unchanged (`rt:{sha}`, `rp:{sha}` and the platform twins), as is every token-keyed record — only
+  the keys that name an account moved.
+
+  Threading the subject made the tenant a parameter on the public surface: `AuthEngine`'s
+  `list_user_sessions`, `revoke_user_session`, `revoke_other_user_sessions`,
+  `revoke_all_sessions` and `change_password`, and `SessionService`'s `list_sessions`,
+  `revoke_session` and `revoke_all_except_current`. The axum routes pass the verified token's own
+  `tenant_id`. `TokenManagerService` and `SessionService` now take the identifier key as a
+  constructor argument rather than an optional wither: it was optional while it fed only the
+  recent-authentication marker, where an absent key fails closed, and a session subject has no
+  such fallback.
+
+  **This has no compatibility path, and `@bymax-one/nest-auth` 1.4.4 (2026-08-19) already shipped
+  its half.** A backend on the old shape writes `sess:{userId}` while one on the new shape reads
+  `sess:{hmac}`: sessions stay alive and unswept, a revoke-all misses them, and an epoch bump on
+  one side is invisible to the other. Neither library carries a fallback for the previous
+  preimage — deliberately, because a fallback is compatibility weight for a deployment that a
+  cutover removes the need for.
+
+  So this is a **cutover, not a rolling upgrade**, in both directions: the two libraries deploy
+  together, and neither may run two versions of itself at once. The MFA keyspace is where the
+  second half bites hardest rather than the session one — the transition lock that serializes the
+  read-modify-write on the recovery-code list is keyed by this same subject, so two pods that
+  disagree about the subject take different locks and do not exclude each other at all, and the
+  `rcu:` claim can then be spent twice. Drain the old pods before the new ones serve.
+
+  **A live keyspace must be migrated, not dropped**, and nothing here performs it — the
+  obligations are the consumer's:
+
+  - The dashboard session index **fans out**: one old `sess:{userId}` becomes N new keys, one per
+    tenant that id appears in. Partition its members by reading each member's own `rt:`/`rp:`
+    record for that record's `tenantId` — the old index MIXES tenants, so emptying it into a
+    single derived index hands one tenant another's live sessions, which is the defect again with
+    the migration as its delivery mechanism.
+  - **Epochs are copied forward and never backwards**, carrying at least the old value and the
+    remaining TTL. An epoch that moves down revalidates every access token the bump it replaces
+    had already killed.
+
+  `AuthEngine::session_subject` is public for exactly this: it names the new key, so a migration
+  need not re-derive it by hand. The executable spec is `conformance/wire-contract.json` —
+  `hmacKeyDerivation` (it carries a test vector), `userSubjectPreimages`,
+  `userSubjectDerivedKeys`, `sessionIndexMembers` and `recordEncodings.refreshSession`.
+
+- **The tenant is length-prefixed in the shared user subject.** `dashboard:{tenantId}:{userId}`
+  is not injective. Both components may legitimately contain `:` — a tenant id is validated for
+  length and control characters only, and a user id is whatever the host's repository assigns — so
+  tenant `acme:prod` + user `u1` and tenant `acme` + user `prod:u1` built one preimage. Everything
+  derived from it collided, `rcu:` included: the marker that stops one recovery code being spent
+  twice, which means one tenant could spend another tenant's code.
+
+  The tenant's UTF-8 **byte** length now precedes it (`dashboard:9:acme:prod:u1` against
+  `dashboard:4:acme:prod:u1`). Bytes, not characters: `str::len()` already counts bytes, and the
+  symmetric mistake on the TypeScript side is `String.length`, which counts UTF-16 units — the two
+  agree on ASCII and derive different keys for the first accented tenant id, a split that surfaces
+  only in production and only in some locales. The platform arm takes no prefix and no tenant:
+  one component after the plane, nothing to disambiguate.
+
+  `conformance/wire-contract.json` was adopted from nest-auth byte for byte for this (verified
+  with `cmp` against their tree, not retyped from a description); `mfaSubject*` became
+  `userSubject*` there. The preimage test now asserts the PROPERTY — that the two formerly
+  colliding pairs differ, and that a 4-character 6-byte tenant id derives the 6 — rather than the
+  literal shape, which a port counting characters would have passed.
+
+  **Breaking, with no compatibility path**, on the same terms as the session-keyspace entry
+  above: every key derived from the subject moves, and both libraries must ship it together.
 
 - **The account-status gate is scoped to the token's tenant.** `AuthEngine::assert_user_active`
   resolved the account with `find_by_id(sub, None)` — and `UserRepository` says in as many words

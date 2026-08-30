@@ -584,6 +584,7 @@ impl AuthEngine {
     /// when the screen refuses the new password; or a repository/store [`AuthError`].
     pub async fn change_password(
         &self,
+        tenant_id: &str,
         user_id: &str,
         current_password: &str,
         new_password: &str,
@@ -639,15 +640,17 @@ impl AuthEngine {
             Some(raw) => {
                 let hash = RawRefreshToken::from_raw(raw.to_owned()).redis_hash();
                 self.sessions()
-                    .revoke_all_except_current(user_id, &hash)
+                    .revoke_all_except_current(tenant_id, user_id, &hash)
                     .await?;
             }
             None => {
+                let subject =
+                    self.session_subject(SessionKind::Dashboard, Some(tenant_id), user_id);
                 self.session_store()
-                    .revoke_all(SessionKind::Dashboard, user_id)
+                    .revoke_all(SessionKind::Dashboard, &subject)
                     .await?;
                 self.session_store()
-                    .bump_epoch(SessionKind::Dashboard, user_id)
+                    .bump_epoch(SessionKind::Dashboard, &subject)
                     .await?;
             }
         }
@@ -737,11 +740,19 @@ impl AuthEngine {
         // touched here. Revoking the refresh sessions stops rotation; bumping the token epoch
         // additionally invalidates every already-issued (stateless) access token at once, so a
         // reset takes effect immediately rather than lingering for the access-token lifetime.
+        // The proof carries the tenant it was issued for, and that is the tenant the reset acts
+        // in: resolving one from the id would be the cross-tenant lookup these keys moved to
+        // avoid.
+        let subject = self.session_subject(
+            crate::traits::SessionKind::Dashboard,
+            Some(&context.tenant_id),
+            &context.user_id,
+        );
         self.session_store()
-            .revoke_all(crate::traits::SessionKind::Dashboard, &context.user_id)
+            .revoke_all(crate::traits::SessionKind::Dashboard, &subject)
             .await?;
         self.session_store()
-            .bump_epoch(crate::traits::SessionKind::Dashboard, &context.user_id)
+            .bump_epoch(crate::traits::SessionKind::Dashboard, &subject)
             .await?;
         // A completed reset is the event an operator correlates an account takeover against:
         // it revokes every session the account had and invalidates its outstanding access
@@ -908,7 +919,17 @@ mod tests {
         };
         assert!(
             h.stores
-                .create_session(SessionKind::Dashboard, &hash, &record, 3600)
+                .create_session(
+                    SessionKind::Dashboard,
+                    &h.engine.session_subject(
+                        SessionKind::Dashboard,
+                        record.tenant_id.as_deref(),
+                        &record.user_id
+                    ),
+                    &hash,
+                    &record,
+                    3600,
+                )
                 .await
                 .is_ok()
         );
@@ -980,7 +1001,13 @@ mod tests {
         let id = h.seed(SeedUser::active("epoch@example.com", "pw")).await;
         // Before the reset the user carries the inert epoch 0.
         assert!(matches!(
-            h.stores.current_epoch(SessionKind::Dashboard, &id).await,
+            h.stores
+                .current_epoch(
+                    SessionKind::Dashboard,
+                    &h.engine
+                        .session_subject(SessionKind::Dashboard, Some("t1"), &id),
+                )
+                .await,
             Ok(0)
         ));
         let known = "e".repeat(64);
@@ -1010,7 +1037,13 @@ mod tests {
         assert!(h.engine.reset_password(reset, &ctx()).await.is_ok());
         // The reset advanced the epoch: any token stamped at 0 is now below the current value.
         assert!(matches!(
-            h.stores.current_epoch(SessionKind::Dashboard, &id).await,
+            h.stores
+                .current_epoch(
+                    SessionKind::Dashboard,
+                    &h.engine
+                        .session_subject(SessionKind::Dashboard, Some("t1"), &id),
+                )
+                .await,
             Ok(1)
         ));
     }
@@ -1859,7 +1892,13 @@ mod tests {
 
         assert!(
             engine
-                .change_password(&user.id, "oldsecret77", "glidingwalnut42", None)
+                .change_password(
+                    "tenant-nine",
+                    &user.id,
+                    "oldsecret77",
+                    "glidingwalnut42",
+                    None
+                )
                 .await
                 .is_ok()
         );
@@ -2497,14 +2536,14 @@ mod tests {
         // A wrong current password writes nothing.
         let refused = h
             .engine
-            .change_password(&id, "not-the-password", "glidingwalnut42", None)
+            .change_password("t1", &id, "not-the-password", "glidingwalnut42", None)
             .await;
         assert!(matches!(refused, Err(AuthError::InvalidCredentials)));
 
         // The right one rotates it, and the new password is what logs in afterwards.
         assert!(
             h.engine
-                .change_password(&id, "oldsecret77", "glidingwalnut42", None)
+                .change_password("t1", &id, "oldsecret77", "glidingwalnut42", None)
                 .await
                 .is_ok()
         );
@@ -2532,7 +2571,7 @@ mod tests {
         for _ in 0..5 {
             let _ = h
                 .engine
-                .change_password(&id, "not-the-password", "glidingwalnut42", None)
+                .change_password("t1", &id, "not-the-password", "glidingwalnut42", None)
                 .await;
         }
 
@@ -2540,7 +2579,7 @@ mod tests {
         // credential one — the caller has to wait, not keep guessing.
         let refused = h
             .engine
-            .change_password(&id, "oldsecret77", "glidingwalnut42", None)
+            .change_password("t1", &id, "oldsecret77", "glidingwalnut42", None)
             .await;
         assert!(
             matches!(refused, Err(AuthError::AccountLocked { .. })),
@@ -2570,6 +2609,7 @@ mod tests {
         assert!(
             h.engine
                 .change_password(
+                    "t1",
                     &id,
                     "oldsecret77",
                     "glidingwalnut42",
@@ -2617,7 +2657,7 @@ mod tests {
 
         let refused = h
             .engine
-            .change_password(&user.id, "anything", "glidingwalnut42", None)
+            .change_password("t1", &user.id, "anything", "glidingwalnut42", None)
             .await;
         assert!(matches!(refused, Err(AuthError::InvalidCredentials)));
     }
@@ -2634,7 +2674,7 @@ mod tests {
 
         let refused = h
             .engine
-            .change_password(&id, "oldsecret77", "Password1234567", None)
+            .change_password("t1", &id, "oldsecret77", "Password1234567", None)
             .await;
         assert!(matches!(refused, Err(AuthError::PasswordCompromised)));
     }

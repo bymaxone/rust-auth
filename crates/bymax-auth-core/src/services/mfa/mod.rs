@@ -31,7 +31,7 @@ use zeroize::Zeroizing;
 use crate::services::brute_force::BruteForceService;
 use crate::services::session::SessionService;
 use crate::services::token_manager::TokenManagerService;
-use crate::services::{internal_error, now_unix, to_hex};
+use crate::services::{internal_error, now_unix, to_hex, user_subject};
 use crate::traits::{
     AuthHooks, EmailProvider, MfaStore, PlatformUserRepository, SessionKind, SessionStore,
     UserRepository,
@@ -162,42 +162,6 @@ impl MfaUserView {
     }
 }
 
-/// The subject every MFA store key and brute-force counter in this module is derived from:
-/// `dashboard:{tenant_id}:{user_id}`, or `platform:{user_id}` on the plane whose admins are
-/// cross-tenant and carry no tenant at all.
-///
-/// One definition rather than eight copies. Eight keys derive from this shape — the transition
-/// lock, the pending-enrolment record, the recent-auth marker, the TOTP anti-replay marker, the
-/// recovery-code claim, and the challenge/disable/reauth failure counters — and a copy that
-/// drifts is a key that silently stops agreeing with the one nest-auth derives from the same
-/// preimage.
-///
-/// The tenant belongs in it for the reason OWASP's multi-tenant guidance gives for cache keys
-/// and composite lookups: a key built from a resource id alone is shared by every tenant that
-/// hands out that id, and a library cannot assume the host's ids are unique across tenants —
-/// `find_by_id` takes a tenant precisely because they may not be. Without it the failure
-/// counters were the worst of the eight: two accounts sharing an id shared a lockout budget, so
-/// failures in one tenant locked an account in another and a success in one cleared the other's
-/// — a credential-free cross-tenant lockout, against NIST SP 800-63B's requirement that
-/// rate-limiting bound failures on *the subscriber account*.
-///
-/// `MfaContext::as_str` rather than a literal: the plane's wire name has exactly one definition
-/// and this preimage has to agree byte-for-byte with nest-auth's.
-/// The PLANE decides the shape, not whether a tenant happened to be supplied. A platform
-/// caller that passes one — a host reusing a dashboard code path, a test fixture — must not be
-/// able to move the platform preimage off `platform:{user_id}`: that shape is half of a
-/// cross-implementation agreement, and a key that changes with an argument nobody meant to pass
-/// is a key that silently stops matching the one nest-auth derives. So the platform arm ignores
-/// the value rather than trusting the call site to have withheld it.
-fn scoped_subject(ctx: MfaContext, tenant_id: Option<&str>, user_id: &str) -> String {
-    match (ctx, tenant_id) {
-        (MfaContext::Dashboard, Some(tenant)) => {
-            format!("{}:{tenant}:{user_id}", ctx.as_str())
-        }
-        _ => format!("{}:{user_id}", ctx.as_str()),
-    }
-}
-
 /// Whether a `(plane, tenant)` pair is one this library will act on: the dashboard plane needs
 /// a non-empty tenant, and the platform plane must carry none.
 ///
@@ -213,7 +177,7 @@ fn scoped_subject(ctx: MfaContext, tenant_id: Option<&str>, user_id: &str) -> St
 /// The empty string is refused, not treated as a tenant. `Some("")` is a present-but-meaningless
 /// value that would otherwise build the preimage `dashboard::{userId}` — a third keyspace that
 /// neither this library nor nest-auth derives anywhere else, reachable only by a caller passing
-/// a blank. Rejecting it here is what makes [`scoped_subject`]'s dashboard arm total in practice.
+/// a blank. Rejecting it here is what makes [`crate::services::user_subject`]'s dashboard arm total in practice.
 pub(crate) const fn plane_tenant_is_well_formed(ctx: MfaContext, tenant_id: Option<&str>) -> bool {
     match (ctx, tenant_id) {
         (MfaContext::Dashboard, Some(tenant)) => !tenant.is_empty(),
@@ -224,7 +188,7 @@ pub(crate) const fn plane_tenant_is_well_formed(ctx: MfaContext, tenant_id: Opti
 
 /// Refuse a malformed `(plane, tenant)` pair at a public entry point, before any key is derived.
 ///
-/// [`scoped_subject`] is total — it has to be, because the platform plane legitimately has no
+/// [`crate::services::user_subject`] is total — it has to be, because the platform plane legitimately has no
 /// tenant — so on its own a `None` slipping in on the dashboard plane would silently rebuild the
 /// old unscoped preimage: the vulnerable derivation, reachable by omitting an argument. This is
 /// the guard that makes that unreachable, and it fails closed at the entry point rather than
@@ -373,15 +337,14 @@ impl MfaService {
             // The marker is planted by `TokenManagerService::issue_tokens` and NOT by
             // `reissue_tokens`, which is what makes it proof of anything: an attacker holding a
             // stolen session can rotate it indefinitely and never make the mark fresh again.
-            // `MfaContext::as_str` rather than a match written here: the plane's wire name has
-            // exactly one definition, and this preimage has to agree byte-for-byte with
-            // nest-auth's `recentAuthKey`. A second copy is a second thing to keep in step —
-            // and the `Platform` arm of that copy was unreachable anyway, since a platform
-            // admin's `password_hash` is non-optional and so never takes this branch.
-            let marker = to_hex(&hmac_sha256(
-                self.identifier_key.as_ref(),
-                scoped_subject(ctx, tenant_id, user_id).as_bytes(),
-            ));
+            // Through `user_subject_hash`, not a copy of its body written here. The preimage has
+            // to agree byte-for-byte with nest-auth's `recentAuthKey`, and the WRITER of this
+            // marker derived it differently until recently — `hmac_sha256("{plane}:{userId}")`,
+            // with no tenant — so the mark was planted where nothing read it and every
+            // password-less account was refused enrolment. One call, one derivation, is what
+            // stops the two halves drifting apart again.
+            let marker =
+                crate::services::user_subject_hash(&self.identifier_key, ctx, tenant_id, user_id);
             if !self.session_store.has_recent_auth(&marker).await? {
                 tracing::warn!(%user_id, "mfa setup: no recent authentication");
                 return Err(AuthError::ReauthenticationRequired);
@@ -411,17 +374,34 @@ impl MfaService {
         }
     }
 
-    /// The `mfa_setup:` key suffix for a user (`hmac_sha256(scoped_subject)`, hex). The
+    /// The session-index / token-epoch key suffix for a user on the plane `ctx` names.
+    ///
+    /// The same `userSubject` the MFA keys derive from, which is the point: an MFA state change
+    /// revokes every session and bumps the epoch, so the keys it writes and the keys it sweeps
+    /// have to agree on what identifies the account. They did not while `sess:`/`ep:` were keyed
+    /// on the bare id.
+    pub(crate) fn session_subject(
+        &self,
+        ctx: MfaContext,
+        tenant_id: Option<&str>,
+        user_id: &str,
+    ) -> String {
+        crate::services::session_subject_hash(
+            &self.identifier_key,
+            session_kind(ctx),
+            tenant_id,
+            user_id,
+        )
+    }
+
+    /// The `mfa_setup:` key suffix for a user (`hmac_sha256(user_subject)`, hex). The
     /// low-entropy id is keyed, never used raw, so no PII reaches a store key.
     fn setup_key(&self, ctx: MfaContext, tenant_id: Option<&str>, user_id: &str) -> String {
-        to_hex(&hmac_sha256(
-            self.identifier_key.as_ref(),
-            scoped_subject(ctx, tenant_id, user_id).as_bytes(),
-        ))
+        crate::services::user_subject_hash(&self.identifier_key, ctx, tenant_id, user_id)
     }
 
     /// The `tu:` anti-replay key suffix for a `(plane, tenant, user_id, code)` tuple
-    /// (`hmac_sha256("{scoped_subject}:{code}")`, hex) — ties the marker to the plane, the
+    /// (`hmac_sha256("{user_subject}:{code}")`, hex) — ties the marker to the plane, the
     /// tenant, the user and the code value, with no plaintext code in the store and no
     /// cross-user, cross-tenant or cross-plane replay.
     ///
@@ -437,7 +417,7 @@ impl MfaService {
     ) -> String {
         to_hex(&hmac_sha256(
             self.identifier_key.as_ref(),
-            format!("{}:{code}", scoped_subject(ctx, tenant_id, user_id)).as_bytes(),
+            format!("{}:{code}", user_subject(ctx, tenant_id, user_id)).as_bytes(),
         ))
     }
 
@@ -470,7 +450,7 @@ impl MfaService {
     fn challenge_bf_id(&self, ctx: MfaContext, tenant_id: Option<&str>, user_id: &str) -> String {
         to_hex(&hmac_sha256(
             self.identifier_key.as_ref(),
-            format!("challenge:{}", scoped_subject(ctx, tenant_id, user_id)).as_bytes(),
+            format!("challenge:{}", user_subject(ctx, tenant_id, user_id)).as_bytes(),
         ))
     }
 
@@ -480,7 +460,7 @@ impl MfaService {
     fn disable_bf_id(&self, ctx: MfaContext, tenant_id: Option<&str>, user_id: &str) -> String {
         to_hex(&hmac_sha256(
             self.identifier_key.as_ref(),
-            format!("disable:{}", scoped_subject(ctx, tenant_id, user_id)).as_bytes(),
+            format!("disable:{}", user_subject(ctx, tenant_id, user_id)).as_bytes(),
         ))
     }
 
@@ -493,7 +473,7 @@ impl MfaService {
     fn reauth_bf_id(&self, ctx: MfaContext, tenant_id: Option<&str>, user_id: &str) -> String {
         to_hex(&hmac_sha256(
             self.identifier_key.as_ref(),
-            format!("reauth:{}", scoped_subject(ctx, tenant_id, user_id)).as_bytes(),
+            format!("reauth:{}", user_subject(ctx, tenant_id, user_id)).as_bytes(),
         ))
     }
 
@@ -701,10 +681,7 @@ impl MfaService {
     /// two halves of one deployment serializing against different locks would lose the
     /// property entirely.
     fn mfa_lock_id(&self, ctx: MfaContext, tenant_id: Option<&str>, user_id: &str) -> String {
-        to_hex(&hmac_sha256(
-            self.identifier_key.as_ref(),
-            scoped_subject(ctx, tenant_id, user_id).as_bytes(),
-        ))
+        crate::services::user_subject_hash(&self.identifier_key, ctx, tenant_id, user_id)
     }
 
     /// Perform one MFA state transition as a serialized read-modify-write.

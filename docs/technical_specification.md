@@ -1657,7 +1657,7 @@ The internal repository row (`AuthUser`) carries `password_hash`, `mfa_secret`, 
 
 The services never touch Redis directly; they depend on the three **domain-level** store traits defined authoritatively in **§12.3** — `SessionStore`, `OtpStore`, `BruteForceStore` — plus the auxiliary single-purpose stores (`MfaStore`, `OAuthStateStore`, `PasswordResetStore`, `InvitationStore`, `UserStatusCache`). These present an intent-named surface keyed by `SessionKind { Dashboard, Platform }`, **not** low-level Redis verbs:
 
-- `SessionStore`: `create_session(kind, …)` · `rotate(kind, …) -> RotateOutcome` · `find_session(kind, …)` · `list_sessions(kind, user)` · `revoke_session(kind, user, hash)` · `revoke_all(kind, user)` · `blacklist_access(jti_or_hash, ttl)` · `is_blacklisted(jti_or_hash)`.
+- `SessionStore`: `create_session(kind, subject_hash, …)` · `rotate(kind, …) -> RotateOutcome` · `find_session(kind, …)` · `list_sessions(kind, subject_hash)` · `revoke_session(kind, subject_hash, hash)` · `revoke_all(kind, subject_hash)` · `find_family_owner(kind, family)` · `revoke_family(kind, family, owner_subject_hash)` · `blacklist_access(jti_or_hash, ttl)` · `is_blacklisted(jti_or_hash)`. Every method that names an ACCOUNT takes the `subject_hash` the engine derives (§12.4), never a user id — the store holds no hashing key.
 - `OtpStore`: `put(purpose, id, code, ttl)` · `verify(purpose, id, code, max_attempts)` · `try_begin_resend(purpose, id, cooldown)`.
 - `BruteForceStore`: `is_locked(id, max_attempts)` · `record_failure(id, window)` · `reset(id)` · `remaining_lockout_secs(id)`.
 
@@ -1951,7 +1951,7 @@ struct RefreshSession {
 2. `raw_refresh = Uuid::new_v4()`; `hash = sha256(raw_refresh)`; `key = "rt:{hash}"`.
 3. Build `RefreshSession` (with `mfa_enabled` from the user). `ttl = refresh_expires_in_days * 86400`.
 4. `set_session(key, json, ttl)`.
-5. Track in the per-user set so MFA enable/disable can invalidate all sessions atomically: `sadd("sess:{user_id}", "rt:{hash}")`, then `expire("sess:{user_id}", ttl)`.
+5. Track in the per-account set so MFA enable/disable can invalidate all sessions atomically: `sadd("sess:{subject_hash}", "rt:{hash}")`, then `expire("sess:{subject_hash}", ttl)`. `subject_hash` is `hmac_sha256(hmac_key, user_subject)` — see §12.4.
 6. Return `AuthResult { user, access_token, raw_refresh_token }`.
 
 Platform variant uses `prt:` and stores `tenant_id = ""`.
@@ -2032,9 +2032,9 @@ Purpose: create/list/revoke/revoke-all refresh sessions, enforce a per-user conc
 ```rust
 impl SessionService {
     pub async fn create_session(&self, user_id: &str, raw_refresh: &str, ip: &str, ua: &str) -> Result<String, AuthError>; // returns sha256 hash
-    pub async fn list_sessions(&self, user_id: &str, current_hash: Option<&str>) -> Result<Vec<SessionInfo>, AuthError>;
-    pub async fn revoke_session(&self, user_id: &str, session_hash: &str) -> Result<(), AuthError>;
-    pub async fn revoke_all_except_current(&self, user_id: &str, current_hash: &str) -> Result<(), AuthError>;
+    pub async fn list_sessions(&self, tenant_id: &str, user_id: &str, current_hash: Option<&str>) -> Result<Vec<SessionInfo>, AuthError>;
+    pub async fn revoke_session(&self, tenant_id: &str, user_id: &str, session_hash: &str) -> Result<(), AuthError>;
+    pub async fn revoke_all_except_current(&self, tenant_id: &str, user_id: &str, current_hash: &str) -> Result<(), AuthError>;
     pub async fn rotate_session(&self, old_hash: &str, new_hash: &str, ip: &str, ua: &str) -> Result<(), AuthError>;
 }
 ```
@@ -2047,7 +2047,7 @@ Constants: `MAX_IP_LENGTH: usize = 45` (IPv6 max — IP is truncated before stor
 
 #### 7.4.1 `create_session`
 
-**Caller ordering contract:** must be called **after** `TokenManagerService` has already added `rt:{hash}` to `sess:{user_id}` (so the limit check counts it).
+**Caller ordering contract:** must be called **after** `TokenManagerService` has already added `rt:{hash}` to `sess:{subject_hash}` (so the limit check counts it).
 
 1. `hash = sha256(raw_refresh)`; `device = parse_user_agent(ua)`; `now = epoch_ms`; `ttl = days*86400`.
 2. `set_session("sd:{hash}", json(detail with ip truncated to MAX_IP_LENGTH), ttl)`.
@@ -2057,18 +2057,18 @@ Constants: `MAX_IP_LENGTH: usize = 45` (IPv6 max — IP is truncated before stor
 
 #### 7.4.2 `enforce_session_limit` (FIFO eviction)
 
-1. `members = smembers("sess:{user_id}")`; keep only `rt:`-prefixed (exclude `rp:` grace pointers).
+1. `members = smembers("sess:{subject_hash}")`; keep only `rt:`-prefixed (exclude `rp:` grace pointers).
 2. `limit = resolve_session_limit(user_id)` — calls `config.sessions.max_sessions_resolver(user)` if set, else `default_max_sessions`; falls back to default if the user is missing or the resolver errors.
 3. If `rt_members.len() <= limit`, return.
 4. For each `rt:` member, read `sd:{hash}.created_at` (missing/unparseable → treated as oldest, `0`). Sort ascending by `created_at`.
 5. `evict_count = len - limit`; choose the oldest `evict_count`, **excluding** `new_hash`.
-6. For each victim (best-effort, errors logged not propagated — the new session is already committed): `del("rt:{hash}")`, `srem("sess:{user_id}", "rt:{hash}")`, `del("sd:{hash}")`; spawn `on_session_evicted(user_id, hash, ctx)` fire-and-forget.
+6. For each victim (best-effort, errors logged not propagated — the new session is already committed): `del("rt:{hash}")`, `srem("sess:{subject_hash}", "rt:{hash}")`, `del("sd:{hash}")`; spawn `on_session_evicted(user_id, hash, ctx)` fire-and-forget.
 
 > **Concurrency caveat & the `= 1` case.** The `SMEMBERS → read created_at → DEL` sequence is **best-effort, not atomic**: N simultaneous logins can transiently overshoot the cap by up to **N−1** sessions before eviction settles. This is acceptable for a *soft* cap (`default_max_sessions >= 2`), which is the documented behavior. For a **hard** cap — in particular `default_max_sessions = 1`, where any overshoot means a second concurrent session briefly coexists — best-effort FIFO is insufficient: enforcement MUST instead run as a single atomic `enforce_session_limit` Lua (`SMEMBERS` + conditional `DEL` of the over-limit members in one script, mirroring §12.5.3's ownership-checked pattern) so the live count can never exceed the limit even under a race. `rotate_session` already uses fully atomic Lua; `create_session`'s limit step is the one to harden when a strict cap is required.
 
 #### 7.4.3 `list_sessions`
 
-1. `smembers("sess:{user_id}")`, keep `rt:` members.
+1. `smembers("sess:{subject_hash}")`, keep `rt:` members.
 2. For each, `get("sd:{hash}")`. Missing or unparseable detail → mark the member **stale**, skip it.
 3. Build `SessionInfo`; `is_current = timing_safe_compare(hash, current_hash.unwrap_or(""))` (a 64-char hash never length-matches `""`, so absent current → all `false`).
 4. Asynchronously `srem` all stale members (fire-and-forget; logs truncate the key to `rt:` + 8 chars to avoid leaking full hashes).
@@ -2327,7 +2327,7 @@ impl PlatformAuthService {
 5. If `admin.mfa_enabled`: `issue_mfa_temp_token(admin.id, MfaContext::Platform)`, return `MfaChallenge(MfaChallengeResult { mfa_required: true, mfa_temp_token })` (§13.3).
 6. Strip credentials → `SafeAuthPlatformUser`; `issue_platform_tokens(...)`; spawn `update_last_login` fire-and-forget; return `Success(PlatformAuthResult)`.
 
-`logout`: `remaining = max(0, exp - now)`; if `> 0`, `blacklist_access(&jti, remaining)` (the store owns the `rv:` prefix). `hash = sha256(raw_refresh)`; then `revoke_session(SessionKind::Platform, user_id, &hash)` removes the `prt:` record, its `psd:` detail, the `psess:{user_id}` membership, and the `prp:` grace pointer from the last rotation in one ownership-checked domain call — keeping the set accurate for a future `revoke_all`.
+`logout`: `remaining = max(0, exp - now)`; if `> 0`, `blacklist_access(&jti, remaining)` (the store owns the `rv:` prefix). `hash = sha256(raw_refresh)`; then `revoke_session(SessionKind::Platform, user_id, &hash)` removes the `prt:` record, its `psd:` detail, the `psess:{subject_hash}` membership, and the `prp:` grace pointer from the last rotation in one ownership-checked domain call — keeping the set accurate for a future `revoke_all`.
 `refresh`: delegates to `tokens.reissue_platform_tokens(...)`.
 `me`: `find_by_id`; `None` → `TokenInvalid`; strip credentials → `SafeAuthPlatformUser`.
 `revoke_all_platform_sessions`: `sessions.revoke_all(SessionKind::Platform, user_id)` (the atomic `invalidate_user_sessions` Lua: SMEMBERS → DEL each namespaced member → DEL the set, one round-trip).
@@ -4263,7 +4263,7 @@ pub trait SessionStore: Send + Sync {
     /// Look up a live session by refresh-token hash (no rotation).
     async fn find_session(&self, kind: SessionKind, token_hash: &str) -> Result<Option<SessionRecord>, AuthError>;
     /// List all live sessions for a user (SMEMBERS + MGET of detail keys).
-    async fn list_sessions(&self, kind: SessionKind, user_id: &str) -> Result<Vec<SessionDetail>, AuthError>;
+    async fn list_sessions(&self, kind: SessionKind, subject_hash: &str) -> Result<Vec<SessionDetail>, AuthError>;
     /// Ownership-checked single revoke (Lua `session_revoke`, §12.5.3) → SESSION_NOT_FOUND if not owned.
     async fn revoke_session(&self, kind: SessionKind, user_id: &str, session_hash: &str) -> Result<(), AuthError>;
     /// Revoke every session for a user in one Lua transaction (`invalidate_user_sessions`).
@@ -4301,12 +4301,21 @@ Auxiliary single-purpose keyspaces (MFA pending setup, MFA temp token, MFA anti-
 
 All keys are `{namespace}:{prefix}:{identifier}` (default namespace `auth`). Every high-entropy secret (refresh token, reset token, invitation token, OAuth state, MFA temp token) is **SHA-256 hashed before becoming a key**, so the raw secret is never resident in Redis. Low-entropy identifiers (email) are keyed via **HMAC-SHA-256(value, server_secret)**, never bare SHA-256 (see §17). Every key has a TTL — no orphan keys.
 
+**`userSubject`** — every key below that names an ACCOUNT rather than a token is suffixed with
+`hmac_sha256(hmacKey, userSubject)` in lower-case hex, where the subject is
+`dashboard:{utf8ByteLength(tenantId)}:{tenantId}:{userId}` or, on the cross-tenant platform
+plane, `platform:{userId}`. The tenant scope is load-bearing: `UserRepository::find_by_id` takes
+a tenant precisely because a repository id may not be unique across tenants, so a key built from
+the bare id is shared by two unrelated accounts on any host that numbers users per tenant. The
+preimage and the full list of keys derived from it are pinned by `conformance/wire-contract.json`
+(`userSubjectPreimages`, `userSubjectDerivedKeys`) and held byte-identical with nest-auth.
+
 | Prefix | Key pattern | Value | TTL | Purpose |
 | --- | --- | --- | --- | --- |
 | `rt` | `auth:rt:{sha256(refresh_token)}` | JSON `SessionRecord` `{ userId, tenantId, role, device, ip, createdAt, mfaEnabled, familyId }` (`familyId` omitted when empty) | `refresh_expires_in_days` × 86400 s | Dashboard refresh-token session. Holds everything needed to reissue an access token without a DB hit. |
 | `rv` | `auth:rv:{jti}` (preferred) or `auth:rv:{sha256(jwt)}` | `"1"` | Remaining JWT lifetime computed from `exp − now` | Access-JWT revocation blacklist. Written on logout; consulted by `JwtAuthGuard`. `jti` keying avoids hashing the whole compact JWT. |
-| `ep` | `auth:ep:{userId}` | Numeric generation counter (string) | 30 days | Per-user token **epoch**. Every access token is stamped with the epoch current at issuance; verification rejects a token stamped below the stored value. A password reset advances it, invalidating every outstanding access token in one write — the stateless counterpart to `rv:`, which can only revoke tokens one `jti` at a time. The TTL far exceeds any access-token lifetime, so a bump stays in force for every pre-bump token's remaining life. |
-| `pep` | `auth:pep:{userId}` | Numeric generation counter (string) | 30 days | Platform per-admin token epoch. Analogue of `ep`; separate because the two planes' ids come from different repositories and may collide. |
+| `ep` | `auth:ep:{hmac_sha256(hmacKey, userSubject)}` | Numeric generation counter (string) | 30 days | Per-account token **epoch**, keyed by the tenant-scoped `userSubject` rather than by the bare repository id — on a host that numbers users per tenant, an epoch on the bare id let one tenant's revocation invalidate another tenant's access tokens. Every access token is stamped with the epoch current at issuance; verification rejects a token stamped below the stored value. A password reset advances it, invalidating every outstanding access token in one write — the stateless counterpart to `rv:`, which can only revoke tokens one `jti` at a time. The TTL far exceeds any access-token lifetime, so a bump stays in force for every pre-bump token's remaining life. |
+| `pep` | `auth:pep:{hmac_sha256(hmacKey, userSubject)}` | Numeric generation counter (string) | 30 days | Platform per-admin token epoch. Analogue of `ep`; separate because the two planes' ids come from different repositories and may collide. |
 | `us` | `auth:us:{userId}` | Status string (`"ACTIVE"`, `"BANNED"`, …) | `user_status_cache_ttl_seconds` (default 60 s) | User-status cache. Avoids a DB read per request; invalidated on `update_status`. |
 | `rp` | `auth:rp:{sha256(old_refresh_token)}` | JSON `SessionRecord` — the **new** session, never the raw token | `refresh_grace_window_seconds` (default 30 s) | Rotation grace pointer. Lets a legitimately-concurrent request still carrying the old token recover the rotated identity and be issued a fresh token, instead of being logged out. Stores the session record (not the raw refresh token), so a Redis snapshot never leaks a live credential. |
 | `cf` | `auth:cf:{sha256(consumed_refresh_token)}` | `familyId` of the lineage the consumed token belonged to | `refresh_expires_in_days` × 86400 s | Consumed-token family marker. Planted in the same atomic step that consumes a token, and deliberately outliving the much shorter grace pointer: once the pointer is gone, the marker's presence is what proves a presented token was legitimately issued and already rotated — a **reuse**, not a random string (§12.5.1). |
@@ -4315,19 +4324,19 @@ All keys are `{namespace}:{prefix}:{identifier}` (default namespace `auth`). Eve
 | `pw_reset` | `auth:pw_reset:{sha256(reset_token)}` | `userId` | `password_reset.token_ttl_seconds` (default 3600 s) | Password-reset token (`method = "token"`). Consumed on use. |
 | `otp` | `auth:otp:{purpose}:{hmac_sha256(tenantId + ":" + email)}` | JSON `{ code: string, attempts: number }` | `otp_ttl_seconds` (per purpose) | OTP record. `attempts` tracks failures (max 5). Purposes: `password_reset`, `email_verification`. Tenant-scoped to prevent collision. |
 | `mfa` | `auth:mfa:{sha256(mfa_temp_token)}` | `userId` | 300 s (5 min) | MFA temp-token anti-replay/consumption marker. Issued after password step when MFA is enabled; deleted when the challenge succeeds or after the lockout threshold. |
-| `sess` | `auth:sess:{userId}` | Redis SET whose members are full key **suffixes**: `rt:{sha256(refresh_token)}` for a live session and `rp:{sha256(old_refresh_token)}` for a rotation grace pointer | max refresh TTL | Dashboard active-session index. Drives listing (filtered to `rt:` members), counting and FIFO eviction. The prefixed-suffix member format is byte-identical to nest-auth, so revoke-all can delete `{namespace}:{member}` verbatim — including the grace pointers, which a bare-hash member could not identify. |
-| `sd` | `auth:sd:{sessionHash}` | JSON `{ device, ip, createdAt, lastActivityAt }` — the two timestamps are **Unix-millisecond numbers** (nest-auth writes `Date.now()` and discards a record whose timestamps are not numbers), keyed by the **bare** hash, not the `sess:` member | max refresh TTL | Dashboard per-session detail (one `rt:` member of `sess:{userId}`). |
+| `sess` | `auth:sess:{hmac_sha256(hmacKey, userSubject)}` | Redis SET whose members are full key **suffixes**: `rt:{sha256(refresh_token)}` for a live session and `rp:{sha256(old_refresh_token)}` for a rotation grace pointer | max refresh TTL | Dashboard active-session index, keyed by the tenant-scoped `userSubject`: an index on the bare id was shared between same-id accounts in different tenants, so a revoke-all swept a stranger's sessions. Drives listing (filtered to `rt:` members), counting and FIFO eviction. The prefixed-suffix member format is byte-identical to nest-auth, so revoke-all can delete `{namespace}:{member}` verbatim — including the grace pointers, which a bare-hash member could not identify. |
+| `sd` | `auth:sd:{sessionHash}` | JSON `{ device, ip, createdAt, lastActivityAt }` — the two timestamps are **Unix-millisecond numbers** (nest-auth writes `Date.now()` and discards a record whose timestamps are not numbers), keyed by the **bare** hash, not the `sess:` member | max refresh TTL | Dashboard per-session detail (one `rt:` member of `sess:{hmac_sha256(hmacKey, userSubject)}`). |
 | `inv` | `auth:inv:{sha256(invitation_token)}` | JSON `{ email, role, tenantId, inviterUserId, createdAt }` (`createdAt` is an ISO-8601 string) | `invitations.token_ttl_seconds` (default 604800 s) | Pending invitation. Consumed on accept. `createdAt` is **mandatory**: nest-auth's record guard rejects a record without it, and because accept consumes the token with a single-use `GETDEL` the rejection would destroy the invitation rather than merely fail it. |
 | `os` | `auth:os:{sha256(state)}` | JSON `{ tenantId, codeVerifier }` | 600 s (10 min) | OAuth CSRF `state` + PKCE `code_verifier`. Single-use; deleted on callback. |
 | `wst` | `auth:wst:{sha256(ws_ticket)}` | JSON `WsTicketSnapshot` `{ sub, tenantId, role, status, mfaEnabled, mfaVerified }` | `WS_TICKET_TTL_SECONDS` (30 s) | **rust-auth-only, feature `websocket`.** Single-use WebSocket upgrade ticket (§7.3.6 / §8.7). Minted from an already-authorized, MFA-satisfied session and redeemed once (`GETDEL`) at the WS handshake, so an access JWT never appears in a URL. The value is a verified-claims **snapshot**, never a token. This prefix is outside the nest-auth parity surface (nest-auth authenticates WebSockets via the `Authorization` header, not a ticket), so it is purely additive: a `nest-auth` server never reads or writes `wst:`, and cross-backend Redis sharing is unaffected. |
-| `tu` | `auth:tu:{hmac_sha256(userId + ":" + code)}` | `"1"` | 90 s (≈ 3 × TOTP window) | TOTP anti-replay. The key is the **HMAC of `userId:code`**, never the raw 6-digit code (which is low-entropy and would be reversible as a bare key) — matching §7.5.6. A code that just verified is marked so it cannot be replayed inside its drift window. |
+| `tu` | `auth:tu:{hmac_sha256(hmacKey, userSubject + ":" + code)}` | `"1"` | 90 s (≈ 3 × TOTP window) | TOTP anti-replay. The key is the **HMAC of `{userSubject}:{code}`**, never the raw 6-digit code (which is low-entropy and would be reversible as a bare key) — matching §7.5.6. A code that just verified is marked so it cannot be replayed inside its drift window. |
 | `prt` | `auth:prt:{sha256(refresh_token)}` | JSON `{ userId, role, device, ip, createdAt, mfaEnabled, familyId }` (`familyId` omitted when empty) | `refresh_expires_in_days` × 86400 s | Platform-admin refresh session. Platform analogue of `rt`. |
 | `prp` | `auth:prp:{sha256(old_refresh_token)}` | JSON `SessionRecord` — the new session, never the raw token | `refresh_grace_window_seconds` (default 30 s) | Platform rotation grace pointer. Analogue of `rp`. |
 | `pcf` | `auth:pcf:{sha256(consumed_refresh_token)}` | `familyId` | `refresh_expires_in_days` × 86400 s | Platform consumed-token family marker. Analogue of `cf`. |
 | `pfam` | `auth:pfam:{familyId}` | Redis SET of bare `sha256(refresh_token)` hashes | `refresh_expires_in_days` × 86400 s | Platform refresh-token family index. Analogue of `fam`. |
 | `pw_vtok` | `auth:pw_vtok:{sha256(verified_token)}` | JSON `{ email, tenantId }` | 300 s (5 min) | Password-reset OTP "verified" token (2-step OTP flow). Bridges verify-OTP → reset-password, closing the verify/reset race. Consumed on reset. |
-| `mfa_setup` | `auth:mfa_setup:{hmac_sha256(userId)}` | JSON `{ encryptedSecret, hashedCodes: string[], encryptedPlainCodes }` | 600 s (10 min) | MFA pending-setup data: AES-256-GCM-encrypted TOTP secret + HMAC-SHA-256-keyed recovery-code hashes + the AES-256-GCM-encrypted plaintext codes (so the idempotent `setup()` fast-path can re-return them), held between `setup()` and `verify_enable()`. Consumed on enable. The low-entropy `userId` is keyed via HMAC-SHA-256 (§12.2), matching §7.5.1. |
-| `psess` | `auth:psess:{userId}` | Redis SET of full key **suffixes**: `prt:{sha256(refresh_token)}` and `prp:{sha256(old_refresh_token)}` | max refresh TTL | Platform active-session index. Analogue of `sess`; the platform keyspace is deliberately separate. |
+| `mfa_setup` | `auth:mfa_setup:{hmac_sha256(hmacKey, userSubject)}` | JSON `{ encryptedSecret, hashedCodes: string[], encryptedPlainCodes }` | 600 s (10 min) | MFA pending-setup data: AES-256-GCM-encrypted TOTP secret + HMAC-SHA-256-keyed recovery-code hashes + the AES-256-GCM-encrypted plaintext codes (so the idempotent `setup()` fast-path can re-return them), held between `setup()` and `verify_enable()`. Consumed on enable. The low-entropy account identifier is keyed via HMAC-SHA-256 over the tenant-scoped `userSubject` (§12.2), matching §7.5.1. |
+| `psess` | `auth:psess:{hmac_sha256(hmacKey, userSubject)}` | Redis SET of full key **suffixes**: `prt:{sha256(refresh_token)}` and `prp:{sha256(old_refresh_token)}` | max refresh TTL | Platform active-session index. Analogue of `sess`; the platform keyspace is deliberately separate. |
 | `psd` | `auth:psd:{sessionHash}` | JSON `{ device, ip, createdAt, lastActivityAt }` (Unix-millisecond timestamps, as `sd`) | max refresh TTL | Platform per-session detail. Analogue of `sd`. |
 | `resend` | `auth:resend:{purpose}:{hmac_sha256(tenantId + ":" + email)}` | `"1"` | 60 s | OTP-resend cooldown. Stops an attacker from resetting the `attempts` counter by spamming resends. Purposes: `password_reset`, `email_verification`. |
 
@@ -4364,7 +4373,7 @@ Called when `refresh_rotate` reports a reuse. Kills every live descendant of the
 
 Closes an IDOR/BOLA hole: a user must not revoke a session hash they do not own.
 
-- **KEYS** — `[1]` `sess:{userId}` (or `psess:{userId}`), `[2]` `rt:{sessionHash}` (or `prt:{sessionHash}`), `[3]` `sd:{sessionHash}` (or `psd:{sessionHash}`). All three arrive fully namespaced (built by `NamespacedRedis`), so **every** key the script touches is declared in `KEYS` — required for Redis Cluster key routing.
+- **KEYS** — `[1]` `sess:{subjectHash}` (or `psess:{subjectHash}`), `[2]` `rt:{sessionHash}` (or `prt:{sessionHash}`), `[3]` `sd:{sessionHash}` (or `psd:{sessionHash}`). All three arrive fully namespaced (built by `NamespacedRedis`), so **every** key the script touches is declared in `KEYS` — required for Redis Cluster key routing.
 - **ARGV** — `[1]` `rt:{sessionHash}` (or `prt:{sessionHash}`) — the `sess:`-set member, which is the full key suffix, not a bare hash.
 - **Contract:**
   1. `SISMEMBER KEYS[1] ARGV[1]`. If `0` → **return `0`** ⇒ caller raises `AuthError::SessionNotFound` (404).
@@ -4397,7 +4406,7 @@ Makes "compare code, bump attempts, consume on success, lock on max" a single at
 
 ### 12.6 Performance and operational notes
 
-- All operations are O(1) except `list_sessions` (`SMEMBERS` + `MGET`), which is O(N) in the number of a single user's sessions (typically < 10, hard-bounded by FIFO eviction).
+- All operations are O(1) except `list_sessions` (`SMEMBERS` + `MGET`), which is O(N) in the number of a single account's sessions (typically < 10, hard-bounded by FIFO eviction).
 - Namespacing isolates the auth keyspace from the host application's own Redis keys.
 - Scripts are loaded with `SCRIPT LOAD` lazily on first use; the `NOSCRIPT` fallback keeps the system correct across Redis restarts and failovers without a warm-up step.
 - The same keyspace and TTLs are honored by the `nest-auth` implementation, enabling a side-by-side migration where both backends share one Redis.

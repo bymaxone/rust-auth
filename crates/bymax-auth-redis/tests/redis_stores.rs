@@ -43,6 +43,17 @@ fn token_hash(token: &str) -> String {
         .collect()
 }
 
+/// The session-index / token-epoch key suffix a store-level test seeds an account under.
+///
+/// Production derives `hmac_sha256(identifier_key, user_subject)` in the ENGINE and hands the
+/// result to the store, which treats it as opaque and never re-derives it — so a readable
+/// stand-in keeps these assertions about the keyspace rather than about hashing, while still
+/// proving the index key is the subject and not the bare user id. The engine-level tests
+/// further down use the real derivation, through `AuthEngine::session_subject`.
+fn subject(user: &str) -> String {
+    format!("s-{user}")
+}
+
 fn record(user: &str) -> SessionRecord {
     SessionRecord {
         user_id: user.to_owned(),
@@ -64,6 +75,7 @@ fn rotation_with_grace(old: &str, new: &str, user: &str, grace_ttl: u64) -> Sess
         new_hash: new.to_owned(),
         new_raw: "raw-token-never-persisted".to_owned(),
         new_record: record(user),
+        subject_hash: subject(user),
         refresh_ttl: 3600,
         grace_ttl,
     }
@@ -96,7 +108,12 @@ async fn session_create_rotate_grace_revoke_and_blacklist() {
     let rec = record("u1");
 
     // Create, then find (hit + miss) and list.
-    assert!(stores.create_session(kind, "h1", &rec, 3600).await.is_ok());
+    assert!(
+        stores
+            .create_session(kind, &subject("u1"), "h1", &rec, 3600)
+            .await
+            .is_ok()
+    );
     assert!(matches!(
         stores.find_session(kind, "h1").await,
         Ok(Some(r)) if r.user_id == "u1"
@@ -106,15 +123,20 @@ async fn session_create_rotate_grace_revoke_and_blacklist() {
         Ok(None)
     ));
     assert!(matches!(
-        stores.list_sessions(kind, "u1").await,
+        stores.list_sessions(kind, &subject("u1")).await,
         Ok(v) if v.len() == 1 && v[0].session_hash == "h1"
     ));
 
     // A member whose detail key has expired ahead of its index membership is skipped on list.
     assert!(redis.del("auth:sd:h1").await);
-    assert!(matches!(stores.list_sessions(kind, "u1").await, Ok(v) if v.is_empty()));
+    assert!(matches!(stores.list_sessions(kind, &subject("u1")).await, Ok(v) if v.is_empty()));
     // Restore the detail for the rest of the flow.
-    assert!(stores.create_session(kind, "h1", &rec, 3600).await.is_ok());
+    assert!(
+        stores
+            .create_session(kind, &subject("u1"), "h1", &rec, 3600)
+            .await
+            .is_ok()
+    );
 
     // Rotate h1 -> h2: the old token is consumed and the index moves to the new hash.
     let rot = rotation("h1", "h2", "u1");
@@ -125,7 +147,7 @@ async fn session_create_rotate_grace_revoke_and_blacklist() {
     assert!(matches!(stores.find_session(kind, "h1").await, Ok(None)));
     assert!(matches!(stores.find_session(kind, "h2").await, Ok(Some(_))));
     assert!(matches!(
-        stores.list_sessions(kind, "u1").await,
+        stores.list_sessions(kind, &subject("u1")).await,
         Ok(v) if v.len() == 1 && v[0].session_hash == "h2"
     ));
 
@@ -143,21 +165,38 @@ async fn session_create_rotate_grace_revoke_and_blacklist() {
 
     // Ownership-checked revoke: a non-owner and an unknown hash are both rejected.
     assert!(matches!(
-        stores.revoke_session(kind, "intruder", "h2").await,
+        stores
+            .revoke_session(kind, &subject("intruder"), "h2")
+            .await,
         Err(AuthError::SessionNotFound)
     ));
     assert!(matches!(
-        stores.revoke_session(kind, "u1", "absent").await,
+        stores.revoke_session(kind, &subject("u1"), "absent").await,
         Err(AuthError::SessionNotFound)
     ));
-    assert!(stores.revoke_session(kind, "u1", "h2").await.is_ok());
+    assert!(
+        stores
+            .revoke_session(kind, &subject("u1"), "h2")
+            .await
+            .is_ok()
+    );
     assert!(matches!(stores.find_session(kind, "h2").await, Ok(None)));
 
     // revoke_all clears every member key and the index set in one transaction.
-    assert!(stores.create_session(kind, "a1", &rec, 3600).await.is_ok());
-    assert!(stores.create_session(kind, "a2", &rec, 3600).await.is_ok());
-    assert!(stores.revoke_all(kind, "u1").await.is_ok());
-    assert!(matches!(stores.list_sessions(kind, "u1").await, Ok(v) if v.is_empty()));
+    assert!(
+        stores
+            .create_session(kind, &subject("u1"), "a1", &rec, 3600)
+            .await
+            .is_ok()
+    );
+    assert!(
+        stores
+            .create_session(kind, &subject("u1"), "a2", &rec, 3600)
+            .await
+            .is_ok()
+    );
+    assert!(stores.revoke_all(kind, &subject("u1")).await.is_ok());
+    assert!(matches!(stores.list_sessions(kind, &subject("u1")).await, Ok(v) if v.is_empty()));
     assert!(matches!(stores.find_session(kind, "a1").await, Ok(None)));
 
     // Access-JWT blacklist: absent, then present; a zero-TTL blacklist is a no-op.
@@ -190,26 +229,26 @@ async fn a_grace_recovery_is_refused_once_either_witness_is_gone() {
     // (1) Both witnesses present: the write lands, and every key it owes is there.
     assert!(
         stores
-            .create_session(kind, "w1", &record("wu"), 3600)
+            .create_session(kind, &subject("wu"), "w1", &record("wu"), 3600)
             .await
             .is_ok()
     );
     let written = stores
-        .create_recovered_session(kind, "w2", &record("wu"), 3600)
+        .create_recovered_session(kind, &subject("wu"), "w2", &record("wu"), 3600)
         .await;
     assert!(matches!(written, Ok(true)), "{written:?}");
     assert!(redis.ttl("auth:rt:w2").await > 0, "the session record");
     assert!(redis.ttl("auth:sd:w2").await > 0, "the detail record");
-    let members = redis.smembers("auth:sess:wu").await;
+    let members = redis.smembers("auth:sess:s-wu").await;
     assert!(members.iter().any(|m| m == "rt:w2"), "index: {members:?}");
     let family = redis.smembers("auth:fam:fam-wu").await;
     assert!(family.iter().any(|m| m == "w2"), "family: {family:?}");
 
     // (2) The per-user index is gone — the witness `invalidate_user_sessions` deletes once it
     // has emptied the set, so its absence IS "a revoke-all has run". Nothing is written.
-    assert!(redis.del("auth:sess:wu").await);
+    assert!(redis.del("auth:sess:s-wu").await);
     let swept = stores
-        .create_recovered_session(kind, "w3", &record("wu"), 3600)
+        .create_recovered_session(kind, &subject("wu"), "w3", &record("wu"), 3600)
         .await;
     assert!(matches!(swept, Ok(false)), "{swept:?}");
     assert_eq!(redis.ttl("auth:rt:w3").await, -2, "nothing may be written");
@@ -218,13 +257,13 @@ async fn a_grace_recovery_is_refused_once_either_witness_is_gone() {
     // A recovery into a revoked family would hand back the login the detection just killed.
     assert!(
         stores
-            .create_session(kind, "w4", &record("wu"), 3600)
+            .create_session(kind, &subject("wu"), "w4", &record("wu"), 3600)
             .await
             .is_ok()
     );
     assert!(redis.del("auth:fam:fam-wu").await);
     let orphaned = stores
-        .create_recovered_session(kind, "w5", &record("wu"), 3600)
+        .create_recovered_session(kind, &subject("wu"), "w5", &record("wu"), 3600)
         .await;
     assert!(matches!(orphaned, Ok(false)), "{orphaned:?}");
     assert_eq!(redis.ttl("auth:rt:w5").await, -2, "nothing may be written");
@@ -250,7 +289,7 @@ async fn sweep_grace_pointers_clears_every_pointer_and_its_index_entry() {
     for (old, new) in [("g1", "g2"), ("g3", "g4")] {
         assert!(
             stores
-                .create_session(kind, old, &record("gu"), 3600)
+                .create_session(kind, &subject("gu"), old, &record("gu"), 3600)
                 .await
                 .is_ok()
         );
@@ -263,11 +302,16 @@ async fn sweep_grace_pointers_clears_every_pointer_and_its_index_entry() {
     // Both pointers exist and both are named by the user's session index.
     assert!(redis.ttl("auth:rp:g1").await > 0);
     assert!(redis.ttl("auth:rp:g3").await > 0);
-    let before = redis.smembers("auth:sess:gu").await;
+    let before = redis.smembers("auth:sess:s-gu").await;
     assert!(before.iter().any(|m| m == "rp:g1"), "index: {before:?}");
     assert!(before.iter().any(|m| m == "rp:g3"), "index: {before:?}");
 
-    assert!(stores.sweep_grace_pointers(kind, "gu").await.is_ok());
+    assert!(
+        stores
+            .sweep_grace_pointers(kind, &subject("gu"))
+            .await
+            .is_ok()
+    );
 
     // Every pointer key is gone (an absent key reports a -2 TTL)...
     assert_eq!(redis.ttl("auth:rp:g1").await, -2);
@@ -275,7 +319,7 @@ async fn sweep_grace_pointers_clears_every_pointer_and_its_index_entry() {
     // ...and so is every pointer MEMBER, which is the half a bare key delete would miss: a
     // member naming a key that no longer exists would keep the index reporting sessions the
     // account does not have.
-    let after = redis.smembers("auth:sess:gu").await;
+    let after = redis.smembers("auth:sess:s-gu").await;
     assert!(
         !after.iter().any(|m| m.starts_with("rp:")),
         "no grace member may survive the sweep: {after:?}"
@@ -310,7 +354,7 @@ async fn listing_prunes_expired_grace_members_and_keeps_live_ones() {
     // One rotation whose pointer expires almost immediately, one whose pointer stays.
     assert!(
         stores
-            .create_session(kind, "p1", &record("pu"), 3600)
+            .create_session(kind, &subject("pu"), "p1", &record("pu"), 3600)
             .await
             .is_ok()
     );
@@ -322,7 +366,7 @@ async fn listing_prunes_expired_grace_members_and_keeps_live_ones() {
     ));
     assert!(
         stores
-            .create_session(kind, "p3", &record("pu"), 3600)
+            .create_session(kind, &subject("pu"), "p3", &record("pu"), 3600)
             .await
             .is_ok()
     );
@@ -338,10 +382,10 @@ async fn listing_prunes_expired_grace_members_and_keeps_live_ones() {
     // reaches the prune's "not a pointer" path — and it must be left alone: the prune keys on
     // an EXPIRED `rp:` key, and a bare hash has no `rp:` key to look up at all. Deleting it on
     // that basis would drop an entry whose meaning this version cannot read.
-    assert!(redis.sadd("auth:sess:pu", "legacyhash").await);
+    assert!(redis.sadd("auth:sess:s-pu", "legacyhash").await);
 
     // Both members are in the index while both pointers are live.
-    let before = redis.smembers("auth:sess:pu").await;
+    let before = redis.smembers("auth:sess:s-pu").await;
     assert!(before.iter().any(|m| m == "rp:p1"), "index: {before:?}");
     assert!(before.iter().any(|m| m == "rp:p3"), "index: {before:?}");
 
@@ -358,9 +402,9 @@ async fn listing_prunes_expired_grace_members_and_keeps_live_ones() {
         "the long pointer must still be live"
     );
 
-    assert!(stores.list_sessions(kind, "pu").await.is_ok());
+    assert!(stores.list_sessions(kind, &subject("pu")).await.is_ok());
 
-    let after = redis.smembers("auth:sess:pu").await;
+    let after = redis.smembers("auth:sess:s-pu").await;
     assert!(
         !after.iter().any(|m| m == "rp:p1"),
         "the expired grace member must be pruned: {after:?}"
@@ -387,14 +431,19 @@ async fn sweep_grace_pointers_is_a_no_op_when_there_are_none() {
 
     assert!(
         stores
-            .create_session(kind, "n1", &record("nu"), 3600)
+            .create_session(kind, &subject("nu"), "n1", &record("nu"), 3600)
             .await
             .is_ok()
     );
 
-    assert!(stores.sweep_grace_pointers(kind, "nu").await.is_ok());
+    assert!(
+        stores
+            .sweep_grace_pointers(kind, &subject("nu"))
+            .await
+            .is_ok()
+    );
 
-    let after = redis.smembers("auth:sess:nu").await;
+    let after = redis.smembers("auth:sess:s-nu").await;
     assert!(after.iter().any(|m| m == "rt:n1"), "index: {after:?}");
 }
 
@@ -409,7 +458,7 @@ async fn rotate_with_zero_grace_writes_no_grace_pointer() {
     // A live session under `z1`, then a rotation with a zero-width grace window.
     assert!(
         stores
-            .create_session(kind, "z1", &record("zu"), 3600)
+            .create_session(kind, &subject("zu"), "z1", &record("zu"), 3600)
             .await
             .is_ok()
     );
@@ -441,6 +490,48 @@ async fn rotate_with_zero_grace_writes_no_grace_pointer() {
 }
 
 #[tokio::test]
+async fn a_family_owner_read_skips_members_it_cannot_name() {
+    let Some(redis) = common::try_start().await else {
+        return;
+    };
+    let Some(stores) = redis.stores() else { return };
+    let kind = SessionKind::Dashboard;
+
+    // Each family holds exactly ONE member. `find_family_owner` walks `SMEMBERS`, whose order is
+    // arbitrary, and returns at the first readable owner — so a family that also contained a good
+    // member would let the store return before ever reaching the one under test, and the
+    // assertion would pass without exercising anything.
+
+    // A member whose record cannot be parsed names nobody rather than panicking. Both libraries
+    // write this keyspace, so a shape one side cannot read has to degrade to "keep looking".
+    assert!(redis.sadd("auth:fam:fam-corrupt", "corrupt-hash").await);
+    assert!(redis.set_raw("auth:rt:corrupt-hash", "{not json").await);
+    let corrupt = stores.find_family_owner(kind, "fam-corrupt").await;
+    assert!(
+        matches!(&corrupt, Ok(None)),
+        "an unparseable member was reported as an owner: {corrupt:?}"
+    );
+
+    // A record that parses but carries no user id names nobody either. An event naming the empty
+    // string is worse than no event, because a consumer would act on it — and the revocation
+    // would derive a session-index key from an empty subject and prune a stranger's.
+    let anonymous = SessionRecord {
+        user_id: String::new(),
+        ..record("anon")
+    };
+    let Ok(json) = serde_json::to_string(&anonymous) else {
+        return;
+    };
+    assert!(redis.sadd("auth:fam:fam-anon", "anon-hash").await);
+    assert!(redis.set_raw("auth:rt:anon-hash", &json).await);
+    let anon = stores.find_family_owner(kind, "fam-anon").await;
+    assert!(
+        matches!(&anon, Ok(None)),
+        "a record with no user id was reported as an owner: {anon:?}"
+    );
+}
+
+#[tokio::test]
 async fn reuse_past_grace_is_detected_and_revoke_family_kills_the_lineage() {
     let Some(redis) = common::try_start().await else {
         return;
@@ -452,7 +543,7 @@ async fn reuse_past_grace_is_detected_and_revoke_family_kills_the_lineage() {
     // consumed (a grace pointer planted) and the family index moves to the live descendant r2.
     assert!(
         stores
-            .create_session(kind, "r1", &record("fu"), 3600)
+            .create_session(kind, &subject("fu"), "r1", &record("fu"), 3600)
             .await
             .is_ok()
     );
@@ -463,7 +554,7 @@ async fn reuse_past_grace_is_detected_and_revoke_family_kills_the_lineage() {
     // The family index exists (a positive TTL) and, while r2 is live, r2 is listed for the user.
     assert!(redis.ttl("auth:fam:fam-fu").await > 0);
     assert!(matches!(
-        stores.list_sessions(kind, "fu").await,
+        stores.list_sessions(kind, &subject("fu")).await,
         Ok(v) if v.len() == 1 && v[0].session_hash == "r2"
     ));
 
@@ -477,16 +568,49 @@ async fn reuse_past_grace_is_detected_and_revoke_family_kills_the_lineage() {
     // The failed reuse never minted a live token: `rX` was never persisted.
     assert!(matches!(stores.find_session(kind, "rX").await, Ok(None)));
 
+    // Before revoking: the family index is the last surviving link between the replayed token and
+    // an account, so the owner has to be readable THROUGH it. Asserted on the record's own fields
+    // rather than on "some Some", because the revocation derives the index it prunes from this
+    // record's `tenant_id` — an owner read that returned the wrong record, or none, would prune a
+    // stranger's index or none at all, and the deletes below would still look correct.
+    let owner = stores.find_family_owner(kind, "fam-fu").await;
+    assert!(
+        matches!(&owner, Ok(Some(r)) if r.user_id == "fu" && r.tenant_id.as_deref() == Some("t1")),
+        "the family owner must be readable from the index: {owner:?}"
+    );
+    // A family nobody has ever heard of names nobody, and so does the empty id.
+    assert!(matches!(
+        stores.find_family_owner(kind, "no-such-family").await,
+        Ok(None)
+    ));
+    assert!(matches!(stores.find_family_owner(kind, "").await, Ok(None)));
+
     // Revoking the family deletes the live descendant r2, prunes it from the owner's `sess:` set,
     // and drops the family index.
-    assert!(stores.revoke_family(kind, "fam-fu").await.is_ok());
+    assert!(
+        stores
+            .revoke_family(kind, "fam-fu", Some(&subject("fu")))
+            .await
+            .is_ok()
+    );
+    // …and once every member is gone the family names nobody, which is the `None` the caller
+    // turns into an empty index key rather than pruning a wrong one.
+    assert!(matches!(
+        stores.find_family_owner(kind, "fam-fu").await,
+        Ok(None)
+    ));
     assert!(matches!(stores.find_session(kind, "r2").await, Ok(None)));
-    assert!(matches!(stores.list_sessions(kind, "fu").await, Ok(v) if v.is_empty()));
+    assert!(matches!(stores.list_sessions(kind, &subject("fu")).await, Ok(v) if v.is_empty()));
     assert_eq!(redis.ttl("auth:fam:fam-fu").await, -2);
 
     // revoke_family is idempotent: an empty and an unknown family are both no-ops.
-    assert!(stores.revoke_family(kind, "").await.is_ok());
-    assert!(stores.revoke_family(kind, "unknown-family").await.is_ok());
+    assert!(stores.revoke_family(kind, "", None).await.is_ok());
+    assert!(
+        stores
+            .revoke_family(kind, "unknown-family", None)
+            .await
+            .is_ok()
+    );
 }
 
 #[tokio::test]
@@ -505,7 +629,7 @@ async fn a_grace_pointer_cannot_resurrect_a_revoked_family() {
     // thief back the lineage the revocation just killed.
     assert!(
         stores
-            .create_session(kind, "k1", &record("ku"), 3600)
+            .create_session(kind, &subject("ku"), "k1", &record("ku"), 3600)
             .await
             .is_ok()
     );
@@ -530,7 +654,12 @@ async fn a_grace_pointer_cannot_resurrect_a_revoked_family() {
         stores.rotate(kind, &rotation("k1", "kX", "ku")).await,
         Ok(RotateOutcome::Reused(family)) if family == "fam-ku"
     ));
-    assert!(stores.revoke_family(kind, "fam-ku").await.is_ok());
+    assert!(
+        stores
+            .revoke_family(kind, "fam-ku", Some(&subject("ku")))
+            .await
+            .is_ok()
+    );
 
     // The still-live sibling pointer must NOT recover a session. Two independent guards now
     // refuse it: the successor probe inside the script (k3 was deleted with the family, so the
@@ -552,7 +681,7 @@ async fn a_grace_pointer_cannot_resurrect_a_revoked_family() {
         "a pointer whose successor is gone must never recover, got {replayed:?}"
     );
     assert!(matches!(stores.find_session(kind, "kY").await, Ok(None)));
-    assert!(matches!(stores.list_sessions(kind, "ku").await, Ok(v) if v.is_empty()));
+    assert!(matches!(stores.list_sessions(kind, &subject("ku")).await, Ok(v) if v.is_empty()));
 }
 
 #[tokio::test]
@@ -570,7 +699,7 @@ async fn a_revoked_session_cannot_be_rebuilt_from_its_predecessors_grace_pointer
     // device" undone by the device's own consumed token.
     assert!(
         stores
-            .create_session(kind, "g1", &record("gu"), 3600)
+            .create_session(kind, &subject("gu"), "g1", &record("gu"), 3600)
             .await
             .is_ok()
     );
@@ -597,7 +726,12 @@ async fn a_revoked_session_cannot_be_rebuilt_from_its_predecessors_grace_pointer
         Ok(RotateOutcome::Rotated(_))
     ));
     assert!(redis.ttl("auth:rp:g2").await > 0);
-    assert!(stores.revoke_session(kind, "gu", "g3").await.is_ok());
+    assert!(
+        stores
+            .revoke_session(kind, &subject("gu"), "g3")
+            .await
+            .is_ok()
+    );
 
     // The pointer survives (nothing knew to delete it) but must no longer recover: its
     // successor g3 is gone.
@@ -628,7 +762,7 @@ async fn a_grace_recovery_is_refused_when_the_family_index_is_gone() {
     // index deleted — which the probe alone would wave through.
     assert!(
         stores
-            .create_session(kind, "f1", &record("fu"), 3600)
+            .create_session(kind, &subject("fu"), "f1", &record("fu"), 3600)
             .await
             .is_ok()
     );
@@ -658,32 +792,54 @@ async fn token_epoch_defaults_to_zero_bumps_monotonically_and_is_keyspace_disjoi
     let kind = SessionKind::Dashboard;
 
     // An unbumped user reads epoch 0, and the read never creates a key (only a bump does).
-    assert!(matches!(stores.current_epoch(kind, "eu").await, Ok(0)));
-    assert_eq!(redis.ttl("auth:ep:eu").await, -2, "a read plants no key");
+    assert!(matches!(
+        stores.current_epoch(kind, &subject("eu")).await,
+        Ok(0)
+    ));
+    assert_eq!(redis.ttl("auth:ep:s-eu").await, -2, "a read plants no key");
 
     // A bump increments (creating the key at 1), returns the new value, and carries a TTL.
-    assert!(matches!(stores.bump_epoch(kind, "eu").await, Ok(1)));
-    assert!(matches!(stores.current_epoch(kind, "eu").await, Ok(1)));
+    assert!(matches!(
+        stores.bump_epoch(kind, &subject("eu")).await,
+        Ok(1)
+    ));
+    assert!(matches!(
+        stores.current_epoch(kind, &subject("eu")).await,
+        Ok(1)
+    ));
     assert!(
-        redis.ttl("auth:ep:eu").await > 0,
+        redis.ttl("auth:ep:s-eu").await > 0,
         "the epoch key carries a TTL"
     );
-    assert!(matches!(stores.bump_epoch(kind, "eu").await, Ok(2)));
-    assert!(matches!(stores.current_epoch(kind, "eu").await, Ok(2)));
+    assert!(matches!(
+        stores.bump_epoch(kind, &subject("eu")).await,
+        Ok(2)
+    ));
+    assert!(matches!(
+        stores.current_epoch(kind, &subject("eu")).await,
+        Ok(2)
+    ));
 
     // The platform keyspace (`pep:`) is disjoint from the dashboard one (`ep:`): the same user
     // id carries an independent epoch under each kind.
     assert!(matches!(
-        stores.current_epoch(SessionKind::Platform, "eu").await,
+        stores
+            .current_epoch(SessionKind::Platform, &subject("eu"))
+            .await,
         Ok(0)
     ));
     assert!(matches!(
-        stores.bump_epoch(SessionKind::Platform, "eu").await,
+        stores
+            .bump_epoch(SessionKind::Platform, &subject("eu"))
+            .await,
         Ok(1)
     ));
-    assert!(redis.ttl("auth:pep:eu").await > 0);
+    assert!(redis.ttl("auth:pep:s-eu").await > 0);
     // The dashboard epoch is unaffected by the platform bump.
-    assert!(matches!(stores.current_epoch(kind, "eu").await, Ok(2)));
+    assert!(matches!(
+        stores.current_epoch(kind, &subject("eu")).await,
+        Ok(2)
+    ));
 }
 
 #[tokio::test]
@@ -703,7 +859,7 @@ async fn a_legacy_session_without_a_family_plants_no_family_keys() {
     };
     assert!(
         stores
-            .create_session(kind, "l1", &legacy, 3600)
+            .create_session(kind, &subject("lu"), "l1", &legacy, 3600)
             .await
             .is_ok()
     );
@@ -756,19 +912,19 @@ async fn revoking_a_family_resolves_the_owner_past_unreadable_members() {
     // the index and leave every revoked session listed until the index itself expired.
     assert!(
         stores
-            .create_session(kind, "o1", &record("ou"), 3600)
+            .create_session(kind, &subject("ou"), "o1", &record("ou"), 3600)
             .await
             .is_ok()
     );
     assert!(
         stores
-            .create_session(kind, "o2", &record("ou"), 3600)
+            .create_session(kind, &subject("ou"), "o2", &record("ou"), 3600)
             .await
             .is_ok()
     );
     assert!(
         stores
-            .create_session(kind, "o3", &record("ou"), 3600)
+            .create_session(kind, &subject("ou"), "o3", &record("ou"), 3600)
             .await
             .is_ok()
     );
@@ -777,7 +933,7 @@ async fn revoking_a_family_resolves_the_owner_past_unreadable_members() {
     // would share, so it has to be skipped like the other two. o4 is the one that answers.
     assert!(
         stores
-            .create_session(kind, "o4", &record("ou"), 3600)
+            .create_session(kind, &subject("ou"), "o4", &record("ou"), 3600)
             .await
             .is_ok()
     );
@@ -790,23 +946,33 @@ async fn revoking_a_family_resolves_the_owner_past_unreadable_members() {
     .unwrap_or_default();
     assert!(redis.set_raw("auth:rt:o3", &ownerless).await);
 
-    assert!(stores.revoke_family(kind, "fam-ou").await.is_ok());
+    assert!(
+        stores
+            .revoke_family(kind, "fam-ou", Some(&subject("ou")))
+            .await
+            .is_ok()
+    );
 
     // Every member key is gone and the owner's index was pruned, which is only possible if the
     // walk reached o4.
     assert_eq!(redis.ttl("auth:rt:o4").await, -2);
-    assert!(redis.smembers("auth:sess:ou").await.is_empty());
+    assert!(redis.smembers("auth:sess:s-ou").await.is_empty());
 
     // And when NO member names an owner — every record already expired — the revocation still
     // drops the family index rather than failing. There is simply no index left to prune.
     assert!(
         stores
-            .create_session(kind, "g1", &record("gu2"), 3600)
+            .create_session(kind, &subject("gu2"), "g1", &record("gu2"), 3600)
             .await
             .is_ok()
     );
     assert!(redis.del("auth:rt:g1").await);
-    assert!(stores.revoke_family(kind, "fam-gu2").await.is_ok());
+    assert!(
+        stores
+            .revoke_family(kind, "fam-gu2", Some(&subject("gu2")))
+            .await
+            .is_ok()
+    );
     assert_eq!(redis.ttl("auth:fam:fam-gu2").await, -2);
 }
 
@@ -820,7 +986,7 @@ async fn platform_sessions_use_the_platform_keyspace() {
 
     assert!(
         stores
-            .create_session(kind, "phash1", &record("padmin"), 3600)
+            .create_session(kind, &subject("padmin"), "phash1", &record("padmin"), 3600)
             .await
             .is_ok()
     );
@@ -834,8 +1000,8 @@ async fn platform_sessions_use_the_platform_keyspace() {
         stores.find_session(SessionKind::Dashboard, "phash1").await,
         Ok(None)
     ));
-    assert!(stores.revoke_all(kind, "padmin").await.is_ok());
-    assert!(matches!(stores.list_sessions(kind, "padmin").await, Ok(v) if v.is_empty()));
+    assert!(stores.revoke_all(kind, &subject("padmin")).await.is_ok());
+    assert!(matches!(stores.list_sessions(kind, &subject("padmin")).await, Ok(v) if v.is_empty()));
 }
 
 #[tokio::test]
@@ -910,37 +1076,49 @@ async fn session_index_members_are_prefixed_key_suffixes() {
     // on a shared Redis, and unrevokable *here* for anything the other backend wrote.
     assert!(
         stores
-            .create_session(SessionKind::Dashboard, "m1", &record("mu"), 3600)
+            .create_session(
+                SessionKind::Dashboard,
+                &subject("mu"),
+                "m1",
+                &record("mu"),
+                3600
+            )
             .await
             .is_ok()
     );
-    assert_eq!(redis.smembers("auth:sess:mu").await, vec!["rt:m1"]);
+    assert_eq!(redis.smembers("auth:sess:s-mu").await, vec!["rt:m1"]);
 
     // The platform keyspace stays SEPARATE (`psess:` not `sess:`) and uses its own `prt:` member.
     assert!(
         stores
-            .create_session(SessionKind::Platform, "p1", &record("pu"), 3600)
+            .create_session(
+                SessionKind::Platform,
+                &subject("pu"),
+                "p1",
+                &record("pu"),
+                3600
+            )
             .await
             .is_ok()
     );
-    assert_eq!(redis.smembers("auth:psess:pu").await, vec!["prt:p1"]);
-    assert!(redis.smembers("auth:sess:pu").await.is_empty());
+    assert_eq!(redis.smembers("auth:psess:s-pu").await, vec!["prt:p1"]);
+    assert!(redis.smembers("auth:sess:s-pu").await.is_empty());
 
     // Listing strips the prefix so `session_hash` stays the bare hash the domain layer
     // validates as 64-hex, and so the `sd:` detail key (keyed by the bare hash) resolves.
     assert!(matches!(
-        stores.list_sessions(SessionKind::Dashboard, "mu").await,
+        stores.list_sessions(SessionKind::Dashboard, &subject("mu")).await,
         Ok(v) if v.len() == 1 && v[0].session_hash == "m1"
     ));
 
     // Revoke is ownership-checked against the prefixed member; it must still match.
     assert!(
         stores
-            .revoke_session(SessionKind::Dashboard, "mu", "m1")
+            .revoke_session(SessionKind::Dashboard, &subject("mu"), "m1")
             .await
             .is_ok()
     );
-    assert!(redis.smembers("auth:sess:mu").await.is_empty());
+    assert!(redis.smembers("auth:sess:s-mu").await.is_empty());
 }
 
 #[tokio::test]
@@ -958,7 +1136,7 @@ async fn revoke_all_sweeps_rotation_grace_pointers() {
     // recovering sessions. Indexing the pointer as `rp:{oldHash}` is what makes it sweepable.
     assert!(
         stores
-            .create_session(kind, "g1", &record("gu"), 3600)
+            .create_session(kind, &subject("gu"), "g1", &record("gu"), 3600)
             .await
             .is_ok()
     );
@@ -968,22 +1146,25 @@ async fn revoke_all_sweeps_rotation_grace_pointers() {
     ));
 
     // Post-rotation the index holds the new live session AND the grace pointer for the old one.
-    assert_eq!(redis.smembers("auth:sess:gu").await, vec!["rp:g1", "rt:g2"]);
+    assert_eq!(
+        redis.smembers("auth:sess:s-gu").await,
+        vec!["rp:g1", "rt:g2"]
+    );
     assert!(redis.ttl("auth:rp:g1").await > 0);
     // The grace pointer is not a session, so it must not appear in the user's session list.
     assert!(matches!(
-        stores.list_sessions(kind, "gu").await,
+        stores.list_sessions(kind, &subject("gu")).await,
         Ok(v) if v.len() == 1 && v[0].session_hash == "g2"
     ));
 
-    assert!(stores.revoke_all(kind, "gu").await.is_ok());
+    assert!(stores.revoke_all(kind, &subject("gu")).await.is_ok());
 
     // The grace pointer key is GONE (`-2` = absent), not merely orphaned in the index.
     assert_eq!(redis.ttl("auth:rp:g1").await, -2);
     // …and so are the live session, its detail, and the index itself.
     assert_eq!(redis.ttl("auth:rt:g2").await, -2);
     assert_eq!(redis.ttl("auth:sd:g2").await, -2);
-    assert!(redis.smembers("auth:sess:gu").await.is_empty());
+    assert!(redis.smembers("auth:sess:s-gu").await.is_empty());
 
     // The security property, observed through the API: replaying the rotated-away token can no
     // longer recover a session through the grace window after a revoke-all. It is reported as a
@@ -1010,7 +1191,7 @@ async fn platform_revoke_all_sweeps_its_own_grace_pointers() {
     // deliberate, only the member FORMAT is shared with the dashboard side.
     assert!(
         stores
-            .create_session(kind, "pg1", &record("pgu"), 3600)
+            .create_session(kind, &subject("pgu"), "pg1", &record("pgu"), 3600)
             .await
             .is_ok()
     );
@@ -1019,17 +1200,17 @@ async fn platform_revoke_all_sweeps_its_own_grace_pointers() {
         Ok(RotateOutcome::Rotated(_))
     ));
     assert_eq!(
-        redis.smembers("auth:psess:pgu").await,
+        redis.smembers("auth:psess:s-pgu").await,
         vec!["prp:pg1", "prt:pg2"]
     );
     assert!(redis.ttl("auth:prp:pg1").await > 0);
 
-    assert!(stores.revoke_all(kind, "pgu").await.is_ok());
+    assert!(stores.revoke_all(kind, &subject("pgu")).await.is_ok());
     assert_eq!(redis.ttl("auth:prp:pg1").await, -2);
     assert_eq!(redis.ttl("auth:prt:pg2").await, -2);
     assert_eq!(redis.ttl("auth:psd:pg2").await, -2);
     // The dashboard index was never touched — the keyspaces stay independent.
-    assert!(redis.smembers("auth:sess:pgu").await.is_empty());
+    assert!(redis.smembers("auth:sess:s-pgu").await.is_empty());
 }
 
 #[tokio::test]
@@ -1044,7 +1225,7 @@ async fn zero_grace_rotation_indexes_no_grace_member() {
     // leave a member pointing at nothing. Only the live session is indexed.
     assert!(
         stores
-            .create_session(kind, "n1", &record("nu"), 3600)
+            .create_session(kind, &subject("nu"), "n1", &record("nu"), 3600)
             .await
             .is_ok()
     );
@@ -1054,7 +1235,7 @@ async fn zero_grace_rotation_indexes_no_grace_member() {
             .await,
         Ok(RotateOutcome::Rotated(_))
     ));
-    assert_eq!(redis.smembers("auth:sess:nu").await, vec!["rt:n2"]);
+    assert_eq!(redis.smembers("auth:sess:s-nu").await, vec!["rt:n2"]);
 }
 
 #[tokio::test]
@@ -1074,7 +1255,7 @@ async fn session_detail_is_stored_with_unix_millisecond_timestamps() {
     };
     assert!(
         stores
-            .create_session(SessionKind::Dashboard, "t1", &rec, 3600)
+            .create_session(SessionKind::Dashboard, &subject("tu"), "t1", &rec, 3600)
             .await
             .is_ok()
     );
@@ -1097,7 +1278,7 @@ async fn session_detail_is_stored_with_unix_millisecond_timestamps() {
             .await
     );
     assert!(matches!(
-        stores.list_sessions(SessionKind::Dashboard, "tu").await,
+        stores.list_sessions(SessionKind::Dashboard, &subject("tu")).await,
         Ok(v) if v.len() == 1
             && v[0].device == "Safari"
             && v[0].created_at.unix_timestamp_nanos() / 1_000_000 == 1_700_000_000_123
@@ -1237,7 +1418,13 @@ async fn keys_are_namespaced_no_pii_and_carry_a_ttl() {
     let kind = SessionKind::Dashboard;
     assert!(
         stores
-            .create_session(kind, "deadbeef01", &record("user-42"), 3600)
+            .create_session(
+                kind,
+                &subject("user-42"),
+                "deadbeef01",
+                &record("user-42"),
+                3600
+            )
             .await
             .is_ok()
     );
@@ -1251,6 +1438,7 @@ async fn keys_are_namespaced_no_pii_and_carry_a_ttl() {
         stores
             .create_session(
                 SessionKind::Platform,
+                &subject("padmin"),
                 "platformhash03",
                 &record("padmin"),
                 3600
@@ -1944,7 +2132,12 @@ async fn engine_persists_normalized_ua_and_ip_matching_the_new_session_hook() {
 
     // The PERSISTED record (read via the store, i.e. what `list_sessions` returns) carries the
     // parsed UA and the byte-bounded IP — proving normalization reached Redis, not only the hook.
-    let listed = stores.list_sessions(SessionKind::Dashboard, &user_id).await;
+    let listed = stores
+        .list_sessions(
+            SessionKind::Dashboard,
+            &engine.session_subject(SessionKind::Dashboard, Some("t1"), &user_id),
+        )
+        .await;
     assert!(matches!(&listed, Ok(v) if v.len() == 1));
     let Ok(listed) = listed else { return };
     let Some(detail) = listed.into_iter().next() else { return };
@@ -2147,7 +2340,12 @@ async fn engine_session_limit_evicts_oldest_against_redis() {
 
     // The cap holds at two and the oldest (registration) session was evicted, while the newest
     // survives — proof the FIFO eviction excluded the just-created session.
-    let listed = stores.list_sessions(SessionKind::Dashboard, &user_id).await;
+    let listed = stores
+        .list_sessions(
+            SessionKind::Dashboard,
+            &engine.session_subject(SessionKind::Dashboard, Some("t1"), &user_id),
+        )
+        .await;
     assert!(matches!(&listed, Ok(v) if v.len() == 2));
     let Ok(listed) = listed else { return };
     assert!(listed.iter().all(|s| s.session_hash != first_hash));

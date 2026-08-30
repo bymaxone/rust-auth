@@ -26,14 +26,11 @@ use bymax_auth_types::{PlatformAuthResult, PlatformClaims, PlatformType, SafeAut
 use zeroize::Zeroizing;
 
 use crate::services::session::normalize_session_metadata;
-use crate::services::{
-    internal_error, is_refresh_token_shape, new_uuid_v4, now_offset, now_unix, to_hex,
-};
+use crate::services::{internal_error, is_refresh_token_shape, new_uuid_v4, now_offset, now_unix};
 use crate::traits::{
     AuthHooks, HookContext, RotateOutcome, SessionKind, SessionRecord, SessionRotation,
     SessionStore,
 };
-use bymax_auth_crypto::mac::hmac_sha256;
 
 /// MFA temp-token lifetime, in seconds (§7.3 constant `MFA_TEMP_TOKEN_TTL_SECONDS`).
 ///
@@ -86,6 +83,38 @@ impl MfaTokenSupport {
 #[cfg(feature = "mfa")]
 fn jti_hash(jti: &str) -> String {
     crate::services::to_hex(&bymax_auth_crypto::mac::sha256(jti.as_bytes()))
+}
+
+/// Whether this issuance actually verified a credential belonging to the ACCOUNT — the only
+/// question the recent-authentication marker answers.
+///
+/// A `bool` beside `mfa_verified` would be two adjacent booleans at the call site, and this
+/// distinction is too load-bearing to be positional: the marker is the sole proof
+/// `MfaService::assert_reauthenticated` has for an account with no local password, so a caller
+/// that plants it without a proof hands MFA enrolment to whoever holds the session.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CredentialProof {
+    /// A password, a second factor, or an identity provider was verified for THIS issuance.
+    Proved,
+    /// No credential was verified. A workspace switch or an impersonation: the authority is the
+    /// CALLER's, not the account's, so it proves nothing about the account holder being present.
+    Unproven,
+}
+
+/// The four resolved token lifetimes, grouped so the manager's constructor takes one value for
+/// them instead of four adjacent scalars — three of which are durations of different units and
+/// two of which are bare `u32` day counts, which is exactly the argument list a caller silently
+/// transposes.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct TokenLifetimes {
+    /// How long a freshly-signed access token is valid.
+    pub access_ttl: Duration,
+    /// The refresh session's lifetime, in days.
+    pub refresh_expires_in_days: u32,
+    /// The rotation grace window; zero disables the grace pointer entirely.
+    pub grace_window: Duration,
+    /// The absolute cap on a login lineage, in days; zero means uncapped.
+    pub absolute_session_lifetime_days: u32,
 }
 
 /// The `iss`/`aud` pair a deployment binds its tokens to, or neither.
@@ -174,11 +203,16 @@ pub struct TokenManagerService {
     /// stamped with an issuer the verifier does not require, or required where none is
     /// stamped, is a deployment that rejects its own tokens.
     binding: TokenBinding,
-    /// The engine's identifier-hashing key, used to derive the recent-authentication marker's
-    /// key. `None` only on the bare constructor the unit tests use; the engine always wires it,
-    /// and an absent key means no marker is planted, which fails CLOSED — a flow that requires
-    /// recent authentication refuses rather than admitting an unproven caller.
-    identifier_key: Option<Zeroizing<[u8; 64]>>,
+    /// The engine's identifier-hashing key. Derives the recent-authentication marker and the
+    /// **session subject** — the suffix of the session index and the token epoch.
+    ///
+    /// A constructor parameter rather than an optional wither. It was optional while it fed
+    /// only the recent-auth marker, where an absent key fails CLOSED (no marker is planted, so
+    /// a flow requiring recent authentication refuses). The session subject has no such
+    /// fallback: every session write needs one, and a manager that quietly derived a key
+    /// without the engine's would put its sessions in a keyspace nothing else reads. Requiring
+    /// it here is what stops a test double and a deployment keying the same session two ways.
+    identifier_key: Zeroizing<[u8; 64]>,
     /// The MFA single-use temp-token support, wired only when an MFA store is supplied.
     #[cfg(feature = "mfa")]
     mfa: Option<MfaTokenSupport>,
@@ -283,59 +317,39 @@ impl TokenManagerService {
         .map_err(map_jwt_error)
     }
 
-    /// Assemble the token manager from the signing key, the session store, and the
-    /// resolved token lifetimes.
+    /// Assemble the token manager from the signing key, the session store, the resolved token
+    /// lifetimes, and the identifier-hashing key.
     pub(crate) fn new(
         key: HsKey,
         previous_keys: Vec<HsKey>,
         session_store: Arc<dyn SessionStore>,
-        access_ttl: Duration,
-        refresh_expires_in_days: u32,
-        grace_window: Duration,
-        absolute_session_lifetime_days: u32,
+        lifetimes: TokenLifetimes,
+        identifier_key: Zeroizing<[u8; 64]>,
     ) -> Self {
         Self {
             key,
             previous_keys,
             session_store,
-            access_ttl,
-            refresh_ttl_secs: u64::from(refresh_expires_in_days) * 86_400,
-            grace_ttl_secs: grace_window.as_secs(),
-            absolute_lifetime_secs: u64::from(absolute_session_lifetime_days) * 86_400,
+            access_ttl: lifetimes.access_ttl,
+            refresh_ttl_secs: u64::from(lifetimes.refresh_expires_in_days) * 86_400,
+            grace_ttl_secs: lifetimes.grace_window.as_secs(),
+            absolute_lifetime_secs: u64::from(lifetimes.absolute_session_lifetime_days) * 86_400,
             hooks: Arc::new(crate::traits::NoOpAuthHooks),
             binding: TokenBinding::default(),
-            identifier_key: None,
+            identifier_key,
             #[cfg(feature = "mfa")]
             mfa: None,
         }
     }
 
-    /// Install the identifier-hashing key that derives the recent-authentication marker.
+    /// The session-index / token-epoch key suffix for one account on one plane.
     ///
-    /// Separate from [`Self::new`] for the same reason [`Self::with_hooks`] is: every unit-test
-    /// caller builds the manager without one, and threading it through those call sites would
-    /// say nothing about the behaviour they exercise.
-    #[must_use]
-    pub(crate) fn with_identifier_key(mut self, key: Zeroizing<[u8; 64]>) -> Self {
-        self.identifier_key = Some(key);
-        self
-    }
-
-    /// The recent-authentication marker key for one account on one plane, or `None` when no
-    /// identifier key is wired.
-    ///
-    /// `hmac_sha256("{plane}:{user_id}")`, held byte-identical with nest-auth's
-    /// `recentAuthKey` and pinned by `conformance/wire-contract.json`. The plane is in the
-    /// PREIMAGE rather than the key path because a dashboard user and a platform admin can
-    /// carry the same id from different consumer repositories, and without it one would satisfy
-    /// the other's freshness check.
-    fn recent_auth_hash(&self, plane: &str, user_id: &str) -> Option<String> {
-        self.identifier_key.as_ref().map(|key| {
-            to_hex(&hmac_sha256(
-                key.as_ref(),
-                format!("{plane}:{user_id}").as_bytes(),
-            ))
-        })
+    /// `hmac_sha256(identifier_key, user_subject)`, the derivation the shared contract lists
+    /// under `userSubjectDerivedKeys`. The dashboard arm carries the tenant, so one tenant's
+    /// revocation can no longer reach another tenant's account of the same id; the platform arm
+    /// carries none, because its admins are cross-tenant.
+    fn subject_hash(&self, kind: SessionKind, tenant_id: Option<&str>, user_id: &str) -> String {
+        crate::services::session_subject_hash(&self.identifier_key, kind, tenant_id, user_id)
     }
 
     /// Install the consumer's hooks, so reuse detection can report itself.
@@ -399,14 +413,19 @@ impl TokenManagerService {
         ip: &str,
         user_agent: &str,
         mfa_verified: bool,
+        proof: CredentialProof,
     ) -> Result<AuthResult, AuthError> {
         let refresh = RawRefreshToken::generate();
         let now = now_unix();
+        // The tenant-scoped subject every per-account session key derives from. Built once and
+        // reused for the epoch read and the session write, so the two can never name different
+        // accounts.
+        let subject = self.subject_hash(SessionKind::Dashboard, Some(&user.tenant_id), &user.id);
         // Stamp the user's current token epoch so a later bump (a reset or sign-out-everywhere)
         // invalidates this token at verification.
         let epoch = self
             .session_store
-            .current_epoch(SessionKind::Dashboard, &user.id)
+            .current_epoch(SessionKind::Dashboard, &subject)
             .await?;
         let claims = DashboardClaims {
             iss: None,
@@ -446,6 +465,7 @@ impl TokenManagerService {
         self.session_store
             .create_session(
                 SessionKind::Dashboard,
+                &subject,
                 &refresh.redis_hash(),
                 &record,
                 self.refresh_ttl_secs,
@@ -458,9 +478,32 @@ impl TokenManagerService {
         // does not plant one, because a refresh proves possession of a token rather than of a
         // credential. That asymmetry is the whole value — an attacker holding a stolen session
         // can rotate it forever and never make the mark fresh again.
-        if let Some(hash) = self.recent_auth_hash("dashboard", &user.id) {
+        // The SAME subject the session index and the epoch use. It had its own derivation —
+        // `hmac_sha256("{plane}:{userId}")`, with no tenant and no length prefix — and that
+        // derivation never matched the one the reader uses. `MfaService`'s re-authentication
+        // gate reads `ra:{hmac_sha256(hmacKey, userSubject)}`, which is what the contract's
+        // `recentAuthMarker` names, so on the dashboard plane the marker was planted at a key
+        // nobody read: every password-less (OAuth-provisioned) account was refused MFA
+        // enrolment with `ReauthenticationRequired`, permanently. It failed CLOSED, which is
+        // why it was survivable, and it was invisible because the tests plant the marker by
+        // hand at the reader's key rather than signing in — each half correct, never compared.
+        //
+        // The old preimage also carried no tenant, so two accounts sharing an id in different
+        // tenants shared one marker. Inert only because nothing read that key.
+        // Only when a credential was actually proved. `issue_tokens` is shared by the login,
+        // MFA-challenge, OAuth-callback and register paths — which all prove one — AND by
+        // `issue_tokens_for_user_id`, the documented password-less workspace-switch and
+        // impersonation API, which proves nothing about the account holder.
+        //
+        // Planting it unconditionally would be worse than the bug it replaced. For an account
+        // with no local password, `MfaService::assert_reauthenticated` has no password to verify
+        // and relies on this marker alone, so an impersonation session could enrol an
+        // attacker-controlled second factor — and enrolling revokes the owner's sessions and
+        // displays the recovery codes once, to whoever enrolled. That is the takeover the marker
+        // exists to prevent, reached through the one door that never authenticated.
+        if proof == CredentialProof::Proved {
             self.session_store
-                .mark_recent_auth(&hash, RECENT_AUTH_TTL_SECS)
+                .mark_recent_auth(&subject, RECENT_AUTH_TTL_SECS)
                 .await?;
         }
 
@@ -506,12 +549,21 @@ impl TokenManagerService {
         let seed = live.unwrap_or_else(|| placeholder_record(ip, user_agent));
         self.assert_within_absolute_lifetime(&seed)?;
         let new_record = identity_record(&seed, ip, user_agent);
+        // The index the rotation moves the membership within. Derived from the record the
+        // rotation is FOR, which on the live path is the real owner — the only path on which
+        // the script touches the index at all.
+        let subject = self.subject_hash(
+            SessionKind::Dashboard,
+            new_record.tenant_id.as_deref(),
+            &new_record.user_id,
+        );
 
         let rotation = SessionRotation {
             old_hash,
             new_hash: new.redis_hash(),
             new_raw: new.expose_secret().to_owned(),
             new_record: new_record.clone(),
+            subject_hash: subject.clone(),
             refresh_ttl: self.refresh_ttl_secs,
             grace_ttl: self.grace_ttl_secs,
         };
@@ -524,7 +576,7 @@ impl TokenManagerService {
             RotateOutcome::Rotated(_old) => {
                 let epoch = self
                     .session_store
-                    .current_epoch(SessionKind::Dashboard, &new_record.user_id)
+                    .current_epoch(SessionKind::Dashboard, &subject)
                     .await?;
                 let access_token = self.issue_access(&self.rotated_claims(&new_record, epoch))?;
                 Ok(RotatedTokens {
@@ -546,6 +598,13 @@ impl TokenManagerService {
                 // rather than re-planting a grace pointer.
                 let fresh = RawRefreshToken::generate();
                 let fresh_record = identity_record(&recovered, ip, user_agent);
+                // The RECOVERED record names the owner; the placeholder that reached the script
+                // did not, so the subject built before the rotation cannot be reused here.
+                let recovered_subject = self.subject_hash(
+                    SessionKind::Dashboard,
+                    fresh_record.tenant_id.as_deref(),
+                    &fresh_record.user_id,
+                );
                 // One atomic step, not a plain write. Written loosely, this landed several
                 // awaits after the script returned, and a `revoke_all` arriving in that gap
                 // swept an index the recovered session was not in yet — so it survived a
@@ -555,6 +614,7 @@ impl TokenManagerService {
                     .session_store
                     .create_recovered_session(
                         SessionKind::Dashboard,
+                        &recovered_subject,
                         &fresh.redis_hash(),
                         &fresh_record,
                         self.refresh_ttl_secs,
@@ -568,7 +628,7 @@ impl TokenManagerService {
                 }
                 let epoch = self
                     .session_store
-                    .current_epoch(SessionKind::Dashboard, &fresh_record.user_id)
+                    .current_epoch(SessionKind::Dashboard, &recovered_subject)
                     .await?;
                 let access_token = self.issue_access(&self.rotated_claims(&fresh_record, epoch))?;
                 Ok(RotatedTokens {
@@ -590,26 +650,40 @@ impl TokenManagerService {
                 //
                 // Two events rather than one: the detection is the finding and the revocation
                 // is the response to it, and a `revoke_family` that fails must not take the
-                // finding down with it. The owner is only knowable after the revocation.
+                // finding down with it.
                 tracing::warn!(
                     family_id = %family,
                     "refresh: reuse of a consumed refresh token detected — revoking the token family"
                 );
-                // The owner comes back from the revocation, and can come from nowhere
-                // else: the replayed token's own key was deleted when it was rotated, so
-                // the family index is the last surviving link to an account.
+                // The owner is read from the family index, and can come from nowhere else: the
+                // replayed token's own key was deleted when it was rotated, so the index is the
+                // last surviving link to an account. Read BEFORE the revocation rather than
+                // returned by it, because the revocation needs the owner's tenant-scoped
+                // subject to prune the right session index — and the record is what carries the
+                // tenant.
                 let owner = self
                     .session_store
-                    .revoke_family(SessionKind::Dashboard, &family)
+                    .find_family_owner(SessionKind::Dashboard, &family)
                     .await?;
+                let owner_subject = owner.as_ref().map(|record| {
+                    self.subject_hash(
+                        SessionKind::Dashboard,
+                        record.tenant_id.as_deref(),
+                        &record.user_id,
+                    )
+                });
+                self.session_store
+                    .revoke_family(SessionKind::Dashboard, &family, owner_subject.as_deref())
+                    .await?;
+                let owner_id = owner.as_ref().map(|record| record.user_id.as_str());
                 // Bound rather than inlined in the field; see the note in `login`.
-                let owner_id = owner.as_deref().unwrap_or("<unknown>");
+                let logged_owner = owner_id.unwrap_or("<unknown>");
                 tracing::warn!(
-                    user_id = owner_id,
+                    user_id = logged_owner,
                     family_id = %family,
                     "refresh: token family revoked after reuse detection"
                 );
-                self.fire_reuse_detected(owner.as_deref(), &family).await;
+                self.fire_reuse_detected(owner_id, &family).await;
                 Err(AuthError::RefreshTokenInvalid)
             }
             RotateOutcome::Invalid => {
@@ -650,9 +724,14 @@ impl TokenManagerService {
     ) -> Result<PlatformAuthResult, AuthError> {
         let refresh = RawRefreshToken::generate();
         let now = now_unix();
+        // The platform subject carries no tenant segment — its admins are cross-tenant and have
+        // none — but it is still an HMAC of `platform:{adminId}` rather than the bare id. A
+        // platform epoch left on the bare id would be a different key from the one nest-auth
+        // reads, and an epoch nobody bumps revalidates admin tokens a revocation had killed.
+        let subject = self.subject_hash(SessionKind::Platform, None, &admin.id);
         let epoch = self
             .session_store
-            .current_epoch(SessionKind::Platform, &admin.id)
+            .current_epoch(SessionKind::Platform, &subject)
             .await?;
         let claims = PlatformClaims {
             iss: None,
@@ -688,6 +767,7 @@ impl TokenManagerService {
         self.session_store
             .create_session(
                 SessionKind::Platform,
+                &subject,
                 &refresh.redis_hash(),
                 &record,
                 self.refresh_ttl_secs,
@@ -733,12 +813,15 @@ impl TokenManagerService {
         let seed = live.unwrap_or_else(|| placeholder_record(ip, user_agent));
         self.assert_within_absolute_lifetime(&seed)?;
         let new_record = platform_identity_record(&seed, ip, user_agent);
+        // The index the rotation moves the membership within; see the dashboard twin.
+        let subject = self.subject_hash(SessionKind::Platform, None, &new_record.user_id);
 
         let rotation = SessionRotation {
             old_hash,
             new_hash: new.redis_hash(),
             new_raw: new.expose_secret().to_owned(),
             new_record: new_record.clone(),
+            subject_hash: subject.clone(),
             refresh_ttl: self.refresh_ttl_secs,
             grace_ttl: self.grace_ttl_secs,
         };
@@ -751,7 +834,7 @@ impl TokenManagerService {
             RotateOutcome::Rotated(_old) => {
                 let epoch = self
                     .session_store
-                    .current_epoch(SessionKind::Platform, &new_record.user_id)
+                    .current_epoch(SessionKind::Platform, &subject)
                     .await?;
                 let access_token =
                     self.issue_platform_access(&self.rotated_platform_claims(&new_record, epoch))?;
@@ -774,6 +857,10 @@ impl TokenManagerService {
                 // identity rather than re-planting a grace pointer.
                 let fresh = RawRefreshToken::generate();
                 let fresh_record = platform_identity_record(&recovered, ip, user_agent);
+                // The RECOVERED record names the owner; the placeholder that reached the script
+                // did not, so the subject built before the rotation cannot be reused here.
+                let recovered_subject =
+                    self.subject_hash(SessionKind::Platform, None, &fresh_record.user_id);
                 // The platform twin of the dashboard grace write, atomic for the same reason —
                 // on the plane where the surviving session is the highest-privilege identity
                 // in the system.
@@ -781,6 +868,7 @@ impl TokenManagerService {
                     .session_store
                     .create_recovered_session(
                         SessionKind::Platform,
+                        &recovered_subject,
                         &fresh.redis_hash(),
                         &fresh_record,
                         self.refresh_ttl_secs,
@@ -791,7 +879,7 @@ impl TokenManagerService {
                 }
                 let epoch = self
                     .session_store
-                    .current_epoch(SessionKind::Platform, &fresh_record.user_id)
+                    .current_epoch(SessionKind::Platform, &recovered_subject)
                     .await?;
                 let access_token = self
                     .issue_platform_access(&self.rotated_platform_claims(&fresh_record, epoch))?;
@@ -809,20 +897,28 @@ impl TokenManagerService {
                     family_id = %family,
                     "platform refresh: reuse of a consumed refresh token detected — revoking the token family"
                 );
-                // The owner comes back from the revocation, and can come from nowhere
-                // else: the replayed token's own key was deleted when it was rotated, so
-                // the family index is the last surviving link to an account.
+                // The owner is read from the family index, and can come from nowhere else: the
+                // replayed token's own key was deleted when it was rotated, so the index is the
+                // last surviving link to an account. Read before the revocation, which needs
+                // the owner's subject to prune the right session index.
                 let owner = self
                     .session_store
-                    .revoke_family(SessionKind::Platform, &family)
+                    .find_family_owner(SessionKind::Platform, &family)
                     .await?;
-                let owner_id = owner.as_deref().unwrap_or("<unknown>");
+                let owner_subject = owner
+                    .as_ref()
+                    .map(|record| self.subject_hash(SessionKind::Platform, None, &record.user_id));
+                self.session_store
+                    .revoke_family(SessionKind::Platform, &family, owner_subject.as_deref())
+                    .await?;
+                let owner_id = owner.as_ref().map(|record| record.user_id.as_str());
+                let logged_owner = owner_id.unwrap_or("<unknown>");
                 tracing::warn!(
-                    user_id = owner_id,
+                    user_id = logged_owner,
                     family_id = %family,
                     "platform refresh: token family revoked after reuse detection"
                 );
-                self.fire_reuse_detected(owner.as_deref(), &family).await;
+                self.fire_reuse_detected(owner_id, &family).await;
                 Err(AuthError::RefreshTokenInvalid)
             }
             RotateOutcome::Invalid => {
@@ -856,7 +952,10 @@ impl TokenManagerService {
         if claims.epoch
             < self
                 .session_store
-                .current_epoch(SessionKind::Platform, &claims.sub)
+                .current_epoch(
+                    SessionKind::Platform,
+                    &self.subject_hash(SessionKind::Platform, None, &claims.sub),
+                )
                 .await?
         {
             return Err(AuthError::TokenRevoked);
@@ -894,7 +993,10 @@ impl TokenManagerService {
         let now = now_unix();
         let epoch = self
             .session_store
-            .current_epoch(SessionKind::Platform, &claims.sub)
+            .current_epoch(
+                SessionKind::Platform,
+                &self.subject_hash(SessionKind::Platform, None, &claims.sub),
+            )
             .await?;
         self.issue_platform_access(&PlatformClaims {
             epoch,
@@ -951,7 +1053,14 @@ impl TokenManagerService {
         if claims.epoch
             < self
                 .session_store
-                .current_epoch(SessionKind::Dashboard, &claims.sub)
+                .current_epoch(
+                    SessionKind::Dashboard,
+                    &self.subject_hash(
+                        SessionKind::Dashboard,
+                        Some(&claims.tenant_id),
+                        &claims.sub,
+                    ),
+                )
                 .await?
         {
             return Err(AuthError::TokenRevoked);
@@ -1088,9 +1197,10 @@ impl TokenManagerService {
         }
         // Stamped so the challenge token dies with the rest of the account's credentials. See
         // the claim's own documentation for what it was surviving.
+        let kind = crate::services::mfa::session_kind(context);
         let epoch = self
             .session_store
-            .current_epoch(crate::services::mfa::session_kind(context), user_id)
+            .current_epoch(kind, &self.subject_hash(kind, tenant_id, user_id))
             .await?;
         let (token, jti) = self.build_mfa_temp_token(user_id, context, tenant_id, epoch)?;
         if let Some(support) = &self.mfa {
@@ -1146,12 +1256,13 @@ impl TokenManagerService {
         //
         // The check lives here rather than in `MfaService::challenge` so every caller of the
         // temp token inherits it.
+        let kind = crate::services::mfa::session_kind(claims.context);
         if claims.epoch
             < self
                 .session_store
                 .current_epoch(
-                    crate::services::mfa::session_kind(claims.context),
-                    &claims.sub,
+                    kind,
+                    &self.subject_hash(kind, claims.tenant_id.as_deref(), &claims.sub),
                 )
                 .await?
         {
@@ -1294,9 +1405,15 @@ impl TokenManagerService {
         mfa_enabled: bool,
     ) -> Result<String, AuthError> {
         let now = now_unix();
+        // The tenant the token is about to carry, not the one in the stale claims: this method
+        // re-signs precisely when the account's authority moved, and the epoch it stamps must be
+        // the one `verify_access` will read back from the re-signed token.
         let epoch = self
             .session_store
-            .current_epoch(SessionKind::Dashboard, &claims.sub)
+            .current_epoch(
+                SessionKind::Dashboard,
+                &self.subject_hash(SessionKind::Dashboard, Some(tenant_id), &claims.sub),
+            )
             .await?;
         self.issue_access(&DashboardClaims {
             epoch,
@@ -1423,8 +1540,15 @@ fn placeholder_record(ip: &str, user_agent: &str) -> SessionRecord {
     }
 }
 
+/// The identifier-hashing key the test fixtures in this file derive every account-scoped key
+/// under. Fixed rather than random so a test can recompute a subject and name the exact key a
+/// flow wrote, and shared by both test modules so the two cannot key the same account apart.
+#[cfg(test)]
+const TEST_IDENTIFIER_KEY: [u8; 64] = [9u8; 64];
+
 #[cfg(test)]
 mod tests {
+
     use super::*;
     use crate::testing::InMemoryStores;
     use time::OffsetDateTime;
@@ -1440,9 +1564,15 @@ mod tests {
     /// llvm-cov counts. Behind a helper the `else { return }` fits inline, which is the idiom
     /// the rest of the suite uses.
     async fn issued_for(svc: &TokenManagerService) -> Option<AuthResult> {
-        svc.issue_tokens(&user(), "10.0.0.1", "agent/1.0", false)
-            .await
-            .ok()
+        svc.issue_tokens(
+            &user(),
+            "10.0.0.1",
+            "agent/1.0",
+            false,
+            CredentialProof::Proved,
+        )
+        .await
+        .ok()
     }
 
     /// Rotate `refresh` through `svc`, or `None` when it could not.
@@ -1474,11 +1604,13 @@ mod tests {
             key(),
             Vec::new(),
             store,
-            Duration::from_secs(900),
-            7,
-            Duration::from_secs(30),
-            // No absolute cap in the default fixture; the cap has its own tests.
-            0,
+            TokenLifetimes {
+                access_ttl: Duration::from_secs(900),
+                refresh_expires_in_days: 7,
+                grace_window: Duration::from_secs(30),
+                absolute_session_lifetime_days: 0,
+            },
+            Zeroizing::new(TEST_IDENTIFIER_KEY),
         )
     }
 
@@ -1488,10 +1620,38 @@ mod tests {
             key(),
             retired,
             store,
-            Duration::from_secs(900),
-            7,
-            Duration::from_secs(30),
-            0,
+            TokenLifetimes {
+                access_ttl: Duration::from_secs(900),
+                refresh_expires_in_days: 7,
+                grace_window: Duration::from_secs(30),
+                absolute_session_lifetime_days: 0,
+            },
+            Zeroizing::new(TEST_IDENTIFIER_KEY),
+        )
+    }
+
+    /// The dashboard session subject the fixtures' manager derives for [`user`] — the key its
+    /// token epoch actually lives under.
+    ///
+    /// A test that bumped `ep:"u1"` by hand would write a key the verifier no longer reads, and
+    /// would then assert that a pre-bump token is still accepted while calling that a pass.
+    fn dashboard_subject() -> String {
+        crate::services::session_subject_hash(
+            &TEST_IDENTIFIER_KEY,
+            SessionKind::Dashboard,
+            Some(&user().tenant_id),
+            &user().id,
+        )
+    }
+
+    /// The platform twin, for [`platform_admin`]. No tenant segment — its admins have none.
+    #[cfg(feature = "platform")]
+    fn platform_subject() -> String {
+        crate::services::session_subject_hash(
+            &TEST_IDENTIFIER_KEY,
+            SessionKind::Platform,
+            None,
+            &platform_admin().id,
         )
     }
 
@@ -1519,7 +1679,13 @@ mod tests {
         let store = Arc::new(InMemoryStores::new());
         let svc = service(store.clone());
         let first = svc
-            .issue_tokens(&user(), "203.0.113.4", "agent/1.0", false)
+            .issue_tokens(
+                &user(),
+                "203.0.113.4",
+                "agent/1.0",
+                false,
+                CredentialProof::Proved,
+            )
             .await;
         assert!(first.is_ok());
         let Ok(first) = first else { return };
@@ -1537,7 +1703,13 @@ mod tests {
         ));
 
         let second = svc
-            .issue_tokens(&user(), "203.0.113.4", "agent/1.0", false)
+            .issue_tokens(
+                &user(),
+                "203.0.113.4",
+                "agent/1.0",
+                false,
+                CredentialProof::Proved,
+            )
             .await;
         let Ok(second) = second else { return };
         let Ok(second_claims) = svc.verify_access(&second.access_token).await else { return };
@@ -1554,7 +1726,13 @@ mod tests {
         let store = Arc::new(InMemoryStores::new());
         let svc = service(store.clone());
         let issued = svc
-            .issue_tokens(&user(), "10.0.0.1", "agent/1.0", false)
+            .issue_tokens(
+                &user(),
+                "10.0.0.1",
+                "agent/1.0",
+                false,
+                CredentialProof::Proved,
+            )
             .await;
         let Ok(issued) = issued else { return };
 
@@ -1601,7 +1779,13 @@ mod tests {
         let store = Arc::new(InMemoryStores::new());
         let svc = service(store.clone());
         let issued = svc
-            .issue_tokens(&user(), "10.0.0.1", "agent/1.0", false)
+            .issue_tokens(
+                &user(),
+                "10.0.0.1",
+                "agent/1.0",
+                false,
+                CredentialProof::Proved,
+            )
             .await;
         let Ok(issued) = issued else { return };
         let old_hash = RawRefreshToken::from_raw(issued.refresh_token.clone()).redis_hash();
@@ -1752,6 +1936,125 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_login_plants_the_recent_auth_marker_at_the_key_the_reader_looks_under() {
+        // The writer and the reader of `ra:` had DIFFERENT preimages and nothing compared them.
+        // `issue_tokens` planted `hmac_sha256("dashboard:{userId}")`; `MfaService`'s
+        // re-authentication gate reads `hmac_sha256(userSubject)` —
+        // `dashboard:{utf8ByteLength(tenantId)}:{tenantId}:{userId}` — which is what the shared
+        // contract's `recentAuthMarker` names. So on the dashboard plane the marker was written
+        // to a key nobody read, and every password-less account was refused MFA enrolment with
+        // `ReauthenticationRequired`, permanently.
+        //
+        // It was invisible because the MFA fixtures plant the marker BY HAND at the reader's key
+        // instead of signing in: both halves were correct in isolation and never met. So this
+        // test derives the expectation by hand too — the same independence, aimed at the writer.
+        // Calling the service's own helper here would follow the derivation wherever it goes and
+        // assert nothing.
+        let store = Arc::new(InMemoryStores::new());
+        let svc = service(store.clone());
+        let user = user();
+        let expected = crate::services::to_hex(&bymax_auth_crypto::mac::hmac_sha256(
+            &TEST_IDENTIFIER_KEY,
+            format!(
+                "dashboard:{}:{}:{}",
+                user.tenant_id.len(),
+                user.tenant_id,
+                user.id
+            )
+            .as_bytes(),
+        ));
+
+        assert!(matches!(store.has_recent_auth(&expected).await, Ok(false)));
+        assert!(
+            svc.issue_tokens(
+                &user,
+                "10.0.0.1",
+                "agent/1.0",
+                false,
+                CredentialProof::Proved
+            )
+            .await
+            .is_ok()
+        );
+        assert!(
+            matches!(store.has_recent_auth(&expected).await, Ok(true)),
+            "the login planted no marker at the tenant-scoped subject the MFA gate reads"
+        );
+
+        // …and NOT at the tenant-less preimage it used to use, which two accounts sharing an id
+        // in different tenants would have shared.
+        let old_shape = crate::services::to_hex(&bymax_auth_crypto::mac::hmac_sha256(
+            &TEST_IDENTIFIER_KEY,
+            format!("dashboard:{}", user.id).as_bytes(),
+        ));
+        assert!(
+            matches!(store.has_recent_auth(&old_shape).await, Ok(false)),
+            "the tenant-less recent-auth key is still being written"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_unproven_issuance_plants_no_recent_auth_marker() {
+        // `issue_tokens` is shared by the paths that verify a credential AND by
+        // `issue_tokens_for_user_id`, the documented password-less workspace-switch and
+        // impersonation API. Only the first kind may plant the recent-authentication marker.
+        //
+        // This is the sharp edge of fixing the marker's key. While the writer and the reader
+        // disagreed, planting it on an unproven issuance was harmless because nothing read that
+        // key. Making them agree turned the same line into a live grant: for an account with no
+        // local password, `MfaService::assert_reauthenticated` has no password to verify and
+        // relies on this marker alone, so an impersonation session could enrol an
+        // attacker-controlled second factor — and enrolling revokes the owner's sessions and
+        // displays the recovery codes once, to whoever enrolled. A fix that opens the door it
+        // was closing is not a fix.
+        let store = Arc::new(InMemoryStores::new());
+        let svc = service(store.clone());
+        let user = user();
+        let marker = crate::services::to_hex(&bymax_auth_crypto::mac::hmac_sha256(
+            &TEST_IDENTIFIER_KEY,
+            format!(
+                "dashboard:{}:{}:{}",
+                user.tenant_id.len(),
+                user.tenant_id,
+                user.id
+            )
+            .as_bytes(),
+        ));
+
+        assert!(
+            svc.issue_tokens(
+                &user,
+                "10.0.0.1",
+                "agent/1.0",
+                false,
+                CredentialProof::Unproven
+            )
+            .await
+            .is_ok(),
+            "the session itself must still be issued — only the proof is withheld"
+        );
+        assert!(
+            matches!(store.has_recent_auth(&marker).await, Ok(false)),
+            "a password-less issuance counted as a recent authentication"
+        );
+
+        // …and the proved path still plants it, so the check above is measuring the flag rather
+        // than a marker that never lands at all.
+        assert!(
+            svc.issue_tokens(
+                &user,
+                "10.0.0.1",
+                "agent/1.0",
+                false,
+                CredentialProof::Proved
+            )
+            .await
+            .is_ok()
+        );
+        assert!(matches!(store.has_recent_auth(&marker).await, Ok(true)));
+    }
+
+    #[tokio::test]
     async fn a_reuse_with_no_recoverable_owner_fires_no_event() {
         // A family whose every member has expired names nobody. The refusal is unchanged and
         // the hook stays silent rather than emitting an unattributable alert.
@@ -1768,9 +2071,16 @@ mod tests {
                 .is_ok()
         );
         // Drop the only live descendant, so the family index survives with nothing readable.
+        // Through the account's SUBJECT, which is what the index is keyed by — passing the bare
+        // id revokes nothing, the descendant stays readable, and the test then measures a
+        // recoverable owner while claiming to measure an unrecoverable one.
         assert!(
             store
-                .revoke_session(SessionKind::Dashboard, &user().id, &rotated_hash(&rotated))
+                .revoke_session(
+                    SessionKind::Dashboard,
+                    &dashboard_subject(),
+                    &rotated_hash(&rotated)
+                )
                 .await
                 .is_ok()
         );
@@ -1875,7 +2185,13 @@ mod tests {
         let store = Arc::new(InMemoryStores::new());
         let svc = service(store);
         let issued = svc
-            .issue_tokens(&user(), "10.0.0.1", "agent/1.0", false)
+            .issue_tokens(
+                &user(),
+                "10.0.0.1",
+                "agent/1.0",
+                false,
+                CredentialProof::Proved,
+            )
             .await;
         let Ok(issued) = issued else { return };
         let Ok(claims) = svc.verify_access(&issued.access_token).await else { return };
@@ -1895,20 +2211,37 @@ mod tests {
         let store = Arc::new(InMemoryStores::new());
         let svc = service(store.clone());
         let issued = svc
-            .issue_tokens(&user(), "10.0.0.1", "agent/1.0", false)
+            .issue_tokens(
+                &user(),
+                "10.0.0.1",
+                "agent/1.0",
+                false,
+                CredentialProof::Proved,
+            )
             .await;
         let Ok(issued) = issued else { return };
         // Freshly issued: it verifies (stamped at the current epoch 0).
         assert!(svc.verify_access(&issued.access_token).await.is_ok());
         // Bump the epoch (what a password reset does), then the pre-bump token is revoked...
-        assert!(store.bump_epoch(SessionKind::Dashboard, "u1").await.is_ok());
+        assert!(
+            store
+                .bump_epoch(SessionKind::Dashboard, &dashboard_subject())
+                .await
+                .is_ok()
+        );
         assert!(matches!(
             svc.verify_access(&issued.access_token).await,
             Err(AuthError::TokenRevoked)
         ));
         // ...while a token issued AFTER the bump carries the new epoch and still verifies.
         let after = svc
-            .issue_tokens(&user(), "10.0.0.1", "agent/1.0", false)
+            .issue_tokens(
+                &user(),
+                "10.0.0.1",
+                "agent/1.0",
+                false,
+                CredentialProof::Proved,
+            )
             .await;
         let Ok(after) = after else { return };
         assert!(svc.verify_access(&after.access_token).await.is_ok());
@@ -1930,7 +2263,12 @@ mod tests {
                 .await
                 .is_ok()
         );
-        assert!(store.bump_epoch(SessionKind::Platform, "p1").await.is_ok());
+        assert!(
+            store
+                .bump_epoch(SessionKind::Platform, &platform_subject())
+                .await
+                .is_ok()
+        );
         assert!(matches!(
             svc.verify_platform_access(&issued.access_token).await,
             Err(AuthError::TokenRevoked)
@@ -2006,7 +2344,13 @@ mod tests {
         };
 
         let issued = svc
-            .issue_tokens(&enrolled, "10.0.0.1", "agent/1.0", true)
+            .issue_tokens(
+                &enrolled,
+                "10.0.0.1",
+                "agent/1.0",
+                true,
+                CredentialProof::Proved,
+            )
             .await;
         let Ok(issued) = issued else { return };
 
@@ -2027,7 +2371,13 @@ mod tests {
         let svc = service(store);
 
         let issued = svc
-            .issue_tokens(&user(), "10.0.0.1", "agent/1.0", false)
+            .issue_tokens(
+                &user(),
+                "10.0.0.1",
+                "agent/1.0",
+                false,
+                CredentialProof::Proved,
+            )
             .await;
         let Ok(issued) = issued else { return };
 
@@ -2124,7 +2474,13 @@ mod tests {
         let store = Arc::new(InMemoryStores::new());
         let svc = service(store);
         let issued_dash = svc
-            .issue_tokens(&user(), "10.0.0.1", "agent/1.0", false)
+            .issue_tokens(
+                &user(),
+                "10.0.0.1",
+                "agent/1.0",
+                false,
+                CredentialProof::Proved,
+            )
             .await;
         let Ok(dash) = issued_dash else { return };
         assert!(matches!(
@@ -2225,10 +2581,13 @@ mod tests {
             key(),
             Vec::new(),
             store,
-            Duration::from_secs(900),
-            7,
-            Duration::from_secs(30),
-            0,
+            TokenLifetimes {
+                access_ttl: Duration::from_secs(900),
+                refresh_expires_in_days: 7,
+                grace_window: Duration::from_secs(30),
+                absolute_session_lifetime_days: 0,
+            },
+            Zeroizing::new(TEST_IDENTIFIER_KEY),
         )
         .with_mfa_support(support)
     }
@@ -2506,13 +2865,16 @@ mod tests {
             retired_key(),
             Vec::new(),
             store.clone(),
-            Duration::from_secs(900),
-            7,
-            Duration::from_secs(30),
-            0,
+            TokenLifetimes {
+                access_ttl: Duration::from_secs(900),
+                refresh_expires_in_days: 7,
+                grace_window: Duration::from_secs(30),
+                absolute_session_lifetime_days: 0,
+            },
+            Zeroizing::new(TEST_IDENTIFIER_KEY),
         );
         let issued = minted_under_old
-            .issue_tokens(&user(), "1.2.3.4", "agent", false)
+            .issue_tokens(&user(), "1.2.3.4", "agent", false, CredentialProof::Proved)
             .await;
         let Ok(issued) = issued else { return };
         drop(old_manager);
@@ -2543,13 +2905,16 @@ mod tests {
             HsKey::from_bytes(b"a-key-nobody-in-this-deployment-holds"),
             Vec::new(),
             store,
-            Duration::from_secs(900),
-            7,
-            Duration::from_secs(30),
-            0,
+            TokenLifetimes {
+                access_ttl: Duration::from_secs(900),
+                refresh_expires_in_days: 7,
+                grace_window: Duration::from_secs(30),
+                absolute_session_lifetime_days: 0,
+            },
+            Zeroizing::new(TEST_IDENTIFIER_KEY),
         );
         let issued = forged
-            .issue_tokens(&user(), "1.2.3.4", "agent", false)
+            .issue_tokens(&user(), "1.2.3.4", "agent", false, CredentialProof::Proved)
             .await;
         let Ok(issued) = issued else { return };
 
@@ -2566,7 +2931,7 @@ mod tests {
         let store = Arc::new(InMemoryStores::new());
         let rotating = service_rotating(store.clone(), vec![retired_key()]);
         let issued = rotating
-            .issue_tokens(&user(), "1.2.3.4", "agent", false)
+            .issue_tokens(&user(), "1.2.3.4", "agent", false, CredentialProof::Proved)
             .await;
         let Ok(issued) = issued else { return };
 
@@ -2777,10 +3142,13 @@ mod tests {
             retired,
             Vec::new(),
             store.clone(),
-            Duration::from_secs(900),
-            7,
-            Duration::from_secs(30),
-            0,
+            TokenLifetimes {
+                access_ttl: Duration::from_secs(900),
+                refresh_expires_in_days: 7,
+                grace_window: Duration::from_secs(30),
+                absolute_session_lifetime_days: 0,
+            },
+            Zeroizing::new(TEST_IDENTIFIER_KEY),
         );
         let Some(issued) = issued_for(&old).await else { return };
 
@@ -2879,7 +3247,12 @@ mod tests {
             "a freshly issued challenge token must verify: {first:?}"
         );
 
-        assert!(store.bump_epoch(SessionKind::Dashboard, "u1").await.is_ok());
+        assert!(
+            store
+                .bump_epoch(SessionKind::Dashboard, &dashboard_subject())
+                .await
+                .is_ok()
+        );
 
         let after = svc.verify_mfa_temp_token(&temp).await;
         assert!(
@@ -2931,8 +3304,19 @@ mod tests {
         let store = Arc::new(InMemoryStores::new());
         let svc = service(store.clone());
 
-        // The account's generation has moved on since the stale claims were minted.
-        let bumped = store.bump_epoch(SessionKind::Dashboard, "u1").await;
+        // The account's generation has moved on since the stale claims were minted. Bumped under
+        // the subject of the tenant the re-issue is MOVING the account to (`new-tenant`), not the
+        // stale claims' `old-tenant`: the re-signed token will carry the new tenant, so that is
+        // the subject its next verification reads the epoch from, and stamping an epoch from the
+        // old tenant's counter would hand back a token that verifies against a counter nobody
+        // bumps.
+        let subject = crate::services::session_subject_hash(
+            &TEST_IDENTIFIER_KEY,
+            SessionKind::Dashboard,
+            Some("new-tenant"),
+            &stale_dashboard_claims().sub,
+        );
+        let bumped = store.bump_epoch(SessionKind::Dashboard, &subject).await;
         let Ok(bumped) = bumped else { return };
         assert_eq!(bumped, 1, "the fixture epoch must start at zero");
 
@@ -3054,7 +3438,16 @@ mod tests {
         let store = Arc::new(InMemoryStores::new());
         let svc = service(store.clone());
 
-        let bumped = store.bump_epoch(SessionKind::Platform, "a1").await;
+        // The stale claims name `a1`, not the `platform_admin` fixture, so the epoch has to be
+        // bumped under THAT admin's subject — the one `reissue_platform_access_with_authority`
+        // will read back.
+        let subject = crate::services::session_subject_hash(
+            &TEST_IDENTIFIER_KEY,
+            SessionKind::Platform,
+            None,
+            &stale_platform_claims().sub,
+        );
+        let bumped = store.bump_epoch(SessionKind::Platform, &subject).await;
         let Ok(bumped) = bumped else { return };
         assert_eq!(bumped, 1, "the fixture epoch must start at zero");
 
@@ -3150,10 +3543,24 @@ mod absolute_lifetime_tests {
             HsKey::from_bytes(b"0123456789abcdef0123456789abcdef"),
             Vec::new(),
             store,
-            Duration::from_secs(900),
-            7,
-            Duration::from_secs(30),
-            30,
+            TokenLifetimes {
+                access_ttl: Duration::from_secs(900),
+                refresh_expires_in_days: 7,
+                grace_window: Duration::from_secs(30),
+                absolute_session_lifetime_days: 30,
+            },
+            Zeroizing::new(TEST_IDENTIFIER_KEY),
+        )
+    }
+
+    /// The dashboard session subject the fixtures' manager derives for a record's account —
+    /// the index a seeded session has to be registered under for the manager to find it.
+    fn subject(record: &SessionRecord) -> String {
+        crate::services::session_subject_hash(
+            &TEST_IDENTIFIER_KEY,
+            SessionKind::Dashboard,
+            record.tenant_id.as_deref(),
+            &record.user_id,
         )
     }
 
@@ -3188,16 +3595,20 @@ mod absolute_lifetime_tests {
             HsKey::from_bytes(b"0123456789abcdef0123456789abcdef"),
             Vec::new(),
             store.clone(),
-            Duration::from_secs(900),
-            7,
-            Duration::from_secs(30),
-            0,
+            TokenLifetimes {
+                access_ttl: Duration::from_secs(900),
+                refresh_expires_in_days: 7,
+                grace_window: Duration::from_secs(30),
+                absolute_session_lifetime_days: 0,
+            },
+            Zeroizing::new(TEST_IDENTIFIER_KEY),
         );
         let old = RawRefreshToken::generate();
         assert!(
             store
                 .create_session(
                     SessionKind::Dashboard,
+                    &subject(&record_born(31)),
                     &old.redis_hash(),
                     &record_born(31),
                     3600
@@ -3233,6 +3644,7 @@ mod absolute_lifetime_tests {
             store
                 .create_session(
                     SessionKind::Dashboard,
+                    &subject(&record_born(31)),
                     &old.redis_hash(),
                     &record_born(31),
                     3600
@@ -3265,6 +3677,7 @@ mod absolute_lifetime_tests {
             store
                 .create_session(
                     SessionKind::Dashboard,
+                    &subject(&record_born(29)),
                     &old.redis_hash(),
                     &record_born(29),
                     3600
@@ -3295,7 +3708,13 @@ mod absolute_lifetime_tests {
         };
         assert!(
             store
-                .create_session(SessionKind::Dashboard, &old.redis_hash(), &exactly, 3600)
+                .create_session(
+                    SessionKind::Dashboard,
+                    &subject(&exactly),
+                    &old.redis_hash(),
+                    &exactly,
+                    3600,
+                )
                 .await
                 .is_ok()
         );
@@ -3320,7 +3739,13 @@ mod absolute_lifetime_tests {
         let old = RawRefreshToken::generate();
         assert!(
             store
-                .create_session(SessionKind::Dashboard, &old.redis_hash(), &uncapped, 3600)
+                .create_session(
+                    SessionKind::Dashboard,
+                    &subject(&uncapped),
+                    &old.redis_hash(),
+                    &uncapped,
+                    3600,
+                )
                 .await
                 .is_ok()
         );
@@ -3335,16 +3760,20 @@ mod absolute_lifetime_tests {
             HsKey::from_bytes(b"0123456789abcdef0123456789abcdef"),
             Vec::new(),
             store.clone(),
-            Duration::from_secs(900),
-            7,
-            Duration::from_secs(30),
-            0,
+            TokenLifetimes {
+                access_ttl: Duration::from_secs(900),
+                refresh_expires_in_days: 7,
+                grace_window: Duration::from_secs(30),
+                absolute_session_lifetime_days: 0,
+            },
+            Zeroizing::new(TEST_IDENTIFIER_KEY),
         );
         let ancient = RawRefreshToken::generate();
         assert!(
             store
                 .create_session(
                     SessionKind::Dashboard,
+                    &subject(&record_born(365)),
                     &ancient.redis_hash(),
                     &record_born(365),
                     3600

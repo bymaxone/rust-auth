@@ -391,7 +391,13 @@ impl AuthEngine {
         let safe = SafeAuthUser::from(user);
         let result = self
             .tokens()
-            .issue_tokens(&safe, ip, user_agent, false)
+            .issue_tokens(
+                &safe,
+                ip,
+                user_agent,
+                false,
+                crate::services::token_manager::CredentialProof::Proved,
+            )
             .await?;
         // Enforce the concurrent-session cap (and fire the new-session hook) for the
         // just-issued session before the fire-and-forget bookkeeping; a no-op when session
@@ -508,7 +514,7 @@ mod tests {
         let listed = h
             .engine
             .sessions()
-            .list_sessions(&id, Some(&second_hash))
+            .list_sessions(&second.user.tenant_id, &id, Some(&second_hash))
             .await;
         assert!(matches!(&listed, Ok(v) if v.len() == 1));
         let Ok(listed) = listed else { return };

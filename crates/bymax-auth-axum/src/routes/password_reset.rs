@@ -88,6 +88,7 @@ async fn change_password(
     match state
         .engine()
         .change_password(
+            &user.0.tenant_id,
             &user.0.sub,
             &dto.current_password,
             &dto.new_password,

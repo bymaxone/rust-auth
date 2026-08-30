@@ -579,12 +579,13 @@ impl bymax_auth_core::traits::SessionStore for FailingStores {
     async fn create_session(
         &self,
         kind: bymax_auth_core::traits::SessionKind,
+        subject_hash: &str,
         token_hash: &str,
         detail: &bymax_auth_core::traits::SessionRecord,
         ttl_secs: u64,
     ) -> Result<(), bymax_auth_types::AuthError> {
         self.inner
-            .create_session(kind, token_hash, detail, ttl_secs)
+            .create_session(kind, subject_hash, token_hash, detail, ttl_secs)
             .await
     }
     async fn rotate(
@@ -604,17 +605,19 @@ impl bymax_auth_core::traits::SessionStore for FailingStores {
     async fn list_sessions(
         &self,
         _kind: bymax_auth_core::traits::SessionKind,
-        _user_id: &str,
+        _subject_hash: &str,
     ) -> Result<Vec<bymax_auth_core::traits::SessionDetail>, bymax_auth_types::AuthError> {
         Err(fail())
     }
     async fn revoke_session(
         &self,
         kind: bymax_auth_core::traits::SessionKind,
-        user_id: &str,
+        subject_hash: &str,
         session_hash: &str,
     ) -> Result<(), bymax_auth_types::AuthError> {
-        self.inner.revoke_session(kind, user_id, session_hash).await
+        self.inner
+            .revoke_session(kind, subject_hash, session_hash)
+            .await
     }
     async fn delete_grace_pointer(
         &self,
@@ -626,34 +629,45 @@ impl bymax_auth_core::traits::SessionStore for FailingStores {
     async fn create_recovered_session(
         &self,
         kind: bymax_auth_core::traits::SessionKind,
+        subject_hash: &str,
         token_hash: &str,
         detail: &bymax_auth_core::traits::SessionRecord,
         ttl_secs: u64,
     ) -> Result<bool, bymax_auth_types::AuthError> {
         self.inner
-            .create_recovered_session(kind, token_hash, detail, ttl_secs)
+            .create_recovered_session(kind, subject_hash, token_hash, detail, ttl_secs)
             .await
     }
     async fn sweep_grace_pointers(
         &self,
         kind: bymax_auth_core::traits::SessionKind,
-        user_id: &str,
+        subject_hash: &str,
     ) -> Result<(), bymax_auth_types::AuthError> {
-        self.inner.sweep_grace_pointers(kind, user_id).await
+        self.inner.sweep_grace_pointers(kind, subject_hash).await
     }
     async fn revoke_all(
         &self,
         _kind: bymax_auth_core::traits::SessionKind,
-        _user_id: &str,
+        _subject_hash: &str,
     ) -> Result<(), bymax_auth_types::AuthError> {
         Err(fail())
+    }
+    async fn find_family_owner(
+        &self,
+        kind: bymax_auth_core::traits::SessionKind,
+        family_id: &str,
+    ) -> Result<Option<bymax_auth_core::traits::SessionRecord>, bymax_auth_types::AuthError> {
+        self.inner.find_family_owner(kind, family_id).await
     }
     async fn revoke_family(
         &self,
         kind: bymax_auth_core::traits::SessionKind,
         family_id: &str,
-    ) -> Result<Option<String>, bymax_auth_types::AuthError> {
-        self.inner.revoke_family(kind, family_id).await
+        owner_subject_hash: Option<&str>,
+    ) -> Result<(), bymax_auth_types::AuthError> {
+        self.inner
+            .revoke_family(kind, family_id, owner_subject_hash)
+            .await
     }
     async fn blacklist_access(
         &self,
@@ -673,16 +687,16 @@ impl bymax_auth_core::traits::SessionStore for FailingStores {
     async fn current_epoch(
         &self,
         kind: bymax_auth_core::traits::SessionKind,
-        user_id: &str,
+        subject_hash: &str,
     ) -> Result<u64, bymax_auth_types::AuthError> {
-        self.inner.current_epoch(kind, user_id).await
+        self.inner.current_epoch(kind, subject_hash).await
     }
     async fn bump_epoch(
         &self,
         kind: bymax_auth_core::traits::SessionKind,
-        user_id: &str,
+        subject_hash: &str,
     ) -> Result<u64, bymax_auth_types::AuthError> {
-        self.inner.bump_epoch(kind, user_id).await
+        self.inner.bump_epoch(kind, subject_hash).await
     }
 }
 
