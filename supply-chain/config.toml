@@ -92,7 +92,7 @@ version = "1.4.2"
 criteria = "safe-to-run"
 
 [[exemptions.chacha20]]
-version = "0.10.1"
+version = "0.10.2"
 criteria = "safe-to-run"
 
 [[exemptions.chrono]]
@@ -232,7 +232,7 @@ version = "0.10.4"
 criteria = "safe-to-deploy"
 
 [[exemptions.h2]]
-version = "0.4.15"
+version = "0.4.19"
 criteria = "safe-to-deploy"
 
 [[exemptions.hashbrown]]
