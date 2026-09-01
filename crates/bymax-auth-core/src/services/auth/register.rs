@@ -33,7 +33,7 @@ impl AuthEngine {
             email: normalize_email(&input.email),
             ..input
         };
-        // The resolver, when present, is authoritative — the body tenant is ignored (§24.8).
+        // The resolver, when present, is authoritative — a body tenant is refused (§24.8).
         let tenant_id = self.resolve_tenant(input.tenant_id.as_deref(), ctx).await?;
         let hook_ctx = HookContext::from_request(
             ctx,

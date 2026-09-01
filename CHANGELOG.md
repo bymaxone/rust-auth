@@ -10,7 +10,75 @@ version bump.
 
 ## [Unreleased]
 
+### Added
+
+- **An unaccompanied change to the shared wire contract now fails the build.**
+  `conformance/wire-contract.json` is held byte-identical by nest-auth, and the suites only ever
+  read *values* out of it (a preimage template, a status, a record shape) — so a change to a part
+  nothing happened to read yet, or a reformat that rewrites every line while changing no value,
+  passed. `crates/bymax-auth-core/tests/wire_contract_identity.rs` pins its SHA-256 (`d7d0bdf3…`),
+  so every byte change here has to be declared in the same commit by someone who looked at it.
+  nest-auth pins the same constant in its own suite.
+
+  **It does not gate cross-implementation divergence, and calling it that would be false.** Walk
+  it through: nest-auth changes the contract and its own constant in one commit — its suite is
+  green; nothing moved here, so this suite is green; bytes divergent. Two independent local hashes
+  cannot enforce agreement between two repositories, because neither reads the other. Closing that
+  needs a comparison that crosses the boundary — one side fetching the other's committed blob in
+  CI, or both consuming one immutable versioned artifact — which is proposed, unbuilt, and a
+  maintainer call on both ends. Until then the identity rests where it already rested: on both
+  maintainers changing the file deliberately and together. This narrows the accident, not the
+  divergence.
+
+  The working tree is hashed rather than `git show HEAD:`, which is the authoritative form: `git`
+  is not reachable from every place these tests run (a mutation run executes against a copied tree
+  with no repository in it), and a check that skipped itself there would pass on a broken state in
+  the very place the gate measuring the tests runs.
+
 ### Fixed
+
+- **BREAKING: a request naming `tenantId` is now refused when the deployment configures a
+  `TenantIdResolver`**, instead of being accepted and silently discarded. A security audit of a
+  derived backend found `POST /register` answering `201` for
+  `{"tenantId": "attacker-chosen-tenant", ...}` while creating the account under the resolved
+  tenant — the caller's belief about which tenant it registered into diverging from server state,
+  on the boundary the resolver exists to defend, with nothing in the response saying so. No
+  privilege crossed, and that is why it survived: accept-and-ignore is the worst of the three
+  available answers precisely because it looks like success.
+
+  The refusal is **conditional, and the asymmetry is the point**. Without a resolver the field is
+  the only thing that can name a tenant — `resolve_tenant` already answers `400` when it is
+  absent — so refusing it outright would break every deployment that relies on it. With a
+  resolver configured it does not participate at all, and `deny_unknown_fields` already refuses a
+  property that does not exist on exactly that principle. This makes the principle config-aware
+  rather than carving an exception out of it.
+
+  `null` and an omitted field are not refused: both deserialize to `None`, the caller asserted
+  nothing, and there is nothing to contradict. The refusal is placed **before** the resolver runs,
+  so a caller cannot tell a refusal apart from a deployment whose resolver would have failed.
+
+  **Apply to a derived backend:** if you configure a `TenantIdResolver`, stop sending `tenantId`
+  on the nine endpoints that accept it. Eight read it from the **request body** — `register`,
+  `login`, `verify-email`, `resend-verification`, `forgot-password`, `reset-password`,
+  `verify-otp`, `resend-otp` — and one reads it from the **query string**:
+  `GET /oauth/{provider}?tenantId=…`, so dropping a body field is not the change to make there.
+  All nine answered `200`/`201` while discarding the value and now answer `400 auth.validation`
+  with `field: "tenantId"`. Deployments without a resolver are unaffected — the field remains
+  required there.
+
+  Paired with nest-auth's own refusal (its `resolveTenantId`, released in 1.4.2), down to the
+  message bytes: `tenantId is decided by this deployment and must not be sent`. Held in one
+  `BODY_TENANT_REFUSAL` constant so the string the two backends share has one place to drift from.
+
+- **BREAKING (npm client): `tenantId` is optional, and `useAuth()` no longer invents `'default'`
+  for a caller that named no tenant.** `LoginInput`, `RegisterInput` and `ResetPasswordInput`
+  declared it required, and the React `login` / `forgotPassword` hooks substituted `'default'`
+  when the caller passed nothing — so against a resolver-configured backend every call through
+  those hooks now names a tenant the deployment refuses, and against a backend without a resolver
+  it silently signed people into a tenant they never chose. The field is now omitted when absent
+  (`JSON.stringify` drops it), which lets one client serve both deployment shapes and lets the
+  backend's own `400 auth.validation` say which one this is. A caller that relied on the implicit
+  `'default'` must now pass `tenantId: 'default'` explicitly.
 
 - **The error-catalog parity test now reads the shared contract's status table instead of one
   written down beside it.** `conformance/wire-contract.json` pinned the code vocabulary but never
