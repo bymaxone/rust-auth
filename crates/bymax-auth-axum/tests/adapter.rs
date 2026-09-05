@@ -3805,3 +3805,94 @@ async fn the_capturing_mailer_records_the_codes_and_ignores_the_rest() {
             .is_ok()
     );
 }
+
+// ----------------------------------------------------------------------------------------
+// reset-password proof arity (cross-implementation)
+// ----------------------------------------------------------------------------------------
+
+#[tokio::test]
+async fn reset_password_counts_the_proofs_the_way_nest_auth_does() {
+    // `POST /auth/password/reset-password` carries exactly one of `token` / `otp` /
+    // `verifiedToken`, and how the two backends COUNT them is wire behaviour that neither the
+    // shared contract nor a status table pins: it is arity, not vocabulary.
+    //
+    // nest-auth counts through `@IsOptional()`, whose predicate is literally
+    // `value !== null && value !== undefined`, so a body sending `token: null` beside a real
+    // `otp` is ONE proof there, not two. This side counts through `serde`, where `null` and an
+    // omitted key both deserialize to `None`. The two agree — but by two different mechanisms
+    // that could drift apart without either suite noticing, which is what this test is for.
+    // Measured against nest-auth's answers on an OTP-method deployment, body for body.
+    let Some(h) = build(EngineSpec::default()) else { return };
+    let app = router(&h);
+    seed_user(&h, "arity@e.com", "glidingwalnut42", "USER").await;
+
+    // ONE proof: the `null` is not an assertion, so the `otp` stands alone and is verified —
+    // and fails, because no reset was ever initiated for this address.
+    let one = Req::post("/auth/password/reset-password")
+        .json(serde_json::json!({
+            "email": "arity@e.com", "newPassword": "newpassword1234",
+            "token": null, "otp": "123456", "tenantId": TENANT
+        }))
+        .send(&app)
+        .await;
+    assert_eq!(one.status, StatusCode::UNAUTHORIZED);
+    assert_eq!(one.json()["error"]["code"], "auth.otp_invalid");
+
+    // TWO proofs: refused before any of them is spent, so neither the OTP attempt budget nor
+    // the single-use verified token is consumed by a malformed request.
+    let two = Req::post("/auth/password/reset-password")
+        .json(serde_json::json!({
+            "email": "arity@e.com", "newPassword": "newpassword1234",
+            "otp": "123456", "verifiedToken": "a".repeat(64), "tenantId": TENANT
+        }))
+        .send(&app)
+        .await;
+    assert_eq!(two.status, StatusCode::BAD_REQUEST);
+    assert_eq!(
+        two.json()["error"]["code"],
+        "auth.password_reset_token_invalid"
+    );
+
+    // NONE: the same answer as two, deliberately — a caller learns nothing about which shape
+    // this deployment wanted from the error it gets back.
+    let none = Req::post("/auth/password/reset-password")
+        .json(serde_json::json!({
+            "email": "arity@e.com", "newPassword": "newpassword1234", "tenantId": TENANT
+        }))
+        .send(&app)
+        .await;
+    assert_eq!(none.status, StatusCode::BAD_REQUEST);
+    assert_eq!(
+        none.json()["error"]["code"],
+        "auth.password_reset_token_invalid"
+    );
+}
+
+#[tokio::test]
+async fn a_structurally_valid_proof_the_configured_method_does_not_accept_is_refused_alike() {
+    // Structurally valid, deployment-ineligible: a link `token` is one proof, and one proof is
+    // the right arity — but this deployment's method is `otp`, so it is refused as a method
+    // mismatch with the SAME `auth.password_reset_token_invalid`, without ever reaching a
+    // lookup. Indistinguishable from a wrong arity, which is what keeps the configured method
+    // out of an unauthenticated caller's reach — and it is nest-auth's answer to the same body.
+    //
+    // Its own test rather than a fourth request on the arity one: the route's rate limiter
+    // spends its window in three, so a fourth request measures the limiter instead of the
+    // dispatch.
+    let Some(h) = build(EngineSpec::default()) else { return };
+    let app = router(&h);
+    seed_user(&h, "mismatch@e.com", "glidingwalnut42", "USER").await;
+
+    let mismatch = Req::post("/auth/password/reset-password")
+        .json(serde_json::json!({
+            "email": "mismatch@e.com", "newPassword": "newpassword1234",
+            "token": "a".repeat(64), "tenantId": TENANT
+        }))
+        .send(&app)
+        .await;
+    assert_eq!(mismatch.status, StatusCode::BAD_REQUEST);
+    assert_eq!(
+        mismatch.json()["error"]["code"],
+        "auth.password_reset_token_invalid"
+    );
+}

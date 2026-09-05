@@ -16,9 +16,6 @@ import type {
 import type { AuthResult, LoginResult } from "../shared/auth-result.types";
 import type { AuthUserClient } from "../shared/auth-user.types";
 
-/** The default tenant used when a caller does not pass one to `login` / `forgotPassword`. */
-const DEFAULT_TENANT_ID = "default";
-
 /** The default session revalidation cadence, in milliseconds. `0` disables the interval. */
 const DEFAULT_REVALIDATE_INTERVAL_MS = 300_000;
 
@@ -152,7 +149,14 @@ export function useSession(): UseSessionResult {
 
 /** The shape returned by {@link useAuth}. */
 export interface UseAuthResult {
-  /** Authenticate; `tenantId` defaults to `'default'`. Triggers a session revalidation. */
+  /**
+   * Authenticate. `tenantId` is passed through exactly as given and omitted when absent:
+   * a backend configuring a `TenantIdResolver` refuses a body that names a tenant, and one
+   * without a resolver refuses a body that names none — so which shape is right belongs to
+   * the deployment, and this hook no longer decides it by inventing `'default'`.
+   *
+   * Triggers a session revalidation.
+   */
   login: (
     email: string,
     password: string,
@@ -162,7 +166,7 @@ export interface UseAuthResult {
   register: (data: RegisterInput) => Promise<AuthResult>;
   /** Sign out, then revalidate the (now anonymous) session. */
   logout: () => Promise<void>;
-  /** Begin a password reset; `tenantId` defaults to `'default'`. */
+  /** Begin a password reset; `tenantId` is passed through as given, per {@link login}. */
   forgotPassword: (email: string, tenantId?: string) => Promise<void>;
   /** Complete a password reset. */
   resetPassword: (input: ResetPasswordInput) => Promise<void>;
@@ -183,7 +187,7 @@ export function useAuth(): UseAuthResult {
       const result = await client.login({
         email,
         password,
-        tenantId: options?.tenantId ?? DEFAULT_TENANT_ID,
+        ...(options?.tenantId === undefined ? {} : { tenantId: options.tenantId }),
       });
       await refresh();
       return result;
@@ -207,7 +211,7 @@ export function useAuth(): UseAuthResult {
 
   const forgotPassword = React.useCallback<UseAuthResult["forgotPassword"]>(
     async (email, tenantId) => {
-      await client.forgotPassword(email, tenantId ?? DEFAULT_TENANT_ID);
+      await client.forgotPassword(email, tenantId);
     },
     [client],
   );

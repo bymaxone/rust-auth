@@ -92,7 +92,7 @@ pnpm add @bymax-one/rust-auth
 
 ### 🏢 Multi-Tenant & Platform
 
-- ✅ **Tenant Isolation** — All operations scoped by `tenant_id` via a configurable `TenantIdResolver` (anti-spoofing: the body is ignored)
+- ✅ **Tenant Isolation** — All operations scoped by `tenant_id` via a configurable `TenantIdResolver` (anti-spoofing: a body that names a tenant is refused)
 - ✅ **Platform Admin Auth** — A separate identity domain with its own claims, sessions, and role hierarchy — fully isolated from tenant users
 - ✅ **User Invitations** — Single-use tokenized invites with role + tenant assignment and re-validation on accept
 - ✅ **Role-Based Access Control** — Hierarchical roles enforced by the `RequireRole<R>` extractor
@@ -625,7 +625,7 @@ Verification pins `header.alg == "HS256"` **before** any signature math — `non
 
 ### Separate Auth Contexts for Multi-Tenant SaaS
 
-Platform admins and tenant users are fully isolated — separate repositories, claims, extractors, and routes. When a `TenantIdResolver` is configured it is authoritative on **every** tenant-scoped flow (login, register, both email-verification steps, all four password-reset steps, and the OAuth initiate), and the body's `tenantId` is ignored — preventing tenant spoofing at the architecture level.
+Platform admins and tenant users are fully isolated — separate repositories, claims, extractors, and routes. When a `TenantIdResolver` is configured it is authoritative on **every** tenant-scoped flow (login, register, both email-verification steps, all four password-reset steps, and the OAuth initiate), and a request that names a `tenantId` of its own is refused with `auth.validation` rather than having it silently discarded — preventing tenant spoofing at the architecture level, and saying so instead of answering success while the account lands under a different tenant.
 
 Because a configured resolver makes the body's value dead weight, `tenantId` is **optional** on every DTO that carries it and a client may omit it entirely. With no resolver configured the body is the only thing that can name a tenant, and a request naming none is refused with `auth.validation` rather than defaulted — the deployment has to choose one of the two, and neither choice is guessed on its behalf.
 

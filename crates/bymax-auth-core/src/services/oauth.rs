@@ -141,8 +141,9 @@ impl AuthEngine {
         // Resolve the provider first: an unknown provider fails without minting state.
         let provider_impl = self.resolve_oauth_provider(provider)?;
         // A deployment that derives the tenant from the request has stated that the caller's
-        // value is not to be trusted. Resolved before any state is minted, so a request that
-        // the resolver refuses consumes nothing.
+        // value is not to be trusted, so a query naming one is refused rather than discarded.
+        // Resolved before any state is minted, so a request that the resolver refuses consumes
+        // nothing — no state record is left behind for a callback to redeem.
         let tenant_id = self.resolve_tenant(tenant_id, ctx).await?;
 
         let state = generate_state();
@@ -1716,14 +1717,25 @@ mod tests {
         // becoming an uncovered LINE, which is what the 100% gate measures.
         let Ok(engine) = built else { return };
 
-        // No `host`: the resolver refuses, and the spoofed body value must not stand in for it.
-        let empty = RequestContext::new("1.2.3.4", "ua", std::collections::BTreeMap::new());
+        // A query naming a tenant is refused outright: this deployment decides the tenant, and
+        // the initiate is the door that decides which one an account gets provisioned into.
         // Awaited into a binding first, as the resolvable case below is: an `.await` inside the
         // `matches!` scrutinee splits the expression across the suspend point and leaves the
         // resumption region on a line of its own, which the 100% gate reads as uncovered.
-        let refused = engine
+        let empty = RequestContext::new("1.2.3.4", "ua", std::collections::BTreeMap::new());
+        let named = engine
             .oauth_initiate("google", Some("victim-tenant"), &empty)
             .await;
+        assert!(
+            matches!(&named, Err(AuthError::Validation { details })
+                if details.len() == 1 && details[0].field == "tenantId"),
+            "a query-named tenant must be refused, not discarded"
+        );
+        // Refused before any state is minted, so nothing is left behind for a callback to
+        // redeem — the resolution happens ahead of `generate_state`.
+
+        // No `host` and a silent query: the resolver refuses, and nothing stands in for it.
+        let refused = engine.oauth_initiate("google", None, &empty).await;
         assert!(
             matches!(refused, Err(AuthError::Forbidden)),
             "the initiate must consult the resolver, not the query string"
@@ -1736,9 +1748,7 @@ mod tests {
         let resolved_ctx = RequestContext::new("1.2.3.4", "ua", headers);
         // Asserted first, destructured second: the workspace denies `panic!` in tests too, so
         // the failure has to come from the assertion rather than from an `else` arm.
-        let minted = engine
-            .oauth_initiate("google", Some("victim-tenant"), &resolved_ctx)
-            .await;
+        let minted = engine.oauth_initiate("google", None, &resolved_ctx).await;
         assert!(minted.is_ok(), "a resolvable request must mint a redirect");
         let Ok(redirect) = minted else { return };
         let stored = OAuthStateStore::take_state(stores.as_ref(), &state_key(&redirect.state))
