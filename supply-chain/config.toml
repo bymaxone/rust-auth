@@ -136,11 +136,11 @@ version = "6.2.1"
 criteria = "safe-to-deploy"
 
 [[exemptions.deadpool]]
-version = "0.13.0"
+version = "0.13.1"
 criteria = "safe-to-deploy"
 
 [[exemptions.deadpool-redis]]
-version = "0.23.0"
+version = "0.23.1"
 criteria = "safe-to-deploy"
 
 [[exemptions.deadpool-runtime]]
@@ -480,7 +480,7 @@ version = "11.6.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.redis]]
-version = "1.5.0"
+version = "1.6.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.redox_syscall]]
