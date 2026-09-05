@@ -2631,13 +2631,16 @@ their ordering reproduces the NestJS guard pipeline.
 | Method | Path                    | Handler              | Extractors / guards            | Success | Body DTO | Feature  |
 | ------ | ----------------------- | -------------------- | ------------------------------ | ------- | -------- | -------- |
 | GET    | `/auth/sessions`        | `list_sessions`      | `AuthUser`, `UserStatus`       | 200     | —        | sessions |
-| DELETE | `/auth/sessions/all`    | `revoke_all_sessions`| `AuthUser`, `UserStatus`       | 204     | —        | sessions |
+| POST   | `/auth/sessions/revoke-all` | `revoke_all_sessions`| `AuthUser`, `UserStatus`   | 204     | `RefreshDto` (bearer mode)| sessions |
 | DELETE | `/auth/sessions/{id}`   | `revoke_session`     | `AuthUser`, `UserStatus`       | 204     | —        | sessions |
 
 > `{id}` is the full 64-char SHA-256 session hash from `GET /auth/sessions`.
 > Axum 0.8 path syntax uses braces (`/{id}`), not the colon form. The static
-> `all` segment is registered and matched ahead of the `{id}` capture; in Axum
-> 0.8 static segments win over captures, so declaration order is irrelevant.
+> `revoke-all` segment is registered and matched ahead of the `{id}` capture;
+> in Axum 0.8 static segments win over captures, so declaration order is
+> irrelevant. There is **no** static `all` segment: the retired
+> `DELETE /auth/sessions/all` reaches the `{id}` capture as `id = "all"`,
+> which is not a session hash, so it answers `404 auth.session_not_found`.
 
 #### 8.2.5 PlatformAuthController — group `platform` (feature `platform`)
 
@@ -5073,7 +5076,7 @@ brute-force headroom per IP.
 | `POST /auth/email/change/confirm`       | `email_change_confirm` | 5    | 60          | Bounds guessing at the address-change token.                          |
 | `GET /auth/sessions`                    | `list_sessions`       | 30    | 60          | Generous read limit.                                                     |
 | `DELETE /auth/sessions/{id}`            | `revoke_session`      | 10    | 60          | Bound single-session revocation.                                        |
-| `DELETE /auth/sessions/all`             | `revoke_all_sessions` | 5     | 60          | Bound bulk revocation.                                                   |
+| `POST /auth/sessions/revoke-all`        | `revoke_all_sessions` | 5     | 60          | Bound bulk revocation.                                                   |
 | `GET /auth/oauth/{provider}`            | `oauth_initiate`      | 10    | 60          | Initiate + callback = 2 reqs/login; cap of 10 keeps effective logins ≤5. |
 | `GET /auth/oauth/{provider}/callback`   | `oauth_callback`      | 10    | 60          | Matches `oauth_initiate`; prevents callback-only flooding.              |
 

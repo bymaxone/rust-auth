@@ -208,7 +208,7 @@ pub struct RateLimitConfig {
     pub list_sessions: Option<RateLimit>,
     /// `DELETE /auth/sessions/{id}` — 10 / 60s.
     pub revoke_session: Option<RateLimit>,
-    /// `DELETE /auth/sessions/all` — 5 / 60s.
+    /// `POST /auth/sessions/revoke-all` — 5 / 60s.
     pub revoke_all_sessions: Option<RateLimit>,
     /// `GET /auth/oauth/{provider}` — 10 / 60s.
     pub oauth_initiate: Option<RateLimit>,
