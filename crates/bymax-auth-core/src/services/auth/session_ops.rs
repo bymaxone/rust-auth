@@ -56,18 +56,19 @@ impl AuthEngine {
         // when the token is allowed to be absent.
         let session_hash = is_refresh_token_shape(raw_refresh)
             .then(|| RawRefreshToken::from_raw(raw_refresh.to_owned()).redis_hash());
-        let user_id = match &session_hash {
+        // The record, not just its `user_id`: the session index this logout has to prune is
+        // keyed by the TENANT-SCOPED subject, and the record is the only thing on this path
+        // that carries the tenant — the access token is allowed to be absent.
+        let owner = match &session_hash {
             Some(hash) => self
                 .session_store()
                 .find_session(SessionKind::Dashboard, hash)
                 .await
                 .ok()
-                .flatten()
-                .map(|record| record.user_id)
-                .unwrap_or_default(),
-            None => String::new(),
+                .flatten(),
+            None => None,
         };
-        let user_id = user_id.as_str();
+        let user_id = owner.as_ref().map_or("", |record| record.user_id.as_str());
 
         if let Ok(claims) = self.tokens().verify_access_ignoring_expiry(access_token) {
             // Blacklist for the token's residual lifetime only. `try_from` clamps to `0` if
@@ -87,9 +88,16 @@ impl AuthEngine {
         // other store error are swallowed, so logout is idempotent and never blocks. A
         // malformed/oversized token is skipped before hashing — it owns no session anyway.
         if let Some(session_hash) = &session_hash {
+            let subject = self.session_subject(
+                SessionKind::Dashboard,
+                owner
+                    .as_ref()
+                    .and_then(|record| record.tenant_id.as_deref()),
+                user_id,
+            );
             if let Err(error) = self
                 .session_store()
-                .revoke_session(SessionKind::Dashboard, user_id, session_hash)
+                .revoke_session(SessionKind::Dashboard, &subject, session_hash)
                 .await
             {
                 // Swallowed by design, but not silently: an operator seeing repeated cleanup
@@ -215,12 +223,13 @@ impl AuthEngine {
                 // into its new tenant. That is the deliberate trade for scoping the read: the
                 // alternative resolves an account by id alone, which is exactly what is not
                 // safe to do. Re-authenticating names the new tenant explicitly.
-                self.revoke_all_sessions(&user_id).await?;
+                self.revoke_all_sessions(&claims.tenant_id, &user_id)
+                    .await?;
                 return Err(AuthError::TokenInvalid);
             }
         };
         if let Err(error) = self.assert_user_not_blocked(&user.status) {
-            self.revoke_all_sessions(&user_id).await?;
+            self.revoke_all_sessions(&user.tenant_id, &user_id).await?;
             return Err(error);
         }
         // Refused, but NOT compensated. An unproven address is an unfinished onboarding, not a
@@ -300,12 +309,17 @@ impl AuthEngine {
     /// # Errors
     ///
     /// Returns a store [`AuthError`] when the sweep or the epoch bump fails.
-    pub async fn revoke_all_sessions(&self, user_id: &str) -> Result<(), AuthError> {
+    pub async fn revoke_all_sessions(
+        &self,
+        tenant_id: &str,
+        user_id: &str,
+    ) -> Result<(), AuthError> {
+        let subject = self.session_subject(SessionKind::Dashboard, Some(tenant_id), user_id);
         self.session_store()
-            .revoke_all(SessionKind::Dashboard, user_id)
+            .revoke_all(SessionKind::Dashboard, &subject)
             .await?;
         self.session_store()
-            .bump_epoch(SessionKind::Dashboard, user_id)
+            .bump_epoch(SessionKind::Dashboard, &subject)
             .await?;
         Ok(())
     }
@@ -352,7 +366,17 @@ impl AuthEngine {
         let safe = SafeAuthUser::from(user);
         let result = self
             .tokens()
-            .issue_tokens(&safe, ip, user_agent, false)
+            .issue_tokens(
+                &safe,
+                ip,
+                user_agent,
+                false,
+                // No credential was verified: this is the password-less workspace-switch /
+                // impersonation door, and the authority is the CALLER's. Planting the
+                // recent-authentication marker here would let an impersonation session enrol a
+                // second factor on an account with no local password, which has no other proof.
+                crate::services::token_manager::CredentialProof::Unproven,
+            )
             .await?;
 
         let hook_ctx = identity_only_context(
@@ -647,7 +671,17 @@ mod tests {
         };
         let seeded = h
             .stores
-            .create_session(SessionKind::Dashboard, &raw.redis_hash(), &record, 3600)
+            .create_session(
+                SessionKind::Dashboard,
+                &h.engine.session_subject(
+                    SessionKind::Dashboard,
+                    record.tenant_id.as_deref(),
+                    &record.user_id,
+                ),
+                &raw.redis_hash(),
+                &record,
+                3600,
+            )
             .await;
         assert!(seeded.is_ok());
 
