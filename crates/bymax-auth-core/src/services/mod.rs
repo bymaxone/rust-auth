@@ -92,10 +92,9 @@ pub(crate) fn to_hex(bytes: &[u8]) -> String {
 /// plane whose admins are cross-tenant and carry no tenant at all.
 ///
 /// The shared contract calls this the `userSubject` and lists what derives from it under
-/// `userSubjectDerivedKeys`: the MFA setup record, the recent-authentication marker, the TOTP
-/// anti-replay marker, the recovery-code claim, the three MFA failure counters, and — since the
-/// keyspace was scoped — the dashboard/platform **session index** and **token epoch**. It
-/// outgrew MFA, which is why it no longer carries that name.
+/// `userSubjectDerivedKeys`. In this library today that is the MFA setup record, the
+/// recent-authentication marker, the TOTP anti-replay marker, the recovery-code claim and the
+/// three MFA failure counters.
 ///
 /// # The length prefix is load-bearing
 ///
