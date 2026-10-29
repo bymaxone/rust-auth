@@ -40,7 +40,7 @@ version bump.
   `conformance/wire-contract.json` is held byte-identical by nest-auth, and the suites only ever
   read *values* out of it (a preimage template, a status, a record shape) — so a change to a part
   nothing happened to read yet, or a reformat that rewrites every line while changing no value,
-  passed. `crates/bymax-auth-core/tests/wire_contract_identity.rs` pins its SHA-256 (`d7d0bdf3…`),
+  passed. `crates/bymax-auth-core/tests/wire_contract_identity.rs` pins its SHA-256 (`bf3e8b63…`, the digest of nest-auth's copy),
   so every byte change here has to be declared in the same commit by someone who looked at it.
   nest-auth pins the same constant in its own suite.
 

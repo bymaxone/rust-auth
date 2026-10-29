@@ -35,7 +35,7 @@ use bymax_auth_crypto::mac::sha256;
 /// half — see the limits at the top of this file before trusting this constant to do more than it
 /// does.
 const WIRE_CONTRACT_SHA256: &str =
-    "d7d0bdf3080946eac8bc79bba989091c6358c18d9489c3e1b7df611b692c0396";
+    "bf3e8b63a7ce6dbb8d2aacd85f7d2aae660131e62ec809aa851d378cf98d0f91";
 
 /// The contract, as it sits in the working tree.
 ///
