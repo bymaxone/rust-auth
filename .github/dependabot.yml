@@ -10,6 +10,16 @@ updates:
       prefix: chore
       include: scope
 
+  # The example workspace has its own committed Cargo.lock, separate from the root one.
+  - package-ecosystem: cargo
+    directory: "/examples"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: chore
+      include: scope
+
   # GitHub Actions referenced by the workflows.
   - package-ecosystem: github-actions
     directory: "/"
@@ -65,3 +75,18 @@ updates:
           - "@types/react"
           - "@types/react-dom"
           - "@testing-library/react"
+
+  # The example apps each commit their own package-lock.json. Without these entries their
+  # lockfiles never receive version or security updates and accumulate advisories.
+  - package-ecosystem: npm
+    directories:
+      - "/examples/e2e"
+      - "/examples/nextjs"
+      - "/examples/react-vite"
+      - "/examples/smoke-npm"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: chore
+      include: scope
