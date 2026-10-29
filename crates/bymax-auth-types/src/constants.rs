@@ -4,9 +4,11 @@
 //!
 //! These are the single source of truth that the server, the typed client, and the
 //! WASM edge proxy all read, so they cannot disagree. The [`routes`] paths are shown
-//! with the default [`AUTH_ROUTE_PREFIX`]; if a deployment changes the prefix, the
-//! refresh cookie path and the route paths move together (the adapter recomposes them),
-//! which is why [`AUTH_REFRESH_COOKIE_PATH`] must track the prefix.
+//! with the default [`AUTH_ROUTE_PREFIX`]. These are fixed strings: a deployment that
+//! changes the route prefix must also set the refresh cookie path explicitly, and config
+//! validation rejects a custom prefix while the refresh cookie path is still the default
+//! (`ConfigError::RefreshPathMismatch`), which is how [`AUTH_REFRESH_COOKIE_PATH`] is kept
+//! in step with the prefix.
 
 /// Cookie carrying the HS256 access JWT. `HttpOnly`, `SameSite=Lax`, path `/`.
 pub const AUTH_ACCESS_COOKIE_NAME: &str = "access_token";

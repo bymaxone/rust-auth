@@ -1,7 +1,7 @@
 set -e
 # Load cargo onto PATH for GUI git clients (Cursor, VS Code, GitHub Desktop) launched
-# by launchd, which do not source the interactive shell profile. No-op in a terminal
-# that already has cargo on PATH.
-[ -f "$HOME/.cargo/env" ] && . "$HOME/.cargo/env"
+# by launchd, which do not source the interactive shell profile. Skipped when cargo is
+# already on PATH, so it never shadows a cargo supplied by Nix, asdf or Homebrew.
+if ! command -v cargo >/dev/null 2>&1 && [ -f "$HOME/.cargo/env" ]; then . "$HOME/.cargo/env"; fi
 cargo fmt --all --check
 cargo test --workspace
