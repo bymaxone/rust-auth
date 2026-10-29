@@ -61,6 +61,8 @@ version bump.
 
 ### Fixed
 
+- **A blocked, unverified or deleted account with a pending second factor is now told that, not `mfa_required`.** `MfaSatisfied` demanded the challenge before it looked at the account, so the answer depended on whether the handler also listed `UserStatus` first. With an MFA challenge pending the extractor now runs the status gate (`assert_user_active_and_verified`) before refusing: a blocked account answers its `account_*` code, an unverified address `email_not_verified` where verification is required, and a deleted account `token_invalid`. Accounts with no pending challenge pay no extra lookup. This is the same order as nest-auth's access-token verifier and its HTTP guard chain. The platform adapter has no MFA extractor, so there is no platform arm here.
+
 - **The contract test read a hand-written subset of the section it was checking, and that is how
   the session keyspace below stayed unfixed with a green gate.** `userSubjectDerivedKeys` holds
   eight entries; the assertion listed six, naming them "the six keys that were in the blind spot"
