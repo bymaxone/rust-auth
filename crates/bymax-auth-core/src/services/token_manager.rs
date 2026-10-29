@@ -27,7 +27,7 @@ use zeroize::Zeroizing;
 
 use crate::services::session::normalize_session_metadata;
 use crate::services::{
-    internal_error, is_refresh_token_shape, new_uuid_v4, now_offset, now_unix, to_hex,
+    internal_error, is_refresh_token_shape, new_uuid_v4, now_offset, now_unix, to_hex, user_subject,
 };
 use crate::traits::{
     AuthHooks, HookContext, RotateOutcome, SessionKind, SessionRecord, SessionRotation,
@@ -321,19 +321,19 @@ impl TokenManagerService {
         self
     }
 
-    /// The recent-authentication marker key for one account on one plane, or `None` when no
+    /// The recent-authentication marker key for one dashboard account, or `None` when no
     /// identifier key is wired.
     ///
-    /// `hmac_sha256("{plane}:{user_id}")`, held byte-identical with nest-auth's
-    /// `recentAuthKey` and pinned by `conformance/wire-contract.json`. The plane is in the
-    /// PREIMAGE rather than the key path because a dashboard user and a platform admin can
-    /// carry the same id from different consumer repositories, and without it one would satisfy
-    /// the other's freshness check.
-    fn recent_auth_hash(&self, plane: &str, user_id: &str) -> Option<String> {
+    /// `hmac_sha256(user_subject)`, the same subject every MFA-derived key uses and held
+    /// byte-identical with nest-auth's `recentAuthKey` (pinned by
+    /// `conformance/wire-contract.json`). The reader in the MFA setup gate derives the marker
+    /// through the same function, so a writer on any other preimage would plant a key nothing
+    /// ever reads and enrolment would always ask to re-authenticate.
+    fn recent_auth_hash(&self, tenant_id: &str, user_id: &str) -> Option<String> {
         self.identifier_key.as_ref().map(|key| {
             to_hex(&hmac_sha256(
                 key.as_ref(),
-                format!("{plane}:{user_id}").as_bytes(),
+                user_subject(MfaContext::Dashboard, Some(tenant_id), user_id).as_bytes(),
             ))
         })
     }
@@ -458,7 +458,7 @@ impl TokenManagerService {
         // does not plant one, because a refresh proves possession of a token rather than of a
         // credential. That asymmetry is the whole value — an attacker holding a stolen session
         // can rotate it forever and never make the mark fresh again.
-        if let Some(hash) = self.recent_auth_hash("dashboard", &user.id) {
+        if let Some(hash) = self.recent_auth_hash(&user.tenant_id, &user.id) {
             self.session_store
                 .mark_recent_auth(&hash, RECENT_AUTH_TTL_SECS)
                 .await?;
@@ -1510,6 +1510,27 @@ mod tests {
             last_login_at: None,
             created_at: OffsetDateTime::UNIX_EPOCH,
         }
+    }
+
+    #[tokio::test]
+    async fn issuing_tokens_plants_the_recent_auth_marker_the_mfa_gate_reads() {
+        // The writer here and the reader in the MFA setup gate derive the marker independently;
+        // the MFA tests plant it by hand, so nothing else proves the two agree. A writer left on
+        // the pre-length-prefix `dashboard:{user_id}` preimage plants a key nothing reads, and
+        // every enrolment after a fresh login is refused as "re-authenticate".
+        let store = Arc::new(InMemoryStores::new());
+        let svc = service(store.clone()).with_identifier_key(Zeroizing::new([9u8; 64]));
+        let Some(_issued) = issued_for(&svc).await else { return };
+
+        let marker = to_hex(&hmac_sha256(
+            &[9u8; 64],
+            user_subject(MfaContext::Dashboard, Some("t1"), "u1").as_bytes(),
+        ));
+        let planted = store.has_recent_auth(&marker).await;
+        assert!(
+            matches!(planted, Ok(true)),
+            "login did not plant the marker the MFA setup gate derives: {planted:?}"
+        );
     }
 
     #[tokio::test]
