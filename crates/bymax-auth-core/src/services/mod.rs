@@ -129,24 +129,6 @@ pub(crate) fn user_subject(plane: MfaContext, tenant_id: Option<&str>, user_id: 
     }
 }
 
-/// The store-key suffix for a subject: `hmac_sha256(identifier_key, user_subject)` in lower-case
-/// hex.
-///
-/// Keyed, never a bare digest, and never the raw id: a user id is low-entropy enough to reverse
-/// out of a plain SHA-256, and a key carrying it in the clear turns anyone with store access into
-/// a reader of account identifiers. The same reasoning the `lf:` login counter already applies.
-pub(crate) fn user_subject_hash(
-    identifier_key: &[u8; 64],
-    plane: MfaContext,
-    tenant_id: Option<&str>,
-    user_id: &str,
-) -> String {
-    to_hex(&bymax_auth_crypto::mac::hmac_sha256(
-        identifier_key,
-        user_subject(plane, tenant_id, user_id).as_bytes(),
-    ))
-}
-
 /// Mint a fresh RFC 4122 version-4 UUID from the CSPRNG, hyphenated and lower-case. Used
 /// for every access-token `jti` (the revocation-blacklist key) and the MFA temp-token
 /// `jti`. Hand-rolled over the crate's CSPRNG so no `uuid` dependency is pulled in.
