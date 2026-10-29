@@ -673,7 +673,7 @@
     "epoch": {
       "claim": "epoch",
       "type": "non-negative integer",
-      "storedUnder": "{ep|pep}:{userId}",
+      "storedUnder": "{ep|pep}:{hmac_sha256(hmacKey, userSubject)}",
       "absentReadsAs": 0,
       "rejectWhen": "stampedEpoch < storedEpoch"
     }

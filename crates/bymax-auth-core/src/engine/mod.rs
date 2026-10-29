@@ -133,6 +133,31 @@ impl AuthEngine {
         &self.config
     }
 
+    /// The session subject for one account on one plane: `hmac_sha256(hmac_key, user_subject)`
+    /// in lower-case hex — the suffix of the session index (`sess:`/`psess:`) and the token
+    /// epoch (`ep:`/`pep:`).
+    ///
+    /// Every engine-level flow that revokes sessions or bumps an epoch goes through here, so
+    /// there is one derivation to be right rather than one per flow. `tenant_id` is the
+    /// account's own tenant on the dashboard plane and `None` on the platform plane, where
+    /// admins are cross-tenant and have none.
+    ///
+    /// Public because a deployment with a LIVE keyspace has to migrate it: these keys used to
+    /// be `sess:{userId}` / `ep:{userId}`, the move has no compatibility path, and a host
+    /// copying an epoch forward or fanning a session index out per tenant needs the new key
+    /// name. Deriving it by hand from the contract is possible and is the thing to get wrong;
+    /// the value is a keyed hash of an id the store already holds, so exposing it reveals
+    /// nothing the keyspace does not.
+    #[must_use]
+    pub fn session_subject(
+        &self,
+        kind: crate::traits::SessionKind,
+        tenant_id: Option<&str>,
+        user_id: &str,
+    ) -> String {
+        crate::services::session_subject_hash(self.config.hmac_key(), kind, tenant_id, user_id)
+    }
+
     /// The dashboard/tenant user repository.
     #[must_use]
     pub fn user_repository(&self) -> &Arc<dyn UserRepository> {

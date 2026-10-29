@@ -10,7 +10,8 @@
 -- not tell an `rt:` hash from an `rp:` one, so a just-rotated refresh token survived
 -- revoke-all for its whole grace window — a live credential outliving the logout meant to kill it.
 --
--- KEYS[1] = sess:{userId}   the user's session-index SET (already namespaced)
+-- KEYS[1] = sess:{subjectHash}  the account's session-index SET (already namespaced). The
+--                               suffix is `hmac_sha256(hmacKey, userSubject)`, never a user id.
 -- ARGV[1] = namespace       e.g. "auth"
 -- ARGV[2] = live prefix     "rt" (dashboard) or "prt" (platform)
 -- ARGV[3] = detail prefix   "sd" (dashboard) or "psd" (platform)

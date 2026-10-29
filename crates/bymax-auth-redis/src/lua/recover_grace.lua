@@ -21,7 +21,7 @@
 -- the write, so a `revoke_family` in between would have been undone by the `SADD` that follows.
 --
 -- KEYS[1] rt:{new_hash}        the recovered session record
--- KEYS[2] sess:{user_id}       the per-user index, and the witness
+-- KEYS[2] sess:{subject_hash}  the per-account index, and the witness
 -- KEYS[3] sd:{new_hash}        the display-metadata record
 -- KEYS[4] fam:{family_id}      the lineage index ('' family: unused)
 -- ARGV[1] session record JSON

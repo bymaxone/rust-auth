@@ -2,7 +2,8 @@
 -- IDOR/BOLA hole: a user must not revoke a session hash they do not own. The membership
 -- test and the deletes are one atomic unit, so a session cannot be half-revoked.
 --
--- KEYS[1] = sess:{userId}     the user's session-index SET
+-- KEYS[1] = sess:{subjectHash} the account's session-index SET, keyed by
+--                              `hmac_sha256(hmacKey, userSubject)` rather than by a user id
 -- KEYS[2] = rt:{sessionHash}  the refresh-session key
 -- KEYS[3] = sd:{sessionHash}  the per-session detail key
 -- ARGV[1] = rt:{sessionHash}  the SET member to revoke — the full key SUFFIX, not a bare
