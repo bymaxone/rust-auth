@@ -250,14 +250,14 @@ impl AuthEngine {
 
     /// Mint a single-use WebSocket upgrade ticket (§7.3.6) from an already-verified dashboard
     /// session snapshot: the store generates an opaque CSPRNG ticket, persists the snapshot
-    /// under `wst:{sha256(ticket)}` with a ~30 s TTL, and returns the raw ticket. The access
+    /// under `wst:{sha256(ticket)}` with a ~30 s TTL (never longer than the minting token's remaining life), and returns the raw ticket. The access
     /// token is never echoed into the ticket — only the verified identity snapshot is stored.
     ///
     /// # Errors
     ///
     /// Returns [`AuthError::Internal`] when no WS-ticket store is wired or when the account
-    /// read fails, [`AuthError::TokenInvalid`] when the token names an account that no longer
-    /// exists, the status-specific error for a blocked account (the snapshot is read from the
+    /// read fails, [`AuthError::TokenInvalid`] when the token has no lifetime left or names an
+    /// account that no longer exists, the status-specific error for a blocked account (the snapshot is read from the
     /// account, so its standing is checked here rather than trusted from the token), or a store
     /// [`AuthError`] on a persistence failure.
     pub async fn issue_ws_ticket(&self, claims: &DashboardClaims) -> Result<String, AuthError> {
@@ -304,7 +304,16 @@ impl AuthEngine {
             jti: claims.jti.clone(),
             epoch: claims.epoch,
         };
-        store.mint(&snapshot, WS_TICKET_TTL_SECONDS).await
+        // A logout blacklists the token's `jti` only until the token expires, so a ticket that
+        // outlived its token could be redeemed after that logout once the entry is gone. The
+        // ticket therefore lives no longer than the token it was minted from, and a token with
+        // no lifetime left mints nothing.
+        let remaining = u64::try_from(claims.exp.saturating_sub(now_unix())).unwrap_or(0);
+        let ttl = WS_TICKET_TTL_SECONDS.min(remaining);
+        if ttl == 0 {
+            return Err(AuthError::TokenInvalid);
+        }
+        store.mint(&snapshot, ttl).await
     }
 
     /// Redeem a single-use WebSocket upgrade ticket (§7.3.6): the store atomically `GETDEL`s
@@ -875,7 +884,7 @@ mod tests {
             mfa_enabled: false,
             mfa_verified: false,
             iat: now_unix(),
-            exp: now_unix(),
+            exp: now_unix() + 900,
             epoch: 0,
         }
     }

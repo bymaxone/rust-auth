@@ -193,3 +193,86 @@ async fn a_revoked_ticket_gets_the_answer_of_an_unknown_one() {
         (Err(AuthError::TokenInvalid), Err(AuthError::TokenInvalid))
     ));
 }
+
+/// A ticket store that remembers the TTL it was asked to mint with.
+struct RecordingTicketStore {
+    ttls: std::sync::Mutex<Vec<u64>>,
+}
+
+#[async_trait::async_trait]
+impl crate::traits::WsTicketStore for RecordingTicketStore {
+    async fn mint(&self, _snapshot: &WsTicketSnapshot, ttl_secs: u64) -> Result<String, AuthError> {
+        if let Ok(mut ttls) = self.ttls.lock() {
+            ttls.push(ttl_secs);
+        }
+        Ok("0".repeat(64))
+    }
+    async fn redeem(&self, _ticket: &str) -> Result<Option<WsTicketSnapshot>, AuthError> {
+        Ok(None)
+    }
+}
+
+/// The TTLs `issue_ws_ticket` minted with for tokens that expire in `lifetimes` seconds.
+async fn minted_ttls(lifetimes: &[i64]) -> Vec<Option<u64>> {
+    use crate::config::Environment;
+    use crate::testing::{InMemoryStores, InMemoryUserRepository};
+    use crate::traits::UserRepository as _;
+    use std::sync::Arc;
+
+    let users = Arc::new(InMemoryUserRepository::new());
+    let stores = Arc::new(InMemoryStores::new());
+    let recorder = Arc::new(RecordingTicketStore {
+        ttls: std::sync::Mutex::new(Vec::new()),
+    });
+    let created = users
+        .create(bymax_auth_types::CreateUserData {
+            email: "ttl@example.com".to_owned(),
+            name: "Ttl".to_owned(),
+            password_hash: None,
+            role: None,
+            status: Some("ACTIVE".to_owned()),
+            tenant_id: "t1".to_owned(),
+            email_verified: Some(true),
+        })
+        .await;
+    let built = AuthEngine::builder()
+        .config(base_config())
+        .environment(Environment::Test)
+        .user_repository(users)
+        .session_store(stores.clone())
+        .otp_store(stores.clone())
+        .brute_force_store(stores)
+        .ws_ticket_store(recorder.clone())
+        .build();
+    let (Ok(user), Ok(engine)) = (created, built) else { return Vec::new() };
+
+    let mut out = Vec::new();
+    for lifetime in lifetimes {
+        let claims = DashboardClaims {
+            sub: user.id.clone(),
+            exp: now_unix() + lifetime,
+            ..sample_claims()
+        };
+        let before = recorder.ttls.lock().map(|t| t.len()).unwrap_or(0);
+        let issued = engine.issue_ws_ticket(&claims).await;
+        let after = recorder.ttls.lock().map(|t| t.clone()).unwrap_or_default();
+        out.push(match issued {
+            Ok(_) => after.get(before).copied(),
+            Err(_) => None,
+        });
+    }
+    out
+}
+
+#[tokio::test]
+async fn a_ticket_never_outlives_the_token_it_was_minted_from() {
+    // A logout blacklists the jti only until the token expires, so a ticket that outlived its
+    // token could be redeemed after that logout once the blacklist entry was gone.
+    let ttls = minted_ttls(&[900, 5]).await;
+    assert_eq!(ttls, vec![Some(WS_TICKET_TTL_SECONDS), Some(5)]);
+}
+
+#[tokio::test]
+async fn a_token_with_no_lifetime_left_mints_no_ticket() {
+    assert_eq!(minted_ttls(&[0, -3]).await, vec![None, None]);
+}

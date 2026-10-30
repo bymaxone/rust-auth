@@ -2024,7 +2024,7 @@ the `WsAuthUser` upgrade extractor (§8.7).
 /auth/ws-ticket` gates on `AuthUser` + `UserStatus` + `MfaSatisfied`, so a live,
 non-blocked, MFA-satisfied session is proven *before* a ticket exists):
 1. `raw = generate_secure_token(32)` — opaque CSPRNG, **not** a JWT; `hash = sha256(raw)`.
-2. `set_session("wst:{hash}", json(snapshot), WS_TICKET_TTL_SECONDS)` (~30 s). The `WsTicketSnapshot` carries only the verified identity already on the access token (`sub, tenant_id, role, status, mfa_enabled, mfa_verified`) plus the minting token's `jti` and `epoch` — identifiers, not credentials; no secret, no signature.
+2. `set_session("wst:{hash}", json(snapshot), ttl)` where `ttl` is the lesser of `WS_TICKET_TTL_SECONDS` (~30 s) and the minting token's remaining life — a logout blacklists the `jti` only until the token expires, so a ticket must not outlive it; a token with no life left mints nothing (`TokenInvalid`). The `WsTicketSnapshot` carries only the verified identity already on the access token (`sub, tenant_id, role, status, mfa_enabled, mfa_verified`) plus the minting token's `jti` and `epoch` — identifiers, not credentials; no secret, no signature.
 3. Return `raw` (delivered as the body's `{ ticket }`).
 
 `redeem_ws_ticket(raw)` — called once, inside the upgrade extractor:
