@@ -112,7 +112,7 @@ pub struct SessionRecord {
     /// so every enrolled user is refused by every route behind the MFA gate once the first
     /// access token ages out. A session inherits the assurance of the authentication event that
     /// created it (NIST SP 800-63B-4, Session Management). Enabling, disabling and resetting
-    /// MFA revoke every session, so a stored `true` never outlives the factor it describes.
+    /// MFA through this library revokes every session, so a stored `true` does not outlive the factor it describes.
     #[serde(
         default,
         deserialize_with = "strict_true",
