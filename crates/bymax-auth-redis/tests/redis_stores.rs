@@ -63,6 +63,7 @@ fn record(user: &str) -> SessionRecord {
         ip: "203.0.113.4".to_owned(),
         created_at: OffsetDateTime::UNIX_EPOCH,
         mfa_enabled: false,
+        mfa_verified: false,
         family_id: format!("fam-{user}"),
         family_created_at: Some(OffsetDateTime::UNIX_EPOCH),
     }

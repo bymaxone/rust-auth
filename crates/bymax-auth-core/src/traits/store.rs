@@ -88,8 +88,7 @@ pub struct SessionRecord {
     /// refuses a token whose claims say `mfa_enabled && !mfa_verified`, one routine
     /// refresh would silently disable second-factor enforcement for an enrolled account.
     ///
-    /// `mfa_verified` is deliberately NOT stored: it must stay `false` in a rotated token
-    /// so clearing the second factor always goes back through the MFA challenge.
+    /// The second-factor claim is stored separately, as [`SessionRecord::mfa_verified`].
     ///
     /// Required on the wire, deliberately. Defaulting a missing value to `false` would turn a
     /// truncated or corrupt record into a silent second-factor bypass — the gate only refuses a
@@ -98,6 +97,28 @@ pub struct SessionRecord {
     /// record that cannot be read is treated as no session at all, which costs the holder a
     /// login and costs an attacker the bypass.
     pub mfa_enabled: bool,
+    /// Whether this session was established through the MFA challenge.
+    ///
+    /// Written ONLY as `true` and omitted otherwise, never as `false`, so a record that never
+    /// cleared the challenge stays byte-identical to what it was before the field existed. Read
+    /// strictly: only the JSON boolean `true` counts. An absent field, a legacy record, and any
+    /// other value (`"true"`, `1`, `null`) read as `false` and do not fail the record, because
+    /// a record that cannot be read costs the holder a login and a value that is not `true`
+    /// must never be granted the benefit of the doubt.
+    ///
+    /// Every rotation and every grace-window recovery carries it from the stored record to its
+    /// successor and into the claims of the new access token. Without it a rotation mints
+    /// `mfa_verified: false`, and no route lets an authenticated session re-acquire the claim,
+    /// so every enrolled user is refused by every route behind the MFA gate once the first
+    /// access token ages out. A session inherits the assurance of the authentication event that
+    /// created it (NIST SP 800-63B-4, Session Management). Enabling, disabling and resetting
+    /// MFA revoke every session, so a stored `true` never outlives the factor it describes.
+    #[serde(
+        default,
+        deserialize_with = "strict_true",
+        skip_serializing_if = "is_false"
+    )]
+    pub mfa_verified: bool,
     /// The refresh-token **family** (login lineage) this session belongs to. Minted at login
     /// and inherited unchanged across every rotation, so all descendants of one login share it.
     /// It is the unit of reuse-detection revocation: presenting an already-consumed refresh
@@ -122,6 +143,26 @@ pub struct SessionRecord {
         skip_serializing_if = "Option::is_none"
     )]
     pub family_created_at: Option<OffsetDateTime>,
+}
+
+/// Read a flag strictly: only the JSON boolean `true` is `true`. Any other value, of any type,
+/// reads as `false` instead of failing the record it sits in.
+fn strict_true<'de, D>(deserializer: D) -> Result<bool, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::Deserialize;
+    Ok(matches!(
+        serde_json::Value::deserialize(deserializer)?,
+        serde_json::Value::Bool(true)
+    ))
+}
+
+/// `skip_serializing_if` predicate: the flag is written only when it is `true`.
+// The signature is fixed by serde: it receives a reference.
+#[allow(clippy::trivially_copy_pass_by_ref)]
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 /// Serde adapter for an optional RFC 3339 instant, so a record with no family birth time
@@ -1012,6 +1053,7 @@ mod tests {
             ip: "203.0.113.4".into(),
             created_at: OffsetDateTime::UNIX_EPOCH,
             mfa_enabled: false,
+            mfa_verified: false,
             family_id: "fam-1".into(),
             family_created_at: Some(OffsetDateTime::UNIX_EPOCH),
         }
@@ -1452,6 +1494,64 @@ mod tests {
         let familyless_json: serde_json::Value = serde_json::to_value(familyless)?;
         assert!(familyless_json.get("familyId").is_none());
         assert!(familyless_json.get("familyCreatedAt").is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn the_second_factor_flag_is_optional_on_the_wire_and_written_only_when_true()
+    -> serde_json::Result<()> {
+        // The contract names `mfaVerified` as an optional field of the refresh record. A record
+        // that never cleared the challenge must stay byte-identical to what it was before the
+        // field existed, so `false` is omitted rather than written.
+        let optional: Vec<String> = contract_section("refreshSession")
+            .get("optionalFields")
+            .and_then(serde_json::Value::as_array)
+            .map(|fields| {
+                fields
+                    .iter()
+                    .filter_map(serde_json::Value::as_str)
+                    .map(str::to_owned)
+                    .collect()
+            })
+            .unwrap_or_default();
+        assert_eq!(optional, vec!["mfaVerified".to_owned()]);
+
+        let unverified: serde_json::Value = serde_json::to_value(session_record())?;
+        assert!(unverified.get("mfaVerified").is_none());
+
+        let verified = SessionRecord {
+            mfa_verified: true,
+            ..session_record()
+        };
+        let verified: serde_json::Value = serde_json::to_value(verified)?;
+        assert_eq!(
+            verified.get("mfaVerified"),
+            Some(&serde_json::Value::Bool(true))
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn the_second_factor_flag_is_read_strictly() -> serde_json::Result<()> {
+        // Only the JSON boolean `true` is verified. An absent field (a legacy record) and every
+        // other value read as false, and none of them fails the record, which would cost the
+        // holder a login for a value that was never going to be granted anything.
+        let base = serde_json::to_value(session_record())?;
+        let read = |value: Option<serde_json::Value>| -> serde_json::Result<bool> {
+            let mut record = base.clone();
+            if let (Some(object), Some(value)) = (record.as_object_mut(), value) {
+                object.insert("mfaVerified".to_owned(), value);
+            }
+            Ok(serde_json::from_value::<SessionRecord>(record)?.mfa_verified)
+        };
+
+        assert!(read(Some(serde_json::json!(true)))?);
+        assert!(!read(None)?);
+        assert!(!read(Some(serde_json::json!(false)))?);
+        assert!(!read(Some(serde_json::json!("true")))?);
+        assert!(!read(Some(serde_json::json!(1)))?);
+        assert!(!read(Some(serde_json::Value::Null))?);
+        assert!(!read(Some(serde_json::json!([true])))?);
         Ok(())
     }
 

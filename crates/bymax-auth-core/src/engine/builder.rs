@@ -732,6 +732,7 @@ mod tests {
             ip: "203.0.113.4".to_owned(),
             created_at: time::OffsetDateTime::UNIX_EPOCH,
             mfa_enabled: false,
+            mfa_verified: false,
             family_id: String::new(),
             family_created_at: None,
         };

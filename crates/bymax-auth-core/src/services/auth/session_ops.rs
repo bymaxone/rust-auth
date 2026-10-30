@@ -668,6 +668,7 @@ mod tests {
             ip: "1.2.3.4".to_owned(),
             created_at: OffsetDateTime::now_utc(),
             mfa_enabled: false,
+            mfa_verified: false,
             family_id: "fam-unverified".to_owned(),
             family_created_at: Some(OffsetDateTime::now_utc()),
         };

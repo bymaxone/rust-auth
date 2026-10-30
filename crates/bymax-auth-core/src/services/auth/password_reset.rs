@@ -922,6 +922,7 @@ mod tests {
             ip: "1.2.3.4".to_owned(),
             created_at: time::OffsetDateTime::UNIX_EPOCH,
             mfa_enabled: false,
+            mfa_verified: false,
             family_id: "fam-test".to_owned(),
             family_created_at: Some(time::OffsetDateTime::UNIX_EPOCH),
         };

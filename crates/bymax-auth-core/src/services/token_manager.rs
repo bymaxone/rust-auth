@@ -456,6 +456,9 @@ impl TokenManagerService {
             ip: stored_ip,
             created_at: now_offset(),
             mfa_enabled: user.mfa_enabled,
+            // Persisted only when this session cleared the challenge, so a rotation can carry
+            // the claim forward instead of minting `false`.
+            mfa_verified,
             // A fresh login opens a new refresh-token family; every rotation inherits this id,
             // so the whole lineage can be revoked together on reuse detection.
             family_id: new_uuid_v4(),
@@ -760,6 +763,8 @@ impl TokenManagerService {
             ip: stored_ip,
             created_at: now_offset(),
             mfa_enabled: admin.mfa_enabled,
+            // Persisted only when this session cleared the challenge, as on the dashboard plane.
+            mfa_verified,
             // A fresh platform login opens a new refresh-token family (section 12.5.2).
             family_id: new_uuid_v4(),
             family_created_at: Some(now_offset()),
@@ -1010,8 +1015,8 @@ impl TokenManagerService {
     }
 
     /// Build the platform access claims for a rotated/recovered session. As with the dashboard
-    /// rotation, `mfa_verified` is dropped (re-acquired only via the MFA challenge) while
-    /// `mfa_enabled` is carried over from the stored record; the claims carry no `tenant_id`.
+    /// rotation, `mfa_verified` and `mfa_enabled` are both carried over from the stored record;
+    /// the claims carry no `tenant_id`.
     /// The `epoch` is the admin's current generation, read at rotation time. `refresh` then
     /// re-stamps the role and MFA flag from the account it re-reads, via
     /// [`Self::reissue_platform_access_with_authority`].
@@ -1026,7 +1031,7 @@ impl TokenManagerService {
             role: record.role.clone(),
             token_type: PlatformType::Platform,
             mfa_enabled: record.mfa_enabled,
-            mfa_verified: false,
+            mfa_verified: record.mfa_verified,
             iat: now,
             exp: now.saturating_add(self.access_ttl.as_secs().min(i64::MAX as u64) as i64),
             epoch,
@@ -1427,9 +1432,9 @@ impl TokenManagerService {
         })
     }
 
-    /// Build the access claims for a rotated/recovered session. Rotation always drops
-    /// `mfa_verified` (the user re-acquires it only via the MFA challenge) and issues an
-    /// empty `status` — status guards consult the repository/status cache, not the rotated
+    /// Build the access claims for a rotated/recovered session. Rotation carries
+    /// `mfa_verified` over from the stored record, which holds `true` only for a session
+    /// established through the MFA challenge, and issues an empty `status` — status guards consult the repository/status cache, not the rotated
     /// JWT, because the stored session record carries no live status. The `epoch` is the
     /// user's current generation, read at rotation time.
     ///
@@ -1451,7 +1456,7 @@ impl TokenManagerService {
             token_type: DashboardType::Dashboard,
             status: String::new(),
             mfa_enabled: record.mfa_enabled,
-            mfa_verified: false,
+            mfa_verified: record.mfa_verified,
             iat: now,
             exp: now.saturating_add(self.access_ttl.as_secs().min(i64::MAX as u64) as i64),
             epoch,
@@ -1489,6 +1494,8 @@ fn identity_record(seed: &SessionRecord, ip: &str, user_agent: &str) -> SessionR
         ip: stored_ip,
         created_at: now_offset(),
         mfa_enabled: seed.mfa_enabled,
+        // Carried to the successor unchanged, on rotation and on grace-window recovery alike.
+        mfa_verified: seed.mfa_verified,
         // Rotation inherits the seed's family unchanged, so every descendant of one login
         // shares the id and the whole lineage is revocable together on reuse detection.
         family_id: seed.family_id.clone(),
@@ -1513,6 +1520,8 @@ fn platform_identity_record(seed: &SessionRecord, ip: &str, user_agent: &str) ->
         ip: stored_ip,
         created_at: now_offset(),
         mfa_enabled: seed.mfa_enabled,
+        // Carried to the successor unchanged, on rotation and on grace-window recovery alike.
+        mfa_verified: seed.mfa_verified,
         // The platform rotation inherits the seed's family unchanged (section 12.5.2).
         family_id: seed.family_id.clone(),
         family_created_at: seed.family_created_at,
@@ -1533,6 +1542,8 @@ fn placeholder_record(ip: &str, user_agent: &str) -> SessionRecord {
         ip: stored_ip,
         created_at: now_offset(),
         mfa_enabled: false,
+        // A placeholder stands for a record that vanished, so it carries nothing forward.
+        mfa_verified: false,
         // The placeholder is never stored (an absent live token yields only Grace/Reused/Invalid),
         // so it carries no family and no birth time.
         family_id: String::new(),
@@ -2334,8 +2345,10 @@ mod tests {
         // The MFA gate refuses a token only when `mfa_enabled && !mfa_verified`. If rotation
         // reset `mfa_enabled` to false, one routine refresh (every ~15 min) would mint a token
         // that clears every MFA-gated route without the holder ever completing a challenge —
-        // a silent bypass for an enrolled account. The flag must survive rotation; the
-        // `mfa_verified` proof must NOT, so the second factor is re-acquired via the challenge.
+        // a silent bypass for an enrolled account. The flag must survive rotation, and so must
+        // the `mfa_verified` proof of a session that cleared the challenge: no route lets an
+        // authenticated session re-acquire it, so a rotation that dropped it would lock the
+        // holder out of every route behind the gate.
         let store = Arc::new(InMemoryStores::new());
         let svc = service(store);
         let enrolled = SafeAuthUser {
@@ -2360,7 +2373,146 @@ mod tests {
         let Ok(rotated) = rotated else { return };
 
         let claims = svc.verify_access(&rotated.access_token).await;
-        assert!(matches!(&claims, Ok(c) if c.mfa_enabled && !c.mfa_verified));
+        assert!(matches!(&claims, Ok(c) if c.mfa_enabled && c.mfa_verified));
+    }
+
+    /// Rotate `refresh` `times` times and return the last access token's `mfa_verified`.
+    async fn verified_after_rotations(
+        svc: &TokenManagerService,
+        enrolled: &SafeAuthUser,
+        challenge_cleared: bool,
+        times: usize,
+    ) -> Option<bool> {
+        let issued = svc
+            .issue_tokens(
+                enrolled,
+                "10.0.0.1",
+                "agent/1.0",
+                challenge_cleared,
+                CredentialProof::Proved,
+            )
+            .await
+            .ok()?;
+        let mut refresh = issued.refresh_token;
+        let mut access = issued.access_token;
+        for _ in 0..times {
+            let rotated = svc
+                .reissue_tokens(&refresh, "10.0.0.1", "agent/1.0")
+                .await
+                .ok()?;
+            refresh = rotated.refresh_token;
+            access = rotated.access_token;
+        }
+        svc.verify_access(&access)
+            .await
+            .ok()
+            .map(|c| c.mfa_verified)
+    }
+
+    #[tokio::test]
+    async fn a_session_that_cleared_the_challenge_stays_verified_across_rotations() {
+        // Two rotations, not one: the claim has to be carried from each successor to the next.
+        let svc = service(Arc::new(InMemoryStores::new()));
+        let enrolled = SafeAuthUser {
+            mfa_enabled: true,
+            ..user()
+        };
+        assert_eq!(
+            verified_after_rotations(&svc, &enrolled, true, 2).await,
+            Some(true)
+        );
+    }
+
+    #[tokio::test]
+    async fn a_session_that_never_cleared_the_challenge_stays_unverified_across_rotations() {
+        // The negative of the test above, and the one that would catch a rotation that wrote
+        // `true` where it should not: no challenge, no claim, however many times it rotates.
+        let svc = service(Arc::new(InMemoryStores::new()));
+        let enrolled = SafeAuthUser {
+            mfa_enabled: true,
+            ..user()
+        };
+        assert_eq!(
+            verified_after_rotations(&svc, &enrolled, false, 3).await,
+            Some(false)
+        );
+    }
+
+    #[tokio::test]
+    async fn the_stored_record_omits_the_flag_until_the_challenge_and_carries_it_after() {
+        let store = Arc::new(InMemoryStores::new());
+        let svc = service(store.clone());
+        let enrolled = SafeAuthUser {
+            mfa_enabled: true,
+            ..user()
+        };
+        for (cleared, expected) in [(false, false), (true, true)] {
+            let Ok(issued) = svc
+                .issue_tokens(
+                    &enrolled,
+                    "10.0.0.1",
+                    "agent/1.0",
+                    cleared,
+                    CredentialProof::Proved,
+                )
+                .await
+            else {
+                return;
+            };
+            let Ok(rotated) = svc
+                .reissue_tokens(&issued.refresh_token, "10.0.0.1", "agent/1.0")
+                .await
+            else {
+                return;
+            };
+            let hash = RawRefreshToken::from_raw(rotated.refresh_token).redis_hash();
+            let stored = store.find_session(SessionKind::Dashboard, &hash).await;
+            assert!(matches!(&stored, Ok(Some(r)) if r.mfa_verified == expected));
+            let json = stored
+                .ok()
+                .flatten()
+                .and_then(|record| serde_json::to_value(record).ok());
+            assert_eq!(
+                json.as_ref()
+                    .is_some_and(|j| j.get("mfaVerified").is_some()),
+                expected
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_grace_window_recovery_carries_the_second_factor_claim() {
+        // The loser of a rotation race is recovered into a fresh session; that session is the
+        // user's next one, so it has to inherit the claim from the record it was recovered from.
+        let svc = service(Arc::new(InMemoryStores::new()));
+        let enrolled = SafeAuthUser {
+            mfa_enabled: true,
+            ..user()
+        };
+        let Ok(issued) = svc
+            .issue_tokens(
+                &enrolled,
+                "10.0.0.1",
+                "agent/1.0",
+                true,
+                CredentialProof::Proved,
+            )
+            .await
+        else {
+            return;
+        };
+        assert!(
+            svc.reissue_tokens(&issued.refresh_token, "10.0.0.1", "agent/1.0")
+                .await
+                .is_ok()
+        );
+
+        let recovered = svc
+            .reissue_tokens(&issued.refresh_token, "10.0.0.1", "agent/1.0")
+            .await;
+        let Ok(recovered) = recovered else { return };
+        let claims = svc.verify_access(&recovered.access_token).await;
+        assert!(matches!(&claims, Ok(c) if c.mfa_enabled && c.mfa_verified));
     }
 
     #[tokio::test]
@@ -2412,7 +2564,64 @@ mod tests {
         let Ok(rotated) = rotated else { return };
 
         let claims = svc.verify_platform_access(&rotated.access_token).await;
-        assert!(matches!(&claims, Ok(c) if c.mfa_enabled && !c.mfa_verified));
+        assert!(matches!(&claims, Ok(c) if c.mfa_enabled && c.mfa_verified));
+    }
+
+    #[tokio::test]
+    async fn a_platform_session_keeps_the_second_factor_claim_only_if_it_cleared_it() {
+        let svc = service(Arc::new(InMemoryStores::new()));
+        let enrolled = SafeAuthPlatformUser {
+            mfa_enabled: true,
+            ..platform_admin()
+        };
+        for cleared in [true, false] {
+            let Ok(issued) = svc
+                .issue_platform_tokens(&enrolled, "10.0.0.1", "agent/1.0", cleared)
+                .await
+            else {
+                return;
+            };
+            let mut refresh = issued.refresh_token;
+            let mut access = issued.access_token;
+            for _ in 0..2 {
+                let Ok(rotated) = svc
+                    .reissue_platform_tokens(&refresh, "10.0.0.1", "agent/1.0")
+                    .await
+                else {
+                    return;
+                };
+                refresh = rotated.refresh_token;
+                access = rotated.access_token;
+            }
+            let claims = svc.verify_platform_access(&access).await;
+            assert!(matches!(&claims, Ok(c) if c.mfa_verified == cleared));
+        }
+    }
+
+    #[tokio::test]
+    async fn a_platform_grace_window_recovery_carries_the_second_factor_claim() {
+        let svc = service(Arc::new(InMemoryStores::new()));
+        let enrolled = SafeAuthPlatformUser {
+            mfa_enabled: true,
+            ..platform_admin()
+        };
+        let Ok(issued) = svc
+            .issue_platform_tokens(&enrolled, "10.0.0.1", "agent/1.0", true)
+            .await
+        else {
+            return;
+        };
+        assert!(
+            svc.reissue_platform_tokens(&issued.refresh_token, "10.0.0.1", "agent/1.0")
+                .await
+                .is_ok()
+        );
+        let recovered = svc
+            .reissue_platform_tokens(&issued.refresh_token, "10.0.0.1", "agent/1.0")
+            .await;
+        let Ok(recovered) = recovered else { return };
+        let claims = svc.verify_platform_access(&recovered.access_token).await;
+        assert!(matches!(&claims, Ok(c) if c.mfa_verified));
     }
 
     fn platform_admin() -> SafeAuthPlatformUser {
@@ -3574,6 +3783,7 @@ mod absolute_lifetime_tests {
             ip: "203.0.113.4".to_owned(),
             created_at: now_offset(),
             mfa_enabled: false,
+            mfa_verified: false,
             family_id: "fam-1".to_owned(),
             family_created_at: Some(now_offset() - TimeDuration::days(days_ago)),
         }

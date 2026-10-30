@@ -1954,7 +1954,8 @@ struct RefreshSession {
     device: String,
     ip: String,
     created_at: String, // RFC3339
-    mfa_enabled: bool,  // propagated into rotated tokens; mfa_verified is NEVER stored
+    mfa_enabled: bool,  // propagated into rotated tokens
+    mfa_verified: bool, // written only when true (a session established through the MFA challenge), read strictly, carried through every rotation and grace recovery
 }
 ```
 
@@ -1990,7 +1991,7 @@ Algorithm:
 
 `parse_session` rejects malformed JSON or missing `user_id`/`role` with `RefreshTokenInvalid`; absent `mfa_enabled` defaults to `false` and an absent `family_id` to empty, which is the legacy record written before families existed — it skips all family bookkeeping and can never trip reuse detection.
 
-`build_rotated_result`: issues an access token with `status = ""` (the Redis session does not carry full user data — status guards must consult the repo/status cache, not the rotated JWT) and `mfa_verified = false` (rotation always drops verification; the user re-acquires it only via the MFA challenge), while `mfa_enabled` is carried from the session so the MFA guard keeps enforcing. The `epoch` claim is re-read at rotation time, so a password reset that lands mid-session is picked up by the very next rotation.
+`build_rotated_result`: issues an access token with `status = ""` (the Redis session does not carry full user data — status guards must consult the repo/status cache, not the rotated JWT) and `mfa_verified` carried from the stored session record, which holds `true` only for a session established through the MFA challenge (no route lets an authenticated session re-acquire the claim, so a rotation that dropped it would lock every enrolled user out of the routes behind the MFA gate), while `mfa_enabled` is carried from the session so the MFA guard keeps enforcing. The `epoch` claim is re-read at rotation time, so a password reset that lands mid-session is picked up by the very next rotation.
 
 Platform rotation (`reissue_platform_tokens`) mirrors this with `prt:`/`prp:`/`pcf:`/`pfam:` prefixes and `tenant_id = ""`.
 
@@ -2181,7 +2182,7 @@ Authenticated endpoint — fetch precedes brute-force (the JWT already binds the
 3. If `mfa_secret` absent (inconsistency), `TokenInvalid`. Decrypt secret.
 4. `verify_totp_with_anti_replay` — **only TOTP** accepted (recovery codes cannot disable MFA by design). Invalid → `record_failure` + `MfaInvalidCode`.
 5. `reset_failures`; `update_mfa(user_id, { mfa_enabled: false, mfa_secret: None, mfa_recovery_codes: None })`.
-6. `sessions.revoke_all(kind, user_id)` (domain op; §12.3) so subsequent rotations emit `mfa_enabled:false`/`mfa_verified:false`, clearing stale `mfa_verified:true` claims.
+6. `sessions.revoke_all(kind, user_id)` (domain op; §12.3) so no stored `mfa_verified:true` outlives the factor it describes.
 7. `email.send_mfa_disabled_notification(...)`; spawn `after_mfa_disabled` fire-and-forget.
 
 #### 7.5.5 `regenerate_recovery_codes`
@@ -4330,7 +4331,7 @@ preimage and the full list of keys derived from it are pinned by `conformance/wi
 
 | Prefix | Key pattern | Value | TTL | Purpose |
 | --- | --- | --- | --- | --- |
-| `rt` | `auth:rt:{sha256(refresh_token)}` | JSON `SessionRecord` `{ userId, tenantId, role, device, ip, createdAt, mfaEnabled, familyId }` (`familyId` omitted when empty) | `refresh_expires_in_days` × 86400 s | Dashboard refresh-token session. Holds everything needed to reissue an access token without a DB hit. |
+| `rt` | `auth:rt:{sha256(refresh_token)}` | JSON `SessionRecord` `{ userId, tenantId, role, device, ip, createdAt, mfaEnabled, mfaVerified, familyId }` (`familyId` omitted when empty; `mfaVerified` written only as `true` and omitted otherwise) | `refresh_expires_in_days` × 86400 s | Dashboard refresh-token session. Holds everything needed to reissue an access token without a DB hit. |
 | `rv` | `auth:rv:{jti}` (preferred) or `auth:rv:{sha256(jwt)}` | `"1"` | Remaining JWT lifetime computed from `exp − now` | Access-JWT revocation blacklist. Written on logout; consulted by `JwtAuthGuard`. `jti` keying avoids hashing the whole compact JWT. |
 | `ep` | `auth:ep:{hmac_sha256(hmacKey, userSubject)}` | Numeric generation counter (string) | 30 days | Per-account token **epoch**, keyed by the tenant-scoped `userSubject` rather than by the bare repository id — on a host that numbers users per tenant, an epoch on the bare id let one tenant's revocation invalidate another tenant's access tokens. Every access token is stamped with the epoch current at issuance; verification rejects a token stamped below the stored value. A password reset advances it, invalidating every outstanding access token in one write — the stateless counterpart to `rv:`, which can only revoke tokens one `jti` at a time. The TTL far exceeds any access-token lifetime, so a bump stays in force for every pre-bump token's remaining life. |
 | `pep` | `auth:pep:{hmac_sha256(hmacKey, userSubject)}` | Numeric generation counter (string) | 30 days | Platform per-admin token epoch. Analogue of `ep`; separate because the two planes' ids come from different repositories and may collide. |
@@ -4347,7 +4348,7 @@ preimage and the full list of keys derived from it are pinned by `conformance/wi
 | `os` | `auth:os:{sha256(state)}` | JSON `{ tenantId, codeVerifier }` | 600 s (10 min) | OAuth CSRF `state` + PKCE `code_verifier`. Single-use; deleted on callback. |
 | `wst` | `auth:wst:{sha256(ws_ticket)}` | JSON `WsTicketSnapshot` `{ sub, tenantId, role, status, mfaEnabled, mfaVerified }` | `WS_TICKET_TTL_SECONDS` (30 s) | **rust-auth-only, feature `websocket`.** Single-use WebSocket upgrade ticket (§7.3.6 / §8.7). Minted from an already-authorized, MFA-satisfied session and redeemed once (`GETDEL`) at the WS handshake, so an access JWT never appears in a URL. The value is a verified-claims **snapshot**, never a token. This prefix is outside the nest-auth parity surface (nest-auth authenticates WebSockets via the `Authorization` header, not a ticket), so it is purely additive: a `nest-auth` server never reads or writes `wst:`, and cross-backend Redis sharing is unaffected. |
 | `tu` | `auth:tu:{hmac_sha256(hmacKey, userSubject + ":" + code)}` | `"1"` | 90 s (≈ 3 × TOTP window) | TOTP anti-replay. The key is the **HMAC of `{userSubject}:{code}`**, never the raw 6-digit code (which is low-entropy and would be reversible as a bare key) — matching §7.5.6. A code that just verified is marked so it cannot be replayed inside its drift window. |
-| `prt` | `auth:prt:{sha256(refresh_token)}` | JSON `{ userId, role, device, ip, createdAt, mfaEnabled, familyId }` (`familyId` omitted when empty) | `refresh_expires_in_days` × 86400 s | Platform-admin refresh session. Platform analogue of `rt`. |
+| `prt` | `auth:prt:{sha256(refresh_token)}` | JSON `{ userId, role, device, ip, createdAt, mfaEnabled, mfaVerified, familyId }` (`familyId` omitted when empty; `mfaVerified` written only as `true` and omitted otherwise) | `refresh_expires_in_days` × 86400 s | Platform-admin refresh session. Platform analogue of `rt`. |
 | `prp` | `auth:prp:{sha256(old_refresh_token)}` | JSON `SessionRecord` — the new session, never the raw token | `refresh_grace_window_seconds` (default 30 s) | Platform rotation grace pointer. Analogue of `rp`. |
 | `pcf` | `auth:pcf:{sha256(consumed_refresh_token)}` | `familyId` | `refresh_expires_in_days` × 86400 s | Platform consumed-token family marker. Analogue of `cf`. |
 | `pfam` | `auth:pfam:{familyId}` | Redis SET of bare `sha256(refresh_token)` hashes | `refresh_expires_in_days` × 86400 s | Platform refresh-token family index. Analogue of `fam`. |
