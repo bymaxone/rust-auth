@@ -100,7 +100,7 @@ version = "0.4.45"
 criteria = "safe-to-run"
 
 [[exemptions.combine]]
-version = "4.6.7"
+version = "4.6.9"
 criteria = "safe-to-deploy"
 
 [[exemptions.compact_str]]
@@ -480,7 +480,7 @@ version = "11.6.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.redis]]
-version = "1.6.0"
+version = "1.8.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.redox_syscall]]
@@ -520,7 +520,7 @@ version = "2.1.3"
 criteria = "safe-to-run"
 
 [[exemptions.rustls]]
-version = "0.23.43"
+version = "0.23.46"
 criteria = "safe-to-run"
 
 [[exemptions.rustls-native-certs]]
@@ -532,7 +532,7 @@ version = "1.15.1"
 criteria = "safe-to-run"
 
 [[exemptions.rustls-webpki]]
-version = "0.103.10"
+version = "0.103.16"
 criteria = "safe-to-run"
 
 [[exemptions.rustversion]]
@@ -668,7 +668,7 @@ version = "1.12.0"
 criteria = "safe-to-run"
 
 [[exemptions.tokio]]
-version = "1.53.1"
+version = "1.54.1"
 criteria = "safe-to-deploy"
 
 [[exemptions.tokio-macros]]
@@ -904,7 +904,7 @@ version = "0.1.7"
 criteria = "safe-to-deploy"
 
 [[exemptions.zeroize]]
-version = "1.9.0"
+version = "1.9.1"
 criteria = "safe-to-deploy"
 
 [[exemptions.zerotrie]]

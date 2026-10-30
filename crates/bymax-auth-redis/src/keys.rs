@@ -28,9 +28,14 @@ pub enum Prefix {
     Rt,
     /// Access-JWT revocation blacklist (`rv`).
     Rv,
-    /// Dashboard per-user token epoch / generation counter (`ep`).
+    /// Dashboard per-account token epoch / generation counter (`ep`).
+    ///
+    /// Suffixed by `hmac_sha256(hmacKey, userSubject)`, not by a user id: an epoch on the bare
+    /// id is shared by every tenant that numbers its users the same way, so bumping one
+    /// account's epoch silently revoked another tenant's access tokens.
     Ep,
-    /// Platform per-user token epoch / generation counter (`pep`).
+    /// Platform per-account token epoch / generation counter (`pep`). Same subject derivation,
+    /// with no tenant segment — a platform admin is cross-tenant and has none.
     Pep,
     /// Dashboard rotation grace pointer (`rp`).
     Rp,
@@ -40,9 +45,14 @@ pub enum Prefix {
     /// not key suffixes: a family only ever indexes live `rt:` sessions, so the prefix is
     /// implied by the index itself.
     Fam,
-    /// Dashboard active-session index SET (`sess`). Its members are full key **suffixes** —
-    /// `rt:{hash}` for a live session, `rp:{oldHash}` for a rotation grace pointer — never bare
-    /// hashes, matching nest-auth so either backend can revoke the other's sessions.
+    /// Dashboard active-session index SET (`sess`), keyed by
+    /// `hmac_sha256(hmacKey, userSubject)` — the tenant-scoped account subject, never a bare
+    /// user id, which one tenant's revoke-all could otherwise share with another's account.
+    ///
+    /// Its members are full key **suffixes** — `rt:{hash}` for a live session, `rp:{oldHash}`
+    /// for a rotation grace pointer — never bare hashes, matching nest-auth so either backend
+    /// can revoke the other's sessions. Only the index KEY moved onto the subject; the members
+    /// are unchanged.
     Sess,
     /// Dashboard per-session detail (`sd`).
     Sd,
@@ -82,8 +92,10 @@ pub enum Prefix {
     /// Platform refresh-token family index SET (`pfam`). Members are bare `sha256` hashes, as
     /// on the dashboard plane.
     Pfam,
-    /// Platform active-session index SET (`psess`). Members are `prt:{hash}` / `prp:{oldHash}`
-    /// key suffixes; the platform keyspace is deliberately separate from the dashboard one.
+    /// Platform active-session index SET (`psess`), keyed by the platform subject
+    /// (`hmac_sha256(hmacKey, "platform:{adminId}")`). Members are `prt:{hash}` /
+    /// `prp:{oldHash}` key suffixes; the platform keyspace is deliberately separate from the
+    /// dashboard one.
     Psess,
     /// Platform per-session detail (`psd`).
     Psd,

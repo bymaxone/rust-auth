@@ -625,9 +625,10 @@ mod tests {
             tokio::task::yield_now().await;
         }
 
-        // Reaching here at all is the assertion: the sweeper ran on a live limiter without
-        // taking the runtime down, which is the failure mode a panic in a detached task has.
-        assert!(config.limiter().len() < usize::MAX);
+        // Narrow on purpose: this shows the sweeper can be spawned and ticked on a live
+        // limiter and leaves it usable. A panic inside the detached task would NOT fail this
+        // test, because its `JoinHandle` is dropped; the reclaim itself is `retain_recent`.
+        assert!(config.limiter().is_empty());
     }
 
     /// Built outside a Tokio runtime, the sweeper warns and gives up rather than panicking.

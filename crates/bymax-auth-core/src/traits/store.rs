@@ -9,7 +9,7 @@
 //! the engine surfaces.
 
 use async_trait::async_trait;
-use bymax_auth_types::AuthError;
+use bymax_auth_types::{AuthError, MfaContext};
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 
@@ -21,6 +21,23 @@ pub enum SessionKind {
     Dashboard,
     /// Platform-admin sessions.
     Platform,
+}
+
+impl SessionKind {
+    /// The identity **plane** this kind names, as the user-subject preimage spells it.
+    ///
+    /// [`MfaContext`] is the plane enum the shared `userSubject` derivation takes, and it
+    /// outgrew MFA the moment the recent-authentication marker started using it. Mapping
+    /// through one function rather than matching at each call site is what keeps the session
+    /// keyspace and the MFA keyspace from drifting onto two different spellings of the same
+    /// plane — a drift that would be invisible until two libraries disagreed about a key.
+    #[must_use]
+    pub const fn plane(self) -> MfaContext {
+        match self {
+            Self::Dashboard => MfaContext::Dashboard,
+            Self::Platform => MfaContext::Platform,
+        }
+    }
 }
 
 /// The purpose namespace an OTP record belongs to. Its [`OtpPurpose::as_str`] form is the
@@ -247,6 +264,14 @@ pub struct SessionRotation {
     pub new_raw: String,
     /// The session record bound to the new token.
     pub new_record: SessionRecord,
+    /// The owner's `hmac_sha256(identifier_key, user_subject)` suffix — the session index the
+    /// rotation moves the membership within.
+    ///
+    /// Derived from the record the rotation is FOR, which on the live path is the real owner:
+    /// the script touches the index only on that path, and the caller reaches it only when its
+    /// own pre-read of the old key succeeded. On the grace and reuse paths the record is a
+    /// placeholder, so this hash names an index the script never touches.
+    pub subject_hash: String,
     /// TTL for the new refresh session, in seconds.
     pub refresh_ttl: u64,
     /// TTL for the rotation grace pointer, in seconds.
@@ -261,6 +286,7 @@ impl std::fmt::Debug for SessionRotation {
             .field("new_hash", &self.new_hash)
             .field("new_raw", &"[REDACTED]")
             .field("new_record", &self.new_record)
+            .field("subject_hash", &self.subject_hash)
             .field("refresh_ttl", &self.refresh_ttl)
             .field("grace_ttl", &self.grace_ttl)
             .finish()
@@ -312,6 +338,19 @@ pub struct WsTicketSnapshot {
 /// Refresh-session lifecycle plus access-JWT revocation. Backs the `rt`/`prt`, `rp`/`prp`,
 /// `sess`/`psess`, `sd`/`psd`, and `rv` keyspaces.
 ///
+/// # `subject_hash`, never a user id
+///
+/// Every method that names an ACCOUNT rather than a token takes a `subject_hash`: the
+/// `hmac_sha256(identifier_key, user_subject)` suffix the shared contract lists under
+/// `userSubjectDerivedKeys`, in lower-case hex. The engine derives it; a store never sees the
+/// raw id and never holds the hashing key, exactly as [`SessionStore::mark_recent_auth`] and
+/// the MFA store already work.
+///
+/// Two properties come from that, and both were absent while these keys were built from the
+/// bare id. The subject is TENANT-SCOPED, so one tenant's revocation cannot reach another
+/// tenant's account that happens to share an id. And the key carries no account identifier in
+/// the clear, in a store both this library and nest-auth read.
+///
 /// # Errors
 ///
 /// Returns [`AuthError`] on a store failure; ownership-checked operations return the
@@ -320,10 +359,12 @@ pub struct WsTicketSnapshot {
 /// caller on [`RotateOutcome::Invalid`]).
 #[async_trait]
 pub trait SessionStore: Send + Sync {
-    /// Persist a freshly-issued refresh session and register it in the user's session set.
+    /// Persist a freshly-issued refresh session and register it in the owner's session set at
+    /// `{sess|psess}:{subject_hash}`.
     async fn create_session(
         &self,
         kind: SessionKind,
+        subject_hash: &str,
         token_hash: &str,
         detail: &SessionRecord,
         ttl_secs: u64,
@@ -343,11 +384,11 @@ pub trait SessionStore: Send + Sync {
         token_hash: &str,
     ) -> Result<Option<SessionRecord>, AuthError>;
 
-    /// List all live sessions for a user.
+    /// List all live sessions for the account named by `subject_hash`.
     async fn list_sessions(
         &self,
         kind: SessionKind,
-        user_id: &str,
+        subject_hash: &str,
     ) -> Result<Vec<SessionDetail>, AuthError>;
 
     /// Write the session a **grace recovery** produced, atomically with the check that the
@@ -365,17 +406,18 @@ pub trait SessionStore: Send + Sync {
     async fn create_recovered_session(
         &self,
         kind: SessionKind,
+        subject_hash: &str,
         token_hash: &str,
         detail: &SessionRecord,
         ttl_secs: u64,
     ) -> Result<bool, AuthError>;
 
     /// Ownership-checked single revoke. Returns [`AuthError::SessionNotFound`] when the
-    /// hash is not owned by the user.
+    /// hash is not a member of `subject_hash`'s session index.
     async fn revoke_session(
         &self,
         kind: SessionKind,
-        user_id: &str,
+        subject_hash: &str,
         session_hash: &str,
     ) -> Result<(), AuthError>;
 
@@ -409,27 +451,52 @@ pub trait SessionStore: Send + Sync {
     ///
     /// "Sign out my other devices" is a statement about right now, so no credential minted
     /// before that moment may still produce a session.
-    async fn sweep_grace_pointers(&self, kind: SessionKind, user_id: &str)
-    -> Result<(), AuthError>;
+    async fn sweep_grace_pointers(
+        &self,
+        kind: SessionKind,
+        subject_hash: &str,
+    ) -> Result<(), AuthError>;
 
-    /// Revoke every session for a user in one transaction.
-    async fn revoke_all(&self, kind: SessionKind, user_id: &str) -> Result<(), AuthError>;
+    /// Revoke every session for an account in one transaction.
+    async fn revoke_all(&self, kind: SessionKind, subject_hash: &str) -> Result<(), AuthError>;
+
+    /// The record of any one live member of a refresh-token **family**, or `None` when no
+    /// member record is readable (every descendant has expired).
+    ///
+    /// Every member of one family descends from a single login, so any readable member names
+    /// the same account — which is why one record is enough. The reuse-detection caller cannot
+    /// obtain the owner any other way: the replayed token's own `rt:` key was deleted when it
+    /// was rotated, so the family index is the only surviving link between that token and an
+    /// account.
+    ///
+    /// Split out of [`SessionStore::revoke_family`] because the revocation has to prune the
+    /// owner's session index, and that key is now `{sess|psess}:{subject_hash}` — a derivation
+    /// that needs the engine's identifier key, which a store deliberately does not hold. The
+    /// caller reads the owner here (getting the `tenant_id` the subject needs along with the
+    /// id), derives the hash, and hands it back to the revocation, which still performs the
+    /// deletes and the index prune as one atomic step.
+    async fn find_family_owner(
+        &self,
+        kind: SessionKind,
+        family_id: &str,
+    ) -> Result<Option<SessionRecord>, AuthError>;
 
     /// Revoke every live session in a refresh-token **family** (one login lineage), deleting
     /// each descendant's refresh/detail keys and clearing the family index. Called on
     /// reuse-detection ([`RotateOutcome::Reused`]) to lock out a stolen token's whole chain.
     /// Idempotent: an unknown or already-cleared family is a no-op.
     ///
-    /// Returns the id of the account the family belonged to, or `None` when no member record
-    /// was readable. The owner is reported because the reuse-detection caller cannot obtain it
-    /// any other way: the replayed token's own `rt:` key was deleted when it was rotated, so
-    /// the family index is the only surviving link between that token and an account — and an
-    /// implementation already has to read a member to find the session index it prunes.
+    /// `owner_subject_hash` names the session index to prune each revoked member from, and is
+    /// `None` when [`SessionStore::find_family_owner`] found nothing readable — in which case
+    /// every descendant has already expired and there is no index left to prune. The member
+    /// keys are deleted either way: the prune is bookkeeping, and skipping the deletes because
+    /// the owner could not be named would leave a stolen lineage alive.
     async fn revoke_family(
         &self,
         kind: SessionKind,
         family_id: &str,
-    ) -> Result<Option<String>, AuthError>;
+        owner_subject_hash: Option<&str>,
+    ) -> Result<(), AuthError>;
 
     /// Add a JTI (preferred) or full-JWT hash to the access-token blacklist for its
     /// remaining lifetime.
@@ -447,13 +514,13 @@ pub trait SessionStore: Send + Sync {
     /// Stamped into a freshly-issued access token and re-read on every verification: a token
     /// whose stamped epoch is below this value was issued before an invalidating event and is
     /// rejected. The `0` default keeps the mechanism inert for a user who has never had a bump.
-    async fn current_epoch(&self, kind: SessionKind, user_id: &str) -> Result<u64, AuthError>;
+    async fn current_epoch(&self, kind: SessionKind, subject_hash: &str) -> Result<u64, AuthError>;
 
     /// Atomically increment the user's token epoch and return the new value, invalidating every
     /// outstanding access token for that user at once (a password reset or a sign-out-everywhere).
     /// Idempotent in effect: each call advances the generation, and only tokens stamped at or
     /// above the new value remain valid.
-    async fn bump_epoch(&self, kind: SessionKind, user_id: &str) -> Result<u64, AuthError>;
+    async fn bump_epoch(&self, kind: SessionKind, subject_hash: &str) -> Result<u64, AuthError>;
 
     /// Record that the account completed a REAL authentication, at `ra:{user_id_hash}` with a
     /// short TTL. Presence is the whole meaning; the value carries nothing.
@@ -1194,6 +1261,7 @@ mod tests {
             new_hash: "newhash".to_owned(),
             new_raw: "live-refresh-token".to_owned(),
             new_record: session_record(),
+            subject_hash: "subjecthash".to_owned(),
             refresh_ttl: 60,
             grace_ttl: 30,
         };

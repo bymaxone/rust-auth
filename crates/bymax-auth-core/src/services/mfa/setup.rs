@@ -166,11 +166,12 @@ impl MfaService {
         // the current session too, so the "current session continues" this comment once
         // promised was never true — only its access token survived, the one artifact the
         // epoch is able to reach.)
+        let subject = self.session_subject(ctx, tenant_id, user_id);
         self.session_store
-            .revoke_all(session_kind(ctx), user_id)
+            .revoke_all(session_kind(ctx), &subject)
             .await?;
         self.session_store
-            .bump_epoch(session_kind(ctx), user_id)
+            .bump_epoch(session_kind(ctx), &subject)
             .await?;
 
         self.notify_enabled(&view, user_id, ip, user_agent);
