@@ -620,7 +620,7 @@ The library is a set of crates you embed in your Axum service — a framework-ag
 │                                                            │
 │   bymax-auth-axum   →  router · extractors · rate-limit    │
 │        │                                                   │
-│   bymax-auth-core   →  AuthEngine · services · hooks       │
+│   bymax-auth-core   →  AuthEngine · services · 17 hooks    │
 │      ╱   │   ╲                                             │
 │  -crypto -jwt -types     (pure-Rust, wasm-safe)            │
 │        │                                                   │
