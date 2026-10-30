@@ -5636,7 +5636,10 @@ verification and returns claims from `decode_jwt` (parity with nest-auth's
 security patterns from nest-auth are preserved unchanged: `isBackgroundRequest`,
 the `_r` redirect-loop counter, `reason=expired` guard, `has_session` signal
 cookie, status blocking, RBAC, and the `x-user-*` propagation headers (UI-only,
-never authoritative).
+never authoritative). `publicPaths` is the proxy's only allow-list: an entry is a prefix that
+ends at a segment boundary, every other path requires a verified access token, and `'/'` is a
+prefix of every path, so a `'/'` entry makes every route public; a deployment lists each public
+prefix instead. `roleRules` only adds a role requirement to an already-authenticated request.
 
 ---
 
