@@ -1,0 +1,174 @@
+# Compares this repository's `conformance/wire-contract.json` with the copy in
+# bymaxone/nest-auth, byte for byte. The mirror of the check nest-auth runs against this
+# repository's copy: each side reads the other, because neither suite can.
+#
+# The contract is duplicated in two repositories because both libraries read
+# and write one Redis, and each suite validates its own copy against its own
+# constant. Two independent local hashes cannot enforce agreement between two
+# repositories, because neither one reads the other: both CIs stay green over a
+# divergent keyspace. This is the check that reads the other side.
+#
+# It reports through a tracking issue and never fails a pull request. Parity
+# rounds are sequential by design — one side lands first, the other follows —
+# so a red gate on the PR that STARTS a round would block the very change it is
+# meant to coordinate. The issue is the signal; it closes itself once the two
+# copies agree.
+#
+# Three triggers, because no single one is enough:
+#   - `schedule` catches the other repository changing. GitHub documents that
+#     "scheduled workflows are automatically disabled when no repository
+#     activity has occurred in 60 days" in a public repository, and that the
+#     event "can be delayed during periods of high loads", so it cannot be the
+#     only trigger.
+#   - `push` to the default branch on the contract path catches THIS repository
+#     changing, within minutes, without waiting for a schedule.
+#   - `workflow_dispatch` is the manual re-check after the other side lands.
+# https://docs.github.com/en/actions/writing-workflows/choosing-when-your-workflow-runs/events-that-trigger-workflows
+name: Contract Parity
+
+on:
+  schedule:
+    # Daily, off the hour: scheduled runs cluster at :00 and GitHub delays them
+    # under load. 04:53 sits half an hour after the daily dependency audit (04:23)
+    # and clear of the Monday cluster (05:31, 06:17, 07:17).
+    - cron: '53 4 * * *'
+  push:
+    branches: [main]
+    paths:
+      - conformance/wire-contract.json
+      - .github/workflows/contract-parity.yml
+  workflow_dispatch:
+
+# Single-flight across the whole repository, not keyed by `github.ref`: what two
+# runs would race over is one tracking issue, so a ref-scoped group would leave
+# the race intact. Queue rather than cancel — interrupting a run midway through
+# rewriting or closing that issue is worse than waiting for it.
+concurrency:
+  group: contract-parity
+  cancel-in-progress: false
+
+# `issues: write` lets the check file and close its own tracking issue; reading
+# the sibling's public copy needs nothing beyond `contents: read`.
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  parity:
+    name: Contract parity with nest-auth
+    # `workflow_dispatch` can be fired from any branch. Comparing a branch's
+    # unmerged contract and writing the result to the repository-wide tracking
+    # issue would report a state this package does not declare.
+    if: github.ref_name == github.event.repository.default_branch
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      SIBLING: bymaxone/nest-auth
+      CONTRACT_PATH: conformance/wire-contract.json
+      LABEL: contract-drift
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Fetch the sibling's copy
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          # A failed fetch fails the job. Treating "could not read it" as "it
+          # matches" would close a real tracking issue on an outage, and
+          # treating it as "it differs" would open one on the same outage.
+          gh api "repos/$SIBLING/contents/$CONTRACT_PATH" \
+            -H 'Accept: application/vnd.github.raw+json' > "$RUNNER_TEMP/sibling.json"
+          test -s "$RUNNER_TEMP/sibling.json"
+
+      - name: Compare
+        id: compare
+        run: |
+          set -euo pipefail
+          LOCAL_SHA=$(sha256sum "$CONTRACT_PATH" | cut -d' ' -f1)
+          SIBLING_SHA=$(sha256sum "$RUNNER_TEMP/sibling.json" | cut -d' ' -f1)
+          {
+            echo "local=$LOCAL_SHA"
+            echo "sibling=$SIBLING_SHA"
+            if [ "$LOCAL_SHA" = "$SIBLING_SHA" ]; then echo "drift=false"; else echo "drift=true"; fi
+          } >> "$GITHUB_OUTPUT"
+
+          # Capped: the issue body has a size limit and the first screens of a
+          # diff say where the copies part.
+          diff -u --label "$SIBLING" --label "$GITHUB_REPOSITORY" \
+            "$RUNNER_TEMP/sibling.json" "$CONTRACT_PATH" | head -n 200 > "$RUNNER_TEMP/contract.diff" || true
+
+          {
+            echo "## Contract parity"
+            echo
+            echo "| Repository | sha256 |"
+            echo "| --- | --- |"
+            echo "| $GITHUB_REPOSITORY | \`$LOCAL_SHA\` |"
+            echo "| $SIBLING | \`$SIBLING_SHA\` |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Open, update, or close the tracking issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DRIFT: ${{ steps.compare.outputs.drift }}
+          LOCAL_SHA: ${{ steps.compare.outputs.local }}
+          SIBLING_SHA: ${{ steps.compare.outputs.sibling }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          TITLE="Wire contract differs from nest-auth"
+          # Markdown code spans need backticks, and a backtick inside shell quotes
+          # reads as a command substitution to the reader even where it is not
+          # one, so it is held in a variable.
+          BT=$(printf '\140')
+
+          # The label doubles as the lookup key, so it has to exist before the
+          # first issue is filed.
+          gh label create "$LABEL" --color B60205 \
+            --description "The wire contract differs between rust-auth and nest-auth" \
+            2>/dev/null || true
+
+          EXISTING=$(gh issue list --state open --label "$LABEL" --limit 1 --json number --jq '.[0].number // empty')
+
+          if [ "$DRIFT" = "false" ]; then
+            if [ -n "$EXISTING" ]; then
+              # Self-healing: whoever landed the second half of the round should
+              # not also have to remember to close this.
+              gh issue close "$EXISTING" --comment "Both copies are byte-identical as of [this run]($RUN_URL) (sha256 ${BT}$LOCAL_SHA${BT}). Closing automatically."
+            fi
+            echo "No drift."
+            exit 0
+          fi
+
+          BODY_FILE="$RUNNER_TEMP/issue-body.md"
+          {
+            echo "${BT}$CONTRACT_PATH${BT} differs from the copy in ${BT}$SIBLING${BT}."
+            echo
+            echo "| Repository | sha256 |"
+            echo "| --- | --- |"
+            echo "| ${BT}$GITHUB_REPOSITORY${BT} | ${BT}$LOCAL_SHA${BT} |"
+            echo "| ${BT}$SIBLING${BT} | ${BT}$SIBLING_SHA${BT} |"
+            echo
+            echo "Both libraries read and write one Redis, so a record or key that one declares and the other does not is a divergent keyspace. During a parity round this is expected until the second side lands."
+            echo
+            echo "<details><summary>Diff ($SIBLING → $GITHUB_REPOSITORY, first 200 lines)</summary>"
+            echo
+            echo "${BT}${BT}${BT}diff"
+            cat "$RUNNER_TEMP/contract.diff"
+            echo "${BT}${BT}${BT}"
+            echo
+            echo "</details>"
+            echo
+            echo "---"
+            echo
+            echo "Detected by the ${BT}contract-parity${BT} check ([run]($RUN_URL)). This issue is rewritten on every run and closes itself once the copies agree."
+          } > "$BODY_FILE"
+
+          if [ -n "$EXISTING" ]; then
+            gh issue edit "$EXISTING" --body-file "$BODY_FILE"
+            echo "Updated issue #$EXISTING."
+          else
+            gh issue create --title "$TITLE" --label "$LABEL" --body-file "$BODY_FILE"
+          fi
