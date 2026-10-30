@@ -568,7 +568,7 @@
     "totpSecretAtRest": "aes-256-gcm over the BASE32 TEXT of the secret",
     "recoveryCodeDigest": "hex hmac-sha256 of the code under the derived identifier key",
     "otpRecordCode": "hex hmac-sha256 of `{identifier}:{code}` under the derived identifier key",
-    "wsTicket": "64 lowercase hex characters (32 CSPRNG bytes), single-use, 30 s lifetime"
+    "wsTicket": "64 lowercase hex characters (32 CSPRNG bytes), single-use, at most 30 s and never beyond the minting access token's own expiry"
   },
   "passwordHashFormat": {
     "$comment": [
