@@ -331,11 +331,12 @@ impl AuthEngine {
     ///
     /// # Errors
     ///
-    /// Returns [`AuthError::TokenInvalid`] for an unknown user, a status [`AuthError`] for a
+    /// Returns [`AuthError::TokenInvalid`] for a user who does not exist in `tenant_id`, a status [`AuthError`] for a
     /// blocked account, [`AuthError::EmailNotVerified`] when verification is pending,
     /// [`AuthError::MfaRequired`] for an MFA-enabled user, or a store/signing [`AuthError`].
     pub async fn issue_tokens_for_user_id(
         &self,
+        tenant_id: &str,
         user_id: &str,
         ip: &str,
         user_agent: &str,
@@ -343,7 +344,7 @@ impl AuthEngine {
         let config = self.config().config();
         let user = match self
             .user_repository()
-            .find_by_id(user_id, None)
+            .find_by_id(user_id, Some(tenant_id))
             .await
             .map_err(map_repository_error)?
         {
@@ -877,15 +878,37 @@ mod tests {
         let id = h.seed(SeedUser::active("switch@example.com", "pw")).await;
         let issued = h
             .engine
-            .issue_tokens_for_user_id(&id, "1.2.3.4", "agent")
+            .issue_tokens_for_user_id("t1", &id, "1.2.3.4", "agent")
             .await;
         assert!(matches!(&issued, Ok(a) if a.user.email == "switch@example.com"));
         assert!(matches!(
             h.engine
-                .issue_tokens_for_user_id("missing", "1.2.3.4", "agent")
+                .issue_tokens_for_user_id("t1", "missing", "1.2.3.4", "agent")
                 .await,
             Err(AuthError::TokenInvalid)
         ));
+    }
+
+    #[tokio::test]
+    async fn password_less_issuance_does_not_reach_an_account_in_another_tenant() {
+        // `issue_tokens_for_user_id` mints a full session for whoever the id names, so the id
+        // is resolved inside the tenant the caller names: a repository id is unique only within
+        // a tenant, and another tenant's account must not be reachable through it.
+        let mut cfg = base_config();
+        cfg.email_verification.required = false;
+        let Some(h) = harness(cfg, None) else { return };
+        let id = h
+            .seed(SeedUser::active("tenant-one@example.com", "pw"))
+            .await;
+
+        let crossed = h
+            .engine
+            .issue_tokens_for_user_id("t2", &id, "1.2.3.4", "agent")
+            .await;
+        assert!(
+            matches!(crossed, Err(AuthError::TokenInvalid)),
+            "a session was issued for an account in another tenant"
+        );
     }
 
     #[tokio::test]
@@ -908,7 +931,7 @@ mod tests {
             .await;
         assert!(matches!(
             h.engine
-                .issue_tokens_for_user_id(&banned, "1.2.3.4", "agent")
+                .issue_tokens_for_user_id("t1", &banned, "1.2.3.4", "agent")
                 .await,
             Err(AuthError::AccountBanned)
         ));
@@ -925,7 +948,7 @@ mod tests {
             .await;
         assert!(matches!(
             h.engine
-                .issue_tokens_for_user_id(&unverified, "1.2.3.4", "agent")
+                .issue_tokens_for_user_id("t1", &unverified, "1.2.3.4", "agent")
                 .await,
             Err(AuthError::EmailNotVerified)
         ));
@@ -942,7 +965,7 @@ mod tests {
             .await;
         assert!(matches!(
             h.engine
-                .issue_tokens_for_user_id(&mfa, "1.2.3.4", "agent")
+                .issue_tokens_for_user_id("t1", &mfa, "1.2.3.4", "agent")
                 .await,
             Err(AuthError::MfaRequired)
         ));
