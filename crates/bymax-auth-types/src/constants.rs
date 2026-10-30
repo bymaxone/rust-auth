@@ -4,9 +4,11 @@
 //!
 //! These are the single source of truth that the server, the typed client, and the
 //! WASM edge proxy all read, so they cannot disagree. The [`routes`] paths are shown
-//! with the default [`AUTH_ROUTE_PREFIX`]; if a deployment changes the prefix, the
-//! refresh cookie path and the route paths move together (the adapter recomposes them),
-//! which is why [`AUTH_REFRESH_COOKIE_PATH`] must track the prefix.
+//! with the default [`AUTH_ROUTE_PREFIX`]. These are fixed strings: a deployment that
+//! changes the route prefix must also set the refresh cookie path explicitly, and config
+//! validation rejects a custom prefix while the refresh cookie path is still the default
+//! (`ConfigError::RefreshPathMismatch`), which is how [`AUTH_REFRESH_COOKIE_PATH`] is kept
+//! in step with the prefix.
 
 /// Cookie carrying the HS256 access JWT. `HttpOnly`, `SameSite=Lax`, path `/`.
 pub const AUTH_ACCESS_COOKIE_NAME: &str = "access_token";
@@ -97,8 +99,11 @@ pub mod routes {
     // SessionController — `sessions` feature
     /// `GET` — list the caller's sessions.
     pub const SESSIONS_LIST: &str = "/auth/sessions";
-    /// `DELETE` — revoke every session.
-    pub const SESSIONS_REVOKE_ALL: &str = "/auth/sessions/all";
+    /// `POST` — revoke every session **except the caller's own**, which is why the request
+    /// carries the caller's refresh token: it names the one session to keep. The constant is
+    /// named for the path, not for a full sign-out — for that, the account's own sessions are
+    /// swept by the flows that change a credential (password reset, MFA disable).
+    pub const SESSIONS_REVOKE_ALL: &str = "/auth/sessions/revoke-all";
     /// `DELETE` — revoke one session by its hash (`/auth/sessions/{id}`).
     pub const SESSIONS_REVOKE_ONE: &str = "/auth/sessions/{id}";
 

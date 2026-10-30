@@ -21,7 +21,7 @@ export const AUTH_ROUTES = {
   PASSWORD_VERIFY_OTP: "/auth/password/verify-otp",
   PASSWORD_RESEND_OTP: "/auth/password/resend-otp",
   SESSIONS_LIST: "/auth/sessions",
-  SESSIONS_REVOKE_ALL: "/auth/sessions/all",
+  SESSIONS_REVOKE_ALL: "/auth/sessions/revoke-all",
   SESSIONS_REVOKE_ONE: "/auth/sessions/{id}",
   PLATFORM_LOGIN: "/auth/platform/login",
   PLATFORM_MFA_CHALLENGE: "/auth/platform/mfa/challenge",

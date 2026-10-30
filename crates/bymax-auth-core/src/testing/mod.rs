@@ -451,8 +451,19 @@ impl PlatformUserRepository for InMemoryPlatformUserRepository {
 #[derive(Debug, Default)]
 pub struct InMemoryStores {
     sessions: Mutex<HashMap<(SessionKind, String), SessionRecord>>,
+    /// `sess:`/`psess:` — the per-account session index, keyed by `(kind, subject_hash)`. The
+    /// subject hash is what the real store keys on, so the double keys on it too: keying the
+    /// double on the bare user id while production keyed on the subject is precisely the shape
+    /// of divergence that lets a test pass against the double and the deployment misbehave.
     session_index: Mutex<HashMap<(SessionKind, String), Vec<SessionDetail>>>,
-    grace: Mutex<HashMap<(SessionKind, String), SessionRecord>>,
+    /// `rp:`/`prp:` — rotation grace pointers, keyed by `(kind, old_hash)` and carrying the
+    /// owner's subject hash beside the recovered record.
+    ///
+    /// The subject is stored rather than recomputed because this double holds no hashing key,
+    /// and both `revoke_all` and `sweep_grace_pointers` have to find every pointer ONE account
+    /// owns — the real store finds them as members of that account's `sess:` set, which is the
+    /// same question asked a different way.
+    grace: Mutex<HashMap<(SessionKind, String), (String, SessionRecord)>>,
     /// `cf:` consumed-token markers: an already-rotated token's hash → the family it belonged
     /// to. Outlives the grace pointer (which the real store keys with the shorter grace TTL),
     /// so a post-grace replay of the consumed token is detected as a reuse rather than a plain
@@ -486,8 +497,9 @@ pub struct InMemoryStores {
     /// half-done, and the caller has to hear about it. A store that always succeeds leaves that
     /// propagation unasserted.
     forced_epoch_bump_failures: Mutex<usize>,
-    /// `ep:`/`pep:` per-user token epoch (generation counter), keyed by `(kind, user_id)`. A
-    /// bump invalidates every access token stamped below the new value. Absent reads as `0`.
+    /// `ep:`/`pep:` per-account token epoch (generation counter), keyed by
+    /// `(kind, subject_hash)`. A bump invalidates every access token stamped below the new
+    /// value. Absent reads as `0`.
     epochs: Mutex<HashMap<(SessionKind, String), u64>>,
     /// The refresh TTL the last `rotate` was given, in seconds — the session-touch path's
     /// copy of the same lifetime, wired separately from the token manager's.
@@ -655,6 +667,7 @@ impl SessionStore for InMemoryStores {
     async fn create_recovered_session(
         &self,
         kind: SessionKind,
+        subject_hash: &str,
         token_hash: &str,
         detail: &SessionRecord,
         ttl_secs: u64,
@@ -670,7 +683,7 @@ impl SessionStore for InMemoryStores {
                 return Ok(false);
             }
         }
-        if !lock(&self.session_index).contains_key(&(kind, detail.user_id.clone())) {
+        if !lock(&self.session_index).contains_key(&(kind, subject_hash.to_owned())) {
             return Ok(false);
         }
         if !detail.family_id.is_empty()
@@ -678,7 +691,7 @@ impl SessionStore for InMemoryStores {
         {
             return Ok(false);
         }
-        self.create_session(kind, token_hash, detail, ttl_secs)
+        self.create_session(kind, subject_hash, token_hash, detail, ttl_secs)
             .await?;
         Ok(true)
     }
@@ -686,6 +699,7 @@ impl SessionStore for InMemoryStores {
     async fn create_session(
         &self,
         kind: SessionKind,
+        subject_hash: &str,
         token_hash: &str,
         detail: &SessionRecord,
         ttl_secs: u64,
@@ -693,7 +707,7 @@ impl SessionStore for InMemoryStores {
         *lock(&self.last_session_ttl_secs) = Some(ttl_secs);
         lock(&self.sessions).insert((kind, token_hash.to_owned()), detail.clone());
         lock(&self.session_index)
-            .entry((kind, detail.user_id.clone()))
+            .entry((kind, subject_hash.to_owned()))
             .or_default()
             .push(SessionDetail {
                 session_hash: token_hash.to_owned(),
@@ -728,10 +742,10 @@ impl SessionStore for InMemoryStores {
             );
             lock(&self.grace).insert(
                 (kind, rotation.old_hash.clone()),
-                rotation.new_record.clone(),
+                (rotation.subject_hash.clone(), rotation.new_record.clone()),
             );
             let mut index = lock(&self.session_index);
-            if let Some(details) = index.get_mut(&(kind, old_record.user_id.clone())) {
+            if let Some(details) = index.get_mut(&(kind, rotation.subject_hash.clone())) {
                 details.retain(|d| d.session_hash != rotation.old_hash);
                 details.push(SessionDetail {
                     session_hash: rotation.new_hash.clone(),
@@ -768,7 +782,9 @@ impl SessionStore for InMemoryStores {
         // nest-auth's end-to-end tier run against, so a weaker rule here would let a divergence
         // ship unnoticed. A record that names no family recovers as
         // before.
-        if let Some(recovered) = lock(&self.grace).remove(&(kind, rotation.old_hash.clone())) {
+        if let Some((_subject, recovered)) =
+            lock(&self.grace).remove(&(kind, rotation.old_hash.clone()))
+        {
             if recovered.family_id.is_empty()
                 || lock(&self.families).contains_key(&(kind, recovered.family_id.clone()))
             {
@@ -798,10 +814,10 @@ impl SessionStore for InMemoryStores {
     async fn list_sessions(
         &self,
         kind: SessionKind,
-        user_id: &str,
+        subject_hash: &str,
     ) -> Result<Vec<SessionDetail>, AuthError> {
         Ok(lock(&self.session_index)
-            .get(&(kind, user_id.to_owned()))
+            .get(&(kind, subject_hash.to_owned()))
             .cloned()
             .unwrap_or_default())
     }
@@ -809,13 +825,13 @@ impl SessionStore for InMemoryStores {
     async fn revoke_session(
         &self,
         kind: SessionKind,
-        user_id: &str,
+        subject_hash: &str,
         session_hash: &str,
     ) -> Result<(), AuthError> {
         self.take_forced_failure()?;
         let mut index = lock(&self.session_index);
         let details = index
-            .get_mut(&(kind, user_id.to_owned()))
+            .get_mut(&(kind, subject_hash.to_owned()))
             .ok_or(AuthError::SessionNotFound)?;
         let before = details.len();
         details.retain(|d| d.session_hash != session_hash);
@@ -841,19 +857,19 @@ impl SessionStore for InMemoryStores {
     async fn sweep_grace_pointers(
         &self,
         kind: SessionKind,
-        user_id: &str,
+        subject_hash: &str,
     ) -> Result<(), AuthError> {
         self.take_forced_failure()?;
         // Every pointer this account owns, not just one hash: the real store reads the `rp:`
-        // members out of the user's session index, and the record each pointer holds names its
-        // owner, so the in-memory twin filters on that.
+        // members out of the account's session index, and each pointer here carries the subject
+        // whose index it was added to, so the in-memory twin filters on that.
         lock(&self.grace)
-            .retain(|(entry_kind, _), record| *entry_kind != kind || record.user_id != user_id);
+            .retain(|(entry_kind, _), (owner, _)| *entry_kind != kind || owner != subject_hash);
         Ok(())
     }
 
-    async fn revoke_all(&self, kind: SessionKind, user_id: &str) -> Result<(), AuthError> {
-        if let Some(details) = lock(&self.session_index).remove(&(kind, user_id.to_owned())) {
+    async fn revoke_all(&self, kind: SessionKind, subject_hash: &str) -> Result<(), AuthError> {
+        if let Some(details) = lock(&self.session_index).remove(&(kind, subject_hash.to_owned())) {
             let mut sessions = lock(&self.sessions);
             for detail in details {
                 sessions.remove(&(kind, detail.session_hash));
@@ -866,38 +882,56 @@ impl SessionStore for InMemoryStores {
         // double that keeps them is *weaker* than production: a token inside its grace window
         // would still recover a session after "sign out everywhere", a password reset, or an
         // MFA change, which is the exact property those flows exist to guarantee.
-        lock(&self.grace).retain(|(k, _), record| *k != kind || record.user_id != user_id);
+        lock(&self.grace).retain(|(k, _), (owner, _)| *k != kind || owner != subject_hash);
         Ok(())
+    }
+
+    async fn find_family_owner(
+        &self,
+        kind: SessionKind,
+        family_id: &str,
+    ) -> Result<Option<SessionRecord>, AuthError> {
+        if family_id.is_empty() {
+            return Ok(None);
+        }
+        let families = lock(&self.families);
+        let Some(hashes) = families.get(&(kind, family_id.to_owned())) else {
+            return Ok(None);
+        };
+        let sessions = lock(&self.sessions);
+        Ok(hashes
+            .iter()
+            .filter_map(|hash| sessions.get(&(kind, hash.clone())))
+            .find(|record| !record.user_id.is_empty())
+            .cloned())
     }
 
     async fn revoke_family(
         &self,
         kind: SessionKind,
         family_id: &str,
-    ) -> Result<Option<String>, AuthError> {
+        owner_subject_hash: Option<&str>,
+    ) -> Result<(), AuthError> {
         // Idempotent: an empty, unknown, or already-cleared family drops nothing.
         if family_id.is_empty() {
-            return Ok(None);
+            return Ok(());
         }
         let Some(hashes) = lock(&self.families).remove(&(kind, family_id.to_owned())) else {
-            return Ok(None);
+            return Ok(());
         };
         let mut sessions = lock(&self.sessions);
         let mut index = lock(&self.session_index);
-        let mut owner = None;
         for hash in hashes {
             // Every live descendant of the compromised login is deleted, and pruned from its
-            // owner's session index (all family members share one user).
-            if let Some(record) = sessions.remove(&(kind, hash.clone())) {
-                if owner.is_none() && !record.user_id.is_empty() {
-                    owner = Some(record.user_id.clone());
-                }
-                if let Some(details) = index.get_mut(&(kind, record.user_id.clone())) {
-                    details.retain(|detail| detail.session_hash != hash);
-                }
+            // owner's session index (all family members share one login, so one subject).
+            sessions.remove(&(kind, hash.clone()));
+            if let Some(owner) = owner_subject_hash
+                && let Some(details) = index.get_mut(&(kind, owner.to_owned()))
+            {
+                details.retain(|detail| detail.session_hash != hash);
             }
         }
-        Ok(owner)
+        Ok(())
     }
 
     async fn blacklist_access(
@@ -913,9 +947,9 @@ impl SessionStore for InMemoryStores {
         Ok(lock(&self.blacklist).contains(jti_or_hash))
     }
 
-    async fn current_epoch(&self, kind: SessionKind, user_id: &str) -> Result<u64, AuthError> {
+    async fn current_epoch(&self, kind: SessionKind, subject_hash: &str) -> Result<u64, AuthError> {
         Ok(lock(&self.epochs)
-            .get(&(kind, user_id.to_owned()))
+            .get(&(kind, subject_hash.to_owned()))
             .copied()
             .unwrap_or(0))
     }
@@ -929,7 +963,7 @@ impl SessionStore for InMemoryStores {
         Ok(lock(&self.recent_auth).contains_key(user_id_hash))
     }
 
-    async fn bump_epoch(&self, kind: SessionKind, user_id: &str) -> Result<u64, AuthError> {
+    async fn bump_epoch(&self, kind: SessionKind, subject_hash: &str) -> Result<u64, AuthError> {
         {
             let mut armed = lock(&self.forced_epoch_bump_failures);
             if *armed > 0 {
@@ -938,7 +972,7 @@ impl SessionStore for InMemoryStores {
             }
         }
         let mut epochs = lock(&self.epochs);
-        let entry = epochs.entry((kind, user_id.to_owned())).or_insert(0);
+        let entry = epochs.entry((kind, subject_hash.to_owned())).or_insert(0);
         *entry += 1;
         Ok(*entry)
     }
@@ -1603,6 +1637,15 @@ mod tests {
         assert!(repo.update_status("missing", "X").await.is_ok());
     }
 
+    /// A stand-in session subject for `user`.
+    ///
+    /// The double treats the subject as an opaque suffix, exactly as the Redis store does — the
+    /// real value is `hmac_sha256(identifier_key, user_subject)` and deriving it is the engine's
+    /// job. A readable label keeps these assertions about the index rather than about hashing.
+    fn subject(user: &str) -> String {
+        format!("subj-{user}")
+    }
+
     fn record(user: &str) -> SessionRecord {
         record_in_family(user, "fam-1")
     }
@@ -1627,13 +1670,13 @@ mod tests {
         let kind = SessionKind::Dashboard;
         assert!(
             store
-                .create_session(kind, "h1", &record("u1"), 60)
+                .create_session(kind, &subject("u1"), "h1", &record("u1"), 60)
                 .await
                 .is_ok()
         );
         assert!(matches!(store.find_session(kind, "h1").await, Ok(Some(_))));
         assert!(matches!(store.find_session(kind, "absent").await, Ok(None)));
-        assert!(matches!(store.list_sessions(kind, "u1").await, Ok(v) if v.len() == 1));
+        assert!(matches!(store.list_sessions(kind, &subject("u1")).await, Ok(v) if v.len() == 1));
 
         // Rotate h1 -> h2 (Rotated), then a second rotate of h1 hits the grace pointer.
         let rotation = SessionRotation {
@@ -1641,6 +1684,7 @@ mod tests {
             new_hash: "h2".to_owned(),
             new_raw: "raw2".to_owned(),
             new_record: record("u1"),
+            subject_hash: subject("u1"),
             refresh_ttl: 60,
             grace_ttl: 30,
         };
@@ -1664,24 +1708,29 @@ mod tests {
 
         // Ownership-checked revoke: unknown user, unknown hash, then the real one.
         assert!(matches!(
-            store.revoke_session(kind, "ghost", "h2").await,
+            store.revoke_session(kind, &subject("ghost"), "h2").await,
             Err(AuthError::SessionNotFound)
         ));
         assert!(matches!(
-            store.revoke_session(kind, "u1", "absent").await,
+            store.revoke_session(kind, &subject("u1"), "absent").await,
             Err(AuthError::SessionNotFound)
         ));
-        assert!(store.revoke_session(kind, "u1", "h2").await.is_ok());
+        assert!(
+            store
+                .revoke_session(kind, &subject("u1"), "h2")
+                .await
+                .is_ok()
+        );
 
         // revoke_all clears the remaining index entry (and the no-op empty case).
         assert!(
             store
-                .create_session(kind, "h3", &record("u1"), 60)
+                .create_session(kind, &subject("u1"), "h3", &record("u1"), 60)
                 .await
                 .is_ok()
         );
-        assert!(store.revoke_all(kind, "u1").await.is_ok());
-        assert!(store.revoke_all(kind, "nobody").await.is_ok());
+        assert!(store.revoke_all(kind, &subject("u1")).await.is_ok());
+        assert!(store.revoke_all(kind, &subject("nobody")).await.is_ok());
 
         // Access blacklist.
         assert!(matches!(store.is_blacklisted("jti").await, Ok(false)));
@@ -1696,7 +1745,13 @@ mod tests {
         // A login in family "famA", then a rotation h1 -> h2 (same inherited family).
         assert!(
             store
-                .create_session(kind, "h1", &record_in_family("u1", "famA"), 60)
+                .create_session(
+                    kind,
+                    &subject("u1"),
+                    "h1",
+                    &record_in_family("u1", "famA"),
+                    60
+                )
                 .await
                 .is_ok()
         );
@@ -1705,6 +1760,7 @@ mod tests {
             new_hash: "h2".to_owned(),
             new_raw: "raw2".to_owned(),
             new_record: record_in_family("u1", "famA"),
+            subject_hash: subject("u1"),
             refresh_ttl: 60,
             grace_ttl: 30,
         };
@@ -1727,18 +1783,31 @@ mod tests {
         // The live descendant h2 is present until the family is revoked; revoke_family then
         // deletes it and clears the owner's index, and is idempotent on unknown/empty families.
         assert!(matches!(store.find_session(kind, "h2").await, Ok(Some(_))));
-        // …and it reports the account the family belonged to. That owner is the only thing
-        // reuse detection can name its victim with: the replayed token's own key was deleted
-        // when it was rotated, so the family index is the last surviving link to an account.
+        // …and the account the family belonged to is readable BEFORE the revocation. That owner
+        // is the only thing reuse detection can name its victim with: the replayed token's own
+        // key was deleted when it was rotated, so the family index is the last surviving link to
+        // an account — and the revocation needs the owner's subject to prune the right index.
         assert!(matches!(
-            store.revoke_family(kind, "famA").await,
-            Ok(Some(owner)) if owner == "u1"
+            store.find_family_owner(kind, "famA").await,
+            Ok(Some(owner)) if owner.user_id == "u1"
         ));
+        assert!(
+            store
+                .revoke_family(kind, "famA", Some(&subject("u1")))
+                .await
+                .is_ok()
+        );
         assert!(matches!(store.find_session(kind, "h2").await, Ok(None)));
-        assert!(matches!(store.list_sessions(kind, "u1").await, Ok(v) if v.is_empty()));
-        // A family with nothing left readable names nobody rather than someone.
-        assert!(matches!(store.revoke_family(kind, "famA").await, Ok(None)));
-        assert!(matches!(store.revoke_family(kind, "").await, Ok(None)));
+        assert!(matches!(store.list_sessions(kind, &subject("u1")).await, Ok(v) if v.is_empty()));
+        // A family with nothing left readable names nobody rather than someone, and revoking it
+        // again is a no-op rather than an error.
+        assert!(matches!(
+            store.find_family_owner(kind, "famA").await,
+            Ok(None)
+        ));
+        assert!(matches!(store.find_family_owner(kind, "").await, Ok(None)));
+        assert!(store.revoke_family(kind, "famA", None).await.is_ok());
+        assert!(store.revoke_family(kind, "", None).await.is_ok());
 
         // A member whose record carries no owner is skipped rather than reported: an event
         // naming the empty string is worse than no event, because a consumer would act on it.
@@ -1747,17 +1816,27 @@ mod tests {
         // the assertion would pass or fail by luck.
         assert!(
             store
-                .create_session(kind, "anon", &record_in_family("", "famB"), 60)
+                .create_session(
+                    kind,
+                    &subject(""),
+                    "anon",
+                    &record_in_family("", "famB"),
+                    60
+                )
                 .await
                 .is_ok()
         );
-        assert!(matches!(store.revoke_family(kind, "famB").await, Ok(None)));
+        assert!(matches!(
+            store.find_family_owner(kind, "famB").await,
+            Ok(None)
+        ));
+        assert!(store.revoke_family(kind, "famB", None).await.is_ok());
 
         // A session with no family plants no consumed marker, so a post-grace replay is a
         // plain Invalid, never a reuse.
         assert!(
             store
-                .create_session(kind, "g1", &record_in_family("u2", ""), 60)
+                .create_session(kind, &subject("u2"), "g1", &record_in_family("u2", ""), 60)
                 .await
                 .is_ok()
         );
@@ -1766,6 +1845,7 @@ mod tests {
             new_hash: "g2".to_owned(),
             new_raw: "rawg".to_owned(),
             new_record: record_in_family("u2", ""),
+            subject_hash: subject("u2"),
             refresh_ttl: 60,
             grace_ttl: 30,
         };
@@ -1780,6 +1860,143 @@ mod tests {
         ));
     }
 
+    /// The three lineages both scoping tests need: the target account, another account on the
+    /// same plane, and the target's id on the OTHER plane. Each is created and rotated once, so
+    /// each owns a grace pointer keyed by its superseded hash.
+    ///
+    /// Shared because `revoke_all` and `sweep_grace_pointers` carry the same two-part predicate
+    /// (`kind` AND `subject`) over the same map. Two copies of this arrangement would be two
+    /// things to keep in step, and the mutation gate proved they are not interchangeable: the
+    /// version that tested only one of the two left the other's predicate unpinned.
+    async fn plant_grace_lineages(store: &InMemoryStores) {
+        for (kind, hash, user, family) in [
+            (SessionKind::Dashboard, "a1", "u1", "famA"),
+            (SessionKind::Dashboard, "b1", "u2", "famB"),
+            (SessionKind::Platform, "p1", "u1", "famP"),
+        ] {
+            assert!(
+                store
+                    .create_session(
+                        kind,
+                        &subject(user),
+                        hash,
+                        &record_in_family(user, family),
+                        60
+                    )
+                    .await
+                    .is_ok()
+            );
+        }
+        for (kind, old, new, user, family) in [
+            (SessionKind::Dashboard, "a1", "a2", "u1", "famA"),
+            (SessionKind::Dashboard, "b1", "b2", "u2", "famB"),
+            (SessionKind::Platform, "p1", "p2", "u1", "famP"),
+        ] {
+            assert!(matches!(
+                store
+                    .rotate(kind, &grace_replay(old, new, user, family))
+                    .await,
+                Ok(RotateOutcome::Rotated(_))
+            ));
+        }
+    }
+
+    /// A rotation bundle presenting `old` again — the replay whose outcome reports whether that
+    /// lineage's grace pointer survived: `Grace` while the pointer is there, `Reused` once it has
+    /// been swept and only the consumed-family marker is left.
+    fn grace_replay(old: &str, new: &str, user: &str, family: &str) -> SessionRotation {
+        SessionRotation {
+            old_hash: old.to_owned(),
+            new_hash: new.to_owned(),
+            new_raw: String::new(),
+            new_record: record_in_family(user, family),
+            subject_hash: subject(user),
+            refresh_ttl: 60,
+            grace_ttl: 30,
+        }
+    }
+
+    /// Assert that the target's grace pointer is gone and the other two survive — the property
+    /// both scoping predicates have to hold.
+    async fn assert_only_the_target_was_swept(store: &InMemoryStores) {
+        assert!(matches!(
+            store
+                .rotate(
+                    SessionKind::Dashboard,
+                    &grace_replay("a1", "a-replay", "u1", "famA")
+                )
+                .await,
+            Ok(RotateOutcome::Reused(family)) if family == "famA"
+        ));
+        // Bound before the assertion, not inlined into it: a two-argument `assert!` whose
+        // condition contains the `.await` leaves that region counted only on the FAILING path,
+        // which shows up as an uncovered line under a 100% gate. The same reason the message can
+        // now name the value it saw.
+        let other_account = store
+            .rotate(
+                SessionKind::Dashboard,
+                &grace_replay("b1", "b-replay", "u2", "famB"),
+            )
+            .await;
+        assert!(
+            matches!(other_account, Ok(RotateOutcome::Grace(_))),
+            "another account's grace pointer was swept: {other_account:?}"
+        );
+        let other_plane = store
+            .rotate(
+                SessionKind::Platform,
+                &grace_replay("p1", "p-replay", "u1", "famP"),
+            )
+            .await;
+        assert!(
+            matches!(other_plane, Ok(RotateOutcome::Grace(_))),
+            "a dashboard sweep reached the platform keyspace: {other_plane:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn revoke_all_sweeps_only_the_named_accounts_grace_pointers() {
+        // `revoke_all` deletes the account's grace pointers as well as its sessions, because the
+        // real store finds them as members of the same `sess:` set. The predicate that picks them
+        // is `kind` AND `subject`, and neither half was pinned.
+        //
+        // Both directions matter. Sweeping too little leaves a token rotated away moments before
+        // "sign out everywhere" able to recover a full session for its whole grace window.
+        // Sweeping too much silently signs out a stranger — the cross-tenant revocation this
+        // keyspace moved to prevent, reintroduced one layer up in the double.
+        let store = InMemoryStores::new();
+        plant_grace_lineages(&store).await;
+
+        assert!(
+            store
+                .revoke_all(SessionKind::Dashboard, &subject("u1"))
+                .await
+                .is_ok()
+        );
+
+        assert_only_the_target_was_swept(&store).await;
+    }
+
+    #[tokio::test]
+    async fn sweep_grace_pointers_touches_only_the_named_account() {
+        // The same two-part predicate as `revoke_all`, on the call `revoke_all_except_current`
+        // uses — and it needs its own test rather than inheriting that one's: they are separate
+        // `retain` closures, and the mutation gate kills them separately. This is the arm that
+        // runs when the caller KEEPS a session, so over-sweeping here signs out a stranger while
+        // the caller's own device carries on, which is the shape that reads as working.
+        let store = InMemoryStores::new();
+        plant_grace_lineages(&store).await;
+
+        assert!(
+            store
+                .sweep_grace_pointers(SessionKind::Dashboard, &subject("u1"))
+                .await
+                .is_ok()
+        );
+
+        assert_only_the_target_was_swept(&store).await;
+    }
+
     #[tokio::test]
     async fn armed_cleanup_failures_are_finite() {
         // The point of arming a COUNT is that it runs out. A counter that never reached zero
@@ -1791,7 +2008,7 @@ mod tests {
         let kind = SessionKind::Dashboard;
         assert!(
             store
-                .create_session(kind, "a1", &record("u9"), 60)
+                .create_session(kind, &subject("u9"), "a1", &record("u9"), 60)
                 .await
                 .is_ok()
         );
@@ -1799,7 +2016,7 @@ mod tests {
         store.fail_next_cleanup_writes(2);
         // Armed: a backend error, not the `SessionNotFound` an absent session would give.
         assert!(matches!(
-            store.revoke_session(kind, "u9", "a1").await,
+            store.revoke_session(kind, &subject("u9"), "a1").await,
             Err(AuthError::Internal(_))
         ));
         assert!(matches!(
@@ -1808,7 +2025,12 @@ mod tests {
         ));
         // Disarmed: the session is still there (both armed calls failed before touching it),
         // so this one succeeds — which it could not if the counter had grown or stalled.
-        assert!(store.revoke_session(kind, "u9", "a1").await.is_ok());
+        assert!(
+            store
+                .revoke_session(kind, &subject("u9"), "a1")
+                .await
+                .is_ok()
+        );
         assert!(store.delete_grace_pointer(kind, "a1").await.is_ok());
     }
 
@@ -1822,7 +2044,13 @@ mod tests {
         let store = InMemoryStores::new();
         assert!(
             store
-                .create_session(kind, "s1", &record_in_family("u3", "famB"), 60)
+                .create_session(
+                    kind,
+                    &subject("u3"),
+                    "s1",
+                    &record_in_family("u3", "famB"),
+                    60
+                )
                 .await
                 .is_ok()
         );
@@ -1831,6 +2059,7 @@ mod tests {
             new_hash: "s2".to_owned(),
             new_raw: "raws2".to_owned(),
             new_record: record_in_family("u3", "famB"),
+            subject_hash: subject("u3"),
             refresh_ttl: 60,
             grace_ttl: 30,
         };
@@ -1856,7 +2085,13 @@ mod tests {
         let store = InMemoryStores::new();
         assert!(
             store
-                .create_session(kind, "t1", &record_in_family("u4", "famC"), 60)
+                .create_session(
+                    kind,
+                    &subject("u4"),
+                    "t1",
+                    &record_in_family("u4", "famC"),
+                    60
+                )
                 .await
                 .is_ok()
         );
@@ -1869,6 +2104,7 @@ mod tests {
                         new_hash: "t2".to_owned(),
                         new_raw: "rawt2".to_owned(),
                         new_record: record_in_family("u4", "famC"),
+                        subject_hash: subject("u4"),
                         refresh_ttl: 60,
                         grace_ttl: 30,
                     },
@@ -1876,7 +2112,12 @@ mod tests {
                 .await,
             Ok(RotateOutcome::Rotated(_))
         ));
-        assert!(store.revoke_family(kind, "famC").await.is_ok());
+        assert!(
+            store
+                .revoke_family(kind, "famC", Some(&subject("u4")))
+                .await
+                .is_ok()
+        );
         assert!(matches!(
             store
                 .rotate(
@@ -1886,6 +2127,7 @@ mod tests {
                         new_hash: "t3".to_owned(),
                         new_raw: "rawt3".to_owned(),
                         new_record: record_in_family("u4", "famC"),
+                        subject_hash: subject("u4"),
                         refresh_ttl: 60,
                         grace_ttl: 30,
                     },

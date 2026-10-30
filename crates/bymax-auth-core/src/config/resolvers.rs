@@ -39,8 +39,10 @@ pub enum TenantResolveError {
 }
 
 /// Resolves the tenant id from request parts. When configured, the value it returns is the
-/// **only** tenant id the engine uses for that request — any `tenant_id` in the request
-/// body is ignored entirely (anti-spoofing).
+/// **only** tenant id the engine uses for that request, and a request that names a `tenant_id`
+/// of its own is refused with `auth.validation` rather than having it discarded (anti-spoofing:
+/// a discarded value answers `201` while the account lands somewhere else, which tells the
+/// caller nothing about the divergence).
 ///
 /// # Errors
 ///

@@ -162,12 +162,13 @@ impl AuthEngine {
     /// Returns a store [`AuthError`] on an infrastructure failure.
     pub async fn list_user_sessions(
         &self,
+        tenant_id: &str,
         user_id: &str,
         raw_refresh: Option<&str>,
     ) -> Result<Vec<SessionInfo>, AuthError> {
         let current_hash = current_session_hash(raw_refresh);
         self.sessions()
-            .list_sessions(user_id, current_hash.as_deref())
+            .list_sessions(tenant_id, user_id, current_hash.as_deref())
             .await
     }
 
@@ -181,11 +182,12 @@ impl AuthEngine {
     /// [`AuthError`].
     pub async fn revoke_user_session(
         &self,
+        tenant_id: &str,
         user_id: &str,
         session_hash: &str,
     ) -> Result<(), AuthError> {
         self.sessions()
-            .revoke_session(user_id, session_hash)
+            .revoke_session(tenant_id, user_id, session_hash)
             .await?;
         // …and cut the access tokens with it. Deleting the refresh session stops rotation but
         // says nothing about the stateless access token that session's holder is already
@@ -203,28 +205,40 @@ impl AuthEngine {
         // is in fact still alive. `logout` keeps the plain revoke — it blacklists its own `jti`
         // by name, and ending one session must not reach every other device's access token.
         self.session_store()
-            .bump_epoch(crate::traits::SessionKind::Dashboard, user_id)
+            .bump_epoch(
+                crate::traits::SessionKind::Dashboard,
+                &self.session_subject(
+                    crate::traits::SessionKind::Dashboard,
+                    Some(tenant_id),
+                    user_id,
+                ),
+            )
             .await?;
         Ok(())
     }
 
-    /// Revoke every session for the caller except the current one (`DELETE /auth/sessions/all`).
-    /// The current session is identified by the request's raw refresh token; when none is
-    /// present the caller's session cannot be excluded, so this is a no-op rather than wiping
-    /// the live session out from under the request.
+    /// Revoke every session for the caller except the current one
+    /// (`POST /auth/sessions/revoke-all`).
+    ///
+    /// The current session is identified by the request's raw refresh token. Without it there is
+    /// no way to tell which session to keep, and the call is **refused** rather than treated as
+    /// a no-op: answering success having done nothing is the failure mode this route exists to
+    /// avoid, since the caller reaching for it believes a device is compromised right now.
     ///
     /// # Errors
     ///
-    /// Returns a store [`AuthError`] on an infrastructure failure.
+    /// Returns [`AuthError::SessionNotFound`] when no usable refresh token names the caller's
+    /// current session, or a store [`AuthError`] on an infrastructure failure.
     pub async fn revoke_other_user_sessions(
         &self,
+        tenant_id: &str,
         user_id: &str,
         raw_refresh: Option<&str>,
     ) -> Result<(), AuthError> {
         match current_session_hash(raw_refresh) {
             Some(current) => {
                 self.sessions()
-                    .revoke_all_except_current(user_id, &current)
+                    .revoke_all_except_current(tenant_id, user_id, &current)
                     .await
             }
             // Without the caller's refresh token there is no way to tell which session to
@@ -264,11 +278,19 @@ impl AuthEngine {
         // status at all and the socket ran with a blank authorization field for as long as it
         // stayed open. Re-reading also supplies the status gate this path never had — a banned
         // account holding a live access token could mint a ticket, and nothing downstream
-        // would notice — and gives the socket the role and tenant the account holds now rather
-        // than the ones its login did.
+        // would notice — and gives the socket the role the account holds now rather than the
+        // one its login did.
+        //
+        // Scoped by the TOKEN's tenant, not read without one. A repository id is unique only
+        // within a tenant (`UserRepository::find_by_id`), so an unscoped read on a host with
+        // per-tenant serial ids could resolve another tenant's account and hand its role,
+        // status and tenant to the socket — a ticket authorizing a long-lived connection as
+        // somebody else. That also means the snapshot's tenant is now the token's tenant by
+        // construction: an account moved to another tenant no longer resolves here at all, and
+        // mints no ticket, which is the same answer every other request-path read gives it.
         let user = self
             .user_repository()
-            .find_by_id(&claims.sub, None)
+            .find_by_id(&claims.sub, Some(&claims.tenant_id))
             .await
             .map_err(crate::services::auth::map_repository_error)?
             .ok_or(AuthError::TokenInvalid)?;
@@ -736,7 +758,7 @@ mod tests {
         // The session lists, with the current session flagged via the presented refresh token.
         let sessions = h
             .engine
-            .list_user_sessions(&sub, Some(&auth.refresh_token))
+            .list_user_sessions("t1", &sub, Some(&auth.refresh_token))
             .await;
         assert!(matches!(&sessions, Ok(list) if list.iter().any(|s| s.is_current)));
 
@@ -757,26 +779,26 @@ mod tests {
         assert!(matches!(&second, Ok(LoginResult::Success(_))));
         let Ok(LoginResult::Success(second)) = second else { return };
         assert!(matches!(
-            h.engine.list_user_sessions(&sub, None).await,
+            h.engine.list_user_sessions("t1", &sub, None).await,
             Ok(list) if list.len() == 2
         ));
         assert!(
             h.engine
-                .revoke_other_user_sessions(&sub, Some(&second.refresh_token))
+                .revoke_other_user_sessions("t1", &sub, Some(&second.refresh_token))
                 .await
                 .is_ok()
         );
         // Only the session that presented the token survives.
         assert!(matches!(
             h.engine
-                .list_user_sessions(&sub, Some(&second.refresh_token))
+                .list_user_sessions("t1", &sub, Some(&second.refresh_token))
                 .await,
             Ok(list) if list.len() == 1 && list[0].is_current
         ));
 
         // A malformed/unowned session hash revokes as not-found (no IDOR oracle).
         assert!(matches!(
-            h.engine.revoke_user_session(&sub, "not-a-hash").await,
+            h.engine.revoke_user_session("t1", &sub, "not-a-hash").await,
             Err(AuthError::SessionNotFound)
         ));
     }
@@ -792,12 +814,12 @@ mod tests {
     async fn revoke_other_user_sessions_without_a_current_hash_refuses() {
         let Some(h) = harness(base_config(), None) else { return };
         assert!(matches!(
-            h.engine.revoke_other_user_sessions("u", None).await,
+            h.engine.revoke_other_user_sessions("t1", "u", None).await,
             Err(AuthError::SessionNotFound)
         ));
         assert!(matches!(
             h.engine
-                .revoke_other_user_sessions("u", Some("not-shaped"))
+                .revoke_other_user_sessions("t1", "u", Some("not-shaped"))
                 .await,
             Err(AuthError::SessionNotFound)
         ));
@@ -866,6 +888,11 @@ mod tests {
             h.stores
                 .create_session(
                     crate::traits::SessionKind::Dashboard,
+                    &h.engine.session_subject(
+                        crate::traits::SessionKind::Dashboard,
+                        Some("t1"),
+                        &id
+                    ),
                     &session_hash,
                     &record,
                     3600
@@ -876,7 +903,7 @@ mod tests {
 
         h.stores.fail_next_epoch_bumps(1);
 
-        let revoked = h.engine.revoke_user_session(&id, &session_hash).await;
+        let revoked = h.engine.revoke_user_session("t1", &id, &session_hash).await;
         assert!(
             revoked.is_err(),
             "a revoke whose epoch bump failed must not report success: {revoked:?}"
@@ -993,6 +1020,31 @@ mod tests {
             h.engine.redeem_ws_ticket(&"a1".repeat(32)).await,
             Err(AuthError::TokenInvalid)
         ));
+    }
+
+    #[tokio::test]
+    async fn ws_ticket_refuses_claims_naming_another_tenant() {
+        // The account read behind the mint is scoped by the token's tenant. Without that scope
+        // a host whose repository ids are per-tenant serials could resolve a DIFFERENT tenant's
+        // account and snapshot its role and status into the ticket — and a ticket authorizes a
+        // socket for the connection's whole lifetime with no per-request gate behind it, so the
+        // wrong snapshot outlives every other check in the system.
+        //
+        // Asserted with an id that genuinely EXISTS under `t1` and claims naming `tenant-b`:
+        // a subject that does not exist would fail on the unscoped path too, and prove nothing
+        // about the predicate. The sibling `me` test is built the same way, and this one exists
+        // because none of the other ws-ticket tests would fail if the scope were removed.
+        let Some(h) = harness(base_config(), None) else { return };
+        let claims = DashboardClaims {
+            tenant_id: "tenant-b".to_owned(),
+            ..seeded_claims(&h).await
+        };
+
+        let minted = h.engine.issue_ws_ticket(&claims).await;
+        assert!(
+            matches!(minted, Err(AuthError::TokenInvalid)),
+            "claims naming another tenant must mint no ticket"
+        );
     }
 
     /// A WS-ticket store whose backend always fails, to exercise the store-error propagation

@@ -651,7 +651,9 @@ pub struct AuthConfig {
     pub user_status_cache_ttl: Duration,
     /// Router-mounting toggles.
     pub controllers: ControllerToggles,
-    /// Optional tenant-id resolver. When `Some`, its value is authoritative and any
-    /// body-supplied `tenant_id` is ignored entirely (anti-spoofing).
+    /// Optional tenant-id resolver. When `Some`, its value is authoritative and a request that
+    /// names a `tenant_id` of its own is refused with `auth.validation` on that field rather
+    /// than having it discarded (anti-spoofing). `null` and an absent field are accepted: they
+    /// assert nothing to contradict.
     pub tenant_id_resolver: Option<Arc<dyn TenantIdResolver>>,
 }

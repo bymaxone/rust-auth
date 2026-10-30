@@ -497,7 +497,7 @@ mod tests {
         // The stored side of the contract: the key the generation is read back from.
         assert_eq!(
             epoch.get("storedUnder").and_then(serde_json::Value::as_str),
-            Some("{ep|pep}:{userId}")
+            Some("{ep|pep}:{hmac_sha256(hmacKey, userSubject)}")
         );
     }
 }

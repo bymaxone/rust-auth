@@ -41,11 +41,12 @@ impl MfaService {
         // Revoke every refresh session AND advance the token epoch: an auth-state change
         // revokes everything issued under the previous state, in both directions — the same
         // rule the password-reset flow applies (see the enable path for the full rationale).
+        let subject = self.session_subject(ctx, tenant_id, user_id);
         self.session_store
-            .revoke_all(session_kind(ctx), user_id)
+            .revoke_all(session_kind(ctx), &subject)
             .await?;
         self.session_store
-            .bump_epoch(session_kind(ctx), user_id)
+            .bump_epoch(session_kind(ctx), &subject)
             .await?;
         self.notify_disabled(&view, user_id, ip, user_agent);
         Ok(())
@@ -104,11 +105,12 @@ impl MfaService {
         }
         self.transition_mfa_record(user_id, ctx, tenant_id, |_| Some((false, None, None)))
             .await?;
+        let subject = self.session_subject(ctx, tenant_id, user_id);
         self.session_store
-            .revoke_all(session_kind(ctx), user_id)
+            .revoke_all(session_kind(ctx), &subject)
             .await?;
         self.session_store
-            .bump_epoch(session_kind(ctx), user_id)
+            .bump_epoch(session_kind(ctx), &subject)
             .await?;
         tracing::warn!(
             target: "bymax_auth::mfa",

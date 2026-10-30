@@ -73,13 +73,15 @@ pub fn error_response(error: &AuthError) -> Response {
 /// whole anti-enumeration contract, and it is why they discard the engine's `Err`.
 ///
 /// [`AuthError::Validation`] is the one error that must not be discarded, because it cannot be
-/// explained by any account. It is reached only when nothing in the request can scope it — no
-/// `TenantIdResolver` is configured and the body named no tenant — a decision made before any
-/// lookup runs, so surfacing it reveals only what the caller already knows about their own
-/// request. Collapsing it instead answers `200` to a request that sent no mail and never
-/// could, which is the failure that looks like success from every side: the caller waits for a
-/// message that was never going to arrive, and the deployment's misconfiguration stays
-/// invisible.
+/// explained by any account. It is reached only on the two tenant-scoping refusals — no
+/// `TenantIdResolver` is configured and the body named no tenant, or one IS configured and the
+/// body named one anyway — both decided before any lookup runs, so surfacing either reveals
+/// only what the caller already knows about their own request. What it does disclose is which
+/// of the two shapes this deployment takes, and that is the point: a client cannot be told to
+/// stop sending a field it is never allowed to hear about. Collapsing it instead answers `200`
+/// to a request that sent no mail and never could — the failure that looks like success from
+/// every side: the caller waits for a message that was never going to arrive, and the
+/// deployment's misconfiguration stays invisible.
 ///
 /// Everything else still collapses. An account that does not exist, one that is blocked, and a
 /// store that is briefly unreachable are all indistinguishable here by design.

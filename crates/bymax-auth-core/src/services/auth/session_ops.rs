@@ -56,18 +56,19 @@ impl AuthEngine {
         // when the token is allowed to be absent.
         let session_hash = is_refresh_token_shape(raw_refresh)
             .then(|| RawRefreshToken::from_raw(raw_refresh.to_owned()).redis_hash());
-        let user_id = match &session_hash {
+        // The record, not just its `user_id`: the session index this logout has to prune is
+        // keyed by the TENANT-SCOPED subject, and the record is the only thing on this path
+        // that carries the tenant — the access token is allowed to be absent.
+        let owner = match &session_hash {
             Some(hash) => self
                 .session_store()
                 .find_session(SessionKind::Dashboard, hash)
                 .await
                 .ok()
-                .flatten()
-                .map(|record| record.user_id)
-                .unwrap_or_default(),
-            None => String::new(),
+                .flatten(),
+            None => None,
         };
-        let user_id = user_id.as_str();
+        let user_id = owner.as_ref().map_or("", |record| record.user_id.as_str());
 
         if let Ok(claims) = self.tokens().verify_access_ignoring_expiry(access_token) {
             // Blacklist for the token's residual lifetime only. `try_from` clamps to `0` if
@@ -87,9 +88,16 @@ impl AuthEngine {
         // other store error are swallowed, so logout is idempotent and never blocks. A
         // malformed/oversized token is skipped before hashing — it owns no session anyway.
         if let Some(session_hash) = &session_hash {
+            let subject = self.session_subject(
+                SessionKind::Dashboard,
+                owner
+                    .as_ref()
+                    .and_then(|record| record.tenant_id.as_deref()),
+                user_id,
+            );
             if let Err(error) = self
                 .session_store()
-                .revoke_session(SessionKind::Dashboard, user_id, session_hash)
+                .revoke_session(SessionKind::Dashboard, &subject, session_hash)
                 .await
             {
                 // Swallowed by design, but not silently: an operator seeing repeated cleanup
@@ -126,14 +134,27 @@ impl AuthEngine {
 
     /// Return the credential-free user for the authenticated subject.
     ///
+    /// `tenant_id` scopes the lookup and callers on the request path must supply it, exactly as
+    /// [`AuthEngine::assert_user_active`] requires. A repository id is unique only *within* a
+    /// tenant — [`crate::traits::UserRepository`] says so, and reserves `None` for internal
+    /// admin flows where cross-tenant access is intentional. Returning an account profile is
+    /// not one of those: this call used to pass `None`, so a host whose ids are per-tenant
+    /// serials could answer `GET /auth/me` with a **different tenant's** account — name, email
+    /// and role of someone the caller has no relationship to. The token carries the tenant, so
+    /// there is nothing to guess.
+    ///
     /// # Errors
     ///
-    /// Returns [`AuthError::TokenInvalid`] when the subject no longer exists, or a store
-    /// [`AuthError`] on a repository failure.
-    pub async fn me(&self, user_id: &str) -> Result<SafeAuthUser, AuthError> {
+    /// Returns [`AuthError::TokenInvalid`] when the subject does not exist within that tenant,
+    /// or a store [`AuthError`] on a repository failure.
+    pub async fn me(
+        &self,
+        user_id: &str,
+        tenant_id: Option<&str>,
+    ) -> Result<SafeAuthUser, AuthError> {
         match self
             .user_repository()
-            .find_by_id(user_id, None)
+            .find_by_id(user_id, tenant_id)
             .await
             .map_err(map_repository_error)?
         {
@@ -179,22 +200,36 @@ impl AuthEngine {
         // on both the live and the grace path. The compensation is deliberately total: every
         // session the account holds is revoked, including the one just minted, and the epoch
         // bump kills the access token issued a moment ago.
+        //
+        // Scoped by the session's tenant, which the rotated token carries. A repository id is
+        // unique only within a tenant (`UserRepository::find_by_id`), so reading without one
+        // let a host with per-tenant serial ids resolve a DIFFERENT tenant's account — and this
+        // path then applies that account's status gate and stamps its authority into the token
+        // the caller walks away with. Rotation is the door a signed-in caller uses on every
+        // access-token expiry, so an unscoped read here is the most-travelled one in the engine.
         let user = match self
             .user_repository()
-            .find_by_id(&user_id, None)
+            .find_by_id(&user_id, Some(&claims.tenant_id))
             .await
             .map_err(map_repository_error)?
         {
             Some(user) => user,
             None => {
-                // The account is gone and the session record outlived it. End it rather than
-                // hand back a token for a user nobody can look up.
-                self.revoke_all_sessions(&user_id).await?;
+                // The account is gone, or it no longer belongs to the tenant this session was
+                // opened under. Either way the session record outlived what it described: end
+                // it rather than hand back a token for a user this tenant cannot look up.
+                //
+                // A tenant move therefore ends the session instead of following the account
+                // into its new tenant. That is the deliberate trade for scoping the read: the
+                // alternative resolves an account by id alone, which is exactly what is not
+                // safe to do. Re-authenticating names the new tenant explicitly.
+                self.revoke_all_sessions(&claims.tenant_id, &user_id)
+                    .await?;
                 return Err(AuthError::TokenInvalid);
             }
         };
         if let Err(error) = self.assert_user_not_blocked(&user.status) {
-            self.revoke_all_sessions(&user_id).await?;
+            self.revoke_all_sessions(&user.tenant_id, &user_id).await?;
             return Err(error);
         }
         // Refused, but NOT compensated. An unproven address is an unfinished onboarding, not a
@@ -209,12 +244,17 @@ impl AuthEngine {
         // Re-stamp the access token from the account just re-read.
         //
         // Rotation builds its claims from the session record written at LOGIN, and that record
-        // carries the role and tenant the account had then, inherited unchanged through every
-        // later rotation. So demoting an ADMIN to MEMBER, or moving a user between tenants,
-        // had no effect on a live session: it kept minting tokens carrying the old authority
-        // for the refresh token's whole lifetime, and every role check in the system reads
-        // that claim. The gates above already re-read the account — the current authority was
-        // sitting right there, unused.
+        // carries the role the account had then, inherited unchanged through every later
+        // rotation. So demoting an ADMIN to MEMBER had no effect on a live session: it kept
+        // minting tokens carrying the old authority for the refresh token's whole lifetime, and
+        // every role check in the system reads that claim. The gates above already re-read the
+        // account — the current authority was sitting right there, unused.
+        //
+        // `tenant_id` is NOT compared, and its absence here is load-bearing rather than an
+        // omission. The read above is scoped BY `claims.tenant_id`, so a row that came back is
+        // a row in that tenant and the two can never differ — comparing them would be a
+        // condition that cannot fail, reading like a guard while guarding nothing. A tenant
+        // move is handled where it actually lands: the scoped read misses, and the session ends.
         //
         // The comparison covers every claim the token carries authority in, not just the two
         // that motivated the original fix. Naming a subset is what left `mfa_enabled` stale:
@@ -231,10 +271,7 @@ impl AuthEngine {
         //
         // Re-signed only when a claim actually differs, so ordinary rotation costs nothing
         // extra.
-        let rotated = if claims.role == user.role
-            && claims.tenant_id == user.tenant_id
-            && claims.mfa_enabled == user.mfa_enabled
-        {
+        let rotated = if claims.role == user.role && claims.mfa_enabled == user.mfa_enabled {
             rotated
         } else {
             RotatedTokens {
@@ -272,12 +309,17 @@ impl AuthEngine {
     /// # Errors
     ///
     /// Returns a store [`AuthError`] when the sweep or the epoch bump fails.
-    pub async fn revoke_all_sessions(&self, user_id: &str) -> Result<(), AuthError> {
+    pub async fn revoke_all_sessions(
+        &self,
+        tenant_id: &str,
+        user_id: &str,
+    ) -> Result<(), AuthError> {
+        let subject = self.session_subject(SessionKind::Dashboard, Some(tenant_id), user_id);
         self.session_store()
-            .revoke_all(SessionKind::Dashboard, user_id)
+            .revoke_all(SessionKind::Dashboard, &subject)
             .await?;
         self.session_store()
-            .bump_epoch(SessionKind::Dashboard, user_id)
+            .bump_epoch(SessionKind::Dashboard, &subject)
             .await?;
         Ok(())
     }
@@ -324,7 +366,17 @@ impl AuthEngine {
         let safe = SafeAuthUser::from(user);
         let result = self
             .tokens()
-            .issue_tokens(&safe, ip, user_agent, false)
+            .issue_tokens(
+                &safe,
+                ip,
+                user_agent,
+                false,
+                // No credential was verified: this is the password-less workspace-switch /
+                // impersonation door, and the authority is the CALLER's. Planting the
+                // recent-authentication marker here would let an impersonation session enrol a
+                // second factor on an account with no local password, which has no other proof.
+                crate::services::token_manager::CredentialProof::Unproven,
+            )
             .await?;
 
         let hook_ctx = identity_only_context(
@@ -458,18 +510,47 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn moving_a_user_between_tenants_lands_on_the_next_rotation_too() {
-        // Same freeze, other claim: the tenant scopes every lookup the host performs, so a
-        // stale one reads another tenant's data with a token the engine itself minted.
+    async fn moving_a_user_between_tenants_ends_the_session_instead_of_following_it() {
+        // Rotation used to re-stamp the new tenant into the token, so a moved account kept its
+        // session and simply started carrying `tenant-b`. That rested on resolving the account
+        // by id ALONE, and a repository id is unique only within a tenant
+        // (`UserRepository::find_by_id`) — on a host with per-tenant serial ids the same read
+        // could return a stranger's row and stamp THAT authority into the caller's token. The
+        // read is scoped now, so a moved account is simply not found under the session's tenant.
+        //
+        // Asserted as an explicit `Err`, not through the `let … else { return }` fixture idiom
+        // the helpers use: `rotate` is `.ok()`, so binding this one would turn the very failure
+        // under test into an early return and leave the test green having measured nothing.
+        // That is precisely what happened when this assertion was first written the other way.
         let mut cfg = base_config();
         cfg.email_verification.required = false;
         let Some(h) = harness(cfg, None) else { return };
         let Some((id, auth)) = logged_in(&h, "moved@e.com", "pw123456").await else { return };
         assert!(h.users.set_authority(&id, None, Some("tenant-b")));
 
-        let Some(rotated) = rotate(&h, &auth.refresh_token).await else { return };
-        let Some(claims) = claims_of(&h, &rotated.tokens.access_token).await else { return };
-        assert_eq!(claims.tenant_id, "tenant-b");
+        // Awaited into a binding rather than inside the `matches!` scrutinee: an `.await` there
+        // splits the expression across the suspend point and leaves the resumption region on a
+        // line of its own, which the 100% line gate reads as uncovered. `services::oauth`'s
+        // resolver test carries the same note for the same reason.
+        let moved = h
+            .engine
+            .refresh(&auth.refresh_token, "1.2.3.4", "agent")
+            .await;
+        assert!(
+            matches!(moved, Err(AuthError::TokenInvalid)),
+            "a session whose account left the tenant must end, not follow the account"
+        );
+
+        // And it ends totally: the compensation revokes every session the account holds, so the
+        // refresh token cannot be replayed into a second attempt.
+        let replayed = h
+            .engine
+            .refresh(&auth.refresh_token, "1.2.3.4", "agent")
+            .await;
+        assert!(matches!(
+            replayed,
+            Err(AuthError::RefreshTokenInvalid | AuthError::TokenInvalid)
+        ));
     }
 
     #[tokio::test]
@@ -590,7 +671,17 @@ mod tests {
         };
         let seeded = h
             .stores
-            .create_session(SessionKind::Dashboard, &raw.redis_hash(), &record, 3600)
+            .create_session(
+                SessionKind::Dashboard,
+                &h.engine.session_subject(
+                    SessionKind::Dashboard,
+                    record.tenant_id.as_deref(),
+                    &record.user_id,
+                ),
+                &raw.redis_hash(),
+                &record,
+                3600,
+            )
             .await;
         assert!(seeded.is_ok());
 
@@ -737,15 +828,27 @@ mod tests {
 
     #[tokio::test]
     async fn me_returns_the_user_or_token_invalid() {
-        // `me` projects the stored user; an unknown subject is TokenInvalid.
+        // `me` projects the stored user within the caller's tenant; an unknown subject is
+        // TokenInvalid.
         let mut cfg = base_config();
         cfg.email_verification.required = false;
         let Some(h) = harness(cfg, None) else { return };
         let id = h.seed(SeedUser::active("me@example.com", "pw")).await;
-        let found = h.engine.me(&id).await;
+        let found = h.engine.me(&id, Some("t1")).await;
         assert!(matches!(found, Ok(u) if u.email == "me@example.com"));
         assert!(matches!(
-            h.engine.me("missing").await,
+            h.engine.me("missing", Some("t1")).await,
+            Err(AuthError::TokenInvalid)
+        ));
+
+        // The real id under the WRONG tenant is refused, which is the whole point of scoping
+        // the read. A repository id is unique only within a tenant, so an unscoped lookup on a
+        // host with per-tenant serial ids answered this call with another tenant's account —
+        // handing the caller a name, an email and a role belonging to a stranger. Asserted with
+        // an id that genuinely exists, because an id that does not exist would pass either way
+        // and prove nothing about the predicate.
+        assert!(matches!(
+            h.engine.me(&id, Some("other-tenant")).await,
             Err(AuthError::TokenInvalid)
         ));
     }

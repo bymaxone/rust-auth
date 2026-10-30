@@ -9,10 +9,12 @@
 -- ARGV[4] = the owner's session-index key (already namespaced), or '' when no member record was
 --           readable and there is therefore no index left to prune
 --
--- The owner is resolved by the caller rather than decoded here: every member of one family
--- belongs to the same login, so reading one record in the host language keeps this script free
--- of `cjson`. The membership is still re-read here, so a member added between the two steps is
--- revoked too.
+-- The owner is resolved by the caller rather than decoded here, for two reasons. Every member of
+-- one family belongs to the same login, so reading one record in the host language keeps this
+-- script free of `cjson`. And the index key is now `sess:{hmac_sha256(hmacKey, userSubject)}`,
+-- which needs both the record's `tenantId` and the engine's hashing key — neither of which the
+-- store crate holds. The membership is still re-read here, so a member added between the two
+-- steps is revoked too.
 --
 -- Returns the number of family members that were removed. Idempotent: an unknown or empty
 -- family removes nothing.

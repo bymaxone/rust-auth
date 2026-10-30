@@ -41,6 +41,15 @@ use crate::traits::{HookContext, SessionRecord};
 /// response, so account existence never leaks through latency (§7.1 / §15.5 / §17.2).
 pub(crate) const ANTI_ENUM_MIN_MS: u64 = 300;
 
+/// The `auth.validation` message a request naming its own tenant gets back when the deployment
+/// configures a `TenantIdResolver`.
+///
+/// Shared verbatim with nest-auth's `resolveTenantId`, so the two backends answer the same
+/// request with the same bytes: the field name and this sentence are what a client keys off, and
+/// a message that drifts on one side alone is a divergence a status code comparison cannot see.
+pub(crate) const BODY_TENANT_REFUSAL: &str =
+    "tenantId is decided by this deployment and must not be sent";
+
 /// The ceiling, in seconds, a fire-and-forget hook or repository side-effect may run before
 /// it is abandoned (its result swallowed and logged), so a slow collaborator can never
 /// stall — or roll back — the user-facing response.
@@ -56,9 +65,11 @@ pub struct RegisterInput {
     pub name: String,
     /// The plaintext password (redacted in `Debug`).
     pub password: String,
-    /// The tenant scope supplied by the caller; ignored when a `TenantIdResolver` is set, and
-    /// `None` when the caller named none. A request that names no tenant with no resolver
-    /// configured is refused with a `validation` error naming this field, never defaulted.
+    /// The tenant scope supplied by the caller, and `None` when the caller named none.
+    /// Refused with a `validation` error naming this field when a `TenantIdResolver` is set —
+    /// the deployment decides the tenant, so a value it would discard only misleads the caller.
+    /// A request that names no tenant with no resolver configured is refused with the same
+    /// error, never defaulted.
     pub tenant_id: Option<String>,
 }
 
@@ -80,9 +91,11 @@ pub struct LoginInput {
     pub email: String,
     /// The plaintext password (redacted in `Debug`).
     pub password: String,
-    /// The tenant scope supplied by the caller; ignored when a `TenantIdResolver` is set, and
-    /// `None` when the caller named none. A request that names no tenant with no resolver
-    /// configured is refused with a `validation` error naming this field, never defaulted.
+    /// The tenant scope supplied by the caller, and `None` when the caller named none.
+    /// Refused with a `validation` error naming this field when a `TenantIdResolver` is set —
+    /// the deployment decides the tenant, so a value it would discard only misleads the caller.
+    /// A request that names no tenant with no resolver configured is refused with the same
+    /// error, never defaulted.
     pub tenant_id: Option<String>,
 }
 
@@ -173,22 +186,40 @@ pub(crate) async fn normalize_anti_enum(started: std::time::Instant) {
 
 impl AuthEngine {
     /// Resolve the tenant for a request: a configured [`crate::config::TenantIdResolver`]
-    /// is authoritative and overrides the body-supplied value (§24 invariant 8); otherwise
-    /// the body value is used verbatim.
+    /// is authoritative and a caller that names a tenant anyway is refused (§24 invariant 8);
+    /// otherwise the body value is used verbatim.
     ///
     /// Because a configured resolver makes the caller's value dead weight, `body_tenant` is
     /// optional and a request may omit it entirely. The two states a request can arrive in
-    /// therefore differ: with a resolver, the caller's value is ignored whether present or
-    /// absent; without one, it is the only thing that can name a tenant, and its absence is a
-    /// request that cannot be scoped. That case is refused rather than defaulted, because
-    /// inventing a tenant name would silently gather into one scope every account a
-    /// misconfigured deployment created — and that scope keys the user lookup, the Redis
-    /// records and the HMAC identifiers built from it.
+    /// therefore differ: with a resolver the caller must name nothing; without one, the caller's
+    /// value is the only thing that can name a tenant, and its absence is a request that cannot
+    /// be scoped. That case is refused rather than defaulted, because inventing a tenant name
+    /// would silently gather into one scope every account a misconfigured deployment created —
+    /// and that scope keys the user lookup, the Redis records and the HMAC identifiers built
+    /// from it.
+    ///
+    /// **A caller that names a tenant under a configured resolver is refused, not ignored.** It
+    /// used to be accepted and discarded, which is the worst of the three available answers: the
+    /// caller believes it chose a tenant, the engine put the account somewhere else, and nothing
+    /// in the response says so. The divergence sits on the tenancy boundary the resolver exists
+    /// to defend — a registration answering `201` for `tenantId: "victim-tenant"` while creating
+    /// the account in `default` is misdirection, even though no privilege crossed. A security
+    /// audit of a derived backend found exactly that on `POST /register`, and this refusal is
+    /// the paired half of nest-auth's (`resolveTenantId`, released in its 1.4.2): the two
+    /// backends answer the same request the same way, down to the message.
+    ///
+    /// The asymmetry is deliberate and is why the refusal is conditional: refusing the field
+    /// outright would break every deployment WITHOUT a resolver, where it is the only
+    /// participation mechanism there is.
+    ///
+    /// `None` — a caller that sent nothing, and (through `serde`) one that sent `null` — is not
+    /// refused under a resolver: it asserted nothing, so there is nothing to contradict.
     ///
     /// # Errors
     ///
-    /// Returns [`AuthError::Validation`] when no resolver is configured and the caller named no
-    /// tenant, [`AuthError::Forbidden`] when the resolver yields an empty id, or
+    /// Returns [`AuthError::Validation`] when a resolver is configured and the caller named a
+    /// tenant anyway, or when no resolver is configured and the caller named none;
+    /// [`AuthError::Forbidden`] when the resolver yields an empty id; or
     /// [`AuthError::Internal`] for any other resolver failure.
     pub(crate) async fn resolve_tenant(
         &self,
@@ -197,6 +228,14 @@ impl AuthEngine {
     ) -> Result<String, AuthError> {
         match self.config().config().tenant_id_resolver.as_ref() {
             Some(resolver) => {
+                if body_tenant.is_some() {
+                    return Err(AuthError::Validation {
+                        details: vec![bymax_auth_types::FieldError {
+                            field: "tenantId".to_owned(),
+                            message: BODY_TENANT_REFUSAL.to_owned(),
+                        }],
+                    });
+                }
                 let parts = request_parts_from_context(ctx);
                 resolver.resolve(&parts).await.map_err(map_tenant_error)
             }
@@ -792,31 +831,51 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn resolve_tenant_uses_the_resolver_over_the_body() {
-        // With a resolver configured, the resolved value wins over the body tenant (§24.8);
-        // an absent host (resolver Empty) surfaces as Forbidden.
+    async fn resolve_tenant_refuses_a_caller_named_tenant_and_uses_the_resolver_otherwise() {
+        // With a resolver configured, a caller that names a tenant is REFUSED rather than
+        // overridden (§24.8). Overriding still answered `201` while creating the account under
+        // the resolved tenant, so the caller's belief about which tenant it registered into
+        // diverged from engine state with nothing in the response saying so — the shape a
+        // security audit of a derived backend found on `POST /register`, and the shape
+        // nest-auth's `resolveTenantId` refuses as of its 1.4.2.
         let mut cfg = test_support::base_config();
         cfg.tenant_id_resolver = Some(Arc::new(HostTenantResolver));
         let Some(h) = test_support::harness(cfg, None) else { return };
         let mut headers = BTreeMap::new();
         headers.insert("host".to_owned(), "resolved-tenant".to_owned());
         let ctx = RequestContext::new("1.2.3.4", "ua", headers);
-        assert!(matches!(
-            h.engine.resolve_tenant(Some("body-tenant"), &ctx).await,
-            Ok(t) if t == "resolved-tenant"
-        ));
+        let refused = h.engine.resolve_tenant(Some("body-tenant"), &ctx).await;
+        assert!(
+            matches!(&refused, Err(AuthError::Validation { details })
+                if details.len() == 1
+                    && details[0].field == "tenantId"
+                    && details[0].message == BODY_TENANT_REFUSAL),
+            "expected a tenantId validation failure, got {refused:?}"
+        );
+
+        // Refused BEFORE the resolver runs: an empty host would otherwise surface as Forbidden,
+        // and a caller that learns which of the two answers it gets has learned whether this
+        // deployment's resolver can scope its request.
         let empty_ctx = RequestContext::new("1.2.3.4", "ua", BTreeMap::new());
         assert!(matches!(
             h.engine
                 .resolve_tenant(Some("body-tenant"), &empty_ctx)
                 .await,
-            Err(AuthError::Forbidden)
+            Err(AuthError::Validation { .. })
         ));
-        // A configured resolver makes the caller's value dead weight, so a request that names
-        // no tenant is resolved exactly like one that does.
+
+        // The other half, and the reason the refusal is not the whole test: with the caller
+        // silent, the RESOLVED value is what scopes the request. Asserting only the refusal
+        // would leave that unpinned.
         assert!(matches!(
             h.engine.resolve_tenant(None, &ctx).await,
             Ok(t) if t == "resolved-tenant"
+        ));
+        // A resolver that cannot scope the request is still a Forbidden, on the silent body
+        // that now reaches it.
+        assert!(matches!(
+            h.engine.resolve_tenant(None, &empty_ctx).await,
+            Err(AuthError::Forbidden)
         ));
     }
 
@@ -943,53 +1002,151 @@ mod tests {
         // The check is indirect but exact: the resolver refuses when no `host` header is
         // present, so a flow that consults it fails with `Forbidden` on an empty context and a
         // flow that ignores it does not. Every one of these used to be silently fine.
+        //
+        // Each flow is driven TWICE, because the two halves fail independently. A body naming a
+        // tenant must be refused (`Validation` on `tenantId`) — asserting only that would leave
+        // it possible for a flow to refuse the named value and then scope itself by something
+        // other than the resolver. A body naming none must reach the resolver (`Forbidden` here)
+        // — asserting only that would let a flow quietly go back to honouring the caller's
+        // value, which is the divergence the refusal exists to close.
         let mut cfg = test_support::base_config();
         cfg.tenant_id_resolver = Some(Arc::new(HostTenantResolver));
         let Some(h) = test_support::harness(cfg, None) else { return };
         let empty = RequestContext::new("1.2.3.4", "ua", BTreeMap::new());
-
-        let forgot = crate::services::auth::ForgotPasswordInput {
-            email: "x@example.com".to_owned(),
-            tenant_id: Some("body-tenant".to_owned()),
+        let refused = |outcome: Result<(), AuthError>| {
+            matches!(outcome, Err(AuthError::Validation { details })
+                if details.len() == 1 && details[0].field == "tenantId")
         };
+
+        let forgot = |tenant: Option<&str>| crate::services::auth::ForgotPasswordInput {
+            email: "x@example.com".to_owned(),
+            tenant_id: tenant.map(str::to_owned),
+        };
+        assert!(refused(
+            h.engine
+                .initiate_reset(forgot(Some("body-tenant")), &empty)
+                .await
+        ));
         assert!(matches!(
-            h.engine.initiate_reset(forgot, &empty).await,
+            h.engine.initiate_reset(forgot(None), &empty).await,
             Err(AuthError::Forbidden)
         ));
 
-        let verify_otp = crate::services::auth::VerifyResetOtpInput {
+        let verify_otp = |tenant: Option<&str>| crate::services::auth::VerifyResetOtpInput {
             email: "x@example.com".to_owned(),
-            tenant_id: Some("body-tenant".to_owned()),
+            tenant_id: tenant.map(str::to_owned),
             otp: "123456".to_owned(),
         };
+        assert!(refused(
+            h.engine
+                .verify_reset_otp(verify_otp(Some("body-tenant")), &empty)
+                .await
+                .map(|_| ())
+        ));
         assert!(matches!(
-            h.engine.verify_reset_otp(verify_otp, &empty).await,
+            h.engine.verify_reset_otp(verify_otp(None), &empty).await,
             Err(AuthError::Forbidden)
         ));
 
-        let resend = crate::services::auth::ResendResetOtpInput {
+        let resend = |tenant: Option<&str>| crate::services::auth::ResendResetOtpInput {
             email: "x@example.com".to_owned(),
-            tenant_id: Some("body-tenant".to_owned()),
+            tenant_id: tenant.map(str::to_owned),
         };
+        assert!(refused(
+            h.engine
+                .resend_reset_otp(resend(Some("body-tenant")), &empty)
+                .await
+        ));
         assert!(matches!(
-            h.engine.resend_reset_otp(resend, &empty).await,
+            h.engine.resend_reset_otp(resend(None), &empty).await,
             Err(AuthError::Forbidden)
         ));
 
-        assert!(matches!(
+        assert!(refused(
             h.engine
                 .verify_email(Some("body-tenant"), "x@example.com", "123456", &empty)
-                .await,
-            Err(AuthError::Forbidden)
+                .await
+                .map(|_| ())
         ));
         assert!(matches!(
             h.engine
-                .resend_verification_email(Some("body-tenant"), "x@example.com", &empty)
+                .verify_email(None, "x@example.com", "123456", &empty)
                 .await,
             Err(AuthError::Forbidden)
         ));
 
-        // `oauth_initiate` is the eighth tenant-scoped flow and belongs on this list, but it
+        assert!(refused(
+            h.engine
+                .resend_verification_email(Some("body-tenant"), "x@example.com", &empty)
+                .await
+        ));
+        assert!(matches!(
+            h.engine
+                .resend_verification_email(None, "x@example.com", &empty)
+                .await,
+            Err(AuthError::Forbidden)
+        ));
+
+        // The three flows a caller actually authenticates through. They are the reason this test
+        // asserts at FLOW level rather than trusting the `resolve_tenant` helper test: each one
+        // forwards its own `input.tenant_id` to the helper, and a call site that stopped
+        // forwarding it — passing `None`, or reading some other field — would leave the helper
+        // test green while that flow silently accepted a caller-named tenant again. `register`
+        // is where the audit found the divergence in the first place.
+        let register = |tenant: Option<&str>| crate::services::auth::RegisterInput {
+            email: "x@example.com".to_owned(),
+            name: "X".to_owned(),
+            password: "glidingwalnut42".to_owned(),
+            tenant_id: tenant.map(str::to_owned),
+        };
+        assert!(refused(
+            h.engine
+                .register(register(Some("body-tenant")), &empty)
+                .await
+                .map(|_| ())
+        ));
+        assert!(matches!(
+            h.engine.register(register(None), &empty).await,
+            Err(AuthError::Forbidden)
+        ));
+
+        let login = |tenant: Option<&str>| crate::services::auth::LoginInput {
+            email: "x@example.com".to_owned(),
+            password: "glidingwalnut42".to_owned(),
+            tenant_id: tenant.map(str::to_owned),
+        };
+        assert!(refused(
+            h.engine
+                .login(login(Some("body-tenant")), &empty)
+                .await
+                .map(|_| ())
+        ));
+        assert!(matches!(
+            h.engine.login(login(None), &empty).await,
+            Err(AuthError::Forbidden)
+        ));
+
+        // The confirm step, separate from the three initiate-side reset flows above: it resolves
+        // the tenant again to re-bind the stored proof context, so it is its own call site.
+        let confirm = |tenant: Option<&str>| crate::services::auth::ResetPasswordInput {
+            email: "x@example.com".to_owned(),
+            tenant_id: tenant.map(str::to_owned),
+            new_password: "glidingwalnut42".to_owned(),
+            token: None,
+            otp: Some("123456".to_owned()),
+            verified_token: None,
+        };
+        assert!(refused(
+            h.engine
+                .reset_password(confirm(Some("body-tenant")), &empty)
+                .await
+        ));
+        assert!(matches!(
+            h.engine.reset_password(confirm(None), &empty).await,
+            Err(AuthError::Forbidden)
+        ));
+
+        // `oauth_initiate` is the ninth tenant-scoped flow and belongs on this list, but it
         // needs a configured provider to reach the resolver at all (the provider is resolved
         // first, so an unknown one fails before any consumer code runs). It is asserted in
         // `services::oauth::tests::oauth_initiate_honours_the_tenant_resolver`, against a

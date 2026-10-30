@@ -139,8 +139,8 @@ impl AuthEngine {
         // spelling, or a reset started under one casing cannot be completed under another.
         //
         // The tenant goes through the resolver for the same reason `login` and `register` do:
-        // when one is configured it is authoritative and the body value is ignored, which is
-        // the whole anti-spoofing promise. Without it a caller on one tenant could drive
+        // when one is configured it is authoritative and a body that names a tenant is refused,
+        // which is the whole anti-spoofing promise. Without it a caller on one tenant could drive
         // reset mail at accounts in another — and a reset started under the resolved tenant
         // could never be completed, because the stored context and the confirm step would
         // disagree about which tenant it belonged to.
@@ -224,7 +224,7 @@ impl AuthEngine {
         // and the reset context written for the confirm step) must derive from one
         // spelling, or a reset started under one casing cannot be completed under another.
         // The tenant goes through the resolver, exactly as `login` and `register` do: when one
-        // is configured it is authoritative and the body value is ignored. That is the
+        // is configured it is authoritative and a body that names a tenant is refused. That is the
         // anti-spoofing promise, and it also keeps this step reading the same tenant the
         // initiate step wrote under.
         let tenant_id = self.resolve_tenant(input.tenant_id.as_deref(), ctx).await?;
@@ -381,7 +381,7 @@ impl AuthEngine {
         // and the reset context written for the confirm step) must derive from one
         // spelling, or a reset started under one casing cannot be completed under another.
         // The tenant goes through the resolver, exactly as `login` and `register` do: when one
-        // is configured it is authoritative and the body value is ignored. That is the
+        // is configured it is authoritative and a body that names a tenant is refused. That is the
         // anti-spoofing promise, and it also keeps this step reading the same tenant the
         // initiate step wrote under.
         let tenant_id = self.resolve_tenant(input.tenant_id.as_deref(), ctx).await?;
@@ -439,7 +439,7 @@ impl AuthEngine {
         // and the reset context written for the confirm step) must derive from one
         // spelling, or a reset started under one casing cannot be completed under another.
         // The tenant goes through the resolver, exactly as `login` and `register` do: when one
-        // is configured it is authoritative and the body value is ignored. That is the
+        // is configured it is authoritative and a body that names a tenant is refused. That is the
         // anti-spoofing promise, and it also keeps this step reading the same tenant the
         // initiate step wrote under.
         let tenant_id = self.resolve_tenant(input.tenant_id.as_deref(), ctx).await?;
@@ -584,14 +584,18 @@ impl AuthEngine {
     /// when the screen refuses the new password; or a repository/store [`AuthError`].
     pub async fn change_password(
         &self,
+        tenant_id: &str,
         user_id: &str,
         current_password: &str,
         new_password: &str,
         current_refresh: Option<&str>,
     ) -> Result<(), AuthError> {
+        // Scoped to the caller's tenant: `None` is the cross-tenant admin lookup, and the session
+        // revocation below is keyed on this same tenant, so reading across tenants here would
+        // verify and change one tenant's account while revoking another tenant's sessions.
         let user = self
             .user_repository()
-            .find_by_id(user_id, None)
+            .find_by_id(user_id, Some(tenant_id))
             .await
             .map_err(map_repository_error)?;
         // A verified token whose subject is gone, and an account with no local password, answer
@@ -639,15 +643,17 @@ impl AuthEngine {
             Some(raw) => {
                 let hash = RawRefreshToken::from_raw(raw.to_owned()).redis_hash();
                 self.sessions()
-                    .revoke_all_except_current(user_id, &hash)
+                    .revoke_all_except_current(tenant_id, user_id, &hash)
                     .await?;
             }
             None => {
+                let subject =
+                    self.session_subject(SessionKind::Dashboard, Some(tenant_id), user_id);
                 self.session_store()
-                    .revoke_all(SessionKind::Dashboard, user_id)
+                    .revoke_all(SessionKind::Dashboard, &subject)
                     .await?;
                 self.session_store()
-                    .bump_epoch(SessionKind::Dashboard, user_id)
+                    .bump_epoch(SessionKind::Dashboard, &subject)
                     .await?;
             }
         }
@@ -737,11 +743,19 @@ impl AuthEngine {
         // touched here. Revoking the refresh sessions stops rotation; bumping the token epoch
         // additionally invalidates every already-issued (stateless) access token at once, so a
         // reset takes effect immediately rather than lingering for the access-token lifetime.
+        // The proof carries the tenant it was issued for, and that is the tenant the reset acts
+        // in: resolving one from the id would be the cross-tenant lookup these keys moved to
+        // avoid.
+        let subject = self.session_subject(
+            crate::traits::SessionKind::Dashboard,
+            Some(&context.tenant_id),
+            &context.user_id,
+        );
         self.session_store()
-            .revoke_all(crate::traits::SessionKind::Dashboard, &context.user_id)
+            .revoke_all(crate::traits::SessionKind::Dashboard, &subject)
             .await?;
         self.session_store()
-            .bump_epoch(crate::traits::SessionKind::Dashboard, &context.user_id)
+            .bump_epoch(crate::traits::SessionKind::Dashboard, &subject)
             .await?;
         // A completed reset is the event an operator correlates an account takeover against:
         // it revokes every session the account had and invalidates its outstanding access
@@ -908,7 +922,17 @@ mod tests {
         };
         assert!(
             h.stores
-                .create_session(SessionKind::Dashboard, &hash, &record, 3600)
+                .create_session(
+                    SessionKind::Dashboard,
+                    &h.engine.session_subject(
+                        SessionKind::Dashboard,
+                        record.tenant_id.as_deref(),
+                        &record.user_id
+                    ),
+                    &hash,
+                    &record,
+                    3600,
+                )
                 .await
                 .is_ok()
         );
@@ -980,7 +1004,13 @@ mod tests {
         let id = h.seed(SeedUser::active("epoch@example.com", "pw")).await;
         // Before the reset the user carries the inert epoch 0.
         assert!(matches!(
-            h.stores.current_epoch(SessionKind::Dashboard, &id).await,
+            h.stores
+                .current_epoch(
+                    SessionKind::Dashboard,
+                    &h.engine
+                        .session_subject(SessionKind::Dashboard, Some("t1"), &id),
+                )
+                .await,
             Ok(0)
         ));
         let known = "e".repeat(64);
@@ -1010,7 +1040,13 @@ mod tests {
         assert!(h.engine.reset_password(reset, &ctx()).await.is_ok());
         // The reset advanced the epoch: any token stamped at 0 is now below the current value.
         assert!(matches!(
-            h.stores.current_epoch(SessionKind::Dashboard, &id).await,
+            h.stores
+                .current_epoch(
+                    SessionKind::Dashboard,
+                    &h.engine
+                        .session_subject(SessionKind::Dashboard, Some("t1"), &id),
+                )
+                .await,
             Ok(1)
         ));
     }
@@ -1859,7 +1895,13 @@ mod tests {
 
         assert!(
             engine
-                .change_password(&user.id, "oldsecret77", "glidingwalnut42", None)
+                .change_password(
+                    "tenant-nine",
+                    &user.id,
+                    "oldsecret77",
+                    "glidingwalnut42",
+                    None
+                )
                 .await
                 .is_ok()
         );
@@ -2497,14 +2539,14 @@ mod tests {
         // A wrong current password writes nothing.
         let refused = h
             .engine
-            .change_password(&id, "not-the-password", "glidingwalnut42", None)
+            .change_password("t1", &id, "not-the-password", "glidingwalnut42", None)
             .await;
         assert!(matches!(refused, Err(AuthError::InvalidCredentials)));
 
         // The right one rotates it, and the new password is what logs in afterwards.
         assert!(
             h.engine
-                .change_password(&id, "oldsecret77", "glidingwalnut42", None)
+                .change_password("t1", &id, "oldsecret77", "glidingwalnut42", None)
                 .await
                 .is_ok()
         );
@@ -2512,6 +2554,39 @@ mod tests {
             login_ok(&h, "changer@example.com", "glidingwalnut42")
                 .await
                 .is_some()
+        );
+    }
+
+    #[tokio::test]
+    async fn change_password_does_not_reach_an_account_in_another_tenant() {
+        // `find_by_id(.., None)` is the cross-tenant admin lookup. Reading with it here meant a
+        // caller in `t2` naming an id that lives in `t1` verified the current password against
+        // `t1`'s account and rotated it, while the session revocation (keyed on the caller's
+        // tenant) swept `t2`'s sessions: the wrong account changed and the right sessions went.
+        let Some(h) = token_harness() else { return };
+        let id = h
+            .seed(SeedUser::active("tenant-one@example.com", "oldsecret77"))
+            .await;
+
+        let crossed = h
+            .engine
+            .change_password("t2", &id, "oldsecret77", "glidingwalnut42", None)
+            .await;
+        assert!(
+            matches!(crossed, Err(AuthError::InvalidCredentials)),
+            "a caller in another tenant must not be able to rotate this account: {crossed:?}"
+        );
+
+        // The account is untouched: the old password still logs in, the attempted one does not.
+        assert!(
+            login_ok(&h, "tenant-one@example.com", "oldsecret77")
+                .await
+                .is_some()
+        );
+        assert!(
+            login_ok(&h, "tenant-one@example.com", "glidingwalnut42")
+                .await
+                .is_none()
         );
     }
 
@@ -2532,7 +2607,7 @@ mod tests {
         for _ in 0..5 {
             let _ = h
                 .engine
-                .change_password(&id, "not-the-password", "glidingwalnut42", None)
+                .change_password("t1", &id, "not-the-password", "glidingwalnut42", None)
                 .await;
         }
 
@@ -2540,7 +2615,7 @@ mod tests {
         // credential one — the caller has to wait, not keep guessing.
         let refused = h
             .engine
-            .change_password(&id, "oldsecret77", "glidingwalnut42", None)
+            .change_password("t1", &id, "oldsecret77", "glidingwalnut42", None)
             .await;
         assert!(
             matches!(refused, Err(AuthError::AccountLocked { .. })),
@@ -2570,6 +2645,7 @@ mod tests {
         assert!(
             h.engine
                 .change_password(
+                    "t1",
                     &id,
                     "oldsecret77",
                     "glidingwalnut42",
@@ -2617,7 +2693,7 @@ mod tests {
 
         let refused = h
             .engine
-            .change_password(&user.id, "anything", "glidingwalnut42", None)
+            .change_password("t1", &user.id, "anything", "glidingwalnut42", None)
             .await;
         assert!(matches!(refused, Err(AuthError::InvalidCredentials)));
     }
@@ -2634,7 +2710,7 @@ mod tests {
 
         let refused = h
             .engine
-            .change_password(&id, "oldsecret77", "Password1234567", None)
+            .change_password("t1", &id, "oldsecret77", "Password1234567", None)
             .await;
         assert!(matches!(refused, Err(AuthError::PasswordCompromised)));
     }

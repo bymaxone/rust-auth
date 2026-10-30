@@ -259,14 +259,22 @@ function isRefreshSkipped(
 /**
  * Credentials accepted by {@link AuthClient.login} / {@link AuthClient.register}. The
  * `tenantId` scopes the lookup to a tenant, matching the backend's multi-tenant model.
+ *
+ * It is OPTIONAL, and which of the two shapes is correct is the deployment's to decide, not
+ * this client's. A backend that configures a `TenantIdResolver` derives the tenant from the
+ * request and **refuses** a body that names one (`400 auth.validation` on `tenantId`); a
+ * backend without one requires it, and refuses a body that names none with the same error.
+ * Omitting the field when the caller named nothing is what lets one client serve both — and
+ * why nothing here invents a value: a tenant the caller never chose is the divergence the
+ * backend's refusal exists to surface.
  */
 export interface LoginInput {
   /** The account email. */
   email: string;
   /** The account password (sent over the wire to the backend, never stored). */
   password: string;
-  /** The tenant the account belongs to. */
-  tenantId: string;
+  /** The tenant the account belongs to; omit under a resolver-configured backend. */
+  tenantId?: string;
 }
 
 /** Registration payload for {@link AuthClient.register}. */
@@ -277,16 +285,16 @@ export interface RegisterInput {
   password: string;
   /** The new account display name. */
   name: string;
-  /** The tenant the account is created under. */
-  tenantId: string;
+  /** The tenant the account is created under; omit under a resolver-configured backend. */
+  tenantId?: string;
 }
 
 /** The fields shared by every {@link ResetPasswordInput} variant. */
 interface ResetPasswordBase {
   /** The account email. */
   email: string;
-  /** The tenant the account belongs to. */
-  tenantId: string;
+  /** The tenant the account belongs to; omit under a resolver-configured backend. */
+  tenantId?: string;
   /** The new password to set. */
   newPassword: string;
 }
@@ -320,7 +328,7 @@ export interface AuthClient {
   /** POST `/auth/mfa/challenge` with the MFA temp token and TOTP code. */
   mfaChallenge(tempToken: string, code: string): Promise<AuthResult>;
   /** POST `/auth/password/forgot-password` to start a password reset. */
-  forgotPassword(email: string, tenantId: string): Promise<void>;
+  forgotPassword(email: string, tenantId?: string): Promise<void>;
   /** POST `/auth/password/reset-password` to complete a password reset. */
   resetPassword(input: ResetPasswordInput): Promise<void>;
 }

@@ -188,7 +188,11 @@ async fn refresh(
 /// `GET /auth/me` (200). Requires [`AuthUser`]. Returns the credential-free user as the
 /// top-level body (no wrapper) — see [`user_body`].
 async fn me(State(state): State<AuthState>, user: AuthUser) -> Response {
-    match state.engine().me(&user.0.sub).await {
+    match state
+        .engine()
+        .me(&user.0.sub, Some(&user.0.tenant_id))
+        .await
+    {
         Ok(safe) => (StatusCode::OK, user_body(&safe)).into_response(),
         Err(error) => error_response(&error),
     }

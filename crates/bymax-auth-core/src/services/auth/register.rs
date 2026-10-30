@@ -33,7 +33,7 @@ impl AuthEngine {
             email: normalize_email(&input.email),
             ..input
         };
-        // The resolver, when present, is authoritative — the body tenant is ignored (§24.8).
+        // The resolver, when present, is authoritative — a body tenant is refused (§24.8).
         let tenant_id = self.resolve_tenant(input.tenant_id.as_deref(), ctx).await?;
         let hook_ctx = HookContext::from_request(
             ctx,
@@ -85,7 +85,13 @@ impl AuthEngine {
         tracing::info!(user_id = %safe.id, tenant_id = %tenant, "register: user registered");
         let result = self
             .tokens()
-            .issue_tokens(&safe, &ctx.ip, &ctx.user_agent, false)
+            .issue_tokens(
+                &safe,
+                &ctx.ip,
+                &ctx.user_agent,
+                false,
+                crate::services::token_manager::CredentialProof::Proved,
+            )
             .await?;
 
         // Enforce the concurrent-session cap (and fire the new-session hook) for the

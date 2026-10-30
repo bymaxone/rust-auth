@@ -338,7 +338,11 @@ impl PlatformAuthService {
             let session_hash = RawRefreshToken::from_raw(raw_refresh.to_owned()).redis_hash();
             let _ = self
                 .session_store
-                .revoke_session(SessionKind::Platform, admin_id, &session_hash)
+                .revoke_session(
+                    SessionKind::Platform,
+                    &self.session_subject(admin_id),
+                    &session_hash,
+                )
                 .await;
             let _ = self
                 .session_store
@@ -372,13 +376,30 @@ impl PlatformAuthService {
     ///
     /// Returns a store [`AuthError`] on an infrastructure failure.
     pub async fn revoke_all_platform_sessions(&self, admin_id: &str) -> Result<(), AuthError> {
+        let subject = self.session_subject(admin_id);
         self.session_store
-            .revoke_all(SessionKind::Platform, admin_id)
+            .revoke_all(SessionKind::Platform, &subject)
             .await?;
         self.session_store
-            .bump_epoch(SessionKind::Platform, admin_id)
+            .bump_epoch(SessionKind::Platform, &subject)
             .await?;
         Ok(())
+    }
+
+    /// The platform session subject for one admin: `hmac_sha256(identifier_key,
+    /// "platform:{adminId}")` in lower-case hex — the suffix of `psess:` and `pep:`.
+    ///
+    /// No tenant segment, because a platform admin has none. The relocation off the bare id
+    /// still matters on this plane, and matters most here: `pep:` is what makes a revoked
+    /// administrator's outstanding access tokens stop verifying, and an epoch written under one
+    /// key while the verifier reads another is a revocation that silently does nothing.
+    fn session_subject(&self, admin_id: &str) -> String {
+        crate::services::session_subject_hash(
+            &self.identifier_key,
+            SessionKind::Platform,
+            None,
+            admin_id,
+        )
     }
 
     /// The hashed brute-force identifier for a platform login: `hmac_sha256("platform:{email}")`

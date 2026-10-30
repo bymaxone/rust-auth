@@ -152,10 +152,11 @@ fn interpret_rotate(raw: Option<String>) -> Result<RotateParsed, RedisStoreError
 
 impl RedisStores {
     /// Persist a freshly-issued refresh session: the record under `rt:`, the `rt:{hash}`
-    /// member in the user's `sess:` SET, and the detail under `sd:`, each with the refresh TTL.
+    /// member in the owner's `sess:` SET, and the detail under `sd:`, each with the refresh TTL.
     async fn create_session_inner(
         &self,
         kind: SessionKind,
+        subject_hash: &str,
         token_hash: &str,
         detail: &SessionRecord,
         ttl_secs: u64,
@@ -163,7 +164,7 @@ impl RedisStores {
         let prefixes = kind_prefixes(kind);
         let keys = self.keys();
         let rt_key = keys.key(prefixes.rt, token_hash);
-        let sess_key = keys.key(prefixes.sess, &detail.user_id);
+        let sess_key = keys.key(prefixes.sess, subject_hash);
         let sd_key = keys.key(prefixes.sd, token_hash);
         let live_member = index_member(prefixes.rt, token_hash);
         let record_json = serde_json::to_string(detail)?;
@@ -227,6 +228,7 @@ impl RedisStores {
     async fn create_recovered_session_inner(
         &self,
         kind: SessionKind,
+        subject_hash: &str,
         token_hash: &str,
         detail: &SessionRecord,
         ttl_secs: u64,
@@ -234,7 +236,7 @@ impl RedisStores {
         let prefixes = kind_prefixes(kind);
         let keys = self.keys();
         let rt_key = keys.key(prefixes.rt, token_hash);
-        let sess_key = keys.key(prefixes.sess, &detail.user_id);
+        let sess_key = keys.key(prefixes.sess, subject_hash);
         let sd_key = keys.key(prefixes.sd, token_hash);
         // An empty family has no index key; the script never touches KEYS[4] in that case, but
         // a placeholder still has to be passed so the key count matches.
@@ -284,8 +286,8 @@ impl RedisStores {
         let fam_key = keys.key(prefixes.fam, family);
         // The owner's session index. The script touches it only on the live-rotation path,
         // which the caller can reach only when its own pre-read of the old key succeeded — so
-        // `new_record.user_id` is the real owner there, never a placeholder.
-        let sess_key = keys.key(prefixes.sess, &rotation.new_record.user_id);
+        // `subject_hash` names the real owner there, never a placeholder.
+        let sess_key = keys.key(prefixes.sess, &rotation.subject_hash);
         let new_json = serde_json::to_string(&rotation.new_record)?;
 
         let mut conn = self.connection().await?;
@@ -358,29 +360,26 @@ impl RedisStores {
     /// each from its owner's `sess:` SET, and dropping the family index — the reuse-detection
     /// lockout of a stolen token's whole lineage.
     ///
-    /// The owner is resolved here rather than decoded inside the script: every member of one
-    /// family belongs to the same login, so the first readable record names it, and reading it
-    /// with a real parser keeps the script free of `cjson`.
+    /// The owner's index key is supplied by the caller rather than derived here: it is
+    /// `{sess|psess}:{hmac_sha256(identifier_key, user_subject)}`, and this crate deliberately
+    /// holds no hashing key. An empty `ARGV[4]` tells the script there is no index to prune,
+    /// which is what an unreadable owner means — every descendant has already expired.
     async fn revoke_family_inner(
         &self,
         kind: SessionKind,
         family_id: &str,
-    ) -> Result<Option<String>, RedisStoreError> {
+        owner_subject_hash: Option<&str>,
+    ) -> Result<(), RedisStoreError> {
         // An empty family id has no index key; nothing to revoke.
         if family_id.is_empty() {
-            return Ok(None);
+            return Ok(());
         }
         let prefixes = kind_prefixes(kind);
         let keys = self.keys();
         let fam_key = keys.key(prefixes.fam, family_id);
+        let owner_index =
+            owner_subject_hash.map_or_else(String::new, |hash| keys.key(prefixes.sess, hash));
         let mut conn = self.connection().await?;
-        let members: Vec<String> = conn.smembers(&fam_key).await?;
-        let owner = self
-            .resolve_family_owner(&mut conn, &prefixes, &members)
-            .await?;
-        let owner_index = owner
-            .as_ref()
-            .map_or_else(String::new, |id| keys.key(prefixes.sess, id));
         script::REVOKE_FAMILY
             .prepare()
             .key(&fam_key)
@@ -390,27 +389,36 @@ impl RedisStores {
             .arg(&owner_index)
             .invoke_async::<i64>(&mut conn)
             .await?;
-        Ok(owner)
+        Ok(())
     }
 
-    /// Resolve the id of the user a family belongs to, or `None` when no member record is
+    /// The record of any one live member of a family, or `None` when no member record is
     /// readable — every member may have already expired, in which case there is no index left
     /// to prune and nobody left to name.
-    async fn resolve_family_owner(
+    ///
+    /// The whole record rather than the id alone: the caller needs the `tenant_id` too, because
+    /// the session index it prunes is keyed by the tenant-scoped subject and an id on its own no
+    /// longer identifies an account.
+    async fn find_family_owner_inner(
         &self,
-        conn: &mut Connection,
-        prefixes: &KindPrefixes,
-        members: &[String],
-    ) -> Result<Option<String>, RedisStoreError> {
+        kind: SessionKind,
+        family_id: &str,
+    ) -> Result<Option<SessionRecord>, RedisStoreError> {
+        if family_id.is_empty() {
+            return Ok(None);
+        }
+        let prefixes = kind_prefixes(kind);
         let keys = self.keys();
-        for hash in members {
+        let mut conn = self.connection().await?;
+        let members: Vec<String> = conn.smembers(keys.key(prefixes.fam, family_id)).await?;
+        for hash in &members {
             let raw: Option<String> = conn.get(keys.key(prefixes.rt, hash)).await?;
             let Some(raw) = raw else { continue };
             let Ok(record) = serde_json::from_str::<SessionRecord>(&raw) else {
                 continue;
             };
             if !record.user_id.is_empty() {
-                return Ok(Some(record.user_id));
+                return Ok(Some(record));
             }
         }
         Ok(None)
@@ -481,11 +489,11 @@ impl RedisStores {
     async fn list_sessions_inner(
         &self,
         kind: SessionKind,
-        user_id: &str,
+        subject_hash: &str,
     ) -> Result<Vec<SessionDetail>, RedisStoreError> {
         let prefixes = kind_prefixes(kind);
         let keys = self.keys();
-        let sess_key = keys.key(prefixes.sess, user_id);
+        let sess_key = keys.key(prefixes.sess, subject_hash);
         let mut conn = self.connection().await?;
         let members: Vec<String> = conn.smembers(&sess_key).await?;
         let mut details = Vec::with_capacity(members.len());
@@ -543,12 +551,12 @@ impl RedisStores {
     async fn revoke_session_inner(
         &self,
         kind: SessionKind,
-        user_id: &str,
+        subject_hash: &str,
         session_hash: &str,
     ) -> Result<bool, RedisStoreError> {
         let prefixes = kind_prefixes(kind);
         let keys = self.keys();
-        let sess_key = keys.key(prefixes.sess, user_id);
+        let sess_key = keys.key(prefixes.sess, subject_hash);
         let rt_key = keys.key(prefixes.rt, session_hash);
         let sd_key = keys.key(prefixes.sd, session_hash);
         // The ownership check is a SISMEMBER against the index, whose members are full key
@@ -596,11 +604,11 @@ impl RedisStores {
     async fn sweep_grace_pointers_inner(
         &self,
         kind: SessionKind,
-        user_id: &str,
+        subject_hash: &str,
     ) -> Result<(), RedisStoreError> {
         let prefixes = kind_prefixes(kind);
         let keys = self.keys();
-        let sess_key = keys.key(prefixes.sess, user_id);
+        let sess_key = keys.key(prefixes.sess, subject_hash);
         let namespace = keys.namespace().to_owned();
         let mut conn = self.connection().await?;
         let members: Vec<String> = conn.smembers(&sess_key).await?;
@@ -625,11 +633,11 @@ impl RedisStores {
     async fn revoke_all_inner(
         &self,
         kind: SessionKind,
-        user_id: &str,
+        subject_hash: &str,
     ) -> Result<(), RedisStoreError> {
         let prefixes = kind_prefixes(kind);
         let keys = self.keys();
-        let sess_key = keys.key(prefixes.sess, user_id);
+        let sess_key = keys.key(prefixes.sess, subject_hash);
         let mut conn = self.connection().await?;
         script::INVALIDATE_USER_SESSIONS
             .prepare()
@@ -673,9 +681,9 @@ impl RedisStores {
     async fn current_epoch_inner(
         &self,
         kind: SessionKind,
-        user_id: &str,
+        subject_hash: &str,
     ) -> Result<u64, RedisStoreError> {
-        let key = self.keys().key(epoch_prefix(kind), user_id);
+        let key = self.keys().key(epoch_prefix(kind), subject_hash);
         let mut conn = self.connection().await?;
         let value: Option<u64> = conn.get(&key).await?;
         Ok(value.unwrap_or(0))
@@ -729,9 +737,9 @@ impl RedisStores {
     async fn bump_epoch_inner(
         &self,
         kind: SessionKind,
-        user_id: &str,
+        subject_hash: &str,
     ) -> Result<u64, RedisStoreError> {
-        let key = self.keys().key(epoch_prefix(kind), user_id);
+        let key = self.keys().key(epoch_prefix(kind), subject_hash);
         let mut conn = self.connection().await?;
         let (new_value, _): (u64, bool) = redis::pipe()
             .atomic()
@@ -765,11 +773,12 @@ impl SessionStore for RedisStores {
     async fn create_session(
         &self,
         kind: SessionKind,
+        subject_hash: &str,
         token_hash: &str,
         detail: &SessionRecord,
         ttl_secs: u64,
     ) -> Result<(), AuthError> {
-        self.create_session_inner(kind, token_hash, detail, ttl_secs)
+        self.create_session_inner(kind, subject_hash, token_hash, detail, ttl_secs)
             .await
             .map_err(AuthError::from)
     }
@@ -797,9 +806,9 @@ impl SessionStore for RedisStores {
     async fn list_sessions(
         &self,
         kind: SessionKind,
-        user_id: &str,
+        subject_hash: &str,
     ) -> Result<Vec<SessionDetail>, AuthError> {
-        self.list_sessions_inner(kind, user_id)
+        self.list_sessions_inner(kind, subject_hash)
             .await
             .map_err(AuthError::from)
     }
@@ -807,11 +816,11 @@ impl SessionStore for RedisStores {
     async fn revoke_session(
         &self,
         kind: SessionKind,
-        user_id: &str,
+        subject_hash: &str,
         session_hash: &str,
     ) -> Result<(), AuthError> {
         let owned = self
-            .revoke_session_inner(kind, user_id, session_hash)
+            .revoke_session_inner(kind, subject_hash, session_hash)
             .await
             .map_err(AuthError::from)?;
         if owned {
@@ -824,11 +833,12 @@ impl SessionStore for RedisStores {
     async fn create_recovered_session(
         &self,
         kind: SessionKind,
+        subject_hash: &str,
         token_hash: &str,
         detail: &SessionRecord,
         ttl_secs: u64,
     ) -> Result<bool, AuthError> {
-        self.create_recovered_session_inner(kind, token_hash, detail, ttl_secs)
+        self.create_recovered_session_inner(kind, subject_hash, token_hash, detail, ttl_secs)
             .await
             .map_err(AuthError::from)
     }
@@ -846,15 +856,25 @@ impl SessionStore for RedisStores {
     async fn sweep_grace_pointers(
         &self,
         kind: SessionKind,
-        user_id: &str,
+        subject_hash: &str,
     ) -> Result<(), AuthError> {
-        self.sweep_grace_pointers_inner(kind, user_id)
+        self.sweep_grace_pointers_inner(kind, subject_hash)
             .await
             .map_err(AuthError::from)
     }
 
-    async fn revoke_all(&self, kind: SessionKind, user_id: &str) -> Result<(), AuthError> {
-        self.revoke_all_inner(kind, user_id)
+    async fn revoke_all(&self, kind: SessionKind, subject_hash: &str) -> Result<(), AuthError> {
+        self.revoke_all_inner(kind, subject_hash)
+            .await
+            .map_err(AuthError::from)
+    }
+
+    async fn find_family_owner(
+        &self,
+        kind: SessionKind,
+        family_id: &str,
+    ) -> Result<Option<SessionRecord>, AuthError> {
+        self.find_family_owner_inner(kind, family_id)
             .await
             .map_err(AuthError::from)
     }
@@ -863,8 +883,9 @@ impl SessionStore for RedisStores {
         &self,
         kind: SessionKind,
         family_id: &str,
-    ) -> Result<Option<String>, AuthError> {
-        self.revoke_family_inner(kind, family_id)
+        owner_subject_hash: Option<&str>,
+    ) -> Result<(), AuthError> {
+        self.revoke_family_inner(kind, family_id, owner_subject_hash)
             .await
             .map_err(AuthError::from)
     }
@@ -885,8 +906,8 @@ impl SessionStore for RedisStores {
             .map_err(AuthError::from)
     }
 
-    async fn current_epoch(&self, kind: SessionKind, user_id: &str) -> Result<u64, AuthError> {
-        self.current_epoch_inner(kind, user_id)
+    async fn current_epoch(&self, kind: SessionKind, subject_hash: &str) -> Result<u64, AuthError> {
+        self.current_epoch_inner(kind, subject_hash)
             .await
             .map_err(AuthError::from)
     }
@@ -903,8 +924,8 @@ impl SessionStore for RedisStores {
             .map_err(AuthError::from)
     }
 
-    async fn bump_epoch(&self, kind: SessionKind, user_id: &str) -> Result<u64, AuthError> {
-        self.bump_epoch_inner(kind, user_id)
+    async fn bump_epoch(&self, kind: SessionKind, subject_hash: &str) -> Result<u64, AuthError> {
+        self.bump_epoch_inner(kind, subject_hash)
             .await
             .map_err(AuthError::from)
     }
