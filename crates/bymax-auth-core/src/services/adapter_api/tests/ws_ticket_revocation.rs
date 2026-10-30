@@ -268,11 +268,14 @@ async fn minted_ttls(lifetimes: &[i64]) -> Vec<Option<u64>> {
 async fn a_ticket_never_outlives_the_token_it_was_minted_from() {
     // A logout blacklists the jti only until the token expires, so a ticket that outlived its
     // token could be redeemed after that logout once the blacklist entry was gone.
+    // One second is kept back: the clocks count whole seconds, so a ticket minted late in a
+    // second could otherwise outlast the token, and the blacklist entry a later logout writes,
+    // by up to a second.
     let ttls = minted_ttls(&[900, 5]).await;
-    assert_eq!(ttls, vec![Some(WS_TICKET_TTL_SECONDS), Some(5)]);
+    assert_eq!(ttls, vec![Some(WS_TICKET_TTL_SECONDS), Some(4)]);
 }
 
 #[tokio::test]
 async fn a_token_with_no_lifetime_left_mints_no_ticket() {
-    assert_eq!(minted_ttls(&[0, -3]).await, vec![None, None]);
+    assert_eq!(minted_ttls(&[1, 0, -3]).await, vec![None, None, None]);
 }

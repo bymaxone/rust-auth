@@ -306,10 +306,12 @@ impl AuthEngine {
         };
         // A logout blacklists the token's `jti` only until the token expires, so a ticket that
         // outlived its token could be redeemed after that logout once the entry is gone. The
-        // ticket therefore lives no longer than the token it was minted from, and a token with
-        // no lifetime left mints nothing.
+        // ticket therefore expires no later than the token it was minted from, and a token with
+        // no lifetime left mints nothing. Clocks here count whole seconds, so a ticket minted
+        // late in a second would otherwise outlast the token by up to a second; one second is
+        // kept back to hold the ceiling.
         let remaining = u64::try_from(claims.exp.saturating_sub(now_unix())).unwrap_or(0);
-        let ttl = WS_TICKET_TTL_SECONDS.min(remaining);
+        let ttl = WS_TICKET_TTL_SECONDS.min(remaining.saturating_sub(1));
         if ttl == 0 {
             return Err(AuthError::TokenInvalid);
         }
