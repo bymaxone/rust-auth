@@ -892,9 +892,8 @@ mod tests {
     #[tokio::test]
     async fn password_less_issuance_does_not_reach_an_account_in_another_tenant() {
         // `issue_tokens_for_user_id` mints a full session for whoever the id names, so the id
-        // has to be resolved inside the tenant the caller names: a repository id is unique only
-        // within a tenant, and the unscoped read resolved `t1`'s account for a `t2` call and
-        // signed a token for it.
+        // is resolved inside the tenant the caller names: a repository id is unique only within
+        // a tenant, and another tenant's account must not be reachable through it.
         let mut cfg = base_config();
         cfg.email_verification.required = false;
         let Some(h) = harness(cfg, None) else { return };

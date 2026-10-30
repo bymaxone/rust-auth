@@ -1042,34 +1042,21 @@ mod tests {
         assert!(matches!(&remaining, Ok(v) if v.len() == 1 && v[0].session_hash == new));
     }
 
-    #[tokio::test]
-    async fn a_session_record_for_another_tenant_does_not_resolve_that_users_account() {
-        // The cap resolver and the new-session hook both need the account behind a session. They
-        // read it with the SESSION's tenant: a record for `t2` naming an id that lives in `t1`
-        // finds nothing, so the default cap applies and the hook is not fired with another
-        // tenant's profile. Unscoped, the `t1` account was found, its resolver capped the `t2`
-        // session list at one, and its owner's profile went to the hook.
-        let store = Arc::new(InMemoryStores::new());
-        let users = Arc::new(InMemoryUserRepository::new());
-        let hooks = Arc::new(CountingHooks::default());
-        let uid = seed_user(&users, "scoped-read").await;
+    /// Stores two `t2` sessions for `uid` and returns the newer one with its hash.
+    async fn store_two_t2_sessions(store: &InMemoryStores, uid: &str) -> (String, SessionRecord) {
         let base = OffsetDateTime::UNIX_EPOCH;
-        let first = hash("5555");
-        let second = hash("6666");
-        let first_rec = SessionRecord {
+        let t2 = |created| SessionRecord {
             tenant_id: Some("t2".to_owned()),
-            ..record(&uid, base)
+            ..record(uid, created)
         };
-        let second_rec = SessionRecord {
-            tenant_id: Some("t2".to_owned()),
-            ..record(&uid, base + time::Duration::seconds(5))
-        };
-        for (hash, rec) in [(&first, &first_rec), (&second, &second_rec)] {
+        let first = (hash("5555"), t2(base));
+        let second = (hash("6666"), t2(base + time::Duration::seconds(5)));
+        for (hash, rec) in [&first, &second] {
             assert!(
                 store
                     .create_session(
                         SessionKind::Dashboard,
-                        &subject_in("t2", &uid),
+                        &subject_in("t2", uid),
                         hash,
                         rec,
                         3600,
@@ -1078,6 +1065,19 @@ mod tests {
                     .is_ok()
             );
         }
+        second
+    }
+
+    #[tokio::test]
+    async fn a_session_record_for_another_tenant_does_not_resolve_that_users_account() {
+        // The cap resolver and the new-session hook read the account behind a session with the
+        // SESSION's tenant. A `t2` record naming an id that lives in `t1` finds nothing, so the
+        // default cap applies and the hook is not fired with another tenant's profile.
+        let store = Arc::new(InMemoryStores::new());
+        let users = Arc::new(InMemoryUserRepository::new());
+        let hooks = Arc::new(CountingHooks::default());
+        let uid = seed_user(&users, "scoped-read").await;
+        let (second, second_rec) = store_two_t2_sessions(&store, &uid).await;
         let svc = service(
             store,
             users,
