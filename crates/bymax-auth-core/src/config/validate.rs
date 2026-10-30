@@ -1709,6 +1709,18 @@ mod tests {
     }
 
     #[test]
+    fn a_pinned_identifier_key_derives_the_cross_implementation_known_answer() {
+        // The same vector nest-auth pins for `identifierKey`: the key is
+        // `sha256_hex("bymax-auth:hmac-key:v1:" + identifier_key)`, whatever the signing secret.
+        let cfg = config_with(SIGNING_SECRET, Some("0123456789abcdef0123456789abcdef"));
+        assert!(cfg.validate(Environment::Test).is_ok());
+        assert_eq!(
+            key_of(cfg).as_slice(),
+            b"0dd66555bd2d89e0eb4ce050f1fef427bea6799bec27fb8e313f69ab965048c1"
+        );
+    }
+
+    #[test]
     fn an_identifier_key_equal_to_the_signing_secret_moves_nothing() {
         // The step that makes a later rotation safe must not move a single name.
         assert_eq!(
