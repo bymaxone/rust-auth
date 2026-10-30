@@ -904,7 +904,7 @@ version = "0.1.7"
 criteria = "safe-to-deploy"
 
 [[exemptions.zeroize]]
-version = "1.9.0"
+version = "1.9.1"
 criteria = "safe-to-deploy"
 
 [[exemptions.zerotrie]]
