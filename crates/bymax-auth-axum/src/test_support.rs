@@ -151,7 +151,7 @@ pub(crate) async fn dashboard_token(scaffold: &Scaffold, user_id: &str) -> Strin
     scaffold
         .state
         .engine()
-        .issue_tokens_for_user_id(user_id, "203.0.113.4", "agent")
+        .issue_tokens_for_user_id("t1", user_id, "203.0.113.4", "agent")
         .await
         .map(|result| result.access_token)
         .unwrap_or_default()

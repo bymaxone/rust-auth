@@ -163,7 +163,10 @@ impl SessionService {
         // always excludes the just-created session, so a literal 0 would leave the user one
         // over an impossible "zero" cap forever. Treating 0 as 1 keeps the just-created session
         // and evicts every other, which is the only coherent outcome for a single-session cap.
-        let limit = self.resolve_session_limit(user_id).await.max(1);
+        let limit = self
+            .resolve_session_limit(record.tenant_id.as_deref(), user_id)
+            .await
+            .max(1);
 
         // Sort oldest-first so the FIFO victims are the front of the list. A session whose
         // detail vanished is treated as oldest by the store's epoch fallback already.
@@ -204,13 +207,13 @@ impl SessionService {
 
     /// Resolve the per-user concurrent-session cap: the optional resolver wins when it is
     /// configured and the user can be loaded; otherwise the configured default applies.
-    async fn resolve_session_limit(&self, user_id: &str) -> u32 {
+    async fn resolve_session_limit(&self, tenant_id: Option<&str>, user_id: &str) -> u32 {
         let Some(resolver) = self.config.max_sessions_resolver.as_ref() else {
             return self.config.default_max_sessions;
         };
         // The resolver needs the full user; a missing user or a repository failure falls back
         // to the default rather than failing the limit check.
-        match self.users.find_by_id(user_id, None).await {
+        match self.users.find_by_id(user_id, tenant_id).await {
             Ok(Some(user)) => resolver.resolve(&user).await,
             _ => self.config.default_max_sessions,
         }
@@ -381,7 +384,11 @@ impl SessionService {
     /// Fire the fire-and-forget new-session hook, projecting the safe user when it can be
     /// loaded. The hook receives a short (eight-char) session hash, never the full one.
     async fn fire_new_session(&self, record: &SessionRecord, new_hash: &str, ctx: &HookContext) {
-        let Ok(Some(user)) = self.users.find_by_id(&record.user_id, None).await else {
+        let Ok(Some(user)) = self
+            .users
+            .find_by_id(&record.user_id, record.tenant_id.as_deref())
+            .await
+        else {
             // No user to project — skip the hook rather than fabricate identity.
             return;
         };
@@ -1033,6 +1040,66 @@ mod tests {
         );
         let remaining = svc.list_sessions("t1", &uid, Some(&new)).await;
         assert!(matches!(&remaining, Ok(v) if v.len() == 1 && v[0].session_hash == new));
+    }
+
+    #[tokio::test]
+    async fn a_session_record_for_another_tenant_does_not_resolve_that_users_account() {
+        // The cap resolver and the new-session hook both need the account behind a session. They
+        // read it with the SESSION's tenant: a record for `t2` naming an id that lives in `t1`
+        // finds nothing, so the default cap applies and the hook is not fired with another
+        // tenant's profile. Unscoped, the `t1` account was found, its resolver capped the `t2`
+        // session list at one, and its owner's profile went to the hook.
+        let store = Arc::new(InMemoryStores::new());
+        let users = Arc::new(InMemoryUserRepository::new());
+        let hooks = Arc::new(CountingHooks::default());
+        let uid = seed_user(&users, "scoped-read").await;
+        let base = OffsetDateTime::UNIX_EPOCH;
+        let first = hash("5555");
+        let second = hash("6666");
+        let first_rec = SessionRecord {
+            tenant_id: Some("t2".to_owned()),
+            ..record(&uid, base)
+        };
+        let second_rec = SessionRecord {
+            tenant_id: Some("t2".to_owned()),
+            ..record(&uid, base + time::Duration::seconds(5))
+        };
+        for (hash, rec) in [(&first, &first_rec), (&second, &second_rec)] {
+            assert!(
+                store
+                    .create_session(
+                        SessionKind::Dashboard,
+                        &subject_in("t2", &uid),
+                        hash,
+                        rec,
+                        3600,
+                    )
+                    .await
+                    .is_ok()
+            );
+        }
+        let svc = service(
+            store,
+            users,
+            hooks.clone(),
+            config(10, Some(Arc::new(CapOf(1)))),
+        );
+        assert!(
+            svc.after_session_created(&second_rec, &second, &ctx())
+                .await
+                .is_ok()
+        );
+
+        let listed = svc.list_sessions("t2", &uid, None).await;
+        assert!(
+            matches!(&listed, Ok(v) if v.len() == 2),
+            "a resolver for another tenant's account capped this tenant's sessions: {listed:?}"
+        );
+        assert_eq!(
+            hooks.new_sessions.load(Ordering::Relaxed),
+            0,
+            "the new-session hook received another tenant's account"
+        );
     }
 
     #[tokio::test]

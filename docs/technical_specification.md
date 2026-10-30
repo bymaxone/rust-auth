@@ -1678,7 +1678,7 @@ impl AuthEngine {
     pub async fn me(&self, user_id: &str) -> Result<SafeAuthUser, AuthError>;
     pub async fn verify_email(&self, tenant_id: &str, email: &str, otp: &str) -> Result<(), AuthError>;
     pub async fn resend_verification_email(&self, tenant_id: &str, email: &str) -> Result<(), AuthError>;
-    pub async fn issue_tokens_for_user_id(&self, user_id: &str, ip: &str, user_agent: &str) -> Result<AuthResult, AuthError>;
+    pub async fn issue_tokens_for_user_id(&self, tenant_id: &str, user_id: &str, ip: &str, user_agent: &str) -> Result<AuthResult, AuthError>;
 }
 ```
 
@@ -1791,7 +1791,7 @@ Traits/crates: `OtpStore`, `UserRepository`, `EmailProvider`, `AuthHooks`.
 Purpose: issue a full dashboard session for an existing user **without** a password (workspace-switch / impersonation). **Authorization is the caller's responsibility** — the adapter/host must have already proven ownership.
 
 Algorithm:
-1. `find_by_id(user_id)`. If `None`, return `TokenInvalid`.
+1. `find_by_id(user_id, Some(tenant_id))`. If `None`, return `TokenInvalid`.
 2. `assert_user_not_blocked(&user)` — identical status gate to `login`, so a SUSPENDED/BANNED/INACTIVE user cannot be revived through the switch.
 3. If `email_verification.required && !email_verified`, return `EmailNotVerified`.
 4. If `user.mfa_enabled`, return `MfaRequired` (no challenge issued) — the host must detect this *before* calling and route through the MFA challenge instead; issuing `mfa_verified = false` tokens here would 401 every subsequent guarded request.
