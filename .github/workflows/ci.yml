@@ -48,7 +48,7 @@ jobs:
       # No --all-features here: .cargo/mutants.toml already carries it in
       # additional_cargo_args, and cargo rejects the flag twice.
       # Mutate only what this run changed. A full sweep is ~2200 mutants at ~100 s each and
-      # cannot finish inside the 240-minute job limit, so on main it was always cancelled.
+      # does not fit the 240-minute job limit.
       # `--in-diff` (https://mutants.rs/in-diff.html) tests only the mutants overlapping the
       # diff. The base comes from the event payload at run time, never from a `${{ }}` pasted
       # into the script, so a dispatch input cannot inject shell: a push diffs against
