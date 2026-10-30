@@ -581,18 +581,12 @@ Everything is configured through `AuthConfig`. Two ready-made profiles bundle se
 > (`ConfigError::AccessLifetimeExceedsEpochRetention`) rather than letting it fail open, and
 > `nest-auth` enforces the identical bound.
 
-One option is deliberately off by default, because switching it on changes behaviour for
-origins that already exist (`jwt.absolute_session_lifetime_days` is on, at 30 days; `0` turns
-the cap off, and without a cap a client refreshing every fifteen minutes keeps a session alive
-forever):
-
-- `cookies.trusted_origins` is required as soon as `same_site` is `None` — that is the setting
-  where the browser sends the session cookie cross-site, so an origin has to be authorized. It
-  is also accepted under `Lax`/`Strict` when `cookies.resolve_domains` is configured: those
-  withhold the cookie cross-**site**, not cross-**origin**, so a deployment serving
-  `app.example.com` and `api.example.com` from one `.example.com` cookie is same-site and the
-  browser does send it. Without a shared cookie domain the list can never be consulted, and is
-  still refused.
+`cookies.trusted_origins` is required, and must be non-empty, as soon as `same_site` is `None`:
+that is the setting where the browser sends the session cookie cross-site, so an origin has to
+be authorized. Every entry must be a bare origin (scheme, host and an optional port), or
+`build()` refuses it. Under `Lax`/`Strict` the list may stay empty, but a deployment serving
+`app.example.com` and `api.example.com` from one `.example.com` cookie (`cookies.resolve_domains`)
+is same-site, so the browser does send the cookie between them; list those origins too.
 
 The breached-password check is opt-in for a different reason: it is the only part of the
 credential path that reaches the network, and a library should not start talking to a third
@@ -626,7 +620,7 @@ The library is a set of crates you embed in your Axum service — a framework-ag
 │                                                            │
 │   bymax-auth-axum   →  router · extractors · rate-limit    │
 │        │                                                   │
-│   bymax-auth-core   →  AuthEngine · services · 17 hooks    │
+│   bymax-auth-core   →  AuthEngine · services · hooks       │
 │      ╱   │   ╲                                             │
 │  -crypto -jwt -types     (pure-Rust, wasm-safe)            │
 │        │                                                   │

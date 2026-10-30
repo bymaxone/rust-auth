@@ -9,13 +9,7 @@
 
 This document is the **single source of truth** for the `rust-auth` library. It defines what the library is, what it must do (full parity with `@bymax-one/nest-auth`), and how it is built, tested, and published. It deliberately includes conceptual Rust signatures, crate trees, configuration schemas, and catalogs (Redis keys, error codes, dependencies) — but no full implementations; those are produced during development. Downstream, this spec feeds the phased roadmap and the per-task breakdown.
 
-**Where the code and this document differ, the code is authoritative.** The Rust blocks below are design sketches, not copies of the compiled API. These are known to be abridged or shaped differently from the crates; the rustdoc of each crate is the exact reference:
-
-- `AuthConfig`, `JwtConfig`, `PasswordConfig`, `CookieConfig`, `MfaConfig` and `ControllerToggles` (§5) omit fields the code has (`email_change`, `identifier_key`, `password.min_length`, `jwt.previous_secrets`, `jwt.issuer`, `jwt.audience`, `cookies.trusted_origins`, `mfa.previous_encryption_keys`), and `ConfigError` and its rule table list only some of the variants.
-- The `AuthEngine` struct sketch (§7.0) shows services the engine does not hold; the password-reset and invitation flows are methods of `AuthEngine`. `TokenManagerService` and `SessionService` (§7.3, §7.4) differ in the exact arguments of `issue_tokens`, `issue_mfa_temp_token`, `consume_mfa_temp_token` and the session-creation and rotation entry points; the WebSocket ticket methods live on `AuthEngine`.
-- `AuthHooks` (§9) also has `on_login_failed`, `on_lockout` and `on_refresh_token_reuse_detected`, and `before_register` returns `BeforeRegisterResult::Allow(RegisterOverrides) | Reject`, not a flag and modified data.
-- The Redis key catalog (§12.4) omits the `rcu`, `ra`, `ec`, `invidx` and `mfalock` prefixes.
-- `AuthUser` and `AuthPlatformUser` do not derive `TS`; only the `Safe*` projections do, behind the `ts-export` feature.
+**Where the code and this document differ, the code is authoritative.** The Rust blocks below are design sketches, not copies of the compiled API; the rustdoc of each crate is the exact reference.
 
 **How to read this document.** Sections 1–2 frame the *what and why* (overview, scope, scenarios, success criteria). Sections 3–17 specify the *Rust backend* (`bymax-auth` on crates.io). Sections 18–19 specify the *frontend distribution* (`@bymax-one/rust-auth` on npm) and dependencies. Sections 20–22 cover quality, release engineering, and explicit non-goals. Section 23 records constraints, risks, open questions, and references. Section 24 enumerates the inviolable **security invariants** the implementation and CI must protect. Section 25 lists the official examples and the production **dogfooding** consumer.
 
