@@ -2489,7 +2489,7 @@ mod tests {
             mfa_enabled: true,
             ..user()
         };
-        let Ok(issued) = svc
+        let issued = svc
             .issue_tokens(
                 &enrolled,
                 "10.0.0.1",
@@ -2497,10 +2497,8 @@ mod tests {
                 true,
                 CredentialProof::Proved,
             )
-            .await
-        else {
-            return;
-        };
+            .await;
+        let Ok(issued) = issued else { return };
         assert!(
             svc.reissue_tokens(&issued.refresh_token, "10.0.0.1", "agent/1.0")
                 .await
@@ -2605,12 +2603,10 @@ mod tests {
             mfa_enabled: true,
             ..platform_admin()
         };
-        let Ok(issued) = svc
+        let issued = svc
             .issue_platform_tokens(&enrolled, "10.0.0.1", "agent/1.0", true)
-            .await
-        else {
-            return;
-        };
+            .await;
+        let Ok(issued) = issued else { return };
         assert!(
             svc.reissue_platform_tokens(&issued.refresh_token, "10.0.0.1", "agent/1.0")
                 .await
