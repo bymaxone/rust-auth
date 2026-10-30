@@ -39,13 +39,16 @@ impl AuthEngine {
     ///
     /// # Errors
     ///
-    /// Returns [`AuthError::InvalidCredentials`] when the account has no local password or the
-    /// submitted one is wrong — the same error a failed login returns, so a thief holding an
-    /// access token learns nothing they did not already know.
-    /// Returns [`AuthError::EmailAlreadyExists`] when the address is the account's own or
-    /// belongs to another account in the tenant, or a store/repository [`AuthError`].
+    /// Returns [`AuthError::InvalidCredentials`] when the account is not in `tenant_id`, has no
+    /// local password or the submitted one is wrong — the same error a failed login returns, so
+    /// a thief holding an access token learns nothing they did not already know.
+    /// Returns the account-status error for a blocked account, [`AuthError::AccountLocked`]
+    /// while the password lockout is running, [`AuthError::EmailAlreadyExists`] when the
+    /// address is the account's own or belongs to another account in the tenant, or a
+    /// store/repository [`AuthError`].
     pub async fn request_email_change(
         &self,
+        tenant_id: &str,
         user_id: &str,
         new_email: &str,
         current_password: &str,
@@ -57,7 +60,7 @@ impl AuthEngine {
 
         let user = self
             .user_repository()
-            .find_by_id(user_id, None)
+            .find_by_id(user_id, Some(tenant_id))
             .await
             .map_err(map_repository_error)?
             // A verified token whose subject no longer exists, and an account with no local
@@ -136,7 +139,8 @@ impl AuthEngine {
     /// # Errors
     ///
     /// Returns [`AuthError::EmailChangeTokenInvalid`] when the token is unknown, expired,
-    /// already used, or no longer bound to the account's password;
+    /// already used, no longer bound to the account's password, or the account is no longer in
+    /// the tenant the request was made under; the account-status error for a blocked account;
     /// [`AuthError::EmailAlreadyExists`] when the address was taken between the request and the
     /// confirmation; or a store/repository [`AuthError`].
     pub async fn confirm_email_change(&self, token: &str) -> Result<(), AuthError> {
@@ -152,7 +156,7 @@ impl AuthEngine {
 
         let user = self
             .user_repository()
-            .find_by_id(&context.user_id, None)
+            .find_by_id(&context.user_id, Some(&context.tenant_id))
             .await
             .map_err(map_repository_error)?
             .ok_or(AuthError::EmailChangeTokenInvalid)?;
@@ -436,7 +440,7 @@ mod tests {
         let Ok(user) = created else { return };
 
         let requested = engine
-            .request_email_change(&user.id, "new@example.com", "right")
+            .request_email_change("t1", &user.id, "new@example.com", "right")
             .await;
         assert!(matches!(requested, Err(AuthError::Internal(_))));
 
@@ -467,9 +471,32 @@ mod tests {
 
         let refused = h
             .engine
-            .request_email_change(&user.id, "new@example.com", "anything")
+            .request_email_change("t1", &user.id, "new@example.com", "anything")
             .await;
         assert!(matches!(refused, Err(AuthError::InvalidCredentials)));
+    }
+
+    #[tokio::test]
+    async fn an_address_change_requested_from_another_tenant_does_not_reach_the_account() {
+        // `find_by_id(.., None)` is the cross-tenant admin lookup. Reading with it here meant a
+        // caller in `t2` naming an id that lives in `t1` had the password checked, the lockout
+        // counted and the verification mail built against `t1`'s account. The tenant comes from
+        // the verified token, so the read has to be scoped by it.
+        let Some(h) = setup() else { return };
+        let id = h.seed(SeedUser::active("owner@example.com", "right")).await;
+
+        let crossed = h
+            .engine
+            .request_email_change("t2", &id, "new@example.com", "right")
+            .await;
+        assert!(
+            matches!(crossed, Err(AuthError::InvalidCredentials)),
+            "a caller in another tenant must not reach this account: {crossed:?}"
+        );
+        assert_eq!(
+            stored_email(&h, &id).await.as_deref(),
+            Some("owner@example.com")
+        );
     }
 
     #[tokio::test]
@@ -488,7 +515,7 @@ mod tests {
         for _ in 0..5 {
             let _ = h
                 .engine
-                .request_email_change(&id, "new@example.com", "wrong")
+                .request_email_change("t1", &id, "new@example.com", "wrong")
                 .await;
         }
 
@@ -496,7 +523,7 @@ mod tests {
         // credential one — the caller has to wait, not keep guessing.
         let refused = h
             .engine
-            .request_email_change(&id, "new@example.com", "right")
+            .request_email_change("t1", &id, "new@example.com", "right")
             .await;
         assert!(
             matches!(refused, Err(AuthError::AccountLocked { .. })),
@@ -520,7 +547,7 @@ mod tests {
 
         let refused = h
             .engine
-            .request_email_change(&id, "attacker@example.com", "right")
+            .request_email_change("t1", &id, "attacker@example.com", "right")
             .await;
 
         assert!(
@@ -539,7 +566,7 @@ mod tests {
 
         let refused = h
             .engine
-            .request_email_change(&id, "new@example.com", "right")
+            .request_email_change("t1", &id, "new@example.com", "right")
             .await;
         assert!(matches!(refused, Err(AuthError::Internal(_))));
     }
@@ -711,7 +738,7 @@ mod tests {
 
         assert!(
             h.engine
-                .request_email_change(&id, "new@example.com", "right")
+                .request_email_change("t1", &id, "new@example.com", "right")
                 .await
                 .is_ok()
         );
@@ -731,7 +758,7 @@ mod tests {
 
         assert!(matches!(
             h.engine
-                .request_email_change(&id, "new@example.com", "wrong")
+                .request_email_change("t1", &id, "new@example.com", "wrong")
                 .await,
             Err(AuthError::InvalidCredentials)
         ));
@@ -749,7 +776,7 @@ mod tests {
 
         assert!(matches!(
             h.engine
-                .request_email_change("ghost", "new@example.com", "right")
+                .request_email_change("t1", "ghost", "new@example.com", "right")
                 .await,
             Err(AuthError::InvalidCredentials)
         ));
@@ -766,13 +793,13 @@ mod tests {
 
         assert!(matches!(
             h.engine
-                .request_email_change(&id, "taken@example.com", "right")
+                .request_email_change("t1", &id, "taken@example.com", "right")
                 .await,
             Err(AuthError::EmailAlreadyExists)
         ));
         assert!(matches!(
             h.engine
-                .request_email_change(&id, "OLD@Example.com", "right")
+                .request_email_change("t1", &id, "OLD@Example.com", "right")
                 .await,
             Err(AuthError::EmailAlreadyExists)
         ));

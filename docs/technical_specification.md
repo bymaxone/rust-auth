@@ -2353,7 +2353,7 @@ Stored payload `StoredInvitation { email, role, tenant_id, inviter_user_id, crea
 `invite`:
 1. Normalize `email` (trim + lowercase) at the service boundary.
 2. If `role` is not a key in `config.roles.hierarchy`, `InsufficientRole` (403).
-3. `find_by_id(inviter_user_id)`; `None` → `TokenInvalid`.
+3. `find_by_id(inviter_user_id, Some(tenant_id))`; `None` → `TokenInvalid`.
 4. `has_role(inviter.role, role, &hierarchy)` — the inviter must hold a role ≥ the invited role; else `InsufficientRole` (403).
 5. `raw = generate_secure_token(32)` (64 hex); store `StoredInvitation` under `inv:{sha256(raw)}` with the TTL.
 6. `email.send_invitation(email, InviteData { inviter_name, tenant_name: tenant_name.unwrap_or(tenant_id), invite_token: raw, expires_at })`. The raw token is **not** logged; the email provider builds the accept URL.
@@ -2875,7 +2875,7 @@ pub struct RequirePlatformRole<R: PlatformRole>(pub PlatformClaims, PhantomData<
   the configured `blocked_statuses`, it rejects with the status-specific code:
   `AccountBanned` / `AccountInactive` / `AccountSuspended` / `PendingApproval`
   (all 403). The cache and its invalidation-on-`update_status` are engine
-  responsibilities; the extractor calls `AuthEngine::assert_user_active(sub)`.
+  responsibilities; the extractor calls `AuthEngine::assert_user_active(sub, tenant_id)` with the token's tenant.
 
 - **`MfaSatisfied`** — the `MfaRequiredGuard`. Resolves `AuthUser`, then requires
   `claims.mfa_verified == true` when the account has MFA enabled; otherwise

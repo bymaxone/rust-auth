@@ -45,7 +45,12 @@ async fn request(
 ) -> Response {
     match state
         .engine()
-        .request_email_change(&user.0.sub, &dto.new_email, &dto.current_password)
+        .request_email_change(
+            &user.0.tenant_id,
+            &user.0.sub,
+            &dto.new_email,
+            &dto.current_password,
+        )
         .await
     {
         Ok(()) => StatusCode::NO_CONTENT.into_response(),

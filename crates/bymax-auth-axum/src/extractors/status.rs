@@ -30,7 +30,7 @@ where
         // unique only within a tenant, so an unscoped lookup can resolve someone else's account.
         auth_state
             .engine()
-            .assert_user_active(&claims.sub, Some(&claims.tenant_id))
+            .assert_user_active(&claims.sub, &claims.tenant_id)
             .await?;
         Ok(Self(claims))
     }
@@ -67,7 +67,7 @@ where
         let claims = verified_dashboard_claims(parts, &auth_state).await?;
         auth_state
             .engine()
-            .assert_user_active_and_verified(&claims.sub, Some(&claims.tenant_id))
+            .assert_user_active_and_verified(&claims.sub, &claims.tenant_id)
             .await?;
         Ok(Self(claims))
     }

@@ -659,7 +659,7 @@ impl AuthEngine {
         }
 
         tracing::info!(user_id = %user_id, "password change: completed, other sessions revoked");
-        self.notify_password_changed(user_id).await;
+        self.notify_password_changed(tenant_id, user_id).await;
         Ok(())
     }
 
@@ -669,8 +669,12 @@ impl AuthEngine {
     /// transaction that bound the new credential. Never awaited and never allowed to fail the
     /// operation: a delivery problem must not undo a password that is already written, nor
     /// answer differently to the caller.
-    async fn notify_password_changed(&self, user_id: &str) {
-        let Ok(Some(user)) = self.user_repository().find_by_id(user_id, None).await else {
+    async fn notify_password_changed(&self, tenant_id: &str, user_id: &str) {
+        let Ok(Some(user)) = self
+            .user_repository()
+            .find_by_id(user_id, Some(tenant_id))
+            .await
+        else {
             return;
         };
         spawn_guarded(run_send_password_changed(
@@ -697,7 +701,7 @@ impl AuthEngine {
         }
         let current = self
             .user_repository()
-            .find_by_id(&context.user_id, None)
+            .find_by_id(&context.user_id, Some(&context.tenant_id))
             .await
             .map_err(map_repository_error)?
             .map(|user| password_fingerprint(&user))
@@ -764,7 +768,8 @@ impl AuthEngine {
 
         // A reset needs the notice at least as much as a change does: the classic takeover
         // completes one from a compromised mailbox and deletes the mail.
-        self.notify_password_changed(&context.user_id).await;
+        self.notify_password_changed(&context.tenant_id, &context.user_id)
+            .await;
 
         let hook_ctx = reset_context_hooks(context);
         let safe = self.project_user_for_hook(context).await;
@@ -784,7 +789,7 @@ impl AuthEngine {
     async fn project_user_for_hook(&self, context: &ResetContext) -> Option<SafeAuthUser> {
         match self
             .user_repository()
-            .find_by_id(&context.user_id, None)
+            .find_by_id(&context.user_id, Some(&context.tenant_id))
             .await
         {
             Ok(Some(user)) => Some(SafeAuthUser::from(user)),
@@ -1912,6 +1917,19 @@ mod tests {
             vec![("tenant-nine".to_owned(), "notified@example.com".to_owned())],
             "the password-changed notice did not reach the owner under their own tenant"
         );
+
+        // And the notice is scoped the same way: naming a tenant the account is not in sends
+        // nothing. Unscoped, it found the account anyway and mailed its owner about a change
+        // made under another tenant's name.
+        engine
+            .notify_password_changed("tenant-other", &user.id)
+            .await;
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        assert_eq!(
+            mailer.changed_notices().len(),
+            1,
+            "a notice was sent for an account that is not in the named tenant"
+        );
     }
 
     #[tokio::test]
@@ -2587,6 +2605,34 @@ mod tests {
             login_ok(&h, "tenant-one@example.com", "glidingwalnut42")
                 .await
                 .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_reset_context_from_another_tenant_does_not_read_the_account() {
+        // The reset proof carries its tenant, so the two follow-up reads (is the proof still
+        // bound to the password, and the user handed to the hook) are scoped by it. Unscoped,
+        // a context naming `t2` still found the `t1` account, compared its password fingerprint
+        // and handed its profile to the hook.
+        let Some(h) = token_harness() else { return };
+        let id = h
+            .seed(SeedUser::active("ctx-scope@example.com", "oldsecret77"))
+            .await;
+        let Ok(Some(user)) = h.users.find_by_id(&id, None).await else { return };
+        let foreign = ResetContext {
+            user_id: id.clone(),
+            email: user.email.clone(),
+            tenant_id: "t2".to_owned(),
+            password_fingerprint: password_fingerprint(&user),
+        };
+
+        assert!(
+            h.engine.assert_proof_still_bound(&foreign).await.is_err(),
+            "a proof for another tenant must not read this account's password"
+        );
+        assert!(
+            h.engine.project_user_for_hook(&foreign).await.is_none(),
+            "a context for another tenant must not project this account to the hook"
         );
     }
 

@@ -64,7 +64,9 @@ impl AuthEngine {
     ///
     /// Returns [`AuthError::InsufficientRole`] when the invited role is unknown or the inviter
     /// does not hold a role at least as high, [`AuthError::TokenInvalid`] when the inviter no
-    /// longer exists, or a store [`AuthError`].
+    /// longer exists or does not live in the tenant being invited into (the read is scoped to
+    /// it), [`AuthError::InsufficientRole`] again when a repository that ignored the scope
+    /// handed back a row from another tenant, or a store [`AuthError`].
     pub async fn invite(
         &self,
         inviter_user_id: &str,
@@ -88,7 +90,7 @@ impl AuthEngine {
         }
         let inviter = self
             .user_repository()
-            .find_by_id(inviter_user_id, None)
+            .find_by_id(inviter_user_id, Some(tenant_id))
             .await
             .map_err(map_repository_error)?
             .ok_or(AuthError::TokenInvalid)?;
@@ -177,7 +179,8 @@ impl AuthEngine {
     /// # Errors
     ///
     /// Returns [`AuthError::InvalidInvitationToken`] for an unknown/expired/used token, a
-    /// malformed stored record, or a tampered role; [`AuthError::EmailAlreadyExists`] when the
+    /// malformed stored record, a tampered role, or an inviter who is gone, blocked, in another
+    /// tenant or no longer outranks the invited role; [`AuthError::EmailAlreadyExists`] when the
     /// invitee already has an account in the tenant; or a hashing/store [`AuthError`].
     pub async fn accept_invitation(
         &self,
@@ -333,11 +336,12 @@ impl AuthEngine {
     ///
     /// # Errors
     ///
-    /// Returns [`AuthError::TokenInvalid`] when the revoker no longer exists,
-    /// [`AuthError::InsufficientRole`] when the revoker belongs to another tenant or is not in
-    /// good standing — both facts about the caller alone — or a store/repository
-    /// [`AuthError`]. A revoker who merely does not out-rank the invitation is answered
-    /// `Ok(false)`, exactly as one asking about an address with nothing pending.
+    /// Returns [`AuthError::TokenInvalid`] when the revoker no longer exists or does not live in
+    /// `tenant_id` (the read is scoped to it), [`AuthError::InsufficientRole`] when a repository
+    /// that ignored the scope handed back a row from another tenant, and the account-status
+    /// error when the revoker is not in good standing — all facts about the caller alone — or a
+    /// store/repository [`AuthError`]. A revoker who merely does not out-rank the invitation is
+    /// answered `Ok(false)`, exactly as one asking about an address with nothing pending.
     pub async fn revoke_invitation(
         &self,
         revoker_user_id: &str,
@@ -351,7 +355,7 @@ impl AuthEngine {
 
         let revoker = self
             .user_repository()
-            .find_by_id(revoker_user_id, None)
+            .find_by_id(revoker_user_id, Some(tenant_id))
             .await
             .map_err(map_repository_error)?
             .ok_or(AuthError::TokenInvalid)?;
@@ -423,7 +427,7 @@ impl AuthEngine {
     ) -> Result<(), AuthError> {
         let inviter = self
             .user_repository()
-            .find_by_id(&invitation.inviter_user_id, None)
+            .find_by_id(&invitation.inviter_user_id, Some(&invitation.tenant_id))
             .await
             .map_err(map_repository_error)?;
         let still_authorised = inviter.is_some_and(|inviter| {
@@ -618,7 +622,11 @@ mod tests {
         let Some(s) = setup(invite_config()) else { return };
         let admin = seed_admin(&s.users, "t1admin@example.com", "ADMIN").await;
 
-        // Same inviter, same role, only the tenant differs: t1 succeeds, t2 is refused.
+        // The inviter is read scoped to the tenant being invited into, so a repository that
+        // honours the scope never returns the row; this one ignores it, which is the case the
+        // comparison below exists for. Same inviter, same role, only the tenant differs: t1
+        // succeeds, t2 is refused.
+        s.users.ignore_tenant_on_id();
         assert!(matches!(
             s.engine
                 .invite(&admin, "victim@example.com", "ADMIN", "t2", None)
@@ -632,6 +640,31 @@ mod tests {
                 .is_ok(),
             "the inviter's own tenant must still work"
         );
+    }
+
+    #[tokio::test]
+    async fn invite_and_revoke_do_not_find_an_inviter_from_another_tenant() {
+        // The inviter and the revoker are read scoped to the tenant named in the call, so an
+        // account that lives in another tenant is not found there: `TokenInvalid`, as nest-auth
+        // answers (`invitation.service.ts`: `findById({ id, tenantId })`, then `TOKEN_INVALID`).
+        // Before the read was scoped the row was found and a later tenant comparison refused it
+        // with `InsufficientRole`; that comparison stays as the second lock (the two tests that
+        // run against a repository ignoring the scope).
+        let Some(s) = setup(invite_config()) else { return };
+        let admin = seed_admin(&s.users, "t1admin2@example.com", "ADMIN").await;
+
+        assert!(matches!(
+            s.engine
+                .invite(&admin, "victim@example.com", "ADMIN", "t2", None)
+                .await,
+            Err(AuthError::TokenInvalid)
+        ));
+        assert!(matches!(
+            s.engine
+                .revoke_invitation(&admin, "someone@example.com", "t2")
+                .await,
+            Err(AuthError::TokenInvalid)
+        ));
     }
 
     #[tokio::test]
@@ -1303,6 +1336,8 @@ mod tests {
     async fn a_revoker_from_another_tenant_is_refused_before_any_lookup() {
         let Some(s) = setup(invite_config()) else { return };
         let inviter = seed_admin(&s.users, "admin@example.com", "ADMIN").await;
+        // Against a repository that ignores the scope, so the tenant comparison is what refuses.
+        s.users.ignore_tenant_on_id();
 
         assert!(matches!(
             s.engine
