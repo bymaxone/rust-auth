@@ -88,7 +88,7 @@ impl AuthEngine {
         }
         let inviter = self
             .user_repository()
-            .find_by_id(inviter_user_id, None)
+            .find_by_id(inviter_user_id, Some(tenant_id))
             .await
             .map_err(map_repository_error)?
             .ok_or(AuthError::TokenInvalid)?;
@@ -351,7 +351,7 @@ impl AuthEngine {
 
         let revoker = self
             .user_repository()
-            .find_by_id(revoker_user_id, None)
+            .find_by_id(revoker_user_id, Some(tenant_id))
             .await
             .map_err(map_repository_error)?
             .ok_or(AuthError::TokenInvalid)?;
@@ -423,7 +423,7 @@ impl AuthEngine {
     ) -> Result<(), AuthError> {
         let inviter = self
             .user_repository()
-            .find_by_id(&invitation.inviter_user_id, None)
+            .find_by_id(&invitation.inviter_user_id, Some(&invitation.tenant_id))
             .await
             .map_err(map_repository_error)?;
         let still_authorised = inviter.is_some_and(|inviter| {
@@ -618,7 +618,11 @@ mod tests {
         let Some(s) = setup(invite_config()) else { return };
         let admin = seed_admin(&s.users, "t1admin@example.com", "ADMIN").await;
 
-        // Same inviter, same role, only the tenant differs: t1 succeeds, t2 is refused.
+        // The inviter is read scoped to the tenant being invited into, so a repository that
+        // honours the scope never returns the row; this one ignores it, which is the case the
+        // comparison below exists for. Same inviter, same role, only the tenant differs: t1
+        // succeeds, t2 is refused.
+        s.users.ignore_tenant_on_id();
         assert!(matches!(
             s.engine
                 .invite(&admin, "victim@example.com", "ADMIN", "t2", None)
@@ -632,6 +636,31 @@ mod tests {
                 .is_ok(),
             "the inviter's own tenant must still work"
         );
+    }
+
+    #[tokio::test]
+    async fn invite_and_revoke_do_not_find_an_inviter_from_another_tenant() {
+        // The inviter and the revoker are read scoped to the tenant named in the call, so an
+        // account that lives in another tenant is not found there: `TokenInvalid`, as nest-auth
+        // answers (`invitation.service.ts`: `findById({ id, tenantId })`, then `TOKEN_INVALID`).
+        // Before the read was scoped the row was found and a later tenant comparison refused it
+        // with `InsufficientRole`; that comparison stays as the second lock (the two tests that
+        // run against a repository ignoring the scope).
+        let Some(s) = setup(invite_config()) else { return };
+        let admin = seed_admin(&s.users, "t1admin2@example.com", "ADMIN").await;
+
+        assert!(matches!(
+            s.engine
+                .invite(&admin, "victim@example.com", "ADMIN", "t2", None)
+                .await,
+            Err(AuthError::TokenInvalid)
+        ));
+        assert!(matches!(
+            s.engine
+                .revoke_invitation(&admin, "someone@example.com", "t2")
+                .await,
+            Err(AuthError::TokenInvalid)
+        ));
     }
 
     #[tokio::test]
@@ -1303,6 +1332,8 @@ mod tests {
     async fn a_revoker_from_another_tenant_is_refused_before_any_lookup() {
         let Some(s) = setup(invite_config()) else { return };
         let inviter = seed_admin(&s.users, "admin@example.com", "ADMIN").await;
+        // Against a repository that ignores the scope, so the tenant comparison is what refuses.
+        s.users.ignore_tenant_on_id();
 
         assert!(matches!(
             s.engine

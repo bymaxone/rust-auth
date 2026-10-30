@@ -53,6 +53,11 @@ pub struct InMemoryUserRepository {
     /// answer from the wrong tenant, and testing that refusal needs a repository that actually
     /// returns one.
     ignore_tenant_on_email_lookup: AtomicBool,
+    /// When set, `find_by_id` drops its `tenant_id` argument — a repository that ignores the
+    /// scope it is handed. The engine reads scoped and then still compares the row's tenant to
+    /// the one it asked for; that second lock only runs against a repository that answers from
+    /// the wrong tenant, which this reproduces.
+    ignore_tenant_on_id_lookup: AtomicBool,
     /// When set and raised, every read reports the account with MFA gone.
     ///
     /// A transition re-reads the account inside its lock, and the mutation abandons when that
@@ -81,6 +86,13 @@ impl InMemoryUserRepository {
     /// would. See the field of the same name.
     pub fn ignore_tenant_on_email(&self) {
         self.ignore_tenant_on_email_lookup
+            .store(true, Ordering::SeqCst);
+    }
+
+    /// Make `find_by_id` ignore its `tenant_id`, as a misconfigured consumer repository would.
+    /// See the field of the same name.
+    pub fn ignore_tenant_on_id(&self) {
+        self.ignore_tenant_on_id_lookup
             .store(true, Ordering::SeqCst);
     }
 
@@ -155,10 +167,11 @@ impl UserRepository for InMemoryUserRepository {
             }
         }
         let users = lock(&self.users);
+        let scoped = !self.ignore_tenant_on_id_lookup.load(Ordering::SeqCst);
         let answer = users
             .get(id)
             .filter(|u| match tenant_id {
-                Some(scope) => u.tenant_id == scope,
+                Some(scope) => !scoped || u.tenant_id == scope,
                 None => true,
             })
             .cloned();

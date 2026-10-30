@@ -12,6 +12,12 @@ version bump.
 
 ### Changed
 
+- **BREAKING (public API): request-path account reads are scoped to the caller's tenant, as nest-auth does.** `UserRepository::find_by_id(id, None)` is the cross-tenant admin lookup, and ten request-path reads still used it, so on a host that numbers users per tenant a call naming another tenant's id read, and in some flows acted on, the wrong account. Each now reads with the tenant that is already at hand (the verified token's, or the stored reset, email-change or invitation record's): `request_email_change`, `confirm_email_change`, `invite`, `revoke_invitation`, the invitation's inviter re-check, `notify_password_changed` (the "your password changed" notice used to reach the other tenant's owner), the reset proof's password binding, the `after_password_reset` hook projection, and the transparent password rehash after login. Changed public signatures:
+  - `AuthEngine::request_email_change(tenant_id, user_id, new_email, current_password)` takes the caller's `tenant_id` first (the axum route passes the token's).
+  - `AuthEngine::assert_user_active` and `AuthEngine::assert_user_active_and_verified` take `tenant_id: &str` instead of `Option<&str>`.
+
+  Behaviour: an inviter or revoker who lives in another tenant is now not found there, so `invite` and `revoke_invitation` answer `TokenInvalid` (nest-auth's answer) instead of `InsufficientRole`; the tenant comparison stays as a second lock for a repository that ignores the scope. The in-memory test double gained `InMemoryUserRepository::ignore_tenant_on_id()` to exercise that second lock. The repository's write methods (`update_password`, `update_email`, `update_status`, `update_email_verified`, `update_last_login`) still take no tenant; that is a separate change.
+
 - **BREAKING: bulk session revocation moved from `DELETE /auth/sessions/all` to
   `POST /auth/sessions/revoke-all`.** Guards, rate limit (5/60), `204` and error codes are
   unchanged; only the method and the last path segment moved. `AUTH_ROUTES.SESSIONS_REVOKE_ALL`
