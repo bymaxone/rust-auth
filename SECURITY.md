@@ -6,13 +6,12 @@ security reports as a first-class priority.
 
 ## Supported versions
 
-| Version | Supported                          |
-| ------- | ---------------------------------- |
-| 0.x     | ✅ latest minor (pre-1.0)          |
+No release has been published yet, so there is no supported version today. Once a
+release ships, the latest released minor receives security fixes; older lines are
+supported on a best-effort basis and any change is announced in the release notes.
 
-Once `1.0.0` ships, the latest released minor receives security fixes; older
-lines are supported on a best-effort basis and any change is announced in the
-release notes.
+A report against the code on the default branch is still welcome: it is handled
+the same way, and it lands before the first release.
 
 ## Reporting a vulnerability
 

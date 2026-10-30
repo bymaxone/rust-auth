@@ -9,6 +9,8 @@
 
 This document is the **single source of truth** for the `rust-auth` library. It defines what the library is, what it must do (full parity with `@bymax-one/nest-auth`), and how it is built, tested, and published. It deliberately includes conceptual Rust signatures, crate trees, configuration schemas, and catalogs (Redis keys, error codes, dependencies) — but no full implementations; those are produced during development. Downstream, this spec feeds the phased roadmap and the per-task breakdown.
 
+**Where the code and this document differ, the code is authoritative.** The Rust blocks below are design sketches, not copies of the compiled API; the rustdoc of each crate is the exact reference.
+
 **How to read this document.** Sections 1–2 frame the *what and why* (overview, scope, scenarios, success criteria). Sections 3–17 specify the *Rust backend* (`bymax-auth` on crates.io). Sections 18–19 specify the *frontend distribution* (`@bymax-one/rust-auth` on npm) and dependencies. Sections 20–22 cover quality, release engineering, and explicit non-goals. Section 23 records constraints, risks, open questions, and references. Section 24 enumerates the inviolable **security invariants** the implementation and CI must protect. Section 25 lists the official examples and the production **dogfooding** consumer.
 
 ## Table of Contents
@@ -1046,7 +1048,7 @@ The **Default** column lists `AuthConfig::default()` (≡ `nest_compat_defaults(
 | `jwt.refresh_expires_in_days` | `u32` | No | `7` | Refresh lifetime (days) |
 | `jwt.algorithm` | `JwtAlgorithm` | No | `Hs256` | Pinned — HS256 only |
 | `jwt.refresh_grace_window` | `Duration` | No | `30s` | Must be < refresh lifetime |
-| `jwt.absolute_session_lifetime_days` | `u32` | No | `0` (off) | Caps how long one login can be extended by rotation; `0` disables the cap |
+| `jwt.absolute_session_lifetime_days` | `u32` | No | `30` | Caps how long one login can be extended by rotation; `0` disables the cap |
 | `roles.hierarchy` | `HashMap<String, Vec<String>>` | Yes | — | Non-empty; referential integrity enforced |
 | `roles.platform_hierarchy` | `Option<HashMap<…>>` | Cond. | `None` | Required when `platform.enabled` |
 | `password.active_algorithm` | `PasswordAlgorithm` | No | `Scrypt` | New-hash algorithm; `Argon2id` requires the `argon2` feature (§5.1.9) |
@@ -1095,7 +1097,7 @@ The **Default** column lists `AuthConfig::default()` (≡ `nest_compat_defaults(
 | `route_prefix` | `String` | No | `auth` | |
 | `redis_namespace` | `String` | No | `auth` | All keys prefixed `{ns}:` |
 | `blocked_statuses` | `Vec<String>` | No | `["BANNED","INACTIVE","SUSPENDED"]` | |
-| `user_status_cache_ttl` | `Duration` | No | `60s` | Status revocation latency |
+| `user_status_cache_ttl` | `Duration` | No | `60s` | Reserved: no status cache exists yet, so nothing reads it and the status is read from the repository on every request that needs it |
 | `controllers.*` | `ControllerToggles` | No | see 5.1.8 | Gates router mounting |
 | `tenant_id_resolver` | `Option<Arc<dyn …>>` | No | `None` | Anti-spoofing |
 
@@ -1237,7 +1239,7 @@ The entropy gate is a first-order filter (it detects extreme low-diversity secre
 Two values are derived during `build()` and stored on the resolved engine, not exposed in `AuthConfig`:
 
 - **`secure_cookies` (resolved bool):** `config.secure_cookies` if `Some`, else `environment == Production`.
-- **HMAC key (`SecretString`):** `SHA-256("bymax-auth:hmac-key:v1" || jwt.secret)`. Used to hash Redis identifiers (brute-force, OTP, MFA setup, anti-replay) so the JWT signing key and the identifier-hashing key are cryptographically independent. Rotating `jwt.secret` rotates this key automatically. The domain-separation label is a fixed constant; changing it invalidates every existing keyed identifier and is therefore a breaking change.
+- **HMAC key (`SecretString`):** the ASCII hex of `SHA-256("bymax-auth:hmac-key:v1" || ":" || secret)`, where `secret` is `AuthConfig::identifier_key` when it is set and `jwt.secret` otherwise. Used to hash Redis identifiers (brute-force, OTP, MFA setup, anti-replay) so the JWT signing key and the identifier-hashing key are cryptographically independent. Unless `identifier_key` is pinned, rotating `jwt.secret` rotates this key and renames every identifier; pin `identifier_key` to the current `jwt.secret` before a rotation to keep them in place. The domain-separation label is a fixed constant; changing it invalidates every existing keyed identifier and is therefore a breaking change.
 
 ### 5.6 Mapping `controllers.*` to Rust (feature flags + builder toggles + router mounting)
 
@@ -1255,10 +1257,10 @@ The route groups and the toggle/feature that gates each:
 | --- | --- | --- | --- |
 | Auth | `/register` `/login` `/logout` `/refresh` `/me` `/verify-email` `/resend-verification` | `auth` (default on) | — (always compiled) |
 | Password reset | `/password/forgot-password` `/password/reset-password` `/password/verify-otp` `/password/resend-otp` `/password/change` | `password_reset` (default on) | — (always compiled) |
-| MFA | `/mfa/setup` `/mfa/verify-enable` `/mfa/challenge` `/mfa/disable` | `mfa` (opt-in) | `mfa` |
-| Sessions | `/sessions` (GET, DELETE) `/sessions/:id` (DELETE) | `sessions` (auto when `sessions.enabled`) | `sessions` |
-| Platform | `/platform/login` `/platform/me` `/platform/logout` `/platform/refresh` `/platform/sessions` (and `/platform/mfa/challenge` when `mfa` is also on) | `platform` (auto when `platform.enabled`) | `platform` |
-| OAuth | `/oauth/:provider/authorize` `/oauth/:provider/callback` | `oauth` (opt-in) | `oauth` |
+| MFA | `/mfa/setup` `/mfa/verify-enable` `/mfa/challenge` `/mfa/disable` `/mfa/recovery-codes` | `mfa` (opt-in) | `mfa` |
+| Sessions | `/sessions` (GET) `/sessions/{id}` (DELETE) `/sessions/revoke-all` (POST) | `sessions` (auto when `sessions.enabled`) | `sessions` |
+| Platform | `/platform/login` `/platform/me` `/platform/logout` `/platform/refresh` `/platform/sessions` (and `/platform/mfa/challenge`, `/platform/mfa/setup`, `/platform/mfa/verify-enable`, `/platform/mfa/disable`, `/platform/mfa/recovery-codes` when `mfa` is also on) | `platform` (auto when `platform.enabled`) | `platform` |
+| OAuth | `/oauth/{provider}` `/oauth/{provider}/callback` | `oauth` (opt-in) | `oauth` |
 | Invitations | `/invitations` `/invitations/accept` `/invitations/revoke` | `invitations` (auto when `invitations.enabled`) | `invitations` |
 | Email change | `/email/change` `/email/change/confirm` | `email_change` (opt-in) | — (always compiled) |
 
@@ -1654,7 +1656,7 @@ pub struct HookContext {
 }
 ```
 
-**Hook discipline (invariant, identical to nest-auth):** only `before_register` (and `on_oauth_login`, covered in §11) may block a flow. Every `after_*` / `on_*` hook is **fire-and-forget under one model** (shared verbatim with §9.4): the engine moves owned data (a `SafeAuthUser` clone + `HookContext`) into a **detached `tokio::spawn` task wrapped in a 5 s `tokio::time::timeout` ceiling**. A slow or hanging hook therefore can never stall the auth response; a hook that errors, times out, or panics is isolated by the task boundary (the runtime catches the panic — it never unwinds into the caller) and logged via `tracing::error!`, and it never rolls back a completed DB/Redis mutation. The 5 s ceiling is the single knob bounding hook latency impact.
+**Hook discipline (invariant, identical to nest-auth):** only `before_register`, `before_login` and `on_oauth_login` (covered in §11) may block a flow. Every `after_*` / `on_*` hook is **fire-and-forget under one model** (shared verbatim with §9.4): the engine moves owned data (a `SafeAuthUser` clone + `HookContext`) into a **detached `tokio::spawn` task wrapped in a 5 s `tokio::time::timeout` ceiling**. A slow or hanging hook therefore can never stall the auth response; a hook that errors, times out, or panics is isolated by the task boundary (the runtime catches the panic — it never unwinds into the caller) and logged via `tracing::error!`, and it never rolls back a completed DB/Redis mutation. The 5 s ceiling is the single knob bounding hook latency impact.
 
 #### 7.0.4 `SafeAuthUser` projection
 
@@ -1686,13 +1688,13 @@ The key prefixes (`rt:`/`prt:`, `rp:`/`prp:`, `sess:`/`psess:`, `sd:`/`psd:`, `r
 
 ```rust
 impl AuthEngine {
-    pub async fn register(&self, dto: RegisterDto, ctx: &RequestContext) -> Result<AuthResult, AuthError>;
-    pub async fn login(&self, dto: LoginDto, ctx: &RequestContext) -> Result<LoginResult, AuthError>;
-    pub async fn logout(&self, access_token: &str, raw_refresh: &str, user_id: &str) -> Result<(), AuthError>;
-    pub async fn refresh(&self, old_refresh: &str, ip: &str, user_agent: &str) -> Result<RotatedTokens, AuthError>;
-    pub async fn me(&self, user_id: &str) -> Result<SafeAuthUser, AuthError>;
-    pub async fn verify_email(&self, tenant_id: &str, email: &str, otp: &str) -> Result<(), AuthError>;
-    pub async fn resend_verification_email(&self, tenant_id: &str, email: &str) -> Result<(), AuthError>;
+    pub async fn register(&self, input: RegisterInput, ctx: &RequestContext) -> Result<LoginResult, AuthError>;
+    pub async fn login(&self, input: LoginInput, ctx: &RequestContext) -> Result<LoginResult, AuthError>;
+    pub async fn logout(&self, access_token: &str, raw_refresh: &str) -> Result<(), AuthError>;
+    pub async fn refresh(&self, old_refresh: &str, ip: &str, user_agent: &str) -> Result<RefreshedSession, AuthError>; // RefreshedSession { tokens: RotatedTokens, user }
+    pub async fn me(&self, user_id: &str, tenant_id: Option<&str>) -> Result<SafeAuthUser, AuthError>;
+    pub async fn verify_email(&self, tenant_id: Option<&str>, email: &str, otp: &str, ctx: &RequestContext) -> Result<(), AuthError>;
+    pub async fn resend_verification_email(&self, tenant_id: Option<&str>, email: &str, ctx: &RequestContext) -> Result<(), AuthError>;
     pub async fn issue_tokens_for_user_id(&self, tenant_id: &str, user_id: &str, ip: &str, user_agent: &str) -> Result<AuthResult, AuthError>;
 }
 ```
@@ -1718,7 +1720,7 @@ Algorithm:
 10. Spawn `after_register(safe_user, ctx)` fire-and-forget.
 11. Return `AuthResult`.
 
-Security: uniqueness-before-hash avoids a CPU-amplification oracle on duplicate emails; `before_register` is the only blocking hook; credential fields are stripped before step 8.
+Security: a duplicate email spends one sentinel verify before it is refused, so its latency matches a fresh registration and adds no amplification a login could not already be used for; `before_register` is the only blocking hook; credential fields are stripped before step 8.
 Traits/crates: `UserRepository`, `AuthHooks`, `EmailProvider`, `PasswordService` (crypto), `TokenManagerService` (jwt+redis), `SessionService`.
 
 #### 7.1.2 `login`
@@ -1727,22 +1729,22 @@ Purpose: authenticate email + password; return either `Success(AuthResult)` or `
 
 Algorithm:
 1. Resolve `tenant_id` (as in `register`).
-2. Compute the brute-force identifier: `hmac_sha256(format!("{tenant_id}:{email}"), config.hmac_key)`. The `:` separator gives prefix-collision resistance; HMAC (not bare SHA-256) blocks rainbow-table reversal of the low-entropy email and keeps the Redis-identifier domain independent of the JWT secret.
+2. Compute the brute-force identifier: hex of `hmac_sha256(config.hmac_key, format!("dashboard:{tenant_id}:{email}"))`. The plane prefix and the `:` separators give prefix-collision resistance; HMAC (not bare SHA-256) blocks rainbow-table reversal of the low-entropy email and keeps the Redis-identifier domain independent of the JWT secret.
 3. `brute_force.is_locked_out(&id)`. If locked, fetch `remaining_lockout_seconds` and return `AccountLocked` with HTTP 429 and a `retry_after_seconds` detail.
 4. Await `before_login(email, tenant_id, ctx)` if set.
 5. `user_repo.find_by_email(email, tenant_id)`.
 6. **User-not-found / null-hash path:** perform a throw-away `passwords.verify(&dto.password, &SENTINEL_HASH)` against a **startup-loaded sentinel hash** (a valid PHC string computed once at boot with the configured algorithm/params), discard the boolean, then `brute_force.record_failure(&id)` and return `InvalidCredentials`. Always running the KDF keeps login latency uniform whether or not the email exists, so timing cannot be used as an enumeration oracle; the lockout counter remains the primary defense. (Agrees with §15.5 / §17.2.)
-7. Status gate: `assert_user_not_blocked(&user)` (§7.1.7) — runs **before** the expensive hash compare so blocked accounts never consume KDF CPU.
-8. Email-verification gate: if `email_verification.required && !user.email_verified`, return `EmailNotVerified`.
-9. `passwords.verify(&dto.password, &user.password_hash)`. On `false`: `brute_force.record_failure(&id)`, return `InvalidCredentials`.
+7. `passwords.verify(&dto.password, &user.password_hash)`. On `false`: `brute_force.record_failure(&id)`, return `InvalidCredentials`.
+8. Status gate: `assert_user_not_blocked(&user)` (§7.1.7) — runs only **after** the password is proved. Before it, a blocked or unverified account answered with its own status, faster than every other refusal and without touching the failure counter, so an attacker could enumerate addresses and read their moderation state without ever tripping a lockout.
+9. Email-verification gate: if `email_verification.required && !user.email_verified`, return `EmailNotVerified` (also only after the password is proved).
 10. On match: `brute_force.reset_failures(&id)`.
-11. **Rehash-on-verify:** if `config.password.rehash_on_verify` is set **and** the password verification reports the stored hash needs a rehash (algorithm or params no longer match the configured current scheme), spawn a fire-and-forget task: hash the password, then `user_repo.update_password(id, tenant_id, new_hash)` only if the stored hash is still the one that was verified. Failure is logged, never blocks login (§7.2.3).
+11. **Rehash-on-verify:** if `config.password.rehash_on_verify` is set **and** the password verification reports the stored hash needs a rehash (algorithm or params no longer match the configured current scheme), spawn a fire-and-forget task: hash the password, then `user_repo.update_password(id, tenant_id, new_hash)` after re-reading the account and finding the stored hash unchanged since the verification (a check, not a compare-and-set: the repository trait offers none). Failure is logged, never blocks login (§7.2.3).
 12. MFA branch: if `user.mfa_enabled`, `tokens.issue_mfa_temp_token(user.id, MfaContext::Dashboard)` and return `LoginResult::MfaChallenge(MfaChallengeResult { mfa_required: true, mfa_temp_token })` (shape in §13.3).
 13. Else project to `SafeAuthUser`; `tokens.issue_tokens(...)`; if `sessions.enabled`, `sessions.create_session(...)`.
 14. Spawn fire-and-forget: `user_repo.update_last_login(id, tenant_id)` and `after_login(safe_user, ctx)`.
 15. Return `Success(AuthResult)`.
 
-Security: generic `InvalidCredentials` for both unknown-email and wrong-password (no enumeration); status & verification gates precede the KDF; rehash-on-verify upgrades stored hashes transparently when cost parameters are raised or the algorithm is switched.
+Security: generic `InvalidCredentials` for both unknown-email and wrong-password (no enumeration); the status and verification gates run only after the password is proved, so they cannot be read without the credential; rehash-on-verify upgrades stored hashes transparently when cost parameters are raised or the algorithm is switched.
 Traits/crates: `UserRepository`, `BruteForceStore`, `PasswordService`, `TokenManagerService`, `SessionService`, `AuthHooks`.
 
 #### 7.1.3 `logout`
@@ -2247,8 +2249,6 @@ impl BruteForceService {
 }
 ```
 
-Constants: key prefix `"lf:"`; `MAX_IDENTIFIER_LENGTH = 512` bytes. Configured `max_attempts` (default **5**, matching `brute_force.max_attempts` in §5.3/§12.4/§15.3 and nest-auth's `bruteForce.maxAttempts`) and `window_seconds` (default 900).
-
 **Identifier contract:** callers always pass a hashed identifier — `hmac_sha256(email, hmac_key)` or `sha256(ip)` — never raw PII. `validate_identifier` rejects any identifier containing `:`, `\n`, `\r` (would corrupt the namespaced key) or exceeding 512 bytes, returning `Forbidden` (logged at error level; no internal detail leaks to the response).
 
 - `is_locked_out`: `validate`; `get("lf:{id}")`; `Some(n) && n >= max_attempts` → `true`, else `false`.
@@ -2607,7 +2607,7 @@ their ordering reproduces the NestJS guard pipeline.
 
 | Method | Path                       | Handler                   | Extractors / guards                  | Success | Body DTO                          | Feature |
 | ------ | -------------------------- | ------------------------- | ------------------------------------ | ------- | --------------------------------- | ------- |
-| POST   | `/auth/mfa/setup`          | `mfa_setup`               | `AuthUser` (+ `SkipMfa` semantics)   | 200     | —                                 | mfa     |
+| POST   | `/auth/mfa/setup`          | `mfa_setup`               | `AuthUser` (+ `SkipMfa` semantics)   | 201     | —                                 | mfa     |
 | POST   | `/auth/mfa/verify-enable`  | `mfa_verify_enable`       | `AuthUser` (+ `SkipMfa`)             | 204     | `MfaVerifyDto`                    | mfa     |
 | POST   | `/auth/mfa/challenge`      | `mfa_challenge`           | `ValidatedJson<MfaChallengeDto>`     | 200     | `MfaChallengeDto`                 | mfa     |
 | POST   | `/auth/mfa/disable`        | `mfa_disable`             | `AuthUser`                           | 204     | `MfaDisableDto`                   | mfa     |
@@ -2678,7 +2678,7 @@ their ordering reproduces the NestJS guard pipeline.
 
 | Method | Path                                | Handler                       | Extractors / guards | Success | Body DTO                        | Feature           |
 | ------ | ----------------------------------- | ----------------------------- | ------------------- | ------- | ------------------------------- | ----------------- |
-| POST   | `/auth/platform/mfa/setup`          | `platform_mfa_setup`          | `PlatformUser`      | 200     | —                               | platform + mfa    |
+| POST   | `/auth/platform/mfa/setup`          | `platform_mfa_setup`          | `PlatformUser`      | 201     | —                               | platform + mfa    |
 | POST   | `/auth/platform/mfa/verify-enable`  | `platform_mfa_verify_enable`  | `PlatformUser`      | 204     | `MfaVerifyDto`                  | platform + mfa    |
 | POST   | `/auth/platform/mfa/disable`        | `platform_mfa_disable`        | `PlatformUser`      | 204     | `MfaDisableDto`                 | platform + mfa    |
 | POST   | `/auth/platform/mfa/recovery-codes` | `platform_mfa_regen_recovery` | `PlatformUser`      | 200     | `MfaRegenerateRecoveryCodesDto` | platform + mfa    |
@@ -4302,7 +4302,7 @@ pub trait OtpStore: Send + Sync {
     async fn try_begin_resend(&self, purpose: OtpPurpose, identifier: &str, cooldown_secs: u64) -> Result<bool, AuthError>;
 }
 
-/// Fixed-window failed-attempt counters keyed by HMAC(tenant:email) (`lf:`).
+/// Fixed-window failed-attempt counters keyed by HMAC(`dashboard:{tenant}:{email}`) (`lf:`).
 #[async_trait::async_trait]
 pub trait BruteForceStore: Send + Sync {
     async fn is_locked(&self, identifier: &str, max_attempts: u32) -> Result<bool, AuthError>;
@@ -4334,17 +4334,16 @@ preimage and the full list of keys derived from it are pinned by `conformance/wi
 | `rv` | `auth:rv:{jti}` (preferred) or `auth:rv:{sha256(jwt)}` | `"1"` | Remaining JWT lifetime computed from `exp − now` | Access-JWT revocation blacklist. Written on logout; consulted by `JwtAuthGuard`. `jti` keying avoids hashing the whole compact JWT. |
 | `ep` | `auth:ep:{hmac_sha256(hmacKey, userSubject)}` | Numeric generation counter (string) | 30 days | Per-account token **epoch**, keyed by the tenant-scoped `userSubject` rather than by the bare repository id — on a host that numbers users per tenant, an epoch on the bare id let one tenant's revocation invalidate another tenant's access tokens. Every access token is stamped with the epoch current at issuance; verification rejects a token stamped below the stored value. A password reset advances it, invalidating every outstanding access token in one write — the stateless counterpart to `rv:`, which can only revoke tokens one `jti` at a time. The TTL far exceeds any access-token lifetime, so a bump stays in force for every pre-bump token's remaining life. |
 | `pep` | `auth:pep:{hmac_sha256(hmacKey, userSubject)}` | Numeric generation counter (string) | 30 days | Platform per-admin token epoch. Analogue of `ep`; separate because the two planes' ids come from different repositories and may collide. |
-| `us` | `auth:us:{userId}` | Status string (`"ACTIVE"`, `"BANNED"`, …) | `user_status_cache_ttl_seconds` (default 60 s) | User-status cache. Avoids a DB read per request; invalidated on `update_status`. |
 | `rp` | `auth:rp:{sha256(old_refresh_token)}` | JSON `SessionRecord` — the **new** session, never the raw token | `refresh_grace_window_seconds` (default 30 s) | Rotation grace pointer. Lets a legitimately-concurrent request still carrying the old token recover the rotated identity and be issued a fresh token, instead of being logged out. Stores the session record (not the raw refresh token), so a Redis snapshot never leaks a live credential. |
 | `cf` | `auth:cf:{sha256(consumed_refresh_token)}` | `familyId` of the lineage the consumed token belonged to | `refresh_expires_in_days` × 86400 s | Consumed-token family marker. Planted in the same atomic step that consumes a token, and deliberately outliving the much shorter grace pointer: once the pointer is gone, the marker's presence is what proves a presented token was legitimately issued and already rotated — a **reuse**, not a random string (§12.5.1). |
 | `fam` | `auth:fam:{familyId}` | Redis SET of **bare** `sha256(refresh_token)` hashes | `refresh_expires_in_days` × 86400 s | Dashboard refresh-token family index: one login lineage, minted at login and inherited by every rotation. Members are bare hashes, unlike `sess:` — a family only ever tracks live `rt:` sessions, so the keyspace is implied. Deleting this key revokes the lineage and, as a side effect, refuses any grace recovery that still names it. |
-| `lf` | `auth:lf:{hmac_sha256(tenantId + ":" + email)}` | Numeric counter (string) | `window_seconds` (default 900 s) | Per-tenant failed-login counter. Fixed window — TTL set only on the 0→1 transition. Tenant scoping prevents cross-tenant lockout. |
-| `pw_reset` | `auth:pw_reset:{sha256(reset_token)}` | `userId` | `password_reset.token_ttl_seconds` (default 3600 s) | Password-reset token (`method = "token"`). Consumed on use. |
-| `otp` | `auth:otp:{purpose}:{hmac_sha256(tenantId + ":" + email)}` | JSON `{ code: string, attempts: number }` | `otp_ttl_seconds` (per purpose) | OTP record. `attempts` tracks failures (max 5). Purposes: `password_reset`, `email_verification`. Tenant-scoped to prevent collision. |
+| `lf` | `auth:lf:{hmac_sha256(hmac_key, "dashboard:" + tenantId + ":" + email)}` | Numeric counter (string) | `brute_force.window` (default 900 s) | Per-tenant failed-login counter. Fixed window — TTL set only on the 0→1 transition. Tenant scoping prevents cross-tenant lockout. |
+| `pw_reset` | `auth:pw_reset:{sha256(reset_token)}` | `userId` | `password_reset.token_ttl` (default 600 s) | Password-reset token (`method = "token"`). Consumed on use. |
+| `otp` | `auth:otp:{purpose}:{hmac_sha256(tenantId + ":" + email)}` | Redis HASH with fields `code` and `attempts` (`HINCRBY` bumps `attempts`) | `otp_ttl_seconds` (per purpose) | OTP record. `attempts` tracks failures (max 5). Purposes: `password_reset`, `email_verification`. Tenant-scoped to prevent collision. |
 | `mfa` | `auth:mfa:{sha256(mfa_temp_token)}` | `userId` | 300 s (5 min) | MFA temp-token anti-replay/consumption marker. Issued after password step when MFA is enabled; deleted when the challenge succeeds or after the lockout threshold. |
 | `sess` | `auth:sess:{hmac_sha256(hmacKey, userSubject)}` | Redis SET whose members are full key **suffixes**: `rt:{sha256(refresh_token)}` for a live session and `rp:{sha256(old_refresh_token)}` for a rotation grace pointer | max refresh TTL | Dashboard active-session index, keyed by the tenant-scoped `userSubject`: an index on the bare id was shared between same-id accounts in different tenants, so a revoke-all swept a stranger's sessions. Drives listing (filtered to `rt:` members), counting and FIFO eviction. The prefixed-suffix member format is byte-identical to nest-auth, so revoke-all can delete `{namespace}:{member}` verbatim — including the grace pointers, which a bare-hash member could not identify. |
 | `sd` | `auth:sd:{sessionHash}` | JSON `{ device, ip, createdAt, lastActivityAt }` — the two timestamps are **Unix-millisecond numbers** (nest-auth writes `Date.now()` and discards a record whose timestamps are not numbers), keyed by the **bare** hash, not the `sess:` member | max refresh TTL | Dashboard per-session detail (one `rt:` member of `sess:{hmac_sha256(hmacKey, userSubject)}`). |
-| `inv` | `auth:inv:{sha256(invitation_token)}` | JSON `{ email, role, tenantId, inviterUserId, createdAt }` (`createdAt` is an ISO-8601 string) | `invitations.token_ttl_seconds` (default 604800 s) | Pending invitation. Consumed on accept. `createdAt` is **mandatory**: nest-auth's record guard rejects a record without it, and because accept consumes the token with a single-use `GETDEL` the rejection would destroy the invitation rather than merely fail it. |
+| `inv` | `auth:inv:{sha256(invitation_token)}` | JSON `{ email, role, tenantId, inviterUserId, createdAt }` (`createdAt` is an ISO-8601 string) | `invitations.token_ttl` (default 172800 s) | Pending invitation. Consumed on accept. `createdAt` is **mandatory**: nest-auth's record guard rejects a record without it, and because accept consumes the token with a single-use `GETDEL` the rejection would destroy the invitation rather than merely fail it. |
 | `os` | `auth:os:{sha256(state)}` | JSON `{ tenantId, codeVerifier }` | 600 s (10 min) | OAuth CSRF `state` + PKCE `code_verifier`. Single-use; deleted on callback. |
 | `wst` | `auth:wst:{sha256(ws_ticket)}` | JSON `WsTicketSnapshot` `{ sub, tenantId, role, status, mfaEnabled, mfaVerified }` | `WS_TICKET_TTL_SECONDS` (30 s) | **rust-auth-only, feature `websocket`.** Single-use WebSocket upgrade ticket (§7.3.6 / §8.7). Minted from an already-authorized, MFA-satisfied session and redeemed once (`GETDEL`) at the WS handshake, so an access JWT never appears in a URL. The value is a verified-claims **snapshot**, never a token. This prefix is outside the nest-auth parity surface (nest-auth authenticates WebSockets via the `Authorization` header, not a ticket), so it is purely additive: a `nest-auth` server never reads or writes `wst:`, and cross-backend Redis sharing is unaffected. |
 | `tu` | `auth:tu:{hmac_sha256(hmacKey, userSubject + ":" + code)}` | `"1"` | 90 s (≈ 3 × TOTP window) | TOTP anti-replay. The key is the **HMAC of `{userSubject}:{code}`**, never the raw 6-digit code (which is low-entropy and would be reversible as a bare key) — matching §7.5.6. A code that just verified is marked so it cannot be replayed inside its drift window. |
@@ -4402,7 +4401,7 @@ Closes an IDOR/BOLA hole: a user must not revoke a session hash they do not own.
 
 Guarantees the lockout window starts at the **first** failure and never slides forward, defeating the "one attempt just before expiry" evasion.
 
-- **KEYS** — `[1]` `lf:{hmac(tenant:email)}`.
+- **KEYS** — `[1]` `lf:{hmac(dashboard:tenant:email)}`.
 - **ARGV** — `[1]` window TTL (s).
 - **Contract:** `INCR KEYS[1]`; **if result == 1 then `EXPIRE KEYS[1] ARGV[1]`**; return the counter. TTL is set only on the 0→1 transition; subsequent failures never extend it.
 - **Rust mapping:** `i64` (new counter). `BruteForceStore::is_locked` compares against `max_attempts`; `record_failure` returns the counter so the caller can attach a `Retry-After` derived from `remaining_lockout_secs` when the threshold is crossed.

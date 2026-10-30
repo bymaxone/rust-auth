@@ -100,7 +100,7 @@ pnpm add @bymax-one/rust-auth
 ### 🧩 Developer Experience
 
 - ✅ **Full-Stack Typed** — Rust domain types → TypeScript via `ts-rs`, drift-gated in CI
-- ✅ **Two Published Artifacts** — `bymax-auth` on crates.io, `@bymax-one/rust-auth` on npm, versioned in lockstep
+- ✅ **Two Artifacts** — `bymax-auth` for crates.io, `@bymax-one/rust-auth` for npm, versioned in lockstep (neither is published yet)
 - ✅ **Builder + Validated Config** — Assemble the engine with `AuthEngineBuilder`; `build()` fails fast with a typed `ConfigError`
 - ✅ **Trait-Pluggable** — Bring your own database, email transport, HTTP client, and stores
 - ✅ **Axum-Native Extractors** — `FromRequestParts` guards (`AuthUser`, `RequireRole<R>`, …) — no middleware soup, no Passport equivalent
@@ -127,6 +127,7 @@ A thin facade over a set of focused internal crates. You enable only the capabil
 | `invitations`    | Tokenized user invitations                                                 |
 | `redis`          | Canonical Redis stores (`redis` + `deadpool-redis`) with atomic Lua        |
 | `axum`           | HTTP router, extractors, DTO validation, cookie delivery, per-route rate limiting, WebSocket tickets |
+| `breach`         | Opt-in breached-password check (`HibpBreachChecker`, HIBP k-anonymity)     |
 | `client`         | Native Rust typed auth client                                              |
 | `full`           | Every backend feature above                                                |
 
@@ -166,7 +167,7 @@ nextjs ──→ bymax-auth-wasm (edge HS256 verifier)
 ```toml
 # Cargo.toml
 [dependencies]
-bymax-auth = { version = "1", features = ["argon2", "sessions", "mfa", "oauth", "oauth-reqwest", "redis", "axum"] }
+bymax-auth = { version = "<first release>", features = ["argon2", "sessions", "mfa", "oauth", "oauth-reqwest", "redis", "axum"] }
 ```
 
 ### 2. Implement the repository trait
@@ -175,9 +176,9 @@ The library defines **what** it needs — your app provides **how**. Map the abs
 
 ```rust
 use async_trait::async_trait;
-use bymax_auth::{
-    AuthUser, CreateUserData, CreateWithOAuthData, RepositoryError, UpdateMfaData, UserRepository,
-};
+use bymax_auth::core::RepositoryError;
+use bymax_auth::core::traits::UserRepository;
+use bymax_auth::types::{AuthUser, CreateUserData, CreateWithOAuthData, UpdateMfaData};
 
 pub struct PgUserRepository {
     pool: sqlx::PgPool,
@@ -197,7 +198,7 @@ impl UserRepository for PgUserRepository {
         .bind(tenant_id)
         .fetch_optional(&self.pool)
         .await
-        .map_err(RepositoryError::backend)
+        .map_err(|e| RepositoryError::Backend(Box::new(e)))
     }
 
     async fn create(&self, data: CreateUserData) -> Result<AuthUser, RepositoryError> {
@@ -280,7 +281,7 @@ To bridge the port onto something the sink shape does not fit, implement `EmailP
 
 ```rust
 use async_trait::async_trait;
-use bymax_auth::core::traits::{EmailProvider, InviteData, SessionInfo};
+use bymax_auth::core::traits::{EmailError, EmailProvider, InviteData, SessionInfo};
 
 pub struct ResendEmailProvider { /* client, from, app_url */ }
 
@@ -288,26 +289,30 @@ pub struct ResendEmailProvider { /* client, from, app_url */ }
 impl EmailProvider for ResendEmailProvider {
     async fn send_password_reset_token(
         &self, tenant_id: &str, email: &str, token: &str, locale: Option<&str>,
-    ) {
+    ) -> Result<(), EmailError> {
         // Render and send with your transport of choice (Resend/SES/SMTP).
+        Ok(())
     }
 
     async fn send_email_verification_otp(
         &self, tenant_id: &str, email: &str, otp: &str, locale: Option<&str>,
-    ) {
+    ) -> Result<(), EmailError> {
         // …
+        Ok(())
     }
 
     async fn send_new_session_alert(
         &self, tenant_id: &str, email: &str, info: &SessionInfo, locale: Option<&str>,
-    ) {
+    ) -> Result<(), EmailError> {
         // …
+        Ok(())
     }
 
     async fn send_invitation(
         &self, tenant_id: &str, email: &str, data: &InviteData, locale: Option<&str>,
-    ) {
+    ) -> Result<(), EmailError> {
         // …
+        Ok(())
     }
 
     // … password-reset OTP, MFA enabled/disabled notifications, etc.
@@ -323,26 +328,35 @@ impl EmailProvider for ResendEmailProvider {
 
 ```rust
 use std::sync::Arc;
-use bymax_auth::{
-    auth_router, AuthConfig, AuthEngine, AxumAuthConfig, Environment, RedisStores,
-};
+use bymax_auth::axum::{auth_router, AxumAuthConfig, ClientIpSource};
+use bymax_auth::core::providers::{GoogleOAuthProvider, ReqwestHttpClient};
+use bymax_auth::core::{AuthConfig, AuthEngine, Environment};
+use bymax_auth::redis::RedisStores;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    let http = Arc::new(ReqwestHttpClient::new()?);
+    let google_config = /* GoogleOAuthConfig { client id, secret, redirect URI, … } */;
     let engine = AuthEngine::builder()
         .config(AuthConfig::secure_defaults()) // or AuthConfig::nest_compat_defaults()
         .environment(Environment::Production)   // resolves Secure cookies + prod redirect checks
         .user_repository(Arc::new(PgUserRepository { pool }))
         .email_provider(Arc::new(ResendEmailProvider { /* … */ }))
-        .redis_stores(Arc::new(RedisStores::connect("redis://127.0.0.1").await?))
-        .oauth_provider(Arc::new(bymax_auth::GoogleProvider::new(/* client id/secret */)))
-        .http_client(Arc::new(bymax_auth::ReqwestHttpClient::default()))
+        .redis_stores(Arc::new(RedisStores::connect("redis://127.0.0.1", "auth")?))
+        .http_client(http.clone())
+        .oauth_provider(Arc::new(GoogleOAuthProvider::new(google_config, http)))
         .build()?;
 
-    let app = auth_router(AxumAuthConfig::new(Arc::new(engine)));
+    // `ClientIpSource` states how the per-route rate limiter learns the caller's address.
+    let app = auth_router(engine, AxumAuthConfig::new(ClientIpSource::PeerAddr));
 
     let listener = tokio::net::TcpListener::bind("0.0.0.0:3000").await?;
-    axum::serve(listener, app).await?;
+    // The rate limiter reads the peer address, so serve with connect info.
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    )
+    .await?;
     Ok(())
 }
 ```
@@ -353,20 +367,26 @@ Guards are Axum `FromRequestParts` extractors — compose them straight into a h
 
 ```rust
 use axum::Json;
-use bymax_auth::{AuthUser, RequireRole, SafeAuthUser, SelfOrAdmin};
+use bymax_auth::axum::{AdminRole, AuthUser, RequireRole, Role, SelfOrAdmin};
+use bymax_auth::types::DashboardClaims;
 
-// Any authenticated dashboard user.
-async fn profile(user: AuthUser) -> Json<SafeAuthUser> {
-    Json(user.into_safe())
+// A role is a marker type whose NAME is a key of `roles.hierarchy`.
+struct Admin;
+impl Role for Admin { const NAME: &'static str = "ADMIN"; }
+impl AdminRole for Admin { const NAME: &'static str = "ADMIN"; }
+
+// Any authenticated dashboard user; `.0` carries the verified claims.
+async fn profile(user: AuthUser) -> Json<DashboardClaims> {
+    Json(user.0)
 }
 
 // Admins (and anything above them in the hierarchy) only.
-async fn list_users(_: RequireRole<{ "admin" }>) -> &'static str {
+async fn list_users(_: RequireRole<Admin>) -> &'static str {
     "ok"
 }
 
-// The resource owner, or an admin.
-async fn update_user(_: SelfOrAdmin) -> &'static str {
+// The resource owner (the `{user_id}` path segment), or an admin.
+async fn update_user(_: SelfOrAdmin<Admin>) -> &'static str {
     "ok"
 }
 ```
@@ -382,8 +402,9 @@ import { AuthProvider } from '@bymax-one/rust-auth/react'
 import { createAuthClient } from '@bymax-one/rust-auth/client'
 
 const authClient = createAuthClient({
-  // Same-origin calls flow through the Next.js proxy under `/api/auth/*`.
-  // Set `baseUrl` only for a cross-origin API.
+  // The origin every endpoint is resolved against. An empty string keeps calls same-origin,
+  // through the Next.js route handlers.
+  baseUrl: '',
 })
 
 export function Providers({ children }: { children: React.ReactNode }) {
@@ -425,16 +446,18 @@ Mount the auth proxy at the project root and expose the `/api/auth/*` route hand
 import { createAuthProxy } from '@bymax-one/rust-auth/nextjs'
 
 export const { proxy } = createAuthProxy({
-  publicRoutes: ['/', '/auth/login', '/auth/register'],
-  protectedRoutes: [
-    { pattern: '/dashboard/:path*', allowedRoles: ['admin', 'member'] },
-    { pattern: '/admin/:path*', allowedRoles: ['admin'] },
-  ],
-  loginPath: '/auth/login',
-  apiBase: process.env.API_BASE_URL!,
-  jwtSecret: process.env.JWT_SECRET, // verified at the edge via WASM
-  cookieNames: { access: 'access_token', refresh: 'refresh_token', hasSession: 'has_session' },
-  blockedUserStatuses: ['BANNED', 'INACTIVE', 'SUSPENDED'],
+  accessTokenSecret: process.env.AUTH_ACCESS_TOKEN_SECRET ?? null, // verified at the edge via WASM
+  loginPath: '/login',
+  // Prefixes at a segment boundary: never list '/', which would make every route public.
+  // `/auth` is the same-origin forwarding route to the backend (login, register, ...) and
+  // `/api/auth` holds the client-refresh and logout handlers; both must be reachable while
+  // the caller is unauthenticated, or an expired access token can never be refreshed.
+  publicPaths: ['/login', '/auth', '/api/auth'],
+  // The silent-refresh handler lives UNDER `/auth` so the path-scoped refresh cookie (path
+  // `/auth`) is sent to it; a handler under `/api/auth` would never receive that cookie.
+  silentRefreshPath: '/auth/silent-refresh',
+  roleRules: [{ pathPrefix: '/admin', roles: ['ADMIN'] }],
+  blockedStatuses: ['BANNED', 'INACTIVE', 'SUSPENDED'],
 })
 
 export const config = { matcher: ['/((?!_next/static|_next/image|favicon.ico).*)'] }
@@ -448,10 +471,19 @@ export const config = { matcher: ['/((?!_next/static|_next/image|favicon.ico).*)
 import { createLogoutHandler } from '@bymax-one/rust-auth/nextjs'
 
 export const POST = createLogoutHandler({
-  apiBase: process.env.API_BASE_URL!,
-  mode: 'redirect',
-  loginPath: '/auth/login',
-  cookieNames: { access: 'access_token', refresh: 'refresh_token', hasSession: 'has_session' },
+  backendUrl: process.env.API_BASE_URL!,
+  loginPath: '/login',
+})
+```
+
+```typescript
+// app/auth/silent-refresh/route.ts — the proxy redirects here when the access token has
+// expired but a `has_session` signal is present
+import { createSilentRefreshHandler } from '@bymax-one/rust-auth/nextjs'
+
+export const GET = createSilentRefreshHandler({
+  backendUrl: process.env.API_BASE_URL!,
+  loginPath: '/login',
 })
 ```
 
@@ -464,17 +496,17 @@ Everything is configured through `AuthConfig`. Two ready-made profiles bundle se
 | Profile                        | Posture                                                                              |
 | ------------------------------ | ------------------------------------------------------------------------------------ |
 | `AuthConfig::nest_compat_defaults()` | Behavioral parity with `@bymax-one/nest-auth` out of the box (scrypt, email verification required, brute-force `max_attempts = 5`) — the `Default` |
-| `AuthConfig::secure_defaults()`      | Hardened opt-in profile (Argon2id, stricter cookies) — available under the `argon2` feature |
+| `AuthConfig::secure_defaults()`      | Hardened opt-in profile (Argon2id as the password KDF) — available under the `argon2` feature |
 
 | Group              | Key options                                                                  | nest-compat default        |
 | ------------------ | ---------------------------------------------------------------------------- | -------------------------- |
-| **jwt**            | `secret` (required, ≥ 32 chars), `previous_secrets` (and the top-level `identifier_key`), `access_ttl`, `refresh_expires_in_days`, `absolute_session_lifetime_days`, `issuer`, `audience` | `15m`, `7d`, off, HS256 (pinned), both off |
+| **jwt**            | `secret` (required, ≥ 32 chars), `previous_secrets` (and the top-level `identifier_key`), `access_expires_in`, `refresh_expires_in_days`, `absolute_session_lifetime_days`, `issuer`, `audience` | `15m`, `7d`, `30` (`0` disables the cap), HS256 (pinned), both off |
 | **password**       | `active_algorithm`, scrypt `cost_factor` / Argon2id `memory_kib`             | scrypt N=2¹⁷, r=8, p=1     |
 | **token_delivery** | `Cookie` \| `Bearer` \| `Both`                                               | `Cookie`                   |
-| **cookies**        | names, `refresh_cookie_path`, `same_site`, `trusted_origins`, `resolve_domains` | HttpOnly, Secure, Strict, `[]` |
+| **cookies**        | names, `refresh_cookie_path`, `same_site`, `trusted_origins`, `resolve_domains` | HttpOnly, Secure, Lax (the refresh cookie is Strict), `[]` |
 | **mfa**            | `encryption_key` (32 bytes), `previous_encryption_keys`, `issuer`, `totp_window`, `recovery_code_count` | —              |
 | **sessions**       | `enabled`, `default_max_sessions`, `max_sessions_resolver`                   | `false`, `5`               |
-| **brute_force**    | `max_attempts`, `window_seconds`                                             | `5`, `900`                 |
+| **brute_force**    | `max_attempts`, `window`                                                     | `5`, `900`                 |
 | **rate limiting**  | `AxumAuthConfig::rate_limits` — per-route governor limits, pinned to the shared contract | on, per-route |
 | **password_reset** | `method` (`Token` \| `Otp`), `otp_length`, `token_ttl`                       | `Token`, 600 s             |
 | **platform**       | `enabled` (requires `roles.platform_hierarchy`)                              | `false`                    |
@@ -568,18 +600,12 @@ Everything is configured through `AuthConfig`. Two ready-made profiles bundle se
 > (`ConfigError::AccessLifetimeExceedsEpochRetention`) rather than letting it fail open, and
 > `nest-auth` enforces the identical bound.
 
-Two options are deliberately off by default, because switching either on changes behaviour for
-sessions and origins that already exist:
-
-- `jwt.absolute_session_lifetime_days` caps how long one login can be extended by rotation.
-  Without it, a client refreshing every fifteen minutes keeps a session alive forever.
-- `cookies.trusted_origins` is required as soon as `same_site` is `None` — that is the setting
-  where the browser sends the session cookie cross-site, so an origin has to be authorized. It
-  is also accepted under `Lax`/`Strict` when `cookies.resolve_domains` is configured: those
-  withhold the cookie cross-**site**, not cross-**origin**, so a deployment serving
-  `app.example.com` and `api.example.com` from one `.example.com` cookie is same-site and the
-  browser does send it. Without a shared cookie domain the list can never be consulted, and is
-  still refused.
+`cookies.trusted_origins` is required, and must be non-empty, as soon as `same_site` is `None`:
+that is the setting where the browser sends the session cookie cross-site, so an origin has to
+be authorized. Every entry must be a bare origin (scheme, host and an optional port), or
+`build()` refuses it. Under `Lax`/`Strict` the list may stay empty, but a deployment serving
+`app.example.com` and `api.example.com` from one `.example.com` cookie (`cookies.resolve_domains`)
+is same-site, so the browser does send the cookie between them; list those origins too.
 
 The breached-password check is opt-in for a different reason: it is the only part of the
 credential path that reaches the network, and a library should not start talking to a third
@@ -588,7 +614,7 @@ supplies the transport it already has:
 
 ```rust
 // Cargo.toml: bymax-auth = { version = "…", features = ["breach"] }
-use bymax_auth::HibpBreachChecker;
+use bymax_auth::core::traits::HibpBreachChecker;
 
 let engine = AuthEngine::builder()
     .config(config)
@@ -613,7 +639,7 @@ The library is a set of crates you embed in your Axum service — a framework-ag
 │                                                            │
 │   bymax-auth-axum   →  router · extractors · rate-limit    │
 │        │                                                   │
-│   bymax-auth-core   →  AuthEngine · services · 14 hooks    │
+│   bymax-auth-core   →  AuthEngine · services · 17 hooks    │
 │      ╱   │   ╲                                             │
 │  -crypto -jwt -types     (pure-Rust, wasm-safe)            │
 │        │                                                   │
@@ -692,7 +718,7 @@ When integrating `bymax-auth` in production, verify each of the following:
 | Token Generation  | `getrandom`/`OsRng` CSPRNG — 256 bits of entropy                     |
 | Secret Comparison | `subtle` constant-time — never `==` on secret bytes                  |
 | JWT               | Hand-rolled HS256 (`hmac` + `sha2`), `jti` blacklist via Redis        |
-| Cookies           | HttpOnly, Secure-by-default, `SameSite=Strict`, path-scoped refresh   |
+| Cookies           | HttpOnly, Secure-by-default, `SameSite=Lax` (refresh cookie `Strict`), path-scoped refresh |
 | Brute-Force       | Redis atomic fixed-window counters per `HMAC(tenant:email)`           |
 | CSRF (OAuth)      | 64-hex single-use `state` (`GETDEL`) + PKCE `code_verifier` (S256)    |
 | Refresh Rotation  | Single-use tokens with a grace window; a replay past it revokes that login's whole family lineage |
@@ -775,7 +801,7 @@ Authentication is critical infrastructure, so the suite is held to a bar beyond 
 
 ```bash
 cargo test --workspace --all-features      # unit + integration
-cargo llvm-cov --workspace --all-features  # 100% line/region gate
+cargo llvm-cov --workspace --all-features  # 100% line/function gate
 cargo mutants                              # mutation testing
 cargo deny check                           # supply-chain policy
 wasm-pack test --node bindings/bymax-auth-wasm
