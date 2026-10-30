@@ -456,6 +456,9 @@ impl TokenManagerService {
             ip: stored_ip,
             created_at: now_offset(),
             mfa_enabled: user.mfa_enabled,
+            // Persisted only when this session cleared the challenge, so a rotation can carry
+            // the claim forward instead of minting `false`.
+            mfa_verified,
             // A fresh login opens a new refresh-token family; every rotation inherits this id,
             // so the whole lineage can be revoked together on reuse detection.
             family_id: new_uuid_v4(),
@@ -760,6 +763,8 @@ impl TokenManagerService {
             ip: stored_ip,
             created_at: now_offset(),
             mfa_enabled: admin.mfa_enabled,
+            // Persisted only when this session cleared the challenge, as on the dashboard plane.
+            mfa_verified,
             // A fresh platform login opens a new refresh-token family (section 12.5.2).
             family_id: new_uuid_v4(),
             family_created_at: Some(now_offset()),
@@ -1010,8 +1015,8 @@ impl TokenManagerService {
     }
 
     /// Build the platform access claims for a rotated/recovered session. As with the dashboard
-    /// rotation, `mfa_verified` is dropped (re-acquired only via the MFA challenge) while
-    /// `mfa_enabled` is carried over from the stored record; the claims carry no `tenant_id`.
+    /// rotation, `mfa_verified` and `mfa_enabled` are both carried over from the stored record;
+    /// the claims carry no `tenant_id`.
     /// The `epoch` is the admin's current generation, read at rotation time. `refresh` then
     /// re-stamps the role and MFA flag from the account it re-reads, via
     /// [`Self::reissue_platform_access_with_authority`].
@@ -1026,7 +1031,7 @@ impl TokenManagerService {
             role: record.role.clone(),
             token_type: PlatformType::Platform,
             mfa_enabled: record.mfa_enabled,
-            mfa_verified: false,
+            mfa_verified: record.mfa_verified,
             iat: now,
             exp: now.saturating_add(self.access_ttl.as_secs().min(i64::MAX as u64) as i64),
             epoch,
@@ -1427,9 +1432,9 @@ impl TokenManagerService {
         })
     }
 
-    /// Build the access claims for a rotated/recovered session. Rotation always drops
-    /// `mfa_verified` (the user re-acquires it only via the MFA challenge) and issues an
-    /// empty `status` — status guards consult the repository/status cache, not the rotated
+    /// Build the access claims for a rotated/recovered session. Rotation carries
+    /// `mfa_verified` over from the stored record, which holds `true` only for a session
+    /// established through the MFA challenge, and issues an empty `status` — status guards consult the repository/status cache, not the rotated
     /// JWT, because the stored session record carries no live status. The `epoch` is the
     /// user's current generation, read at rotation time.
     ///
@@ -1451,7 +1456,7 @@ impl TokenManagerService {
             token_type: DashboardType::Dashboard,
             status: String::new(),
             mfa_enabled: record.mfa_enabled,
-            mfa_verified: false,
+            mfa_verified: record.mfa_verified,
             iat: now,
             exp: now.saturating_add(self.access_ttl.as_secs().min(i64::MAX as u64) as i64),
             epoch,
@@ -1489,6 +1494,8 @@ fn identity_record(seed: &SessionRecord, ip: &str, user_agent: &str) -> SessionR
         ip: stored_ip,
         created_at: now_offset(),
         mfa_enabled: seed.mfa_enabled,
+        // Carried to the successor unchanged, on rotation and on grace-window recovery alike.
+        mfa_verified: seed.mfa_verified,
         // Rotation inherits the seed's family unchanged, so every descendant of one login
         // shares the id and the whole lineage is revocable together on reuse detection.
         family_id: seed.family_id.clone(),
@@ -1513,6 +1520,8 @@ fn platform_identity_record(seed: &SessionRecord, ip: &str, user_agent: &str) ->
         ip: stored_ip,
         created_at: now_offset(),
         mfa_enabled: seed.mfa_enabled,
+        // Carried to the successor unchanged, on rotation and on grace-window recovery alike.
+        mfa_verified: seed.mfa_verified,
         // The platform rotation inherits the seed's family unchanged (section 12.5.2).
         family_id: seed.family_id.clone(),
         family_created_at: seed.family_created_at,
@@ -1533,6 +1542,8 @@ fn placeholder_record(ip: &str, user_agent: &str) -> SessionRecord {
         ip: stored_ip,
         created_at: now_offset(),
         mfa_enabled: false,
+        // A placeholder stands for a record that vanished, so it carries nothing forward.
+        mfa_verified: false,
         // The placeholder is never stored (an absent live token yields only Grace/Reused/Invalid),
         // so it carries no family and no birth time.
         family_id: String::new(),
@@ -1552,6 +1563,8 @@ mod tests {
     use super::*;
     use crate::testing::InMemoryStores;
     use time::OffsetDateTime;
+
+    mod mfa_rotation;
 
     fn key() -> HsKey {
         HsKey::from_bytes(b"a-test-hs256-secret-key-0123456789")
@@ -2334,8 +2347,10 @@ mod tests {
         // The MFA gate refuses a token only when `mfa_enabled && !mfa_verified`. If rotation
         // reset `mfa_enabled` to false, one routine refresh (every ~15 min) would mint a token
         // that clears every MFA-gated route without the holder ever completing a challenge —
-        // a silent bypass for an enrolled account. The flag must survive rotation; the
-        // `mfa_verified` proof must NOT, so the second factor is re-acquired via the challenge.
+        // a silent bypass for an enrolled account. The flag must survive rotation, and so must
+        // the `mfa_verified` proof of a session that cleared the challenge: no route lets an
+        // authenticated session re-acquire it, so a rotation that dropped it would lock the
+        // holder out of every route behind the gate.
         let store = Arc::new(InMemoryStores::new());
         let svc = service(store);
         let enrolled = SafeAuthUser {
@@ -2360,7 +2375,7 @@ mod tests {
         let Ok(rotated) = rotated else { return };
 
         let claims = svc.verify_access(&rotated.access_token).await;
-        assert!(matches!(&claims, Ok(c) if c.mfa_enabled && !c.mfa_verified));
+        assert!(matches!(&claims, Ok(c) if c.mfa_enabled && c.mfa_verified));
     }
 
     #[tokio::test]
@@ -2412,7 +2427,7 @@ mod tests {
         let Ok(rotated) = rotated else { return };
 
         let claims = svc.verify_platform_access(&rotated.access_token).await;
-        assert!(matches!(&claims, Ok(c) if c.mfa_enabled && !c.mfa_verified));
+        assert!(matches!(&claims, Ok(c) if c.mfa_enabled && c.mfa_verified));
     }
 
     fn platform_admin() -> SafeAuthPlatformUser {
@@ -3574,6 +3589,7 @@ mod absolute_lifetime_tests {
             ip: "203.0.113.4".to_owned(),
             created_at: now_offset(),
             mfa_enabled: false,
+            mfa_verified: false,
             family_id: "fam-1".to_owned(),
             family_created_at: Some(now_offset() - TimeDuration::days(days_ago)),
         }

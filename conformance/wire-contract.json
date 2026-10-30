@@ -458,7 +458,11 @@
       "createdAt": "iso8601-string",
       "familyId": "omitted from the record entirely when empty, never written as an empty string",
       "familyCreatedAt": "iso8601-string; the FAMILY's birth, carried unchanged through every rotation — distinct from createdAt, which is this session's own and resets on each one. Omitted alongside familyId on a legacy record, which is then not subject to the absolute lifetime cap.",
-      "$comment": "mfaEnabled must survive rotation: the MFA gate refuses only when mfaEnabled && !mfaVerified, so losing it turns one refresh into a silent second-factor bypass."
+      "optionalFields": [
+        "mfaVerified"
+      ],
+      "mfaVerified": "boolean; written ONLY as `true`, when the session was established through the MFA challenge, and omitted otherwise — never written as `false`. Read strictly: only a JSON boolean `true` is verified, so a record without the field (a legacy record, or one opened without the challenge) and any other value read as false. Carried unchanged through every rotation and every grace-window recovery, on both planes.",
+      "$comment": "mfaEnabled must survive rotation: the MFA gate refuses only when mfaEnabled && !mfaVerified, so losing it turns one refresh into a silent second-factor bypass. mfaVerified must survive it too, from the other side: no route lets an authenticated session re-acquire the claim, so a rotation that does not carry it forward locks every MFA user out of every route behind the gate once the access token ages out."
     },
     "sessionDetail": {
       "key": "{sd|psd}:{sha256(refreshToken)}",

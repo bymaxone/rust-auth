@@ -21,6 +21,9 @@
 
 mod common;
 
+#[path = "adapter/mfa_rotation.rs"]
+mod mfa_rotation;
+
 use common::{
     Captured, EngineSpec, Req, TENANT, build, build_oauth_with_failing_state_store,
     build_oauth_with_redirects, current_totp, enable_mfa_flag, router, seed_admin, seed_user,

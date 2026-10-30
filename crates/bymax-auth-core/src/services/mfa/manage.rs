@@ -12,8 +12,8 @@ use crate::services::mfa::{MfaService, MfaUserView, generate_recovery_code, sess
 impl MfaService {
     /// Disable MFA after a successful TOTP re-auth (§7.5.4). **Only** a TOTP code is accepted —
     /// a recovery code can never disable MFA by design. On success MFA is cleared and every
-    /// session is revoked, so subsequent rotations emit `mfa_verified:false` and stale
-    /// `mfa_verified:true` claims are cleared.
+    /// session is revoked and the token epoch bumped, so no stored `mfa_verified:true` record
+    /// or issued claim outlives the factor.
     ///
     /// # Errors
     ///

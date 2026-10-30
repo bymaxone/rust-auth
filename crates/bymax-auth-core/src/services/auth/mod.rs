@@ -348,6 +348,9 @@ impl AuthEngine {
             ip: stored_ip,
             created_at: now_offset(),
             mfa_enabled: result.user.mfa_enabled,
+            // This record feeds the hook and eviction projection only; the stored record
+            // already carries the real value.
+            mfa_verified: false,
             // The family id is server-internal to the reuse-detection store and is not part of
             // the new-session hook / eviction projection (which keys on the session hash), so
             // this display record leaves it empty.

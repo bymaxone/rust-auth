@@ -88,8 +88,7 @@ pub struct SessionRecord {
     /// refuses a token whose claims say `mfa_enabled && !mfa_verified`, one routine
     /// refresh would silently disable second-factor enforcement for an enrolled account.
     ///
-    /// `mfa_verified` is deliberately NOT stored: it must stay `false` in a rotated token
-    /// so clearing the second factor always goes back through the MFA challenge.
+    /// The second-factor claim is stored separately, as [`SessionRecord::mfa_verified`].
     ///
     /// Required on the wire, deliberately. Defaulting a missing value to `false` would turn a
     /// truncated or corrupt record into a silent second-factor bypass — the gate only refuses a
@@ -98,6 +97,28 @@ pub struct SessionRecord {
     /// record that cannot be read is treated as no session at all, which costs the holder a
     /// login and costs an attacker the bypass.
     pub mfa_enabled: bool,
+    /// Whether this session was established through the MFA challenge.
+    ///
+    /// Written ONLY as `true` and omitted otherwise, never as `false`, so a record that never
+    /// cleared the challenge stays byte-identical to what it was before the field existed. Read
+    /// strictly: only the JSON boolean `true` counts. An absent field, a legacy record, and any
+    /// other value (`"true"`, `1`, `null`) read as `false` and do not fail the record, because
+    /// a record that cannot be read costs the holder a login and a value that is not `true`
+    /// must never be granted the benefit of the doubt.
+    ///
+    /// Every rotation and every grace-window recovery carries it from the stored record to its
+    /// successor and into the claims of the new access token. Without it a rotation mints
+    /// `mfa_verified: false`, and no route lets an authenticated session re-acquire the claim,
+    /// so every enrolled user is refused by every route behind the MFA gate once the first
+    /// access token ages out. A session inherits the assurance of the authentication event that
+    /// created it (NIST SP 800-63B-4, Session Management). Enabling, disabling and resetting
+    /// MFA through this library revokes every session, so a stored `true` does not outlive the factor it describes.
+    #[serde(
+        default,
+        deserialize_with = "strict_true",
+        skip_serializing_if = "is_false"
+    )]
+    pub mfa_verified: bool,
     /// The refresh-token **family** (login lineage) this session belongs to. Minted at login
     /// and inherited unchanged across every rotation, so all descendants of one login share it.
     /// It is the unit of reuse-detection revocation: presenting an already-consumed refresh
@@ -122,6 +143,26 @@ pub struct SessionRecord {
         skip_serializing_if = "Option::is_none"
     )]
     pub family_created_at: Option<OffsetDateTime>,
+}
+
+/// Read a flag strictly: only the JSON boolean `true` is `true`. Any other value, of any type,
+/// reads as `false` instead of failing the record it sits in.
+fn strict_true<'de, D>(deserializer: D) -> Result<bool, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::Deserialize;
+    Ok(matches!(
+        serde_json::Value::deserialize(deserializer)?,
+        serde_json::Value::Bool(true)
+    ))
+}
+
+/// `skip_serializing_if` predicate: the flag is written only when it is `true`.
+// The signature is fixed by serde: it receives a reference.
+#[allow(clippy::trivially_copy_pass_by_ref)]
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 /// Serde adapter for an optional RFC 3339 instant, so a record with no family birth time
@@ -1003,6 +1044,8 @@ pub trait OAuthStateStore: Send + Sync {
 mod tests {
     use super::*;
 
+    mod session_record_wire;
+
     fn session_record() -> SessionRecord {
         SessionRecord {
             user_id: "u1".into(),
@@ -1012,6 +1055,7 @@ mod tests {
             ip: "203.0.113.4".into(),
             created_at: OffsetDateTime::UNIX_EPOCH,
             mfa_enabled: false,
+            mfa_verified: false,
             family_id: "fam-1".into(),
             family_created_at: Some(OffsetDateTime::UNIX_EPOCH),
         }
