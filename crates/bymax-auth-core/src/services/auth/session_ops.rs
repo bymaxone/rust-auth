@@ -908,8 +908,7 @@ mod tests {
             .await;
         assert!(
             matches!(crossed, Err(AuthError::TokenInvalid)),
-            "a session was issued for an account in another tenant: {:?}",
-            crossed.as_ref().map(|auth| &auth.user.email)
+            "a session was issued for an account in another tenant"
         );
     }
 
