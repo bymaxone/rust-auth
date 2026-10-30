@@ -2249,7 +2249,7 @@ impl BruteForceService {
 }
 ```
 
-Constants: key prefix `"lf:"`; `MAX_IDENTIFIER_LENGTH = 512` bytes. Configured `max_attempts` (default **5**, matching `brute_force.max_attempts` in §5.3/§12.4/§15.3 and nest-auth's `bruteForce.maxAttempts`) and `window_seconds` (default 900).
+Constants: key prefix `"lf:"`; `MAX_IDENTIFIER_LENGTH = 512` bytes. Configured `max_attempts` (default **5**, matching `brute_force.max_attempts` in §5.3/§12.4/§15.3 and nest-auth's `bruteForce.maxAttempts`) and `window` (default 900 s).
 
 **Identifier contract:** callers always pass a hashed identifier — `hmac_sha256(email, hmac_key)` or `sha256(ip)` — never raw PII. `validate_identifier` rejects any identifier containing `:`, `\n`, `\r` (would corrupt the namespaced key) or exceeding 512 bytes, returning `Forbidden` (logged at error level; no internal detail leaks to the response).
 
@@ -4339,7 +4339,7 @@ preimage and the full list of keys derived from it are pinned by `conformance/wi
 | `rp` | `auth:rp:{sha256(old_refresh_token)}` | JSON `SessionRecord` — the **new** session, never the raw token | `refresh_grace_window_seconds` (default 30 s) | Rotation grace pointer. Lets a legitimately-concurrent request still carrying the old token recover the rotated identity and be issued a fresh token, instead of being logged out. Stores the session record (not the raw refresh token), so a Redis snapshot never leaks a live credential. |
 | `cf` | `auth:cf:{sha256(consumed_refresh_token)}` | `familyId` of the lineage the consumed token belonged to | `refresh_expires_in_days` × 86400 s | Consumed-token family marker. Planted in the same atomic step that consumes a token, and deliberately outliving the much shorter grace pointer: once the pointer is gone, the marker's presence is what proves a presented token was legitimately issued and already rotated — a **reuse**, not a random string (§12.5.1). |
 | `fam` | `auth:fam:{familyId}` | Redis SET of **bare** `sha256(refresh_token)` hashes | `refresh_expires_in_days` × 86400 s | Dashboard refresh-token family index: one login lineage, minted at login and inherited by every rotation. Members are bare hashes, unlike `sess:` — a family only ever tracks live `rt:` sessions, so the keyspace is implied. Deleting this key revokes the lineage and, as a side effect, refuses any grace recovery that still names it. |
-| `lf` | `auth:lf:{hmac_sha256(tenantId + ":" + email)}` | Numeric counter (string) | `window_seconds` (default 900 s) | Per-tenant failed-login counter. Fixed window — TTL set only on the 0→1 transition. Tenant scoping prevents cross-tenant lockout. |
+| `lf` | `auth:lf:{hmac_sha256(hmac_key, "dashboard:" + tenantId + ":" + email)}` | Numeric counter (string) | `brute_force.window` (default 900 s) | Per-tenant failed-login counter. Fixed window — TTL set only on the 0→1 transition. Tenant scoping prevents cross-tenant lockout. |
 | `pw_reset` | `auth:pw_reset:{sha256(reset_token)}` | `userId` | `password_reset.token_ttl` (default 600 s) | Password-reset token (`method = "token"`). Consumed on use. |
 | `otp` | `auth:otp:{purpose}:{hmac_sha256(tenantId + ":" + email)}` | Redis HASH with fields `code` and `attempts` (`HINCRBY` bumps `attempts`) | `otp_ttl_seconds` (per purpose) | OTP record. `attempts` tracks failures (max 5). Purposes: `password_reset`, `email_verification`. Tenant-scoped to prevent collision. |
 | `mfa` | `auth:mfa:{sha256(mfa_temp_token)}` | `userId` | 300 s (5 min) | MFA temp-token anti-replay/consumption marker. Issued after password step when MFA is enabled; deleted when the challenge succeeds or after the lockout threshold. |
@@ -4403,7 +4403,7 @@ Closes an IDOR/BOLA hole: a user must not revoke a session hash they do not own.
 
 Guarantees the lockout window starts at the **first** failure and never slides forward, defeating the "one attempt just before expiry" evasion.
 
-- **KEYS** — `[1]` `lf:{hmac(tenant:email)}`.
+- **KEYS** — `[1]` `lf:{hmac(dashboard:tenant:email)}`.
 - **ARGV** — `[1]` window TTL (s).
 - **Contract:** `INCR KEYS[1]`; **if result == 1 then `EXPIRE KEYS[1] ARGV[1]`**; return the counter. TTL is set only on the 0→1 transition; subsequent failures never extend it.
 - **Rust mapping:** `i64` (new counter). `BruteForceStore::is_locked` compares against `max_attempts`; `record_failure` returns the counter so the caller can attach a `Retry-After` derived from `remaining_lockout_secs` when the threshold is crossed.

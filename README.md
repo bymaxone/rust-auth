@@ -176,7 +176,8 @@ The library defines **what** it needs — your app provides **how**. Map the abs
 
 ```rust
 use async_trait::async_trait;
-use bymax_auth::core::traits::{RepositoryError, UserRepository};
+use bymax_auth::core::RepositoryError;
+use bymax_auth::core::traits::UserRepository;
 use bymax_auth::types::{AuthUser, CreateUserData, CreateWithOAuthData, UpdateMfaData};
 
 pub struct PgUserRepository {
