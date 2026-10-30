@@ -64,7 +64,8 @@ impl AuthEngine {
     ///
     /// Returns [`AuthError::InsufficientRole`] when the invited role is unknown or the inviter
     /// does not hold a role at least as high, [`AuthError::TokenInvalid`] when the inviter no
-    /// longer exists, or a store [`AuthError`].
+    /// longer exists or does not live in the tenant being invited into (the read is scoped to
+    /// it), or a store [`AuthError`].
     pub async fn invite(
         &self,
         inviter_user_id: &str,
@@ -333,11 +334,12 @@ impl AuthEngine {
     ///
     /// # Errors
     ///
-    /// Returns [`AuthError::TokenInvalid`] when the revoker no longer exists,
-    /// [`AuthError::InsufficientRole`] when the revoker belongs to another tenant or is not in
-    /// good standing — both facts about the caller alone — or a store/repository
-    /// [`AuthError`]. A revoker who merely does not out-rank the invitation is answered
-    /// `Ok(false)`, exactly as one asking about an address with nothing pending.
+    /// Returns [`AuthError::TokenInvalid`] when the revoker no longer exists or does not live in
+    /// `tenant_id` (the read is scoped to it), [`AuthError::InsufficientRole`] when a repository
+    /// that ignored the scope handed back a row from another tenant, and the account-status
+    /// error when the revoker is not in good standing — all facts about the caller alone — or a
+    /// store/repository [`AuthError`]. A revoker who merely does not out-rank the invitation is
+    /// answered `Ok(false)`, exactly as one asking about an address with nothing pending.
     pub async fn revoke_invitation(
         &self,
         revoker_user_id: &str,
