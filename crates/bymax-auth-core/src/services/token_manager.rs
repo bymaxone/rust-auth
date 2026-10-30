@@ -2447,7 +2447,7 @@ mod tests {
             ..user()
         };
         for (cleared, expected) in [(false, false), (true, true)] {
-            let Ok(issued) = svc
+            let issued = svc
                 .issue_tokens(
                     &enrolled,
                     "10.0.0.1",
@@ -2455,16 +2455,12 @@ mod tests {
                     cleared,
                     CredentialProof::Proved,
                 )
-                .await
-            else {
-                return;
-            };
-            let Ok(rotated) = svc
+                .await;
+            let Ok(issued) = issued else { return };
+            let rotated = svc
                 .reissue_tokens(&issued.refresh_token, "10.0.0.1", "agent/1.0")
-                .await
-            else {
-                return;
-            };
+                .await;
+            let Ok(rotated) = rotated else { return };
             let hash = RawRefreshToken::from_raw(rotated.refresh_token).redis_hash();
             let stored = store.find_session(SessionKind::Dashboard, &hash).await;
             assert!(matches!(&stored, Ok(Some(r)) if r.mfa_verified == expected));
@@ -2573,21 +2569,17 @@ mod tests {
             ..platform_admin()
         };
         for cleared in [true, false] {
-            let Ok(issued) = svc
+            let issued = svc
                 .issue_platform_tokens(&enrolled, "10.0.0.1", "agent/1.0", cleared)
-                .await
-            else {
-                return;
-            };
+                .await;
+            let Ok(issued) = issued else { return };
             let mut refresh = issued.refresh_token;
             let mut access = issued.access_token;
             for _ in 0..2 {
-                let Ok(rotated) = svc
+                let rotated = svc
                     .reissue_platform_tokens(&refresh, "10.0.0.1", "agent/1.0")
-                    .await
-                else {
-                    return;
-                };
+                    .await;
+                let Ok(rotated) = rotated else { return };
                 refresh = rotated.refresh_token;
                 access = rotated.access_token;
             }
