@@ -188,10 +188,8 @@ so the contract test enforces it.
 that copies a table out of the contract, or that lists a hand-written subset of a section it reads,
 detects drift only in what it happens to name — and reports agreement for everything else.
 
-This has now happened twice in this repository. `tests/error_catalog.rs` carried a hand-written
-status table and checked rust-auth against itself. The `userSubjectDerivedKeys` assertion listed six
-of eight keys, and the two it omitted were the two the contract declares mandatory; they stayed
-unimplemented for ten days with the gate green.
+A hand-written table checks rust-auth against itself, and a partial key list passes with the gate
+green while the omitted keys go unimplemented.
 
 **Safe path:** assert **set equality** against the section, in both directions. A key added to the
 contract must fail the build until it is derived; a key removed must fail until the removal is
@@ -217,7 +215,7 @@ number**. A diff that shifts lines in `crates/bymax-auth-core/src/engine/builder
 reappears as a survivor against a floor that is supposed to block a release.
 
 This does **not** fail closed: the mutation sweep runs post-merge, so a survivor is a line in a
-report, not a red pull request. It has gone stale twice, once unnoticed across several commits.
+report, not a red pull request.
 
 **Safe path:** when a diff touches either file, run
 `cargo mutants --list | grep -E "redis_stores|issue_mfa_temp_token"` and confirm only the compiled
