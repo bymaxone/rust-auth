@@ -89,33 +89,36 @@ impl WsTicketStore for RedisStores {
 mod tests {
     use super::parse_snapshot;
 
-    /// A complete record, with `fields` replacing or adding to it.
+    /// The fields of a complete record.
+    fn complete() -> serde_json::Map<String, serde_json::Value> {
+        serde_json::Map::from_iter([
+            ("sub".to_owned(), serde_json::json!("u1")),
+            ("tenantId".to_owned(), serde_json::json!("t1")),
+            ("role".to_owned(), serde_json::json!("USER")),
+            ("status".to_owned(), serde_json::json!("ACTIVE")),
+            ("mfaEnabled".to_owned(), serde_json::json!(true)),
+            ("mfaVerified".to_owned(), serde_json::json!(true)),
+            ("jti".to_owned(), serde_json::json!("a-jti")),
+            ("epoch".to_owned(), serde_json::json!(3)),
+        ])
+    }
+
+    /// A complete record, with `overrides` replacing or adding to it.
     fn record(overrides: &[(&str, serde_json::Value)]) -> String {
-        let mut object = serde_json::json!({
-            "sub": "u1",
-            "tenantId": "t1",
-            "role": "USER",
-            "status": "ACTIVE",
-            "mfaEnabled": true,
-            "mfaVerified": true,
-            "jti": "a-jti",
-            "epoch": 3
-        });
-        if let Some(map) = object.as_object_mut() {
-            for (key, value) in overrides {
-                map.insert((*key).to_owned(), value.clone());
-            }
-        }
-        object.to_string()
+        let mut map = complete();
+        map.extend(
+            overrides
+                .iter()
+                .map(|(key, value)| ((*key).to_owned(), value.clone())),
+        );
+        serde_json::Value::Object(map).to_string()
     }
 
     /// The complete record without `key`.
     fn without(key: &str) -> String {
-        let mut value: serde_json::Value = serde_json::from_str(&record(&[])).unwrap_or_default();
-        if let Some(map) = value.as_object_mut() {
-            map.remove(key);
-        }
-        value.to_string()
+        let mut map = complete();
+        map.remove(key);
+        serde_json::Value::Object(map).to_string()
     }
 
     #[test]
