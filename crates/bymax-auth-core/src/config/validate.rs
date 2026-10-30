@@ -39,11 +39,20 @@ pub struct ResolvedConfig {
 }
 
 impl ResolvedConfig {
-    /// Assemble a resolved config, deriving the identifier-hashing key from the JWT secret.
+    /// Assemble a resolved config, deriving the identifier-hashing key from `identifier_key` when
+    /// it is set and from the JWT secret otherwise.
     /// Callers pass the already-validated config, the resolved environment, and the
     /// resolved `secure_cookies` value.
     pub(crate) fn new(config: AuthConfig, environment: Environment, secure_cookies: bool) -> Self {
-        let hmac_key = derive_hmac_key(config.jwt.secret.expose_secret());
+        // The identifiers derive from `identifier_key` when it is pinned and from the signing
+        // secret otherwise, so a rotation of the signing secret moves nothing once it is.
+        let hmac_key = derive_hmac_key(
+            config
+                .identifier_key
+                .as_ref()
+                .unwrap_or(&config.jwt.secret)
+                .expose_secret(),
+        );
         let previous_hmac_keys = config
             .jwt
             .previous_secrets
@@ -77,8 +86,9 @@ impl ResolvedConfig {
         self.secure_cookies
     }
 
-    /// The derived identifier-hashing key — the ASCII hex of `SHA-256("{label}:{jwt.secret}")`
-    /// — used to HMAC low-entropy Redis identifiers so the signing key and the
+    /// The derived identifier-hashing key — the ASCII hex of
+    /// `SHA-256("{label}:{identifier_key}")`, where the secret is `identifier_key` when it is set
+    /// and `jwt.secret` otherwise — used to HMAC low-entropy Redis identifiers so the signing key and the
     /// identifier-hashing key are cryptographically independent. The 64-byte ASCII-hex
     /// encoding is part of the cross-implementation contract, not an implementation detail:
     /// `nest-auth` derives the same key the same way, so a key derived from the raw digest
@@ -240,6 +250,20 @@ impl AuthConfig {
         let entropy = shannon_entropy(secret);
         if entropy < MIN_SECRET_ENTROPY {
             return Err(ConfigError::JwtSecretLowEntropy { entropy });
+        }
+
+        // Rule 2a: a pinned identifier key is key material for every identifier, so it clears the
+        // same bar as the signing secret.
+        if let Some(key) = &self.identifier_key {
+            let key = key.expose_secret();
+            let len = key.chars().count();
+            if len < MIN_SECRET_LEN {
+                return Err(ConfigError::IdentifierKeyTooShort { len });
+            }
+            let entropy = shannon_entropy(key);
+            if entropy < MIN_SECRET_ENTROPY {
+                return Err(ConfigError::IdentifierKeyLowEntropy { entropy });
+            }
         }
 
         // Rule 2b: every retired secret is held to the same bar. They still verify tokens and
@@ -1655,6 +1679,89 @@ mod tests {
         let other_resolved = ResolvedConfig::new(other, Environment::Test, false);
         assert_ne!(resolved.hmac_key(), other_resolved.hmac_key());
         assert!(!other_resolved.secure_cookies());
+    }
+
+    /// Strong secrets the identifier-key tests choose between.
+    const SIGNING_SECRET: &str = "kR7pQw9zTr4XmVn2PsB6yLdG3hJ8fCxZ5aNeU1oIqW0M";
+    const ROTATED_SECRET: &str = "Zx4mQ7wLpR2nT9yB6vKdH3sJfCgA5eU8iO1rXwNqYtM0";
+    const IDENTIFIER_SECRET: &str = "Zt8#vB3@nM6$qL9%wE2^rY5&uI1*oP4(aS7)dF0!gH";
+
+    fn config_with(secret: &str, identifier_key: Option<&str>) -> AuthConfig {
+        let mut cfg = valid_config();
+        cfg.jwt.secret = SecretString::from(secret.to_owned());
+        cfg.identifier_key = identifier_key.map(|key| SecretString::from(key.to_owned()));
+        cfg
+    }
+
+    fn key_of(cfg: AuthConfig) -> [u8; 64] {
+        *ResolvedConfig::new(cfg, Environment::Test, true).hmac_key()
+    }
+
+    #[test]
+    fn the_identifier_key_defaults_to_the_derivation_from_the_signing_secret() {
+        // Known answer shared with nest-auth: a default that moved would rename every identifier
+        // on upgrade.
+        let resolved = ResolvedConfig::new(valid_config(), Environment::Test, true);
+        assert_eq!(
+            resolved.hmac_key().as_slice(),
+            b"0dd66555bd2d89e0eb4ce050f1fef427bea6799bec27fb8e313f69ab965048c1"
+        );
+    }
+
+    #[test]
+    fn an_identifier_key_equal_to_the_signing_secret_moves_nothing() {
+        // The step that makes a later rotation safe must not move a single name.
+        assert_eq!(
+            key_of(config_with(SIGNING_SECRET, Some(SIGNING_SECRET))),
+            key_of(config_with(SIGNING_SECRET, None))
+        );
+    }
+
+    #[test]
+    fn a_pinned_identifier_key_survives_a_rotation_of_the_signing_secret() {
+        let before = key_of(config_with(SIGNING_SECRET, Some(SIGNING_SECRET)));
+        let mut rotated = config_with(ROTATED_SECRET, Some(SIGNING_SECRET));
+        rotated.jwt.previous_secrets = vec![SecretString::from(SIGNING_SECRET.to_owned())];
+        assert_eq!(key_of(rotated), before);
+        // Unpinned, the same rotation moves the key: the property the option exists for.
+        assert_ne!(key_of(config_with(ROTATED_SECRET, None)), before);
+    }
+
+    #[test]
+    fn a_different_identifier_key_derives_a_different_key_the_same_way() {
+        let pinned = key_of(config_with(SIGNING_SECRET, Some(IDENTIFIER_SECRET)));
+        assert_eq!(pinned, key_of(config_with(IDENTIFIER_SECRET, None)));
+        assert_ne!(pinned, key_of(config_with(SIGNING_SECRET, None)));
+    }
+
+    #[test]
+    fn previous_identifier_keys_still_derive_from_the_retired_signing_secrets() {
+        // They exist to read recovery-code digests written under a retired signing secret, which
+        // the identifier key does not change.
+        let mut cfg = config_with(SIGNING_SECRET, Some(IDENTIFIER_SECRET));
+        cfg.jwt.previous_secrets = vec![SecretString::from(ROTATED_SECRET.to_owned())];
+        let resolved = ResolvedConfig::new(cfg, Environment::Test, true);
+        assert_eq!(
+            resolved.previous_hmac_keys(),
+            vec![key_of(config_with(ROTATED_SECRET, None))]
+        );
+    }
+
+    #[test]
+    fn an_identifier_key_is_held_to_the_bar_the_signing_secret_faces() {
+        assert!(
+            config_with(SIGNING_SECRET, Some(IDENTIFIER_SECRET))
+                .validate(Environment::Test)
+                .is_ok()
+        );
+        assert!(matches!(
+            config_with(SIGNING_SECRET, Some("short")).validate(Environment::Test),
+            Err(ConfigError::IdentifierKeyTooShort { len: 5 })
+        ));
+        assert!(matches!(
+            config_with(SIGNING_SECRET, Some(&"a".repeat(40))).validate(Environment::Test),
+            Err(ConfigError::IdentifierKeyLowEntropy { .. })
+        ));
     }
 
     /// The first HMAC vector from the shared cross-implementation wire contract, as
