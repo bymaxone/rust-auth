@@ -792,19 +792,26 @@ impl MfaService {
         codes: Option<Vec<String>>,
     ) -> Result<(), AuthError> {
         match ctx {
-            MfaContext::Dashboard => self
-                .user_repo
-                .update_mfa(
-                    user_id,
-                    tenant_id,
-                    bymax_auth_types::UpdateMfaData {
-                        mfa_enabled: enabled,
-                        mfa_secret: secret,
-                        mfa_recovery_codes: codes,
-                    },
-                )
-                .await
-                .map_err(repository_error),
+            MfaContext::Dashboard => {
+                // Every public entry refuses a dashboard call without a tenant before it gets
+                // here (`plane_tenant_is_well_formed`); the write still cannot be issued without
+                // one, because an unscoped write is the defect the tenant argument exists to
+                // prevent.
+                let tenant_id =
+                    tenant_id.ok_or_else(|| internal_error("MFA write without a tenant"))?;
+                self.user_repo
+                    .update_mfa(
+                        user_id,
+                        tenant_id,
+                        bymax_auth_types::UpdateMfaData {
+                            mfa_enabled: enabled,
+                            mfa_secret: secret,
+                            mfa_recovery_codes: codes,
+                        },
+                    )
+                    .await
+                    .map_err(repository_error)
+            }
             MfaContext::Platform => {
                 let repo = self
                     .platform_repo

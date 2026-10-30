@@ -1964,7 +1964,7 @@ impl MfaStore for DisableOnLockMfaStore {
                 .users
                 .update_mfa(
                     &self.user_id,
-                    None,
+                    "t1",
                     bymax_auth_types::UpdateMfaData {
                         mfa_enabled: false,
                         mfa_secret: None,
@@ -2116,7 +2116,7 @@ impl crate::traits::UserRepository for TenantBlindUsers {
     async fn update_mfa(
         &self,
         id: &str,
-        tenant_id: Option<&str>,
+        tenant_id: &str,
         data: bymax_auth_types::UpdateMfaData,
     ) -> Result<(), crate::RepositoryError> {
         self.inner.update_mfa(id, tenant_id, data).await
@@ -2751,7 +2751,7 @@ async fn challenge_collapses_an_undecryptable_secret_to_an_opaque_error() {
         .users
         .update_mfa(
             &uid,
-            None,
+            "t1",
             bymax_auth_types::UpdateMfaData {
                 mfa_enabled: true,
                 mfa_secret: Some("not-a-valid-wire".to_owned()),
@@ -3379,7 +3379,7 @@ async fn a_totp_challenge_rewrites_a_secret_stored_under_a_retired_key() {
         h.users
             .update_mfa(
                 &uid,
-                None,
+                "t1",
                 bymax_auth_types::UpdateMfaData {
                     mfa_enabled: true,
                     mfa_secret: Some(stored_under_retired.clone()),
@@ -3443,7 +3443,7 @@ async fn the_retired_key_rewrite_abandons_when_mfa_vanished_under_the_lock() {
         h.users
             .update_mfa(
                 &uid,
-                None,
+                "t1",
                 bymax_auth_types::UpdateMfaData {
                     mfa_enabled: true,
                     mfa_secret: Some(stored_under_retired.clone()),
@@ -3790,7 +3790,7 @@ async fn a_recovery_challenge_that_loses_the_temp_token_consume_issues_no_sessio
         users
             .update_mfa(
                 &user.id,
-                None,
+                "t1",
                 bymax_auth_types::UpdateMfaData {
                     mfa_enabled: true,
                     mfa_secret: Some(data.encrypted_secret),
@@ -3873,7 +3873,7 @@ async fn one_recovery_code_cannot_be_spent_twice_even_with_two_temp_tokens() {
         users
             .update_mfa(
                 &user.id,
-                None,
+                "t1",
                 bymax_auth_types::UpdateMfaData {
                     mfa_enabled: true,
                     mfa_secret: Some(data.encrypted_secret),
@@ -4615,4 +4615,18 @@ fn an_mfa_notice_is_attributed_to_the_account_tenant_or_the_platform_plane() {
         platform.email_tenant(),
         crate::traits::PLATFORM_EMAIL_TENANT
     );
+}
+
+/// A dashboard MFA write cannot be issued without a tenant: an unscoped write is the defect the
+/// tenant argument exists to prevent, so the persistence step refuses instead of widening it.
+#[tokio::test]
+async fn a_dashboard_mfa_write_without_a_tenant_is_refused() {
+    let users = Arc::new(InMemoryUserRepository::new());
+    let service = service_over(Arc::new(InMemoryStores::new()), users);
+
+    let written = service
+        .persist_mfa("u1", MfaContext::Dashboard, None, true, None, None)
+        .await;
+
+    assert!(matches!(written, Err(AuthError::Internal(_))));
 }

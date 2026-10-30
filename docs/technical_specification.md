@@ -1481,9 +1481,8 @@ pub trait UserRepository: Send + Sync {
     async fn update_password(&self, id: &str, tenant_id: &str, password_hash: &str)
         -> Result<(), RepositoryError>;
 
-    /// Apply a new TOTP MFA configuration (enable/disable/clear). `None` is the cross-tenant
-    /// admin scope.
-    async fn update_mfa(&self, id: &str, tenant_id: Option<&str>, data: UpdateMfaData)
+    /// Apply a new TOTP MFA configuration (enable/disable/clear).
+    async fn update_mfa(&self, id: &str, tenant_id: &str, data: UpdateMfaData)
         -> Result<(), RepositoryError>;
 
     /// Stamp the current time as the last successful login.

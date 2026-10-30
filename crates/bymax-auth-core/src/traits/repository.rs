@@ -63,9 +63,8 @@ pub trait UserRepository: Send + Sync {
 
     /// Apply a new TOTP MFA configuration (enable / disable / clear), scoped to a tenant.
     ///
-    /// `tenant_id` carries the same contract as [`UserRepository::find_by_id`]'s: implementations
-    /// MUST restrict the write to that tenant, and `None` is reserved for internal admin flows
-    /// that legitimately span tenants.
+    /// `tenant_id` is the tenant the account lives in: implementations MUST restrict the write to
+    /// it. A caller that acts on another tenant's account passes that account's tenant.
     ///
     /// It is here because a write keyed on `id` alone cannot be correct under a schema that
     /// numbers users per tenant, and this is the write every MFA transition performs. Two
@@ -80,7 +79,7 @@ pub trait UserRepository: Send + Sync {
     async fn update_mfa(
         &self,
         id: &str,
-        tenant_id: Option<&str>,
+        tenant_id: &str,
         data: UpdateMfaData,
     ) -> Result<(), RepositoryError>;
 
@@ -252,7 +251,7 @@ mod tests {
         async fn update_mfa(
             &self,
             _id: &str,
-            _tenant_id: Option<&str>,
+            _tenant_id: &str,
             _data: UpdateMfaData,
         ) -> Result<(), RepositoryError> {
             Ok(())
@@ -351,7 +350,7 @@ mod tests {
             users
                 .update_mfa(
                     "x",
-                    None,
+                    "t1",
                     UpdateMfaData {
                         mfa_enabled: false,
                         mfa_secret: None,

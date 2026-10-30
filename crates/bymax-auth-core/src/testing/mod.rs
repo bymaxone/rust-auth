@@ -253,7 +253,7 @@ impl UserRepository for InMemoryUserRepository {
     async fn update_mfa(
         &self,
         id: &str,
-        tenant_id: Option<&str>,
+        tenant_id: &str,
         data: UpdateMfaData,
     ) -> Result<(), RepositoryError> {
         // Scoped like `find_by_id`, and deliberately so: a fixture repository that honoured the
@@ -262,7 +262,7 @@ impl UserRepository for InMemoryUserRepository {
         // as the contract the trait states, or it tests the fixture instead of the library.
         if let Some(user) = lock(&self.users)
             .get_mut(id)
-            .filter(|user| tenant_id.is_none_or(|scope| user.tenant_id == scope))
+            .filter(|user| user.tenant_id == tenant_id)
         {
             user.mfa_enabled = data.mfa_enabled;
             user.mfa_secret = data.mfa_secret;
@@ -1561,7 +1561,7 @@ mod tests {
         assert!(
             repo.update_mfa(
                 &user.id,
-                None,
+                "t1",
                 UpdateMfaData {
                     mfa_enabled: true,
                     mfa_secret: Some("enc".into()),
@@ -1604,7 +1604,7 @@ mod tests {
         assert!(
             repo.update_mfa(
                 "missing",
-                None,
+                "t1",
                 UpdateMfaData {
                     mfa_enabled: false,
                     mfa_secret: None,
@@ -1688,6 +1688,12 @@ mod tests {
                 .await
                 .is_ok()
         );
+        let enrol = UpdateMfaData {
+            mfa_enabled: true,
+            mfa_secret: Some("enc".into()),
+            mfa_recovery_codes: Some(vec!["h".into()]),
+        };
+        assert!(repo.update_mfa(&user.id, "t2", enrol).await.is_ok());
 
         let after = repo.find_by_id(&user.id, Some("t1")).await;
         assert!(matches!(
@@ -1697,6 +1703,8 @@ mod tests {
                 && u.status == user.status
                 && u.email_verified == user.email_verified
                 && u.email == user.email
+                && !u.mfa_enabled
+                && u.mfa_secret.is_none()
         ));
     }
 

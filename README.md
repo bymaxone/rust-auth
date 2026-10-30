@@ -219,7 +219,7 @@ impl UserRepository for PgUserRepository {
     async fn update_mfa(
         &self,
         id: &str,
-        tenant_id: Option<&str>,
+        tenant_id: &str,
         data: UpdateMfaData,
     ) -> Result<(), RepositoryError> {
         todo!()

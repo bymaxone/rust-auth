@@ -583,7 +583,7 @@ mod tests {
             h.users
                 .update_mfa(
                     &id,
-                    None,
+                    "t1",
                     bymax_auth_types::UpdateMfaData {
                         mfa_enabled: true,
                         mfa_secret: Some("encrypted-secret".to_owned()),

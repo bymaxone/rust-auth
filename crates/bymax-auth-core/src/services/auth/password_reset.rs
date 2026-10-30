@@ -2301,7 +2301,7 @@ mod tests {
         async fn update_mfa(
             &self,
             _id: &str,
-            _tenant_id: Option<&str>,
+            _tenant_id: &str,
             _data: bymax_auth_types::UpdateMfaData,
         ) -> Result<(), crate::RepositoryError> {
             Ok(())
@@ -2401,7 +2401,7 @@ mod tests {
         assert!(
             repo.update_mfa(
                 "x",
-                None,
+                "t1",
                 bymax_auth_types::UpdateMfaData {
                     mfa_enabled: false,
                     mfa_secret: None,
