@@ -65,7 +65,8 @@ impl AuthEngine {
     /// Returns [`AuthError::InsufficientRole`] when the invited role is unknown or the inviter
     /// does not hold a role at least as high, [`AuthError::TokenInvalid`] when the inviter no
     /// longer exists or does not live in the tenant being invited into (the read is scoped to
-    /// it), or a store [`AuthError`].
+    /// it), [`AuthError::InsufficientRole`] again when a repository that ignored the scope
+    /// handed back a row from another tenant, or a store [`AuthError`].
     pub async fn invite(
         &self,
         inviter_user_id: &str,
@@ -178,7 +179,8 @@ impl AuthEngine {
     /// # Errors
     ///
     /// Returns [`AuthError::InvalidInvitationToken`] for an unknown/expired/used token, a
-    /// malformed stored record, or a tampered role; [`AuthError::EmailAlreadyExists`] when the
+    /// malformed stored record, a tampered role, or an inviter who is gone, blocked, in another
+    /// tenant or no longer outranks the invited role; [`AuthError::EmailAlreadyExists`] when the
     /// invitee already has an account in the tenant; or a hashing/store [`AuthError`].
     pub async fn accept_invitation(
         &self,

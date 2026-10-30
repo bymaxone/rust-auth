@@ -39,11 +39,13 @@ impl AuthEngine {
     ///
     /// # Errors
     ///
-    /// Returns [`AuthError::InvalidCredentials`] when the account has no local password or the
-    /// submitted one is wrong — the same error a failed login returns, so a thief holding an
-    /// access token learns nothing they did not already know.
-    /// Returns [`AuthError::EmailAlreadyExists`] when the address is the account's own or
-    /// belongs to another account in the tenant, or a store/repository [`AuthError`].
+    /// Returns [`AuthError::InvalidCredentials`] when the account is not in `tenant_id`, has no
+    /// local password or the submitted one is wrong — the same error a failed login returns, so
+    /// a thief holding an access token learns nothing they did not already know.
+    /// Returns the account-status error for a blocked account, [`AuthError::AccountLocked`]
+    /// while the password lockout is running, [`AuthError::EmailAlreadyExists`] when the
+    /// address is the account's own or belongs to another account in the tenant, or a
+    /// store/repository [`AuthError`].
     pub async fn request_email_change(
         &self,
         tenant_id: &str,
@@ -137,7 +139,8 @@ impl AuthEngine {
     /// # Errors
     ///
     /// Returns [`AuthError::EmailChangeTokenInvalid`] when the token is unknown, expired,
-    /// already used, or no longer bound to the account's password;
+    /// already used, no longer bound to the account's password, or the account is no longer in
+    /// the tenant the request was made under; the account-status error for a blocked account;
     /// [`AuthError::EmailAlreadyExists`] when the address was taken between the request and the
     /// confirmation; or a store/repository [`AuthError`].
     pub async fn confirm_email_change(&self, token: &str) -> Result<(), AuthError> {
