@@ -12,7 +12,7 @@ version bump.
 
 ### Changed
 
-- **BREAKING (host-implemented trait): `UserRepository`'s remaining writes take the tenant.** A write keyed on `id` alone cannot be correct under a schema that numbers users per tenant: it lands on another tenant's row. `update_password`, `update_last_login`, `update_status`, `update_email_verified`, `update_email` and `update_mfa` now take `tenant_id: &str` right after `id`, and an implementation MUST restrict the write to that tenant exactly as `find_by_id` restricts its read. The engine passes the tenant it already holds at every call site (the token's, the stored reset or email-change record's, or the verified user's). Changed signatures:
+- **BREAKING (host-implemented trait): `UserRepository`'s remaining writes take the tenant.** A write keyed on `id` alone cannot be correct under a schema that numbers users per tenant: it lands on another tenant's row. `update_password`, `update_last_login`, `update_status`, `update_email_verified`, `update_email` and `update_mfa` now take `tenant_id: &str` right after `id`, and an implementation MUST restrict the write to that tenant exactly as `find_by_id` restricts its read. Changed signatures:
   - `update_password(id, tenant_id, password_hash)`
   - `update_last_login(id, tenant_id)`
   - `update_status(id, tenant_id, status)`
