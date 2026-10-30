@@ -448,7 +448,8 @@ import { createAuthProxy } from '@bymax-one/rust-auth/nextjs'
 export const { proxy } = createAuthProxy({
   accessTokenSecret: process.env.AUTH_ACCESS_TOKEN_SECRET ?? null, // verified at the edge via WASM
   loginPath: '/auth/login',
-  publicPaths: ['/', '/auth/login', '/auth/register'],
+  // Prefixes at a segment boundary: never list '/', which would make every route public.
+  publicPaths: ['/auth/login', '/auth/register'],
   roleRules: [{ pathPrefix: '/admin', roles: ['ADMIN'] }],
   blockedStatuses: ['BANNED', 'INACTIVE', 'SUSPENDED'],
 })
