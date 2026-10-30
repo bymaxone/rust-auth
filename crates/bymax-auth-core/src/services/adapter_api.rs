@@ -29,6 +29,20 @@ use crate::traits::WsTicketSnapshot;
 /// that a leaked upgrade URL exposes at most a seconds-long, already-consumable handshake.
 pub const WS_TICKET_TTL_SECONDS: u64 = 30;
 
+/// The lifetime to mint a WebSocket ticket with, in seconds, or `None` when the minting token
+/// has no lifetime left to bound it by.
+///
+/// A logout blacklists the token's `jti` only until the token expires, so a ticket that outlived
+/// its token could be redeemed after that logout once the entry is gone. The ticket therefore
+/// expires no later than the token it was minted from. Clocks here count whole seconds, so a
+/// ticket minted late in a second would otherwise outlast the token by up to a second; one
+/// second is kept back to hold the ceiling.
+fn ticket_ttl(exp: i64, now: i64) -> Option<u64> {
+    let remaining = u64::try_from(exp.saturating_sub(now)).unwrap_or(0);
+    let ttl = WS_TICKET_TTL_SECONDS.min(remaining.saturating_sub(1));
+    (ttl > 0).then_some(ttl)
+}
+
 impl AuthEngine {
     /// Verify a **dashboard** access JWT for the HTTP boundary: HS256-pinned signature, the
     /// `type == "dashboard"` assertion (enforced structurally by the single-variant
@@ -250,14 +264,14 @@ impl AuthEngine {
 
     /// Mint a single-use WebSocket upgrade ticket (§7.3.6) from an already-verified dashboard
     /// session snapshot: the store generates an opaque CSPRNG ticket, persists the snapshot
-    /// under `wst:{sha256(ticket)}` with a ~30 s TTL, and returns the raw ticket. The access
+    /// under `wst:{sha256(ticket)}` with a ~30 s TTL (never longer than the minting token's remaining life), and returns the raw ticket. The access
     /// token is never echoed into the ticket — only the verified identity snapshot is stored.
     ///
     /// # Errors
     ///
     /// Returns [`AuthError::Internal`] when no WS-ticket store is wired or when the account
-    /// read fails, [`AuthError::TokenInvalid`] when the token names an account that no longer
-    /// exists, the status-specific error for a blocked account (the snapshot is read from the
+    /// read fails, [`AuthError::TokenInvalid`] when the token has no lifetime left or names an
+    /// account that no longer exists, the status-specific error for a blocked account (the snapshot is read from the
     /// account, so its standing is checked here rather than trusted from the token), or a store
     /// [`AuthError`] on a persistence failure.
     pub async fn issue_ws_ticket(&self, claims: &DashboardClaims) -> Result<String, AuthError> {
@@ -299,8 +313,13 @@ impl AuthEngine {
             status: user.status,
             mfa_enabled: claims.mfa_enabled,
             mfa_verified: claims.mfa_verified,
+            // The minting token's identifiers: the two keys its revocation is read by, so the
+            // ticket can be refused at redemption whenever that token would be.
+            jti: claims.jti.clone(),
+            epoch: claims.epoch,
         };
-        store.mint(&snapshot, WS_TICKET_TTL_SECONDS).await
+        let ttl = ticket_ttl(claims.exp, now_unix()).ok_or(AuthError::TokenInvalid)?;
+        store.mint(&snapshot, ttl).await
     }
 
     /// Redeem a single-use WebSocket upgrade ticket (§7.3.6): the store atomically `GETDEL`s
@@ -311,7 +330,8 @@ impl AuthEngine {
     /// # Errors
     ///
     /// Returns [`AuthError::Internal`] when no WS-ticket store is wired, [`AuthError::TokenInvalid`]
-    /// for a missing/expired/already-redeemed ticket, or a store [`AuthError`].
+    /// for a missing/expired/already-redeemed ticket and for one whose minting token has been
+    /// revoked (a logout or an epoch bump), or a store [`AuthError`].
     pub async fn redeem_ws_ticket(&self, ticket: &str) -> Result<DashboardClaims, AuthError> {
         let store = self
             .ws_ticket_store()
@@ -327,6 +347,14 @@ impl AuthEngine {
             return Err(AuthError::TokenInvalid);
         }
         let snapshot = store.redeem(ticket).await?.ok_or(AuthError::TokenInvalid)?;
+        // A ticket outlives the logout or the epoch bump that revoked the token it was minted
+        // from for up to its own TTL, so redemption asks the same two questions the token's
+        // verification does. A revoked ticket gets the answer of an unknown one, so a caller
+        // cannot tell the two apart.
+        if self.ws_ticket_is_revoked(&snapshot).await? {
+            tracing::warn!("ws ticket: refused, the token it was minted from is revoked");
+            return Err(AuthError::TokenInvalid);
+        }
         let now = now_unix();
         Ok(DashboardClaims {
             iss: None,
@@ -345,6 +373,33 @@ impl AuthEngine {
             // the epoch is not consulted for it; it carries the inert default.
             epoch: 0,
         })
+    }
+
+    /// Whether the token a redeemed ticket was minted from is revoked: no identifier to read it
+    /// by, the `rv:{jti}` blacklist (logout), or an account epoch above the ticket's (a password
+    /// reset or sign-out-everywhere).
+    ///
+    /// The plane is the platform one when the snapshot carries no tenant, the dashboard one
+    /// otherwise; a dashboard ticket with an empty tenant names no keyspace and is revoked
+    /// without a read.
+    async fn ws_ticket_is_revoked(&self, snapshot: &WsTicketSnapshot) -> Result<bool, AuthError> {
+        use crate::traits::SessionKind;
+        if snapshot.jti.is_empty() {
+            return Ok(true);
+        }
+        let (kind, tenant) = match snapshot.tenant_id.as_deref() {
+            None => (SessionKind::Platform, None),
+            Some("") => return Ok(true),
+            Some(tenant) => (SessionKind::Dashboard, Some(tenant)),
+        };
+        if self.session_store().is_blacklisted(&snapshot.jti).await? {
+            return Ok(true);
+        }
+        let current = self
+            .session_store()
+            .current_epoch(kind, &self.session_subject(kind, tenant, &snapshot.sub))
+            .await?;
+        Ok(current > snapshot.epoch)
     }
 
     // ---- MFA adapter surface (mfa feature) --------------------------------------------
@@ -637,6 +692,8 @@ mod tests {
     use super::*;
     use crate::services::auth::test_support::{base_config, harness};
 
+    mod ws_ticket_revocation;
+
     /// `current_session_hash` returns `None` for an absent/malformed token and a 64-hex hash
     /// for a well-shaped one.
     #[test]
@@ -833,7 +890,7 @@ mod tests {
             mfa_enabled: false,
             mfa_verified: false,
             iat: now_unix(),
-            exp: now_unix(),
+            exp: now_unix() + 900,
             epoch: 0,
         }
     }

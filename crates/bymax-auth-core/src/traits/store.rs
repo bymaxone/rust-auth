@@ -374,6 +374,14 @@ pub struct WsTicketSnapshot {
     pub mfa_enabled: bool,
     /// Whether the originating session had satisfied MFA.
     pub mfa_verified: bool,
+    /// The `jti` of the access token that minted the ticket, non-empty: the key of the
+    /// per-token blacklist, so a redemption is refused exactly when the minting token would be.
+    /// An identifier, not a credential.
+    pub jti: String,
+    /// The token epoch stamped on the minting access token (`0` when it carried none). A
+    /// redemption is refused when the account's current epoch is above it. Required and read
+    /// as an unsigned integer, so a string, a negative number or a fraction is not a ticket.
+    pub epoch: u64,
 }
 
 /// Refresh-session lifecycle plus access-JWT revocation. Backs the `rt`/`prt`, `rp`/`prp`,
@@ -1288,6 +1296,8 @@ mod tests {
             status: "ACTIVE".into(),
             mfa_enabled: true,
             mfa_verified: true,
+            jti: "jti-1".into(),
+            epoch: 0,
         };
         let json = serde_json::to_string(&snap)?;
         assert!(json.contains("\"mfaEnabled\":true"));
@@ -1512,6 +1522,8 @@ mod tests {
             status: "ACTIVE".into(),
             mfa_enabled: true,
             mfa_verified: true,
+            jti: "jti-1".into(),
+            epoch: 0,
         };
         let json: serde_json::Value = serde_json::to_value(&snapshot)?;
         for field in contract_fields("wsTicket") {

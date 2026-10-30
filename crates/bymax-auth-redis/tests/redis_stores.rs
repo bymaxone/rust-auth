@@ -96,6 +96,8 @@ fn snapshot() -> WsTicketSnapshot {
         status: "ACTIVE".to_owned(),
         mfa_enabled: false,
         mfa_verified: false,
+        jti: "jti-1".into(),
+        epoch: 0,
     }
 }
 

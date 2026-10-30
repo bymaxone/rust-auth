@@ -56,11 +56,20 @@ impl RedisStores {
             .arg(&key)
             .query_async(&mut conn)
             .await?;
-        match raw {
-            Some(json) => Ok(Some(serde_json::from_str(&json)?)),
-            None => Ok(None),
-        }
+        Ok(raw.as_deref().and_then(parse_snapshot))
     }
+}
+
+/// Read a stored ticket record, or `None` when it is not a ticket.
+///
+/// The record was consumed by the `GETDEL` that produced it, so a record that does not carry
+/// the whole shape (a missing `jti` or `epoch`, a `jti` that is not a string, an `epoch` that is
+/// a string, negative or fractional, or text that is not a JSON object at all) is refused
+/// exactly like an unknown ticket instead of surfacing as a backend error: the caller gets the
+/// same answer for every ticket it cannot honour, and a ticket written by an older version of
+/// the writer fails closed.
+fn parse_snapshot(json: &str) -> Option<WsTicketSnapshot> {
+    serde_json::from_str(json).ok()
 }
 
 #[async_trait]
@@ -73,5 +82,76 @@ impl WsTicketStore for RedisStores {
 
     async fn redeem(&self, ticket: &str) -> Result<Option<WsTicketSnapshot>, AuthError> {
         self.redeem_inner(ticket).await.map_err(AuthError::from)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_snapshot;
+
+    /// The fields of a complete record.
+    fn complete() -> serde_json::Map<String, serde_json::Value> {
+        serde_json::Map::from_iter([
+            ("sub".to_owned(), serde_json::json!("u1")),
+            ("tenantId".to_owned(), serde_json::json!("t1")),
+            ("role".to_owned(), serde_json::json!("USER")),
+            ("status".to_owned(), serde_json::json!("ACTIVE")),
+            ("mfaEnabled".to_owned(), serde_json::json!(true)),
+            ("mfaVerified".to_owned(), serde_json::json!(true)),
+            ("jti".to_owned(), serde_json::json!("a-jti")),
+            ("epoch".to_owned(), serde_json::json!(3)),
+        ])
+    }
+
+    /// A complete record, with `overrides` replacing or adding to it.
+    fn record(overrides: &[(&str, serde_json::Value)]) -> String {
+        let mut map = complete();
+        map.extend(
+            overrides
+                .iter()
+                .map(|(key, value)| ((*key).to_owned(), value.clone())),
+        );
+        serde_json::Value::Object(map).to_string()
+    }
+
+    /// The complete record without `key`.
+    fn without(key: &str) -> String {
+        let mut map = complete();
+        map.remove(key);
+        serde_json::Value::Object(map).to_string()
+    }
+
+    #[test]
+    fn a_complete_record_is_a_ticket() {
+        let parsed = parse_snapshot(&record(&[]));
+        assert!(matches!(&parsed, Some(s) if s.jti == "a-jti" && s.epoch == 3));
+    }
+
+    #[test]
+    fn a_platform_record_has_no_tenant() {
+        let parsed = parse_snapshot(&without("tenantId"));
+        assert!(matches!(parsed, Some(s) if s.tenant_id.is_none()));
+    }
+
+    #[test]
+    fn a_record_that_is_not_a_whole_ticket_is_not_a_ticket() {
+        // Every one of these was consumed by the GETDEL, and every one reads as an unknown
+        // ticket: an old writer's record without the two identifiers, a jti that is not a
+        // string, an epoch that is a string, negative or fractional, and text that is not an
+        // object at all.
+        for bad in [
+            without("jti"),
+            without("epoch"),
+            record(&[("jti", serde_json::json!(7))]),
+            record(&[("epoch", serde_json::json!("0"))]),
+            record(&[("epoch", serde_json::json!(-1))]),
+            record(&[("epoch", serde_json::json!(1.5))]),
+            record(&[("mfaVerified", serde_json::json!("true"))]),
+            "[]".to_owned(),
+            "not json".to_owned(),
+            String::new(),
+        ] {
+            assert!(parse_snapshot(&bad).is_none(), "accepted: {bad}");
+        }
     }
 }
