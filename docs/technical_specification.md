@@ -2249,8 +2249,6 @@ impl BruteForceService {
 }
 ```
 
-Constants: key prefix `"lf:"`; `MAX_IDENTIFIER_LENGTH = 512` bytes. Configured `max_attempts` (default **5**, matching `brute_force.max_attempts` in §5.3/§12.4/§15.3 and nest-auth's `bruteForce.maxAttempts`) and `window` (default 900 s).
-
 **Identifier contract:** callers always pass a hashed identifier — `hmac_sha256(email, hmac_key)` or `sha256(ip)` — never raw PII. `validate_identifier` rejects any identifier containing `:`, `\n`, `\r` (would corrupt the namespaced key) or exceeding 512 bytes, returning `Forbidden` (logged at error level; no internal detail leaks to the response).
 
 - `is_locked_out`: `validate`; `get("lf:{id}")`; `Some(n) && n >= max_attempts` → `true`, else `false`.
