@@ -48,6 +48,7 @@ impl AuthConfig {
             ],
             user_status_cache_ttl: Duration::from_secs(60),
             controllers: ControllerToggles::default(),
+            identifier_key: None,
             tenant_id_resolver: None,
         }
     }

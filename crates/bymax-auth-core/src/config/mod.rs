@@ -613,6 +613,17 @@ impl Default for ControllerToggles {
 pub struct AuthConfig {
     /// JWT configuration (required secret).
     pub jwt: JwtConfig,
+    /// The secret the identifier-hashing key derives from; `None` derives it from
+    /// [`JwtConfig::secret`].
+    ///
+    /// It is never used to sign or verify a token. It keys every Redis name that identifies an
+    /// account (the session index, the token epoch, the recent-authentication marker) and the
+    /// stored MFA recovery-code digests, so a value that moves renames them all. Pin it to the
+    /// value `jwt.secret` has today BEFORE rotating the signing secret, and the identifiers stay
+    /// where they are: a revoke-all or a logout keeps refusing the tokens it refused, and the
+    /// recovery codes users filed keep working. It is held to the same length and entropy bar as
+    /// `jwt.secret`.
+    pub identifier_key: Option<SecretString>,
     /// Role hierarchies (required, non-empty dashboard hierarchy).
     pub roles: RolesConfig,
     /// Password-hashing configuration.

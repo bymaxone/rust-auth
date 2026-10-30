@@ -468,7 +468,7 @@ Everything is configured through `AuthConfig`. Two ready-made profiles bundle se
 
 | Group              | Key options                                                                  | nest-compat default        |
 | ------------------ | ---------------------------------------------------------------------------- | -------------------------- |
-| **jwt**            | `secret` (required, ≥ 32 chars), `previous_secrets`, `access_ttl`, `refresh_expires_in_days`, `absolute_session_lifetime_days`, `issuer`, `audience` | `15m`, `7d`, off, HS256 (pinned), both off |
+| **jwt**            | `secret` (required, ≥ 32 chars), `previous_secrets` (and the top-level `identifier_key`), `access_ttl`, `refresh_expires_in_days`, `absolute_session_lifetime_days`, `issuer`, `audience` | `15m`, `7d`, off, HS256 (pinned), both off |
 | **password**       | `active_algorithm`, scrypt `cost_factor` / Argon2id `memory_kib`             | scrypt N=2¹⁷, r=8, p=1     |
 | **token_delivery** | `Cookie` \| `Bearer` \| `Both`                                               | `Cookie`                   |
 | **cookies**        | names, `refresh_cookie_path`, `same_site`, `trusted_origins`, `resolve_domains` | HttpOnly, Secure, Strict, `[]` |
@@ -509,6 +509,30 @@ Everything is configured through `AuthConfig`. Two ready-made profiles bundle se
 > rotation becomes a rollout. Remove the entry once the longest-lived token signed under it has
 > expired: every entry is a key that still opens the door. `mfa.encryption_key` rotates the same
 > way, through its own list — see below.
+
+> **Pin `identifier_key` before you rotate.** Every Redis name that identifies an account — the
+> session index, the token epoch, the MFA keys, the recent-authentication marker, and the OTP and
+> rate-limit identifiers — is an HMAC under a key derived from `jwt.secret` unless you set
+> `identifier_key`, and so are the stored MFA recovery-code digests. Rotate `jwt.secret` alone and
+> all of them are renamed: live sessions lose their index, every token epoch reads zero, so a token
+> that a password reset or a revoke-all had refused is accepted again until it expires, and
+> recovery codes stop verifying unless the old secret is listed in `jwt.previous_secrets`.
+> `identifier_key` is a secret of its own for those names and digests; it is validated like
+> `jwt.secret` and never signs or verifies a token. The value is simply the secret you want them to
+> keep deriving from — there is nothing to compute.
+>
+> |                 | Routine rotation — keep sessions, epochs and recovery codes | Rotation after a compromise — cut the link |
+> | --------------- | ----------------------------------------------------------- | ------------------------------------------ |
+> | Before rotating | Once, set `identifier_key` to the value `jwt.secret` has **now** and deploy. Nothing moves: the derivation is unchanged. Later rotations leave it as it is. | Revoke what has to be revoked while the session index can still find it; afterwards nothing can be revoked through it, and refresh tokens, which are looked up by their own hash, keep working. Do not list the compromised secret in `jwt.previous_secrets`. |
+> | Rotating        | Put the new secret in `jwt.secret` and the old one in `jwt.previous_secrets`; keep `identifier_key` as it is. | Put the new secret in `jwt.secret` **and** choose a new `identifier_key`. |
+> | Names           | Unchanged. | Moved: sessions lose their index until they next refresh (meanwhile they are missing from the session list and cannot be revoked through it, and their refresh tokens still work until they expire), every epoch reads zero, MFA set-up state and lockout counters start empty, and stored recovery-code digests stop verifying. |
+> | Revoked tokens  | Stay revoked. | Tokens signed under the old secret no longer verify. A token signed under a secret that stays in `previous_secrets` and had been refused by an epoch is accepted again, because the epoch is renamed with the rest and revoking first does not carry it across: remove retired secrets from `previous_secrets` or wait out `jwt.access_ttl`. |
+> | Afterwards      | Drop the old secret from `previous_secrets` once its last token has expired. | Users with MFA need new recovery codes: an old code is refused like any wrong code, and sign-in with the authenticator app is unaffected. A signed-in user replaces them with `POST /auth/mfa/recovery-codes` (`POST /auth/platform/mfa/recovery-codes` for an admin, both under the default `route_prefix`), proving a current TOTP code; the library does not regenerate them at the next sign-in or notify anyone, so your application prompts for it. Listing the secret the digests were keyed from (the old `identifier_key`, or the old `jwt.secret` if it was never set) in `previous_secrets` would keep the old codes working, and would keep tokens signed with it verifying if it was also a signing secret: that is the trade-off. |
+>
+> Pinning to the old secret leaves the derived Redis names computable by anyone who knows that
+> secret. They are names, not signing material, and using one still needs access to your Redis;
+> if cutting that link matters more than keeping sessions, take the second column. Without
+> `identifier_key` a rotation moves the names as the second column does, whether or not you wanted them to.
 
 > [!TIP]
 > **Rotating the MFA encryption key.** `mfa.previous_encryption_keys` lists AES-256 keys retired

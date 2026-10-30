@@ -733,6 +733,9 @@ pub struct AuthConfig {
     /// ignored entirely — never read, merged, or used as a fallback
     /// (anti-spoofing parity with nest-auth's `tenantIdResolver`; see §5.7).
     pub tenant_id_resolver: Option<Arc<dyn TenantIdResolver>>,
+    /// The secret the identifier-hashing key derives from; `None` derives it from `jwt.secret`.
+    /// Pin it to the current `jwt.secret` before rotating the signing secret.
+    pub identifier_key: Option<SecretString>,
 }
 ```
 
@@ -1147,6 +1150,10 @@ pub enum ConfigError {
     JwtSecretTooShort { len: usize },
     #[error("jwt.secret entropy {entropy:.2} bits/char is below the 3.5 minimum")]
     JwtSecretLowEntropy { entropy: f64 },
+    #[error("identifier_key must be at least 32 characters (got {len})")]
+    IdentifierKeyTooShort { len: usize },
+    #[error("identifier_key entropy {entropy:.2} bits/char is below the 3.5 minimum")]
+    IdentifierKeyLowEntropy { entropy: f64 },
     #[error("jwt.refresh_grace_window ({grace}s) must be < refresh lifetime ({lifetime}s)")]
     RefreshGraceTooLarge { grace: u64, lifetime: u64 },
     #[error("jwt.refresh_expires_in_days must be a positive value (got {got})")]
@@ -1202,6 +1209,7 @@ Validation rules, in the order applied (parity with `resolveOptions`):
 | --- | --- | --- |
 | 1 | `jwt.secret` length >= 32 | `JwtSecretTooShort` |
 | 2 | `jwt.secret` Shannon entropy >= 3.5 bits/char | `JwtSecretLowEntropy` |
+| 2a | `identifier_key`, when set: >= 32 chars and Shannon entropy >= 3.5 bits/char | `IdentifierKeyTooShort`, `IdentifierKeyLowEntropy` |
 | 3 | `jwt.refresh_expires_in_days > 0` and finite | `RefreshLifetimeInvalid` |
 | 4 | `jwt.refresh_grace_window < refresh_expires_in_days * 86400` | `RefreshGraceTooLarge` |
 | 5 | `roles.hierarchy` non-empty | `EmptyRoleHierarchy` |

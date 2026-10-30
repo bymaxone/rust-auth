@@ -27,6 +27,18 @@ pub enum ConfigError {
         /// The measured Shannon entropy in bits per character.
         entropy: f64,
     },
+    /// `identifier_key` is set and shorter than the 32-character minimum.
+    #[error("identifier_key must be at least 32 characters (got {len})")]
+    IdentifierKeyTooShort {
+        /// The measured key length in characters.
+        len: usize,
+    },
+    /// `identifier_key` is set and its Shannon entropy is below the 3.5 bits/char floor.
+    #[error("identifier_key entropy {entropy:.2} bits/char is below the 3.5 minimum")]
+    IdentifierKeyLowEntropy {
+        /// The measured Shannon entropy in bits per character.
+        entropy: f64,
+    },
     /// `jwt.refresh_grace_window` is not strictly less than the refresh lifetime.
     #[error("jwt.refresh_grace_window ({grace}s) must be < refresh lifetime ({lifetime}s)")]
     RefreshGraceTooLarge {

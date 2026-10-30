@@ -16,8 +16,11 @@
   "version": 1,
   "hmacKeyDerivation": {
     "$comment": [
-      "The identifier-hashing key both sides derive from the JWT secret, and one identifier",
-      "keyed with it. Three things are pinned at once: the ':' separator between label and",
+      "The identifier-hashing key both sides derive from the identifier secret, and one",
+      "identifier keyed with it. The identifier secret is the `identifierKey` option when it is",
+      "set and the JWT secret otherwise, so pinning `identifierKey` to the JWT secret's value",
+      "keeps every derived name where it is across a rotation of the JWT secret. Three things",
+      "are pinned at once: the ':' separator between label and",
       "secret, the SHA-256, and the fact that the HMAC is keyed with the hex TEXT of the digest",
       "rather than its raw bytes. Any of the three drifting produces different Redis keys for",
       "every lockout, OTP, resend cooldown, MFA setup, and anti-replay record.",
