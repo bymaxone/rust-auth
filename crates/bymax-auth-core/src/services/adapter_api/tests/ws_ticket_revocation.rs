@@ -270,9 +270,12 @@ async fn a_ticket_never_outlives_the_token_it_was_minted_from() {
     // token could be redeemed after that logout once the blacklist entry was gone.
     // One second is kept back: the clocks count whole seconds, so a ticket minted late in a
     // second could otherwise outlast the token, and the blacklist entry a later logout writes,
-    // by up to a second.
+    // by up to a second. The test builds the expiry from one clock read and the engine reads
+    // the clock again, so a second boundary between the two may take one more second off: the
+    // assertion is the ceiling (below the 5 s life) with that slack, not an exact value.
     let ttls = minted_ttls(&[900, 5]).await;
-    assert_eq!(ttls, vec![Some(WS_TICKET_TTL_SECONDS), Some(4)]);
+    assert_eq!(ttls.first(), Some(&Some(WS_TICKET_TTL_SECONDS)));
+    assert!(matches!(ttls.get(1), Some(Some(3 | 4))), "{ttls:?}");
 }
 
 #[tokio::test]
