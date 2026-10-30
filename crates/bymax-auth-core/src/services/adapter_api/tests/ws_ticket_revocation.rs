@@ -264,21 +264,45 @@ async fn minted_ttls(lifetimes: &[i64]) -> Vec<Option<u64>> {
     out
 }
 
+#[test]
+fn a_ticket_expires_before_the_token_that_minted_it() {
+    // The lifetime is the lesser of the ticket ceiling and the token's remaining life less one
+    // second, so the ticket ends before the token does on clocks that count whole seconds.
+    assert_eq!(ticket_ttl(1_000, 100), Some(WS_TICKET_TTL_SECONDS));
+    assert_eq!(ticket_ttl(105, 100), Some(4));
+    assert_eq!(ticket_ttl(131, 100), Some(WS_TICKET_TTL_SECONDS));
+    assert_eq!(ticket_ttl(130, 100), Some(WS_TICKET_TTL_SECONDS - 1));
+
+    // Every remaining life from "expired" to past the ceiling: a lifetime is only ever granted
+    // when it ends strictly before the expiry.
+    for exp in 90..=200_i64 {
+        if let Some(ttl) = ticket_ttl(exp, 100) {
+            assert!(ttl > 0 && ttl <= WS_TICKET_TTL_SECONDS);
+            assert!(
+                i64::try_from(ttl).unwrap_or(i64::MAX) < exp - 100,
+                "exp {exp}: ttl {ttl}"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_token_with_no_lifetime_left_has_no_ticket_lifetime() {
+    assert_eq!(ticket_ttl(101, 100), None);
+    assert_eq!(ticket_ttl(100, 100), None);
+    assert_eq!(ticket_ttl(97, 100), None);
+    assert_eq!(ticket_ttl(i64::MIN, 100), None);
+}
+
 #[tokio::test]
-async fn a_ticket_never_outlives_the_token_it_was_minted_from() {
-    // A logout blacklists the jti only until the token expires, so a ticket that outlived its
-    // token could be redeemed after that logout once the blacklist entry was gone.
-    // One second is kept back: the clocks count whole seconds, so a ticket minted late in a
-    // second could otherwise outlast the token, and the blacklist entry a later logout writes,
-    // by up to a second. The test builds the expiry from one clock read and the engine reads
-    // the clock again, so a second boundary between the two may take one more second off: the
-    // assertion is the ceiling (below the 5 s life) with that slack, not an exact value.
-    let ttls = minted_ttls(&[900, 5]).await;
-    assert_eq!(ttls.first(), Some(&Some(WS_TICKET_TTL_SECONDS)));
-    assert!(matches!(ttls.get(1), Some(Some(3 | 4))), "{ttls:?}");
+async fn the_engine_mints_with_the_capped_lifetime() {
+    // Wiring only: the arithmetic is pinned above without a clock. A 900 s token mints with the
+    // ceiling whichever way a second boundary falls.
+    assert_eq!(minted_ttls(&[900]).await, vec![Some(WS_TICKET_TTL_SECONDS)]);
 }
 
 #[tokio::test]
 async fn a_token_with_no_lifetime_left_mints_no_ticket() {
+    // 1 s left is nothing whichever way a second boundary falls.
     assert_eq!(minted_ttls(&[1, 0, -3]).await, vec![None, None, None]);
 }

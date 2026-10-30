@@ -29,6 +29,20 @@ use crate::traits::WsTicketSnapshot;
 /// that a leaked upgrade URL exposes at most a seconds-long, already-consumable handshake.
 pub const WS_TICKET_TTL_SECONDS: u64 = 30;
 
+/// The lifetime to mint a WebSocket ticket with, in seconds, or `None` when the minting token
+/// has no lifetime left to bound it by.
+///
+/// A logout blacklists the token's `jti` only until the token expires, so a ticket that outlived
+/// its token could be redeemed after that logout once the entry is gone. The ticket therefore
+/// expires no later than the token it was minted from. Clocks here count whole seconds, so a
+/// ticket minted late in a second would otherwise outlast the token by up to a second; one
+/// second is kept back to hold the ceiling.
+fn ticket_ttl(exp: i64, now: i64) -> Option<u64> {
+    let remaining = u64::try_from(exp.saturating_sub(now)).unwrap_or(0);
+    let ttl = WS_TICKET_TTL_SECONDS.min(remaining.saturating_sub(1));
+    (ttl > 0).then_some(ttl)
+}
+
 impl AuthEngine {
     /// Verify a **dashboard** access JWT for the HTTP boundary: HS256-pinned signature, the
     /// `type == "dashboard"` assertion (enforced structurally by the single-variant
@@ -304,17 +318,7 @@ impl AuthEngine {
             jti: claims.jti.clone(),
             epoch: claims.epoch,
         };
-        // A logout blacklists the token's `jti` only until the token expires, so a ticket that
-        // outlived its token could be redeemed after that logout once the entry is gone. The
-        // ticket therefore expires no later than the token it was minted from, and a token with
-        // no lifetime left mints nothing. Clocks here count whole seconds, so a ticket minted
-        // late in a second would otherwise outlast the token by up to a second; one second is
-        // kept back to hold the ceiling.
-        let remaining = u64::try_from(claims.exp.saturating_sub(now_unix())).unwrap_or(0);
-        let ttl = WS_TICKET_TTL_SECONDS.min(remaining.saturating_sub(1));
-        if ttl == 0 {
-            return Err(AuthError::TokenInvalid);
-        }
+        let ttl = ticket_ttl(claims.exp, now_unix()).ok_or(AuthError::TokenInvalid)?;
         store.mint(&snapshot, ttl).await
     }
 
