@@ -89,7 +89,8 @@ additional_cargo_args = ["--all-features"]
 #    `additional_cargo_args` note below).
 #
 #    Re-anchored again from 1033 to 1142, when the session keyspace moved onto the
-#    user subject and pushed the method down. Tell the twins apart by the BODY: the excluded one
+#    user subject and pushed the method down, and from 1142 to 1147 when the refresh-session
+#    record gained its second-factor field. Tell the twins apart by the BODY: the excluded one
 #    opens `let _ = (context, tenant_id); tracing::error!(…)`, the compiled one starts with the
 #    plane/tenant well-formedness refusal.
 # 7. The seven `NoOpEmailProvider` sends — the provider's whole job is to do nothing, and each
@@ -143,7 +144,7 @@ exclude_re = [
     'delete match arm "inactive" in assert_not_blocked',
     'replace == with != in validate_password',
     'builder\.rs:220:9: replace AuthEngineBuilder::redis_stores',
-    'token_manager\.rs:1142:9: replace TokenManagerService::issue_mfa_temp_token',
+    'token_manager\.rs:1147:9: replace TokenManagerService::issue_mfa_temp_token',
     'replace <impl EmailProvider for NoOpEmailProvider>::\w+ -> Result<\(\), EmailError> with Ok\(\(\)\)',
     'replace AuthHooks::\w+ -> Result<\(\), HookError> with Ok\(\(\)\)',
     'replace < with <= in MfaService::challenge_platform',
