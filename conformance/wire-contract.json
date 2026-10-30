@@ -512,10 +512,14 @@
         "role",
         "status",
         "mfaEnabled",
-        "mfaVerified"
+        "mfaVerified",
+        "jti",
+        "epoch"
       ],
       "tenantId": "omitted from the record entirely when the ticket is not tenant-scoped",
-      "$comment": "A verified-identity SNAPSHOT, never a token: no jti, no signature, no expiry of its own. The socket it authorizes cannot be turned back into a session. Redemption is a single-use GETDEL, so a captured upgrade URL is worthless once the socket opens."
+      "jti": "string, non-empty; the jti of the access token that minted the ticket — the key of the per-token blacklist rv:{jti}",
+      "epoch": "non-negative integer; the token epoch stamped on the minting access token, 0 when it carried none",
+      "$comment": "A verified-identity SNAPSHOT, never a token: no signature, no expiry of its own. The socket it authorizes cannot be turned back into a session. Redemption is a single-use GETDEL, so a captured upgrade URL is worthless once the socket opens. jti and epoch are identifiers, not credentials: they are the two keys the revocation channels are read by, so redemption is refused exactly when the minting token would be — blacklisted, or stamped below the user's current epoch. A record missing either, or carrying them malformed, is not a ticket."
     },
     "emailChangeContext": {
       "key": "ec:{sha256(token)}",

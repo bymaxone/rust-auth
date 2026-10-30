@@ -1,0 +1,195 @@
+//! A WebSocket ticket is refused at redemption exactly when the access token it was minted from
+//! would be: blacklisted by a logout, or stamped below the account's current epoch. A ticket
+//! whose record lacks the identifiers to check that by is not a ticket.
+//!
+//! Layer: unit tests of the engine's ticket surface over the in-memory doubles, sharing the
+//! fixtures of the parent test module.
+
+use super::*;
+use crate::traits::SessionKind;
+
+/// Mint a ticket for `claims` and return it.
+async fn minted(
+    h: &crate::services::auth::test_support::Harness,
+    claims: &DashboardClaims,
+) -> String {
+    h.engine.issue_ws_ticket(claims).await.unwrap_or_default()
+}
+
+fn dashboard_subject(
+    h: &crate::services::auth::test_support::Harness,
+    claims: &DashboardClaims,
+) -> String {
+    h.engine
+        .session_subject(SessionKind::Dashboard, Some(&claims.tenant_id), &claims.sub)
+}
+
+#[tokio::test]
+async fn a_live_session_redeems_its_ticket() {
+    let Some(h) = harness(base_config(), None) else { return };
+    let claims = seeded_claims(&h).await;
+    let ticket = minted(&h, &claims).await;
+    assert!(!ticket.is_empty());
+
+    let redeemed = h.engine.redeem_ws_ticket(&ticket).await;
+    assert!(matches!(&redeemed, Ok(c) if c.sub == claims.sub));
+}
+
+#[tokio::test]
+async fn a_ticket_minted_before_logout_is_refused() {
+    // Logout blacklists the jti of the token it was handed; the ticket carries that jti.
+    let Some(h) = harness(base_config(), None) else { return };
+    let claims = seeded_claims(&h).await;
+    let ticket = minted(&h, &claims).await;
+    assert!(
+        h.engine
+            .session_store()
+            .blacklist_access(&claims.jti, 900)
+            .await
+            .is_ok()
+    );
+
+    let redeemed = h.engine.redeem_ws_ticket(&ticket).await;
+    assert!(matches!(redeemed, Err(AuthError::TokenInvalid)));
+}
+
+#[tokio::test]
+async fn a_ticket_minted_before_an_epoch_bump_is_refused() {
+    // A password reset or sign-out-everywhere bumps the account's epoch.
+    let Some(h) = harness(base_config(), None) else { return };
+    let claims = seeded_claims(&h).await;
+    let ticket = minted(&h, &claims).await;
+    assert!(
+        h.engine
+            .session_store()
+            .bump_epoch(SessionKind::Dashboard, &dashboard_subject(&h, &claims))
+            .await
+            .is_ok()
+    );
+
+    let redeemed = h.engine.redeem_ws_ticket(&ticket).await;
+    assert!(matches!(redeemed, Err(AuthError::TokenInvalid)));
+}
+
+#[tokio::test]
+async fn a_ticket_minted_after_an_epoch_bump_from_a_current_token_is_accepted() {
+    // The comparison is "current epoch above the ticket's": a token stamped with the bumped
+    // epoch mints a ticket that redeems.
+    let Some(h) = harness(base_config(), None) else { return };
+    let claims = seeded_claims(&h).await;
+    let bumped = h
+        .engine
+        .session_store()
+        .bump_epoch(SessionKind::Dashboard, &dashboard_subject(&h, &claims))
+        .await
+        .unwrap_or_default();
+    let current = DashboardClaims {
+        epoch: bumped,
+        ..claims
+    };
+    let ticket = minted(&h, &current).await;
+
+    assert!(h.engine.redeem_ws_ticket(&ticket).await.is_ok());
+}
+
+/// Store `snapshot` directly, as a writer of any age could, and return the raw ticket.
+async fn stored(
+    h: &crate::services::auth::test_support::Harness,
+    snapshot: &WsTicketSnapshot,
+) -> String {
+    match h.engine.ws_ticket_store() {
+        Some(store) => store.mint(snapshot, 30).await.unwrap_or_default(),
+        None => String::new(),
+    }
+}
+
+fn snapshot(tenant_id: Option<&str>, jti: &str, epoch: u64) -> WsTicketSnapshot {
+    WsTicketSnapshot {
+        sub: "u1".to_owned(),
+        tenant_id: tenant_id.map(str::to_owned),
+        role: "USER".to_owned(),
+        status: "ACTIVE".to_owned(),
+        mfa_enabled: false,
+        mfa_verified: false,
+        jti: jti.to_owned(),
+        epoch,
+    }
+}
+
+#[tokio::test]
+async fn a_ticket_without_an_identifier_to_check_is_refused() {
+    let Some(h) = harness(base_config(), None) else { return };
+    let ticket = stored(&h, &snapshot(Some("t1"), "", 0)).await;
+
+    let redeemed = h.engine.redeem_ws_ticket(&ticket).await;
+    assert!(matches!(redeemed, Err(AuthError::TokenInvalid)));
+}
+
+#[tokio::test]
+async fn a_dashboard_ticket_with_an_empty_tenant_is_refused_without_a_read() {
+    // The empty tenant names no keyspace, so the answer must not depend on a store read: the
+    // blacklist and epoch of a store that would fail are never consulted.
+    let Some(h) = harness(base_config(), None) else { return };
+    let ticket = stored(&h, &snapshot(Some(""), "jti-1", 0)).await;
+
+    let redeemed = h.engine.redeem_ws_ticket(&ticket).await;
+    assert!(matches!(redeemed, Err(AuthError::TokenInvalid)));
+}
+
+#[tokio::test]
+async fn a_platform_ticket_is_checked_against_the_platform_plane() {
+    // No tenant on the snapshot means the platform plane: its own blacklist entry and its own
+    // epoch, never the dashboard's.
+    let Some(h) = harness(base_config(), None) else { return };
+    let live = stored(&h, &snapshot(None, "p-jti-live", 0)).await;
+    assert!(h.engine.redeem_ws_ticket(&live).await.is_ok());
+
+    let blacklisted = stored(&h, &snapshot(None, "p-jti-out", 0)).await;
+    assert!(
+        h.engine
+            .session_store()
+            .blacklist_access("p-jti-out", 900)
+            .await
+            .is_ok()
+    );
+    assert!(matches!(
+        h.engine.redeem_ws_ticket(&blacklisted).await,
+        Err(AuthError::TokenInvalid)
+    ));
+
+    let stale = stored(&h, &snapshot(None, "p-jti-stale", 0)).await;
+    let subject = h.engine.session_subject(SessionKind::Platform, None, "u1");
+    assert!(
+        h.engine
+            .session_store()
+            .bump_epoch(SessionKind::Platform, &subject)
+            .await
+            .is_ok()
+    );
+    assert!(matches!(
+        h.engine.redeem_ws_ticket(&stale).await,
+        Err(AuthError::TokenInvalid)
+    ));
+}
+
+#[tokio::test]
+async fn a_revoked_ticket_gets_the_answer_of_an_unknown_one() {
+    // No oracle: a revoked ticket and a ticket that never existed are the same refusal.
+    let Some(h) = harness(base_config(), None) else { return };
+    let claims = seeded_claims(&h).await;
+    let ticket = minted(&h, &claims).await;
+    assert!(
+        h.engine
+            .session_store()
+            .blacklist_access(&claims.jti, 900)
+            .await
+            .is_ok()
+    );
+
+    let revoked = h.engine.redeem_ws_ticket(&ticket).await;
+    let unknown = h.engine.redeem_ws_ticket(&"0".repeat(64)).await;
+    assert!(matches!(
+        (revoked, unknown),
+        (Err(AuthError::TokenInvalid), Err(AuthError::TokenInvalid))
+    ));
+}

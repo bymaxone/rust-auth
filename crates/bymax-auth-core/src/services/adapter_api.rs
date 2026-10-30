@@ -299,6 +299,10 @@ impl AuthEngine {
             status: user.status,
             mfa_enabled: claims.mfa_enabled,
             mfa_verified: claims.mfa_verified,
+            // The minting token's identifiers: the two keys its revocation is read by, so the
+            // ticket can be refused at redemption whenever that token would be.
+            jti: claims.jti.clone(),
+            epoch: claims.epoch,
         };
         store.mint(&snapshot, WS_TICKET_TTL_SECONDS).await
     }
@@ -327,6 +331,14 @@ impl AuthEngine {
             return Err(AuthError::TokenInvalid);
         }
         let snapshot = store.redeem(ticket).await?.ok_or(AuthError::TokenInvalid)?;
+        // A ticket outlives the logout or the epoch bump that revoked the token it was minted
+        // from for up to its own TTL, so redemption asks the same two questions the token's
+        // verification does. A revoked ticket gets the answer of an unknown one, so a caller
+        // cannot tell the two apart.
+        if self.ws_ticket_is_revoked(&snapshot).await? {
+            tracing::warn!("ws ticket: refused, the token it was minted from is revoked");
+            return Err(AuthError::TokenInvalid);
+        }
         let now = now_unix();
         Ok(DashboardClaims {
             iss: None,
@@ -345,6 +357,33 @@ impl AuthEngine {
             // the epoch is not consulted for it; it carries the inert default.
             epoch: 0,
         })
+    }
+
+    /// Whether the token a redeemed ticket was minted from is revoked: no identifier to read it
+    /// by, the `rv:{jti}` blacklist (logout), or an account epoch above the ticket's (a password
+    /// reset or sign-out-everywhere).
+    ///
+    /// The plane is the platform one when the snapshot carries no tenant, the dashboard one
+    /// otherwise; a dashboard ticket with an empty tenant names no keyspace and is revoked
+    /// without a read.
+    async fn ws_ticket_is_revoked(&self, snapshot: &WsTicketSnapshot) -> Result<bool, AuthError> {
+        use crate::traits::SessionKind;
+        if snapshot.jti.is_empty() {
+            return Ok(true);
+        }
+        let (kind, tenant) = match snapshot.tenant_id.as_deref() {
+            None => (SessionKind::Platform, None),
+            Some("") => return Ok(true),
+            Some(tenant) => (SessionKind::Dashboard, Some(tenant)),
+        };
+        if self.session_store().is_blacklisted(&snapshot.jti).await? {
+            return Ok(true);
+        }
+        let current = self
+            .session_store()
+            .current_epoch(kind, &self.session_subject(kind, tenant, &snapshot.sub))
+            .await?;
+        Ok(current > snapshot.epoch)
     }
 
     // ---- MFA adapter surface (mfa feature) --------------------------------------------
@@ -636,6 +675,8 @@ fn current_session_hash(raw_refresh: Option<&str>) -> Option<String> {
 mod tests {
     use super::*;
     use crate::services::auth::test_support::{base_config, harness};
+
+    mod ws_ticket_revocation;
 
     /// `current_session_hash` returns `None` for an absent/malformed token and a 64-hex hash
     /// for a well-shaped one.
