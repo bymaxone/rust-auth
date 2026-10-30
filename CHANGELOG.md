@@ -54,15 +54,14 @@ version bump.
 
 ### Added
 
-- **`AuthConfig::identifier_key`: rotating `jwt.secret` no longer has to rename every identifier.** The Redis names that identify an account (session index, token epoch, MFA keys, recent-authentication marker, OTP and rate-limit identifiers) and the stored MFA recovery-code digests are HMACs under a key derived from `jwt.secret`. Rotating it alone renamed all of them: every token epoch read zero, so a token that a password reset or a revoke-all had refused was accepted again until it expired. With `identifier_key` set to the value `jwt.secret` has today, the derivation does not move and a later rotation leaves them where they are. Unset, the key derives from `jwt.secret` exactly as before, so nothing changes on upgrade. The value is held to the same length and entropy bar as `jwt.secret` (`ConfigError::IdentifierKeyTooShort`, `ConfigError::IdentifierKeyLowEntropy`), and it never signs or verifies a token. The README has the rotation guide with both paths: routine rotation, and rotation after a compromise. The shared `conformance/wire-contract.json` documents the option and is byte-identical with nest-auth's, which ships the same `identifierKey`. New public field: `AuthConfig::identifier_key: Option<SecretString>`.
+- **`AuthConfig::identifier_key`: rotating `jwt.secret` no longer has to rename every identifier.** The Redis names that identify an account (session index, token epoch, MFA keys, recent-authentication marker, OTP and rate-limit identifiers) and the stored MFA recovery-code digests are HMACs under a key derived from `jwt.secret`. Rotating it alone renamed all of them: every token epoch read zero, so a token that a password reset or a revoke-all had refused was accepted again until it expired. With `identifier_key` set to the value `jwt.secret` has today, the derivation does not move and a later rotation leaves them where they are. Unset, the key derives from `jwt.secret` exactly as before, so nothing changes on upgrade. The value is held to the same length and entropy bar as `jwt.secret` (`ConfigError::IdentifierKeyTooShort`, `ConfigError::IdentifierKeyLowEntropy`), and it never signs or verifies a token. The README has the rotation guide with both paths: routine rotation, and rotation after a compromise. The shared `conformance/wire-contract.json` documents the option. New public field: `AuthConfig::identifier_key: Option<SecretString>`.
 
 - **An unaccompanied change to the shared wire contract now fails the build.**
   `conformance/wire-contract.json` is held byte-identical by nest-auth, and the suites only ever
   read *values* out of it (a preimage template, a status, a record shape) — so a change to a part
   nothing happened to read yet, or a reformat that rewrites every line while changing no value,
-  passed. `crates/bymax-auth-core/tests/wire_contract_identity.rs` pins its SHA-256 (`58164ba0…`),
+  passed. `crates/bymax-auth-core/tests/wire_contract_identity.rs` pins its SHA-256,
   so every byte change here has to be declared in the same commit by someone who looked at it.
-  nest-auth pins the same constant in its own suite.
 
   **It does not gate cross-implementation divergence, and calling it that would be false.** Walk
   it through: nest-auth changes the contract and its own constant in one commit — its suite is
