@@ -145,7 +145,7 @@ mod tests {
         ));
 
         // Banned + MFA pending: the status wins.
-        let _ = s.users.update_status(&id, "BANNED").await;
+        let _ = s.users.update_status(&id, "t1", "BANNED").await;
         let mut parts = parts_with_cookie(&token);
         let banned = MfaSatisfied::from_request_parts(&mut parts, &s.state).await;
         assert!(
@@ -176,7 +176,7 @@ mod tests {
         let id = seed(&s.users, "unverified-pending@e.com", "USER").await;
         let token = mint_token(&mfa_pending_claims(&id));
 
-        let _ = s.users.update_email_verified(&id, false).await;
+        let _ = s.users.update_email_verified(&id, "t1", false).await;
         let mut parts = parts_with_cookie(&token);
         let unverified = MfaSatisfied::from_request_parts(&mut parts, &s.state).await;
         assert!(
@@ -184,7 +184,7 @@ mod tests {
             "an unverified account with MFA pending must be refused as email_not_verified: {unverified:?}"
         );
 
-        let _ = s.users.update_email_verified(&id, true).await;
+        let _ = s.users.update_email_verified(&id, "t1", true).await;
         let mut parts = parts_with_cookie(&token);
         let verified = MfaSatisfied::from_request_parts(&mut parts, &s.state).await;
         assert!(matches!(

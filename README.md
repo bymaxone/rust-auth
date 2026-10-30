@@ -205,11 +205,23 @@ impl UserRepository for PgUserRepository {
         todo!()
     }
 
-    async fn update_password(&self, id: &str, password_hash: &str) -> Result<(), RepositoryError> {
+    // Every write takes the tenant the account lives in and MUST restrict itself to it:
+    // `WHERE id = $1 AND tenant_id = $2`.
+    async fn update_password(
+        &self,
+        id: &str,
+        tenant_id: &str,
+        password_hash: &str,
+    ) -> Result<(), RepositoryError> {
         todo!()
     }
 
-    async fn update_mfa(&self, id: &str, data: UpdateMfaData) -> Result<(), RepositoryError> {
+    async fn update_mfa(
+        &self,
+        id: &str,
+        tenant_id: Option<&str>,
+        data: UpdateMfaData,
+    ) -> Result<(), RepositoryError> {
         todo!()
     }
 

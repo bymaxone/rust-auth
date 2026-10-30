@@ -632,7 +632,7 @@ impl AuthEngine {
             .await?;
         let new_hash = self.passwords().hash(new_password).await?;
         self.user_repository()
-            .update_password(user_id, &new_hash)
+            .update_password(user_id, tenant_id, &new_hash)
             .await
             .map_err(map_repository_error)?;
 
@@ -738,7 +738,7 @@ impl AuthEngine {
         // there.
         let new_hash = self.passwords().hash(new_password).await?;
         self.user_repository()
-            .update_password(&context.user_id, &new_hash)
+            .update_password(&context.user_id, &context.tenant_id, &new_hash)
             .await
             .map_err(map_repository_error)?;
         // Sessions are invalidated only after the password is durably updated. This is the
@@ -1626,7 +1626,7 @@ mod tests {
 
         assert!(
             FailingLookupRepo
-                .update_email("u1", "new@example.com")
+                .update_email("u1", "t1", "new@example.com")
                 .await
                 .is_ok()
         );
@@ -2264,6 +2264,7 @@ mod tests {
         async fn update_email(
             &self,
             _id: &str,
+            _tenant_id: &str,
             _email: &str,
         ) -> Result<(), crate::RepositoryError> {
             Ok(())
@@ -2292,6 +2293,7 @@ mod tests {
         async fn update_password(
             &self,
             _id: &str,
+            _tenant_id: &str,
             _password_hash: &str,
         ) -> Result<(), crate::RepositoryError> {
             Ok(())
@@ -2304,12 +2306,17 @@ mod tests {
         ) -> Result<(), crate::RepositoryError> {
             Ok(())
         }
-        async fn update_last_login(&self, _id: &str) -> Result<(), crate::RepositoryError> {
+        async fn update_last_login(
+            &self,
+            _id: &str,
+            _tenant_id: &str,
+        ) -> Result<(), crate::RepositoryError> {
             Ok(())
         }
         async fn update_status(
             &self,
             _id: &str,
+            _tenant_id: &str,
             _status: &str,
         ) -> Result<(), crate::RepositoryError> {
             Ok(())
@@ -2317,6 +2324,7 @@ mod tests {
         async fn update_email_verified(
             &self,
             _id: &str,
+            _tenant_id: &str,
             _verified: bool,
         ) -> Result<(), crate::RepositoryError> {
             Ok(())
@@ -2389,7 +2397,7 @@ mod tests {
         assert!(matches!(repo.find_by_id("x", None).await, Ok(None)));
         assert!(repo.find_by_email("e", "t").await.is_err());
         assert!(repo.create(create_data()).await.is_err());
-        assert!(repo.update_password("x", "h").await.is_ok());
+        assert!(repo.update_password("x", "t", "h").await.is_ok());
         assert!(
             repo.update_mfa(
                 "x",
@@ -2403,9 +2411,9 @@ mod tests {
             .await
             .is_ok()
         );
-        assert!(repo.update_last_login("x").await.is_ok());
-        assert!(repo.update_status("x", "ACTIVE").await.is_ok());
-        assert!(repo.update_email_verified("x", true).await.is_ok());
+        assert!(repo.update_last_login("x", "t").await.is_ok());
+        assert!(repo.update_status("x", "t", "ACTIVE").await.is_ok());
+        assert!(repo.update_email_verified("x", "t", true).await.is_ok());
         assert!(matches!(
             repo.find_by_oauth_id("g", "1", "t").await,
             Ok(None)

@@ -65,7 +65,7 @@ impl AuthEngine {
         };
 
         self.user_repository()
-            .update_email_verified(&user.id, true)
+            .update_email_verified(&user.id, tenant_id, true)
             .await
             .map_err(map_repository_error)?;
 

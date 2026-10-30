@@ -740,7 +740,12 @@ mod tests {
         );
 
         // The inviter is banned between minting and redemption.
-        assert!(s.users.update_status(&inviter, "BANNED").await.is_ok());
+        assert!(
+            s.users
+                .update_status(&inviter, "t1", "BANNED")
+                .await
+                .is_ok()
+        );
 
         assert!(matches!(
             s.engine
@@ -1355,7 +1360,12 @@ mod tests {
         let Some(s) = setup(invite_config()) else { return };
         let admin = seed_admin(&s.users, "admin@example.com", "ADMIN").await;
         let suspended = seed_admin(&s.users, "gone@example.com", "ADMIN").await;
-        assert!(s.users.update_status(&suspended, "SUSPENDED").await.is_ok());
+        assert!(
+            s.users
+                .update_status(&suspended, "t1", "SUSPENDED")
+                .await
+                .is_ok()
+        );
         assert!(
             s.engine
                 .invite(&admin, "invitee@example.com", "MEMBER", "t1", None)

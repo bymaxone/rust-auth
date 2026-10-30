@@ -392,6 +392,7 @@ impl AuthEngine {
 
         spawn_guarded(run_update_last_login(
             self.user_repository().clone(),
+            safe.tenant_id.clone(),
             safe.id.clone(),
         ));
         spawn_guarded(run_after_login(self.hooks().clone(), safe, hook_ctx));
@@ -453,7 +454,7 @@ mod tests {
         let Some((id, auth)) = logged_in(&h, "banned@e.com", "pw123456").await else { return };
 
         // The operator bans the account through their own admin surface.
-        assert!(h.users.update_status(&id, "BANNED").await.is_ok());
+        assert!(h.users.update_status(&id, "t1", "BANNED").await.is_ok());
 
         let refused = h
             .engine

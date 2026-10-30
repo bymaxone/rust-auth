@@ -883,7 +883,7 @@ async fn challenge_rejects_an_account_blocked_after_the_temp_token_was_issued() 
     else {
         return;
     };
-    assert!(h.users.update_status(&uid, "SUSPENDED").await.is_ok());
+    assert!(h.users.update_status(&uid, "t1", "SUSPENDED").await.is_ok());
 
     let Some(mfa) = h.engine.mfa() else { return };
     assert!(matches!(
@@ -2105,9 +2105,12 @@ impl crate::traits::UserRepository for TenantBlindUsers {
     async fn update_password(
         &self,
         id: &str,
+        tenant_id: &str,
         password_hash: &str,
     ) -> Result<(), crate::RepositoryError> {
-        self.inner.update_password(id, password_hash).await
+        self.inner
+            .update_password(id, tenant_id, password_hash)
+            .await
     }
 
     async fn update_mfa(
@@ -2119,24 +2122,41 @@ impl crate::traits::UserRepository for TenantBlindUsers {
         self.inner.update_mfa(id, tenant_id, data).await
     }
 
-    async fn update_last_login(&self, id: &str) -> Result<(), crate::RepositoryError> {
-        self.inner.update_last_login(id).await
+    async fn update_last_login(
+        &self,
+        id: &str,
+        tenant_id: &str,
+    ) -> Result<(), crate::RepositoryError> {
+        self.inner.update_last_login(id, tenant_id).await
     }
 
-    async fn update_status(&self, id: &str, status: &str) -> Result<(), crate::RepositoryError> {
-        self.inner.update_status(id, status).await
+    async fn update_status(
+        &self,
+        id: &str,
+        tenant_id: &str,
+        status: &str,
+    ) -> Result<(), crate::RepositoryError> {
+        self.inner.update_status(id, tenant_id, status).await
     }
 
     async fn update_email_verified(
         &self,
         id: &str,
+        tenant_id: &str,
         verified: bool,
     ) -> Result<(), crate::RepositoryError> {
-        self.inner.update_email_verified(id, verified).await
+        self.inner
+            .update_email_verified(id, tenant_id, verified)
+            .await
     }
 
-    async fn update_email(&self, id: &str, email: &str) -> Result<(), crate::RepositoryError> {
-        self.inner.update_email(id, email).await
+    async fn update_email(
+        &self,
+        id: &str,
+        tenant_id: &str,
+        email: &str,
+    ) -> Result<(), crate::RepositoryError> {
+        self.inner.update_email(id, tenant_id, email).await
     }
 
     async fn find_by_oauth_id(

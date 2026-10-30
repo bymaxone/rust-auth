@@ -12,6 +12,15 @@ version bump.
 
 ### Changed
 
+- **BREAKING (host-implemented trait): `UserRepository`'s remaining writes take the tenant.** A write keyed on `id` alone cannot be correct under a schema that numbers users per tenant: it lands on another tenant's row. `update_password`, `update_last_login`, `update_status`, `update_email_verified` and `update_email` now take `tenant_id: &str` right after `id`, and an implementation MUST restrict the write to that tenant exactly as `find_by_id` restricts its read, as `update_mfa` already did. The engine passes the tenant it already holds at every call site (the token's, the stored reset or email-change record's, or the verified user's). Changed signatures:
+  - `update_password(id, tenant_id, password_hash)`
+  - `update_last_login(id, tenant_id)`
+  - `update_status(id, tenant_id, status)`
+  - `update_email_verified(id, tenant_id, verified)`
+  - `update_email(id, tenant_id, email)`
+
+  A stale implementation fails to compile rather than binding the wrong argument. `update_mfa` keeps its `Option<&str>` scope, where `None` is the cross-tenant admin lookup. `PlatformUserRepository` is unchanged: platform admins are not tenant-scoped. The in-memory test double now restricts every write to the named tenant, so a test that names the wrong tenant sees the account untouched.
+
 - **BREAKING (public API): the last three unscoped account reads now carry the tenant.** `AuthEngine::issue_tokens_for_user_id(tenant_id, user_id, ip, user_agent)` takes the caller's `tenant_id` first and reads the account with it, so a workspace switch or impersonation that names another tenant's id no longer signs a session for that account. The session-cap resolver and the new-session hook read the account with the `SessionRecord`'s own tenant instead of by id alone.
 
 - **BREAKING (public API): request-path account reads are scoped to the caller's tenant.** `UserRepository::find_by_id(id, None)` is the cross-tenant admin lookup, and request-path reads still used it, so on a host that numbers users per tenant a call naming another tenant's id read, and in some flows acted on, the wrong account. Each now reads with the tenant that is already at hand (the verified token's, or the stored reset, email-change or invitation record's): `request_email_change`, `confirm_email_change`, `invite`, `revoke_invitation`, the invitation's inviter re-check, `notify_password_changed` (the "your password changed" notice used to reach the other tenant's owner), the reset proof's password binding, the `after_password_reset` hook projection, and the transparent password rehash after login. Changed public signatures:

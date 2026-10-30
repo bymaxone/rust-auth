@@ -93,7 +93,7 @@ mod tests {
         let ok = UserStatus::from_request_parts(&mut parts, &s.state).await;
         assert!(matches!(ok, Ok(UserStatus(_))));
 
-        let _ = s.users.update_status(&id, "BANNED").await;
+        let _ = s.users.update_status(&id, "t1", "BANNED").await;
         let mut parts = parts_with_cookie(&token);
         let denied = UserStatus::from_request_parts(&mut parts, &s.state).await;
         assert!(matches!(
@@ -167,7 +167,7 @@ mod tests {
             Ok(VerifiedUser(_))
         ));
 
-        let _ = s.users.update_email_verified(&id, false).await;
+        let _ = s.users.update_email_verified(&id, "t1", false).await;
         let mut parts = parts_with_cookie(&token);
         let denied = VerifiedUser::from_request_parts(&mut parts, &s.state).await;
         assert!(
@@ -176,8 +176,8 @@ mod tests {
         );
 
         // The status half still applies, so the two gates compose rather than replace.
-        let _ = s.users.update_email_verified(&id, true).await;
-        let _ = s.users.update_status(&id, "SUSPENDED").await;
+        let _ = s.users.update_email_verified(&id, "t1", true).await;
+        let _ = s.users.update_status(&id, "t1", "SUSPENDED").await;
         let mut parts = parts_with_cookie(&token);
         assert!(matches!(
             VerifiedUser::from_request_parts(&mut parts, &s.state).await,
