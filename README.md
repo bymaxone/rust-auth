@@ -447,9 +447,15 @@ import { createAuthProxy } from '@bymax-one/rust-auth/nextjs'
 
 export const { proxy } = createAuthProxy({
   accessTokenSecret: process.env.AUTH_ACCESS_TOKEN_SECRET ?? null, // verified at the edge via WASM
-  loginPath: '/auth/login',
+  loginPath: '/login',
   // Prefixes at a segment boundary: never list '/', which would make every route public.
-  publicPaths: ['/auth/login', '/auth/register'],
+  // `/auth` is the same-origin forwarding route to the backend (login, register, ...) and
+  // `/api/auth` holds the client-refresh and logout handlers; both must be reachable while
+  // the caller is unauthenticated, or an expired access token can never be refreshed.
+  publicPaths: ['/login', '/auth', '/api/auth'],
+  // The silent-refresh handler lives UNDER `/auth` so the path-scoped refresh cookie (path
+  // `/auth`) is sent to it; a handler under `/api/auth` would never receive that cookie.
+  silentRefreshPath: '/auth/silent-refresh',
   roleRules: [{ pathPrefix: '/admin', roles: ['ADMIN'] }],
   blockedStatuses: ['BANNED', 'INACTIVE', 'SUSPENDED'],
 })
@@ -466,7 +472,18 @@ import { createLogoutHandler } from '@bymax-one/rust-auth/nextjs'
 
 export const POST = createLogoutHandler({
   backendUrl: process.env.API_BASE_URL!,
-  loginPath: '/auth/login',
+  loginPath: '/login',
+})
+```
+
+```typescript
+// app/auth/silent-refresh/route.ts — the proxy redirects here when the access token has
+// expired but a `has_session` signal is present
+import { createSilentRefreshHandler } from '@bymax-one/rust-auth/nextjs'
+
+export const GET = createSilentRefreshHandler({
+  backendUrl: process.env.API_BASE_URL!,
+  loginPath: '/login',
 })
 ```
 
