@@ -315,7 +315,8 @@ impl AuthEngine {
     /// # Errors
     ///
     /// Returns [`AuthError::Internal`] when no WS-ticket store is wired, [`AuthError::TokenInvalid`]
-    /// for a missing/expired/already-redeemed ticket, or a store [`AuthError`].
+    /// for a missing/expired/already-redeemed ticket and for one whose minting token has been
+    /// revoked (a logout or an epoch bump), or a store [`AuthError`].
     pub async fn redeem_ws_ticket(&self, ticket: &str) -> Result<DashboardClaims, AuthError> {
         let store = self
             .ws_ticket_store()
