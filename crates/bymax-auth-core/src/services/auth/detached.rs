@@ -99,12 +99,13 @@ pub(crate) async fn run_rehash_password(
     passwords: Arc<PasswordService>,
     repository: Arc<dyn UserRepository>,
     password: String,
+    tenant_id: String,
     user_id: String,
     verified_hash: String,
 ) -> Result<(), AuthError> {
     let new_hash = passwords.hash(&password).await?;
     let current = repository
-        .find_by_id(&user_id, None)
+        .find_by_id(&user_id, Some(&tenant_id))
         .await
         .map_err(map_repository_error)?;
     if current.and_then(|user| user.password_hash) != Some(verified_hash) {
@@ -560,6 +561,7 @@ mod tests {
                 h.engine.passwords().clone(),
                 h.users.clone(),
                 "pw".to_owned(),
+                "t1".to_owned(),
                 id.clone(),
                 original.clone(),
             )
@@ -570,6 +572,39 @@ mod tests {
         let Ok(Some(after)) = after else { return };
         // A fresh hash is produced (different salt), so the stored value changed.
         assert_ne!(after.password_hash.unwrap_or_default(), original);
+    }
+
+    #[tokio::test]
+    async fn a_rehash_scoped_to_another_tenant_leaves_the_account_alone() {
+        // The rehash re-reads the account to confirm the stored hash is still the one that was
+        // verified. Reading it without a tenant could confirm against another tenant's row and
+        // then write there. Scoped to a tenant the account is not in, it finds nothing and
+        // declines, so the stored hash is exactly what it was.
+        let Some(h) = harness(base_config(), None) else { return };
+        let id = h
+            .seed(SeedUser::active("rehash-scope@example.com", "pw"))
+            .await;
+        let Ok(Some(before)) = h.users.find_by_id(&id, None).await else { return };
+        let original = before.password_hash.clone().unwrap_or_default();
+
+        assert!(
+            run_rehash_password(
+                h.engine.passwords().clone(),
+                h.users.clone(),
+                "pw".to_owned(),
+                "t2".to_owned(),
+                id.clone(),
+                original.clone(),
+            )
+            .await
+            .is_ok()
+        );
+        let Ok(Some(after)) = h.users.find_by_id(&id, None).await else { return };
+        assert_eq!(
+            after.password_hash.unwrap_or_default(),
+            original,
+            "a rehash scoped to another tenant rewrote this account"
+        );
     }
 
     #[tokio::test]
@@ -599,6 +634,7 @@ mod tests {
                 h.engine.passwords().clone(),
                 h.users.clone(),
                 "pw".to_owned(),
+                "t1".to_owned(),
                 id.clone(),
                 original,
             )

@@ -44,7 +44,7 @@ where
             // satisfied request costs no extra lookup.
             auth_state
                 .engine()
-                .assert_user_active_and_verified(&claims.sub, Some(&claims.tenant_id))
+                .assert_user_active_and_verified(&claims.sub, &claims.tenant_id)
                 .await?;
             return Err(AuthRejection(AuthError::MfaRequired));
         }

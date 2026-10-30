@@ -103,11 +103,7 @@ impl AuthEngine {
     /// Returns the status-specific [`AuthError`] (`AccountBanned`/`AccountInactive`/
     /// `AccountSuspended`/`PendingApproval`) for a blocked account, [`AuthError::TokenInvalid`]
     /// for an unknown subject, or a store [`AuthError`] on a repository failure.
-    pub async fn assert_user_active(
-        &self,
-        sub: &str,
-        tenant_id: Option<&str>,
-    ) -> Result<(), AuthError> {
+    pub async fn assert_user_active(&self, sub: &str, tenant_id: &str) -> Result<(), AuthError> {
         self.gated_user(sub, tenant_id).await.map(|_| ())
     }
 
@@ -126,7 +122,7 @@ impl AuthEngine {
     pub async fn assert_user_active_and_verified(
         &self,
         sub: &str,
-        tenant_id: Option<&str>,
+        tenant_id: &str,
     ) -> Result<(), AuthError> {
         let user = self.gated_user(sub, tenant_id).await?;
         if self.config().config().email_verification.required && !user.email_verified {
@@ -140,11 +136,11 @@ impl AuthEngine {
     async fn gated_user(
         &self,
         sub: &str,
-        tenant_id: Option<&str>,
+        tenant_id: &str,
     ) -> Result<bymax_auth_types::AuthUser, AuthError> {
         let user = self
             .user_repository()
-            .find_by_id(sub, tenant_id)
+            .find_by_id(sub, Some(tenant_id))
             .await
             .map_err(map_repository_error)?
             .ok_or(AuthError::TokenInvalid)?;
@@ -728,7 +724,7 @@ mod tests {
         assert!(matches!(verified, Ok(claims) if claims.sub == sub));
 
         // An active account passes the status gate; a garbage token fails verification.
-        assert!(h.engine.assert_user_active(&sub, Some("t1")).await.is_ok());
+        assert!(h.engine.assert_user_active(&sub, "t1").await.is_ok());
         assert!(matches!(
             h.engine.verify_access_token("not-a-jwt").await,
             Err(AuthError::TokenInvalid)
@@ -738,9 +734,7 @@ mod tests {
         // are both rejected. Asserting only the admitting side would pass against a gate
         // that admitted everything — which is the whole failure this guards.
         assert!(matches!(
-            h.engine
-                .assert_user_active("no-such-user", Some("t1"))
-                .await,
+            h.engine.assert_user_active("no-such-user", "t1").await,
             Err(AuthError::TokenInvalid)
         ));
         let banned = h
@@ -751,7 +745,7 @@ mod tests {
             })
             .await;
         assert!(matches!(
-            h.engine.assert_user_active(&banned, Some("t1")).await,
+            h.engine.assert_user_active(&banned, "t1").await,
             Err(AuthError::AccountBanned)
         ));
 
@@ -952,7 +946,7 @@ mod tests {
         h.users.fail_next_reads(1);
         let gated = h
             .engine
-            .assert_user_active(&claims.sub, Some(&claims.tenant_id))
+            .assert_user_active(&claims.sub, &claims.tenant_id)
             .await;
         let matched = matches!(gated, Err(AuthError::Internal(_)));
         assert!(
