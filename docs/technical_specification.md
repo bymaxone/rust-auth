@@ -1728,7 +1728,7 @@ Algorithm:
 8. Email-verification gate: if `email_verification.required && !user.email_verified`, return `EmailNotVerified`.
 9. `passwords.verify(&dto.password, &user.password_hash)`. On `false`: `brute_force.record_failure(&id)`, return `InvalidCredentials`.
 10. On match: `brute_force.reset_failures(&id)`.
-11. **Rehash-on-verify:** if `config.password.rehash_on_verify` is set **and** `passwords.needs_rehash(&user.password_hash)` (algorithm or params no longer match the configured current scheme), spawn a fire-and-forget task: `passwords.hash(&dto.password)` → `user_repo.update_password(id, new_hash)`. Failure is logged, never blocks login (§7.2.3).
+11. **Rehash-on-verify:** if `config.password.rehash_on_verify` is set **and** `passwords.needs_rehash(&user.password_hash)` (algorithm or params no longer match the configured current scheme), spawn a fire-and-forget task: `passwords.hash(&dto.password)` → `user_repo.update_password(id, tenant_id, new_hash)`. Failure is logged, never blocks login (§7.2.3).
 12. MFA branch: if `user.mfa_enabled`, `tokens.issue_mfa_temp_token(user.id, MfaContext::Dashboard)` and return `LoginResult::MfaChallenge(MfaChallengeResult { mfa_required: true, mfa_temp_token })` (shape in §13.3).
 13. Else project to `SafeAuthUser`; `tokens.issue_tokens(...)`; if `sessions.enabled`, `sessions.create_session(...)`.
 14. Spawn fire-and-forget: `user_repo.update_last_login(id, tenant_id)` and `after_login(safe_user, ctx)`.

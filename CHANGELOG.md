@@ -28,7 +28,7 @@ version bump.
   - `AuthEngine::request_email_change(tenant_id, user_id, new_email, current_password)` takes the caller's `tenant_id` first (the axum route passes the token's).
   - `AuthEngine::assert_user_active` and `AuthEngine::assert_user_active_and_verified` take `tenant_id: &str` instead of `Option<&str>`.
 
-  Behaviour: an inviter or revoker who lives in another tenant is now not found there, so `invite` and `revoke_invitation` answer `TokenInvalid` instead of `InsufficientRole`; the tenant comparison stays as a second lock for a repository that ignores the scope. The in-memory test double gained `InMemoryUserRepository::ignore_tenant_on_id()` to exercise that second lock. The repository's write methods (`update_password`, `update_email`, `update_status`, `update_email_verified`, `update_last_login`) still take no tenant; that is a separate change.
+  Behaviour: an inviter or revoker who lives in another tenant is now not found there, so `invite` and `revoke_invitation` answer `TokenInvalid` instead of `InsufficientRole`; the tenant comparison stays as a second lock for a repository that ignores the scope. The in-memory test double gained `InMemoryUserRepository::ignore_tenant_on_id()` to exercise that second lock.
 
 - **BREAKING: bulk session revocation moved from `DELETE /auth/sessions/all` to
   `POST /auth/sessions/revoke-all`.** Guards, rate limit (5/60), `204` and error codes are
