@@ -414,6 +414,17 @@ describe("createAuthProxy — client-supplied x-user-* headers never survive", (
 
     expect(redirectedToLogin(response)).toBe(true);
   });
+
+  it("treats the root prefix as every route, so a '/' entry makes the whole app public", async () => {
+    // Pins the semantics the docs state: `publicPaths` entries are prefixes at a segment
+    // boundary and `/` is a prefix of every path. A deployment lists each public prefix instead
+    // of `/`; this test keeps that sentence true.
+    const { proxy } = createAuthProxy({ accessTokenSecret: SECRET, publicPaths: ["/"] });
+    const response = await proxy(new NextRequest("https://app.test/dashboard/settings"));
+
+    expect(redirectedToLogin(response)).toBe(false);
+    expect(response.headers.get("x-middleware-next")).toBe("1");
+  });
 });
 
 describe("createAuthProxy — forged background headers are not an auth bypass (RC10)", () => {

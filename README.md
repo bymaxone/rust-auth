@@ -463,6 +463,9 @@ export const { proxy } = createAuthProxy({
 export const config = { matcher: ['/((?!_next/static|_next/image|favicon.ico).*)'] }
 ```
 
+> `publicPaths` entries are prefixes that end at a segment boundary, and `'/'` is a prefix of every path:
+> `'/'` makes every route public. List each public prefix instead.
+
 > [!IMPORTANT]
 > The WASM module and `verifyJwtToken` are **server/edge only** — never import them into a Client Component. The HS256 secret must never reach the browser; an accidental client import is a security defect (a `server-only` guard catches it at build time).
 
