@@ -5,6 +5,14 @@ on:
   push:
     branches: [main]
   workflow_dispatch:
+    inputs:
+      mutation_base:
+        description: >-
+          Commit to diff against for the mutation run (default: the commit before the one
+          dispatched). The run mutates only what changed since it.
+        required: false
+        default: ''
+        type: string
 
 # Least privilege: the whole workflow is read-only. No job widens this scope.
 permissions:
@@ -39,7 +47,29 @@ jobs:
       run-mutation: true
       # No --all-features here: .cargo/mutants.toml already carries it in
       # additional_cargo_args, and cargo rejects the flag twice.
-      mutation-command: cargo mutants --in-place
+      # Mutate only what this run changed. A full sweep is ~2200 mutants at ~100 s each and
+      # cannot finish inside the 240-minute job limit, so on main it was always cancelled.
+      # `--in-diff` (https://mutants.rs/in-diff.html) tests only the mutants overlapping the
+      # diff. The base comes from the event payload at run time, never from a `${{ }}` pasted
+      # into the script, so a dispatch input cannot inject shell: a push diffs against
+      # `before`, a dispatch against `mutation_base`, and anything without a usable base
+      # (new branch, force push, no input) against the commit's own parent. A diff with no
+      # mutants in it exits 0, and every other nonzero exit (2 missed, 3 timeout) still fails.
+      mutation-command: |
+        set -euo pipefail
+        before="$(jq -r '.before // empty' "$GITHUB_EVENT_PATH")"
+        requested="$(jq -r '.inputs.mutation_base // empty' "$GITHUB_EVENT_PATH")"
+        base="${requested:-$before}"
+        if [ -n "$requested" ] && ! git rev-parse --verify --quiet "${requested}^{commit}" >/dev/null; then
+          echo "mutation_base '$requested' is not a commit in this repository" >&2
+          exit 1
+        fi
+        if [ -z "$base" ] || ! git rev-parse --verify --quiet "${base}^{commit}" >/dev/null; then
+          base="${GITHUB_SHA}^"
+        fi
+        echo "Mutating the changes in ${base}..${GITHUB_SHA}"
+        git diff "$base" "$GITHUB_SHA" -- crates/ > "$RUNNER_TEMP/mutants.diff"
+        cargo mutants --in-place --in-diff "$RUNNER_TEMP/mutants.diff"
       # Match .cargo/mutants.toml examine_globs (logic crates only; bindings/** is
       # excluded there), so a bindings-only change never triggers the gate for
       # code cargo-mutants would not mutate.
