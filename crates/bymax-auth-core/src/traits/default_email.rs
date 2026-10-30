@@ -33,6 +33,12 @@ use time::{OffsetDateTime, UtcOffset};
 
 use super::email::{EmailError, EmailProvider, InviteData, SessionInfo};
 
+mod catalogue;
+
+#[cfg(test)]
+use catalogue::UNEXPECTED_CHANGE_TEXT;
+pub use catalogue::{AuthEmailCatalogue, AuthEmailContext, DefaultAuthEmailCatalogue};
+
 // ---------------------------------------------------------------------------
 // Ports
 // ---------------------------------------------------------------------------
@@ -146,156 +152,6 @@ impl AuthEmailMessage {
         }
     }
 }
-
-/// How long a verification or reset code stays valid, stated in the message that carries it.
-const CODE_VALIDITY_TEXT: &str = "It expires shortly, so use it soon.";
-
-/// Closing line on every message announcing a change the recipient may not have made.
-const UNEXPECTED_CHANGE_TEXT: &str = "If this was not you, secure your account immediately: change your password and sign out of every session.";
-
-/// The copy for every message the port can send, as pure renderers keyed by event.
-///
-/// Every method has a default, so an override implements only the events whose wording it
-/// wants to change and the rest keep the secure default. A catalogue chooses words, never
-/// behaviour: the subject sanitization and the delivery-error policy apply to an override
-/// exactly as they do to the default.
-///
-/// **Escaping is the one exception, and it is a security boundary worth reading twice.** The
-/// provider escapes what it renders — a message that leaves `html` unset has its `text` turned
-/// into escaped paragraphs. A renderer that RETURNS `html` has that value used verbatim, and
-/// owns the escaping of every dynamic value it interpolates: an inviter's display name, a
-/// tenant's name, the address an account moved to. That is deliberate, because the escaped-text
-/// default cannot carry a real `<a>` link — but it means an override that trusts the provider
-/// to escape its markup is trusting a protection that is not there.
-///
-/// Each renderer is a pure function of its inputs, which is what makes an override a drop-in
-/// replacement and keeps the copy testable without a provider around it.
-pub trait AuthEmailCatalogue: Send + Sync {
-    /// Password-reset link carrying a signed token.
-    fn password_reset_token(&self, token: &str, locale: Option<&str>) -> AuthEmailMessage {
-        let _ = locale;
-        AuthEmailMessage::plain(
-            "Reset your password",
-            format!(
-                "Use this token to reset your password: {token}\n\n{CODE_VALIDITY_TEXT}\n\nIf you did not ask to reset your password, ignore this message and nothing will change."
-            ),
-        )
-    }
-
-    /// One-time code for the password-reset flow.
-    fn password_reset_otp(&self, otp: &str, locale: Option<&str>) -> AuthEmailMessage {
-        let _ = locale;
-        AuthEmailMessage::plain(
-            "Your password reset code",
-            format!(
-                "Your password reset code is {otp}.\n\n{CODE_VALIDITY_TEXT}\n\nIf you did not ask to reset your password, ignore this message and nothing will change."
-            ),
-        )
-    }
-
-    /// One-time code that activates a newly registered account.
-    fn email_verification_otp(&self, otp: &str, locale: Option<&str>) -> AuthEmailMessage {
-        let _ = locale;
-        AuthEmailMessage::plain(
-            "Verify your email address",
-            format!(
-                "Your verification code is {otp}.\n\n{CODE_VALIDITY_TEXT}\n\nIf you did not create an account, ignore this message."
-            ),
-        )
-    }
-
-    /// Notice that the account password changed (NIST SP 800-63B §4.6).
-    fn password_changed(&self, locale: Option<&str>) -> AuthEmailMessage {
-        let _ = locale;
-        AuthEmailMessage::plain(
-            "Your password was changed",
-            format!("The password on your account was changed.\n\n{UNEXPECTED_CHANGE_TEXT}"),
-        )
-    }
-
-    /// Code confirming ownership of an address the user is moving to.
-    fn email_change_verification(&self, token: &str, locale: Option<&str>) -> AuthEmailMessage {
-        let _ = locale;
-        AuthEmailMessage::plain(
-            "Confirm your new email address",
-            format!(
-                "Your confirmation code is {token}.\n\n{CODE_VALIDITY_TEXT}\n\nIf you did not ask to change your email address, ignore this message."
-            ),
-        )
-    }
-
-    /// Notice to the previous address that the account's email moved.
-    fn email_changed(
-        &self,
-        old_email: &str,
-        new_email: &str,
-        locale: Option<&str>,
-    ) -> AuthEmailMessage {
-        let _ = (old_email, locale);
-        AuthEmailMessage::plain(
-            "Your email address was changed",
-            format!(
-                "The email address on your account was changed to {new_email}, and this address no longer signs in to it.\n\n{UNEXPECTED_CHANGE_TEXT}"
-            ),
-        )
-    }
-
-    /// Notice that a second factor was added.
-    fn mfa_enabled(&self, locale: Option<&str>) -> AuthEmailMessage {
-        let _ = locale;
-        AuthEmailMessage::plain(
-            "Two-factor authentication is on",
-            format!(
-                "Two-factor authentication was enabled on your account.\n\n{UNEXPECTED_CHANGE_TEXT}"
-            ),
-        )
-    }
-
-    /// Notice that a second factor was removed.
-    fn mfa_disabled(&self, locale: Option<&str>) -> AuthEmailMessage {
-        let _ = locale;
-        AuthEmailMessage::plain(
-            "Two-factor authentication is off",
-            format!(
-                "Two-factor authentication was disabled on your account.\n\n{UNEXPECTED_CHANGE_TEXT}"
-            ),
-        )
-    }
-
-    /// Security alert about a newly established session.
-    fn new_session_alert(&self, session: &SessionInfo, locale: Option<&str>) -> AuthEmailMessage {
-        let _ = locale;
-        AuthEmailMessage::plain(
-            "New sign-in to your account",
-            format!(
-                "A new session was started on your account.\n\nDevice: {}\nIP: {}\nSession: {}\n\n{UNEXPECTED_CHANGE_TEXT}",
-                session.device, session.ip, session.session_hash
-            ),
-        )
-    }
-
-    /// Invitation to join a tenant.
-    fn invitation(&self, invite: &InviteData, locale: Option<&str>) -> AuthEmailMessage {
-        let _ = locale;
-        let expires = render_utc_instant(invite.expires_at);
-        AuthEmailMessage::plain(
-            format!(
-                "{} invited you to {}",
-                invite.inviter_name, invite.tenant_name
-            ),
-            format!(
-                "{} invited you to join {}.\n\nUse this token to accept: {}\n\nIt expires on {expires}.\n\nIf you were not expecting this invitation, ignore this message.",
-                invite.inviter_name, invite.tenant_name, invite.invite_token
-            ),
-        )
-    }
-}
-
-/// The built-in copy: [`AuthEmailCatalogue`] with every method left at its default.
-#[derive(Debug, Default, Clone, Copy)]
-pub struct DefaultAuthEmailCatalogue;
-
-impl AuthEmailCatalogue for DefaultAuthEmailCatalogue {}
 
 // ---------------------------------------------------------------------------
 // Rendering helpers
@@ -572,7 +428,14 @@ impl EmailProvider for DefaultAuthEmailProvider {
             "password_reset_token",
             tenant_id,
             email,
-            self.messages.password_reset_token(token, locale),
+            self.messages.password_reset_token(
+                &AuthEmailContext {
+                    tenant_id,
+                    email,
+                    locale,
+                },
+                token,
+            ),
         )
         .await
     }
@@ -588,7 +451,14 @@ impl EmailProvider for DefaultAuthEmailProvider {
             "password_reset_otp",
             tenant_id,
             email,
-            self.messages.password_reset_otp(otp, locale),
+            self.messages.password_reset_otp(
+                &AuthEmailContext {
+                    tenant_id,
+                    email,
+                    locale,
+                },
+                otp,
+            ),
         )
         .await
     }
@@ -604,7 +474,14 @@ impl EmailProvider for DefaultAuthEmailProvider {
             "email_verification_otp",
             tenant_id,
             email,
-            self.messages.email_verification_otp(otp, locale),
+            self.messages.email_verification_otp(
+                &AuthEmailContext {
+                    tenant_id,
+                    email,
+                    locale,
+                },
+                otp,
+            ),
         )
         .await
     }
@@ -619,7 +496,11 @@ impl EmailProvider for DefaultAuthEmailProvider {
             "password_changed",
             tenant_id,
             email,
-            self.messages.password_changed(locale),
+            self.messages.password_changed(&AuthEmailContext {
+                tenant_id,
+                email,
+                locale,
+            }),
         )
         .await
     }
@@ -635,7 +516,14 @@ impl EmailProvider for DefaultAuthEmailProvider {
             "email_change_verification",
             tenant_id,
             new_email,
-            self.messages.email_change_verification(token, locale),
+            self.messages.email_change_verification(
+                &AuthEmailContext {
+                    tenant_id,
+                    email: new_email,
+                    locale,
+                },
+                token,
+            ),
         )
         .await
     }
@@ -654,7 +542,15 @@ impl EmailProvider for DefaultAuthEmailProvider {
             "email_changed",
             tenant_id,
             old_email,
-            self.messages.email_changed(old_email, new_email, locale),
+            self.messages.email_changed(
+                &AuthEmailContext {
+                    tenant_id,
+                    email: old_email,
+                    locale,
+                },
+                old_email,
+                new_email,
+            ),
         )
         .await
     }
@@ -669,7 +565,11 @@ impl EmailProvider for DefaultAuthEmailProvider {
             "mfa_enabled",
             tenant_id,
             email,
-            self.messages.mfa_enabled(locale),
+            self.messages.mfa_enabled(&AuthEmailContext {
+                tenant_id,
+                email,
+                locale,
+            }),
         )
         .await
     }
@@ -684,7 +584,11 @@ impl EmailProvider for DefaultAuthEmailProvider {
             "mfa_disabled",
             tenant_id,
             email,
-            self.messages.mfa_disabled(locale),
+            self.messages.mfa_disabled(&AuthEmailContext {
+                tenant_id,
+                email,
+                locale,
+            }),
         )
         .await
     }
@@ -700,7 +604,14 @@ impl EmailProvider for DefaultAuthEmailProvider {
             "new_session_alert",
             tenant_id,
             email,
-            self.messages.new_session_alert(session, locale),
+            self.messages.new_session_alert(
+                &AuthEmailContext {
+                    tenant_id,
+                    email,
+                    locale,
+                },
+                session,
+            ),
         )
         .await
     }
@@ -716,7 +627,14 @@ impl EmailProvider for DefaultAuthEmailProvider {
             "invitation",
             tenant_id,
             email,
-            self.messages.invitation(invite, locale),
+            self.messages.invitation(
+                &AuthEmailContext {
+                    tenant_id,
+                    email,
+                    locale,
+                },
+                invite,
+            ),
         )
         .await
     }
@@ -727,6 +645,8 @@ mod tests {
     use super::*;
     use std::sync::Mutex;
     use time::OffsetDateTime;
+
+    mod catalogue_context;
 
     /// One message as the sink saw it — an owned copy of [`OutgoingEmail`], since the borrowed
     /// original does not outlive the call.
@@ -882,7 +802,11 @@ mod tests {
         // writing the line is this library's, not theirs.
         struct CodeInSubject;
         impl AuthEmailCatalogue for CodeInSubject {
-            fn email_verification_otp(&self, otp: &str, _locale: Option<&str>) -> AuthEmailMessage {
+            fn email_verification_otp(
+                &self,
+                _ctx: &AuthEmailContext<'_>,
+                otp: &str,
+            ) -> AuthEmailMessage {
                 AuthEmailMessage::plain(format!("{otp} is your verification code"), "…")
             }
         }
@@ -997,7 +921,7 @@ mod tests {
         // while every unset event keeps the built-in default.
         struct BrandedCatalogue;
         impl AuthEmailCatalogue for BrandedCatalogue {
-            fn mfa_enabled(&self, _locale: Option<&str>) -> AuthEmailMessage {
+            fn mfa_enabled(&self, _ctx: &AuthEmailContext<'_>) -> AuthEmailMessage {
                 AuthEmailMessage {
                     subject: "2FA on".into(),
                     text: "Two-factor is on.".into(),
@@ -1099,24 +1023,29 @@ mod tests {
         // code states it, and a message announcing a change the user may not have made tells
         // them how to react.
         let c = DefaultAuthEmailCatalogue;
-        assert!(c.password_reset_token("TOK", None).text.contains("TOK"));
-        assert!(c.password_reset_otp("123456", None).text.contains("123456"));
+        let ctx = AuthEmailContext {
+            tenant_id: "t1",
+            email: "u@x.io",
+            locale: None,
+        };
+        assert!(c.password_reset_token(&ctx, "TOK").text.contains("TOK"));
+        assert!(c.password_reset_otp(&ctx, "123456").text.contains("123456"));
         assert!(
-            c.email_verification_otp("654321", None)
+            c.email_verification_otp(&ctx, "654321")
                 .text
                 .contains("654321")
         );
         assert!(
-            c.email_change_verification("TOK", None)
+            c.email_change_verification(&ctx, "TOK")
                 .text
                 .contains("TOK")
         );
         for changed in [
-            c.password_changed(None),
-            c.mfa_enabled(None),
-            c.mfa_disabled(None),
-            c.email_changed("old@x.io", "new@x.io", None),
-            c.new_session_alert(&session(), None),
+            c.password_changed(&ctx),
+            c.mfa_enabled(&ctx),
+            c.mfa_disabled(&ctx),
+            c.email_changed(&ctx, "old@x.io", "new@x.io"),
+            c.new_session_alert(&ctx, &session()),
         ] {
             assert!(
                 changed.text.contains(UNEXPECTED_CHANGE_TEXT),
@@ -1124,12 +1053,12 @@ mod tests {
                 changed.subject
             );
         }
-        let invitation = c.invitation(&invite(), None);
+        let invitation = c.invitation(&ctx, &invite());
         assert!(invitation.text.contains(&"0".repeat(64)));
         assert!(invitation.text.contains("1970-01-01T00:00:00Z"));
         assert!(invitation.subject.contains("Acme"));
         // The alert repeats the session facts the recipient needs to recognize it as theirs.
-        let alert = c.new_session_alert(&session(), None);
+        let alert = c.new_session_alert(&ctx, &session());
         assert!(alert.text.contains("Chrome on macOS") && alert.text.contains("203.0.113.4"));
     }
 }
