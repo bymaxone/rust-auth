@@ -72,9 +72,10 @@ pub(crate) async fn run_after_invitation_accepted(
 /// Stamp the user's last successful login.
 pub(crate) async fn run_update_last_login(
     repository: Arc<dyn UserRepository>,
+    tenant_id: String,
     user_id: String,
 ) -> Result<(), RepositoryError> {
-    repository.update_last_login(&user_id).await
+    repository.update_last_login(&user_id, &tenant_id).await
 }
 
 /// Re-hash the just-proven plaintext with the current scheme and persist the upgrade — the
@@ -112,7 +113,7 @@ pub(crate) async fn run_rehash_password(
         return Ok(());
     }
     repository
-        .update_password(&user_id, &new_hash)
+        .update_password(&user_id, &tenant_id, &new_hash)
         .await
         .map_err(map_repository_error)
 }
@@ -540,7 +541,7 @@ mod tests {
         let Some(h) = harness(base_config(), None) else { return };
         let id = h.seed(SeedUser::active("stamp@example.com", "pw")).await;
         assert!(
-            run_update_last_login(h.users.clone(), id.clone())
+            run_update_last_login(h.users.clone(), "t1".to_owned(), id.clone())
                 .await
                 .is_ok()
         );
@@ -626,7 +627,12 @@ mod tests {
         let original = before.password_hash.clone().unwrap_or_default();
 
         // The reset lands first, so the row no longer holds the hash that was verified.
-        assert!(h.users.update_password(&id, "$scrypt$reset").await.is_ok());
+        assert!(
+            h.users
+                .update_password(&id, "t1", "$scrypt$reset")
+                .await
+                .is_ok()
+        );
 
         // The upgrade, still carrying the OLD plaintext, must decline rather than write.
         assert!(

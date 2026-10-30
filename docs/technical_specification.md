@@ -1476,21 +1476,28 @@ pub trait UserRepository: Send + Sync {
     /// Insert a new local user. `data.password_hash` is a crypto-layer hash.
     async fn create(&self, data: CreateUserData) -> Result<AuthUser, RepositoryError>;
 
-    /// Replace the stored password hash. Never plaintext.
-    async fn update_password(&self, id: &str, password_hash: &str)
+    /// Replace the stored password hash. Never plaintext. Every write below takes the
+    /// `tenant_id` the account lives in and MUST restrict itself to it, as `find_by_id` does.
+    async fn update_password(&self, id: &str, tenant_id: &str, password_hash: &str)
         -> Result<(), RepositoryError>;
 
     /// Apply a new TOTP MFA configuration (enable/disable/clear).
-    async fn update_mfa(&self, id: &str, data: UpdateMfaData) -> Result<(), RepositoryError>;
+    async fn update_mfa(&self, id: &str, tenant_id: &str, data: UpdateMfaData)
+        -> Result<(), RepositoryError>;
 
     /// Stamp the current time as the last successful login.
-    async fn update_last_login(&self, id: &str) -> Result<(), RepositoryError>;
+    async fn update_last_login(&self, id: &str, tenant_id: &str) -> Result<(), RepositoryError>;
 
     /// Update the account lifecycle status (e.g. "active", "suspended").
-    async fn update_status(&self, id: &str, status: &str) -> Result<(), RepositoryError>;
+    async fn update_status(&self, id: &str, tenant_id: &str, status: &str)
+        -> Result<(), RepositoryError>;
 
     /// Mark the email verified or unverified.
-    async fn update_email_verified(&self, id: &str, verified: bool)
+    async fn update_email_verified(&self, id: &str, tenant_id: &str, verified: bool)
+        -> Result<(), RepositoryError>;
+
+    /// Replace the account's email address, after the new address has been proven.
+    async fn update_email(&self, id: &str, tenant_id: &str, email: &str)
         -> Result<(), RepositoryError>;
 
     /// Find by OAuth identity. Query by BOTH provider and provider_id to avoid
@@ -1721,10 +1728,10 @@ Algorithm:
 8. Email-verification gate: if `email_verification.required && !user.email_verified`, return `EmailNotVerified`.
 9. `passwords.verify(&dto.password, &user.password_hash)`. On `false`: `brute_force.record_failure(&id)`, return `InvalidCredentials`.
 10. On match: `brute_force.reset_failures(&id)`.
-11. **Rehash-on-verify:** if `config.password.rehash_on_verify` is set **and** `passwords.needs_rehash(&user.password_hash)` (algorithm or params no longer match the configured current scheme), spawn a fire-and-forget task: `passwords.hash(&dto.password)` → `user_repo.update_password(id, new_hash)`. Failure is logged, never blocks login (§7.2.3).
+11. **Rehash-on-verify:** if `config.password.rehash_on_verify` is set **and** the password verification reports the stored hash needs a rehash (algorithm or params no longer match the configured current scheme), spawn a fire-and-forget task: hash the password, then `user_repo.update_password(id, tenant_id, new_hash)` only if the stored hash is still the one that was verified. Failure is logged, never blocks login (§7.2.3).
 12. MFA branch: if `user.mfa_enabled`, `tokens.issue_mfa_temp_token(user.id, MfaContext::Dashboard)` and return `LoginResult::MfaChallenge(MfaChallengeResult { mfa_required: true, mfa_temp_token })` (shape in §13.3).
 13. Else project to `SafeAuthUser`; `tokens.issue_tokens(...)`; if `sessions.enabled`, `sessions.create_session(...)`.
-14. Spawn fire-and-forget: `user_repo.update_last_login(id)` and `after_login(safe_user, ctx)`.
+14. Spawn fire-and-forget: `user_repo.update_last_login(id, tenant_id)` and `after_login(safe_user, ctx)`.
 15. Return `Success(AuthResult)`.
 
 Security: generic `InvalidCredentials` for both unknown-email and wrong-password (no enumeration); status & verification gates precede the KDF; rehash-on-verify upgrades stored hashes transparently when cost parameters are raised or the algorithm is switched.
@@ -1769,7 +1776,7 @@ Algorithm:
 1. `identifier = hmac_sha256("{tenant_id}:{email}", hmac_key)`.
 2. `otp.verify("email_verification", &identifier, otp)` (constant-time, attempt-counted, timing-normalized; §7.6).
 3. `user_repo.find_by_email(email, tenant_id)`. If `None`, return `OtpInvalid` (not a distinct "user not found" — avoids a post-OTP enumeration oracle). The user is identified server-side from the `(tenant_id, email)` pair; the client never supplies `user_id`, so a valid OTP cannot verify a different account.
-4. `user_repo.update_email_verified(id, true)`.
+4. `user_repo.update_email_verified(id, tenant_id, true)`.
 5. Spawn `after_email_verified(safe_user, empty_ctx)` fire-and-forget.
 
 `resend_verification_email(tenant_id, email)` — anti-enumeration + atomic cooldown:
@@ -2294,7 +2301,7 @@ Anti-enumeration + atomic 60 s cooldown via `otp.try_begin_resend(OtpPurpose::Pa
 
 #### 7.8.5 `apply_password_reset` (private)
 
-1. `passwords.hash(new_password)` → `update_password(user_id, hash)`.
+1. `passwords.hash(new_password)` → `update_password(user_id, tenant_id, hash)`.
 2. `sessions.revoke_all(SessionKind::Dashboard, user_id)` (the atomic `invalidate_user_sessions` Lua; §12.3) — revoke all refresh sessions.
 3. Spawn `after_password_reset` fire-and-forget.
 

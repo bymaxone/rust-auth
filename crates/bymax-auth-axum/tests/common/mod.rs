@@ -1132,7 +1132,7 @@ pub async fn enable_mfa_flag(harness: &Harness, user_id: &str) {
         .users
         .update_mfa(
             user_id,
-            None,
+            "t1",
             UpdateMfaData {
                 mfa_enabled: true,
                 mfa_secret: Some("encrypted-secret".to_owned()),
@@ -1144,7 +1144,7 @@ pub async fn enable_mfa_flag(harness: &Harness, user_id: &str) {
 
 /// Set a user's status (e.g. to a blocked value) for the status-gate tests.
 pub async fn set_status(harness: &Harness, user_id: &str, status: &str) {
-    let _ = harness.users.update_status(user_id, status).await;
+    let _ = harness.users.update_status(user_id, "t1", status).await;
 }
 
 // ---- request / response helpers --------------------------------------------------------

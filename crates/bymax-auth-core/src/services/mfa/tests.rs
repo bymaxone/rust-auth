@@ -883,7 +883,7 @@ async fn challenge_rejects_an_account_blocked_after_the_temp_token_was_issued() 
     else {
         return;
     };
-    assert!(h.users.update_status(&uid, "SUSPENDED").await.is_ok());
+    assert!(h.users.update_status(&uid, "t1", "SUSPENDED").await.is_ok());
 
     let Some(mfa) = h.engine.mfa() else { return };
     assert!(matches!(
@@ -1964,7 +1964,7 @@ impl MfaStore for DisableOnLockMfaStore {
                 .users
                 .update_mfa(
                     &self.user_id,
-                    None,
+                    "t1",
                     bymax_auth_types::UpdateMfaData {
                         mfa_enabled: false,
                         mfa_secret: None,
@@ -2105,38 +2105,58 @@ impl crate::traits::UserRepository for TenantBlindUsers {
     async fn update_password(
         &self,
         id: &str,
+        tenant_id: &str,
         password_hash: &str,
     ) -> Result<(), crate::RepositoryError> {
-        self.inner.update_password(id, password_hash).await
+        self.inner
+            .update_password(id, tenant_id, password_hash)
+            .await
     }
 
     async fn update_mfa(
         &self,
         id: &str,
-        tenant_id: Option<&str>,
+        tenant_id: &str,
         data: bymax_auth_types::UpdateMfaData,
     ) -> Result<(), crate::RepositoryError> {
         self.inner.update_mfa(id, tenant_id, data).await
     }
 
-    async fn update_last_login(&self, id: &str) -> Result<(), crate::RepositoryError> {
-        self.inner.update_last_login(id).await
+    async fn update_last_login(
+        &self,
+        id: &str,
+        tenant_id: &str,
+    ) -> Result<(), crate::RepositoryError> {
+        self.inner.update_last_login(id, tenant_id).await
     }
 
-    async fn update_status(&self, id: &str, status: &str) -> Result<(), crate::RepositoryError> {
-        self.inner.update_status(id, status).await
+    async fn update_status(
+        &self,
+        id: &str,
+        tenant_id: &str,
+        status: &str,
+    ) -> Result<(), crate::RepositoryError> {
+        self.inner.update_status(id, tenant_id, status).await
     }
 
     async fn update_email_verified(
         &self,
         id: &str,
+        tenant_id: &str,
         verified: bool,
     ) -> Result<(), crate::RepositoryError> {
-        self.inner.update_email_verified(id, verified).await
+        self.inner
+            .update_email_verified(id, tenant_id, verified)
+            .await
     }
 
-    async fn update_email(&self, id: &str, email: &str) -> Result<(), crate::RepositoryError> {
-        self.inner.update_email(id, email).await
+    async fn update_email(
+        &self,
+        id: &str,
+        tenant_id: &str,
+        email: &str,
+    ) -> Result<(), crate::RepositoryError> {
+        self.inner.update_email(id, tenant_id, email).await
     }
 
     async fn find_by_oauth_id(
@@ -2731,7 +2751,7 @@ async fn challenge_collapses_an_undecryptable_secret_to_an_opaque_error() {
         .users
         .update_mfa(
             &uid,
-            None,
+            "t1",
             bymax_auth_types::UpdateMfaData {
                 mfa_enabled: true,
                 mfa_secret: Some("not-a-valid-wire".to_owned()),
@@ -3359,7 +3379,7 @@ async fn a_totp_challenge_rewrites_a_secret_stored_under_a_retired_key() {
         h.users
             .update_mfa(
                 &uid,
-                None,
+                "t1",
                 bymax_auth_types::UpdateMfaData {
                     mfa_enabled: true,
                     mfa_secret: Some(stored_under_retired.clone()),
@@ -3423,7 +3443,7 @@ async fn the_retired_key_rewrite_abandons_when_mfa_vanished_under_the_lock() {
         h.users
             .update_mfa(
                 &uid,
-                None,
+                "t1",
                 bymax_auth_types::UpdateMfaData {
                     mfa_enabled: true,
                     mfa_secret: Some(stored_under_retired.clone()),
@@ -3770,7 +3790,7 @@ async fn a_recovery_challenge_that_loses_the_temp_token_consume_issues_no_sessio
         users
             .update_mfa(
                 &user.id,
-                None,
+                "t1",
                 bymax_auth_types::UpdateMfaData {
                     mfa_enabled: true,
                     mfa_secret: Some(data.encrypted_secret),
@@ -3853,7 +3873,7 @@ async fn one_recovery_code_cannot_be_spent_twice_even_with_two_temp_tokens() {
         users
             .update_mfa(
                 &user.id,
-                None,
+                "t1",
                 bymax_auth_types::UpdateMfaData {
                     mfa_enabled: true,
                     mfa_secret: Some(data.encrypted_secret),
@@ -4595,4 +4615,18 @@ fn an_mfa_notice_is_attributed_to_the_account_tenant_or_the_platform_plane() {
         platform.email_tenant(),
         crate::traits::PLATFORM_EMAIL_TENANT
     );
+}
+
+/// A dashboard MFA write cannot be issued without a tenant: an unscoped write is the defect the
+/// tenant argument exists to prevent, so the persistence step refuses instead of widening it.
+#[tokio::test]
+async fn a_dashboard_mfa_write_without_a_tenant_is_refused() {
+    let users = Arc::new(InMemoryUserRepository::new());
+    let service = service_over(Arc::new(InMemoryStores::new()), users);
+
+    let written = service
+        .persist_mfa("u1", MfaContext::Dashboard, None, true, None, None)
+        .await;
+
+    assert!(matches!(written, Err(AuthError::Internal(_))));
 }

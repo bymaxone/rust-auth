@@ -407,6 +407,7 @@ impl AuthEngine {
             .await?;
         spawn_guarded(run_update_last_login(
             self.user_repository().clone(),
+            safe.tenant_id.clone(),
             safe.id.clone(),
         ));
         spawn_guarded(run_after_login(self.hooks().clone(), safe, hook_ctx));

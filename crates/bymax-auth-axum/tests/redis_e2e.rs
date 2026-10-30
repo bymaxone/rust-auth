@@ -385,7 +385,7 @@ async fn full_router_against_real_redis() {
     // against real Redis), then rotate.
     assert!(
         users
-            .update_email_verified(&user_id_of(&users, "r@e.com").await, true)
+            .update_email_verified(&user_id_of(&users, "r@e.com").await, TENANT, true)
             .await
             .is_ok()
     );
@@ -624,7 +624,12 @@ async fn full_router_against_real_redis() {
     // handler's `Err` arm runs — without it the arm is unexercised over HTTP, and a regression
     // that turned every refusal into a silent 204 would let a revoked operator keep managing
     // invitations.
-    assert!(users.update_status(&plain_id, "SUSPENDED").await.is_ok());
+    assert!(
+        users
+            .update_status(&plain_id, TENANT, "SUSPENDED")
+            .await
+            .is_ok()
+    );
     let suspended = call(
         &app,
         Method::POST,

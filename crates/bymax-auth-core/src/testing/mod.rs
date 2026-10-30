@@ -232,8 +232,19 @@ impl UserRepository for InMemoryUserRepository {
         Ok(user)
     }
 
-    async fn update_password(&self, id: &str, password_hash: &str) -> Result<(), RepositoryError> {
-        if let Some(user) = lock(&self.users).get_mut(id) {
+    async fn update_password(
+        &self,
+        id: &str,
+        tenant_id: &str,
+        password_hash: &str,
+    ) -> Result<(), RepositoryError> {
+        // Every mutator below is scoped like `update_mfa`: a fixture that honoured the tenant on
+        // reads but not on writes would let a cross-tenant write test pass while the property it
+        // asserts does not hold.
+        if let Some(user) = lock(&self.users)
+            .get_mut(id)
+            .filter(|user| user.tenant_id == tenant_id)
+        {
             user.password_hash = Some(password_hash.to_owned());
         }
         Ok(())
@@ -242,7 +253,7 @@ impl UserRepository for InMemoryUserRepository {
     async fn update_mfa(
         &self,
         id: &str,
-        tenant_id: Option<&str>,
+        tenant_id: &str,
         data: UpdateMfaData,
     ) -> Result<(), RepositoryError> {
         // Scoped like `find_by_id`, and deliberately so: a fixture repository that honoured the
@@ -251,7 +262,7 @@ impl UserRepository for InMemoryUserRepository {
         // as the contract the trait states, or it tests the fixture instead of the library.
         if let Some(user) = lock(&self.users)
             .get_mut(id)
-            .filter(|user| tenant_id.is_none_or(|scope| user.tenant_id == scope))
+            .filter(|user| user.tenant_id == tenant_id)
         {
             user.mfa_enabled = data.mfa_enabled;
             user.mfa_secret = data.mfa_secret;
@@ -260,33 +271,57 @@ impl UserRepository for InMemoryUserRepository {
         Ok(())
     }
 
-    async fn update_last_login(&self, id: &str) -> Result<(), RepositoryError> {
-        if let Some(user) = lock(&self.users).get_mut(id) {
+    async fn update_last_login(&self, id: &str, tenant_id: &str) -> Result<(), RepositoryError> {
+        if let Some(user) = lock(&self.users)
+            .get_mut(id)
+            .filter(|user| user.tenant_id == tenant_id)
+        {
             user.last_login_at = Some(OffsetDateTime::UNIX_EPOCH);
         }
         Ok(())
     }
 
-    async fn update_status(&self, id: &str, status: &str) -> Result<(), RepositoryError> {
-        if let Some(user) = lock(&self.users).get_mut(id) {
+    async fn update_status(
+        &self,
+        id: &str,
+        tenant_id: &str,
+        status: &str,
+    ) -> Result<(), RepositoryError> {
+        if let Some(user) = lock(&self.users)
+            .get_mut(id)
+            .filter(|user| user.tenant_id == tenant_id)
+        {
             user.status = status.to_owned();
         }
         Ok(())
     }
 
-    async fn update_email_verified(&self, id: &str, verified: bool) -> Result<(), RepositoryError> {
-        if let Some(user) = lock(&self.users).get_mut(id) {
+    async fn update_email_verified(
+        &self,
+        id: &str,
+        tenant_id: &str,
+        verified: bool,
+    ) -> Result<(), RepositoryError> {
+        if let Some(user) = lock(&self.users)
+            .get_mut(id)
+            .filter(|user| user.tenant_id == tenant_id)
+        {
             user.email_verified = verified;
         }
         Ok(())
     }
 
-    async fn update_email(&self, id: &str, email: &str) -> Result<(), RepositoryError> {
+    async fn update_email(
+        &self,
+        id: &str,
+        tenant_id: &str,
+        email: &str,
+    ) -> Result<(), RepositoryError> {
         // The address is proven before this runs, so the account stays verified across the
         // change — a store that cleared the flag here would sign the user out of a state it
         // had just proved.
         let mut users = lock(&self.users);
-        if let Some(user) = users.get_mut(id) {
+        if let Some(user) = users.get_mut(id).filter(|user| user.tenant_id == tenant_id) {
             user.email = email.to_owned();
         }
         Ok(())
@@ -1513,12 +1548,20 @@ mod tests {
         ));
 
         // updates on a present id, then on an absent id (no-op).
-        assert!(repo.update_password(&user.id, "$scrypt$y").await.is_ok());
-        assert!(repo.update_password("missing", "$scrypt$y").await.is_ok());
+        assert!(
+            repo.update_password(&user.id, &user.tenant_id, "$scrypt$y")
+                .await
+                .is_ok()
+        );
+        assert!(
+            repo.update_password("missing", &user.tenant_id, "$scrypt$y")
+                .await
+                .is_ok()
+        );
         assert!(
             repo.update_mfa(
                 &user.id,
-                None,
+                "t1",
                 UpdateMfaData {
                     mfa_enabled: true,
                     mfa_secret: Some("enc".into()),
@@ -1528,16 +1571,40 @@ mod tests {
             .await
             .is_ok()
         );
-        assert!(repo.update_last_login(&user.id).await.is_ok());
-        assert!(repo.update_status(&user.id, "ACTIVE").await.is_ok());
-        assert!(repo.update_email_verified(&user.id, true).await.is_ok());
-        assert!(repo.update_last_login("missing").await.is_ok());
-        assert!(repo.update_status("missing", "ACTIVE").await.is_ok());
-        assert!(repo.update_email_verified("missing", true).await.is_ok());
+        assert!(
+            repo.update_last_login(&user.id, &user.tenant_id)
+                .await
+                .is_ok()
+        );
+        assert!(
+            repo.update_status(&user.id, &user.tenant_id, "ACTIVE")
+                .await
+                .is_ok()
+        );
+        assert!(
+            repo.update_email_verified(&user.id, &user.tenant_id, true)
+                .await
+                .is_ok()
+        );
+        assert!(
+            repo.update_last_login("missing", &user.tenant_id)
+                .await
+                .is_ok()
+        );
+        assert!(
+            repo.update_status("missing", &user.tenant_id, "ACTIVE")
+                .await
+                .is_ok()
+        );
+        assert!(
+            repo.update_email_verified("missing", &user.tenant_id, true)
+                .await
+                .is_ok()
+        );
         assert!(
             repo.update_mfa(
                 "missing",
-                None,
+                "t1",
                 UpdateMfaData {
                     mfa_enabled: false,
                     mfa_secret: None,
@@ -1594,6 +1661,51 @@ mod tests {
             updated_at: OffsetDateTime::UNIX_EPOCH,
             created_at: OffsetDateTime::UNIX_EPOCH,
         }
+    }
+
+    #[tokio::test]
+    async fn a_write_naming_another_tenant_leaves_the_account_untouched() {
+        // The double restricts every write to the named tenant, so a test that drives a
+        // cross-tenant write sees the property it asserts rather than a fixture that ignores it.
+        let repo = InMemoryUserRepository::new();
+        let created = repo.create(create_data()).await;
+        let Ok(user) = created else { return };
+
+        assert!(
+            repo.update_password(&user.id, "t2", "$scrypt$z")
+                .await
+                .is_ok()
+        );
+        assert!(repo.update_last_login(&user.id, "t2").await.is_ok());
+        assert!(repo.update_status(&user.id, "t2", "BANNED").await.is_ok());
+        assert!(
+            repo.update_email_verified(&user.id, "t2", true)
+                .await
+                .is_ok()
+        );
+        assert!(
+            repo.update_email(&user.id, "t2", "other@example.com")
+                .await
+                .is_ok()
+        );
+        let enrol = UpdateMfaData {
+            mfa_enabled: true,
+            mfa_secret: Some("enc".into()),
+            mfa_recovery_codes: Some(vec!["h".into()]),
+        };
+        assert!(repo.update_mfa(&user.id, "t2", enrol).await.is_ok());
+
+        let after = repo.find_by_id(&user.id, Some("t1")).await;
+        assert!(matches!(
+            &after,
+            Ok(Some(u)) if u.password_hash == user.password_hash
+                && u.last_login_at.is_none()
+                && u.status == user.status
+                && u.email_verified == user.email_verified
+                && u.email == user.email
+                && !u.mfa_enabled
+                && u.mfa_secret.is_none()
+        ));
     }
 
     #[tokio::test]

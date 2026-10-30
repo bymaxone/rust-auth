@@ -12,13 +12,23 @@ version bump.
 
 ### Changed
 
+- **BREAKING (host-implemented trait): `UserRepository`'s remaining writes take the tenant.** A write keyed on `id` alone cannot be correct under a schema that numbers users per tenant: it lands on another tenant's row. `update_password`, `update_last_login`, `update_status`, `update_email_verified`, `update_email` and `update_mfa` now take `tenant_id: &str` right after `id`, and an implementation MUST restrict the write to that tenant exactly as `find_by_id` restricts its read. Changed signatures:
+  - `update_password(id, tenant_id, password_hash)`
+  - `update_last_login(id, tenant_id)`
+  - `update_status(id, tenant_id, status)`
+  - `update_email_verified(id, tenant_id, verified)`
+  - `update_email(id, tenant_id, email)`
+  - `update_mfa(id, tenant_id, data)` (the tenant was `Option<&str>`, where `None` meant every tenant; there is no such scope any more, and a caller acting on another tenant's account passes that account's tenant)
+
+  A stale implementation fails to compile rather than binding the wrong argument. The dashboard MFA write refuses to run without a tenant. `PlatformUserRepository` is unchanged: platform admins are not tenant-scoped. The in-memory test double now restricts every write to the named tenant, so a test that names the wrong tenant sees the account untouched.
+
 - **BREAKING (public API): the last three unscoped account reads now carry the tenant.** `AuthEngine::issue_tokens_for_user_id(tenant_id, user_id, ip, user_agent)` takes the caller's `tenant_id` first and reads the account with it, so a workspace switch or impersonation that names another tenant's id no longer signs a session for that account. The session-cap resolver and the new-session hook read the account with the `SessionRecord`'s own tenant instead of by id alone.
 
 - **BREAKING (public API): request-path account reads are scoped to the caller's tenant.** `UserRepository::find_by_id(id, None)` is the cross-tenant admin lookup, and request-path reads still used it, so on a host that numbers users per tenant a call naming another tenant's id read, and in some flows acted on, the wrong account. Each now reads with the tenant that is already at hand (the verified token's, or the stored reset, email-change or invitation record's): `request_email_change`, `confirm_email_change`, `invite`, `revoke_invitation`, the invitation's inviter re-check, `notify_password_changed` (the "your password changed" notice used to reach the other tenant's owner), the reset proof's password binding, the `after_password_reset` hook projection, and the transparent password rehash after login. Changed public signatures:
   - `AuthEngine::request_email_change(tenant_id, user_id, new_email, current_password)` takes the caller's `tenant_id` first (the axum route passes the token's).
   - `AuthEngine::assert_user_active` and `AuthEngine::assert_user_active_and_verified` take `tenant_id: &str` instead of `Option<&str>`.
 
-  Behaviour: an inviter or revoker who lives in another tenant is now not found there, so `invite` and `revoke_invitation` answer `TokenInvalid` instead of `InsufficientRole`; the tenant comparison stays as a second lock for a repository that ignores the scope. The in-memory test double gained `InMemoryUserRepository::ignore_tenant_on_id()` to exercise that second lock. The repository's write methods (`update_password`, `update_email`, `update_status`, `update_email_verified`, `update_last_login`) still take no tenant; that is a separate change.
+  Behaviour: an inviter or revoker who lives in another tenant is now not found there, so `invite` and `revoke_invitation` answer `TokenInvalid` instead of `InsufficientRole`; the tenant comparison stays as a second lock for a repository that ignores the scope. The in-memory test double gained `InMemoryUserRepository::ignore_tenant_on_id()` to exercise that second lock.
 
 - **BREAKING: bulk session revocation moved from `DELETE /auth/sessions/all` to
   `POST /auth/sessions/revoke-all`.** Guards, rate limit (5/60), `204` and error codes are

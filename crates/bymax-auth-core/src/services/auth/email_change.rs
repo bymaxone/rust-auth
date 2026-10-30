@@ -176,7 +176,7 @@ impl AuthEngine {
 
         let old_email = user.email.clone();
         self.user_repository()
-            .update_email(&context.user_id, &context.new_email)
+            .update_email(&context.user_id, &context.tenant_id, &context.new_email)
             .await
             .map_err(map_repository_error)?;
         tracing::info!(user_id = %context.user_id, "email change: address changed");
@@ -543,7 +543,7 @@ mod tests {
         let id = h
             .seed(SeedUser::active("blocked@example.com", "right"))
             .await;
-        assert!(h.users.update_status(&id, "SUSPENDED").await.is_ok());
+        assert!(h.users.update_status(&id, "t1", "SUSPENDED").await.is_ok());
 
         let refused = h
             .engine
@@ -963,7 +963,7 @@ mod tests {
         );
 
         // The account is suspended while the link sits in a mailbox.
-        assert!(h.users.update_status(&id, "SUSPENDED").await.is_ok());
+        assert!(h.users.update_status(&id, "t1", "SUSPENDED").await.is_ok());
 
         let confirmed = h.engine.confirm_email_change(&token).await;
         assert!(

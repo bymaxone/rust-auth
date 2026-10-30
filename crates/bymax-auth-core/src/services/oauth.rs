@@ -452,6 +452,7 @@ impl AuthEngine {
             .await?;
         spawn_guarded(run_update_last_login(
             self.user_repository().clone(),
+            safe.tenant_id.clone(),
             safe.id.clone(),
         ));
         spawn_guarded(run_after_login(self.hooks().clone(), safe, hook_ctx));
@@ -808,7 +809,7 @@ mod tests {
             let _ = users
                 .update_mfa(
                     &user.id,
-                    None,
+                    "t1",
                     UpdateMfaData {
                         mfa_enabled: true,
                         mfa_secret: Some("enc".to_owned()),
@@ -1612,7 +1613,7 @@ mod tests {
         let found = users.find_by_email("mock@example.com", "t1").await;
         let Ok(Some(user)) = found else { return };
         assert!(
-            crate::traits::UserRepository::update_status(users.as_ref(), &user.id, "BANNED")
+            crate::traits::UserRepository::update_status(users.as_ref(), &user.id, "t1", "BANNED")
                 .await
                 .is_ok()
         );

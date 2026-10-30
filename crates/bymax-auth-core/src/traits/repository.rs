@@ -49,13 +49,22 @@ pub trait UserRepository: Send + Sync {
 
     /// Replace the stored password hash. The argument is a crypto-layer hash, never
     /// plaintext.
-    async fn update_password(&self, id: &str, password_hash: &str) -> Result<(), RepositoryError>;
+    ///
+    /// `tenant_id` is the tenant the account lives in. An implementation MUST restrict the write
+    /// to that tenant, exactly as [`UserRepository::find_by_id`] restricts its read: a write
+    /// keyed on `id` alone lands on another tenant's row under a schema that numbers users per
+    /// tenant.
+    async fn update_password(
+        &self,
+        id: &str,
+        tenant_id: &str,
+        password_hash: &str,
+    ) -> Result<(), RepositoryError>;
 
     /// Apply a new TOTP MFA configuration (enable / disable / clear), scoped to a tenant.
     ///
-    /// `tenant_id` carries the same contract as [`UserRepository::find_by_id`]'s: implementations
-    /// MUST restrict the write to that tenant, and `None` is reserved for internal admin flows
-    /// that legitimately span tenants.
+    /// `tenant_id` is the tenant the account lives in: implementations MUST restrict the write to
+    /// it. A caller that acts on another tenant's account passes that account's tenant.
     ///
     /// It is here because a write keyed on `id` alone cannot be correct under a schema that
     /// numbers users per tenant, and this is the write every MFA transition performs. Two
@@ -70,18 +79,43 @@ pub trait UserRepository: Send + Sync {
     async fn update_mfa(
         &self,
         id: &str,
-        tenant_id: Option<&str>,
+        tenant_id: &str,
         data: UpdateMfaData,
     ) -> Result<(), RepositoryError>;
 
     /// Stamp the current time as the user's last successful login.
-    async fn update_last_login(&self, id: &str) -> Result<(), RepositoryError>;
+    ///
+    /// `tenant_id` is the tenant the account lives in. An implementation MUST restrict the write
+    /// to that tenant, exactly as [`UserRepository::find_by_id`] restricts its read: a write
+    /// keyed on `id` alone lands on another tenant's row under a schema that numbers users per
+    /// tenant.
+    async fn update_last_login(&self, id: &str, tenant_id: &str) -> Result<(), RepositoryError>;
 
     /// Update the account lifecycle status (e.g. `"active"`, `"suspended"`).
-    async fn update_status(&self, id: &str, status: &str) -> Result<(), RepositoryError>;
+    ///
+    /// `tenant_id` is the tenant the account lives in. An implementation MUST restrict the write
+    /// to that tenant, exactly as [`UserRepository::find_by_id`] restricts its read: a write
+    /// keyed on `id` alone lands on another tenant's row under a schema that numbers users per
+    /// tenant.
+    async fn update_status(
+        &self,
+        id: &str,
+        tenant_id: &str,
+        status: &str,
+    ) -> Result<(), RepositoryError>;
 
     /// Mark the email verified or unverified.
-    async fn update_email_verified(&self, id: &str, verified: bool) -> Result<(), RepositoryError>;
+    ///
+    /// `tenant_id` is the tenant the account lives in. An implementation MUST restrict the write
+    /// to that tenant, exactly as [`UserRepository::find_by_id`] restricts its read: a write
+    /// keyed on `id` alone lands on another tenant's row under a schema that numbers users per
+    /// tenant.
+    async fn update_email_verified(
+        &self,
+        id: &str,
+        tenant_id: &str,
+        verified: bool,
+    ) -> Result<(), RepositoryError>;
 
     /// Replace the account's email address.
     ///
@@ -98,7 +132,15 @@ pub trait UserRepository: Send + Sync {
     /// # Errors
     ///
     /// Returns [`RepositoryError`] when the address is taken or the write fails.
-    async fn update_email(&self, id: &str, email: &str) -> Result<(), RepositoryError>;
+    ///
+    /// `tenant_id` is the tenant the account lives in; the write MUST be restricted to it, as
+    /// for the other mutators.
+    async fn update_email(
+        &self,
+        id: &str,
+        tenant_id: &str,
+        email: &str,
+    ) -> Result<(), RepositoryError>;
 
     /// Find a user by OAuth identity. Query by BOTH provider and provider id to avoid
     /// cross-provider id collisions, scoped by tenant for isolation.
@@ -172,7 +214,12 @@ mod tests {
 
     #[async_trait]
     impl UserRepository for DummyRepo {
-        async fn update_email(&self, _id: &str, _email: &str) -> Result<(), RepositoryError> {
+        async fn update_email(
+            &self,
+            _id: &str,
+            _tenant_id: &str,
+            _email: &str,
+        ) -> Result<(), RepositoryError> {
             Ok(())
         }
 
@@ -196,6 +243,7 @@ mod tests {
         async fn update_password(
             &self,
             _id: &str,
+            _tenant_id: &str,
             _password_hash: &str,
         ) -> Result<(), RepositoryError> {
             Ok(())
@@ -203,20 +251,30 @@ mod tests {
         async fn update_mfa(
             &self,
             _id: &str,
-            _tenant_id: Option<&str>,
+            _tenant_id: &str,
             _data: UpdateMfaData,
         ) -> Result<(), RepositoryError> {
             Ok(())
         }
-        async fn update_last_login(&self, _id: &str) -> Result<(), RepositoryError> {
+        async fn update_last_login(
+            &self,
+            _id: &str,
+            _tenant_id: &str,
+        ) -> Result<(), RepositoryError> {
             Ok(())
         }
-        async fn update_status(&self, _id: &str, _status: &str) -> Result<(), RepositoryError> {
+        async fn update_status(
+            &self,
+            _id: &str,
+            _tenant_id: &str,
+            _status: &str,
+        ) -> Result<(), RepositoryError> {
             Ok(())
         }
         async fn update_email_verified(
             &self,
             _id: &str,
+            _tenant_id: &str,
             _verified: bool,
         ) -> Result<(), RepositoryError> {
             Ok(())
@@ -287,12 +345,12 @@ mod tests {
         assert!(matches!(users.find_by_id("x", Some("t")).await, Ok(None)));
         assert!(matches!(users.find_by_email("e", "t").await, Ok(None)));
         assert!(users.create(sample_create()).await.is_err());
-        assert!(users.update_password("x", "h").await.is_ok());
+        assert!(users.update_password("x", "t", "h").await.is_ok());
         assert!(
             users
                 .update_mfa(
                     "x",
-                    None,
+                    "t1",
                     UpdateMfaData {
                         mfa_enabled: false,
                         mfa_secret: None,
@@ -302,12 +360,17 @@ mod tests {
                 .await
                 .is_ok()
         );
-        assert!(users.update_last_login("x").await.is_ok());
-        assert!(users.update_status("x", "ACTIVE").await.is_ok());
-        assert!(users.update_email_verified("x", true).await.is_ok());
+        assert!(users.update_last_login("x", "t").await.is_ok());
+        assert!(users.update_status("x", "t", "ACTIVE").await.is_ok());
+        assert!(users.update_email_verified("x", "t", true).await.is_ok());
         // The address-change mutator too: the trait grew it with the email-change flow, and a
         // method nothing here calls is a method whose dispatch nothing here proves.
-        assert!(users.update_email("x", "new@example.com").await.is_ok());
+        assert!(
+            users
+                .update_email("x", "t", "new@example.com")
+                .await
+                .is_ok()
+        );
         assert!(matches!(
             users.find_by_oauth_id("google", "1", "t").await,
             Ok(None)

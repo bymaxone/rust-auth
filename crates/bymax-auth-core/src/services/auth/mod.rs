@@ -590,7 +590,7 @@ pub(crate) mod test_support {
                     .users
                     .update_mfa(
                         &user.id,
-                        None,
+                        "t1",
                         UpdateMfaData {
                             mfa_enabled: true,
                             mfa_secret: Some("encrypted-secret".to_owned()),
