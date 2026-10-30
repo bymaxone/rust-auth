@@ -22,8 +22,8 @@ pub use breach::{AllowAllBreachChecker, PasswordBreachChecker};
 pub use common_password::{CommonPasswordChecker, reduce_to_base_word};
 #[doc(inline)]
 pub use default_email::{
-    AuthEmailCatalogue, AuthEmailMessage, AuthEmailSink, DefaultAuthEmailCatalogue,
-    DefaultAuthEmailProvider, DeliveryErrorPolicy, OutgoingEmail,
+    AuthEmailCatalogue, AuthEmailContext, AuthEmailMessage, AuthEmailSink,
+    DefaultAuthEmailCatalogue, DefaultAuthEmailProvider, DeliveryErrorPolicy, OutgoingEmail,
 };
 pub use email::{
     EmailError, EmailProvider, InviteData, NoOpEmailProvider, PLATFORM_EMAIL_TENANT, SessionInfo,
