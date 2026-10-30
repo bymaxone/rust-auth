@@ -1,0 +1,47 @@
+# Keeps the shared half of AGENTS.md in step with the canonical copy in
+# bymaxone/.github. The rules that must not vary between Bymax repositories are
+# edited there; everything this repository writes for itself lives outside the
+# markers and is never touched.
+#
+# Codex reads AGENTS.md from the file tree of the repository under review, so a
+# shared rule has to exist as a real file here rather than be referenced. That is
+# why this is a sync and not a `uses:` — the reusable CI above it propagates by
+# reference, this one has to propagate by commit.
+name: agents-sync
+
+on:
+  schedule:
+    # Weekly, off the hour and clear of this repository's existing Monday cluster:
+    # scorecard at 05:31 and both codeql and peer-advisory-drift at 06:17. The
+    # dependency audit is daily at 04:23 and is not a factor. 07:17 leaves an hour
+    # after the last of them.
+    - cron: '17 7 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  sync:
+    # Referenced by the moving alias rather than pinned, which is the convention
+    # for first-party reusables and the rule the shared block itself states.
+    uses: bymaxone/.github/.github/workflows/agents-sync.yml@v1
+    permissions:
+      contents: write
+      pull-requests: write
+    secrets:
+      # Named rather than `inherit`, so the called workflow receives this one
+      # secret and not every secret this repository holds.
+      #
+      # The mapping is present whether or not the secret is set, because a reusable
+      # workflow receives no secret it is not passed: without the mapping, setting
+      # AGENTS_SYNC_TOKEN would change nothing and the run would keep using the
+      # default token while looking configured. An unset secret evaluates to the
+      # empty string, which the called workflow already falls back from.
+      #
+      # Why it is worth setting: a pull request opened with the default
+      # GITHUB_TOKEN starts no workflow runs, and this repository's ruleset
+      # (`rust-auth-pr-and-ci-gates`) requires status checks to pass. Without this
+      # token an unattended sync pull request therefore cannot merge until somebody
+      # pushes to it.
+      sync-token: ${{ secrets.AGENTS_SYNC_TOKEN }}
