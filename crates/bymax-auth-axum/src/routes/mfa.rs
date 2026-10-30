@@ -78,8 +78,9 @@ async fn setup(
     body: axum::body::Bytes,
 ) -> Response {
     // The body carries the account password. It is optional on the wire — an OAuth-only
-    // account has none — so an absent or unparseable body degrades to "no password supplied"
-    // and the engine decides, rather than 400-ing before it can.
+    // account has none — so an empty body is the same request as `{}`: no password supplied,
+    // and the engine decides. A non-empty body must be a valid `MfaSetupDto`; a malformed one
+    // is a 400, never a silent "no password".
     let dto: MfaSetupDto = match crate::validation::validate_optional_json(&headers, &body) {
         Ok(dto) => dto,
         Err(rejection) => return rejection.into_response(),
