@@ -612,15 +612,11 @@
   },
   "rateLimits": {
     "$comment": [
-      "The per-IP limit each auth route is served under, as `requests/windowSeconds`. Both",
-      "backends enforce these — nest-auth with a Redis fixed-window counter, rust-auth with a",
-      "per-route governor layer — so a deployment that puts the two behind one load balancer",
-      "gets the same answer whichever one serves the request. A value changed on one side only",
-      "is a silent divergence: the same client would be throttled at different points.",
+      "Both backends enforce these with a Redis fixed-window counter shared across instances; the",
+      "key shape under the rl: prefix is per implementation (route naming is not shared), so one",
+      "client served by both libraries gets a budget from each.",
       "",
-      "The STORAGE differs deliberately and is not part of the contract: nest-auth's counter is",
-      "in Redis and therefore shared across instances, rust-auth's is in process memory and",
-      "therefore per-instance. The Redis one is the stricter of the two under horizontal scale."
+      "The per-IP limit each auth route is served under, as `requests/windowSeconds`."
     ],
     "login": "5/60",
     "register": "10/3600",
