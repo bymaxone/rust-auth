@@ -566,6 +566,24 @@ mod tests {
         body.len() >= declared
     }
 
+    /// Read from `stream` until a complete HTTP request has arrived or the peer closes, so a
+    /// request the client writes in several segments is captured whole.
+    async fn read_request<R>(stream: &mut R) -> Option<String>
+    where
+        R: tokio::io::AsyncRead + Unpin,
+    {
+        let mut raw = Vec::new();
+        let mut buf = [0u8; 4096];
+        while !request_is_complete(&String::from_utf8_lossy(&raw)) {
+            let n = stream.read(&mut buf).await.ok()?;
+            if n == 0 {
+                break;
+            }
+            raw.extend_from_slice(&buf[..n]);
+        }
+        Some(String::from_utf8_lossy(&raw).into_owned())
+    }
+
     /// Serve one `reply` and resolve to the full request the client sent, or `None` when no
     /// request arrives within a bounded wait. Unlike [`with_server`], the wait is bounded, so
     /// a client call that sends nothing fails the assertion instead of hanging the suite.
@@ -578,18 +596,10 @@ mod tests {
         let addr = listener.local_addr().ok()?;
         let server = tokio::spawn(async move {
             let (mut socket, _) = listener.accept().await.ok()?;
-            let mut raw = Vec::new();
-            let mut buf = [0u8; 4096];
-            loop {
-                let n = socket.read(&mut buf).await.ok()?;
-                raw.extend_from_slice(&buf[..n]);
-                if n == 0 || request_is_complete(&String::from_utf8_lossy(&raw)) {
-                    break;
-                }
-            }
+            let request = read_request(&mut socket).await?;
             let _ = socket.write_all(&reply).await;
             let _ = socket.flush().await;
-            Some(String::from_utf8_lossy(&raw).into_owned())
+            Some(request)
         });
         body(AuthClient::new(format!("http://{addr}"))).await;
         let outcome = tokio::time::timeout(std::time::Duration::from_secs(2), server).await;
@@ -966,6 +976,38 @@ mod tests {
             assert!(client.has_session());
         })
         .await;
+    }
+
+    #[tokio::test]
+    async fn a_request_written_in_segments_is_read_whole_and_a_closed_peer_ends_the_read() {
+        // reqwest may send the header block and the body in separate writes, so the reader has
+        // to keep going until the declared `Content-Length` has arrived.
+        let (mut client, mut server) = tokio::io::duplex(64);
+        let writer = tokio::spawn(async move {
+            let _ = client
+                .write_all(b"POST /x HTTP/1.1\r\nContent-Length: 5\r\n\r\nab")
+                .await;
+            tokio::task::yield_now().await;
+            let _ = client.write_all(b"cde").await;
+        });
+        let whole = read_request(&mut server).await;
+        let _ = writer.await;
+        assert_eq!(
+            whole.as_deref(),
+            Some("POST /x HTTP/1.1\r\nContent-Length: 5\r\n\r\nabcde")
+        );
+
+        // A peer that closes before the body is complete ends the read with what arrived.
+        let (mut client, mut server) = tokio::io::duplex(64);
+        let _ = client
+            .write_all(b"POST /x HTTP/1.1\r\nContent-Length: 9\r\n\r\nab")
+            .await;
+        drop(client);
+        let partial = read_request(&mut server).await;
+        assert_eq!(
+            partial.as_deref(),
+            Some("POST /x HTTP/1.1\r\nContent-Length: 9\r\n\r\nab")
+        );
     }
 
     #[tokio::test]
