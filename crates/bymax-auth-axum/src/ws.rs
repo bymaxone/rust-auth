@@ -59,7 +59,8 @@ struct TicketQuery {
 /// WebSocket-upgrade auth via a single-use ticket: reads the `ticket` query parameter and
 /// atomically `GETDEL`s `wst:{sha256(ticket)}`, reconstructing the dashboard claims snapshot.
 /// The first redemption wins; a missing / expired / already-redeemed ticket refuses the
-/// handshake with 401. The access JWT is **never** read from the URL.
+/// handshake with 401, and `enforce_tenant_binding` applies to the redeemed claims. The access JWT
+/// is **never** read from the URL.
 #[derive(Debug, Clone)]
 pub struct WsAuthUser(pub DashboardClaims);
 
@@ -74,6 +75,7 @@ where
         let auth_state = AuthState::from_ref(state);
         let ticket = ticket_from_query(parts).ok_or(AuthError::TokenInvalid)?;
         let claims = auth_state.engine().redeem_ws_ticket(&ticket).await?;
+        enforce_tenant_binding(&auth_state, &claims, parts).await?;
         Ok(Self(claims))
     }
 }
@@ -96,14 +98,23 @@ where
         let auth_state = AuthState::from_ref(state);
         let token = bearer_from_header(parts).ok_or(AuthError::TokenInvalid)?;
         let claims = auth_state.engine().verify_access_token(&token).await?;
-        // The same binding the HTTP extractors apply: a gate present on one transport and absent
-        // on the other is a way around it.
-        auth_state
-            .engine()
-            .assert_tenant_binding(&claims.tenant_id, &crate::routes::request_context(parts))
-            .await?;
+        enforce_tenant_binding(&auth_state, &claims, parts).await?;
         Ok(Self(claims))
     }
+}
+
+/// The binding the HTTP extractors apply, on the claims a handshake authenticated. A gate present
+/// on one transport and absent on the other is a way around it, and a ticket is a bearer
+/// credential in its own right, so both handshakes pass through here.
+async fn enforce_tenant_binding(
+    state: &AuthState,
+    claims: &DashboardClaims,
+    parts: &Parts,
+) -> Result<(), AuthError> {
+    state
+        .engine()
+        .assert_tenant_binding(&claims.tenant_id, &crate::routes::request_context(parts))
+        .await
 }
 
 /// Read the bearer token from the handshake `Authorization` header. Mirrors the dashboard
@@ -229,6 +240,44 @@ mod tests {
         assert!(
             matches!(denied, Err(AuthRejection(AuthError::TokenInvalid))),
             "a token minted for t1 opened a socket under t2: {denied:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_ticket_minted_for_one_tenant_does_not_open_a_socket_under_another_tenants_host() {
+        // The browser path redeems a ticket instead of presenting the token, and a ticket is a
+        // bearer credential in its own right: the binding has to hold on the redeemed claims too.
+        let Some(s) = scaffold_with(TokenDelivery::Cookie, enforcing) else { return };
+        let id = seed(&s.users, "wst@e.com", "USER").await;
+        let token = dashboard_token(&s, &id).await;
+        let claims = s.state.engine().verify_access_token(&token).await;
+        assert!(claims.is_ok());
+        let Ok(claims) = claims else { return };
+        let handshake = |ticket: &str, host: &str| {
+            Request::builder()
+                .uri(format!("/ws?ticket={ticket}"))
+                .header(http::header::HOST, host)
+                .body(())
+                .unwrap_or_default()
+                .into_parts()
+                .0
+        };
+
+        let own = s.state.engine().issue_ws_ticket(&claims).await;
+        assert!(own.is_ok());
+        let Ok(own) = own else { return };
+        let mut parts = handshake(&own, "t1");
+        let ok = WsAuthUser::from_request_parts(&mut parts, &s.state).await;
+        assert!(matches!(ok, Ok(WsAuthUser(c)) if c.sub == id));
+
+        let foreign = s.state.engine().issue_ws_ticket(&claims).await;
+        assert!(foreign.is_ok());
+        let Ok(foreign) = foreign else { return };
+        let mut parts = handshake(&foreign, "t2");
+        let denied = WsAuthUser::from_request_parts(&mut parts, &s.state).await;
+        assert!(
+            matches!(denied, Err(AuthRejection(AuthError::TokenInvalid))),
+            "a ticket minted for t1 opened a socket under t2: {denied:?}"
         );
     }
 
