@@ -1,0 +1,134 @@
+name: mutation-sweep
+
+# The full-workspace mutation sweep, split into shards. The per-push gate in `ci.yml` mutates
+# only what a push changed; this is the whole-workspace measurement behind the release floor
+# of zero missed mutants. A full sweep is ~2200 mutants and does not fit one job's limit, so
+# `cargo mutants --shard k/n` (https://mutants.rs/shards.html) divides it across a matrix.
+# Manual only: it is a measurement taken on demand, not a check on every change.
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: Commit, branch or tag to sweep. Defaults to the ref the run was dispatched on.
+        required: false
+        default: ''
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: mutation-sweep-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  shard:
+    name: shard ${{ matrix.shard }}/24
+    runs-on: ubuntu-latest
+    # A shard is ~90 mutants at ~100 s each, so ~150 min; the limit leaves room for a slow
+    # runner without letting a hang hold a runner for the 6-hour platform default.
+    timeout-minutes: 240
+    strategy:
+      fail-fast: false
+      matrix:
+        # cargo-mutants numbers shards from 0.
+        shard: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.ref }}
+      - uses: actions-rust-lang/setup-rust-toolchain@ecabd13d1c56bd1345c230e542e9144811ad706f # v2.0.0
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - uses: taiki-e/install-action@5488ac5a951645ce95062214902ac4b6bc1a1037 # v2.87.32
+        with:
+          tool: cargo-mutants@27.1.0
+      - name: Mutate this shard
+        env:
+          SHARD: ${{ matrix.shard }}
+        # `cap_lints` and `--all-features` come from .cargo/mutants.toml, as in ci.yml, so a
+        # replaced body is tested instead of failing to compile under `-D warnings`. That
+        # setting also removes rustc's const-eval hang detection, hence `--build-timeout`
+        # (the config offers only the multiplier form, which `--in-place` refuses).
+        # The exit status is kept so the artifacts upload before the job reports it.
+        run: |
+          set +e
+          cargo mutants --in-place --build-timeout 300 --shard "${SHARD}/24"
+          status=$?
+          echo "cargo-mutants exit status: ${status}"
+          echo "${status}" > mutants.out/exit-status
+          {
+            echo "### Shard ${SHARD}/24 (exit ${status})"
+            jq -r '"total \(.total_mutants) · caught \(.caught) · missed \(.missed) · timeout \(.timeout) · unviable \(.unviable)"' mutants.out/outcomes.json
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit "${status}"
+      - name: Upload shard results
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: mutants-shard-${{ matrix.shard }}
+          path: mutants.out
+          retention-days: 30
+          if-no-files-found: warn
+
+  summary:
+    name: summary
+    needs: shard
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: mutants-shard-*
+          path: shards
+      - name: Totals, and fail on any missed mutant
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          files=(shards/*/outcomes.json)
+          echo "shards reporting: ${#files[@]} of 24"
+          if [ "${#files[@]}" -ne 24 ]; then
+            echo "::error::only ${#files[@]} of 24 shards produced results; the sweep is incomplete"
+            incomplete=1
+          else
+            incomplete=0
+          fi
+          # cargo-mutants rewrites outcomes.json as it goes, so a shard cancelled at the job
+          # limit or lost with its runner still uploads a partial file. The exit-status file
+          # is written only after cargo-mutants returns, so its absence marks that shard.
+          for f in "${files[@]}"; do
+            d="$(dirname "$f")"
+            if [ ! -s "$d/exit-status" ]; then
+              echo "::error::$(basename "$d") did not run to completion (no exit status recorded)"
+              incomplete=1
+            fi
+          done
+          {
+            echo "### Mutation sweep"
+            echo
+            echo "| shard | total | caught | missed | timeout | unviable |"
+            echo "|---|---|---|---|---|---|"
+            for f in "${files[@]}"; do
+              jq -r --arg s "$(basename "$(dirname "$f")")" \
+                '"| \($s) | \(.total_mutants) | \(.caught) | \(.missed) | \(.timeout) | \(.unviable) |"' "$f"
+            done
+            jq -s -r '"| **all** | \(map(.total_mutants)|add) | \(map(.caught)|add) | \(map(.missed)|add) | \(map(.timeout)|add) | \(map(.unviable)|add) |"' "${files[@]}"
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+          missed=0
+          for f in shards/*/missed.txt; do
+            if [ -s "$f" ]; then
+              missed=1
+              echo "::error::missed mutants in $(dirname "$f")"
+              echo "#### Missed in $(dirname "$f" | xargs basename)" >> "$GITHUB_STEP_SUMMARY"
+              { echo '```'; cat "$f"; echo '```'; } | tee -a "$GITHUB_STEP_SUMMARY"
+            fi
+          done
+          timeouts=0
+          for f in shards/*/timeout.txt; do
+            if [ -s "$f" ]; then
+              timeouts=1
+              { echo "#### Timed out in $(dirname "$f" | xargs basename)"; echo '```'; cat "$f"; echo '```'; } | tee -a "$GITHUB_STEP_SUMMARY"
+            fi
+          done
+          [ "$missed" -eq 0 ] && [ "$incomplete" -eq 0 ] && [ "$timeouts" -eq 0 ]
