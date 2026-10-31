@@ -4,10 +4,10 @@ use super::*;
 
 #[tokio::test]
 async fn only_a_cross_tenant_answer_is_reported_as_a_misconfigured_repository() {
-    // The refusal itself is pinned above; this pins the operator signal. The warning names
-    // the repository as the culprit, so it must fire for an account returned from another
-    // tenant and stay silent for an ordinary same-tenant login and for a plain wrong
-    // password, or it would cry wolf on every request.
+    // The refusal itself is pinned by `a_repository_that_ignores_its_tenant_argument_is_refused`;
+    // this pins the operator signal. The warning names the repository as the culprit, so it
+    // must fire for an account returned from another tenant and stay silent for an ordinary
+    // same-tenant login and for a plain wrong password, or it would cry wolf on every request.
     let mut cfg = base_config();
     cfg.email_verification.required = false;
     let Some(h) = harness(cfg, None) else { return };
