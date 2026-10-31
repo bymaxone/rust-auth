@@ -312,11 +312,19 @@ impl AuthEngine {
         if !crossed {
             return;
         }
-        let retry = self
-            .brute_force()
-            .remaining_lockout_secs(identifier)
-            .await
-            .unwrap_or(0);
+        // The window is set on the first failure and never extended, and reaching this read
+        // means this attempt crossed the threshold — so the configured window is a true upper
+        // bound on what is left, where `0` would tell the hook the account is not locked.
+        let retry = match self.brute_force().remaining_lockout_secs(identifier).await {
+            Ok(remaining) => remaining,
+            Err(error) => {
+                tracing::error!(
+                    %error,
+                    "login: could not read the remaining lockout time for the hook; reporting the configured window"
+                );
+                self.brute_force().window_secs()
+            }
+        };
         if let Err(error) = self
             .hooks()
             .on_lockout(email, tenant_id, retry, hook_ctx)
@@ -1176,6 +1184,47 @@ mod tests {
                 .count(),
             5,
             "the failure hook stopped firing: {seen:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_store_that_cannot_report_the_remaining_lockout_still_announces_the_lock_with_the_window()
+     {
+        // The attempt that crosses the threshold has already locked the account; failing to
+        // read how long is left must not tell the hook it is not locked. The configured window
+        // is the honest bound: the counter's expiry is fixed from the first failure.
+        let spy = Arc::new(FailureSpy::default());
+        let mut cfg = base_config();
+        cfg.email_verification.required = false;
+        let window = cfg.brute_force.window.as_secs();
+        let Some(h) = harness(cfg, Some(spy.clone())) else { return };
+        let _ = h.seed(SeedUser::active("ttl@example.com", "right")).await;
+
+        for _ in 0..4 {
+            let _ = h
+                .engine
+                .login(login_input("ttl@example.com", "wrong"), &ctx())
+                .await;
+        }
+        h.stores.fail_next_lockout_ttl_reads(1);
+        let refused = h
+            .engine
+            .login(login_input("ttl@example.com", "wrong"), &ctx())
+            .await;
+        assert!(
+            matches!(refused, Err(AuthError::InvalidCredentials)),
+            "the store failure changed the answer the caller sees"
+        );
+
+        let lockouts: Vec<String> = spy
+            .seen()
+            .into_iter()
+            .filter(|call| call.starts_with("lockout:"))
+            .collect();
+        assert_eq!(
+            lockouts,
+            vec![format!("lockout:ttl@example.com:{window}")],
+            "the hook must fire once, carrying the configured window"
         );
     }
 

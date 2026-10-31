@@ -563,6 +563,9 @@ pub struct InMemoryStores {
     /// `(reads still to let through, reads to fail after them)` for `is_locked`, set through
     /// [`InMemoryStores::fail_lockout_reads`]. `(0, 0)` — the default — reads normally.
     forced_lockout_read_failures: Mutex<(usize, usize)>,
+    /// Armed count of `remaining_lockout_secs` reads that must fail, set through
+    /// [`InMemoryStores::fail_next_lockout_ttl_reads`].
+    forced_lockout_ttl_failures: Mutex<usize>,
     tickets: Mutex<HashMap<String, WsTicketSnapshot>>,
     ticket_counter: AtomicU64,
     reset_tokens: Mutex<HashMap<String, ResetContext>>,
@@ -647,6 +650,15 @@ impl InMemoryStores {
     /// which is otherwise unreachable against a double that always succeeds.
     pub fn fail_lockout_reads(&self, skip: usize, count: usize) {
         *lock(&self.forced_lockout_read_failures) = (skip, count);
+    }
+
+    /// Make the next `count` reads of the remaining lockout time fail.
+    ///
+    /// That read runs only after the lock is confirmed, to put a retry hint on the lockout
+    /// event, so it is reachable only once the gate read has succeeded. A store that always
+    /// answers leaves the arm that substitutes the configured window unexercised.
+    pub fn fail_next_lockout_ttl_reads(&self, count: usize) {
+        *lock(&self.forced_lockout_ttl_failures) = count;
     }
 
     /// Consume one armed lockout-read failure, if any.
@@ -1103,6 +1115,13 @@ impl BruteForceStore for InMemoryStores {
     /// is always at least 1 — `record_failure` inserts and increments under one lock, and
     /// `reset` removes the entry outright — so the entry's existence is the whole condition.
     async fn remaining_lockout_secs(&self, identifier: &str) -> Result<u64, AuthError> {
+        {
+            let mut armed = lock(&self.forced_lockout_ttl_failures);
+            if *armed > 0 {
+                *armed -= 1;
+                return Err(AuthError::Internal("brute-force store unavailable".into()));
+            }
+        }
         Ok(lock(&self.brute_force)
             .get(identifier)
             .map_or(0, |(_, window)| *window))

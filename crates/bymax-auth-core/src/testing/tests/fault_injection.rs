@@ -59,6 +59,20 @@ async fn fail_lockout_reads_skips_then_fails_exactly_count() {
 }
 
 #[tokio::test]
+async fn fail_next_lockout_ttl_reads_fails_exactly_that_many_then_reads() {
+    let stores = InMemoryStores::new();
+    assert!(stores.record_failure("who", 900).await.is_ok());
+    stores.fail_next_lockout_ttl_reads(2);
+
+    let mut answers = Vec::new();
+    for _ in 0..4 {
+        answers.push(stores.remaining_lockout_secs("who").await.ok());
+    }
+
+    assert_eq!(answers, [None, None, Some(900), Some(900)]);
+}
+
+#[tokio::test]
 async fn refuse_next_recovered_writes_refuses_exactly_that_many_then_writes() {
     let stores = InMemoryStores::new();
     let kind = SessionKind::Dashboard;

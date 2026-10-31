@@ -39,6 +39,12 @@ impl BruteForceService {
         }
     }
 
+    /// The configured fixed window, in seconds: the longest a counter can live, because its
+    /// expiry is set on the first failure and never extended.
+    pub(crate) fn window_secs(&self) -> u64 {
+        self.window_secs
+    }
+
     /// Reject an identifier that could corrupt the namespaced store key — one containing
     /// `:`, `\n`, or `\r`, or exceeding `MAX_IDENTIFIER_LENGTH` bytes — with
     /// [`AuthError::Forbidden`]. The rejection is logged without the identifier value.
