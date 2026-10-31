@@ -9,10 +9,16 @@ use crate::extractors::verified_dashboard_claims;
 use crate::response::AuthRejection;
 use crate::state::AuthState;
 
-/// Requires [`super::AuthUser`] and that the user's current status is not in the configured
-/// blocked set. The status is resolved by `AuthEngine::assert_user_active(sub)`; a blocked
+/// Requires [`super::AuthUser`], that the user's current status is not in the configured
+/// blocked set, and — when `email_verification.required` — that the address is verified. Both
+/// are resolved by `AuthEngine::assert_user_active_and_verified(sub, tenant)`; a blocked
 /// account rejects with the status-specific code (`AccountBanned`/`AccountInactive`/
-/// `AccountSuspended`/`PendingApproval`, all 403). Carries the verified claims.
+/// `AccountSuspended`/`PendingApproval`, all 403) before an unverified address is reported as
+/// `EmailNotVerified`. Carries the verified claims.
+///
+/// Registration mints a session before the address is verified, so the verified rule is part of
+/// this gate rather than a separate one: otherwise that session reaches every route behind it
+/// while the address is still unproven.
 #[derive(Debug, Clone)]
 pub struct UserStatus(pub DashboardClaims);
 
@@ -30,21 +36,19 @@ where
         // unique only within a tenant, so an unscoped lookup can resolve someone else's account.
         auth_state
             .engine()
-            .assert_user_active(&claims.sub, &claims.tenant_id)
+            .assert_user_active_and_verified(&claims.sub, &claims.tenant_id)
             .await?;
         Ok(Self(claims))
     }
 }
 
-/// Requires everything [`UserStatus`] does **and** that the account's address is verified.
+/// The gate for operations that must not be reachable from an address nobody has proven, MFA
+/// enrolment above all: enrolling a second factor on an unverified account binds it to a
+/// mailbox that was never shown to belong to the person, and the recovery path for that factor
+/// runs back through the same address.
 ///
-/// Separate from [`UserStatus`] rather than folded into it, because the two gates protect
-/// different things and the routes that want them differ. `UserStatus` guards operations a
-/// signed-in account may perform regardless of whether its address is proven — listing its own
-/// sessions, changing its password, opening a socket. This one guards the operations that must
-/// not be reachable from an address nobody has proven, MFA enrolment above all: enrolling a
-/// second factor on an unverified account binds it to a mailbox that was never shown to belong
-/// to the person, and the recovery path for that factor runs back through the same address.
+/// It applies the same rule as [`UserStatus`] and is kept as its own type so a route states
+/// that intent by name and keeps doing so if `UserStatus` is ever relaxed.
 ///
 /// `GET /auth/me` deliberately takes neither: a pending or suspended client still has to be able
 /// to read its own profile to render the "verify your email" or "suspended" screen, and
@@ -182,6 +186,39 @@ mod tests {
         assert!(matches!(
             VerifiedUser::from_request_parts(&mut parts, &s.state).await,
             Err(AuthRejection(AuthError::AccountSuspended))
+        ));
+    }
+
+    #[tokio::test]
+    async fn user_status_applies_the_verified_address_rule_like_the_status_guard_it_mirrors() {
+        // The status guard of the TypeScript implementation refuses an unproven address on every
+        // route it guards, not only on MFA management, because registration mints a session
+        // before the address is verified. Without this the sessions, password-change and
+        // WebSocket-ticket routes are reachable from an address nobody has proven.
+        let Some(s) = scaffold(TokenDelivery::Cookie) else { return };
+        let id = seed(&s.users, "usv@e.com", "USER").await;
+        let token = dashboard_token(&s, &id).await;
+
+        let mut parts = parts_with_cookie(&token);
+        assert!(matches!(
+            UserStatus::from_request_parts(&mut parts, &s.state).await,
+            Ok(UserStatus(_))
+        ));
+
+        let _ = s.users.update_email_verified(&id, "t1", false).await;
+        let mut parts = parts_with_cookie(&token);
+        let denied = UserStatus::from_request_parts(&mut parts, &s.state).await;
+        assert!(
+            matches!(denied, Err(AuthRejection(AuthError::EmailNotVerified))),
+            "an unverified address passed the status gate: {denied:?}"
+        );
+
+        // A blocked status is refused first, so a banned account is told it is banned.
+        let _ = s.users.update_status(&id, "t1", "BANNED").await;
+        let mut parts = parts_with_cookie(&token);
+        assert!(matches!(
+            UserStatus::from_request_parts(&mut parts, &s.state).await,
+            Err(AuthRejection(AuthError::AccountBanned))
         ));
     }
 }
