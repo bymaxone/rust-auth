@@ -36,6 +36,7 @@ pub mod otp;
 pub mod password;
 #[cfg(feature = "platform")]
 pub mod platform;
+mod rate_limit;
 pub mod session;
 mod tenant_binding;
 pub mod token_manager;
