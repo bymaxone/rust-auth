@@ -1224,4 +1224,24 @@ mod tests {
         spawn_guarded(async { Ok::<(), HookError>(()) });
         tokio::task::yield_now().await;
     }
+
+    /// The re-proof brute-force identifier is a stable, non-reversible handle that separates
+    /// flows from each other and users from each other. If it collapsed to a constant, or
+    /// ignored either input, every user's guesses would share one budget — locking all of them
+    /// out together — or a guess against one flow would escape the other flow's counter.
+    #[tokio::test]
+    async fn the_reproof_identifier_is_stable_and_scoped_to_flow_and_user() {
+        let Some(h) = test_support::harness(test_support::base_config(), None) else { return };
+        let id = h.engine.reproof_identifier("change-password", "user-1");
+
+        assert_eq!(id.len(), 64);
+        assert!(id.chars().all(|c| c.is_ascii_hexdigit()));
+        assert!(!id.contains("user-1"));
+        assert_eq!(id, h.engine.reproof_identifier("change-password", "user-1"));
+
+        assert_ne!(id, h.engine.reproof_identifier("email-change", "user-1"));
+        assert_ne!(id, h.engine.reproof_identifier("change-password", "user-2"));
+        // Never the `login` budget of the same account.
+        assert_ne!(id, h.engine.lockout_identifier("t1", "user-1"));
+    }
 }

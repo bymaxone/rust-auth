@@ -597,4 +597,27 @@ mod tests {
         assert!(checker.is_breached("аааааааа").await);
         assert!(checker.is_breached("東東東東東東東東").await);
     }
+
+    /// The padded-repeat rule needs MORE than two copies of the unit: a unit repeated exactly
+    /// twice (`abcabc`) is a plausible six-character word, and only a third copy marks padding.
+    /// Asserted from both sides so a rule that flagged every repeated unit, or none, fails.
+    #[test]
+    fn a_padded_repeat_needs_more_than_two_copies_of_the_unit() {
+        assert!(!is_padded_repeat("abcabc"));
+        assert!(is_padded_repeat("abcabcabc"));
+        assert!(!is_padded_repeat("abab"));
+        assert!(is_padded_repeat("ababab"));
+        assert!(!is_padded_repeat("abcdefgh"));
+    }
+
+    /// The fragment floor is exclusive at `MIN_BASE_LENGTH`: a base one character short is
+    /// refused as a fragment, one exactly at the floor is judged on its merits and admitted.
+    #[tokio::test]
+    async fn the_fragment_floor_refuses_below_the_minimum_and_admits_at_it() {
+        let checker = CommonPasswordChecker::new();
+        assert_eq!("xqz".chars().count(), MIN_BASE_LENGTH - 1);
+        assert!(checker.is_breached("xqz").await);
+        assert_eq!("xqzj".chars().count(), MIN_BASE_LENGTH);
+        assert!(!checker.is_breached("xqzj").await);
+    }
 }

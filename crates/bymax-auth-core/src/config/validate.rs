@@ -880,6 +880,25 @@ mod tests {
     }
 
     #[test]
+    fn admits_retired_secrets_and_identifier_keys_exactly_on_both_floors() {
+        // The floors are inclusive for every secret the configuration carries, not just the
+        // signing secret: a 32-character value at exactly 3.5 bits/char clears both bars, so a
+        // pinned identifier key or a retired secret of that shape must be admitted. Only a value
+        // sitting on the boundary can tell `<` from `<=` in either check.
+        const ON_THE_FLOOR: &str = "aabbccddeeffgghhiiiijjjjkkkkllll";
+        assert_eq!(ON_THE_FLOOR.chars().count(), MIN_SECRET_LEN);
+        assert!((shannon_entropy(ON_THE_FLOOR) - MIN_SECRET_ENTROPY).abs() < f64::EPSILON);
+
+        let mut pinned = valid_config();
+        pinned.identifier_key = Some(SecretString::from(ON_THE_FLOOR.to_owned()));
+        assert!(pinned.validate(Environment::Production).is_ok());
+
+        let mut rotated = valid_config();
+        rotated.jwt.previous_secrets = vec![SecretString::from(ON_THE_FLOOR.to_owned())];
+        assert!(rotated.validate(Environment::Production).is_ok());
+    }
+
+    #[test]
     fn rejects_low_entropy_secret() {
         let mut cfg = valid_config();
         // 32 identical characters: length passes, entropy is 0.
