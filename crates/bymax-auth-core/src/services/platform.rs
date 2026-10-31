@@ -1024,6 +1024,63 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn enrolling_a_second_factor_alone_reaches_the_very_next_rotation() {
+        // The role is untouched here, so the role half of the re-stamp condition is satisfied
+        // and the MFA flag is the only thing standing between the stale `prt:` record and the
+        // token. The demotion test above changes the role on every step, which lets a broken
+        // MFA comparison hide behind the role mismatch.
+        let Some(h) = harness(platform_config()) else { return };
+        let make = |mfa: bool| AuthPlatformUser {
+            id: "admin-enrolling".to_owned(),
+            email: "enrolling@admin.io".to_owned(),
+            name: "Admin".to_owned(),
+            password_hash: hash_password("pw"),
+            role: "SUPPORT".to_owned(),
+            status: "ACTIVE".to_owned(),
+            mfa_enabled: mfa,
+            mfa_secret: None,
+            mfa_recovery_codes: None,
+            platform_id: None,
+            last_login_at: None,
+            updated_at: OffsetDateTime::UNIX_EPOCH,
+            created_at: OffsetDateTime::UNIX_EPOCH,
+        };
+        h.admins.insert(make(false));
+        let Some(svc) = h.engine.platform_auth() else { return };
+        let signed_in = svc.login("enrolling@admin.io", "pw", "1.2.3.4", "a").await;
+        let Ok(PlatformLoginResult::Success(auth)) = signed_in else { return };
+
+        // Nothing changed: the rotated token still carries the account's role and no MFA.
+        let unchanged = svc.refresh(&auth.refresh_token, "1.2.3.4", "a").await;
+        assert!(unchanged.is_ok(), "rotation must succeed: {unchanged:?}");
+        let Ok(unchanged) = unchanged else { return };
+        let claims = h
+            .engine
+            .tokens()
+            .verify_platform_access(&unchanged.access_token)
+            .await;
+        assert!(claims.is_ok(), "the token must verify: {claims:?}");
+        let Ok(claims) = claims else { return };
+        assert_eq!(claims.role, "SUPPORT");
+        assert!(!claims.mfa_enabled);
+
+        // The admin enrols: same role, new factor.
+        h.admins.insert(make(true));
+        let enrolled = svc.refresh(&unchanged.refresh_token, "1.2.3.4", "a").await;
+        assert!(enrolled.is_ok(), "rotation must succeed: {enrolled:?}");
+        let Ok(enrolled) = enrolled else { return };
+        let claims = h
+            .engine
+            .tokens()
+            .verify_platform_access(&enrolled.access_token)
+            .await;
+        assert!(claims.is_ok(), "the token must verify: {claims:?}");
+        let Ok(claims) = claims else { return };
+        assert_eq!(claims.role, "SUPPORT");
+        assert!(claims.mfa_enabled, "the MFA flag never reached the token");
+    }
+
+    #[tokio::test]
     async fn each_blocked_status_maps_to_its_specific_error() {
         // Every blocked status maps to its own 403 — for the holder of the password. The gate
         // runs AFTER the KDF now: answering before it enumerated operator accounts and read
