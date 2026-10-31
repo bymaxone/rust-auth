@@ -254,7 +254,7 @@ impl TokenManagerService {
             ..*opts
         };
         let current = verify::<C>(token, &self.key, &opts);
-        if current.is_ok() || self.previous_keys.is_empty() {
+        if current.is_ok() {
             return current;
         }
         for key in &self.previous_keys {
