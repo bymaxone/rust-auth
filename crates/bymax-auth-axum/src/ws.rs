@@ -80,7 +80,7 @@ where
 
 /// WebSocket-upgrade auth for non-browser clients: validates the access JWT in the handshake
 /// `Authorization: Bearer` header (HS256-pinned, `type = dashboard`, `rv:{jti}` revocation) —
-/// the same checks as `AuthUser`, and still **never** from the URL. Refuses with 401 on an
+/// the same checks as `AuthUser` (including `enforce_tenant_binding`), and still **never** from the URL. Refuses with 401 on an
 /// absent or invalid header.
 #[derive(Debug, Clone)]
 pub struct WsAuthUserFromHeader(pub DashboardClaims);
@@ -96,6 +96,12 @@ where
         let auth_state = AuthState::from_ref(state);
         let token = bearer_from_header(parts).ok_or(AuthError::TokenInvalid)?;
         let claims = auth_state.engine().verify_access_token(&token).await?;
+        // The same binding the HTTP extractors apply: a gate present on one transport and absent
+        // on the other is a way around it.
+        auth_state
+            .engine()
+            .assert_tenant_binding(&claims.tenant_id, &crate::routes::request_context(parts))
+            .await?;
         Ok(Self(claims))
     }
 }
@@ -122,9 +128,10 @@ fn bearer_from_header(parts: &Parts) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::{dashboard_token, scaffold, seed};
+    use crate::test_support::{HostTenant, dashboard_token, scaffold, scaffold_with, seed};
     use bymax_auth_core::config::TokenDelivery;
     use http::Request;
+    use std::sync::Arc;
 
     /// Build `Parts` whose URI carries a `?ticket=` query (the sole URL-borne credential).
     fn parts_with_ticket(ticket: &str) -> Parts {
@@ -187,6 +194,42 @@ mod tests {
             none_denied,
             Err(AuthRejection(AuthError::TokenInvalid))
         ));
+    }
+
+    /// Enforce the tenant binding with a resolver that names the tenant after the `host` header.
+    fn enforcing(config: &mut bymax_auth_core::config::AuthConfig) {
+        config.tenant_id_resolver = Some(Arc::new(HostTenant));
+        config.enforce_tenant_binding = true;
+    }
+
+    #[tokio::test]
+    async fn the_header_handshake_applies_the_tenant_binding_like_the_http_extractors() {
+        // A token minted for `t1` must not open a socket under another tenant's host when the
+        // binding is enforced; the resolver here names the tenant after the `host` header.
+        let Some(s) = scaffold_with(TokenDelivery::Cookie, enforcing) else { return };
+        let id = seed(&s.users, "wsb@e.com", "USER").await;
+        let token = dashboard_token(&s, &id).await;
+        let handshake = |host: &str| {
+            Request::builder()
+                .uri("/ws")
+                .header(http::header::AUTHORIZATION, format!("Bearer {token}"))
+                .header(http::header::HOST, host)
+                .body(())
+                .unwrap_or_default()
+                .into_parts()
+                .0
+        };
+
+        let mut own = handshake("t1");
+        let ok = WsAuthUserFromHeader::from_request_parts(&mut own, &s.state).await;
+        assert!(matches!(ok, Ok(WsAuthUserFromHeader(c)) if c.sub == id));
+
+        let mut other = handshake("t2");
+        let denied = WsAuthUserFromHeader::from_request_parts(&mut other, &s.state).await;
+        assert!(
+            matches!(denied, Err(AuthRejection(AuthError::TokenInvalid))),
+            "a token minted for t1 opened a socket under t2: {denied:?}"
+        );
     }
 
     #[tokio::test]

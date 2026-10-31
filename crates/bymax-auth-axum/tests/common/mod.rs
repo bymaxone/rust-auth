@@ -547,6 +547,9 @@ pub struct FailingStores {
     /// `OauthFailed` — the one input that proves an infrastructure failure is NOT swallowed
     /// into the friendly `?error=oauth_failed` redirect.
     oauth_state_fails: bool,
+    /// When set, the invitation index read fails, so the revoke handler's store-failure arm is
+    /// reachable after the extractors have passed.
+    invitation_index_fails: bool,
 }
 
 impl FailingStores {
@@ -555,6 +558,14 @@ impl FailingStores {
             inner: Arc::new(InMemoryStores::new()),
             blacklist_fails: false,
             oauth_state_fails: false,
+            invitation_index_fails: false,
+        }
+    }
+
+    fn with_failing_invitation_index() -> Self {
+        Self {
+            invitation_index_fails: true,
+            ..Self::new()
         }
     }
 
@@ -563,6 +574,7 @@ impl FailingStores {
             inner: Arc::new(InMemoryStores::new()),
             blacklist_fails: true,
             oauth_state_fails: false,
+            invitation_index_fails: false,
         }
     }
 
@@ -571,6 +583,7 @@ impl FailingStores {
             inner: Arc::new(InMemoryStores::new()),
             blacklist_fails: false,
             oauth_state_fails: true,
+            invitation_index_fails: false,
         }
     }
 }
@@ -887,6 +900,9 @@ impl bymax_auth_core::traits::InvitationStore for FailingStores {
         tenant_id: &str,
         email: &str,
     ) -> Result<Option<String>, bymax_auth_types::AuthError> {
+        if self.invitation_index_fails {
+            return Err(fail());
+        }
         self.inner.read_invitation_index(tenant_id, email).await
     }
     async fn take_invitation_index(
@@ -1013,9 +1029,19 @@ impl bymax_auth_core::traits::OAuthStateStore for FailingStores {
 /// Build an engine whose store backend always fails, with the sessions + platform groups on,
 /// so a test can drive the store-failure error arms of the session/platform/WS handlers.
 pub fn build_failing() -> Option<Harness> {
+    build_failing_over(FailingStores::new(), false)
+}
+
+/// As [`build_failing`], with the invitations group mounted and the invitation index read
+/// failing, so the revoke handler's store-failure arm is reachable.
+pub fn build_failing_invitation_index() -> Option<Harness> {
+    build_failing_over(FailingStores::with_failing_invitation_index(), true)
+}
+
+fn build_failing_over(failing: FailingStores, invitations: bool) -> Option<Harness> {
     let users = Arc::new(InMemoryUserRepository::new());
     let admins = Arc::new(InMemoryPlatformUserRepository::new());
-    let failing = Arc::new(FailingStores::new());
+    let failing = Arc::new(failing);
     // The stores field is unused by the failing-store tests, but the Harness shape needs one.
     let inert = Arc::new(InMemoryStores::new());
 
@@ -1032,6 +1058,8 @@ pub fn build_failing() -> Option<Harness> {
     // a freshly registered account has no verified address. Verification is not what they
     // exercise, so it is not required, or the account gate would refuse them before the store.
     config.email_verification.required = false;
+    config.controllers.invitations = invitations;
+    config.invitations.enabled = invitations;
 
     let engine = AuthEngine::builder()
         .config(config)

@@ -38,6 +38,30 @@ pub(crate) struct Scaffold {
 /// the platform/MFA/role extractor tests can run. Returns `None` only if the engine fails to
 /// build (it does not, for this config) — callers use `let Some(s) = scaffold(..) else { return };`.
 pub(crate) fn scaffold(delivery: TokenDelivery) -> Option<Scaffold> {
+    scaffold_with(delivery, |_| {})
+}
+
+/// A resolver that names the tenant after the request's `host` header.
+pub(crate) struct HostTenant;
+
+#[async_trait::async_trait]
+impl bymax_auth_core::config::TenantIdResolver for HostTenant {
+    async fn resolve(
+        &self,
+        parts: &bymax_auth_core::config::RequestParts,
+    ) -> Result<String, bymax_auth_core::config::TenantResolveError> {
+        match parts.host.as_deref() {
+            Some("") | None => Err(bymax_auth_core::config::TenantResolveError::Empty),
+            Some(host) => Ok(host.to_owned()),
+        }
+    }
+}
+
+/// [`scaffold`] with `tweak` applied to the config before the engine is built.
+pub(crate) fn scaffold_with(
+    delivery: TokenDelivery,
+    tweak: impl FnOnce(&mut AuthConfig),
+) -> Option<Scaffold> {
     let users = Arc::new(InMemoryUserRepository::new());
     let admins = Arc::new(InMemoryPlatformUserRepository::new());
     let stores = Arc::new(InMemoryStores::new());
@@ -61,6 +85,7 @@ pub(crate) fn scaffold(delivery: TokenDelivery) -> Option<Scaffold> {
         recovery_code_count: 8,
         totp_window: 2,
     });
+    tweak(&mut config);
 
     let engine = AuthEngine::builder()
         .config(config)

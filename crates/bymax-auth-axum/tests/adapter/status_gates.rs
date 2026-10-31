@@ -5,6 +5,7 @@
 
 use super::*;
 use bymax_auth_core::traits::UserRepository;
+use common::build_failing_invitation_index;
 
 /// Log `email` in (cookie mode) and return its access cookie value.
 async fn access_for(app: &axum::Router, email: &str) -> String {
@@ -108,4 +109,25 @@ async fn an_unverified_address_cannot_move_itself_or_touch_invitations_when_veri
         );
         assert_eq!(code_of(&denied), "auth.email_not_verified", "{path}");
     }
+}
+
+#[tokio::test]
+async fn a_store_failure_while_revoking_is_reported_after_the_account_gate_passes() {
+    // The account gate runs first and passes for a good account; what the handler then answers
+    // is the store's failure, not a silent 204.
+    let Some(h) = build_failing_invitation_index() else { return };
+    let app = router(&h);
+    let reg = Req::post("/auth/register")
+        .json(serde_json::json!({
+            "email": "revoker@e.com", "password": "glidingwalnut42", "name": "Rv", "tenantId": TENANT
+        }))
+        .send(&app)
+        .await;
+    let access = reg.cookie_value("access_token").unwrap_or_default();
+    let revoke = Req::post("/auth/invitations/revoke")
+        .cookie("access_token", &access)
+        .json(serde_json::json!({ "email": "invitee@e.com" }))
+        .send(&app)
+        .await;
+    assert_eq!(revoke.status, StatusCode::INTERNAL_SERVER_ERROR);
 }

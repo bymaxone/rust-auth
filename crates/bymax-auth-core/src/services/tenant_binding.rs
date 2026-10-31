@@ -29,10 +29,12 @@ impl AuthEngine {
         ctx: &RequestContext,
     ) -> Result<(), AuthError> {
         let config = self.config().config();
-        if !config.enforce_tenant_binding {
-            return Ok(());
-        }
-        let Some(resolver) = config.tenant_id_resolver.as_ref() else {
+        // Startup rejects the flag without a resolver, so an enforcing engine always has one.
+        let Some(resolver) = config
+            .tenant_id_resolver
+            .as_ref()
+            .filter(|_| config.enforce_tenant_binding)
+        else {
             return Ok(());
         };
         let request_tenant = resolver
@@ -128,12 +130,9 @@ mod tests {
         let mut config = base_config();
         config.enforce_tenant_binding = true;
         let result = config.validate(crate::config::Environment::Test);
-        assert!(
-            matches!(
-                result,
-                Err(crate::error::ConfigError::TenantBindingWithoutResolver)
-            ),
-            "{result:?}"
-        );
+        assert!(matches!(
+            result,
+            Err(crate::error::ConfigError::TenantBindingWithoutResolver)
+        ));
     }
 }
