@@ -166,3 +166,23 @@ fn argon2_is_stale(hash: &PasswordHash, ident: &str, current: &super::Argon2Para
         _ => true,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::MAX_ADMISSIBLE_LN;
+
+    #[test]
+    fn the_admissible_log_cost_ceiling_is_the_documented_twenty_two() {
+        // The ceiling is the largest `ln` whose smallest legal working set (`r = 1`) still fits
+        // the 512 MiB bound: `128 * 2^22` is exactly that bound and `2^23` is twice it. The
+        // later size check also rejects `ln` 23 and above, so no admissibility result depends
+        // on this constant being 22 rather than larger; it is pinned because it is the figure
+        // the shift in `scrypt_cost_is_admissible` is proven overflow-free against, and the
+        // one the module documents.
+        assert_eq!(MAX_ADMISSIBLE_LN, 22);
+        assert_eq!(
+            128u64 << MAX_ADMISSIBLE_LN,
+            super::MAX_KDF_BYTES_PER_DERIVATION
+        );
+    }
+}
