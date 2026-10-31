@@ -74,9 +74,11 @@ Unless a rule here says to report without one, raise a bug only with its trigger
 repository state, the command, the wrong result. Letting through what should be refused is P1 at
 least, as is a crash an untrusted caller can trigger; a refusal, or a crash no untrusted caller can
 reach, on input the project does not claim to support is not. Behaviour already present at the merge
-base belongs to another change. On new commits, review what changed since the last reviewed commit,
-and treat a thread resolved or answered with a reason as settled. One comment per root cause, its
-siblings named in it.
+base belongs to another change. On new commits, review what changed since the last reviewed commit.
+A thread is settled only when the reply cites evidence that disproves the finding (a command, a
+test, a file:line) or the code it names changed; a resolved thread or a bare reason is not evidence,
+so re-check the current code and raise the finding again only if its trigger still reproduces. One
+comment per root cause, its siblings named in it.
 
 ### A dependency upgrade migrates every call site, not only the ones that fail to compile
 
