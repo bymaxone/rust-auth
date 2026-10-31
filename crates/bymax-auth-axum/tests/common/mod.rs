@@ -67,6 +67,9 @@ pub struct EngineSpec {
     pub email_change: bool,
     pub sessions: bool,
     pub verification_required: bool,
+    /// Resolve the request tenant from the `host` header and enforce that a token's tenant
+    /// equals it.
+    pub enforce_tenant_binding: bool,
     pub allow_oauth: bool,
     /// Origins the deployment trusts for cross-site, cookie-authenticated writes. Setting any
     /// switches `SameSite` to `None`, since the two are only valid together.
@@ -87,6 +90,7 @@ impl Default for EngineSpec {
             email_change: false,
             sessions: false,
             verification_required: false,
+            enforce_tenant_binding: false,
             allow_oauth: false,
             trusted_origins: &[],
             cookie_domains: &[],
@@ -266,6 +270,22 @@ pub struct Harness {
     pub emails: Arc<CapturingEmails>,
 }
 
+/// A resolver that names the tenant after the request's `host` header.
+struct HostTenant;
+
+#[async_trait::async_trait]
+impl bymax_auth_core::config::TenantIdResolver for HostTenant {
+    async fn resolve(
+        &self,
+        parts: &bymax_auth_core::config::RequestParts,
+    ) -> Result<String, bymax_auth_core::config::TenantResolveError> {
+        match parts.host.as_deref() {
+            Some("") | None => Err(bymax_auth_core::config::TenantResolveError::Empty),
+            Some(host) => Ok(host.to_owned()),
+        }
+    }
+}
+
 /// Build an engine + router over in-memory stores per `spec`.
 pub fn build(spec: EngineSpec) -> Option<Harness> {
     let users = Arc::new(InMemoryUserRepository::new());
@@ -276,6 +296,10 @@ pub fn build(spec: EngineSpec) -> Option<Harness> {
     config.jwt.secret = SecretString::from(JWT_SECRET.to_owned());
     config.token_delivery = spec.delivery;
     config.email_verification.required = spec.verification_required;
+    if spec.enforce_tenant_binding {
+        config.tenant_id_resolver = Some(Arc::new(HostTenant));
+        config.enforce_tenant_binding = true;
+    }
     config.password_reset.method = bymax_auth_core::config::ResetMethod::Otp;
     config.roles.hierarchy = HashMap::from([
         ("ADMIN".to_owned(), vec!["USER".to_owned()]),

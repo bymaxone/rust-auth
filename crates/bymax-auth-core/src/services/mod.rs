@@ -37,6 +37,7 @@ pub mod password;
 #[cfg(feature = "platform")]
 pub mod platform;
 pub mod session;
+mod tenant_binding;
 pub mod token_manager;
 
 use bymax_auth_types::{AuthError, MfaContext};

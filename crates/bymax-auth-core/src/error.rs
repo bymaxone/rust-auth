@@ -14,6 +14,14 @@
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum ConfigError {
+    /// `enforce_tenant_binding` is set but no `tenant_id_resolver` is configured, so the binding
+    /// check would have nothing to compare the token's tenant against and would enforce nothing.
+    #[error(
+        "enforce_tenant_binding is true but no tenant_id_resolver is set: with nothing to resolve \
+         the request's tenant, every token would be accepted while the deployment believes the \
+         binding is enforced"
+    )]
+    TenantBindingWithoutResolver,
     /// `jwt.secret` is shorter than the 32-character minimum.
     #[error("jwt.secret must be at least 32 characters (got {len})")]
     JwtSecretTooShort {

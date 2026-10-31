@@ -97,6 +97,12 @@ pub(crate) async fn verified_dashboard_claims(
     }
     let token = source_access_token(parts, state.config()).ok_or(AuthError::TokenMissing)?;
     let claims = state.engine().verify_access_token(&token).await?;
+    // Checked before the claims are cached, so a stacked extractor never reads claims that
+    // skipped the binding.
+    state
+        .engine()
+        .assert_tenant_binding(&claims.tenant_id, &crate::routes::request_context(parts))
+        .await?;
     parts.extensions.insert(claims.clone());
     Ok(claims)
 }
