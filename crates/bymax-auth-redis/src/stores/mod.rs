@@ -2,7 +2,8 @@
 //!
 //! Each submodule implements one (or two) traits on [`crate::RedisStores`]: refresh-session
 //! lifecycle plus access-token blacklist ([`session`]), one-time passwords ([`otp`]), the
-//! fixed-window brute-force counter ([`brute_force`]), the single-use WebSocket ticket
+//! fixed-window brute-force counter ([`brute_force`]), the shared per-route request counter
+//! ([`rate_limit`]), the single-use WebSocket ticket
 //! ([`ws_ticket`]), the small single-use opaque-token keyspaces for password reset and
 //! invitations ([`single_use`]), and — under the `oauth` feature — the single-use OAuth
 //! `state` + PKCE keyspace ([`oauth`]). The atomic, race-sensitive transitions run as Lua scripts
@@ -16,6 +17,7 @@ mod mfa;
 #[cfg(feature = "oauth")]
 mod oauth;
 mod otp;
+mod rate_limit;
 mod session;
 mod single_use;
 mod ws_ticket;

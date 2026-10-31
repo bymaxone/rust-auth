@@ -186,6 +186,16 @@ impl NamespacedRedis {
     pub fn key(&self, prefix: Prefix, id: &str) -> String {
         format!("{}:{}:{}", self.namespace, prefix.as_str(), id)
     }
+
+    /// The rate-limit counter key `{namespace}:rl:{route}:{bucket_hash}`.
+    ///
+    /// Outside [`Prefix`] on purpose: the route naming is each implementation's own, so the family
+    /// is not part of the shared prefix contract. `route` is a static route name the adapter
+    /// defines and `bucket_hash` a keyed hash, neither holding a delimiter or a raw address.
+    #[must_use]
+    pub fn rate_limit_key(&self, route: &str, bucket_hash: &str) -> String {
+        format!("{}:rl:{}:{}", self.namespace, route, bucket_hash)
+    }
 }
 
 #[cfg(test)]
