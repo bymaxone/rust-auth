@@ -17,6 +17,8 @@ mod manage;
 mod setup;
 
 #[cfg(test)]
+mod recovery_tests;
+#[cfg(test)]
 mod tests;
 
 use std::sync::Arc;

@@ -535,6 +535,7 @@ async fn run_after_logout(
 #[cfg(test)]
 mod tests {
     use super::*;
+    mod enrolment_rotation_tests;
     use crate::config::{AuthConfig, Environment};
     use crate::context::RequestContext;
     use crate::engine::AuthEngine;

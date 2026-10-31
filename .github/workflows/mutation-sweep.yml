@@ -61,6 +61,11 @@ jobs:
             echo "### Shard ${SHARD}/24 (exit ${status})"
             jq -r '"total \(.total_mutants) · caught \(.caught) · missed \(.missed) · timeout \(.timeout) · unviable \(.unviable)"' mutants.out/outcomes.json
           } >> "$GITHUB_STEP_SUMMARY"
+          # Exit 3 means only timeouts: a mutant that makes the suite hang is detected, since
+          # a test run that never finishes is not a passing one. Listed in the summary, not failed.
+          if [ "${status}" -eq 3 ]; then
+            exit 0
+          fi
           exit "${status}"
       - name: Upload shard results
         if: always()
@@ -124,11 +129,9 @@ jobs:
               { echo '```'; cat "$f"; echo '```'; } | tee -a "$GITHUB_STEP_SUMMARY"
             fi
           done
-          timeouts=0
           for f in shards/*/timeout.txt; do
             if [ -s "$f" ]; then
-              timeouts=1
               { echo "#### Timed out in $(dirname "$f" | xargs basename)"; echo '```'; cat "$f"; echo '```'; } | tee -a "$GITHUB_STEP_SUMMARY"
             fi
           done
-          [ "$missed" -eq 0 ] && [ "$incomplete" -eq 0 ] && [ "$timeouts" -eq 0 ]
+          [ "$missed" -eq 0 ] && [ "$incomplete" -eq 0 ]

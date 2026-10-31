@@ -466,6 +466,7 @@ fn has_role(holder: &str, required: &str, hierarchy: &HashMap<String, Vec<String
 #[cfg(test)]
 mod tests {
     use super::*;
+    mod structural_guard_tests;
     use crate::config::{AuthConfig, Environment};
     use crate::testing::{InMemoryStores, InMemoryUserRepository};
     use crate::traits::{

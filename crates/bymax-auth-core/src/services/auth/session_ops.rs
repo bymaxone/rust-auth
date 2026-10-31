@@ -421,6 +421,7 @@ fn identity_only_context(
 #[cfg(test)]
 mod tests {
     use super::*;
+    mod logout_hook_tests;
     use crate::services::auth::LoginInput;
     use crate::services::auth::test_support::{Harness, SeedUser, base_config, ctx, harness};
     use crate::traits::{SessionRecord, SessionStore as _, UserRepository as _};

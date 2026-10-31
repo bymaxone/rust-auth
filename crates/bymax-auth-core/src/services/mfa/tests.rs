@@ -28,7 +28,7 @@ use crate::traits::{
 };
 use zeroize::Zeroizing;
 
-const PASSWORD: &str = "correct horse battery staple";
+pub(super) const PASSWORD: &str = "correct horse battery staple";
 const TENANT: &str = "t1";
 
 /// The identifier-hashing key every service in these fixtures shares.
@@ -49,7 +49,7 @@ fn key_b64() -> String {
 /// and enrolment's re-authentication always applies on that plane — a placeholder like
 /// `"$scrypt$x"` makes `setup` refuse, and a test that swallows the refusal with `else
 /// { return }` then passes while exercising nothing.
-fn admin_password_hash() -> String {
+pub(super) fn admin_password_hash() -> String {
     let params = bymax_auth_crypto::password::PasswordParams::default();
     bymax_auth_crypto::password::hash(PASSWORD.as_bytes(), &params).unwrap_or_default()
 }
@@ -61,10 +61,10 @@ fn ctx() -> RequestContext {
 
 /// The harness: a real engine over the in-memory stores with MFA configured, plus handles to
 /// the in-memory repositories for seeding and inspection.
-struct Harness {
-    engine: AuthEngine,
-    users: Arc<InMemoryUserRepository>,
-    platform: Arc<InMemoryPlatformUserRepository>,
+pub(super) struct Harness {
+    pub(super) engine: AuthEngine,
+    pub(super) users: Arc<InMemoryUserRepository>,
+    pub(super) platform: Arc<InMemoryPlatformUserRepository>,
     /// The same stores the engine holds, so a test can arm the transition-lock window.
     stores: Arc<InMemoryStores>,
 }
@@ -72,7 +72,7 @@ struct Harness {
 /// Build the harness. `sessions` toggles session tracking; `wire_platform` wires a platform
 /// repository (without enabling the platform domain) so the platform-context routing is
 /// exercised.
-fn build(sessions: bool, wire_platform: bool) -> Option<Harness> {
+pub(super) fn build(sessions: bool, wire_platform: bool) -> Option<Harness> {
     build_with(sessions, wire_platform, None, None)
 }
 
@@ -148,7 +148,7 @@ fn build_full(
 }
 
 /// Register an active dashboard user and return its id.
-async fn register(engine: &AuthEngine, email: &str) -> Option<String> {
+pub(super) async fn register(engine: &AuthEngine, email: &str) -> Option<String> {
     let input = crate::services::auth::RegisterInput {
         email: email.to_owned(),
         name: "U".to_owned(),
@@ -162,7 +162,7 @@ async fn register(engine: &AuthEngine, email: &str) -> Option<String> {
 }
 
 /// Log in and return the MFA temp token (the user must already have MFA enabled).
-async fn login_temp_token(engine: &AuthEngine, email: &str) -> Option<String> {
+pub(super) async fn login_temp_token(engine: &AuthEngine, email: &str) -> Option<String> {
     let input = crate::services::auth::LoginInput {
         email: email.to_owned(),
         password: PASSWORD.to_owned(),
@@ -193,7 +193,7 @@ fn code_at(secret_b32: &str, at_unix: i64) -> String {
 
 /// A valid TOTP code for `secret_b32` at `offset_secs` from now (for tests that use one or two
 /// codes, where a per-call clock read cannot collide).
-fn code(secret_b32: &str, offset_secs: i64) -> String {
+pub(super) fn code(secret_b32: &str, offset_secs: i64) -> String {
     code_at(secret_b32, now_secs() + offset_secs)
 }
 

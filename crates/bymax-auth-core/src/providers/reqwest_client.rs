@@ -371,4 +371,69 @@ mod tests {
             "an unbounded body must be refused by the cap, not by the peer hanging up: {res:?}"
         );
     }
+
+    /// A `200 OK` carrying exactly `total` body bytes in HTTP chunks of `chunk_len`, properly
+    /// terminated, with no declared length.
+    fn chunked_response(total: usize, chunk_len: usize) -> Vec<u8> {
+        let mut out = b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n".to_vec();
+        let mut remaining = total;
+        while remaining > 0 {
+            let n = remaining.min(chunk_len);
+            out.extend_from_slice(format!("{n:x}\r\n").as_bytes());
+            out.extend_from_slice(&vec![b'a'; n]);
+            out.extend_from_slice(b"\r\n");
+            remaining -= n;
+        }
+        out.extend_from_slice(b"0\r\n\r\n");
+        out
+    }
+
+    /// Send a GET to a one-shot server answering with `raw` and return the outcome.
+    async fn get_from(raw: Vec<u8>) -> Option<Result<HttpResponse, HttpError>> {
+        let (addr, _handle) = spawn_server(Behavior::Respond(raw)).await?;
+        let client = ReqwestHttpClient::new().ok()?;
+        Some(
+            client
+                .send(HttpRequest {
+                    method: HttpMethod::Get,
+                    url: format!("http://{addr}/userinfo"),
+                    headers: Vec::new(),
+                    body: None,
+                })
+                .await,
+        )
+    }
+
+    /// The cap is inclusive: a body of exactly `MAX_RESPONSE_BYTES` is a legitimate response
+    /// and is returned whole, whether its length is declared or streamed. Refusing at the
+    /// boundary would reject the largest response the client promises to accept; the cap's
+    /// absolute value is pinned by the same test.
+    #[tokio::test]
+    async fn a_response_of_exactly_the_cap_is_accepted_declared_or_streamed() {
+        assert_eq!(MAX_RESPONSE_BYTES, 1024 * 1024);
+
+        let body = "a".repeat(MAX_RESPONSE_BYTES);
+        let declared = get_from(ok_response(&body)).await;
+        assert!(
+            matches!(&declared, Some(Ok(r)) if r.body.len() == MAX_RESPONSE_BYTES),
+            "a declared body at the cap must be returned whole"
+        );
+
+        let streamed = get_from(chunked_response(MAX_RESPONSE_BYTES, 64 * 1024)).await;
+        assert!(
+            matches!(&streamed, Some(Ok(r)) if r.body.len() == MAX_RESPONSE_BYTES),
+            "a streamed body at the cap must be returned whole"
+        );
+    }
+
+    /// A streamed body one byte over the cap is refused even when no chunk boundary lands on
+    /// the cap itself: the bound is "more than", not "exactly".
+    #[tokio::test]
+    async fn a_streamed_body_crossing_the_cap_between_chunks_is_refused() {
+        let res = get_from(chunked_response(MAX_RESPONSE_BYTES + 1, 1000)).await;
+        assert!(
+            matches!(&res, Some(Err(HttpError::Transport(msg))) if msg.contains("too large")),
+            "crossing the cap must be refused by the cap"
+        );
+    }
 }

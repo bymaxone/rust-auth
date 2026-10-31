@@ -498,6 +498,9 @@ fn parse_api_error(status: u16, bytes: &[u8]) -> AuthClientError {
 }
 
 #[cfg(test)]
+mod capture_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use std::future::Future;
@@ -509,7 +512,7 @@ mod tests {
 
     /// Build a raw HTTP/1.1 response with `Connection: close` so each request opens a fresh
     /// connection (the mock server serves one queued response per connection).
-    fn response(status: u16, reason: &str, body: &str) -> Vec<u8> {
+    pub(crate) fn response(status: u16, reason: &str, body: &str) -> Vec<u8> {
         format!(
             "HTTP/1.1 {status} {reason}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
             body.len()
@@ -920,39 +923,6 @@ mod tests {
             assert!(client.has_session());
         })
         .await;
-    }
-
-    #[tokio::test]
-    async fn forgot_password_succeeds_on_2xx() {
-        // forgot-password returns 200 `{}`.
-        let plan = vec![Some(response(200, "OK", "{}"))];
-        with_server(plan, |client| async move {
-            assert!(client.forgot_password("u@e.com", "t1").await.is_ok());
-        })
-        .await;
-    }
-
-    #[tokio::test]
-    async fn reset_password_sends_each_proof_variant() {
-        // Each proof variant (token / otp / verified) completes on a 204.
-        let proofs = [
-            ResetPasswordProof::Token("tok".to_owned()),
-            ResetPasswordProof::Otp("123456".to_owned()),
-            ResetPasswordProof::VerifiedToken("vt".to_owned()),
-        ];
-        for proof in proofs {
-            let plan = vec![Some(response(204, "No Content", ""))];
-            with_server(plan, |client| async move {
-                let input = ResetPasswordRequest {
-                    email: "u@e.com".to_owned(),
-                    new_password: "newglidingwalnut42".to_owned(),
-                    proof,
-                    tenant_id: "t1".to_owned(),
-                };
-                assert!(client.reset_password(&input).await.is_ok());
-            })
-            .await;
-        }
     }
 
     #[test]

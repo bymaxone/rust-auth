@@ -692,6 +692,7 @@ mod tests {
     use super::*;
     use crate::services::auth::test_support::{base_config, harness};
 
+    mod verified_gate_tests;
     mod ws_ticket_revocation;
 
     /// `current_session_hash` returns `None` for an absent/malformed token and a 64-hex hash

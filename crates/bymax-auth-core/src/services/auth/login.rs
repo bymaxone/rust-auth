@@ -445,6 +445,7 @@ fn has_local_hash(user: &AuthUser) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    mod tenant_warning_tests;
     use crate::services::auth::test_support::{Harness, SeedUser, base_config, ctx, harness};
     use crate::traits::UserRepository;
     use std::sync::Arc;

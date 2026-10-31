@@ -31,7 +31,7 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-uti
 # The full Axum backend, engine, and real Redis stores for the end-to-end round-trip.
 bymax-auth-axum = { workspace = true, features = ["sessions"] }
 bymax-auth-core = { workspace = true, features = ["testing"] }
-bymax-auth-redis = { workspace = true }
+bymax-auth-redis = { workspace = true, features = ["mfa", "oauth", "platform"] }
 # Serve the built router over a real TCP socket so reqwest can drive it end to end.
 axum = { version = "0.8", default-features = false, features = ["tokio", "http1"] }
 secrecy = "0.10"
