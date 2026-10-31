@@ -40,6 +40,15 @@ fn engine(
     stores: &Arc<InMemoryStores>,
     counter: Option<Arc<dyn RateLimitStore>>,
 ) -> Option<Router> {
+    engine_with_source(stores, counter, ClientIpSource::PeerAddr)
+}
+
+/// As [`engine`], reading the client address by `source`.
+fn engine_with_source(
+    stores: &Arc<InMemoryStores>,
+    counter: Option<Arc<dyn RateLimitStore>>,
+    source: ClientIpSource,
+) -> Option<Router> {
     let mut config = AuthConfig::default();
     config.jwt.secret = SecretString::from(common::JWT_SECRET.to_owned());
     config.roles.hierarchy = HashMap::from([("USER".to_owned(), Vec::new())]);
@@ -60,22 +69,18 @@ fn engine(
         built.as_ref().err()
     );
     let built = built.ok()?;
-    Some(
-        AuthRouter::from_engine(
-            Arc::new(built),
-            AxumAuthConfig::new(ClientIpSource::PeerAddr),
-        )
-        .into_router(),
-    )
+    Some(AuthRouter::from_engine(Arc::new(built), AxumAuthConfig::new(source)).into_router())
 }
 
-/// One failed login from the harness's fixed peer address.
-async fn login_attempt(app: &Router) -> StatusCode {
+/// One failed login from the harness's fixed peer address. A different email for every attempt,
+/// so the account lockout (also a 429) never stands in for the limiter under test.
+async fn login_attempt(app: &Router, attempt: usize) -> Captured {
     Req::post("/auth/login")
-        .json(serde_json::json!({ "email": "no@e.com", "password": "wrong", "tenantId": TENANT }))
+        .json(serde_json::json!({
+            "email": format!("nobody{attempt}@e.com"), "password": "wrong", "tenantId": TENANT
+        }))
         .send(app)
         .await
-        .status
 }
 
 #[tokio::test]
@@ -92,13 +97,16 @@ async fn two_routers_over_one_store_share_one_budget() {
     // The budget is spent across both instances, as a load balancer would spread the requests.
     for attempt in 0..LOGIN_LIMIT {
         let app = if attempt % 2 == 0 { &first } else { &second };
-        assert_eq!(login_attempt(app).await, StatusCode::UNAUTHORIZED);
+        assert_eq!(
+            login_attempt(app, attempt).await.status,
+            StatusCode::UNAUTHORIZED
+        );
     }
-    assert_eq!(login_attempt(&first).await, StatusCode::TOO_MANY_REQUESTS);
-    let refused = Req::post("/auth/login")
-        .json(serde_json::json!({ "email": "no@e.com", "password": "wrong", "tenantId": TENANT }))
-        .send(&second)
-        .await;
+    assert_eq!(
+        login_attempt(&first, LOGIN_LIMIT).await.status,
+        StatusCode::TOO_MANY_REQUESTS
+    );
+    let refused = login_attempt(&second, LOGIN_LIMIT + 1).await;
     assert_eq!(refused.status, StatusCode::TOO_MANY_REQUESTS);
     // The full window, not the time left in it.
     assert_eq!(
@@ -115,7 +123,10 @@ async fn two_routers_over_one_store_share_one_budget() {
 async fn a_failing_counter_is_reported_not_waved_through() {
     let stores = Arc::new(InMemoryStores::new());
     let Some(app) = engine(&stores, Some(Arc::new(DownCounter))) else { return };
-    assert_eq!(login_attempt(&app).await, StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(
+        login_attempt(&app, 0).await.status,
+        StatusCode::INTERNAL_SERVER_ERROR
+    );
 }
 
 #[tokio::test]
@@ -123,32 +134,69 @@ async fn requests_with_no_readable_address_share_one_bucket() {
     let stores = Arc::new(InMemoryStores::new());
     let counter: Arc<dyn RateLimitStore> = stores.clone();
     let Some(app) = engine(&stores, Some(counter)) else { return };
-    let bare = || {
+    let bare = |attempt: usize| {
+        let body =
+            format!(r#"{{"email":"nobody{attempt}@e.com","password":"wrong","tenantId":"t1"}}"#);
         http::Request::builder()
             .method(Method::POST)
             .uri("/auth/login")
             .header(header::CONTENT_TYPE, "application/json")
-            .body(Body::from(
-                r#"{"email":"no@e.com","password":"wrong","tenantId":"t1"}"#,
-            ))
+            .body(Body::from(body))
             .unwrap_or_default()
     };
 
     // No peer address: an unreadable address is one shared bucket, never an unlimited budget.
-    for _ in 0..LOGIN_LIMIT {
-        let answer = app.clone().oneshot(bare()).await;
+    for attempt in 0..LOGIN_LIMIT {
+        let answer = app.clone().oneshot(bare(attempt)).await;
         assert!(matches!(answer, Ok(r) if r.status() == StatusCode::UNAUTHORIZED));
     }
-    let refused = app.clone().oneshot(bare()).await;
-    assert!(matches!(refused, Ok(r) if r.status() == StatusCode::TOO_MANY_REQUESTS));
+    let refused = app.clone().oneshot(bare(LOGIN_LIMIT)).await;
+    let Ok(refused) = refused;
+    assert_eq!(refused.status(), StatusCode::TOO_MANY_REQUESTS);
+    let body = axum::body::to_bytes(refused.into_body(), 64 * 1024)
+        .await
+        .unwrap_or_default();
+    assert!(String::from_utf8_lossy(&body).contains("auth.too_many_requests"));
 }
 
 #[tokio::test]
 async fn without_a_shared_counter_the_in_process_limiter_still_applies() {
     let stores = Arc::new(InMemoryStores::new());
     let Some(app) = engine(&stores, None) else { return };
-    for _ in 0..LOGIN_LIMIT {
-        assert_eq!(login_attempt(&app).await, StatusCode::UNAUTHORIZED);
+    for attempt in 0..LOGIN_LIMIT {
+        assert_eq!(
+            login_attempt(&app, attempt).await.status,
+            StatusCode::UNAUTHORIZED
+        );
     }
-    assert_eq!(login_attempt(&app).await, StatusCode::TOO_MANY_REQUESTS);
+    let limited = login_attempt(&app, LOGIN_LIMIT).await;
+    assert_eq!(limited.status, StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(limited.json()["error"]["code"], "auth.too_many_requests");
+}
+
+#[tokio::test]
+async fn the_in_process_fallback_keys_on_the_forwarded_address_when_it_is_trusted() {
+    let stores = Arc::new(InMemoryStores::new());
+    let Some(app) = engine_with_source(&stores, None, ClientIpSource::TrustedForwardedFor) else {
+        return;
+    };
+    // A different email each time, so the account lockout (also a 429) never answers for the
+    // limiter: only the per-address window can produce `auth.too_many_requests` here.
+    let from = |address: &'static str, attempt: usize| {
+        Req::post("/auth/login")
+            .header(HeaderName::from_static("x-forwarded-for"), address)
+            .json(serde_json::json!({
+                "email": format!("nobody{attempt}@e.com"), "password": "wrong", "tenantId": TENANT
+            }))
+    };
+    for attempt in 0..LOGIN_LIMIT {
+        let answer = from("198.51.100.7", attempt).send(&app).await;
+        assert_eq!(answer.status, StatusCode::UNAUTHORIZED);
+    }
+    let limited = from("198.51.100.7", LOGIN_LIMIT).send(&app).await;
+    assert_eq!(limited.status, StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(limited.json()["error"]["code"], "auth.too_many_requests");
+    // Another forwarded address is another budget, though the peer socket is the same.
+    let other = from("198.51.100.8", LOGIN_LIMIT + 1).send(&app).await;
+    assert_eq!(other.status, StatusCode::UNAUTHORIZED);
 }
