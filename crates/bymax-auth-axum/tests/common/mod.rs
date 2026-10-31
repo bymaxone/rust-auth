@@ -1004,6 +1004,10 @@ pub fn build_failing() -> Option<Harness> {
     config.sessions.enabled = false;
     config.controllers.sessions = true;
     config.platform.enabled = true;
+    // These tests drive the handlers' store-failure arms with an account the test registers, and
+    // a freshly registered account has no verified address. Verification is not what they
+    // exercise, so it is not required, or the account gate would refuse them before the store.
+    config.email_verification.required = false;
 
     let engine = AuthEngine::builder()
         .config(config)
