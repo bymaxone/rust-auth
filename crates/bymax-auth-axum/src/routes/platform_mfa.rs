@@ -16,12 +16,13 @@ use crate::dto::{MfaDisableDto, MfaRegenerateRecoveryCodesDto, MfaVerifyDto};
 use crate::extractors::PlatformUser;
 use crate::response::error_response;
 use crate::routes::RequestMeta;
-use crate::state::{AuthState, AxumAuthConfig, ClientIpSource};
+use crate::shared_limit::Throttle;
+use crate::state::{AuthState, AxumAuthConfig};
 use crate::validation::ValidatedJson;
 
 /// Assemble the `platform_mfa` group under the `platform/mfa` segment, reusing the dashboard
 /// MFA edge limits.
-pub(crate) fn routes(config: &AxumAuthConfig, ip_source: ClientIpSource) -> Router<AuthState> {
+pub(crate) fn routes(config: &AxumAuthConfig, ip_source: &Throttle) -> Router<AuthState> {
     let limits = &config.rate_limits;
     Router::new()
         .route(

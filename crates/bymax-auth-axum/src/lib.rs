@@ -29,6 +29,7 @@ mod rate_limit;
 mod response;
 mod router;
 mod routes;
+mod shared_limit;
 mod state;
 mod trusted_origin;
 mod validation;

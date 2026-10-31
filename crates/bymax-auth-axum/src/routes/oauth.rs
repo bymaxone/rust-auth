@@ -15,7 +15,8 @@ use crate::delivery::TokenDelivery;
 use crate::dto::{OAuthCallbackQuery, OAuthInitiateQuery};
 use crate::response::error_response;
 use crate::routes::{CookieDomains, RequestMeta};
-use crate::state::{AuthState, AxumAuthConfig, ClientIpSource};
+use crate::shared_limit::Throttle;
+use crate::state::{AuthState, AxumAuthConfig};
 use crate::validation::ValidatedQuery;
 
 /// The `?error=` short-code surfaced on an error redirect (§11.4): the suffix of the OAuth
@@ -52,7 +53,7 @@ fn oauth_failure(state: &AuthState) -> Response {
 
 /// Assemble the `oauth` group under the `oauth` segment with per-route rate limits. Axum 0.8
 /// brace path syntax: `/{provider}` and `/{provider}/callback`.
-pub(crate) fn routes(config: &AxumAuthConfig, ip_source: ClientIpSource) -> Router<AuthState> {
+pub(crate) fn routes(config: &AxumAuthConfig, ip_source: &Throttle) -> Router<AuthState> {
     let limits = &config.rate_limits;
     Router::new()
         .route(

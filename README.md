@@ -88,7 +88,7 @@ pnpm add @bymax-one/rust-auth
 - ✅ **Absolute Session Lifetime** — Optional hard cap on how long one login can be extended by rotation
 - ✅ **Cross-Site Request Refusal** — Cookie-authenticated writes from an untrusted origin are rejected (matters under `SameSite=None`)
 - ✅ **Breached-Password Refusal** — Optional Have I Been Pwned check by k-anonymity range, over the crate's own `HttpClient` seam
-- ✅ **Per-Route Rate Limiting** — A governor layer per route, values pinned to the shared cross-implementation contract
+- ✅ **Per-Route Rate Limiting** — A per-route limit counted in the engine's shared Redis counter (one budget across instances), with an in-process governor layer as the fallback when no shared counter is configured; values pinned to the shared cross-implementation contract
 
 ### 🏢 Multi-Tenant & Platform
 
@@ -510,7 +510,7 @@ Everything is configured through `AuthConfig`. Two ready-made profiles bundle se
 | **mfa**            | `encryption_key` (32 bytes), `previous_encryption_keys`, `issuer`, `totp_window`, `recovery_code_count` | —              |
 | **sessions**       | `enabled`, `default_max_sessions`, `max_sessions_resolver`                   | `false`, `5`               |
 | **brute_force**    | `max_attempts`, `window`                                                     | `5`, `900`                 |
-| **rate limiting**  | `AxumAuthConfig::rate_limits` — per-route governor limits, pinned to the shared contract | on, per-route |
+| **rate limiting**  | `AxumAuthConfig::rate_limits` — per-route limits counted in the shared store, pinned to the shared contract | on, per-route |
 | **password_reset** | `method` (`Token` \| `Otp`), `otp_length`, `token_ttl`                       | `Token`, 600 s             |
 | **platform**       | `enabled` (requires `roles.platform_hierarchy`)                              | `false`                    |
 | **invitations**    | `enabled`, `token_ttl`                                                       | `false`, 48 h              |
@@ -727,7 +727,7 @@ When integrating `bymax-auth` in production, verify each of the following:
 | Refresh Rotation  | Single-use tokens with a grace window; a replay past it revokes that login's whole family lineage |
 | Cross-Site Writes | `Origin` / `Sec-Fetch-Site` check on cookie-authenticated writes — the gap `SameSite=None` leaves open |
 | Breached Passwords| Optional Have I Been Pwned range check by k-anonymity; only a 5-char SHA-1 prefix leaves the process |
-| Rate Limiting     | Per-route `tower_governor` layer, in-process; the limits themselves are pinned to the shared contract |
+| Rate Limiting     | Per-route fixed window in the shared Redis counter, with a `tower_governor` layer in process as the fallback; the limits themselves are pinned to the shared contract |
 | Session Lifetime  | Optional absolute cap on how long one login can be extended by rotation |
 | Edge Verify       | Same HS256 primitive compiled to WebAssembly — no network call        |
 

@@ -22,11 +22,12 @@ use crate::routes::{
     CookieDomains, PresentedAccessToken, RequestMeta, parse_optional_refresh_body,
     source_refresh_token,
 };
-use crate::state::{AuthState, AxumAuthConfig, ClientIpSource};
+use crate::shared_limit::Throttle;
+use crate::state::{AuthState, AxumAuthConfig};
 use crate::validation::ValidatedJson;
 
 /// Assemble the `auth` group with per-route rate-limit layers.
-pub(crate) fn routes(config: &AxumAuthConfig, ip_source: ClientIpSource) -> Router<AuthState> {
+pub(crate) fn routes(config: &AxumAuthConfig, ip_source: &Throttle) -> Router<AuthState> {
     let limits = &config.rate_limits;
     let router = Router::new()
         .route(

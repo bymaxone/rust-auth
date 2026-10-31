@@ -4968,8 +4968,10 @@ conflated:
 1. **HTTP rate limiting (edge, per IP)** — a tower layer (`tower_governor`) on
    the Axum routes. This is the Rust replacement for nest-auth's
    `@nestjs/throttler` + `@Throttle(AUTH_THROTTLE_CONFIGS.*)`. It caps the raw
-   request rate per client IP per route, before any business logic runs. It is
-   stateless-per-instance by default (in-memory token buckets) and is about
+   request rate per client IP per route, before any business logic runs. When the
+   engine holds a `RateLimitStore` (the Redis one does) the window is a fixed
+   window in that shared store, so the allowance holds across instances; without
+   one the layer falls back to in-process token buckets, per instance. It is about
    blunt traffic shaping / cheap-request flooding.
 
 2. **Brute-force protection (engine, per identity, Redis)** — `AuthEngine`'s
@@ -5149,13 +5151,14 @@ itself configurable on `AxumAuthConfig`, so deployments behind a known proxy can
 extract the real client IP, and deployments that want a different key
 (e.g. per-API-key) can supply a custom key-extractor.
 
-> **Operational note.** The default `tower_governor` store is in-memory and thus
-> **per instance** — N replicas multiply the effective edge allowance by N. This
-> is acceptable because the edge layer is the *coarse* defense and the
-> authoritative, fleet-wide limit on *failed credential attempts* is the
-> Redis-backed engine brute-force counter. Deployments that need a strict
-> fleet-wide edge limit should enforce it at a shared upstream (gateway/CDN) per
-> option 3, rather than relying on the per-instance in-memory buckets.
+> **Operational note.** With a `RateLimitStore` configured (wired from the same
+> Redis handle by `redis_stores`) the per-route counter is a fixed window in the
+> shared store: `rl:{route}:{hmac(bucket)}`, `INCR` plus `EXPIRE` only on the
+> first request, `Retry-After` equal to the full window, and a store failure
+> answered as an internal error. Without one the in-process `tower_governor`
+> store is **per instance** — N replicas multiply the effective edge allowance by
+> N — and deployments that need a strict fleet-wide edge limit and cannot share a
+> store should enforce it at a shared upstream (gateway/CDN) per option 3.
 ## 17. Cryptography & Security Model
 
 > **Parity contract.** `rust-auth` reproduces the cryptographic guarantees of `@bymax-one/nest-auth` — which builds exclusively on Node's native `node:crypto` — using the **RustCrypto** ecosystem exclusively. No C/C++ bindings, no `ring`, no OpenSSL on any path. Every primitive below is pure Rust, audited, and compiles to both the native target and `wasm32-unknown-unknown` where the edge needs it. Crypto lives in crate **`bymax-auth-crypto`** (`#![forbid(unsafe_code)]`), except the HS256 JWS primitive which lives in `bymax-auth-jwt` (§13.2) so it can be shared with the edge without dragging in password-hashing or AES code. These choices — RustCrypto-only, `#![forbid(unsafe_code)]`, and a hand-rolled pure-Rust HS256 instead of a C-backed JWT library — are equally **dependency-minimization** choices: they keep the crypto and JWT crates free of C/C++ bindings and heavy transitive trees, directly serving the minimal-dependency and supply-chain posture in §19.6.

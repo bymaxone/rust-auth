@@ -27,6 +27,9 @@ mod mfa_rotation;
 #[path = "adapter/mfa_setup_body.rs"]
 mod mfa_setup_body;
 
+#[path = "adapter/shared_rate_limit.rs"]
+mod shared_rate_limit;
+
 #[path = "adapter/status_gates.rs"]
 mod status_gates;
 
