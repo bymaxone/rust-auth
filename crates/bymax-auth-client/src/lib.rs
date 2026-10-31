@@ -550,6 +550,52 @@ mod tests {
         let _ = handle.await;
     }
 
+    /// Whether `raw` holds a complete HTTP request: the header block plus `Content-Length`
+    /// body bytes.
+    fn request_is_complete(raw: &str) -> bool {
+        let Some((head, body)) = raw.split_once("\r\n\r\n") else { return false };
+        let declared = head
+            .lines()
+            .find_map(|l| {
+                l.to_ascii_lowercase()
+                    .strip_prefix("content-length:")
+                    .map(str::to_owned)
+            })
+            .and_then(|v| v.trim().parse::<usize>().ok())
+            .unwrap_or(0);
+        body.len() >= declared
+    }
+
+    /// Serve one `reply` and resolve to the full request the client sent, or `None` when no
+    /// request arrives within a bounded wait. Unlike [`with_server`], the wait is bounded, so
+    /// a client call that sends nothing fails the assertion instead of hanging the suite.
+    async fn capture_request<F, Fut>(reply: Vec<u8>, body: F) -> Option<String>
+    where
+        F: FnOnce(AuthClient) -> Fut,
+        Fut: Future<Output = ()>,
+    {
+        let listener = TcpListener::bind("127.0.0.1:0").await.ok()?;
+        let addr = listener.local_addr().ok()?;
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.ok()?;
+            let mut raw = Vec::new();
+            let mut buf = [0u8; 4096];
+            loop {
+                let n = socket.read(&mut buf).await.ok()?;
+                raw.extend_from_slice(&buf[..n]);
+                if n == 0 || request_is_complete(&String::from_utf8_lossy(&raw)) {
+                    break;
+                }
+            }
+            let _ = socket.write_all(&reply).await;
+            let _ = socket.flush().await;
+            Some(String::from_utf8_lossy(&raw).into_owned())
+        });
+        body(AuthClient::new(format!("http://{addr}"))).await;
+        let outcome = tokio::time::timeout(std::time::Duration::from_secs(2), server).await;
+        outcome.ok().and_then(Result::ok).flatten()
+    }
+
     /// Route a request for the single-flight concurrency test by inspecting the request line
     /// and bearer token: login seeds the session, the refresh `POST` bumps the shared counter
     /// and rotates `acc` → `acc2`, a `me` call carrying the fresh token succeeds, and a `me`
@@ -923,26 +969,37 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn forgot_password_succeeds_on_2xx() {
-        // forgot-password returns 200 `{}`.
-        let plan = vec![Some(response(200, "OK", "{}"))];
-        with_server(plan, |client| async move {
+    async fn forgot_password_posts_the_email_and_tenant() {
+        // forgot-password must reach the backend: a POST to the route with the JSON body.
+        let request = capture_request(response(200, "OK", "{}"), |client| async move {
             assert!(client.forgot_password("u@e.com", "t1").await.is_ok());
         })
-        .await;
+        .await
+        .unwrap_or_default();
+        assert!(request.starts_with("POST /auth/password/forgot-password "));
+        assert!(request.contains(r#""email":"u@e.com""#));
+        assert!(request.contains(r#""tenantId":"t1""#));
     }
 
     #[tokio::test]
-    async fn reset_password_sends_each_proof_variant() {
-        // Each proof variant (token / otp / verified) completes on a 204.
+    async fn reset_password_posts_each_proof_under_its_own_field() {
+        // Each proof variant is sent to the route under exactly its own JSON field.
         let proofs = [
-            ResetPasswordProof::Token("tok".to_owned()),
-            ResetPasswordProof::Otp("123456".to_owned()),
-            ResetPasswordProof::VerifiedToken("vt".to_owned()),
+            (
+                ResetPasswordProof::Token("tok".to_owned()),
+                r#""token":"tok""#,
+            ),
+            (
+                ResetPasswordProof::Otp("123456".to_owned()),
+                r#""otp":"123456""#,
+            ),
+            (
+                ResetPasswordProof::VerifiedToken("vt".to_owned()),
+                r#""verifiedToken":"vt""#,
+            ),
         ];
-        for proof in proofs {
-            let plan = vec![Some(response(204, "No Content", ""))];
-            with_server(plan, |client| async move {
+        for (proof, field) in proofs {
+            let request = capture_request(response(204, "No Content", ""), |client| async move {
                 let input = ResetPasswordRequest {
                     email: "u@e.com".to_owned(),
                     new_password: "newglidingwalnut42".to_owned(),
@@ -951,7 +1008,12 @@ mod tests {
                 };
                 assert!(client.reset_password(&input).await.is_ok());
             })
-            .await;
+            .await
+            .unwrap_or_default();
+            assert!(request.starts_with("POST /auth/password/reset-password "));
+            assert!(request.contains(field));
+            assert!(request.contains(r#""newPassword":"newglidingwalnut42""#));
+            assert!(request.contains(r#""tenantId":"t1""#));
         }
     }
 

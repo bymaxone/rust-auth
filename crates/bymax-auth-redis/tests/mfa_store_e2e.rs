@@ -92,10 +92,44 @@ async fn temp_token_marker_is_put_get_nonconsuming_then_deleted() {
     // GET (never GETDEL): two reads both succeed, so a mistyped code stays retryable.
     assert!(matches!(stores.get_temp("jtihash").await, Ok(Some(ref u)) if u == "user-1"));
     assert!(matches!(stores.get_temp("jtihash").await, Ok(Some(_))));
-    // DEL is idempotent.
-    assert!(stores.del_temp("jtihash").await.is_ok());
-    assert!(stores.del_temp("jtihash").await.is_ok());
+    // DEL is idempotent, and only the call that removed the marker reports `true`.
+    assert!(matches!(stores.del_temp("jtihash").await, Ok(true)));
+    assert!(matches!(stores.del_temp("jtihash").await, Ok(false)));
+    assert!(matches!(stores.del_temp("never-stored").await, Ok(false)));
     assert!(matches!(stores.get_temp("jtihash").await, Ok(None)));
+}
+
+#[tokio::test]
+async fn mfa_lock_is_exclusive_and_released_only_by_its_holder() {
+    let Some(redis) = try_start().await else { return };
+    let Some(stores) = redis.stores("mfalock") else { return };
+
+    assert!(matches!(
+        stores.acquire_mfa_lock("u1", "tok-a", 30).await,
+        Ok(true)
+    ));
+    // A held lock refuses every other caller, whatever its token.
+    assert!(matches!(
+        stores.acquire_mfa_lock("u1", "tok-b", 30).await,
+        Ok(false)
+    ));
+    // A release under a token that does not hold the lock leaves it held.
+    assert!(stores.release_mfa_lock("u1", "tok-b").await.is_ok());
+    assert!(matches!(
+        stores.acquire_mfa_lock("u1", "tok-b", 30).await,
+        Ok(false)
+    ));
+    // The holder's release frees it for the next caller.
+    assert!(stores.release_mfa_lock("u1", "tok-a").await.is_ok());
+    assert!(matches!(
+        stores.acquire_mfa_lock("u1", "tok-b", 30).await,
+        Ok(true)
+    ));
+    // Locks are per id: another transition is unaffected.
+    assert!(matches!(
+        stores.acquire_mfa_lock("u2", "tok-a", 30).await,
+        Ok(true)
+    ));
 }
 
 #[tokio::test]

@@ -673,4 +673,19 @@ mod tests {
             bymax_auth_types::constants::MFA_TEMP_COOKIE_NAME
         ));
     }
+
+    #[cfg(feature = "oauth")]
+    #[test]
+    fn clear_oauth_state_cookie_removes_the_single_use_state() {
+        // The state cookie is single-use: once the callback is handled it must be gone from
+        // the jar, or the next flow is matched against a stale state.
+        let name = bymax_auth_types::constants::OAUTH_STATE_COOKIE_NAME;
+        let cfg = resolved_config_with(DeliveryMode::Cookie, ConfigSS::Lax);
+        let delivery = TokenDelivery::new(&cfg);
+        let jar = cookies_jar();
+        delivery.set_oauth_state_cookie(&jar, "state-1");
+        assert!(has_cookie(&jar, name));
+        delivery.clear_oauth_state_cookie(&jar);
+        assert!(!has_cookie(&jar, name));
+    }
 }

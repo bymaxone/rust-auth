@@ -631,6 +631,39 @@ mod tests {
         assert!(config.limiter().is_empty());
     }
 
+    /// The sweeper actually reclaims a client whose window has expired.
+    ///
+    /// The first tick fires immediately, so an entry that is already stale when the sweeper
+    /// starts is gone after the task has run once. A sweeper that never calls the reclaim
+    /// leaves it in the map for the life of the process.
+    #[tokio::test]
+    async fn the_key_sweeper_reclaims_an_expired_client() {
+        let built = GovernorConfigBuilder::default()
+            .period(std::time::Duration::from_millis(10))
+            .burst_size(1)
+            .key_extractor(PeerIpBucketKeyExtractor)
+            .finish();
+        let Some(config) = built else { return };
+        let config = Arc::new(config);
+
+        let client = IpAddr::from([198, 51, 100, 9]);
+        assert!(config.limiter().check_key(&client).is_ok());
+        assert_eq!(config.limiter().len(), 1);
+        // Real time, not tokio time: the limiter's clock is the wall clock.
+        std::thread::sleep(std::time::Duration::from_millis(200));
+
+        spawn_key_gc(Arc::clone(&config));
+        // Bounded wait for the sweeper's first tick; it never arrives if the reclaim is absent.
+        for _ in 0..200 {
+            if config.limiter().is_empty() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+
+        assert!(config.limiter().is_empty());
+    }
+
     /// Built outside a Tokio runtime, the sweeper warns and gives up rather than panicking.
     ///
     /// A router assembled in a synchronous harness has no runtime to spawn onto. The crate
