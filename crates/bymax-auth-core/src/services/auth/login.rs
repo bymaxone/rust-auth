@@ -1145,6 +1145,16 @@ mod tests {
         // it propagates a failure on purpose, since a lockout that cannot be read is a lockout
         // assumed — so the first is let through and the second, the hook decision, is the one
         // that fails.
+        //
+        // Four ordinary failures first, so the armed attempt is the one that would close the
+        // window: with the read working, it fires `on_lockout`, and its absence below is proof
+        // the failure was injected and swallowed rather than never armed.
+        for _ in 0..4 {
+            let _ = h
+                .engine
+                .login(login_input("blind@example.com", "wrong"), &ctx())
+                .await;
+        }
         h.stores.fail_lockout_reads(1, 1);
         let refused = h
             .engine
@@ -1164,7 +1174,7 @@ mod tests {
             seen.iter()
                 .filter(|call| call.starts_with("failed:invalid_credentials:"))
                 .count(),
-            1,
+            5,
             "the failure hook stopped firing: {seen:?}"
         );
     }
@@ -1329,6 +1339,12 @@ mod tests {
         // that named `t2`. Without the check the login would succeed on the wrong tenant and
         // meter the attempt under a counter the caller chose.
         h.users.ignore_tenant_on_email();
+        // Prove the toggle took effect: the repository really does hand the `t1` row back for
+        // `t2`, so the refusal below is the login's guard and not the double's own scoping.
+        assert!(matches!(
+            h.users.find_by_email("cross@example.com", "t2").await,
+            Ok(Some(user)) if user.tenant_id == "t1"
+        ));
         let unscoped = h
             .engine
             .login(

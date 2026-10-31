@@ -1501,6 +1501,8 @@ mod tests {
     use super::*;
     use std::sync::Arc;
 
+    mod fault_injection;
+
     fn create_data() -> CreateUserData {
         CreateUserData {
             email: "user@example.com".to_owned(),
