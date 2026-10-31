@@ -25,8 +25,8 @@ fn enrolling_admin(mfa: bool) -> AuthPlatformUser {
 async fn enrolling_a_second_factor_alone_reaches_the_very_next_rotation() {
     // The role is untouched here, so the role half of the re-stamp condition is satisfied
     // and the MFA flag is the only thing standing between the stale `prt:` record and the
-    // token. `a_demoted_admin_stops_carrying_the_old_role_on_the_very_next_rotation` changes
-    // the role on every step, which lets a broken MFA comparison hide behind the role mismatch.
+    // token. A rotation that compared only the role, or compared the flag wrongly, would keep
+    // minting the pre-enrolment claim for the refresh token's whole lifetime.
     let Some(h) = harness(platform_config()) else { return };
     h.admins.insert(enrolling_admin(false));
     let Some(svc) = h.engine.platform_auth() else { return };
