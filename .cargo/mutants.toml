@@ -40,6 +40,18 @@ exclude_globs = [
 # well ("cargo mutants --all-features") fails the baseline build before any mutant runs.
 additional_cargo_args = ["--all-features"]
 
+# Lints must not decide whether a mutant builds. CI's toolchain action exports
+# `RUSTFLAGS=-D warnings` (actions-rust-lang/setup-rust-toolchain, the `rustflags` input,
+# default "-D warnings"), and a body replaced by `Ok(())` or `()` leaves its parameters
+# unused, so under that flag every such mutant fails to compile and is reported "unviable"
+# instead of tested — the gate then passes without having run a test. Measured on the same
+# diff: with the flag, 10 of 10 `send_*` mutants unviable; capped, 10 of 10 caught. See
+# https://mutants.rs/strict-lints.html. `-D warnings` stays a gate in the other jobs.
+cap_lints = true
+# It also removes rustc's const-eval hang detection (same page), so the build is bounded
+# by `--build-timeout` on the command line in `.github/workflows/ci.yml`: the config
+# exposes only the multiplier form, which cargo-mutants refuses with `--in-place`.
+
 # Documented equivalent mutants: mutants no test can kill because the change is
 # behaviour-preserving. Each entry names the reason it is equivalent, and the pattern is
 # kept narrow enough that other mutants of the same function are still generated — a

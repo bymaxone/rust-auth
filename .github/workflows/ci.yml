@@ -69,7 +69,10 @@ jobs:
         fi
         echo "Mutating the changes in ${base}..${GITHUB_SHA}"
         git diff "$base" "$GITHUB_SHA" -- crates/ > "$RUNNER_TEMP/mutants.diff"
-        cargo mutants --in-place --in-diff "$RUNNER_TEMP/mutants.diff"
+        # `cap_lints` (.cargo/mutants.toml) turns off rustc's const-eval hang detection, so a
+        # mutant that loops at compile time is bounded here. A build is ~83 s from cold on the
+        # runner and ~10 s incremental per mutant; 300 s is over three cold builds.
+        cargo mutants --in-place --build-timeout 300 --in-diff "$RUNNER_TEMP/mutants.diff"
       # Match .cargo/mutants.toml examine_globs (logic crates only; bindings/** is
       # excluded there), so a bindings-only change never triggers the gate for
       # code cargo-mutants would not mutate.
