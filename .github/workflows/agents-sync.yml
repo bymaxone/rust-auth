@@ -30,18 +30,28 @@ jobs:
       contents: write
       pull-requests: write
     secrets:
-      # Named rather than `inherit`, so the called workflow receives this one
-      # secret and not every secret this repository holds.
+      # Authentication is a GitHub App: the called workflow mints an installation
+      # token per run, so the credential that reaches a run expires within the hour.
+      # The App's private key behind AGENTS_SYNC_PRIVATE_KEY is long-lived and
+      # installed org-wide with write access, so it carries a rotation requirement
+      # of its own.
       #
-      # The mapping is present whether or not the secret is set, because a reusable
-      # workflow receives no secret it is not passed: without the mapping, setting
-      # AGENTS_SYNC_TOKEN would change nothing and the run would keep using the
-      # default token while looking configured. An unset secret evaluates to the
-      # empty string, which the called workflow already falls back from.
+      # Why an App and not the default GITHUB_TOKEN: a pull request opened with the
+      # default token starts no workflow runs, and this repository's ruleset
+      # (`rust-auth-pr-and-ci-gates`) requires status checks to pass, so such a
+      # pull request cannot merge until somebody pushes to it. The default token is
+      # also not permitted to create pull requests in this organisation at all.
       #
-      # Why it is worth setting: a pull request opened with the default
-      # GITHUB_TOKEN starts no workflow runs, and this repository's ruleset
-      # (`rust-auth-pr-and-ci-gates`) requires status checks to pass. Without this
-      # token an unattended sync pull request therefore cannot merge until somebody
-      # pushes to it.
-      sync-token: ${{ secrets.AGENTS_SYNC_TOKEN }}
+      # Both are organisation secrets visible to every repository, so this one reads
+      # them with no configuration here. Named rather than passed with `inherit`, so
+      # the called workflow receives these two and not every secret this repository
+      # holds.
+      #
+      # Supply both or neither: the called workflow refuses a run where exactly one
+      # is set. With neither it falls back to the default token and only warns,
+      # which here means a sync pull request that starts none of its required checks.
+      #
+      # `sync-token`, also a declared input of the called workflow, is left unmapped:
+      # no credential stands behind it in this organisation.
+      app-id: ${{ secrets.AGENTS_SYNC_APP_ID }}
+      app-private-key: ${{ secrets.AGENTS_SYNC_PRIVATE_KEY }}
