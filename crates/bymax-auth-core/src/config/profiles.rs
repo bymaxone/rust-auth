@@ -50,6 +50,7 @@ impl AuthConfig {
             controllers: ControllerToggles::default(),
             identifier_key: None,
             tenant_id_resolver: None,
+            enforce_tenant_binding: false,
         }
     }
 

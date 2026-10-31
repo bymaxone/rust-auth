@@ -241,6 +241,11 @@ impl AuthConfig {
     pub fn validate(&self, environment: Environment) -> Result<bool, ConfigError> {
         let secure_cookies = self.resolve_secure_cookies(environment);
 
+        // A binding with nothing to compare against would report success and enforce nothing.
+        if self.enforce_tenant_binding && self.tenant_id_resolver.is_none() {
+            return Err(ConfigError::TenantBindingWithoutResolver);
+        }
+
         // Rule 1-2: JWT secret length + entropy.
         let secret = self.jwt.secret.expose_secret();
         let len = secret.chars().count();

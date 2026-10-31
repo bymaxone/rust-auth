@@ -12,7 +12,7 @@ use tower_cookies::Cookies;
 
 use crate::delivery::TokenDelivery;
 use crate::dto::{AcceptInvitationDto, CreateInvitationDto, RevokeInvitationDto};
-use crate::extractors::AuthUser;
+use crate::extractors::{AuthUser, UserStatus};
 use crate::response::error_response;
 use crate::routes::{CookieDomains, RequestMeta};
 use crate::state::{AuthState, AxumAuthConfig, ClientIpSource};
@@ -37,11 +37,14 @@ pub(crate) fn routes(config: &AxumAuthConfig, ip_source: ClientIpSource) -> Rout
         )
 }
 
-/// `POST /auth/invitations` (204). Requires [`AuthUser`]. The `tenant_id` is taken from the
+/// `POST /auth/invitations` (204). Requires [`AuthUser`] and a [`UserStatus`] in good standing:
+/// minting an invitation delegates the caller's authority, so a blocked or unproven account may
+/// not. The `tenant_id` is taken from the
 /// inviter's claims — never the body — so a request cannot inject a cross-tenant invitation.
 async fn create(
     State(state): State<AuthState>,
     user: AuthUser,
+    _status: UserStatus,
     ValidatedJson(dto): ValidatedJson<CreateInvitationDto>,
 ) -> Response {
     match state
@@ -60,7 +63,8 @@ async fn create(
     }
 }
 
-/// `POST /auth/invitations/revoke` (204). Requires [`AuthUser`]. The `tenant_id` comes from
+/// `POST /auth/invitations/revoke` (204). Requires [`AuthUser`] and a [`UserStatus`] in good
+/// standing. The `tenant_id` comes from
 /// the caller's claims — never the body — so a request cannot withdraw another tenant's
 /// invitations.
 ///
@@ -72,6 +76,7 @@ async fn create(
 async fn revoke(
     State(state): State<AuthState>,
     user: AuthUser,
+    _status: UserStatus,
     ValidatedJson(dto): ValidatedJson<RevokeInvitationDto>,
 ) -> Response {
     match state

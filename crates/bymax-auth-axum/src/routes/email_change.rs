@@ -13,7 +13,7 @@ use axum::routing::post;
 use http::StatusCode;
 
 use crate::dto::{ChangeEmailDto, ConfirmEmailChangeDto};
-use crate::extractors::AuthUser;
+use crate::extractors::{AuthUser, UserStatus};
 use crate::response::error_response;
 use crate::state::{AuthState, AxumAuthConfig, ClientIpSource};
 use crate::validation::ValidatedJson;
@@ -32,7 +32,7 @@ pub(crate) fn routes(config: &AxumAuthConfig, ip_source: ClientIpSource) -> Rout
         )
 }
 
-/// `POST /auth/email/change` (204). Requires [`AuthUser`]. The account comes from the caller's
+/// `POST /auth/email/change` (204). Requires [`AuthUser`] and a [`UserStatus`] in good standing. The account comes from the caller's
 /// claims — never the body — so a request cannot move someone else's address.
 ///
 /// Answers 204 and nothing else: the failure modes worth reporting (the address is taken, the
@@ -41,6 +41,7 @@ pub(crate) fn routes(config: &AxumAuthConfig, ip_source: ClientIpSource) -> Rout
 async fn request(
     State(state): State<AuthState>,
     user: AuthUser,
+    _status: UserStatus,
     ValidatedJson(dto): ValidatedJson<ChangeEmailDto>,
 ) -> Response {
     match state

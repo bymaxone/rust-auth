@@ -667,4 +667,11 @@ pub struct AuthConfig {
     /// than having it discarded (anti-spoofing). `null` and an absent field are accepted: they
     /// assert nothing to contradict.
     pub tenant_id_resolver: Option<Arc<dyn TenantIdResolver>>,
+    /// Refuse an authenticated request whose token was minted for a different tenant than the one
+    /// `tenant_id_resolver` resolves for that request, default `false`. A valid token is otherwise
+    /// trusted for the tenant baked into it, so a token minted for one tenant is accepted under
+    /// another tenant's host. Where the host is the tenant boundary, enable this. Requires
+    /// `tenant_id_resolver`: a flag with nothing to compare against would enforce nothing, so
+    /// [`AuthConfig::validate`] rejects the pair at startup.
+    pub enforce_tenant_binding: bool,
 }

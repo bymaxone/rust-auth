@@ -67,6 +67,9 @@ pub struct EngineSpec {
     pub email_change: bool,
     pub sessions: bool,
     pub verification_required: bool,
+    /// Resolve the request tenant from the `host` header and enforce that a token's tenant
+    /// equals it.
+    pub enforce_tenant_binding: bool,
     pub allow_oauth: bool,
     /// Origins the deployment trusts for cross-site, cookie-authenticated writes. Setting any
     /// switches `SameSite` to `None`, since the two are only valid together.
@@ -87,6 +90,7 @@ impl Default for EngineSpec {
             email_change: false,
             sessions: false,
             verification_required: false,
+            enforce_tenant_binding: false,
             allow_oauth: false,
             trusted_origins: &[],
             cookie_domains: &[],
@@ -266,6 +270,22 @@ pub struct Harness {
     pub emails: Arc<CapturingEmails>,
 }
 
+/// A resolver that names the tenant after the request's `host` header.
+struct HostTenant;
+
+#[async_trait::async_trait]
+impl bymax_auth_core::config::TenantIdResolver for HostTenant {
+    async fn resolve(
+        &self,
+        parts: &bymax_auth_core::config::RequestParts,
+    ) -> Result<String, bymax_auth_core::config::TenantResolveError> {
+        match parts.host.as_deref() {
+            Some("") | None => Err(bymax_auth_core::config::TenantResolveError::Empty),
+            Some(host) => Ok(host.to_owned()),
+        }
+    }
+}
+
 /// Build an engine + router over in-memory stores per `spec`.
 pub fn build(spec: EngineSpec) -> Option<Harness> {
     let users = Arc::new(InMemoryUserRepository::new());
@@ -276,6 +296,10 @@ pub fn build(spec: EngineSpec) -> Option<Harness> {
     config.jwt.secret = SecretString::from(JWT_SECRET.to_owned());
     config.token_delivery = spec.delivery;
     config.email_verification.required = spec.verification_required;
+    if spec.enforce_tenant_binding {
+        config.tenant_id_resolver = Some(Arc::new(HostTenant));
+        config.enforce_tenant_binding = true;
+    }
     config.password_reset.method = bymax_auth_core::config::ResetMethod::Otp;
     config.roles.hierarchy = HashMap::from([
         ("ADMIN".to_owned(), vec!["USER".to_owned()]),
@@ -523,6 +547,9 @@ pub struct FailingStores {
     /// `OauthFailed` — the one input that proves an infrastructure failure is NOT swallowed
     /// into the friendly `?error=oauth_failed` redirect.
     oauth_state_fails: bool,
+    /// When set, the invitation index read fails, so the revoke handler's store-failure arm is
+    /// reachable after the extractors have passed.
+    invitation_index_fails: bool,
 }
 
 impl FailingStores {
@@ -531,6 +558,14 @@ impl FailingStores {
             inner: Arc::new(InMemoryStores::new()),
             blacklist_fails: false,
             oauth_state_fails: false,
+            invitation_index_fails: false,
+        }
+    }
+
+    fn with_failing_invitation_index() -> Self {
+        Self {
+            invitation_index_fails: true,
+            ..Self::new()
         }
     }
 
@@ -539,6 +574,7 @@ impl FailingStores {
             inner: Arc::new(InMemoryStores::new()),
             blacklist_fails: true,
             oauth_state_fails: false,
+            invitation_index_fails: false,
         }
     }
 
@@ -547,6 +583,7 @@ impl FailingStores {
             inner: Arc::new(InMemoryStores::new()),
             blacklist_fails: false,
             oauth_state_fails: true,
+            invitation_index_fails: false,
         }
     }
 }
@@ -863,6 +900,9 @@ impl bymax_auth_core::traits::InvitationStore for FailingStores {
         tenant_id: &str,
         email: &str,
     ) -> Result<Option<String>, bymax_auth_types::AuthError> {
+        if self.invitation_index_fails {
+            return Err(fail());
+        }
         self.inner.read_invitation_index(tenant_id, email).await
     }
     async fn take_invitation_index(
@@ -989,9 +1029,19 @@ impl bymax_auth_core::traits::OAuthStateStore for FailingStores {
 /// Build an engine whose store backend always fails, with the sessions + platform groups on,
 /// so a test can drive the store-failure error arms of the session/platform/WS handlers.
 pub fn build_failing() -> Option<Harness> {
+    build_failing_over(FailingStores::new(), false)
+}
+
+/// As [`build_failing`], with the invitations group mounted and the invitation index read
+/// failing, so the revoke handler's store-failure arm is reachable.
+pub fn build_failing_invitation_index() -> Option<Harness> {
+    build_failing_over(FailingStores::with_failing_invitation_index(), true)
+}
+
+fn build_failing_over(failing: FailingStores, invitations: bool) -> Option<Harness> {
     let users = Arc::new(InMemoryUserRepository::new());
     let admins = Arc::new(InMemoryPlatformUserRepository::new());
-    let failing = Arc::new(FailingStores::new());
+    let failing = Arc::new(failing);
     // The stores field is unused by the failing-store tests, but the Harness shape needs one.
     let inert = Arc::new(InMemoryStores::new());
 
@@ -1004,6 +1054,12 @@ pub fn build_failing() -> Option<Harness> {
     config.sessions.enabled = false;
     config.controllers.sessions = true;
     config.platform.enabled = true;
+    // These tests drive the handlers' store-failure arms with an account the test registers, and
+    // a freshly registered account has no verified address. Verification is not what they
+    // exercise, so it is not required, or the account gate would refuse them before the store.
+    config.email_verification.required = false;
+    config.controllers.invitations = invitations;
+    config.invitations.enabled = invitations;
 
     let engine = AuthEngine::builder()
         .config(config)

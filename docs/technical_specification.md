@@ -735,6 +735,10 @@ pub struct AuthConfig {
     /// ignored entirely — never read, merged, or used as a fallback
     /// (anti-spoofing parity with nest-auth's `tenantIdResolver`; see §5.7).
     pub tenant_id_resolver: Option<Arc<dyn TenantIdResolver>>,
+    /// Refuse an authenticated request whose token tenant differs from the tenant
+    /// `tenant_id_resolver` names for it (default `false`). Requires `tenant_id_resolver`;
+    /// the pair is rejected at startup otherwise (parity with nest-auth's `enforceTenantBinding`).
+    pub enforce_tenant_binding: bool,
     /// The secret the identifier-hashing key derives from; `None` derives it from `jwt.secret`.
     /// Pin it to the current `jwt.secret` before rotating the signing secret.
     pub identifier_key: Option<SecretString>,
@@ -1100,6 +1104,7 @@ The **Default** column lists `AuthConfig::default()` (≡ `nest_compat_defaults(
 | `user_status_cache_ttl` | `Duration` | No | `60s` | Reserved: no status cache exists yet, so nothing reads it and the status is read from the repository on every request that needs it |
 | `controllers.*` | `ControllerToggles` | No | see 5.1.8 | Gates router mounting |
 | `tenant_id_resolver` | `Option<Arc<dyn …>>` | No | `None` | Anti-spoofing |
+| `enforce_tenant_binding` | `bool` | No | `false` | Refuses a token minted for another tenant than the resolver names for the request; requires `tenant_id_resolver` |
 
 ### 5.4 Builder usage
 
