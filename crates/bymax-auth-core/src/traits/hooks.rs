@@ -373,7 +373,9 @@ pub trait AuthHooks: Send + Sync {
     ///
     /// An attacker who trips the lock and walks away would otherwise never produce the
     /// event, and the account would sit locked with nothing having announced it.
-    /// `retry_after_seconds` is the remaining window at the moment of the lockout.
+    /// `retry_after_seconds` is the remaining window at the moment of the lockout. When the
+    /// store cannot report it, the value is the configured window instead — an upper bound,
+    /// since the window is fixed from the first failure — and never `0`.
     async fn on_lockout(
         &self,
         email: &str,
