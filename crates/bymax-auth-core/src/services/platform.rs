@@ -1023,14 +1023,9 @@ mod tests {
         assert!(claims.mfa_enabled, "the MFA flag never reached the token");
     }
 
-    #[tokio::test]
-    async fn enrolling_a_second_factor_alone_reaches_the_very_next_rotation() {
-        // The role is untouched here, so the role half of the re-stamp condition is satisfied
-        // and the MFA flag is the only thing standing between the stale `prt:` record and the
-        // token. The demotion test above changes the role on every step, which lets a broken
-        // MFA comparison hide behind the role mismatch.
-        let Some(h) = harness(platform_config()) else { return };
-        let make = |mfa: bool| AuthPlatformUser {
+    /// The `SUPPORT` admin the enrolment test signs in as; only `mfa_enabled` varies.
+    fn enrolling_admin(mfa: bool) -> AuthPlatformUser {
+        AuthPlatformUser {
             id: "admin-enrolling".to_owned(),
             email: "enrolling@admin.io".to_owned(),
             name: "Admin".to_owned(),
@@ -1044,8 +1039,17 @@ mod tests {
             last_login_at: None,
             updated_at: OffsetDateTime::UNIX_EPOCH,
             created_at: OffsetDateTime::UNIX_EPOCH,
-        };
-        h.admins.insert(make(false));
+        }
+    }
+
+    #[tokio::test]
+    async fn enrolling_a_second_factor_alone_reaches_the_very_next_rotation() {
+        // The role is untouched here, so the role half of the re-stamp condition is satisfied
+        // and the MFA flag is the only thing standing between the stale `prt:` record and the
+        // token. The demotion test above changes the role on every step, which lets a broken
+        // MFA comparison hide behind the role mismatch.
+        let Some(h) = harness(platform_config()) else { return };
+        h.admins.insert(enrolling_admin(false));
         let Some(svc) = h.engine.platform_auth() else { return };
         let signed_in = svc.login("enrolling@admin.io", "pw", "1.2.3.4", "a").await;
         let Ok(PlatformLoginResult::Success(auth)) = signed_in else { return };
@@ -1065,7 +1069,7 @@ mod tests {
         assert!(!claims.mfa_enabled);
 
         // The admin enrols: same role, new factor.
-        h.admins.insert(make(true));
+        h.admins.insert(enrolling_admin(true));
         let enrolled = svc.refresh(&unchanged.refresh_token, "1.2.3.4", "a").await;
         assert!(enrolled.is_ok(), "rotation must succeed: {enrolled:?}");
         let Ok(enrolled) = enrolled else { return };

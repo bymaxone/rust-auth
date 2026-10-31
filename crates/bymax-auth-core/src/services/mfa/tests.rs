@@ -4639,6 +4639,30 @@ async fn stored_dashboard_codes(h: &Harness, uid: &str) -> Vec<String> {
     }
 }
 
+/// Enrol a dashboard user in MFA and return two distinct recovery codes from the issued set.
+async fn enrol_dashboard(h: &Harness, uid: &str) -> Option<(String, String)> {
+    let mfa = h.engine.mfa()?;
+    let setup = mfa
+        .setup(uid, MfaContext::Dashboard, Some("t1"), Some(PASSWORD))
+        .await
+        .ok()?;
+    let enabled = mfa
+        .verify_and_enable(
+            uid,
+            &code(&setup.secret, 0),
+            "1.2.3.4",
+            "ua",
+            MfaContext::Dashboard,
+            Some("t1"),
+        )
+        .await;
+    assert!(enabled.is_ok(), "enrolment should succeed: {enabled:?}");
+    Some((
+        setup.recovery_codes.first().cloned()?,
+        setup.recovery_codes.get(1).cloned()?,
+    ))
+}
+
 /// Spending one recovery code removes exactly that code from the stored set and leaves the
 /// others redeemable. A splice that removed a different entry, or none, would either lock the
 /// owner out of a code they still hold or leave the spent one on the record.
@@ -4648,28 +4672,10 @@ async fn spending_a_dashboard_recovery_code_removes_only_that_code() {
     let Some(uid) = register(&h.engine, "spend@example.com").await else {
         return;
     };
-    let Some(mfa) = h.engine.mfa() else { return };
-    let Ok(setup) = mfa
-        .setup(&uid, MfaContext::Dashboard, Some("t1"), Some(PASSWORD))
-        .await
-    else {
+    let Some(mfa) = h.engine.mfa() else {
         return;
     };
-    let enabled = mfa
-        .verify_and_enable(
-            &uid,
-            &code(&setup.secret, 0),
-            "1.2.3.4",
-            "ua",
-            MfaContext::Dashboard,
-            Some("t1"),
-        )
-        .await;
-    assert!(enabled.is_ok(), "enrolment should succeed: {enabled:?}");
-    let (Some(kept), Some(spent)) = (
-        setup.recovery_codes.first().cloned(),
-        setup.recovery_codes.get(1).cloned(),
-    ) else {
+    let Some((kept, spent)) = enrol_dashboard(&h, &uid).await else {
         return;
     };
     let before = stored_dashboard_codes(&h, &uid).await;
@@ -4709,12 +4715,9 @@ async fn stored_platform_codes(h: &Harness, id: &str) -> Vec<String> {
     }
 }
 
-/// The platform plane's splice has the same contract: the spent code is persisted out of the
-/// admin record, and only that one.
+/// Seed a platform admin, enrol it in MFA and return two distinct recovery codes from the set.
 #[cfg(feature = "platform")]
-#[tokio::test]
-async fn spending_a_platform_recovery_code_removes_only_that_code() {
-    let Some(h) = build(false, true) else { return };
+async fn enrol_platform(h: &Harness) -> Option<(String, String)> {
     h.platform.insert(AuthPlatformUser {
         id: "p-spend".to_owned(),
         email: "spend@admin.io".to_owned(),
@@ -4730,15 +4733,13 @@ async fn spending_a_platform_recovery_code_removes_only_that_code() {
         updated_at: OffsetDateTime::UNIX_EPOCH,
         created_at: OffsetDateTime::UNIX_EPOCH,
     });
-    let Some(mfa) = h.engine.mfa() else { return };
-    let Ok(setup) = mfa
+    let mfa = h.engine.mfa()?;
+    let setup = mfa
         .setup("p-spend", MfaContext::Platform, None, Some(PASSWORD))
         .await
-    else {
-        return;
-    };
-    assert!(
-        mfa.verify_and_enable(
+        .ok()?;
+    let enabled = mfa
+        .verify_and_enable(
             "p-spend",
             &code(&setup.secret, 0),
             "1.2.3.4",
@@ -4746,13 +4747,24 @@ async fn spending_a_platform_recovery_code_removes_only_that_code() {
             MfaContext::Platform,
             None,
         )
-        .await
-        .is_ok()
-    );
-    let (Some(kept), Some(spent)) = (
-        setup.recovery_codes.first().cloned(),
-        setup.recovery_codes.get(1).cloned(),
-    ) else {
+        .await;
+    assert!(enabled.is_ok(), "enrolment should succeed: {enabled:?}");
+    Some((
+        setup.recovery_codes.first().cloned()?,
+        setup.recovery_codes.get(1).cloned()?,
+    ))
+}
+
+/// The platform plane's splice has the same contract: the spent code is persisted out of the
+/// admin record, and only that one.
+#[cfg(feature = "platform")]
+#[tokio::test]
+async fn spending_a_platform_recovery_code_removes_only_that_code() {
+    let Some(h) = build(false, true) else { return };
+    let Some(mfa) = h.engine.mfa() else {
+        return;
+    };
+    let Some((kept, spent)) = enrol_platform(&h).await else {
         return;
     };
     let before = stored_platform_codes(&h, "p-spend").await;
