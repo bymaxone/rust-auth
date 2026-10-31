@@ -94,6 +94,16 @@ jobs:
           else
             incomplete=0
           fi
+          # cargo-mutants rewrites outcomes.json as it goes, so a shard cancelled at the job
+          # limit or lost with its runner still uploads a partial file. The exit-status file
+          # is written only after cargo-mutants returns, so its absence marks that shard.
+          for f in "${files[@]}"; do
+            d="$(dirname "$f")"
+            if [ ! -s "$d/exit-status" ]; then
+              echo "::error::$(basename "$d") did not run to completion (no exit status recorded)"
+              incomplete=1
+            fi
+          done
           {
             echo "### Mutation sweep"
             echo
