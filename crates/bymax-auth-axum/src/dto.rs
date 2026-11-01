@@ -33,6 +33,8 @@ fn no_control_characters(value: &str, _: &()) -> garde::Result {
     Ok(())
 }
 
+mod code_formats;
+
 /// `POST /auth/register` body.
 #[derive(Debug, Deserialize, Validate)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -280,7 +282,7 @@ pub struct MfaSetupDto {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct MfaVerifyDto {
     /// The 6-digit TOTP shown during enrolment.
-    #[garde(length(min = 6, max = 6))]
+    #[garde(length(min = 6, max = 6), custom(code_formats::totp_code))]
     pub code: String,
 }
 
@@ -299,8 +301,9 @@ pub struct MfaChallengeDto {
     /// not as a field-validation failure.
     #[garde(inner(length(min = 1, max = 512)))]
     pub mfa_temp_token: Option<String>,
-    /// A 6-digit TOTP or a recovery code (≤ 128 prevents hash-bombing).
-    #[garde(length(min = 1, max = 128))]
+    /// A 6-digit TOTP or a recovery code in `XXXX-XXXX-XXXX-XXXX-XXXX-XXXX` form. The 29-character
+    /// ceiling is the longest recovery code and keeps an oversized value from being hashed.
+    #[garde(length(min = 1, max = 29), custom(code_formats::totp_or_recovery_code))]
     pub code: String,
 }
 
@@ -309,7 +312,7 @@ pub struct MfaChallengeDto {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct MfaDisableDto {
     /// The 6-digit TOTP.
-    #[garde(length(min = 6, max = 6))]
+    #[garde(length(min = 6, max = 6), custom(code_formats::totp_code))]
     pub code: String,
 }
 
@@ -318,7 +321,7 @@ pub struct MfaDisableDto {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct MfaRegenerateRecoveryCodesDto {
     /// The 6-digit TOTP.
-    #[garde(length(min = 6, max = 6))]
+    #[garde(length(min = 6, max = 6), custom(code_formats::totp_code))]
     pub code: String,
 }
 

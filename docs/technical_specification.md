@@ -3088,8 +3088,8 @@ pub struct ResendVerificationDto {
 #[derive(Deserialize, Validate)]
 #[serde(deny_unknown_fields)]
 pub struct MfaVerifyDto {
-    /// 6-digit TOTP shown by the authenticator during enrolment.
-    #[garde(length(min = 6, max = 6))]
+    /// 6-digit TOTP shown by the authenticator during enrolment: exactly six ASCII digits (`^\d{6}$`).
+    #[garde(length(min = 6, max = 6), custom(totp_code))]
     pub code: String,
 }
 
@@ -3098,16 +3098,18 @@ pub struct MfaVerifyDto {
 pub struct MfaChallengeDto {
     #[garde(length(min = 1))]
     pub mfa_temp_token: String,
-    /// 6-digit TOTP or a recovery code. Max 128 prevents hash-bombing.
-    #[garde(length(min = 1, max = 128))]
+    /// 6-digit TOTP (`^\d{6}$`) or a recovery code, six hyphen-separated groups of four hex digits
+    /// (`XXXX-XXXX-XXXX-XXXX-XXXX-XXXX`, either case). Max 29 is the longest recovery code. A
+    /// value of any other shape is a `400 auth.validation` and is never counted as a failed attempt.
+    #[garde(length(min = 1, max = 29), custom(totp_or_recovery_code))]
     pub code: String,
 }
 
 #[derive(Deserialize, Validate)]
 #[serde(deny_unknown_fields)]
 pub struct MfaDisableDto {
-    /// TOTP only — recovery codes are not accepted for disable, by design.
-    #[garde(length(min = 6, max = 6))]
+    /// TOTP only — recovery codes are not accepted for disable, by design. Exactly six ASCII digits.
+    #[garde(length(min = 6, max = 6), custom(totp_code))]
     pub code: String,
 }
 
