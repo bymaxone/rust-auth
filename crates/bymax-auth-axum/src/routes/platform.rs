@@ -96,8 +96,8 @@ async fn mfa_challenge(
 ) -> Response {
     // The MFA challenge is served by the MFA service; the temp token's `context: platform`
     // discriminant routes it through the platform store and yields a platform session. A
-    // dashboard-context result is folded into a typed mismatch error inside the engine, so the
-    // handler has only the success/error arms.
+    // dashboard temp token is refused by the engine before the challenge runs, so the handler has
+    // only the success/error arms and a refusal spends nothing.
     #[cfg(feature = "mfa")]
     {
         // `MfaChallengeDto::mfa_temp_token` is optional so the browser OAuth + MFA flow can

@@ -449,15 +449,15 @@ impl AuthEngine {
             .await
     }
 
-    /// Run the **platform** MFA challenge (`POST /auth/platform/mfa/challenge`): the temp
-    /// token's `context: platform` discriminant routes it through the platform store. A
-    /// dashboard-context result here is a mismatch surfaced as
-    /// [`AuthError::MfaTempTokenInvalid`], so the adapter handler never sees the wrong arm.
+    /// Run the **platform** MFA challenge (`POST /auth/platform/mfa/challenge`). A temp token
+    /// minted for the dashboard is refused before the challenge runs, so the refusal creates no
+    /// session and does not spend the token.
     ///
     /// # Errors
     ///
     /// Returns [`AuthError::MfaNotEnabled`] when MFA is not configured,
-    /// [`AuthError::MfaTempTokenInvalid`] for a bad temp token or a dashboard-context result,
+    /// [`AuthError::MfaTempTokenInvalid`] for a bad temp token,
+    /// [`AuthError::PlatformAuthRequired`] for a dashboard temp token,
     /// [`AuthError::MfaInvalidCode`] on a wrong code, or a store [`AuthError`].
     #[cfg(all(feature = "mfa", feature = "platform"))]
     pub async fn platform_mfa_challenge(
@@ -468,32 +468,11 @@ impl AuthEngine {
         user_agent: &str,
     ) -> Result<PlatformAuthResult, AuthError> {
         let result = self
-            .mfa_challenge(mfa_temp_token, code, ip, user_agent)
+            .mfa()
+            .ok_or(AuthError::MfaNotEnabled)?
+            .challenge_platform_only(mfa_temp_token, code, ip, user_agent)
             .await?;
-        Self::mfa_result_platform(result).ok_or(AuthError::MfaTempTokenInvalid)
-    }
-
-    /// Run the **dashboard** MFA challenge (`POST /auth/mfa/challenge`): a platform-context
-    /// result is a mismatch surfaced as [`AuthError::MfaTempTokenInvalid`], so the adapter
-    /// handler never sees the wrong arm.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`AuthError::MfaNotEnabled`] when MFA is not configured,
-    /// [`AuthError::MfaTempTokenInvalid`] for a bad temp token or a platform-context result,
-    /// [`AuthError::MfaInvalidCode`] on a wrong code, or a store [`AuthError`].
-    #[cfg(feature = "mfa")]
-    pub async fn dashboard_mfa_challenge(
-        &self,
-        mfa_temp_token: &str,
-        code: &str,
-        ip: &str,
-        user_agent: &str,
-    ) -> Result<AuthResult, AuthError> {
-        let result = self
-            .mfa_challenge(mfa_temp_token, code, ip, user_agent)
-            .await?;
-        Self::mfa_result_dashboard(result).ok_or(AuthError::MfaTempTokenInvalid)
+        Self::mfa_result_platform(result).ok_or(AuthError::PlatformAuthRequired)
     }
 
     /// Disable MFA (`POST /auth/mfa/disable`), TOTP-gated.

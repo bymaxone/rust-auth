@@ -20,6 +20,8 @@ mod setup;
 #[cfg(test)]
 mod hook_tests;
 #[cfg(test)]
+mod plane_tests;
+#[cfg(test)]
 mod recovery_tests;
 #[cfg(test)]
 mod tests;

@@ -13,6 +13,7 @@ use axum::Router;
 use axum::extract::State;
 use axum::response::{IntoResponse, Response};
 use axum::routing::post;
+use bymax_auth_core::LoginResultMfa;
 use bymax_auth_types::{AuthError, MfaContext};
 use http::StatusCode;
 use serde_json::json;
@@ -170,16 +171,27 @@ async fn challenge(
         return error_response(&AuthError::MfaTempTokenInvalid);
     };
 
+    // This route serves a temp token of either plane, as the one challenge endpoint does in
+    // nest-auth: a dashboard token yields the dashboard session in the configured delivery, a
+    // platform token the platform session in the body (a platform session is never a cookie).
     match state
         .engine()
-        .dashboard_mfa_challenge(temp_token, &dto.code, &ctx.ip, &ctx.user_agent)
+        .mfa_challenge(temp_token, &dto.code, &ctx.ip, &ctx.user_agent)
         .await
     {
-        Ok(auth) => {
+        Ok(outcome) => {
             if cookie_token.is_some() {
                 delivery.clear_mfa_temp_cookie(&cookies);
             }
-            delivery.deliver_auth(&cookies, &auth, StatusCode::OK)
+            match outcome {
+                LoginResultMfa::Dashboard(auth) => {
+                    delivery.deliver_auth(&cookies, &auth, StatusCode::OK)
+                }
+                #[cfg(feature = "platform")]
+                LoginResultMfa::Platform(admin) => {
+                    delivery.deliver_platform_auth(&admin, StatusCode::OK)
+                }
+            }
         }
         Err(error) => {
             // A dead token can never be retried under the same cookie, so drop it; any other
