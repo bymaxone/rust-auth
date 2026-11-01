@@ -170,9 +170,9 @@ fn sanitize_headers(parts: &Parts) -> BTreeMap<String, String> {
 /// the body in `both`. Never a query string. Returns an empty string when the channel carries
 /// none (the engine treats that as an invalid refresh).
 ///
-/// A mode reads exactly its own channel. Reading both in every mode let a `cookie`-mode
-/// deployment accept a token a script put in a body, and a `bearer`-mode one accept a stray
-/// cookie, neither of which that deployment issues or expects.
+/// A mode reads exactly its own channel. A token on the other one is a token the deployment
+/// never issued there, and accepting it lets a script-supplied body value stand in for the
+/// cookie, or a stray cookie for the body.
 pub(crate) fn source_refresh_token(
     delivery: TokenDelivery,
     cookies: &Cookies,
