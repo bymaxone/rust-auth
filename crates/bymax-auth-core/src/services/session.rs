@@ -432,8 +432,9 @@ pub(crate) fn is_session_hash(hash: &str) -> bool {
             .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }
 
-/// The first eight chars of a session hash — the display id and the only form ever logged or
-/// handed to a hook, so a full live session identifier never leaks.
+/// The first eight chars of a session hash — the display id, and the only form ever logged or
+/// handed to `on_new_session`, so a full live session identifier never leaks through either.
+/// (`on_session_evicted` is given the stored hash in full; see `fire_session_evicted`.)
 fn short_hash(hash: &str) -> String {
     hash.chars().take(8).collect()
 }
