@@ -93,7 +93,7 @@ fn registration() -> RegisterRequest {
         email: "round.trip@example.com".to_owned(),
         password: "a-strong-password-123".to_owned(),
         name: "Round Trip".to_owned(),
-        tenant_id: TENANT.to_owned(),
+        tenant_id: Some(TENANT.to_owned()),
     }
 }
 
@@ -130,7 +130,7 @@ async fn register_me_refresh_logout_round_trip_over_real_http() {
         .login(&LoginRequest {
             email: "round.trip@example.com".to_owned(),
             password: "wrong-password".to_owned(),
-            tenant_id: TENANT.to_owned(),
+            tenant_id: Some(TENANT.to_owned()),
         })
         .await;
     assert!(matches!(

@@ -19,6 +19,20 @@
 //! [`AuthClient::me`], the client performs a single, serialized refresh (so concurrent
 //! `401`s queue behind one rotation rather than stampeding the backend) and retries once.
 //!
+//! # Differences from the TypeScript client
+//!
+//! - **No `authFetch` wrapper.** The TypeScript client exposes a fetch wrapper that adds a
+//!   timeout and retries a request after a refresh. This is an intentional difference:
+//!   `reqwest` carries its own timeouts, set on the `reqwest::Client` handed to
+//!   [`AuthClient::with_http_client`], and [`AuthClient::me`] already performs the
+//!   single-flight refresh-and-retry. A second wrapper would be a second place to configure
+//!   the same timeout.
+//! - **The tenant is optional.** [`RegisterRequest::tenant_id`], [`LoginRequest::tenant_id`],
+//!   [`ResetPasswordRequest::tenant_id`] and the `tenant_id` argument of
+//!   [`AuthClient::forgot_password`] are `Option`s, as in the TypeScript client. `None` omits
+//!   the `tenantId` key: the server requires it when no `tenant_id_resolver` is configured and
+//!   refuses it when one is.
+//!
 //! # TLS
 //!
 //! `reqwest` is pulled with no TLS backend (every reqwest TLS feature reintroduces a
@@ -35,6 +49,15 @@ use bymax_auth_types::{
 };
 use reqwest::header::{AUTHORIZATION, CONTENT_TYPE};
 use serde::de::DeserializeOwned;
+
+/// Add `tenantId` to a request body only when the caller named a tenant. An absent tenant is an
+/// absent key, never `null`: the server tells "no tenant named" from "a tenant named" and
+/// refuses the second under a resolver.
+fn with_tenant(body: &mut serde_json::Value, tenant_id: Option<&str>) {
+    if let Some(tenant_id) = tenant_id {
+        body["tenantId"] = serde_json::Value::String(tenant_id.to_owned());
+    }
+}
 
 /// The lowest 4xx that signals an expired/invalid access token at the edge — the trigger
 /// for the single-flight refresh-and-retry in [`AuthClient::me`].
@@ -105,8 +128,10 @@ pub struct RegisterRequest {
     pub password: String,
     /// The display name.
     pub name: String,
-    /// The tenant scope.
-    pub tenant_id: String,
+    /// The tenant scope, or `None` when the deployment resolves the tenant itself (a
+    /// `tenant_id_resolver`). `None` omits the `tenantId` key from the body: the server
+    /// requires the key when no resolver is configured and refuses it when one is.
+    pub tenant_id: Option<String>,
 }
 
 /// Inputs for [`AuthClient::login`].
@@ -116,8 +141,10 @@ pub struct LoginRequest {
     pub email: String,
     /// The plaintext password.
     pub password: String,
-    /// The tenant scope.
-    pub tenant_id: String,
+    /// The tenant scope, or `None` when the deployment resolves the tenant itself (a
+    /// `tenant_id_resolver`). `None` omits the `tenantId` key from the body: the server
+    /// requires the key when no resolver is configured and refuses it when one is.
+    pub tenant_id: Option<String>,
 }
 
 /// The reset proof for [`AuthClient::reset_password`]: exactly one of the emailed token, a
@@ -142,8 +169,10 @@ pub struct ResetPasswordRequest {
     pub new_password: String,
     /// The reset proof (token / OTP / verified token).
     pub proof: ResetPasswordProof,
-    /// The tenant scope.
-    pub tenant_id: String,
+    /// The tenant scope, or `None` when the deployment resolves the tenant itself (a
+    /// `tenant_id_resolver`). `None` omits the `tenantId` key from the body: the server
+    /// requires the key when no resolver is configured and refuses it when one is.
+    pub tenant_id: Option<String>,
 }
 
 /// A typed, `reqwest`-backed client for a `bymax-auth-axum` backend.
@@ -193,12 +222,12 @@ impl AuthClient {
     /// Returns [`AuthClientError`] on a backend error, a transport failure, or a body that
     /// does not deserialize.
     pub async fn register(&self, input: &RegisterRequest) -> Result<AuthOutcome, AuthClientError> {
-        let body = serde_json::json!({
+        let mut body = serde_json::json!({
             "email": input.email,
             "password": input.password,
             "name": input.name,
-            "tenantId": input.tenant_id,
         });
+        with_tenant(&mut body, input.tenant_id.as_deref());
         let request = self.post("/auth/register").body(body.to_string());
         self.complete_login(request).await
     }
@@ -210,11 +239,11 @@ impl AuthClient {
     /// Returns [`AuthClientError`] on a backend error, a transport failure, or a body that
     /// does not deserialize.
     pub async fn login(&self, input: &LoginRequest) -> Result<AuthOutcome, AuthClientError> {
-        let body = serde_json::json!({
+        let mut body = serde_json::json!({
             "email": input.email,
             "password": input.password,
-            "tenantId": input.tenant_id,
         });
+        with_tenant(&mut body, input.tenant_id.as_deref());
         let request = self.post("/auth/login").body(body.to_string());
         self.complete_login(request).await
     }
@@ -306,9 +335,10 @@ impl AuthClient {
     pub async fn forgot_password(
         &self,
         email: &str,
-        tenant_id: &str,
+        tenant_id: Option<&str>,
     ) -> Result<(), AuthClientError> {
-        let body = serde_json::json!({ "email": email, "tenantId": tenant_id });
+        let mut body = serde_json::json!({ "email": email });
+        with_tenant(&mut body, tenant_id);
         let request = self
             .post("/auth/password/forgot-password")
             .body(body.to_string());
@@ -328,8 +358,8 @@ impl AuthClient {
         let mut body = serde_json::json!({
             "email": input.email,
             "newPassword": input.new_password,
-            "tenantId": input.tenant_id,
         });
+        with_tenant(&mut body, input.tenant_id.as_deref());
         let (key, value) = match &input.proof {
             ResetPasswordProof::Token(token) => ("token", token),
             ResetPasswordProof::Otp(otp) => ("otp", otp),
@@ -639,7 +669,7 @@ mod tests {
     }
 
     /// A success auth body (bearer mode): user + token pair.
-    fn auth_body(access: &str, refresh: &str) -> String {
+    pub(crate) fn auth_body(access: &str, refresh: &str) -> String {
         format!(
             r#"{{"user":{{"id":"u1","email":"u@e.com","name":"U","role":"USER","status":"ACTIVE","tenantId":"t1","emailVerified":true,"mfaEnabled":false,"lastLoginAt":null,"createdAt":"2020-01-01T00:00:00Z"}},"accessToken":"{access}","refreshToken":"{refresh}"}}"#
         )
@@ -660,7 +690,7 @@ mod tests {
             email: "u@e.com".to_owned(),
             password: "glidingwalnut42".to_owned(),
             name: "U".to_owned(),
-            tenant_id: "t1".to_owned(),
+            tenant_id: Some("t1".to_owned()),
         }
     }
 
@@ -668,7 +698,7 @@ mod tests {
         LoginRequest {
             email: "u@e.com".to_owned(),
             password: "glidingwalnut42".to_owned(),
-            tenant_id: "t1".to_owned(),
+            tenant_id: Some("t1".to_owned()),
         }
     }
 
