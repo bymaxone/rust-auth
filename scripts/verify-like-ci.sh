@@ -45,7 +45,7 @@ set -uo pipefail
 
 cd "$(dirname "$0")/.."
 
-ALL_GATES=(fmt clippy test hack wasm doc examples-rust examples-web npm)
+ALL_GATES=(fmt clippy test docker-e2e hack wasm doc examples-rust examples-web npm)
 
 # Spelled out rather than `("${@:-${ALL_GATES[@]}}")`. That form does work — bash keeps `$@`'s
 # word-splitting inside the `:-` default even within the quotes, so the list expands to one
@@ -83,6 +83,12 @@ gate_clippy() { cargo clippy --workspace --all-targets --all-features --locked -
 gate_test() {
   cargo build --workspace --all-features --locked &&
     cargo test --workspace --all-features --locked
+}
+
+# The container-backed tests with a missing Docker made a failure (the CI `docker e2e` job).
+gate_docker_e2e() {
+  BYMAX_REQUIRE_DOCKER=1 cargo test -p bymax-auth-redis -p bymax-auth-axum -p bymax-auth-client \
+    --all-features --locked
 }
 
 gate_coverage() {

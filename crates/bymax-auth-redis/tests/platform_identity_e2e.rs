@@ -10,6 +10,9 @@
 //! real error rather than returning silently, so a regression can never pass unnoticed.
 #![cfg(feature = "platform")]
 
+#[path = "common/docker_gate.rs"]
+mod docker_gate;
+
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -58,7 +61,10 @@ impl TestRedis {
 
 /// Start a `redis:8` container, returning `None` when Docker is unavailable so the test skips.
 async fn try_start() -> Option<TestRedis> {
-    let container = Redis::default().with_tag("8").start().await.ok()?;
+    let container = match Redis::default().with_tag("8").start().await {
+        Ok(container) => container,
+        Err(error) => return docker_gate::docker_unavailable("redis:8", error),
+    };
     let host = container.get_host().await.ok()?;
     let port = container.get_host_port_ipv4(REDIS_PORT).await.ok()?;
     let url = format!("redis://{host}:{port}");

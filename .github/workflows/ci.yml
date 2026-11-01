@@ -119,6 +119,50 @@ jobs:
             --locked
 
   # ─────────────────────────────────────────────────────────────────────────────
+  # Container-backed tests. A test that returns early because Docker is missing passes while
+  # proving nothing, so this job sets BYMAX_REQUIRE_DOCKER=1, which turns that skip into a
+  # failure, and then checks that one test from each crate that starts a container ran and
+  # passed. The shared `core` job below does not set the switch, so it cannot vouch for these.
+  # ─────────────────────────────────────────────────────────────────────────────
+  docker-e2e:
+    name: docker e2e (BYMAX_REQUIRE_DOCKER)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      BYMAX_REQUIRE_DOCKER: '1'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions-rust-lang/setup-rust-toolchain@ecabd13d1c56bd1345c230e542e9144811ad706f # v2.0.0
+        with:
+          rustflags: "-D warnings"
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - name: Run the container-backed tests with a missing Docker made a failure
+        run: |
+          set -euo pipefail
+          test "${BYMAX_REQUIRE_DOCKER}" = "1"
+          docker version --format 'docker server {{.Server.Version}}'
+          cargo test -p bymax-auth-redis -p bymax-auth-axum -p bymax-auth-client \
+            --all-features --locked 2>&1 | tee "${RUNNER_TEMP}/docker-e2e.log"
+      - name: Check the container-backed tests ran and passed
+        run: |
+          set -euo pipefail
+          log="${RUNNER_TEMP}/docker-e2e.log"
+          if grep -q 'skipped: no Docker' "${log}"; then
+            echo '::error::a container-backed test skipped for want of Docker'
+            exit 1
+          fi
+          # One test from each crate that starts a container: redis, axum, client.
+          for name in \
+            the_entries_are_the_keys_and_values_the_contract_pins \
+            full_router_against_real_redis \
+            register_me_refresh_logout_round_trip_over_real_http; do
+            if ! grep -Eq "^test (.*::)?${name} \.\.\. ok$" "${log}"; then
+              echo "::error::${name} did not run and pass"
+              exit 1
+            fi
+          done
+
+  # ─────────────────────────────────────────────────────────────────────────────
   # Rustdoc — RUSTDOCFLAGS=-D warnings turns broken intra-doc links, malformed
   # attributes, and missing backticks into hard errors. --no-deps restricts the
   # gate to workspace crates only, not third-party documentation.
@@ -656,6 +700,7 @@ jobs:
     needs:
       - core
       - feature-matrix
+      - docker-e2e
       - doc
       - ts-rs-drift
       - wasm-purity

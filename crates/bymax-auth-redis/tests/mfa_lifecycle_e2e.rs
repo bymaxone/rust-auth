@@ -7,6 +7,9 @@
 //! Compiles only under the `mfa` feature; every case returns early when Docker is unavailable.
 #![cfg(feature = "mfa")]
 
+#[path = "common/docker_gate.rs"]
+mod docker_gate;
+
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
@@ -40,7 +43,10 @@ impl TestRedis {
 }
 
 async fn try_start() -> Option<TestRedis> {
-    let container = Redis::default().with_tag("8").start().await.ok()?;
+    let container = match Redis::default().with_tag("8").start().await {
+        Ok(container) => container,
+        Err(error) => return docker_gate::docker_unavailable("redis:8", error),
+    };
     let host = container.get_host().await.ok()?;
     let port = container.get_host_port_ipv4(REDIS_PORT).await.ok()?;
     let url = format!("redis://{host}:{port}");
