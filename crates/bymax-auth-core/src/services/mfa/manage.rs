@@ -234,7 +234,7 @@ impl MfaService {
         let ctx = self.hook_context(view.plane(), user_id, &view.email, ip, user_agent);
         spawn_guarded(run_after_mfa_disabled(
             self.hooks.clone(),
-            view.hook_user.clone(),
+            super::hooks::after_transition(&view.hook_user, false),
             ctx,
         ));
     }
