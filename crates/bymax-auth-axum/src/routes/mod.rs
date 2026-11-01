@@ -210,7 +210,7 @@ pub(crate) fn source_refresh_token(
 
 /// Parse an optional refresh body shared by the dashboard and platform refresh handlers: an
 /// empty body yields a default [`RefreshDto`] (no body-supplied token, the cookie-mode case);
-/// a present body must deserialize as a valid `RefreshDto` (unknown fields rejected). On a
+/// a present body must deserialize as a valid `RefreshDto` (unknown keys are ignored). On a
 /// malformed body it returns an `auth.validation` error whose `body` detail surfaces the
 /// serde parse message — a body-shape diagnostic that leaks no secret. Both refresh paths use
 /// this one helper so the parsing rule and the error envelope stay identical.
@@ -511,6 +511,11 @@ mod tests {
         ));
         assert!(matches!(
             parse_optional_refresh_body(br#"{"refreshToken":"r1"}"#),
+            Ok(dto) if dto.refresh_token.as_deref() == Some("r1")
+        ));
+        // A key the body does not read is ignored, as on nest-auth's DTO-less routes.
+        assert!(matches!(
+            parse_optional_refresh_body(br#"{"refreshToken":"r1","extra":true}"#),
             Ok(dto) if dto.refresh_token.as_deref() == Some("r1")
         ));
         assert!(matches!(
