@@ -42,6 +42,9 @@ mod mfa_plane;
 #[path = "adapter/ws_ticket_body.rs"]
 mod ws_ticket_body;
 
+#[path = "adapter/mfa_code_shape.rs"]
+mod mfa_code_shape;
+
 #[path = "adapter/mfa_setup_body.rs"]
 mod mfa_setup_body;
 
