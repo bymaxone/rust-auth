@@ -170,14 +170,10 @@ fn body_of(request: &str) -> serde_json::Value {
     serde_json::from_str(body).unwrap_or(serde_json::Value::Null)
 }
 
-#[tokio::test]
-async fn an_absent_tenant_is_an_absent_key_on_every_call_that_takes_one() {
-    // The server refuses a tenant under a resolver, so "no tenant" has to be a missing key, not a
-    // null or an empty string. Each of the four calls is checked against its own request.
-    let auth = response(200, "OK", &super::tests::auth_body("a", "r"));
-    let none = response(204, "No Content", "");
-
-    let register = capture_request(auth.clone(), |client| async move {
+/// The request `register` writes when it is given no tenant.
+async fn register_without_a_tenant() -> String {
+    let reply = response(200, "OK", &super::tests::auth_body("a", "r"));
+    capture_request(reply, |client| async move {
         let input = RegisterRequest {
             email: "u@e.com".to_owned(),
             password: "glidingwalnut42".to_owned(),
@@ -187,8 +183,13 @@ async fn an_absent_tenant_is_an_absent_key_on_every_call_that_takes_one() {
         assert!(client.register(&input).await.is_ok());
     })
     .await
-    .unwrap_or_default();
-    let login = capture_request(auth, |client| async move {
+    .unwrap_or_default()
+}
+
+/// The request `login` writes when it is given no tenant.
+async fn login_without_a_tenant() -> String {
+    let reply = response(200, "OK", &super::tests::auth_body("a", "r"));
+    capture_request(reply, |client| async move {
         let input = LoginRequest {
             email: "u@e.com".to_owned(),
             password: "glidingwalnut42".to_owned(),
@@ -197,13 +198,21 @@ async fn an_absent_tenant_is_an_absent_key_on_every_call_that_takes_one() {
         assert!(client.login(&input).await.is_ok());
     })
     .await
-    .unwrap_or_default();
-    let forgot = capture_request(none.clone(), |client| async move {
+    .unwrap_or_default()
+}
+
+/// The request `forgot_password` writes when it is given no tenant.
+async fn forgot_password_without_a_tenant() -> String {
+    capture_request(response(204, "No Content", ""), |client| async move {
         assert!(client.forgot_password("u@e.com", None).await.is_ok());
     })
     .await
-    .unwrap_or_default();
-    let reset = capture_request(none, |client| async move {
+    .unwrap_or_default()
+}
+
+/// The request `reset_password` writes when it is given no tenant.
+async fn reset_password_without_a_tenant() -> String {
+    capture_request(response(204, "No Content", ""), |client| async move {
         let input = ResetPasswordRequest {
             email: "u@e.com".to_owned(),
             new_password: "newglidingwalnut42".to_owned(),
@@ -213,14 +222,20 @@ async fn an_absent_tenant_is_an_absent_key_on_every_call_that_takes_one() {
         assert!(client.reset_password(&input).await.is_ok());
     })
     .await
-    .unwrap_or_default();
+    .unwrap_or_default()
+}
 
-    for (name, request) in [
-        ("register", register),
-        ("login", login),
-        ("forgot", forgot),
-        ("reset", reset),
-    ] {
+#[tokio::test]
+async fn an_absent_tenant_is_an_absent_key_on_every_call_that_takes_one() {
+    // The server refuses a tenant under a resolver, so "no tenant" has to be a missing key, not a
+    // null or an empty string. Each of the four calls is checked against its own request.
+    let requests = [
+        ("register", register_without_a_tenant().await),
+        ("login", login_without_a_tenant().await),
+        ("forgot", forgot_password_without_a_tenant().await),
+        ("reset", reset_password_without_a_tenant().await),
+    ];
+    for (name, request) in requests {
         let body = body_of(&request);
         assert!(
             body.get("email").is_some(),
