@@ -25,7 +25,7 @@ use crate::state::AuthState;
 /// `POST /auth/ws-ticket` (200). Composes [`AuthUser`] + [`UserStatus`] + [`MfaSatisfied`],
 /// so a ticket is minted only from a fully-authorized, MFA-satisfied session. The access
 /// token travels in the cookie / `Authorization` header as usual — **never** echoed into a
-/// URL. Returns `{ ticket }`.
+/// URL. Returns `{ ticket, expiresIn }` — the shared wire contract's `responseBodies.wsTicket`.
 pub(crate) async fn ws_ticket(
     State(state): State<AuthState>,
     user: AuthUser,
@@ -33,7 +33,11 @@ pub(crate) async fn ws_ticket(
     _mfa: MfaSatisfied,
 ) -> Response {
     match state.engine().issue_ws_ticket(&user.0).await {
-        Ok(ticket) => (StatusCode::OK, Json(json!({ "ticket": ticket }))).into_response(),
+        Ok(issued) => (
+            StatusCode::OK,
+            Json(json!({ "ticket": issued.ticket, "expiresIn": issued.expires_in })),
+        )
+            .into_response(),
         Err(error) => error_response(&error),
     }
 }
@@ -179,7 +183,8 @@ mod tests {
         let Ok(claims) = claims else { return };
         let ticket = s.state.engine().issue_ws_ticket(&claims).await;
         assert!(ticket.is_ok());
-        let Ok(ticket) = ticket else { return };
+        let Ok(issued) = ticket else { return };
+        let ticket = issued.ticket;
 
         let mut parts = parts_with_ticket(&ticket);
         let ok = WsAuthUser::from_request_parts(&mut parts, &s.state).await;
@@ -266,14 +271,14 @@ mod tests {
         let own = s.state.engine().issue_ws_ticket(&claims).await;
         assert!(own.is_ok());
         let Ok(own) = own else { return };
-        let mut parts = handshake(&own, "t1");
+        let mut parts = handshake(&own.ticket, "t1");
         let ok = WsAuthUser::from_request_parts(&mut parts, &s.state).await;
         assert!(matches!(ok, Ok(WsAuthUser(c)) if c.sub == id));
 
         let foreign = s.state.engine().issue_ws_ticket(&claims).await;
         assert!(foreign.is_ok());
         let Ok(foreign) = foreign else { return };
-        let mut parts = handshake(&foreign, "t2");
+        let mut parts = handshake(&foreign.ticket, "t2");
         let denied = WsAuthUser::from_request_parts(&mut parts, &s.state).await;
         assert!(
             matches!(denied, Err(AuthRejection(AuthError::TokenInvalid))),

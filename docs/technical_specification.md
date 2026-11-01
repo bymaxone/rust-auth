@@ -2034,7 +2034,7 @@ the `WsAuthUser` upgrade extractor (§8.7).
 non-blocked, MFA-satisfied session is proven *before* a ticket exists):
 1. `raw = generate_secure_token(32)` — opaque CSPRNG, **not** a JWT; `hash = sha256(raw)`.
 2. `set_session("wst:{hash}", json(snapshot), ttl)` where `ttl` is the lesser of `WS_TICKET_TTL_SECONDS` (~30 s) and the minting token's remaining life less one second (the clocks count whole seconds) — a logout blacklists the `jti` only until the token expires, so a ticket must not outlive it; a token with no life left mints nothing (`TokenInvalid`). The `WsTicketSnapshot` carries only the verified identity already on the access token (`sub, tenant_id, role, status, mfa_enabled, mfa_verified`) plus the minting token's `jti` and `epoch` — identifiers, not credentials; no secret, no signature.
-3. Return `raw` (delivered as the body's `{ ticket }`).
+3. Return `raw` together with the `ttl` it was stored under, in whole seconds (delivered as the body's `{ ticket, expiresIn }`, the shape `responseBodies.wsTicket` pins in the shared wire contract).
 
 `redeem_ws_ticket(raw)` — called once, inside the upgrade extractor:
 1. `getdel("wst:{sha256(raw)}")` — atomic single-use; `None` (absent / expired / already redeemed) → `TokenInvalid`, handshake refused. A record that is not a whole ticket (a missing `jti` or `epoch`, a `jti` that is not a string, an `epoch` that is not a non-negative integer) reads as `None`: the record was consumed by the `getdel`, and a ticket written by an older writer fails closed.
@@ -3242,7 +3242,7 @@ upgrade ticket** that is *not* a JWT and is worthless against the REST API.
    only from a fully-authorized, MFA-satisfied session — the access token travels
    in the cookie / `Authorization` header as usual, **never** in a URL. The
    engine mints an opaque CSPRNG ticket, stores a verified-claims snapshot under
-   `wst:{sha256(ticket)}` with a ~30 s TTL (§12.4), and returns `{ ticket }` in
+   `wst:{sha256(ticket)}` with a ~30 s TTL (§12.4), and returns `{ ticket, expiresIn }` in
    the body (`AuthEngine::issue_ws_ticket`, §7.3.6).
 2. **Redeem (at the upgrade).** The browser opens `wss://…/ws?ticket=<opaque>`.
    The `WsAuthUser` extractor reads the `ticket` query parameter and **`GETDEL`s**

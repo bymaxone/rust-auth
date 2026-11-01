@@ -39,6 +39,9 @@ mod client_ip;
 #[path = "adapter/mfa_plane.rs"]
 mod mfa_plane;
 
+#[path = "adapter/ws_ticket_body.rs"]
+mod ws_ticket_body;
+
 #[path = "adapter/mfa_setup_body.rs"]
 mod mfa_setup_body;
 

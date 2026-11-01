@@ -21,8 +21,18 @@ use crate::engine::AuthEngine;
 #[cfg(feature = "mfa")]
 use crate::services::mfa::{LoginResultMfa, MfaSetupResult};
 use crate::services::session::SessionInfo;
-use crate::services::{is_refresh_token_shape, new_uuid_v4, now_unix};
+use crate::services::{is_refresh_token_shape, new_uuid_v4, now_unix, now_unix_ceil};
 use crate::traits::WsTicketSnapshot;
+
+/// A minted WebSocket upgrade ticket and how long it will live.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct IssuedWsTicket {
+    /// The opaque, single-use ticket.
+    pub ticket: String,
+    /// Whole seconds the ticket stays redeemable: at most [`WS_TICKET_TTL_SECONDS`], and never
+    /// beyond the access token it was minted from.
+    pub expires_in: u64,
+}
 
 /// The lifetime, in seconds, of a single-use WebSocket upgrade ticket (§7.3.6). Short enough
 /// that a leaked upgrade URL exposes at most a seconds-long, already-consumable handshake.
@@ -33,9 +43,10 @@ pub const WS_TICKET_TTL_SECONDS: u64 = 30;
 ///
 /// A logout blacklists the token's `jti` only until the token expires, so a ticket that outlived
 /// its token could be redeemed after that logout once the entry is gone. The ticket therefore
-/// expires no later than the token it was minted from. Clocks here count whole seconds, so a
-/// ticket minted late in a second would otherwise outlast the token by up to a second; one
-/// second is kept back to hold the ceiling.
+/// expires no later than the token it was minted from. `now` is the clock rounded **up** to a
+/// whole second (see `now_unix_ceil`) and one further second is held back, so the ticket still
+/// ends no later than the token when the store applies the write up to a second after the clock
+/// was read, at every sub-second offset.
 fn ticket_ttl(exp: i64, now: i64) -> Option<u64> {
     let remaining = u64::try_from(exp.saturating_sub(now)).unwrap_or(0);
     let ttl = WS_TICKET_TTL_SECONDS.min(remaining.saturating_sub(1));
@@ -244,7 +255,7 @@ impl AuthEngine {
 
     /// Mint a single-use WebSocket upgrade ticket (§7.3.6) from an already-verified dashboard
     /// session snapshot: the store generates an opaque CSPRNG ticket, persists the snapshot
-    /// under `wst:{sha256(ticket)}` with a ~30 s TTL (never longer than the minting token's remaining life), and returns the raw ticket. The access
+    /// under `wst:{sha256(ticket)}` with a ~30 s TTL (never longer than the minting token's remaining life), and returns the raw ticket with the whole seconds it will live. The access
     /// token is never echoed into the ticket — only the verified identity snapshot is stored.
     ///
     /// # Errors
@@ -254,7 +265,10 @@ impl AuthEngine {
     /// account that no longer exists, the status-specific error for a blocked account (the snapshot is read from the
     /// account, so its standing is checked here rather than trusted from the token), or a store
     /// [`AuthError`] on a persistence failure.
-    pub async fn issue_ws_ticket(&self, claims: &DashboardClaims) -> Result<String, AuthError> {
+    pub async fn issue_ws_ticket(
+        &self,
+        claims: &DashboardClaims,
+    ) -> Result<IssuedWsTicket, AuthError> {
         let store = self
             .ws_ticket_store()
             .ok_or_else(|| crate::services::internal_error("ws-ticket store not configured"))?;
@@ -298,8 +312,12 @@ impl AuthEngine {
             jti: claims.jti.clone(),
             epoch: claims.epoch,
         };
-        let ttl = ticket_ttl(claims.exp, now_unix()).ok_or(AuthError::TokenInvalid)?;
-        store.mint(&snapshot, ttl).await
+        let ttl = ticket_ttl(claims.exp, now_unix_ceil()).ok_or(AuthError::TokenInvalid)?;
+        let ticket = store.mint(&snapshot, ttl).await?;
+        Ok(IssuedWsTicket {
+            ticket,
+            expires_in: ttl,
+        })
     }
 
     /// Redeem a single-use WebSocket upgrade ticket (§7.3.6): the store atomically `GETDEL`s
@@ -1017,7 +1035,8 @@ mod tests {
 
         let minted = h.engine.issue_ws_ticket(&claims).await;
         assert!(minted.is_ok());
-        let Ok(ticket) = minted else { return };
+        let Ok(issued) = minted else { return };
+        let ticket = issued.ticket;
 
         let redeemed = h.engine.redeem_ws_ticket(&ticket).await;
         let matched = matches!(&redeemed, Ok(c) if c.sub == claims.sub && c.role == "USER");
