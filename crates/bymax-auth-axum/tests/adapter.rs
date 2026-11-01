@@ -330,9 +330,10 @@ async fn a_configured_domain_resolver_stamps_every_session_cookie_and_the_logout
     // silently did nothing. The resolved domain is stamped on all three session cookies, and
     // the logout clear mirrors it: a browser matches a deletion on name + domain + path, so a
     // host-only clear would leave the real cookie in place and the user who signed out would
-    // stay signed in. Only the first domain is used — a browser rejects a `Set-Cookie` whose
-    // `Domain` is not a suffix of the responding host (RFC 6265 §5.3.6), so a second one on
-    // the same response is either a duplicate scope or a value the browser drops.
+    // stay signed in. Every domain the resolver names gets its own full set, and its own
+    // clear: a browser keeps `Domain=example.com` and `Domain=api.example.com` as two cookies,
+    // and drops on its own the one whose `Domain` is not a suffix of the responding host
+    // (RFC 6265 §5.3.6).
     let Some(h) = build(EngineSpec {
         cookie_domains: &[".example.com", ".api.example.com"],
         ..EngineSpec::default()
@@ -361,7 +362,7 @@ async fn a_configured_domain_resolver_stamps_every_session_cookie_and_the_logout
         Some("app.example.com".to_owned())
     );
     assert_eq!(reg.status, StatusCode::CREATED);
-    assert_eq!(reg.set_cookies.len(), 3);
+    assert_eq!(reg.set_cookies.len(), 6);
     assert_eq!(
         reg.set_cookies
             .iter()
@@ -370,7 +371,15 @@ async fn a_configured_domain_resolver_stamps_every_session_cookie_and_the_logout
         3,
         // The leading dot the resolver returned is dropped on the way out: RFC 6265 §4.1.2.3
         // ignores it, and `Domain=example.com` already matches every subdomain.
-        "expected all three session cookies scoped to the resolved domain"
+        "expected all three session cookies scoped to the first resolved domain"
+    );
+    assert_eq!(
+        reg.set_cookies
+            .iter()
+            .filter(|c| c.contains("Domain=api.example.com"))
+            .count(),
+        3,
+        "expected all three session cookies scoped to the second resolved domain"
     );
 
     // The clear has to replay the cookies: `tower-cookies` only emits a removal for a cookie
@@ -388,16 +397,18 @@ async fn a_configured_domain_resolver_stamps_every_session_cookie_and_the_logout
         .send(&app)
         .await;
     assert_eq!(logout.status, StatusCode::NO_CONTENT);
-    assert_eq!(logout.set_cookies.len(), 3);
-    assert_eq!(
-        logout
-            .set_cookies
-            .iter()
-            .filter(|c| c.contains("Domain=example.com"))
-            .count(),
-        3,
-        "expected all three clears scoped to the resolved domain"
-    );
+    assert_eq!(logout.set_cookies.len(), 6);
+    for domain in ["Domain=example.com", "Domain=api.example.com"] {
+        assert_eq!(
+            logout
+                .set_cookies
+                .iter()
+                .filter(|c| c.contains(domain))
+                .count(),
+            3,
+            "expected all three clears scoped to {domain}"
+        );
+    }
 }
 
 #[tokio::test]
