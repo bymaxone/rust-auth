@@ -98,6 +98,9 @@ async fn an_inviter_who_outranks_the_pending_invitation_replaces_it() {
     );
     let Some(second) = second else { return };
     assert!(record_exists(&s, &second).await);
+    // Exactly one live record: the member's was replaced, not joined. This also shows the count
+    // helper counts, so the "none left" assertion in the mid-invite test is not vacuous.
+    assert_eq!(s.stores.invitation_record_count(), 1);
 }
 
 /// A store that runs `moves` against the shared index immediately before each claim, standing in
