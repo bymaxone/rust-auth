@@ -121,6 +121,34 @@ fn both_planes(hooks: &Arc<LoginHooks>) -> EngineSpec {
     }
 }
 
+/// What a challenge attempt can spend for one account: its sessions, its last-login time and the
+/// login hooks fired so far.
+#[derive(Debug, PartialEq, Eq)]
+struct Spent {
+    sessions: Option<usize>,
+    last_login: Option<Option<time::OffsetDateTime>>,
+    hooks: usize,
+}
+
+async fn spent(h: &common::Harness, hooks: &LoginHooks, user_id: &str) -> Spent {
+    Spent {
+        sessions: h
+            .engine
+            .list_user_sessions(TENANT, user_id, None)
+            .await
+            .map(|found| found.len())
+            .ok(),
+        last_login: h
+            .users
+            .find_by_id(user_id, Some(TENANT))
+            .await
+            .ok()
+            .flatten()
+            .map(|user| user.last_login_at),
+        hooks: hooks.settled_count().await,
+    }
+}
+
 #[tokio::test]
 async fn a_dashboard_temp_token_at_the_platform_route_is_refused_with_nothing_spent() {
     let hooks = Arc::new(LoginHooks::default());
@@ -133,14 +161,7 @@ async fn a_dashboard_temp_token_at_the_platform_route_is_refused_with_nothing_sp
         "an MFA-enabled login hands out a temp token"
     );
     let base = common::now_unix();
-    let hooks_before = hooks.settled_count().await;
-    let last_login_before = h
-        .users
-        .find_by_id(&user_id, Some(TENANT))
-        .await
-        .ok()
-        .flatten()
-        .map(|u| u.last_login_at);
+    let before = spent(&h, &hooks, &user_id).await;
 
     let refused = Req::post("/auth/platform/mfa/challenge")
         .json(serde_json::json!({
@@ -155,33 +176,10 @@ async fn a_dashboard_temp_token_at_the_platform_route_is_refused_with_nothing_sp
     );
 
     // The refusal came before the challenge ran, so nothing was spent: no session was created,
-    // the last-login time did not move, no login hook fired...
-    let sessions = h
-        .engine
-        .list_user_sessions(TENANT, &user_id, None)
-        .await
-        .map(|found| found.len());
-    assert_eq!(
-        sessions.ok(),
-        Some(0),
-        "a refused call left a session behind"
-    );
-    let last_login_after = h
-        .users
-        .find_by_id(&user_id, Some(TENANT))
-        .await
-        .ok()
-        .flatten()
-        .map(|u| u.last_login_at);
-    assert_eq!(
-        last_login_after, last_login_before,
-        "a refused call stamped a login"
-    );
-    assert_eq!(
-        hooks.settled_count().await,
-        hooks_before,
-        "a refused call fired a login hook"
-    );
+    // the last-login time did not move and no login hook fired...
+    let after = spent(&h, &hooks, &user_id).await;
+    assert_eq!(before.sessions, Some(0));
+    assert_eq!(after, before, "a refused call spent something");
     // ...and the token was not spent, so its own route still redeems it.
     let redeemed = Req::post("/auth/mfa/challenge")
         .json(serde_json::json!({
