@@ -59,6 +59,23 @@ pub(crate) fn internal_error(context: &'static str) -> AuthError {
     AuthError::Internal(context.into())
 }
 
+/// Keep the first failure of a logout's revocation writes, and report every one of them.
+///
+/// A logout attempts all of its writes (the access-token blacklist, the refresh-session delete,
+/// the grace-pointer delete) whatever an earlier one did, so one refused write never leaves a
+/// later one unattempted; it then answers the first failure. The cause is logged and the answer
+/// is a generic internal error: a store's own message names its backend.
+pub(crate) fn note_logout_failure(
+    first: &mut Option<AuthError>,
+    step: &str,
+    result: Result<(), AuthError>,
+) {
+    if let Err(error) = result {
+        tracing::warn!(%error, "{step}");
+        first.get_or_insert_with(|| internal_error("a logout revocation write failed"));
+    }
+}
+
 /// Read `identifierPreimages.{name}` from the shared cross-implementation wire contract and
 /// return just the template inside the quotes.
 ///

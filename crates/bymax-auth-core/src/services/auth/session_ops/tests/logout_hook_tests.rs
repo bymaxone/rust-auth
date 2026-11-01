@@ -5,8 +5,8 @@ use std::sync::Arc;
 
 /// A hook spy that records the subject of every `after_logout` notification.
 #[derive(Default)]
-struct LogoutSpy {
-    subjects: std::sync::Mutex<Vec<String>>,
+pub(super) struct LogoutSpy {
+    pub(super) subjects: std::sync::Mutex<Vec<String>>,
 }
 
 #[async_trait::async_trait]

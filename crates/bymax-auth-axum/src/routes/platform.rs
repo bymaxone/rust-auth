@@ -152,15 +152,18 @@ async fn logout(
     PresentedPlatformAccessToken(access_token): PresentedPlatformAccessToken,
     body: axum::body::Bytes,
 ) -> Response {
-    // Best-effort, as the dashboard logout is: an unparseable body degrades to "no token"
-    // rather than blocking the revocation of the access JTI.
+    // An unparseable body degrades to "no token" rather than blocking the revocation of the
+    // access JTI. A store failure is answered, not swallowed, as the dashboard logout does.
     let dto = parse_optional_refresh_body(&body).unwrap_or_default();
     let refresh = dto.refresh_token.unwrap_or_default();
-    let _ = state
+    match state
         .engine()
         .platform_logout(&access_token, &refresh)
-        .await;
-    StatusCode::NO_CONTENT.into_response()
+        .await
+    {
+        Ok(_) => StatusCode::NO_CONTENT.into_response(),
+        Err(error) => error_response(&error),
+    }
 }
 
 /// `POST /auth/platform/refresh` (200). Public. Rotates the platform token pair and echoes the

@@ -10,7 +10,7 @@ use crate::context::to_safe_user;
 use crate::engine::AuthEngine;
 use crate::services::auth::detached::{run_after_login, run_after_logout, run_update_last_login};
 use crate::services::auth::{map_repository_error, spawn_guarded};
-use crate::services::{is_refresh_token_shape, now_unix};
+use crate::services::{is_refresh_token_shape, note_logout_failure, now_unix};
 use crate::traits::{HookContext, HookPlane, SessionKind};
 
 /// What a **dashboard** refresh returns: the rotated tokens plus the account behind them.
@@ -48,8 +48,14 @@ impl AuthEngine {
     ///
     /// # Errors
     ///
-    /// Best-effort cleanup — store failures are swallowed so a logout is never blocked. The
-    /// `Result` is reserved for forward compatibility and currently always returns `Ok`.
+    /// Attempts every revocation write — the access-token blacklist, the refresh-session delete
+    /// and the grace-pointer delete — whatever an earlier one did, then answers the first
+    /// failure as [`AuthError::Internal`]. A `204` for a logout that left the access token or the
+    /// refresh session alive would tell a user who signed out of a lost device that it worked, so
+    /// it is never answered unless every write succeeded. A session already rotated or evicted
+    /// ([`AuthError::SessionNotFound`]) is not a failure, and the logout is idempotent: a retry
+    /// finishes whatever the first attempt left. The `after_logout` hook fires only for a logout
+    /// that succeeded.
     pub async fn logout(&self, access_token: &str, raw_refresh: &str) -> Result<(), AuthError> {
         // The stored session names its owner. Presenting the refresh token proves possession;
         // the record proves whose it is. An access token's claims cannot serve that purpose
@@ -58,64 +64,42 @@ impl AuthEngine {
             .then(|| RawRefreshToken::from_raw(raw_refresh.to_owned()).redis_hash());
         // The record, not just its `user_id`: the session index this logout has to prune is
         // keyed by the TENANT-SCOPED subject, and the record is the only thing on this path
-        // that carries the tenant — the access token is allowed to be absent.
+        // that carries the tenant — the access token is allowed to be absent. A lookup that
+        // fails ends the logout before any write: the owner is unknown, so the writes that
+        // follow could not be aimed.
         let owner = match &session_hash {
             Some(hash) => self
                 .session_store()
                 .find_session(SessionKind::Dashboard, hash)
                 .await
-                .ok()
-                .flatten(),
+                .map_err(|error| {
+                    tracing::warn!(%error, "logout: session lookup failed");
+                    crate::services::internal_error("a logout could not read its session")
+                })?,
             None => None,
         };
+        let mut failure = None;
         let user_id = owner.as_ref().map_or("", |record| record.user_id.as_str());
 
         if let Ok(claims) = self.tokens().verify_access_ignoring_expiry(access_token) {
             // Blacklist for the token's residual lifetime only. `try_from` clamps to `0` if
             // the token lapsed in the window between `verify_access` and this clock read, so a
-            // stale token can never be handed a positive (extended) TTL. Best-effort — a store
-            // failure (including a store that rejects a zero TTL for an already-expiring token)
-            // must not block the logout.
+            // stale token can never be handed a positive (extended) TTL.
             let ttl = u64::try_from(claims.exp.saturating_sub(now_unix())).unwrap_or(0);
-            let _ = self.tokens().revoke_access(&claims.jti, ttl).await;
+            let revoked = self.tokens().revoke_access(&claims.jti, ttl).await;
+            note_logout_failure(
+                &mut failure,
+                "logout: access token revocation failed",
+                revoked,
+            );
         }
 
-        // Clean BOTH the primary and grace refresh keys for the presented token. The
-        // ownership-checked revoke deletes the primary `rt:`/`sd:` keys and the `sess:`
-        // membership; the grace-pointer delete then removes any `rp:` recovery pointer for this
-        // hash, so a token logged out inside its grace window cannot still rotate into a fresh
-        // session. Both are best-effort: `SessionNotFound` (already rotated/evicted) and any
-        // other store error are swallowed, so logout is idempotent and never blocks. A
-        // malformed/oversized token is skipped before hashing — it owns no session anyway.
         if let Some(session_hash) = &session_hash {
-            let subject = self.session_subject(
-                SessionKind::Dashboard,
-                owner
-                    .as_ref()
-                    .and_then(|record| record.tenant_id.as_deref()),
-                user_id,
-            );
-            if let Err(error) = self
-                .session_store()
-                .revoke_session(SessionKind::Dashboard, &subject, session_hash)
-                .await
-            {
-                // Swallowed by design, but not silently: an operator seeing repeated cleanup
-                // failures is looking at sessions that outlive the logout that asked for them.
-                // `SessionNotFound` is the expected outcome for a session already rotated or
-                // evicted, so it is not worth an operator's attention — the same distinction
-                // nest-auth draws before logging.
-                if !matches!(error, AuthError::SessionNotFound) {
-                    tracing::warn!(%error, "logout: session cleanup failed");
-                }
-            }
-            if let Err(error) = self
-                .session_store()
-                .delete_grace_pointer(SessionKind::Dashboard, session_hash)
-                .await
-            {
-                tracing::warn!(%error, "logout: grace pointer cleanup failed");
-            }
+            self.revoke_logout_session(session_hash, owner.as_ref(), &mut failure)
+                .await;
+        }
+        if let Some(error) = failure {
+            return Err(error);
         }
 
         tracing::info!(%user_id, "logout: session closed");
@@ -137,6 +121,39 @@ impl AuthEngine {
             ));
         }
         Ok(())
+    }
+
+    /// Delete BOTH the primary and the grace refresh keys for the presented token. The
+    /// ownership-checked revoke deletes the primary `rt:`/`sd:` keys and the `sess:` membership;
+    /// the grace-pointer delete then removes any `rp:` recovery pointer for this hash, so a token
+    /// logged out inside its grace window cannot still rotate into a fresh session. Both are
+    /// attempted whatever the other did; `SessionNotFound` (already rotated or evicted) is the
+    /// ordinary outcome of a retry and is not recorded.
+    async fn revoke_logout_session(
+        &self,
+        session_hash: &str,
+        owner: Option<&crate::traits::SessionRecord>,
+        failure: &mut Option<AuthError>,
+    ) {
+        let subject = self.session_subject(
+            SessionKind::Dashboard,
+            owner.and_then(|record| record.tenant_id.as_deref()),
+            owner.map_or("", |record| record.user_id.as_str()),
+        );
+        let revoked = self
+            .session_store()
+            .revoke_session(SessionKind::Dashboard, &subject, session_hash)
+            .await;
+        let revoked = match revoked {
+            Err(AuthError::SessionNotFound) => Ok(()),
+            other => other,
+        };
+        note_logout_failure(failure, "logout: session cleanup failed", revoked);
+        let grace = self
+            .session_store()
+            .delete_grace_pointer(SessionKind::Dashboard, session_hash)
+            .await;
+        note_logout_failure(failure, "logout: grace pointer cleanup failed", grace);
     }
 
     /// Return the credential-free user for the authenticated subject.
@@ -429,6 +446,7 @@ fn identity_only_context(
 #[cfg(test)]
 mod tests {
     use super::*;
+    mod logout_failure_tests;
     mod logout_hook_tests;
     use crate::services::auth::LoginInput;
     use crate::services::auth::test_support::{Harness, SeedUser, base_config, ctx, harness};
@@ -983,12 +1001,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn logout_survives_a_store_that_refuses_both_cleanups() {
-        // A backend outage during logout must not fail the logout: the access token is already
-        // blacklisted, and the caller has no way to retry the parts that failed. What it must
-        // not do is pass silently — an operator with a store that keeps refusing is looking at
-        // refresh sessions and grace pointers outliving the logouts that asked for them, and the
-        // response says nothing. Both cleanups are armed to fail, so both report.
+    async fn logout_reports_a_store_that_refuses_both_cleanups() {
+        // A backend outage during logout must not read as a success: a `204` would tell a user
+        // who signed out of a lost device that the refresh session is gone when it is not. Both
+        // cleanups are armed to fail, both are attempted and both are logged, and the answer is
+        // an internal error the caller can retry.
         let mut cfg = base_config();
         cfg.email_verification.required = false;
         let Some(h) = harness(cfg, None) else { return };
@@ -996,22 +1013,21 @@ mod tests {
 
         h.stores.fail_next_cleanup_writes(2);
         let (events, capture) = crate::log_capture::capture_events();
-        assert!(
+        assert!(matches!(
             h.engine
                 .logout(&auth.access_token, &auth.refresh_token)
-                .await
-                .is_ok()
-        );
+                .await,
+            Err(AuthError::Internal(_))
+        ));
         drop(capture);
 
-        // Both refusals are reported. The warning is the whole body of its branch — the logout
-        // returns `Ok` either way and the session survives either way — so the log is the only
-        // place the condition guarding it is observable at all.
+        // Both refusals are logged: the answer carries no cause, so the log is the only place
+        // an operator can see which step failed.
         assert!(events.contains_at(tracing::Level::WARN, "logout: session cleanup failed"));
         assert!(events.contains_at(tracing::Level::WARN, "logout: grace pointer cleanup failed"));
 
         // The failures were consumed by the two cleanup calls, and the session survives them —
-        // which is what makes the swallowed error worth reporting rather than ignoring.
+        // which is what the error answer tells the caller to retry.
         let store: &dyn crate::traits::SessionStore = h.stores.as_ref();
         assert!(matches!(
             store

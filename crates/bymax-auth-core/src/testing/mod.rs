@@ -527,6 +527,12 @@ pub struct InMemoryStores {
     /// through [`InMemoryStores::fail_next_cleanup_writes`]. Zero — the default — means every
     /// call behaves normally.
     forced_write_failures: Mutex<usize>,
+    /// Armed count of `find_session` calls that must fail with a backend error, set through
+    /// [`InMemoryStores::fail_next_session_lookups`].
+    forced_session_lookup_failures: Mutex<usize>,
+    /// Armed count of `blacklist_access` calls that must fail with a backend error, set through
+    /// [`InMemoryStores::fail_next_blacklist_writes`].
+    forced_blacklist_failures: Mutex<usize>,
     /// Armed count of `create_recovered_session` calls that must report the account swept.
     ///
     /// The real refusal is a race: a `revoke_all` landing between the grace pointer's read and
@@ -622,6 +628,18 @@ impl InMemoryStores {
     /// affected call; the default of zero leaves every call behaving normally.
     pub fn fail_next_cleanup_writes(&self, count: usize) {
         *lock(&self.forced_write_failures) = count;
+    }
+
+    /// Make the next `count` `find_session` calls fail with a backend error: the read a logout
+    /// resolves the session's owner by, which has to fail closed before any write.
+    pub fn fail_next_session_lookups(&self, count: usize) {
+        *lock(&self.forced_session_lookup_failures) = count;
+    }
+
+    /// Make the next `count` `blacklist_access` calls fail with a backend error: the write a
+    /// logout relies on to end an access token, refused while every read still answers.
+    pub fn fail_next_blacklist_writes(&self, count: usize) {
+        *lock(&self.forced_blacklist_failures) = count;
     }
 
     /// Make the next `count` `create_recovered_session` calls report the account swept — the
@@ -879,6 +897,15 @@ impl SessionStore for InMemoryStores {
         kind: SessionKind,
         token_hash: &str,
     ) -> Result<Option<SessionRecord>, AuthError> {
+        {
+            let mut armed = lock(&self.forced_session_lookup_failures);
+            if *armed > 0 {
+                *armed -= 1;
+                return Err(crate::services::internal_error(
+                    "forced session lookup failure",
+                ));
+            }
+        }
         Ok(lock(&self.sessions)
             .get(&(kind, token_hash.to_owned()))
             .cloned())
@@ -1012,6 +1039,15 @@ impl SessionStore for InMemoryStores {
         jti_or_hash: &str,
         _remaining_ttl_secs: u64,
     ) -> Result<(), AuthError> {
+        {
+            let mut armed = lock(&self.forced_blacklist_failures);
+            if *armed > 0 {
+                *armed -= 1;
+                return Err(crate::services::internal_error(
+                    "forced blacklist write failure",
+                ));
+            }
+        }
         lock(&self.blacklist).insert(jti_or_hash.to_owned());
         Ok(())
     }
