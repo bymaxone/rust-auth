@@ -50,64 +50,71 @@ async fn try_start() -> Option<TestRedis> {
 const OLD: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const NEW: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 
+/// Claim `hash` for the address `cafe` in tenant `t1` expecting `expected`, with a 600 s TTL.
+async fn claim(stores: &RedisStores, hash: &str, expected: Option<&str>) -> bool {
+    stores
+        .claim_invitation_index("t1", "cafe", hash, 600, expected)
+        .await
+        .unwrap_or(false)
+}
+
+/// The hash the index names for `cafe` in tenant `t1`.
+async fn named(stores: &RedisStores) -> Option<String> {
+    stores
+        .read_invitation_index("t1", "cafe")
+        .await
+        .unwrap_or_default()
+}
+
 #[tokio::test]
-async fn the_claim_proceeds_only_while_the_index_holds_what_was_approved() {
+async fn a_claim_expecting_an_absent_entry_wins_only_on_an_empty_index() {
     let Some(redis) = try_start().await else { return };
     let Some(stores) = redis.stores() else { return };
 
-    // Nothing indexed: a claim expecting "absent" wins, one expecting a hash does not.
-    assert!(matches!(
-        stores
-            .claim_invitation_index("t1", "cafe", OLD, 600, Some(NEW))
-            .await,
-        Ok(false)
-    ));
-    assert!(matches!(
-        stores
-            .claim_invitation_index("t1", "cafe", OLD, 600, None)
-            .await,
-        Ok(true)
-    ));
-    assert!(matches!(stores.read_invitation_index("t1", "cafe").await, Ok(Some(h)) if h == OLD));
+    // Nothing indexed: a claim expecting a hash loses, one expecting "absent" wins.
+    assert!(!claim(&stores, OLD, Some(NEW)).await);
+    assert!(claim(&stores, OLD, None).await);
+    assert_eq!(named(&stores).await.as_deref(), Some(OLD));
+    // Now the index is occupied, a claim still expecting "absent" loses and changes nothing.
+    assert!(!claim(&stores, NEW, None).await);
+    assert_eq!(named(&stores).await.as_deref(), Some(OLD));
+}
 
-    // The index now holds OLD: a claim that still expects "absent" loses and changes nothing,
-    // a claim naming the wrong hash loses, and one naming OLD wins.
-    assert!(matches!(
-        stores
-            .claim_invitation_index("t1", "cafe", NEW, 600, None)
-            .await,
-        Ok(false)
-    ));
-    assert!(matches!(
-        stores
-            .claim_invitation_index("t1", "cafe", NEW, 600, Some(NEW))
-            .await,
-        Ok(false)
-    ));
-    assert!(matches!(stores.read_invitation_index("t1", "cafe").await, Ok(Some(h)) if h == OLD));
-    assert!(matches!(
-        stores
-            .claim_invitation_index("t1", "cafe", NEW, 600, Some(OLD))
-            .await,
-        Ok(true)
-    ));
-    assert!(matches!(stores.read_invitation_index("t1", "cafe").await, Ok(Some(h)) if h == NEW));
+#[tokio::test]
+async fn a_claim_naming_the_wrong_hash_loses_and_one_naming_the_current_hash_wins() {
+    let Some(redis) = try_start().await else { return };
+    let Some(stores) = redis.stores() else { return };
+    assert!(claim(&stores, OLD, None).await);
 
-    // The claimed entry carries the invitation's TTL, and tenants do not share an index.
+    assert!(!claim(&stores, NEW, Some(NEW)).await);
+    assert_eq!(named(&stores).await.as_deref(), Some(OLD));
+    assert!(claim(&stores, NEW, Some(OLD)).await);
+    assert_eq!(named(&stores).await.as_deref(), Some(NEW));
+}
+
+#[tokio::test]
+async fn a_claim_carries_the_ttl_and_a_claim_on_the_held_hash_renews_it() {
+    let Some(redis) = try_start().await else { return };
+    let Some(stores) = redis.stores() else { return };
+    assert!(claim(&stores, OLD, None).await);
     let ttl = redis.ttl("auth:invidx:t1:cafe").await;
     assert!((1..=600).contains(&ttl), "{ttl}");
 
-    // Claiming again with the hash it already holds renews the TTL: an invite that writes its
-    // record later than its claim renews the index so the record cannot outlive the entry that
-    // names it.
-    assert!(matches!(
-        stores
-            .claim_invitation_index("t1", "cafe", NEW, 6000, Some(NEW))
-            .await,
-        Ok(true)
-    ));
-    let renewed = redis.ttl("auth:invidx:t1:cafe").await;
-    assert!(renewed > 600, "{renewed}");
+    // An invite that writes its record later than its claim renews the index so the record
+    // cannot outlive the entry that names it.
+    let renewed = stores
+        .claim_invitation_index("t1", "cafe", OLD, 6000, Some(OLD))
+        .await;
+    assert!(matches!(renewed, Ok(true)));
+    let after = redis.ttl("auth:invidx:t1:cafe").await;
+    assert!(after > 600, "{after}");
+}
+
+#[tokio::test]
+async fn tenants_do_not_share_an_index() {
+    let Some(redis) = try_start().await else { return };
+    let Some(stores) = redis.stores() else { return };
+    assert!(claim(&stores, OLD, None).await);
     assert!(matches!(
         stores.read_invitation_index("t2", "cafe").await,
         Ok(None)
