@@ -14,7 +14,7 @@ use bymax_auth_types::{AuthResult, LoginResult};
 use http::StatusCode;
 use tower_cookies::Cookies;
 
-use crate::delivery::{TokenDelivery, user_body};
+use crate::delivery::{TokenDelivery, user_body, with_extra_cookies};
 use crate::dto::{LoginDto, RegisterDto, ResendVerificationDto, VerifyEmailDto};
 use crate::extractors::AuthUser;
 use crate::response::{anti_enumerating_outcome, error_response};
@@ -143,8 +143,8 @@ async fn logout(
         dto.refresh_token.as_deref(),
     );
     let _ = state.engine().logout(&access_token, &refresh).await;
-    TokenDelivery::with_domains(state.config(), &domains).clear_session(&cookies);
-    StatusCode::NO_CONTENT.into_response()
+    let extras = TokenDelivery::with_domains(state.config(), &domains).clear_session(&cookies);
+    with_extra_cookies(StatusCode::NO_CONTENT.into_response(), extras)
 }
 
 /// `POST /auth/refresh` (200). Public. Rotates the refresh token (cookie or body) into a

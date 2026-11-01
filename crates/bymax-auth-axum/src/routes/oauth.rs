@@ -11,7 +11,7 @@ use bymax_auth_core::OAuthOutcome;
 use http::{HeaderValue, StatusCode, header};
 use tower_cookies::Cookies;
 
-use crate::delivery::TokenDelivery;
+use crate::delivery::{TokenDelivery, with_extra_cookies};
 use crate::dto::{OAuthCallbackQuery, OAuthInitiateQuery};
 use crate::response::error_response;
 use crate::routes::{CookieDomains, RequestMeta};
@@ -141,8 +141,8 @@ async fn callback(
                 // Browser flow: plant the auth cookies into the jar (the cookie-manager layer
                 // emits them on the redirect response), then 302 to the configured URL.
                 Some(url) => {
-                    delivery.set_auth_cookies_for_browser(&cookies, &result);
-                    found(url)
+                    let extras = delivery.set_auth_cookies_for_browser(&cookies, &result);
+                    with_extra_cookies(found(url), extras)
                 }
                 // SPA/API flow: 200 with the delivered auth body.
                 None => delivery.deliver_auth(&cookies, &result, StatusCode::OK),

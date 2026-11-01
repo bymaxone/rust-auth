@@ -4,9 +4,9 @@
 //! It honors the configured mode — `cookie` (set the secure cookies, body = safe user),
 //! `bearer` (no cookies, body = `{ user, accessToken, refreshToken }`), `both` (cookies +
 //! tokens in the body) — and the §14 cookie attributes: HttpOnly (except `has_session`),
-//! Secure-by-default, the refresh cookie path-scoped and `SameSite=Strict`, the access /
-//! signal cookies `SameSite=Lax`. Handlers never hand-roll a `Set-Cookie`; they delegate
-//! here. The MFA-temp cookie (planted on the MFA-gated OAuth callback) is also written here.
+//! Secure-by-default, the refresh cookie path-scoped and `SameSite=Strict` (relaxed only to
+//! `None` for a cross-site deployment), the access / signal cookies on the configured `SameSite`.
+//! Handlers never hand-roll a `Set-Cookie`; they delegate here. The MFA-temp cookie (planted on the MFA-gated OAuth callback) is also written here.
 //!
 //! The **platform** delivery is the one exception to the mode switch: it is always bearer
 //! (§7.11.1 — "`deliver_platform_auth` is **always bearer** regardless of mode"), because the
@@ -18,7 +18,7 @@ use axum::response::{IntoResponse, Response};
 use bymax_auth_core::config::{SameSite as ConfigSameSite, TokenDelivery as DeliveryMode};
 use bymax_auth_types::constants::AUTH_HAS_SESSION_COOKIE_VALUE;
 use bymax_auth_types::{AuthResult, MfaChallengeResult, SafeAuthUser};
-use http::StatusCode;
+use http::{HeaderValue, StatusCode};
 use serde::Serialize;
 use serde_json::json;
 use tower_cookies::Cookies;
@@ -38,6 +38,17 @@ fn with_domain(cookie: Cookie<'static>, domain: Option<&str>) -> Cookie<'static>
         }
         None => cookie,
     }
+}
+
+/// Append the `Set-Cookie` values a multi-domain plant or clear produced beyond the jar's
+/// first scope (see `TokenDelivery::write_scopes`) to `response`.
+pub(crate) fn with_extra_cookies(mut response: Response, extras: Vec<HeaderValue>) -> Response {
+    for value in extras {
+        response
+            .headers_mut()
+            .append(http::header::SET_COOKIE, value);
+    }
+    response
 }
 
 /// Map the engine's `SameSite` to the cookie crate's `SameSite`.
@@ -85,16 +96,47 @@ impl<'a> TokenDelivery<'a> {
         Self { config, domains }
     }
 
-    /// The `Domain` to stamp on each session cookie: `None` (host-only) when no resolver is
-    /// configured, otherwise the **first** domain the resolver returned for this request.
+    /// The scopes to plant or clear the session cookies on: one host-only scope when no domain
+    /// was resolved, otherwise one per resolved domain.
     ///
-    /// Only one can take effect, so only one is emitted. A browser rejects a `Set-Cookie`
-    /// whose `Domain` is not a suffix of the host that sent the response (RFC 6265 §5.3.6),
-    /// which means a second domain on the same response is either the same scope written
-    /// twice or a value the browser drops on the floor. The resolver is handed the request
-    /// host precisely so it can answer with the scope that applies to it.
-    fn domain(&self) -> Option<&str> {
-        self.domains.first().map(String::as_str)
+    /// Every domain gets its own full set, because a browser identifies a cookie by name,
+    /// domain and path: `Domain=example.com` and `Domain=app.example.com` are two cookies kept
+    /// side by side, and a logout that cleared only one would leave the other signed in. A
+    /// domain the browser refuses (not a suffix of the responding host) is dropped by the
+    /// browser alone, so naming one costs nothing.
+    fn scopes(&self) -> Vec<Option<&str>> {
+        if self.domains.is_empty() {
+            return vec![None];
+        }
+        self.domains.iter().map(|d| Some(d.as_str())).collect()
+    }
+
+    /// Write `cookies_for(scope)` for every scope. The first scope goes through the jar; every
+    /// further one is returned as a `Set-Cookie` value for the caller to append to the
+    /// response, because the jar identifies a cookie by name alone and would replace the first
+    /// scope's cookie with the second's. `remove` turns each cookie into its expiry.
+    fn write_scopes(
+        &self,
+        cookies: &Cookies,
+        remove: bool,
+        cookies_for: &dyn Fn(Option<&str>) -> Vec<Cookie<'static>>,
+    ) -> Vec<HeaderValue> {
+        let mut extras = Vec::new();
+        for (index, scope) in self.scopes().into_iter().enumerate() {
+            for cookie in cookies_for(scope) {
+                match (index, remove) {
+                    (0, false) => cookies.add(cookie),
+                    (0, true) => cookies.remove(cookie),
+                    (_, false) => extras.extend(HeaderValue::from_str(&cookie.to_string()).ok()),
+                    (_, true) => {
+                        let mut expired = cookie;
+                        expired.make_removal();
+                        extras.extend(HeaderValue::from_str(&expired.to_string()).ok());
+                    }
+                }
+            }
+        }
+        extras
     }
 
     /// The cookie attributes resolved at router build.
@@ -115,16 +157,27 @@ impl<'a> TokenDelivery<'a> {
             .build()
     }
 
-    /// Build the refresh-token cookie — always path-scoped to the refresh path and always
-    /// `SameSite=Strict` (the long-lived credential's blast-radius limiter), HttpOnly,
-    /// Secure-by-default, with the refresh lifetime as its max-age.
+    /// The `SameSite` of the refresh cookie: `Strict` (the long-lived credential's blast-radius
+    /// limiter) unless the deployment is cross-site (`None`), where a browser sends no `Strict` or
+    /// `Lax` cookie on the refresh request. `Lax` is never chosen for it: it is withheld on the same
+    /// requests `Strict` is, so relaxing to it would weaken the cookie and fix nothing.
+    fn refresh_same_site(&self) -> SameSite {
+        match self.cookies().same_site {
+            ConfigSameSite::None => SameSite::None,
+            ConfigSameSite::Lax | ConfigSameSite::Strict => SameSite::Strict,
+        }
+    }
+
+    /// Build the refresh-token cookie — path-scoped to the refresh path, `SameSite=Strict`
+    /// unless cross-site (see [`Self::refresh_same_site`]), HttpOnly, Secure-by-default, with
+    /// the refresh lifetime as its max-age.
     fn build_refresh_cookie(&self, value: String) -> Cookie<'static> {
         let c = self.cookies();
         Cookie::build((c.refresh_name.clone(), value))
             .path(c.refresh_path.clone())
             .http_only(true)
             .secure(c.secure)
-            .same_site(SameSite::Strict)
+            .same_site(self.refresh_same_site())
             .max_age(Duration::seconds(c.refresh_max_age_secs))
             .build()
     }
@@ -147,50 +200,62 @@ impl<'a> TokenDelivery<'a> {
 
     /// Plant the full auth-cookie set (access + path-scoped refresh + the session signal)
     /// into the jar. Used by login/register/refresh/MFA-success/invitation-accept.
-    fn set_auth_cookies(&self, cookies: &Cookies, access: &str, refresh: &str) {
-        let domain = self.domain();
-        cookies.add(with_domain(
-            self.build_access_cookie(access.to_owned()),
-            domain,
-        ));
-        cookies.add(with_domain(
-            self.build_refresh_cookie(refresh.to_owned()),
-            domain,
-        ));
-        cookies.add(with_domain(self.build_signal_cookie(), domain));
+    fn set_auth_cookies(&self, cookies: &Cookies, access: &str, refresh: &str) -> Vec<HeaderValue> {
+        self.write_scopes(cookies, false, &|domain| {
+            vec![
+                with_domain(self.build_access_cookie(access.to_owned()), domain),
+                with_domain(self.build_refresh_cookie(refresh.to_owned()), domain),
+                with_domain(self.build_signal_cookie(), domain),
+            ]
+        })
     }
 
     /// Plant the auth cookies for a browser-redirect flow (the OAuth success/MFA redirect),
     /// regardless of the configured delivery mode — a browser navigation can only carry the
     /// session via cookies, so the redirect always sets them.
     #[cfg(feature = "oauth")]
-    pub(crate) fn set_auth_cookies_for_browser(&self, cookies: &Cookies, result: &AuthResult) {
-        self.set_auth_cookies(cookies, &result.access_token, &result.refresh_token);
+    pub(crate) fn set_auth_cookies_for_browser(
+        &self,
+        cookies: &Cookies,
+        result: &AuthResult,
+    ) -> Vec<HeaderValue> {
+        self.set_auth_cookies(cookies, &result.access_token, &result.refresh_token)
     }
 
     /// Clear the access, refresh, and session-signal cookies on logout — reusing the exact
     /// `Path` each was set with (a mismatched path leaves a ghost cookie the browser keeps
     /// sending). `Cookies::remove` emits the expiry `Set-Cookie`.
-    pub(crate) fn clear_session(&self, cookies: &Cookies) {
+    pub(crate) fn clear_session(&self, cookies: &Cookies) -> Vec<HeaderValue> {
         let c = self.cookies();
         // The clear has to mirror the plant on every attribute the browser matches a deletion
-        // by — name, domain and path. Clearing a `Domain=`-scoped cookie host-only leaves the
-        // real one in place, and the user who signed out stays signed in.
-        let domain = self.domain();
-        cookies.remove(with_domain(
-            Cookie::build((c.access_name.clone(), "")).path("/").build(),
-            domain,
-        ));
-        cookies.remove(with_domain(
-            Cookie::build((c.refresh_name.clone(), ""))
-                .path(c.refresh_path.clone())
-                .build(),
-            domain,
-        ));
-        cookies.remove(with_domain(
-            Cookie::build((c.signal_name.clone(), "")).path("/").build(),
-            domain,
-        ));
+        // by — name, domain and path — and on `Secure`, so an expiry is never weaker than the
+        // cookie it removes. Clearing a `Domain=`-scoped cookie host-only leaves the real one
+        // in place, and the user who signed out stays signed in.
+        self.write_scopes(cookies, true, &|domain| {
+            vec![
+                with_domain(
+                    Cookie::build((c.access_name.clone(), ""))
+                        .path("/")
+                        .secure(c.secure)
+                        .build(),
+                    domain,
+                ),
+                with_domain(
+                    Cookie::build((c.refresh_name.clone(), ""))
+                        .path(c.refresh_path.clone())
+                        .secure(c.secure)
+                        .build(),
+                    domain,
+                ),
+                with_domain(
+                    Cookie::build((c.signal_name.clone(), ""))
+                        .path("/")
+                        .secure(c.secure)
+                        .build(),
+                    domain,
+                ),
+            ]
+        })
     }
 
     /// Plant the ephemeral OAuth `state` cookie, binding the flow to the browser that started
@@ -236,7 +301,7 @@ impl<'a> TokenDelivery<'a> {
     }
 
     /// Plant the ephemeral MFA-temp cookie (§14.1): path-scoped to the MFA challenge path,
-    /// HttpOnly, Secure-by-default, `SameSite` aligned with the refresh cookie, Max-Age
+    /// HttpOnly, Secure-by-default, the configured `SameSite`, Max-Age
     /// pinned to the temp-token's 300 s lifetime so the cookie can never outlive the JWT.
     /// Only the OAuth callback plants this cookie, so it compiles under the `oauth` feature.
     #[cfg(feature = "oauth")]
@@ -249,7 +314,7 @@ impl<'a> TokenDelivery<'a> {
                 .path(c.mfa_temp_path.clone())
                 .http_only(true)
                 .secure(c.secure)
-                .same_site(SameSite::Strict)
+                .same_site(map_same_site(c.same_site))
                 .max_age(Duration::seconds(max_age))
                 .build(),
         );
@@ -289,13 +354,18 @@ impl<'a> TokenDelivery<'a> {
     ) -> Response {
         match self.config.delivery {
             DeliveryMode::Cookie => {
-                self.set_auth_cookies(cookies, &result.access_token, &result.refresh_token);
-                (status, Json(json!({ "user": result.user }))).into_response()
+                let extras =
+                    self.set_auth_cookies(cookies, &result.access_token, &result.refresh_token);
+                with_extra_cookies(
+                    (status, Json(json!({ "user": result.user }))).into_response(),
+                    extras,
+                )
             }
             DeliveryMode::Bearer => (status, Json(bearer_body(result))).into_response(),
             DeliveryMode::Both => {
-                self.set_auth_cookies(cookies, &result.access_token, &result.refresh_token);
-                (status, Json(bearer_body(result))).into_response()
+                let extras =
+                    self.set_auth_cookies(cookies, &result.access_token, &result.refresh_token);
+                with_extra_cookies((status, Json(bearer_body(result))).into_response(), extras)
             }
         }
     }
@@ -689,3 +759,6 @@ mod tests {
         assert!(!has_cookie(&jar, name));
     }
 }
+
+#[cfg(test)]
+mod domain_tests;

@@ -2437,7 +2437,7 @@ impl TokenDeliveryService {
 
 For each resolved domain, emit three cookies with `SameSite = config.cookies.same_site` (default `lax`) and `Secure = config.secure_cookies` (default `NODE_ENV == production` equivalent → from config):
 - access: name `config.cookies.access_token_name` (default `access_token`), `HttpOnly`, `max_age = jwt.access_cookie_max_age` (a `Duration`). Cookie ages are carried as `Duration` end-to-end; the adapter converts to the integer the cookie layer expects only at serialization time (milliseconds in the JS cookie convention, seconds on the HTTP `Max-Age` wire).
-- refresh: name `config.cookies.refresh_token_name` (default `refresh_token`), `HttpOnly`, `path = cookies.refresh_cookie_path` (default `/auth`), `max_age` = the refresh lifetime as a `Duration` (`refresh_expires_in_days` days).
+- refresh: name `config.cookies.refresh_token_name` (default `refresh_token`), `HttpOnly`, `path = cookies.refresh_cookie_path` (default `/auth`), `SameSite=Strict` whatever `same_site` is, except `None` (the cross-site topology, where a browser sends no `Strict` or `Lax` cookie on the refresh request), `max_age` = the refresh lifetime as a `Duration` (`refresh_expires_in_days` days).
 - session signal: name `config.cookies.session_signal_name` (default `has_session`), value `"1"`, **not** HttpOnly (client JS reads it to know a refresh session exists), `max_age` mirrors the **refresh** lifetime (not the access) so the client can still trigger a silent refresh in the window after the access token expires but before the refresh session does.
 
 `clear_auth_session`: no-op in `bearer` mode; otherwise clear all three on the resolved domains (refresh cookie cleared with its `path`; signal cookie cleared as non-HttpOnly).

@@ -218,6 +218,25 @@ where
     }
 }
 
+/// The hostname a cookie-domain resolver is handed for a raw `Host` value: the port cut, and
+/// the empty string unless what remains is made of letters, digits, dots and hyphens only.
+///
+/// The `Host` header is client-chosen text that ends up in a `Set-Cookie` line, so a value
+/// such as `evil.com; Path=/` must never reach the resolver. A bracketed IPv6 literal fails the
+/// check on its brackets: a literal address has no cookie domain.
+pub(crate) fn cookie_host(raw: &str) -> String {
+    let host = raw.split(':').next().unwrap_or_default();
+    let valid = !host.is_empty()
+        && host
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'-');
+    if valid {
+        host.to_owned()
+    } else {
+        String::new()
+    }
+}
+
 /// A handler extractor that resolves the cookie `Domain`(s) for this request by asking the
 /// configured `cookies.resolve_domains` resolver, or an empty vector when none is configured.
 ///
@@ -255,9 +274,9 @@ where
             .headers
             .get(header::HOST)
             .and_then(|value| value.to_str().ok())
-            .map(|value| value.split(':').next().unwrap_or(value))
-            .unwrap_or("");
-        Ok(Self(resolver.resolve(host)))
+            .map(cookie_host)
+            .unwrap_or_default();
+        Ok(Self(resolver.resolve(&host)))
     }
 }
 
@@ -492,5 +511,24 @@ mod tests {
             "from-body"
         );
         assert_eq!(source_refresh_token(&empty_jar, "refresh_token", None), "");
+    }
+
+    #[test]
+    fn the_host_a_resolver_sees_is_a_plain_hostname_or_empty() {
+        // Port cut, case kept, and anything that is not letters/digits/dots/hyphens refused:
+        // the value is client text on its way into a `Set-Cookie` line.
+        for (raw, expected) in [
+            ("app.example.com", "app.example.com"),
+            ("app.example.com:8443", "app.example.com"),
+            ("APP.Example.com", "APP.Example.com"),
+            ("[::1]:8080", ""),
+            ("[::1]", ""),
+            ("evil.com; Path=/", ""),
+            ("evil.com\r\nSet-Cookie: x=1", ""),
+            ("", ""),
+            (":8080", ""),
+        ] {
+            assert_eq!(cookie_host(raw), expected, "{raw:?}");
+        }
     }
 }
