@@ -284,9 +284,14 @@ impl AuthClient {
     /// [`AuthClientError`] on a backend/transport failure.
     pub async fn logout(&self) -> Result<(), AuthClientError> {
         let access = self.access_token().ok_or(AuthClientError::NoSession)?;
-        let request = self
+        let mut request = self
             .post("/auth/logout")
             .header(AUTHORIZATION, format!("Bearer {access}"));
+        // The server ends the session the refresh token names, so it is sent along: the access
+        // token alone does not identify the refresh session.
+        if let Some(refresh) = self.refresh_token() {
+            request = request.body(serde_json::json!({ "refreshToken": refresh }).to_string());
+        }
         self.send_no_content(request).await?;
         self.clear_tokens();
         Ok(())

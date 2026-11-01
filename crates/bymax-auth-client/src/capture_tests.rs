@@ -147,3 +147,19 @@ async fn reset_password_posts_each_proof_under_its_own_field() {
         assert!(request.contains(r#""tenantId":"t1""#));
     }
 }
+
+#[tokio::test]
+async fn logout_names_the_stored_refresh_token_so_the_server_session_ends() {
+    // The server ends the session the refresh token names, so a logout has to send it: the access
+    // token alone does not identify the refresh session.
+    let request = capture_request(response(204, "No Content", ""), |client| async move {
+        client.store_tokens("acc-token", "ref-token");
+        assert!(client.logout().await.is_ok());
+        assert!(client.access_token().is_none() && client.refresh_token().is_none());
+    })
+    .await
+    .unwrap_or_default();
+    assert!(request.starts_with("POST /auth/logout "));
+    assert!(request.contains("authorization: Bearer acc-token"));
+    assert!(request.contains(r#""refreshToken":"ref-token""#));
+}
