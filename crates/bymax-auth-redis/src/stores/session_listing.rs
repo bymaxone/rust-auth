@@ -1,13 +1,14 @@
 //! Reading one session-detail record for a listing: which members surface and which are left out.
 //!
 //! Layer: a helper of the session store. The decision is pure, so it is testable without a
-//! server; the one Redis call here removes a dead index member atomically.
+//! server; the one Redis call here removes the dead index members in one script.
 
 use bymax_auth_core::traits::SessionDetail;
 
 use super::session::SessionDetailValue;
+use deadpool_redis::Connection;
+
 use crate::error::RedisStoreError;
-use crate::pool::RedisStores;
 use crate::script;
 
 /// What reading one `sd:`/`psd:` record means for the listing.
@@ -39,27 +40,27 @@ pub(super) fn read_detail(hash: &str, raw: Option<&str>) -> DetailRead {
     }
 }
 
-impl RedisStores {
-    /// Remove `member` from the index `sess_key` if, and only if, the key `rt_key` it names is
-    /// gone. Existence is the only evidence admitted: a detail that is missing or damaged does
-    /// not make a session dead, and removing a live one from the index lets it outlive a
-    /// sign-out-everywhere.
-    pub(super) async fn prune_dead_member(
-        &self,
-        sess_key: &str,
-        rt_key: &str,
-        member: &str,
-    ) -> Result<(), RedisStoreError> {
-        let mut conn = self.connection().await?;
-        let _removed: i64 = script::SESSION_PRUNE_DEAD
-            .prepare()
-            .key(sess_key)
-            .key(rt_key)
-            .arg(member)
-            .invoke_async(&mut conn)
-            .await?;
-        Ok(())
+/// Remove from the index `sess_key` every candidate in `members` whose own key is gone, on the
+/// connection the caller already holds. Existence is the only evidence admitted: a detail that is
+/// missing or damaged does not make a session dead, and removing a live one from the index lets
+/// it outlive a sign-out-everywhere. The caller runs this after every read succeeded, so a failed
+/// read never leaves the index half-pruned.
+pub(super) async fn prune_dead_members(
+    conn: &mut Connection,
+    namespace: &str,
+    sess_key: &str,
+    members: &[&str],
+) -> Result<(), RedisStoreError> {
+    if members.is_empty() {
+        return Ok(());
     }
+    let mut invocation = script::SESSION_PRUNE_DEAD.prepare();
+    invocation.key(sess_key).arg(namespace);
+    for member in members {
+        invocation.arg(*member);
+    }
+    let _removed: i64 = invocation.invoke_async(conn).await?;
+    Ok(())
 }
 
 #[cfg(test)]

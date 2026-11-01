@@ -18,7 +18,7 @@ use crate::error::RedisStoreError;
 use crate::keys::Prefix;
 use crate::pool::RedisStores;
 use crate::script;
-use crate::stores::session_listing::{DetailRead, read_detail};
+use crate::stores::session_listing::{DetailRead, prune_dead_members, read_detail};
 
 /// The tag the `refresh_rotate` script prepends to a grace-window recovery payload, matching
 /// the literal in `lua/refresh_rotate.lua`.
@@ -498,6 +498,7 @@ impl RedisStores {
         let mut conn = self.connection().await?;
         let members: Vec<String> = conn.smembers(&sess_key).await?;
         let mut details = Vec::with_capacity(members.len());
+        let mut stale: Vec<&str> = Vec::new();
         let grace_prefix = format!("{}:", prefixes.rp.as_str());
         let namespace = keys.namespace().to_owned();
         for member in &members {
@@ -536,13 +537,11 @@ impl RedisStores {
             let raw: Option<String> = conn.get(&sd_key).await?;
             match read_detail(hash, raw.as_deref()) {
                 DetailRead::Listed(detail) => details.push(detail),
-                // Left out; pruned only if its `rt:` key is gone too (see `DetailRead`).
-                DetailRead::Excluded => {
-                    let rt_key = keys.key(prefixes.rt, hash);
-                    self.prune_dead_member(&sess_key, &rt_key, member).await?;
-                }
+                // Left out; pruned once, after every read, only if its `rt:` key is gone too.
+                DetailRead::Excluded => stale.push(member.as_str()),
             }
         }
+        prune_dead_members(&mut conn, keys.namespace(), &sess_key, &stale).await?;
         Ok(details)
     }
 

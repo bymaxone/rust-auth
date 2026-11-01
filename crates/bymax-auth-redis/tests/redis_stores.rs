@@ -136,6 +136,35 @@ async fn listing_leaves_out_a_damaged_detail_and_prunes_only_a_dead_member() {
 }
 
 #[tokio::test]
+async fn a_failed_detail_read_fails_the_listing_and_prunes_nothing() {
+    let Some(redis) = common::try_start().await else {
+        return;
+    };
+    let Some(stores) = redis.stores() else { return };
+    let kind = SessionKind::Dashboard;
+    for hash in ["h1", "h2"] {
+        let created = stores
+            .create_session(kind, &subject("fu2"), hash, &record("fu2"), 3600)
+            .await;
+        assert!(created.is_ok());
+    }
+    // h1 is dead: detail and refresh key gone. h2's detail key holds the wrong type, so reading it
+    // fails (WRONGTYPE) whichever order the members come back in.
+    assert!(redis.del("auth:sd:h1").await && redis.del("auth:rt:h1").await);
+    assert!(redis.del("auth:sd:h2").await && redis.sadd("auth:sd:h2", "x").await);
+
+    assert!(stores.list_sessions(kind, &subject("fu2")).await.is_err());
+
+    let mut members = redis.smembers("auth:sess:s-fu2").await;
+    members.sort();
+    assert_eq!(
+        members,
+        ["rt:h1", "rt:h2"],
+        "a failed read must prune nothing"
+    );
+}
+
+#[tokio::test]
 async fn session_create_rotate_grace_revoke_and_blacklist() {
     let Some(redis) = common::try_start().await else {
         return;
