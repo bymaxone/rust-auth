@@ -37,6 +37,7 @@ use http::header;
 use http::request::Parts;
 use tower_cookies::Cookies;
 
+use crate::client_ip::ResolvedClientIp;
 use crate::dto::RefreshDto;
 use crate::extractors::source_access_token;
 use crate::state::AuthState;
@@ -122,12 +123,12 @@ pub(crate) fn sensitive_header_names() -> Vec<HeaderName> {
         .collect()
 }
 
-/// Build a framework-neutral [`RequestContext`] from request parts: the client IP (peer
-/// socket address, never a raw `X-Forwarded-For`), the `User-Agent`, and the sanitized
+/// Build a framework-neutral [`RequestContext`] from request parts: the client IP (the
+/// resolved client address, never a raw `X-Forwarded-For`), the `User-Agent`, and the sanitized
 /// header map (sensitive entries removed, keys lowercased). The core never sees a real HTTP
 /// request — this is the only place the adapter translates one.
 pub(crate) fn request_context(parts: &Parts) -> RequestContext {
-    let ip = peer_ip(parts);
+    let ip = client_ip(parts);
     let user_agent = parts
         .headers
         .get(header::USER_AGENT)
@@ -138,15 +139,24 @@ pub(crate) fn request_context(parts: &Parts) -> RequestContext {
     RequestContext::new(ip, user_agent, sanitized_headers)
 }
 
-/// The peer socket IP from the `ConnectInfo` extension, or an empty string when absent (the
-/// engine treats an empty IP as "unknown" for brute-force keying). Never reads
-/// `X-Forwarded-For` — the trusted-proxy strategy applies only to the rate-limit key, not
-/// the engine context.
-pub(crate) fn peer_ip(parts: &Parts) -> String {
+/// The client address the request resolved to, or an empty string when there is none (the
+/// engine treats an empty IP as "unknown" for brute-force keying).
+///
+/// It is the address [`crate::client_ip::resolve_client_ip`] stored: the peer socket address,
+/// or the forwarded client when the peer is a trusted proxy. A request that never passed that
+/// middleware falls back to the peer, and no header is read here.
+pub(crate) fn client_ip(parts: &Parts) -> String {
     parts
         .extensions
-        .get::<ConnectInfo<SocketAddr>>()
-        .map(|info| info.0.ip().to_string())
+        .get::<ResolvedClientIp>()
+        .map(|resolved| resolved.0)
+        .or_else(|| {
+            parts
+                .extensions
+                .get::<ConnectInfo<SocketAddr>>()
+                .map(|info| info.0.ip())
+        })
+        .map(|ip| ip.to_string())
         .unwrap_or_default()
 }
 
@@ -480,14 +490,14 @@ mod tests {
     }
 
     #[test]
-    fn peer_ip_is_empty_without_connect_info() {
+    fn client_ip_is_empty_without_connect_info() {
         // No `ConnectInfo` extension → an empty IP (the engine treats it as unknown).
         let (parts, ()) = Request::builder()
             .uri("/x")
             .body(())
             .unwrap_or_default()
             .into_parts();
-        assert!(peer_ip(&parts).is_empty());
+        assert!(client_ip(&parts).is_empty());
     }
 
     #[test]

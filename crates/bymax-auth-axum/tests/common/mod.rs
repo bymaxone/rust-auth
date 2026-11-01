@@ -465,11 +465,18 @@ pub fn build_oauth_with_failing_state_store() -> Option<Harness> {
 
 /// Assemble the adapter router for the harness engine, keyed on the socket peer address.
 pub fn router(harness: &Harness) -> Router {
-    bymax_auth_axum::AuthRouter::from_engine(
-        harness.engine.clone(),
+    router_with(
+        harness,
         AxumAuthConfig::new(bymax_auth_axum::ClientIpSource::PeerAddr),
     )
-    .into_router()
+}
+
+/// Assemble the adapter router for the harness engine under `config`. A configuration the adapter
+/// refuses yields an empty router, so every request answers 404 and the test fails on its
+/// assertions instead of passing on a missing router.
+pub fn router_with(harness: &Harness, config: AxumAuthConfig) -> Router {
+    bymax_auth_axum::AuthRouter::from_engine(harness.engine.clone(), config)
+        .map_or_else(|_| Router::new(), bymax_auth_axum::AuthRouter::into_router)
 }
 
 /// Seed an active, verified dashboard user with the given role; returns the id.

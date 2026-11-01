@@ -21,6 +21,7 @@
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 
+mod client_ip;
 mod delivery;
 mod dto;
 mod extractors;
@@ -54,7 +55,9 @@ pub use extractors::{
 pub use rate_limit::{RateLimit, RateLimitConfig};
 pub use response::{AuthRejection, error_response};
 pub use router::{AuthRouter, auth_router};
-pub use state::{AuthState, AxumAuthConfig, ClientIpSource, DEFAULT_MAX_BODY_BYTES, RouteGroups};
+pub use state::{
+    AuthState, AxumAuthConfig, ClientIpSource, DEFAULT_MAX_BODY_BYTES, RouteGroups, TrustedProxyFn,
+};
 pub use validation::{ValidatedJson, ValidatedQuery};
 
 #[cfg(feature = "platform")]

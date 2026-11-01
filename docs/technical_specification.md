@@ -2561,7 +2561,17 @@ pub struct AuthState {
 ///
 /// The returned router has its `State` already applied, so it composes directly
 /// into a consumer's app via `app.merge(router)` or `app.nest("/api", router)`.
-pub fn auth_router(engine: AuthEngine, config: AxumAuthConfig) -> Router;
+pub fn auth_router(engine: AuthEngine, config: AxumAuthConfig) -> Result<Router, ConfigError>;
+
+// `AxumAuthConfig::client_ip_source` is `PeerAddr` or `TrustedForwardedFor`. The second requires
+// `AxumAuthConfig::is_trusted_proxy(Fn(IpAddr) -> bool)`; without it the builders return
+// `ConfigError::TrustedForwardedForRequiresPredicate` ("TrustedForwardedFor requires
+// is_trusted_proxy"). `X-Forwarded-For` is read only when the TCP peer satisfies the predicate
+// (the exact answer `true`; a panic is "not trusted"), from the right: the client is the first
+// entry that is not itself a trusted proxy, an all-trusted chain gives its leftmost entry, and an
+// entry that is not an address ends the walk at the last hop that was one. IPv4-mapped IPv6
+// addresses are reduced to IPv4 first. One resolved address feeds the rate limiter (bucketed to
+// the IPv6 /64 there only) and the engine context (session address, lockout key, hooks).
 ```
 
 Group assembly is internal and feature-gated. Each `*_routes` function returns a

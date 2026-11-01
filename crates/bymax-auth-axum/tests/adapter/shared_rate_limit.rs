@@ -78,7 +78,11 @@ fn engine_with_config(
         built.as_ref().err()
     );
     let built = built.ok()?;
-    Some(AuthRouter::from_engine(Arc::new(built), adapter).into_router())
+    Some(
+        AuthRouter::from_engine(Arc::new(built), adapter)
+            .ok()?
+            .into_router(),
+    )
 }
 
 /// One failed login from the harness's fixed peer address. A different email for every attempt,

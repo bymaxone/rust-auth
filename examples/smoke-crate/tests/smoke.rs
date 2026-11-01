@@ -78,6 +78,7 @@ async fn serve(engine: Arc<AuthEngine>) -> Option<(String, tokio::task::JoinHand
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.ok()?;
     let addr = listener.local_addr().ok()?;
     let app = AuthRouter::from_engine(engine, AxumAuthConfig::new(ClientIpSource::PeerAddr))
+        .ok()?
         .into_router();
     let handle = tokio::spawn(async move {
         let service = app.into_make_service_with_connect_info::<SocketAddr>();

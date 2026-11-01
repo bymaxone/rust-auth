@@ -14,36 +14,29 @@ use bymax_auth_core::AuthEngine;
 use bymax_auth_types::AuthError;
 use tower_governor::key_extractor::KeyExtractor;
 
-use crate::rate_limit::{PeerIpBucketKeyExtractor, RateLimit, RightmostForwardedIpKeyExtractor};
+use crate::rate_limit::{ClientIpBucketKeyExtractor, RateLimit};
 use crate::response::error_response;
-use crate::state::ClientIpSource;
 
 /// The bucket requests with no readable address share. A constant, not a per-request value: an
 /// unreadable address must not mean an unlimited budget.
 const UNKNOWN_CLIENT: &str = "unknown";
 
-/// How the per-route limits are enforced for one router: the client-address strategy, and the
-/// engine to count in when it holds a shared counter.
+/// How the per-route limits are enforced for one router: the engine to count in when it holds a
+/// shared counter.
 #[derive(Clone)]
 pub(crate) struct Throttle {
-    source: ClientIpSource,
     shared: Option<Arc<AuthEngine>>,
 }
 
 impl Throttle {
     /// Decide how limits are enforced for `engine`: shared when it holds a counter, in-process
     /// otherwise.
-    pub(crate) fn new(source: ClientIpSource, engine: &Arc<AuthEngine>) -> Self {
+    pub(crate) fn new(engine: &Arc<AuthEngine>) -> Self {
         let shared = engine
             .rate_limit_store()
             .is_some()
             .then(|| Arc::clone(engine));
-        Self { source, shared }
-    }
-
-    /// The client-address strategy the in-process limiter keys on.
-    pub(crate) fn source(&self) -> ClientIpSource {
-        self.source
+        Self { shared }
     }
 
     /// Whether limits are counted in the shared store rather than in process.
@@ -57,26 +50,22 @@ impl Throttle {
         Some(SharedLimit {
             engine: Arc::clone(self.shared.as_ref()?),
             limit: limit?,
-            source: self.source,
         })
     }
 }
 
-/// One route's shared-counter limit: what to count in, how much, and how to find the client.
+/// One route's shared-counter limit: what to count in and how much.
 #[derive(Clone)]
 pub(crate) struct SharedLimit {
     engine: Arc<AuthEngine>,
     limit: RateLimit,
-    source: ClientIpSource,
 }
 
 /// The address bucket a request is charged to, or [`UNKNOWN_CLIENT`] when none can be read.
-fn client_bucket(source: ClientIpSource, request: &Request) -> String {
-    let key = match source {
-        ClientIpSource::PeerAddr => PeerIpBucketKeyExtractor.extract(request),
-        ClientIpSource::TrustedForwardedFor => RightmostForwardedIpKeyExtractor.extract(request),
-    };
-    key.map_or_else(|_| UNKNOWN_CLIENT.to_owned(), |ip| ip.to_string())
+fn client_bucket(request: &Request) -> String {
+    ClientIpBucketKeyExtractor
+        .extract(request)
+        .map_or_else(|_| UNKNOWN_CLIENT.to_owned(), |ip| ip.to_string())
 }
 
 /// Count the request in the shared store and refuse it with the `auth.too_many_requests` envelope
@@ -96,7 +85,7 @@ pub(crate) async fn shared_limit(
             .get::<MatchedPath>()
             .map_or("", MatchedPath::as_str)
     );
-    let bucket = client_bucket(shared.source, &request);
+    let bucket = client_bucket(&request);
     let window = shared.limit.per_seconds.max(1);
     let counted = shared
         .engine

@@ -21,69 +21,37 @@ use tower_governor::GovernorError;
 use tower_governor::governor::{GovernorConfig, GovernorConfigBuilder};
 use tower_governor::key_extractor::KeyExtractor;
 
+use crate::client_ip::ResolvedClientIp;
 use crate::response::error_response;
-use crate::state::ClientIpSource;
 
-/// A [`KeyExtractor`] that reads the **rightmost** `X-Forwarded-For` entry, falling back to
-/// the peer socket address.
+/// A [`KeyExtractor`] that keys on the client address the request resolved to, charged to its
+/// [`rate_limit_bucket`].
 ///
-/// This replaces `tower_governor`'s `SmartIpKeyExtractor`, which takes the **leftmost**
-/// parseable entry and additionally honours `X-Real-IP` and `Forwarded`. A conforming proxy
-/// *appends* the address it observed, so the leftmost entry is whatever the client itself
-/// sent: an attacker rotating `X-Forwarded-For: <random>` gets a fresh limiter key per
-/// request and every per-route limit evaporates, while spoofing a victim's address exhausts
-/// that victim's bucket. `X-Real-IP` and `Forwarded` are ignored entirely — a proxy that
-/// appends to `X-Forwarded-For` gives no such guarantee for headers it does not manage.
+/// The address comes from [`ResolvedClientIp`], which the client-address middleware sets once per
+/// request from the configured [`crate::state::ClientIpSource`] and trusted-proxy predicate, so the limiter
+/// and the engine context agree on who the client is. A request that never passed through that
+/// middleware falls back to the peer socket address and never reads a header.
 ///
-/// The rightmost entry is the one the *nearest* trusted hop wrote, which is the strongest
-/// claim available without a configured trusted-proxy CIDR set. With exactly one proxy in
-/// front — the deployment [`ClientIpSource::TrustedForwardedFor`] documents — it is the real
-/// client. With N proxies it is the Nth-from-the-client hop: still unforgeable, still a
-/// stable key, just coarser.
-///
-/// A malformed or absent header falls back to the peer address rather than failing the
-/// request, so a missing header degrades to the [`ClientIpSource::PeerAddr`] behaviour
-/// instead of 429-ing every caller.
+/// This replaces `tower_governor`'s extractors, which key on the full address (useless for IPv6:
+/// the budget is per key, so an attacker with one routine /64 gets 2^64 of them) and, for the
+/// "smart" one, take the **leftmost** `X-Forwarded-For` entry and honour `X-Real-IP` and
+/// `Forwarded` — all of which the client writes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct RightmostForwardedIpKeyExtractor;
+pub(crate) struct ClientIpBucketKeyExtractor;
 
-impl KeyExtractor for RightmostForwardedIpKeyExtractor {
+impl KeyExtractor for ClientIpBucketKeyExtractor {
     type Key = IpAddr;
 
     fn extract<T>(&self, req: &http::Request<T>) -> Result<Self::Key, GovernorError> {
-        let forwarded = req
-            .headers()
-            .get("x-forwarded-for")
-            .and_then(|value| value.to_str().ok())
-            .and_then(rightmost_forwarded_ip);
-
-        forwarded
+        req.extensions()
+            .get::<ResolvedClientIp>()
+            .map(|resolved| resolved.0)
             .or_else(|| {
                 req.extensions()
                     .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
                     .map(|info| info.0.ip())
             })
             .map(rate_limit_bucket)
-            .ok_or(GovernorError::UnableToExtractKey)
-    }
-}
-
-/// A [`KeyExtractor`] that keys on the peer socket address, charged to its
-/// [`rate_limit_bucket`].
-///
-/// This replaces `tower_governor`'s `PeerIpKeyExtractor`, which keys on the full address. That
-/// is correct for IPv4 and useless for IPv6: the budget is per key, so an attacker with one
-/// routine /64 gets 2^64 of them. The extraction is otherwise identical.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct PeerIpBucketKeyExtractor;
-
-impl KeyExtractor for PeerIpBucketKeyExtractor {
-    type Key = IpAddr;
-
-    fn extract<T>(&self, req: &http::Request<T>) -> Result<Self::Key, GovernorError> {
-        req.extensions()
-            .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
-            .map(|info| rate_limit_bucket(info.0.ip()))
             .ok_or(GovernorError::UnableToExtractKey)
     }
 }
@@ -117,18 +85,6 @@ fn rate_limit_bucket(ip: IpAddr) -> IpAddr {
 
     let [a, b, c, d, ..] = v6.segments();
     IpAddr::V6(Ipv6Addr::new(a, b, c, d, 0, 0, 0, 0))
-}
-
-/// The last parseable IP in a comma-separated `X-Forwarded-For` value.
-///
-/// Scans from the right so the first parseable address found is the one the nearest hop
-/// appended. Returns `None` when no entry parses, which sends the caller to the peer-address
-/// fallback.
-fn rightmost_forwarded_ip(header: &str) -> Option<IpAddr> {
-    header
-        .split(',')
-        .rev()
-        .find_map(|entry| entry.trim().parse::<IpAddr>().ok())
 }
 
 /// One named edge limit: `burst` requests, replenished over `per_seconds`. Modeled as
@@ -272,17 +228,6 @@ impl Default for RateLimitConfig {
     }
 }
 
-/// The two key extractors the adapter alternates between by [`ClientIpSource`]. The
-/// `GovernorConfig`'s `K` type parameter differs per extractor, so the built config is held
-/// behind this enum and a [`GovernorLayer`](tower_governor::GovernorLayer) is applied for
-/// whichever arm is active.
-pub(crate) enum GovernorConfigKind {
-    /// Peer-socket-IP keyed (never reads `X-Forwarded-For`) — the secure default.
-    Peer(Arc<GovernorConfig<PeerIpBucketKeyExtractor, NoOpMiddleware>>),
-    /// Keyed on the rightmost `X-Forwarded-For` entry, for a trusted-proxy deployment.
-    Smart(Arc<GovernorConfig<RightmostForwardedIpKeyExtractor, NoOpMiddleware>>),
-}
-
 /// How often the per-route key maps are swept, in seconds.
 ///
 /// The sweep is O(live keys) and the maps are only ever grown by traffic, so a minute is far
@@ -302,7 +247,7 @@ const KEY_GC_INTERVAL_SECS: u64 = 60;
 /// such maps, all process-lifetime. That is monotonic RSS growth with no ceiling, reachable
 /// without a credential.
 ///
-/// The consumer could not compensate: [`GovernorConfigKind`], [`build_governor_config`] and
+/// The consumer could not compensate: [`build_governor_config`] and
 /// `throttled` are all crate-private and the public `AuthRouter` exposes no path to the
 /// limiters. So the library starts the sweep itself rather than documenting an obligation
 /// nobody can discharge.
@@ -332,32 +277,21 @@ where
     });
 }
 
-/// Build a per-route governor config for `limit` under the configured `ip_source`.
+/// Build a per-route governor config for `limit`, keyed on the resolved client address.
 /// Returns `None` when `limit` is `None` (the route is mounted unthrottled). The build can
 /// only fail if the period/burst were zero, which [`RateLimit::replenish_secs`] and the
 /// `burst.max(1)` guard already prevent — a `None` from `finish()` therefore degrades to an
 /// unthrottled route rather than a panic.
 pub(crate) fn build_governor_config(
     limit: Option<RateLimit>,
-    ip_source: ClientIpSource,
-) -> Option<GovernorConfigKind> {
+) -> Option<Arc<GovernorConfig<ClientIpBucketKeyExtractor, NoOpMiddleware>>> {
     let limit = limit?;
-    let per_second = limit.replenish_secs();
-    let burst = limit.burst.max(1);
-    match ip_source {
-        ClientIpSource::PeerAddr => GovernorConfigBuilder::default()
-            .per_second(per_second)
-            .burst_size(burst)
-            .key_extractor(PeerIpBucketKeyExtractor)
-            .finish()
-            .map(|config| GovernorConfigKind::Peer(Arc::new(config))),
-        ClientIpSource::TrustedForwardedFor => GovernorConfigBuilder::default()
-            .per_second(per_second)
-            .burst_size(burst)
-            .key_extractor(RightmostForwardedIpKeyExtractor)
-            .finish()
-            .map(|config| GovernorConfigKind::Smart(Arc::new(config))),
-    }
+    GovernorConfigBuilder::default()
+        .per_second(limit.replenish_secs())
+        .burst_size(limit.burst.max(1))
+        .key_extractor(ClientIpBucketKeyExtractor)
+        .finish()
+        .map(Arc::new)
 }
 
 /// Normalize a `tower_governor` rejection into the canonical `auth.too_many_requests` (429)
@@ -464,20 +398,9 @@ mod tests {
     }
 
     #[test]
-    fn build_governor_config_for_each_ip_source_and_disabled() {
-        // A `None` limit produces no layer; each IP source builds its keyed config.
-        assert!(build_governor_config(None, ClientIpSource::PeerAddr).is_none());
-        assert!(matches!(
-            build_governor_config(Some(RateLimit::new(5, 60)), ClientIpSource::PeerAddr),
-            Some(GovernorConfigKind::Peer(_))
-        ));
-        assert!(matches!(
-            build_governor_config(
-                Some(RateLimit::new(5, 60)),
-                ClientIpSource::TrustedForwardedFor
-            ),
-            Some(GovernorConfigKind::Smart(_))
-        ));
+    fn build_governor_config_builds_a_keyed_config_unless_the_limit_is_disabled() {
+        assert!(build_governor_config(None).is_none());
+        assert!(build_governor_config(Some(RateLimit::new(5, 60))).is_some());
     }
 
     #[test]
@@ -527,82 +450,30 @@ mod tests {
     }
 
     #[test]
-    fn the_forwarded_extractor_keys_on_the_rightmost_entry() {
-        // A conforming proxy APPENDS the address it observed, so the leftmost entry is
-        // whatever the client itself sent. Keying on it — which `SmartIpKeyExtractor` does —
-        // lets an attacker rotate `X-Forwarded-For` for a fresh limiter key per request,
-        // evaporating every per-route limit; and lets them spoof a victim's address to
-        // exhaust that victim's bucket. The rightmost entry is the one the nearest trusted
-        // hop wrote.
-        let extractor = RightmostForwardedIpKeyExtractor;
+    fn the_extractor_prefers_the_resolved_address_and_never_reads_a_header() {
+        // The resolved address wins over the peer; a request that never passed the resolving
+        // middleware falls back to the peer, and `X-Forwarded-For`, `X-Real-IP` and `Forwarded`
+        // are not read here at all.
+        let extractor = ClientIpBucketKeyExtractor;
+        let mut req = req_with(Some("1.1.1.1"), "198.51.100.7:443");
+        assert_eq!(extractor.extract(&req).ok(), Some(addr("198.51.100.7")));
+        req.extensions_mut()
+            .insert(ResolvedClientIp(addr("203.0.113.9")));
+        assert_eq!(extractor.extract(&req).ok(), Some(addr("203.0.113.9")));
 
-        // Attacker-supplied junk on the left, the proxy's observation on the right.
-        let req = req_with(Some("1.1.1.1, 2.2.2.2, 203.0.113.9"), "10.0.0.1:443");
-        assert_eq!(
-            extractor.extract(&req).ok(),
-            Some(
-                "203.0.113.9"
-                    .parse::<IpAddr>()
-                    .unwrap_or(IpAddr::from([0, 0, 0, 0]))
-            )
-        );
-
-        // Two requests whose ONLY difference is the spoofable left-hand side must share a key,
-        // or the limit is per-attacker-choice rather than per-client.
-        let spoof_a = req_with(Some("9.9.9.9, 203.0.113.9"), "10.0.0.1:443");
-        let spoof_b = req_with(Some("8.8.8.8, 203.0.113.9"), "10.0.0.1:443");
-        assert_eq!(
-            extractor.extract(&spoof_a).ok(),
-            extractor.extract(&spoof_b).ok()
-        );
-    }
-
-    #[test]
-    fn the_forwarded_extractor_falls_back_to_the_peer_address() {
-        // No header, an unparseable header, and an empty header all degrade to the peer
-        // address — the `PeerAddr` behaviour — rather than failing the request, which would
-        // 429 every caller behind a proxy that does not set the header.
-        let extractor = RightmostForwardedIpKeyExtractor;
-        let peer = "198.51.100.7"
-            .parse::<IpAddr>()
-            .unwrap_or(IpAddr::from([0, 0, 0, 0]));
-
-        for header in [None, Some("not-an-ip"), Some(""), Some(" , ")] {
-            let req = req_with(header, "198.51.100.7:443");
-            assert_eq!(
-                extractor.extract(&req).ok(),
-                Some(peer),
-                "header {header:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn the_forwarded_extractor_ignores_x_real_ip_and_forwarded() {
-        // `SmartIpKeyExtractor` also honours `X-Real-IP` and `Forwarded`. A proxy that appends
-        // to `X-Forwarded-For` gives no guarantee about headers it does not manage, so reading
-        // them reopens the same spoofing hole through a different name.
-        let extractor = RightmostForwardedIpKeyExtractor;
-        let mut req = http::Request::builder()
+        let bare = http::Request::builder()
             .uri("/")
             .header("x-real-ip", "1.2.3.4")
             .header("forwarded", "for=5.6.7.8")
             .body(())
             .unwrap_or_default();
-        if let Ok(addr) = "198.51.100.7:443".parse::<std::net::SocketAddr>() {
-            req.extensions_mut()
-                .insert(axum::extract::ConnectInfo(addr));
-        }
-
-        assert_eq!(
-            extractor.extract(&req).ok(),
-            Some(
-                "198.51.100.7"
-                    .parse::<IpAddr>()
-                    .unwrap_or(IpAddr::from([0, 0, 0, 0]))
-            )
-        );
+        assert!(extractor.extract(&bare).is_err());
     }
+
+    fn addr(text: &str) -> IpAddr {
+        text.parse().unwrap_or(IpAddr::from([0, 0, 0, 0]))
+    }
+
     /// Inside a runtime the sweeper actually sweeps.
     ///
     /// The key map grows one entry per distinct client address and nothing removes the ones
@@ -614,7 +485,7 @@ mod tests {
         let built = GovernorConfigBuilder::default()
             .per_second(1)
             .burst_size(1)
-            .key_extractor(PeerIpBucketKeyExtractor)
+            .key_extractor(ClientIpBucketKeyExtractor)
             .finish();
         let Some(config) = built else { return };
         let config = Arc::new(config);
@@ -641,7 +512,7 @@ mod tests {
         let built = GovernorConfigBuilder::default()
             .period(std::time::Duration::from_millis(10))
             .burst_size(1)
-            .key_extractor(PeerIpBucketKeyExtractor)
+            .key_extractor(ClientIpBucketKeyExtractor)
             .finish();
         let Some(config) = built else { return };
         let config = Arc::new(config);
@@ -675,7 +546,7 @@ mod tests {
         let built = GovernorConfigBuilder::default()
             .per_second(1)
             .burst_size(1)
-            .key_extractor(PeerIpBucketKeyExtractor)
+            .key_extractor(ClientIpBucketKeyExtractor)
             .finish();
         let Some(config) = built else { return };
 
