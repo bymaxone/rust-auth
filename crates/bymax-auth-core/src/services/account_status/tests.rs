@@ -237,15 +237,22 @@ impl UserStatusCacheStore for DownCache {
 
 /// An engine over the harness's stores whose status cache is [`DownCache`].
 fn engine_with_down_cache(h: &Harness, cfg: AuthConfig) -> Option<AuthEngine> {
-    AuthEngine::builder()
+    let built = AuthEngine::builder()
         .config(cfg)
         .environment(Environment::Test)
         .user_repository(h.users.clone())
         .email_provider(h.emails.clone())
         .redis_stores(h.stores.clone())
         .user_status_cache(Arc::new(DownCache))
-        .build()
-        .ok()
+        .build();
+    // Asserted, not skipped: a builder that dropped the cache would otherwise make every test
+    // that uses this helper return early and pass.
+    assert!(
+        built.is_ok(),
+        "the engine must build: {:?}",
+        built.as_ref().err()
+    );
+    built.ok()
 }
 
 #[tokio::test]
@@ -308,4 +315,17 @@ async fn verifying_the_address_drops_the_cached_flag_so_the_next_request_passes(
     // No invalidate call from the test: verify_email dropped the stale "0" itself.
     let after = h.engine.assert_user_active_and_verified(&id, TENANT).await;
     assert!(after.is_ok(), "{after:?}");
+}
+
+#[tokio::test]
+async fn a_zero_ttl_never_reaches_the_cache_at_all() {
+    // With the cache off, a cache that would fail every call is never asked: the gate reads the
+    // repository and `invalidate` has nothing to do.
+    let mut cfg = base_config();
+    cfg.user_status_cache_ttl = Duration::ZERO;
+    let Some(h) = harness(cfg.clone(), None) else { return };
+    let id = seeded(&h).await;
+    let Some(engine) = engine_with_down_cache(&h, cfg) else { return };
+    assert!(engine.assert_user_active(&id, TENANT).await.is_ok());
+    assert!(engine.invalidate_account_status(&id, TENANT).await.is_ok());
 }
