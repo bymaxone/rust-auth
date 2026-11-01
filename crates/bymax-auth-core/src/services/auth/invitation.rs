@@ -131,13 +131,14 @@ impl AuthEngine {
         // be redeemed, and a revoke would only ever reach the newest. The caller must outrank
         // the pending invitation they displace; see `claim_invitation_slot`.
         let invitee_hash = self.invitee_identifier(&email);
+        let new_hash = token_hash(&raw);
         let superseded = self
             .claim_invitation_slot(
                 store,
                 &inviter.role,
                 tenant_id,
                 &invitee_hash,
-                &token_hash(&raw),
+                &new_hash,
                 ttl,
             )
             .await?;
@@ -147,6 +148,18 @@ impl AuthEngine {
         // The index was claimed above and the record follows: a crash in between leaves an
         // index naming nothing, an invitation that is simply dead.
         store.put_invitation(&raw, &invitation, ttl).await?;
+        // A revoke or a later invite can move the index between the claim and this write. The
+        // record is then live with nothing naming it (or beside a newer one), so it is withdrawn
+        // rather than left redeemable: the address was changed under this invite.
+        if store
+            .read_invitation_index(tenant_id, &invitee_hash)
+            .await?
+            .as_deref()
+            != Some(new_hash.as_str())
+        {
+            store.delete_invitation_by_hash(&new_hash).await?;
+            return Err(AuthError::InsufficientRole);
+        }
 
         // The email provider builds the accept URL from the raw token (never logged).
         let expires_at = OffsetDateTime::now_utc()

@@ -696,6 +696,14 @@ impl InMemoryStores {
         *lock(&self.last_session_ttl_secs)
     }
 
+    /// How many invitation records are stored, whatever their hash. A test-only inspection
+    /// helper: a test that cannot name the token (it is minted inside the flow) can still show
+    /// that none is left.
+    #[must_use]
+    pub fn invitation_record_count(&self) -> usize {
+        lock(&self.invitations).len()
+    }
+
     /// The refresh TTL the last rotation was stored with, in seconds. A test-only inspection
     /// helper, for the same reason as [`InMemoryStores::peek_session_ttl`].
     #[must_use]

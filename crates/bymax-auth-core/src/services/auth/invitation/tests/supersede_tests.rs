@@ -263,3 +263,114 @@ async fn an_index_that_keeps_moving_exhausts_the_retries_and_is_refused() {
     );
     assert!(events.contains_at(tracing::Level::WARN, "kept changing under the rank check"));
 }
+
+/// A store that withdraws the index just before the record is written, standing in for a
+/// revoke that lands between the claim and the write.
+struct RevokedMidInvite {
+    inner: Arc<InMemoryStores>,
+    tenant: String,
+    invitee: String,
+}
+
+#[async_trait]
+impl InvitationStore for RevokedMidInvite {
+    async fn put_invitation(
+        &self,
+        token: &str,
+        invitation: &StoredInvitation,
+        ttl_secs: u64,
+    ) -> Result<(), AuthError> {
+        self.inner
+            .take_invitation_index(&self.tenant, &self.invitee)
+            .await?;
+        self.inner.put_invitation(token, invitation, ttl_secs).await
+    }
+    async fn consume_invitation(&self, token: &str) -> Result<Option<StoredInvitation>, AuthError> {
+        self.inner.consume_invitation(token).await
+    }
+    async fn put_invitation_index(
+        &self,
+        tenant_id: &str,
+        invitee_hash: &str,
+        token_hash: &str,
+        ttl_secs: u64,
+    ) -> Result<(), AuthError> {
+        self.inner
+            .put_invitation_index(tenant_id, invitee_hash, token_hash, ttl_secs)
+            .await
+    }
+    async fn claim_invitation_index(
+        &self,
+        tenant_id: &str,
+        invitee_hash: &str,
+        token_hash: &str,
+        ttl_secs: u64,
+        expected: Option<&str>,
+    ) -> Result<bool, AuthError> {
+        self.inner
+            .claim_invitation_index(tenant_id, invitee_hash, token_hash, ttl_secs, expected)
+            .await
+    }
+    async fn read_invitation_index(
+        &self,
+        tenant_id: &str,
+        invitee_hash: &str,
+    ) -> Result<Option<String>, AuthError> {
+        self.inner
+            .read_invitation_index(tenant_id, invitee_hash)
+            .await
+    }
+    async fn take_invitation_index(
+        &self,
+        tenant_id: &str,
+        invitee_hash: &str,
+    ) -> Result<Option<String>, AuthError> {
+        self.inner
+            .take_invitation_index(tenant_id, invitee_hash)
+            .await
+    }
+    async fn read_invitation_by_hash(
+        &self,
+        token_hash: &str,
+    ) -> Result<Option<StoredInvitation>, AuthError> {
+        self.inner.read_invitation_by_hash(token_hash).await
+    }
+    async fn delete_invitation_by_hash(&self, token_hash: &str) -> Result<bool, AuthError> {
+        self.inner.delete_invitation_by_hash(token_hash).await
+    }
+}
+
+#[tokio::test]
+async fn an_invite_whose_index_is_withdrawn_before_its_record_lands_leaves_no_live_token() {
+    // A revoke that reads the freshly claimed index, finds no record yet and removes the index
+    // would leave the record that lands next redeemable with nothing naming it: no later revoke
+    // could reach it, but accept would still honour the token. The invite checks the index again
+    // after the write and withdraws its own record when the address changed under it.
+    let Some(base) = setup(invite_config()) else { return };
+    let store = Arc::new(RevokedMidInvite {
+        inner: base.stores.clone(),
+        tenant: "t1".to_owned(),
+        invitee: base.engine.invitee_identifier(PENDING_EMAIL),
+    });
+    let built = AuthEngine::builder()
+        .config(invite_config())
+        .environment(Environment::Test)
+        .user_repository(base.users.clone())
+        .redis_stores(base.stores.clone())
+        .invitation_store(store)
+        .build();
+    assert!(built.is_ok());
+    let Ok(engine) = built else { return };
+    let admin = seed_admin(&base.users, "admin4@example.com", "ADMIN").await;
+
+    let refused = engine
+        .invite(&admin, PENDING_EMAIL, "MEMBER", "t1", None)
+        .await;
+    assert!(
+        matches!(refused, Err(AuthError::InsufficientRole)),
+        "{refused:?}"
+    );
+    // Nothing is left redeemable: the index is gone and no record survives under any hash.
+    assert!(indexed(&base).await.is_none());
+    assert_eq!(base.stores.invitation_record_count(), 0);
+}

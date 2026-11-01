@@ -1,9 +1,9 @@
 //! Superseding a pending invitation when an address is invited again (layer: engine service).
 //!
 //! Superseding destroys a pending invitation, the same end state a revoke produces, so it is
-//! held to the same bar: the caller must outrank the role the pending invitation grants.
-//! Without that, the only authorisation was the role being REQUESTED, which says nothing about
-//! the role of the record being destroyed.
+//! held to the same bar: the caller must outrank the role the pending invitation grants. Being
+//! authorised for the role being requested says nothing about the role of the record being
+//! destroyed.
 
 use std::sync::Arc;
 
