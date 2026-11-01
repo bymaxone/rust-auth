@@ -57,3 +57,16 @@ pub(super) fn platform_hook_user(admin: &AuthPlatformUser) -> SafeAuthUser {
         created_at: admin.created_at,
     }
 }
+
+/// The account as the transition left it, for the `after_mfa_*` hooks.
+///
+/// These hooks fire after the second factor was written, but the view they are built from was
+/// read before the write, so its flag still holds the previous state. Only the flag is taken from
+/// the transition; the rest is the credential-free projection unchanged, and the stored record is
+/// not touched (this works on a copy).
+pub(super) fn after_transition(user: &SafeAuthUser, mfa_enabled: bool) -> SafeAuthUser {
+    SafeAuthUser {
+        mfa_enabled,
+        ..user.clone()
+    }
+}

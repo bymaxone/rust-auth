@@ -2166,7 +2166,7 @@ Recovery codes: each is 12 random bytes → 24 hex chars, grouped `XXXX-XXXX-XXX
 5. **Atomic completion gate:** `getdel(setup_key)`; if `None`, a concurrent request already completed → `MfaSetupRequired` (prevents duplicate `update_mfa` + duplicate "MFA enabled" email).
 6. `update_mfa(user_id, { mfa_enabled: true, mfa_secret: encrypted_secret, mfa_recovery_codes: hashed_codes })` on the correct repo.
 7. `sessions.revoke_all(kind, user_id)` (the domain op — the `invalidate_user_sessions` Lua, §12.3/§12.5) — force re-auth through the MFA challenge (existing access tokens up to 15 min remain valid; accepted tradeoff).
-8. `email.send_mfa_enabled_notification(...)`; spawn `after_mfa_enabled` fire-and-forget, on either plane (a platform administrator is passed as a `SafeAuthUser` with an empty `tenant_id` and `email_verified = true`, and `HookContext.plane = Platform`). `after_mfa_disabled` and `after_mfa_recovery_codes_regenerated` do the same.
+8. `email.send_mfa_enabled_notification(...)`; spawn `after_mfa_enabled` fire-and-forget, on either plane (a platform administrator is passed as a `SafeAuthUser` with an empty `tenant_id` and `email_verified = true`, and `HookContext.plane = Platform`). `after_mfa_disabled` and `after_mfa_recovery_codes_regenerated` do the same. The account handed to `after_mfa_enabled` carries `mfa_enabled = true`, and the one handed to `after_mfa_disabled` (a user disable and an administrative reset alike) carries `false`: the state the transition produced, not the record read before it.
 
 #### 7.5.3 `challenge`
 

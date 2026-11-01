@@ -34,6 +34,16 @@ impl Spy {
         }
     }
 
+    /// Wait for every call to the detached hook `name`, as many as have landed after a pause.
+    async fn calls_named(&self, name: &str) -> Vec<Call> {
+        let _ = self.call(name).await;
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        self.calls
+            .lock()
+            .map(|c| c.iter().filter(|c| c.0 == name).cloned().collect())
+            .unwrap_or_default()
+    }
+
     /// Wait for the detached hook `name` to land, then return its call.
     async fn call(&self, name: &str) -> Option<Call> {
         for _ in 0..100 {
@@ -307,4 +317,159 @@ async fn last_login_moved(h: &Harness, uid: &str) -> bool {
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
     false
+}
+
+/// Enrol the dashboard user `uid` in MFA under tenant `t1` and return the TOTP secret.
+async fn enrol_user(h: &Harness, uid: &str) -> Option<String> {
+    let mfa = h.engine.mfa()?;
+    let setup = mfa
+        .setup(uid, MfaContext::Dashboard, Some("t1"), Some(PASSWORD))
+        .await
+        .ok()?;
+    let enabled = mfa
+        .verify_and_enable(
+            uid,
+            &code(&setup.secret, 0),
+            "1.2.3.4",
+            "ua",
+            MfaContext::Dashboard,
+            Some("t1"),
+        )
+        .await;
+    assert!(enabled.is_ok(), "{enabled:?}");
+    Some(setup.secret)
+}
+
+/// The account a hook is handed describes the state the transition produced, not the record read
+/// before it: `mfa_enabled` is `expected`, and the stored record is not what was mutated.
+fn assert_reports_mfa(call: Option<Call>, name: &str, expected: bool) {
+    assert!(call.is_some(), "{name} never fired");
+    let Some((_, _, user)) = call else { return };
+    assert_eq!(user.mfa_enabled, expected, "{name}: mfa_enabled");
+}
+
+#[tokio::test]
+async fn after_mfa_enabled_reports_mfa_as_enabled_on_both_planes() {
+    let Some((h, spy)) = rig() else { return };
+    seed_admin(&h);
+    assert!(enrol_admin(&h).await.is_some());
+    let Some(uid) = register(&h.engine, "d@example.com").await else { return };
+    assert!(enrol_user(&h, &uid).await.is_some());
+    let calls = spy.calls_named("after_mfa_enabled").await;
+    assert_eq!(calls.len(), 2, "one enable hook per plane");
+    for call in calls {
+        assert_reports_mfa(Some(call), "after_mfa_enabled", true);
+    }
+}
+
+#[tokio::test]
+async fn after_mfa_disabled_reports_mfa_as_disabled_for_a_user_disable() {
+    let Some((h, spy)) = rig() else { return };
+    let Some(uid) = register(&h.engine, "d@example.com").await else { return };
+    let Some(secret) = enrol_user(&h, &uid).await else { return };
+    let Some(mfa) = h.engine.mfa() else { return };
+    let done = mfa
+        .disable(
+            &uid,
+            &code(&secret, 60),
+            "1.2.3.4",
+            "ua",
+            MfaContext::Dashboard,
+            Some("t1"),
+        )
+        .await;
+    assert!(done.is_ok(), "{done:?}");
+    assert_reports_mfa(
+        spy.call("after_mfa_disabled").await,
+        "after_mfa_disabled",
+        false,
+    );
+}
+
+#[tokio::test]
+async fn after_mfa_disabled_reports_mfa_as_disabled_for_a_platform_disable() {
+    let Some((h, spy)) = rig() else { return };
+    seed_admin(&h);
+    let Some(secret) = enrol_admin(&h).await else { return };
+    let Some(mfa) = h.engine.mfa() else { return };
+    let done = mfa
+        .disable(
+            "p1",
+            &code(&secret, 60),
+            "1.2.3.4",
+            "ua",
+            MfaContext::Platform,
+            None,
+        )
+        .await;
+    assert!(done.is_ok(), "{done:?}");
+    assert_reports_mfa(
+        spy.call("after_mfa_disabled").await,
+        "after_mfa_disabled",
+        false,
+    );
+}
+
+#[tokio::test]
+async fn an_administrative_reset_reports_mfa_as_disabled_on_both_planes() {
+    let Some((h, spy)) = rig() else { return };
+    seed_admin(&h);
+    assert!(enrol_admin(&h).await.is_some());
+    let Some(uid) = register(&h.engine, "d@example.com").await else { return };
+    assert!(enrol_user(&h, &uid).await.is_some());
+    let Some(mfa) = h.engine.mfa() else { return };
+    assert!(
+        mfa.reset_mfa("p1", MfaContext::Platform, None)
+            .await
+            .is_ok()
+    );
+    assert!(
+        mfa.reset_mfa(&uid, MfaContext::Dashboard, Some("t1"))
+            .await
+            .is_ok()
+    );
+    let calls = spy.calls_named("after_mfa_disabled").await;
+    assert_eq!(calls.len(), 2, "one disable hook per plane");
+    for call in calls {
+        assert_reports_mfa(Some(call), "after_mfa_disabled", false);
+    }
+}
+
+#[tokio::test]
+async fn the_mfa_hooks_change_only_the_flag_and_never_the_stored_record() {
+    let Some((h, spy)) = rig() else { return };
+    let Some(uid) = register(&h.engine, "d@example.com").await else { return };
+    let before = h.users.find_by_id(&uid, Some("t1")).await.ok().flatten();
+    assert!(enrol_user(&h, &uid).await.is_some());
+    let Some((_, _, handed)) = spy.call("after_mfa_enabled").await else { return };
+    let Some(before) = before else { return };
+    let expected = SafeAuthUser {
+        mfa_enabled: true,
+        ..SafeAuthUser::from(before)
+    };
+    assert_eq!(
+        handed, expected,
+        "the hook payload is the account with only the flag moved"
+    );
+}
+
+#[tokio::test]
+async fn a_platform_admins_mfa_hook_payload_moves_only_the_flag_and_leaves_the_record() {
+    let Some((h, spy)) = rig() else { return };
+    seed_admin(&h);
+    assert!(enrol_admin(&h).await.is_some());
+    let Some((_, _, handed)) = spy.call("after_mfa_enabled").await else { return };
+    assert!(
+        handed.mfa_enabled,
+        "the hook reports the enrolment it follows"
+    );
+    assert_eq!(
+        (handed.tenant_id.as_str(), handed.email_verified),
+        ("", true)
+    );
+    let stored = h.platform.find_by_id("p1").await.ok().flatten();
+    assert!(
+        stored.is_some_and(|a| a.mfa_enabled && a.mfa_secret.is_some()),
+        "the stored record keeps its own state and its secret"
+    );
 }
