@@ -412,6 +412,53 @@ async fn a_configured_domain_resolver_stamps_every_session_cookie_and_the_logout
 }
 
 #[tokio::test]
+async fn a_default_production_config_marks_the_session_and_its_clear_secure() {
+    // `secure_cookies` left unset resolves from the environment: `Secure` on in production, so
+    // the planted cookies carry it and the logout expiries do too. A development or test
+    // environment is the only place it defaults off.
+    let Some(h) = build(EngineSpec {
+        environment: bymax_auth_core::Environment::Production,
+        ..EngineSpec::default()
+    }) else {
+        return;
+    };
+    let app = router(&h);
+    let reg = Req::post("/auth/register")
+        .json(serde_json::json!({
+            "email": "secure@e.com", "password": "glidingwalnut42", "name": "Sec", "tenantId": TENANT
+        }))
+        .send(&app)
+        .await;
+    assert_eq!(reg.status, StatusCode::CREATED);
+    assert_eq!(reg.set_cookies.len(), 3);
+    assert!(
+        reg.set_cookies.iter().all(|c| c.contains("Secure")),
+        "planted cookies must be Secure: {:?}",
+        reg.set_cookies
+    );
+
+    let logout = Req::post("/auth/logout")
+        .cookie(
+            "access_token",
+            &reg.cookie_value("access_token").unwrap_or_default(),
+        )
+        .cookie(
+            "refresh_token",
+            &reg.cookie_value("refresh_token").unwrap_or_default(),
+        )
+        .cookie("has_session", "1")
+        .send(&app)
+        .await;
+    assert_eq!(logout.status, StatusCode::NO_CONTENT);
+    assert_eq!(logout.set_cookies.len(), 3);
+    assert!(
+        logout.set_cookies.iter().all(|c| c.contains("Secure")),
+        "expiry cookies must be Secure: {:?}",
+        logout.set_cookies
+    );
+}
+
+#[tokio::test]
 async fn an_unknown_route_is_404() {
     // A path outside the mounted table is a clean 404.
     let Some(h) = build(EngineSpec::default()) else { return };

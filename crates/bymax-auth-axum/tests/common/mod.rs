@@ -79,6 +79,9 @@ pub struct EngineSpec {
     /// Cookie `Domain`(s) a configured `resolve_domains` should return. Empty leaves the
     /// resolver unconfigured, which is the host-only default.
     pub cookie_domains: &'static [&'static str],
+    /// The deployment environment the engine is built for. `Test` (the default here) leaves the
+    /// cookies without `Secure`; `Production` is what a real deployment resolves to.
+    pub environment: Environment,
 }
 
 impl Default for EngineSpec {
@@ -96,6 +99,7 @@ impl Default for EngineSpec {
             allow_oauth: false,
             trusted_origins: &[],
             cookie_domains: &[],
+            environment: Environment::Test,
         }
     }
 }
@@ -358,7 +362,7 @@ pub fn build(spec: EngineSpec) -> Option<Harness> {
     let emails = Arc::new(CapturingEmails::default());
     let mut builder = AuthEngine::builder()
         .config(config)
-        .environment(Environment::Test)
+        .environment(spec.environment)
         .user_repository(users.clone())
         .platform_user_repository(admins.clone())
         .email_provider(emails.clone())
