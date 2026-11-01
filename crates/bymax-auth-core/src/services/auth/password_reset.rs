@@ -24,7 +24,7 @@ use crate::normalize::normalize_email;
 use crate::services::auth::detached::run_after_password_reset;
 use crate::services::auth::{map_repository_error, normalize_anti_enum, spawn_guarded};
 use crate::services::{is_refresh_token_shape, to_hex};
-use crate::traits::{HookContext, OtpPurpose, ResetContext, SessionKind};
+use crate::traits::{HookContext, HookPlane, OtpPurpose, ResetContext, SessionKind};
 
 /// The lifetime, in seconds, of the short-lived verified token that bridges a successful
 /// OTP verification to the reset form (§7.8 `VERIFIED_TOKEN_TTL_SECONDS`).
@@ -828,6 +828,7 @@ pub(crate) fn digest_eq(a: &str, b: &str) -> bool {
 /// originating request context).
 fn reset_context_hooks(context: &ResetContext) -> HookContext {
     HookContext {
+        plane: HookPlane::Dashboard,
         user_id: Some(context.user_id.clone()),
         email: Some(context.email.clone()),
         tenant_id: Some(context.tenant_id.clone()),

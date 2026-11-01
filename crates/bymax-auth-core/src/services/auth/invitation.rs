@@ -20,7 +20,7 @@ use crate::engine::AuthEngine;
 use crate::normalize::{log_safe, normalize_email};
 use crate::services::auth::detached::run_after_invitation_accepted;
 use crate::services::auth::{map_repository_error, spawn_guarded};
-use crate::traits::{HookContext, InviteData, StoredInvitation};
+use crate::traits::{HookContext, HookPlane, InviteData, StoredInvitation};
 
 mod supersede;
 
@@ -304,6 +304,7 @@ impl AuthEngine {
 
         let ctx = RequestContext::new(ip.to_owned(), user_agent.to_owned(), headers);
         let hook_ctx = HookContext::from_request(
+            HookPlane::Dashboard,
             &ctx,
             Some(safe.id.clone()),
             Some(safe.email.clone()),

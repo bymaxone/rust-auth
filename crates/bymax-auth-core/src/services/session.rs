@@ -657,6 +657,7 @@ mod tests {
 
     fn ctx() -> HookContext {
         HookContext {
+            plane: crate::traits::HookPlane::Dashboard,
             user_id: Some("u1".to_owned()),
             email: Some("u@example.com".to_owned()),
             tenant_id: Some("t1".to_owned()),

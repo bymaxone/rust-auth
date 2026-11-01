@@ -18,7 +18,7 @@ use crate::services::auth::detached::{
 };
 use crate::services::auth::{LoginInput, map_repository_error, normalize_anti_enum, spawn_guarded};
 use crate::status_gate::assert_not_blocked;
-use crate::traits::{HookContext, LoginFailure, LoginFailureReason};
+use crate::traits::{HookContext, HookPlane, LoginFailure, LoginFailureReason};
 
 impl AuthEngine {
     /// Authenticate email + password, returning either a full session or an MFA challenge.
@@ -47,6 +47,7 @@ impl AuthEngine {
         let identifier = self.lockout_identifier(&tenant_id, &input.email);
 
         let hook_ctx = HookContext::from_request(
+            HookPlane::Dashboard,
             ctx,
             None,
             Some(input.email.clone()),

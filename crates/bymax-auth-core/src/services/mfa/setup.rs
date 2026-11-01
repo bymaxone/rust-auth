@@ -180,8 +180,7 @@ impl MfaService {
     }
 
     /// Fire the fire-and-forget "MFA enabled" notifications: the email to the account (both
-    /// contexts) and the `after_mfa_enabled` hook (dashboard only — the platform identity
-    /// domain wires its own notifications). Both are detached so a slow provider never affects
+    /// contexts) and the `after_mfa_enabled` hook (both planes; the hook's context says which). Both are detached so a slow provider never affects
     /// the enable response.
     fn notify_enabled(&self, view: &super::MfaUserView, user_id: &str, ip: &str, user_agent: &str) {
         spawn_guarded(run_send_mfa_enabled(
@@ -189,10 +188,12 @@ impl MfaService {
             view.email_tenant(),
             view.email.clone(),
         ));
-        if let Some(safe) = view.dashboard_user.clone() {
-            let ctx = self.hook_context(user_id, &view.email, ip, user_agent);
-            spawn_guarded(run_after_mfa_enabled(self.hooks.clone(), safe, ctx));
-        }
+        let ctx = self.hook_context(view.plane(), user_id, &view.email, ip, user_agent);
+        spawn_guarded(run_after_mfa_enabled(
+            self.hooks.clone(),
+            view.hook_user.clone(),
+            ctx,
+        ));
     }
 }
 

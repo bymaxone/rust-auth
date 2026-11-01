@@ -31,7 +31,7 @@ use crate::services::auth::detached::{run_after_login, run_update_last_login};
 use crate::services::auth::{map_repository_error, spawn_guarded};
 use crate::services::{internal_error, to_hex};
 use crate::traits::{
-    HookContext, OAuthLoginResult, OAuthProfile, OAuthProvider, OAuthProviderError,
+    HookContext, HookPlane, OAuthLoginResult, OAuthProfile, OAuthProvider, OAuthProviderError,
 };
 
 /// The TTL, in seconds, of the single-use `state` + PKCE record (`os:{sha256(state)}`). Ten
@@ -271,6 +271,7 @@ impl AuthEngine {
         // NoOp hook returns Reject, so OAuth sign-in is disabled until the deployer implements
         // this hook; an Err is treated as a reject (OauthFailed).
         let hook_ctx = HookContext::from_request(
+            HookPlane::Dashboard,
             ctx,
             existing.as_ref().map(|user| user.id.clone()),
             Some(profile.email.clone()),

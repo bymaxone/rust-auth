@@ -7,13 +7,13 @@
 use bymax_auth_jwt::RawRefreshToken;
 use bymax_auth_types::{AuthError, AuthResult, AuthUser, MfaContext, SafeAuthUser};
 
-use crate::services::auth::detached::run_after_login;
+use crate::services::auth::detached::{run_after_login, run_update_last_login};
 use crate::services::auth::spawn_guarded;
 use crate::services::mfa::{LoginResultMfa, MfaService, repository_error};
 use crate::services::session::normalize_session_metadata;
 use crate::services::token_manager::MfaTempVerified;
 use crate::services::{now_offset, to_hex};
-use crate::traits::{HookContext, SessionRecord};
+use crate::traits::{HookContext, HookPlane, SessionRecord};
 
 impl MfaService {
     /// Run the MFA challenge (§7.5.3): verify the temp token (not yet consumed), then route by
@@ -217,7 +217,14 @@ impl MfaService {
             .await?;
         self.enforce_session_limit(&safe, &email, &result, ip, user_agent)
             .await?;
-        let hook_ctx = self.hook_context(&user_id, &email, ip, user_agent);
+        let hook_ctx = self.hook_context(HookPlane::Dashboard, &user_id, &email, ip, user_agent);
+        // The login the password step stopped short of: for an MFA account this is the only place
+        // the last-login time can move.
+        spawn_guarded(run_update_last_login(
+            self.user_repo.clone(),
+            safe.tenant_id.clone(),
+            safe.id.clone(),
+        ));
         spawn_guarded(run_after_login(self.hooks.clone(), safe, hook_ctx));
         tracing::info!(user_id = %user_id, "mfa: challenge passed");
         Ok(LoginResultMfa::Dashboard(result))
@@ -335,13 +342,21 @@ impl MfaService {
             .await?;
         }
 
-        // Mint a full PLATFORM session with `mfa_verified = true`. No dashboard-typed hook fires
-        // (the platform domain manages its own notifications); the session carries no tenant.
+        // Mint a full PLATFORM session with `mfa_verified = true`; it carries no tenant.
+        let hook_user = super::hooks::platform_hook_user(&admin);
+        let email = admin.email.clone();
         let safe = bymax_auth_types::SafeAuthPlatformUser::from(admin);
         let result = self
             .tokens
             .issue_platform_tokens(&safe, ip, user_agent, true)
             .await?;
+        // The login the password step stopped short of, as on the dashboard plane.
+        spawn_guarded(crate::services::platform::run_update_platform_last_login(
+            repo.clone(),
+            user_id.clone(),
+        ));
+        let hook_ctx = self.hook_context(HookPlane::Platform, &user_id, &email, ip, user_agent);
+        spawn_guarded(run_after_login(self.hooks.clone(), hook_user, hook_ctx));
         tracing::info!(user_id = %user_id, "mfa: platform challenge passed");
         Ok(LoginResultMfa::Platform(result))
     }
@@ -547,7 +562,8 @@ impl MfaService {
             family_id: String::new(),
             family_created_at: None,
         };
-        let hook_ctx: HookContext = self.hook_context(&safe.id, email, ip, user_agent);
+        let hook_ctx: HookContext =
+            self.hook_context(HookPlane::Dashboard, &safe.id, email, ip, user_agent);
         self.sessions
             .after_session_created(&record, &new_hash, &hook_ctx)
             .await

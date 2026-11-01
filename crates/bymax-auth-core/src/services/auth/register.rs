@@ -10,7 +10,9 @@ use crate::engine::AuthEngine;
 use crate::normalize::{log_safe, normalize_email};
 use crate::services::auth::detached::run_after_register;
 use crate::services::auth::{RegisterInput, map_repository_error, spawn_guarded};
-use crate::traits::{BeforeRegisterResult, HookContext, RegisterAttempt, RegisterOverrides};
+use crate::traits::{
+    BeforeRegisterResult, HookContext, HookPlane, RegisterAttempt, RegisterOverrides,
+};
 
 impl AuthEngine {
     /// Register a new local (email + password) user, optionally dispatch a verification
@@ -36,6 +38,7 @@ impl AuthEngine {
         // The resolver, when present, is authoritative — a body tenant is refused (§24.8).
         let tenant_id = self.resolve_tenant(input.tenant_id.as_deref(), ctx).await?;
         let hook_ctx = HookContext::from_request(
+            HookPlane::Dashboard,
             ctx,
             None,
             Some(input.email.clone()),
