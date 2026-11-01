@@ -14,6 +14,7 @@ use crate::engine::AuthEngine;
 use crate::services::auth::test_support::base_config;
 use crate::services::{new_uuid_v4, now_unix};
 use crate::testing::{InMemoryPlatformUserRepository, InMemoryStores, InMemoryUserRepository};
+use crate::traits::SessionStore as _;
 
 fn platform_config() -> AuthConfig {
     let mut cfg = base_config();
@@ -195,6 +196,53 @@ async fn an_engine_without_a_platform_repository_refuses_instead_of_skipping_the
     let refused = h.engine.assert_platform_active("a1").await;
     assert!(
         matches!(refused, Err(AuthError::TokenInvalid)),
+        "{refused:?}"
+    );
+}
+
+#[tokio::test]
+async fn an_expired_administrator_token_is_token_invalid() {
+    let admins = Arc::new(InMemoryPlatformUserRepository::new());
+    admins.insert(admin("a1", "ACTIVE"));
+    let Some(engine) = engine(&admins) else { return };
+    let expired = PlatformClaims {
+        exp: now_unix() - 60,
+        ..claims_for("a1")
+    };
+    let token = engine
+        .tokens()
+        .issue_platform_access(&expired)
+        .unwrap_or_default();
+    let refused = engine.verify_access(&token, &platform()).await;
+    assert!(
+        matches!(refused, Err(AuthError::TokenInvalid)),
+        "{refused:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_revoked_dashboard_token_on_the_platform_plane_is_still_the_wrong_plane() {
+    // The type is judged before revocation, as in nest-auth: the caller learns it presented the
+    // other context's token, not that it was revoked.
+    let admins = Arc::new(InMemoryPlatformUserRepository::new());
+    let stores = Arc::new(InMemoryStores::new());
+    let Some(engine) = AuthEngine::builder()
+        .config(platform_config())
+        .environment(Environment::Test)
+        .user_repository(Arc::new(InMemoryUserRepository::new()))
+        .platform_user_repository(admins)
+        .redis_stores(stores.clone())
+        .build()
+        .ok()
+    else {
+        return;
+    };
+    let claims = super::dashboard_tests::claims_for("u1");
+    let token = engine.tokens().issue_access(&claims).unwrap_or_default();
+    assert!(stores.blacklist_access(&claims.jti, 600).await.is_ok());
+    let refused = engine.verify_access(&token, &platform()).await;
+    assert!(
+        matches!(refused, Err(AuthError::PlatformAuthRequired)),
         "{refused:?}"
     );
 }
