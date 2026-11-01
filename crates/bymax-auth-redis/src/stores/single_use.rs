@@ -14,6 +14,7 @@ use bymax_auth_types::AuthError;
 use crate::error::RedisStoreError;
 use crate::keys::{Prefix, to_hex};
 use crate::pool::RedisStores;
+use crate::script;
 
 impl RedisStores {
     /// The fully-qualified key for an opaque token under `prefix`: `sha256(token)` hex, never
@@ -55,6 +56,29 @@ impl RedisStores {
             .query_async::<()>(&mut conn)
             .await?;
         Ok(())
+    }
+
+    /// Compare-and-set `invidx:{tenantId}:{hash}`: point it at `token_hash` only while it holds
+    /// exactly `expected` (`None` for an absent entry), in one script.
+    async fn claim_invitation_index_inner(
+        &self,
+        tenant_id: &str,
+        invitee_hash: &str,
+        token_hash: &str,
+        ttl_secs: u64,
+        expected: Option<&str>,
+    ) -> Result<bool, RedisStoreError> {
+        let key = self.invitee_key(tenant_id, invitee_hash);
+        let mut conn = self.connection().await?;
+        let claimed: i64 = script::CLAIM_INVITATION_INDEX
+            .prepare()
+            .key(&key)
+            .arg(token_hash)
+            .arg(ttl_secs)
+            .arg(expected.unwrap_or(""))
+            .invoke_async(&mut conn)
+            .await?;
+        Ok(claimed == 1)
     }
 
     /// `GET invidx:{tenantId}:{hash}` — read the token hash, leaving the entry in place.
@@ -255,6 +279,19 @@ impl InvitationStore for RedisStores {
         ttl_secs: u64,
     ) -> Result<(), AuthError> {
         self.put_invitation_index_inner(tenant_id, invitee_hash, token_hash, ttl_secs)
+            .await
+            .map_err(AuthError::from)
+    }
+
+    async fn claim_invitation_index(
+        &self,
+        tenant_id: &str,
+        invitee_hash: &str,
+        token_hash: &str,
+        ttl_secs: u64,
+        expected: Option<&str>,
+    ) -> Result<bool, AuthError> {
+        self.claim_invitation_index_inner(tenant_id, invitee_hash, token_hash, ttl_secs, expected)
             .await
             .map_err(AuthError::from)
     }

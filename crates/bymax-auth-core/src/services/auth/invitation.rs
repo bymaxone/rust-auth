@@ -22,6 +22,8 @@ use crate::services::auth::detached::run_after_invitation_accepted;
 use crate::services::auth::{map_repository_error, spawn_guarded};
 use crate::traits::{HookContext, InviteData, StoredInvitation};
 
+mod supersede;
+
 /// The bytes of entropy in an invitation token before hex-encoding (256-bit, 64 hex chars).
 const INVITE_TOKEN_BYTES: usize = 32;
 
@@ -125,27 +127,39 @@ impl AuthEngine {
             created_at: OffsetDateTime::now_utc(),
         };
         // Re-inviting an address supersedes the previous invitation rather than adding a
-        // second one. Two live tokens for one invitee is two chances for an intercepted link
-        // to be redeemed, and a revoke would only ever reach the newest — the older would sit
-        // valid and unreferenced for the rest of its TTL.
-        if let Some(previous) = store
-            .take_invitation_index(tenant_id, &self.invitee_identifier(&email))
-            .await?
-        {
-            store.delete_invitation_by_hash(&previous).await?;
-        }
-        store.put_invitation(&raw, &invitation, ttl).await?;
-        // The invitee index is what makes an invitation manageable at all: the record is keyed
-        // by the hash of a token only the recipient's mailbox holds, so without this nobody on
-        // the issuing side can name a pending invitation, let alone withdraw one.
-        store
-            .put_invitation_index(
+        // second one: two live tokens for one invitee is two chances for an intercepted link to
+        // be redeemed, and a revoke would only ever reach the newest. The caller must outrank
+        // the pending invitation they displace; see `claim_invitation_slot`.
+        let invitee_hash = self.invitee_identifier(&email);
+        let new_hash = token_hash(&raw);
+        let superseded = self
+            .claim_invitation_slot(
+                store,
+                &inviter.role,
                 tenant_id,
-                &self.invitee_identifier(&email),
-                &token_hash(&raw),
+                &invitee_hash,
+                &new_hash,
                 ttl,
             )
             .await?;
+        if let Some(previous) = superseded {
+            store.delete_invitation_by_hash(&previous).await?;
+        }
+        // The index was claimed above and the record follows: a crash in between leaves an
+        // index naming nothing, an invitation that is simply dead.
+        store.put_invitation(&raw, &invitation, ttl).await?;
+        // A revoke or a later invite can move the index between the claim and this write. The
+        // record is then live with nothing naming it (or beside a newer one), so it is withdrawn
+        // rather than left redeemable: the address was changed under this invite. The same
+        // compare-and-set renews the index's TTL, which started at the claim: a record written
+        // later than the claim would otherwise outlive the entry that names it.
+        if !store
+            .claim_invitation_index(tenant_id, &invitee_hash, &new_hash, ttl, Some(&new_hash))
+            .await?
+        {
+            store.delete_invitation_by_hash(&new_hash).await?;
+            return Err(AuthError::InsufficientRole);
+        }
 
         // The email provider builds the accept URL from the raw token (never logged).
         let expires_at = OffsetDateTime::now_utc()
@@ -455,7 +469,11 @@ impl AuthEngine {
 /// either it *is* the required role, or its hierarchy entry transitively includes it. The
 /// hierarchy is denormalized (each role lists every role it includes), so this is a single
 /// membership check — no graph walk.
-fn has_role(holder: &str, required: &str, hierarchy: &HashMap<String, Vec<String>>) -> bool {
+pub(super) fn has_role(
+    holder: &str,
+    required: &str,
+    hierarchy: &HashMap<String, Vec<String>>,
+) -> bool {
     if holder == required {
         return true;
     }
@@ -467,6 +485,7 @@ fn has_role(holder: &str, required: &str, hierarchy: &HashMap<String, Vec<String
 mod tests {
     use super::*;
     mod structural_guard_tests;
+    mod supersede_tests;
     use crate::config::{AuthConfig, Environment};
     use crate::testing::{InMemoryStores, InMemoryUserRepository};
     use crate::traits::{

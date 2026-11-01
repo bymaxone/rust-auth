@@ -59,6 +59,11 @@ pub static REVOKE_FAMILY: LazyLock<LuaScript> =
 pub static BRUTE_FORCE_INCR: LazyLock<LuaScript> =
     LazyLock::new(|| LuaScript::new(include_str!("lua/brute_force_incr.lua")));
 
+/// `claim_invitation_index` — compare-and-set of the invitee index, so a supersede only
+/// displaces the invitation its rank check approved.
+pub static CLAIM_INVITATION_INDEX: LazyLock<LuaScript> =
+    LazyLock::new(|| LuaScript::new(include_str!("lua/claim_invitation_index.lua")));
+
 /// `otp_verify` — attempt-bounded verify + consume (section 12.5.4).
 pub static OTP_VERIFY: LazyLock<LuaScript> =
     LazyLock::new(|| LuaScript::new(include_str!("lua/otp_verify.lua")));

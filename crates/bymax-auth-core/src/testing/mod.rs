@@ -696,6 +696,14 @@ impl InMemoryStores {
         *lock(&self.last_session_ttl_secs)
     }
 
+    /// How many invitation records are stored, whatever their hash. A test-only inspection
+    /// helper: a test that cannot name the token (it is minted inside the flow) can still show
+    /// that none is left.
+    #[must_use]
+    pub fn invitation_record_count(&self) -> usize {
+        lock(&self.invitations).len()
+    }
+
     /// The refresh TTL the last rotation was stored with, in seconds. A test-only inspection
     /// helper, for the same reason as [`InMemoryStores::peek_session_ttl`].
     #[must_use]
@@ -1247,6 +1255,23 @@ impl InvitationStore for InMemoryStores {
     ) -> Result<(), AuthError> {
         lock(&self.invitation_index).insert(invitee_key(tenant_id, email), token_hash.to_owned());
         Ok(())
+    }
+
+    async fn claim_invitation_index(
+        &self,
+        tenant_id: &str,
+        email: &str,
+        token_hash: &str,
+        _ttl_secs: u64,
+        expected: Option<&str>,
+    ) -> Result<bool, AuthError> {
+        let mut index = lock(&self.invitation_index);
+        let key = invitee_key(tenant_id, email);
+        if index.get(&key).map(String::as_str) != expected {
+            return Ok(false);
+        }
+        index.insert(key, token_hash.to_owned());
+        Ok(true)
     }
 
     async fn read_invitation_index(
