@@ -176,6 +176,18 @@ pub enum AuthErrorCode {
     #[serde(rename = "auth.platform_auth_required")]
     PlatformAuthRequired,
 
+    // Service API keys
+    /// The presented API key is absent, malformed, unknown, wrong, revoked or expired. One answer
+    /// for all of them, so the response is no oracle for which one it was.
+    #[serde(rename = "auth.api_key_invalid")]
+    ApiKeyInvalid,
+    /// The API key is valid but does not hold every scope the route declares.
+    #[serde(rename = "auth.api_key_scope_insufficient")]
+    ApiKeyScopeInsufficient,
+    /// An operator-facing call named an API key that does not exist or is no longer active.
+    #[serde(rename = "auth.api_key_not_found")]
+    ApiKeyNotFound,
+
     // Adapter-originated — no nest-auth `auth.*` equivalent
     /// Request body/query failed DTO validation. Per-field messages serialize into
     /// `error.details`. One of two adapter-originated codes (the other is
@@ -222,7 +234,8 @@ impl AuthErrorCode {
             | Self::OtpInvalid
             | Self::OtpExpired
             | Self::OauthFailed
-            | Self::PlatformAuthRequired => 401,
+            | Self::PlatformAuthRequired
+            | Self::ApiKeyInvalid => 401,
             Self::AccountInactive
             | Self::AccountSuspended
             | Self::AccountBanned
@@ -232,8 +245,9 @@ impl AuthErrorCode {
             | Self::InsufficientRole
             | Self::Forbidden
             | Self::UntrustedOrigin
-            | Self::ReauthenticationRequired => 403,
-            Self::SessionNotFound => 404,
+            | Self::ReauthenticationRequired
+            | Self::ApiKeyScopeInsufficient => 403,
+            Self::SessionNotFound | Self::ApiKeyNotFound => 404,
             Self::EmailAlreadyExists
             | Self::MfaAlreadyEnabled
             | Self::MfaStateConflict
@@ -295,6 +309,9 @@ impl AuthErrorCode {
             Self::OauthFailed => "OAuth authentication failed",
             Self::OauthEmailMismatch => "OAuth email does not match",
             Self::PlatformAuthRequired => "Platform authentication required",
+            Self::ApiKeyInvalid => "Invalid API key",
+            Self::ApiKeyScopeInsufficient => "API key lacks the required scope",
+            Self::ApiKeyNotFound => "API key not found",
             Self::Validation => "Validation failed",
             Self::TooManyRequests => "Too many requests. Please slow down and try again shortly.",
             Self::Internal => "Internal server error",
@@ -519,6 +536,17 @@ pub enum AuthError {
     #[error("platform auth required")]
     PlatformAuthRequired,
 
+    // Service API keys
+    /// The presented API key did not verify.
+    #[error("api key invalid")]
+    ApiKeyInvalid,
+    /// The API key does not hold every scope the route declares.
+    #[error("api key scope insufficient")]
+    ApiKeyScopeInsufficient,
+    /// No active API key with the given id.
+    #[error("api key not found")]
+    ApiKeyNotFound,
+
     // Adapter-originated
     /// Request body/query validation failure; carries the per-field messages.
     #[error("validation failed")]
@@ -579,6 +607,9 @@ impl AuthError {
             Self::OauthFailed => AuthErrorCode::OauthFailed,
             Self::OauthEmailMismatch => AuthErrorCode::OauthEmailMismatch,
             Self::PlatformAuthRequired => AuthErrorCode::PlatformAuthRequired,
+            Self::ApiKeyInvalid => AuthErrorCode::ApiKeyInvalid,
+            Self::ApiKeyScopeInsufficient => AuthErrorCode::ApiKeyScopeInsufficient,
+            Self::ApiKeyNotFound => AuthErrorCode::ApiKeyNotFound,
             Self::Validation { .. } => AuthErrorCode::Validation,
             Self::TooManyRequests { .. } => AuthErrorCode::TooManyRequests,
             Self::Internal(_) => AuthErrorCode::Internal,

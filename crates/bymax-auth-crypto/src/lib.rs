@@ -46,6 +46,7 @@ compile_error!(
 
 mod error;
 
+pub mod api_key;
 pub mod compare;
 pub mod mac;
 pub mod password;

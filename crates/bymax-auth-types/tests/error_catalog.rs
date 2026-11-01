@@ -62,6 +62,9 @@ fn catalog() -> Vec<(AuthErrorCode, &'static str)> {
         (OauthFailed, "auth.oauth_failed"),
         (OauthEmailMismatch, "auth.oauth_email_mismatch"),
         (PlatformAuthRequired, "auth.platform_auth_required"),
+        (ApiKeyInvalid, "auth.api_key_invalid"),
+        (ApiKeyScopeInsufficient, "auth.api_key_scope_insufficient"),
+        (ApiKeyNotFound, "auth.api_key_not_found"),
         (Validation, "auth.validation"),
         (TooManyRequests, "auth.too_many_requests"),
         (Internal, "auth.internal"),
@@ -108,6 +111,9 @@ fn all_errors() -> Vec<AuthError> {
         AuthError::OauthFailed,
         AuthError::OauthEmailMismatch,
         AuthError::PlatformAuthRequired,
+        AuthError::ApiKeyInvalid,
+        AuthError::ApiKeyScopeInsufficient,
+        AuthError::ApiKeyNotFound,
         AuthError::Validation {
             details: vec![FieldError {
                 field: "email".to_owned(),
@@ -124,9 +130,9 @@ fn all_errors() -> Vec<AuthError> {
 #[test]
 fn every_code_serializes_to_its_string_and_round_trips() {
     // Table-driven wire-string check: each code's `auth.*` string must match the catalog
-    // exactly. The catalog covers all 38 codes; the status each one answers is asserted
+    // exactly. The catalog covers every code; the status each one answers is asserted
     // against the shared contract in `every_code_answers_the_wire_status_the_contract_pins`.
-    assert_eq!(catalog().len(), 38);
+    assert_eq!(catalog().len(), 41);
     for (code, wire) in catalog() {
         let json = serde_json::to_string(&code).unwrap_or_default();
         assert_eq!(json, format!("\"{wire}\""), "wrong string for {code:?}");
@@ -183,6 +189,9 @@ fn the_table_lists_every_variant_of_the_enum() {
             | OauthFailed
             | OauthEmailMismatch
             | PlatformAuthRequired
+            | ApiKeyInvalid
+            | ApiKeyScopeInsufficient
+            | ApiKeyNotFound
             | Validation
             | TooManyRequests
             | Internal => {}

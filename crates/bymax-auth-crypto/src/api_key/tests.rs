@@ -1,0 +1,196 @@
+//! Tests for the API-key primitives. The grammar and the vector are read from the shared wire
+//! contract, never restated, so a change to either side fails here.
+
+use super::*;
+
+/// The `apiKeys` section of the shared wire contract.
+fn contract() -> serde_json::Value {
+    let path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../conformance/wire-contract.json"
+    );
+    let raw = std::fs::read_to_string(path).unwrap_or_default();
+    let root: serde_json::Value = serde_json::from_str(&raw).unwrap_or(serde_json::Value::Null);
+    root["apiKeys"].clone()
+}
+
+/// A string field of a contract object.
+fn text(value: &serde_json::Value, field: &str) -> String {
+    value[field].as_str().unwrap_or_default().to_owned()
+}
+
+#[test]
+fn the_grammar_constants_are_the_ones_the_contract_pins() {
+    let grammar = &contract()["keyGrammar"];
+    assert_eq!(text(grammar, "separator"), SEPARATOR.to_string());
+    assert_eq!(text(grammar, "defaultPrefix"), DEFAULT_PREFIX);
+    assert_eq!(grammar["keyIdLength"], KEY_ID_LEN);
+    assert_eq!(grammar["secretLength"], SECRET_LEN);
+    // prefix + separator + key id + separator + secret.
+    let total = DEFAULT_PREFIX.len() + 1 + KEY_ID_LEN + 1 + SECRET_LEN;
+    assert_eq!(grammar["totalLengthWithDefaultPrefix"], total);
+}
+
+#[test]
+fn the_contract_vector_formats_parses_and_digests_as_pinned() {
+    let vector = &contract()["vector"];
+    let (pepper, key_id) = (text(vector, "pepper"), text(vector, "keyId"));
+    let (secret, key) = (text(vector, "secret"), text(vector, "key"));
+    assert!(!key.is_empty(), "the contract vector was not read");
+
+    assert_eq!(format(DEFAULT_PREFIX, &key_id, &secret), key);
+    assert_eq!(
+        parse(&key, DEFAULT_PREFIX),
+        Some(ParsedApiKey {
+            key_id: &key_id,
+            secret: &secret
+        })
+    );
+    assert_eq!(digest(&secret, &pepper), text(vector, "digest"));
+}
+
+#[test]
+fn the_vector_secret_is_the_base64url_of_the_bytes_zero_to_thirty_one() {
+    // The contract's secret is a counting pattern, so the encoder is checked against it directly.
+    let bytes: Vec<u8> = (0..32).collect();
+    assert_eq!(
+        encode_base64url(&bytes),
+        text(&contract()["vector"], "secret")
+    );
+}
+
+#[test]
+fn base64url_has_no_padding_and_uses_the_url_alphabet() {
+    assert_eq!(encode_base64url(&[]), "");
+    assert_eq!(encode_base64url(&[0xfb]), "-w");
+    assert_eq!(encode_base64url(&[0xfb, 0xff]), "-_8");
+    assert_eq!(encode_base64url(&[0xfb, 0xff, 0xbf]), "-_-_");
+}
+
+#[test]
+fn a_generated_secret_is_43_distinct_base64url_characters() {
+    let first = generate_secret();
+    assert_eq!(first.len(), SECRET_LEN);
+    assert!(is_secret(&first));
+    assert_ne!(first, generate_secret());
+}
+
+#[test]
+fn a_generated_key_survives_a_format_parse_round_trip() {
+    let key_id = "0b8f3c1e-5d2a-4c7e-9a14-6f3e8d2b7a90";
+    let secret = generate_secret();
+    let key = format("svc", key_id, &secret);
+    assert_eq!(
+        parse(&key, "svc"),
+        Some(ParsedApiKey {
+            key_id,
+            secret: &secret
+        })
+    );
+}
+
+#[test]
+fn a_secret_may_contain_the_separator_and_the_split_stays_on_the_first_two() {
+    let key_id = DUMMY_KEY_ID;
+    let secret = "a_b-c_".to_owned() + &"D".repeat(SECRET_LEN - 6);
+    let key = format(DEFAULT_PREFIX, key_id, &secret);
+    let parsed = parse(&key, DEFAULT_PREFIX);
+    assert_eq!(parsed.map(|p| p.secret), Some(secret.as_str()));
+}
+
+#[test]
+fn anything_but_exactly_the_grammar_does_not_parse() {
+    let id = DUMMY_KEY_ID;
+    let sec = DUMMY_SECRET;
+    let good = format("bak", id, sec);
+    assert!(parse(&good, "bak").is_some());
+
+    let upper_id = id.replace('0', "A");
+    let cases: Vec<(String, &str)> = vec![
+        (String::new(), "empty"),
+        ("bak".to_owned(), "prefix only"),
+        ("bak_".to_owned(), "prefix and separator only"),
+        (good.replacen("bak_", "xyz_", 1), "wrong prefix"),
+        (good.replacen("bak_", "bak-", 1), "wrong separator"),
+        (format("bak", &upper_id, sec), "uppercase key id"),
+        (format("bak", &id[..35], sec), "short key id"),
+        (format("bak", &(id.to_owned() + "0"), sec), "long key id"),
+        (format("bak", id, &sec[..42]), "short secret"),
+        (format("bak", id, &(sec.to_owned() + "A")), "long secret"),
+        (
+            format("bak", id, &sec.replace('A', "=")),
+            "padding character",
+        ),
+        (
+            format("bak", id, &sec.replace('A', "+")),
+            "standard-base64 character",
+        ),
+        (good.clone() + "\n", "trailing newline"),
+        (
+            format("bak", id, &("é".to_owned() + &sec[..41])),
+            "non-ascii secret",
+        ),
+        (
+            format("bak", "é0000000-0000-4000-8000-000000000000", sec),
+            "non-ascii key id",
+        ),
+        (
+            format("bak", &id.replace('-', "_"), sec),
+            "key id without its hyphens",
+        ),
+    ];
+    for (raw, why) in cases {
+        assert_eq!(parse(&raw, "bak"), None, "{why}: {raw:?}");
+    }
+}
+
+#[test]
+fn the_dummies_are_well_formed_so_every_step_still_runs() {
+    assert!(is_key_id(DUMMY_KEY_ID));
+    assert!(is_secret(DUMMY_SECRET));
+    assert_eq!(DUMMY_DIGEST.len(), DIGEST_HEX_LEN);
+    assert!(DUMMY_DIGEST.bytes().all(|b| b == b'0'));
+    assert!(
+        parse(
+            &format(DEFAULT_PREFIX, DUMMY_KEY_ID, DUMMY_SECRET),
+            DEFAULT_PREFIX
+        )
+        .is_some()
+    );
+}
+
+#[test]
+fn a_digest_depends_on_the_pepper_and_the_secret_only() {
+    let a = digest("secret-a", "pepper-one");
+    assert_eq!(a.len(), DIGEST_HEX_LEN);
+    assert_eq!(a, digest("secret-a", "pepper-one"));
+    assert_ne!(a, digest("secret-b", "pepper-one"));
+    assert_ne!(a, digest("secret-a", "pepper-two"));
+}
+
+#[test]
+fn digests_match_only_well_formed_equal_values() {
+    let d = digest(DUMMY_SECRET, "pepper");
+    assert!(digests_match(&d, &d));
+    assert!(!digests_match(&d, &digest("other", "pepper")));
+    // The lookup-miss comparison: a well-formed zero digest equals itself, which is why the
+    // verdict never rests on this comparison alone.
+    assert!(digests_match(DUMMY_DIGEST, DUMMY_DIGEST));
+    assert!(!digests_match(&d, DUMMY_DIGEST));
+}
+
+#[test]
+fn a_malformed_stored_digest_never_matches_anything_itself_included() {
+    let d = digest(DUMMY_SECRET, "pepper");
+    for bad in [
+        "",
+        "not hex",
+        &d.to_uppercase(),
+        &d[..63],
+        &(d.clone() + "0"),
+        &d.replace('a', "g"),
+    ] {
+        assert!(!digests_match(&d, bad), "{bad:?}");
+        assert!(!digests_match(bad, bad), "{bad:?} against itself");
+    }
+}
