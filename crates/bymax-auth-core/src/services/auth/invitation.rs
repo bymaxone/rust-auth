@@ -148,18 +148,8 @@ impl AuthEngine {
         // The index was claimed above and the record follows: a crash in between leaves an
         // index naming nothing, an invitation that is simply dead.
         store.put_invitation(&raw, &invitation, ttl).await?;
-        // A revoke or a later invite can move the index between the claim and this write. The
-        // record is then live with nothing naming it (or beside a newer one), so it is withdrawn
-        // rather than left redeemable: the address was changed under this invite. The same
-        // compare-and-set renews the index's TTL, which started at the claim: a record written
-        // later than the claim would otherwise outlive the entry that names it.
-        if !store
-            .claim_invitation_index(tenant_id, &invitee_hash, &new_hash, ttl, Some(&new_hash))
-            .await?
-        {
-            store.delete_invitation_by_hash(&new_hash).await?;
-            return Err(AuthError::InsufficientRole);
-        }
+        self.confirm_invitation_claim(store, tenant_id, &invitee_hash, &new_hash, ttl)
+            .await?;
 
         // The email provider builds the accept URL from the raw token (never logged).
         let expires_at = OffsetDateTime::now_utc()

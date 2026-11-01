@@ -377,3 +377,171 @@ async fn an_invite_whose_index_is_withdrawn_before_its_record_lands_leaves_no_li
     assert!(indexed(&base).await.is_none());
     assert_eq!(base.stores.invitation_record_count(), 0);
 }
+
+/// A store whose confirmation or cleanup can be made to fail, or whose index is withdrawn just
+/// before the record lands, to exercise the paths after the record is written.
+struct Faulty {
+    inner: Arc<InMemoryStores>,
+    tenant: String,
+    invitee: String,
+    fail_confirm: bool,
+    withdraw_index: bool,
+    fail_delete: bool,
+}
+
+fn store_down() -> AuthError {
+    AuthError::Internal(Box::new(std::io::Error::other("store unavailable")))
+}
+
+#[async_trait]
+impl InvitationStore for Faulty {
+    async fn put_invitation(
+        &self,
+        token: &str,
+        invitation: &StoredInvitation,
+        ttl_secs: u64,
+    ) -> Result<(), AuthError> {
+        if self.withdraw_index {
+            self.inner
+                .take_invitation_index(&self.tenant, &self.invitee)
+                .await?;
+        }
+        self.inner.put_invitation(token, invitation, ttl_secs).await
+    }
+    async fn consume_invitation(&self, token: &str) -> Result<Option<StoredInvitation>, AuthError> {
+        self.inner.consume_invitation(token).await
+    }
+    async fn put_invitation_index(
+        &self,
+        tenant_id: &str,
+        invitee_hash: &str,
+        token_hash: &str,
+        ttl_secs: u64,
+    ) -> Result<(), AuthError> {
+        self.inner
+            .put_invitation_index(tenant_id, invitee_hash, token_hash, ttl_secs)
+            .await
+    }
+    async fn claim_invitation_index(
+        &self,
+        tenant_id: &str,
+        invitee_hash: &str,
+        token_hash: &str,
+        ttl_secs: u64,
+        expected: Option<&str>,
+    ) -> Result<bool, AuthError> {
+        if self.fail_confirm && expected == Some(token_hash) {
+            return Err(store_down());
+        }
+        self.inner
+            .claim_invitation_index(tenant_id, invitee_hash, token_hash, ttl_secs, expected)
+            .await
+    }
+    async fn read_invitation_index(
+        &self,
+        tenant_id: &str,
+        invitee_hash: &str,
+    ) -> Result<Option<String>, AuthError> {
+        self.inner
+            .read_invitation_index(tenant_id, invitee_hash)
+            .await
+    }
+    async fn take_invitation_index(
+        &self,
+        tenant_id: &str,
+        invitee_hash: &str,
+    ) -> Result<Option<String>, AuthError> {
+        self.inner
+            .take_invitation_index(tenant_id, invitee_hash)
+            .await
+    }
+    async fn read_invitation_by_hash(
+        &self,
+        token_hash: &str,
+    ) -> Result<Option<StoredInvitation>, AuthError> {
+        self.inner.read_invitation_by_hash(token_hash).await
+    }
+    async fn delete_invitation_by_hash(&self, token_hash: &str) -> Result<bool, AuthError> {
+        if self.fail_delete {
+            return Err(store_down());
+        }
+        self.inner.delete_invitation_by_hash(token_hash).await
+    }
+}
+
+/// An invite through a [`Faulty`] store: the outcome, the events logged, and the base setup.
+async fn invite_through(
+    fail_confirm: bool,
+    withdraw_index: bool,
+    fail_delete: bool,
+) -> Option<(
+    Result<(), AuthError>,
+    crate::log_capture::CapturedEvents,
+    Setup,
+)> {
+    let base = setup(invite_config())?;
+    let store = Arc::new(Faulty {
+        inner: base.stores.clone(),
+        tenant: "t1".to_owned(),
+        invitee: base.engine.invitee_identifier(PENDING_EMAIL),
+        fail_confirm,
+        withdraw_index,
+        fail_delete,
+    });
+    let built = AuthEngine::builder()
+        .config(invite_config())
+        .environment(Environment::Test)
+        .user_repository(base.users.clone())
+        .redis_stores(base.stores.clone())
+        .invitation_store(store)
+        .build();
+    assert!(built.is_ok());
+    let engine = built.ok()?;
+    let admin = seed_admin(&base.users, "admin5@example.com", "ADMIN").await;
+    let (events, capture) = crate::log_capture::capture_events();
+    let outcome = engine
+        .invite(&admin, PENDING_EMAIL, "MEMBER", "t1", None)
+        .await;
+    drop(capture);
+    Some((outcome, events, base))
+}
+
+#[tokio::test]
+async fn a_store_error_while_confirming_the_claim_withdraws_the_record_and_surfaces_it() {
+    // The record is already written when the confirmation fails; propagating the error without
+    // removing it would leave a redeemable token that nothing names.
+    let Some((outcome, _events, base)) = invite_through(true, false, false).await else {
+        return;
+    };
+    assert!(
+        matches!(outcome, Err(AuthError::Internal(_))),
+        "{outcome:?}"
+    );
+    assert_eq!(base.stores.invitation_record_count(), 0);
+}
+
+#[tokio::test]
+async fn a_failing_cleanup_does_not_replace_the_refusal_and_is_logged() {
+    // The index moved, so the invite is refused with `InsufficientRole`; the withdrawal that
+    // follows failing must not turn that into a store error.
+    let Some((outcome, events, _base)) = invite_through(false, true, true).await else {
+        return;
+    };
+    assert!(
+        matches!(outcome, Err(AuthError::InsufficientRole)),
+        "{outcome:?}"
+    );
+    assert!(events.contains_at(tracing::Level::WARN, "could not withdraw the record"));
+}
+
+#[tokio::test]
+async fn a_failing_cleanup_does_not_replace_a_store_error_either() {
+    let Some((outcome, events, _base)) = invite_through(true, false, true).await else {
+        return;
+    };
+    assert!(
+        matches!(outcome, Err(AuthError::Internal(_))),
+        "{outcome:?}"
+    );
+    assert!(events.contains_at(tracing::Level::WARN, "could not withdraw the record"));
+}

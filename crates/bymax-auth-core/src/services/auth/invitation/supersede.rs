@@ -68,6 +68,49 @@ impl AuthEngine {
         Err(AuthError::InsufficientRole)
     }
 
+    /// Confirm, after the record is written, that the index still names this invitation, and renew
+    /// its TTL.
+    ///
+    /// A revoke or a later invite can move the index between the claim and the write, which
+    /// leaves the record live with nothing naming it (or beside a newer one); the index TTL also
+    /// started at the claim, so a later write would outlive the entry that names it. One
+    /// compare-and-set against this invitation's own hash answers both. Whenever the invitation
+    /// cannot be confirmed, whether the index moved or the store failed, the record is withdrawn
+    /// best-effort and the original outcome is returned: a failing delete is logged and never
+    /// replaces it.
+    ///
+    /// # Errors
+    ///
+    /// [`AuthError::InsufficientRole`] when the index no longer names this invitation, or the
+    /// store [`AuthError`] that failed the confirmation.
+    pub(super) async fn confirm_invitation_claim(
+        &self,
+        store: &Arc<dyn InvitationStore>,
+        tenant_id: &str,
+        invitee_hash: &str,
+        token_hash: &str,
+        ttl_secs: u64,
+    ) -> Result<(), AuthError> {
+        let confirmed = store
+            .claim_invitation_index(
+                tenant_id,
+                invitee_hash,
+                token_hash,
+                ttl_secs,
+                Some(token_hash),
+            )
+            .await;
+        let outcome = match confirmed {
+            Ok(true) => return Ok(()),
+            Ok(false) => AuthError::InsufficientRole,
+            Err(error) => error,
+        };
+        if let Err(error) = store.delete_invitation_by_hash(token_hash).await {
+            tracing::warn!(%error, "invitation: could not withdraw the record of an unconfirmed invite");
+        }
+        Err(outcome)
+    }
+
     /// The token hash currently pending for the address, after checking the caller may destroy
     /// it. An unparseable record is superseded without a check, exactly as a revoke treats it:
     /// it can no longer be accepted either, and leaving it behind would be worse.
