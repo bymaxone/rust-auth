@@ -500,11 +500,10 @@ impl RedisStores {
         let mut details = Vec::with_capacity(members.len());
         let mut stale: Vec<&str> = Vec::new();
         let grace_prefix = format!("{}:", prefixes.rp.as_str());
-        let namespace = keys.namespace().to_owned();
         for member in &members {
             let Some(hash) = live_member_hash(member, prefixes.rt) else {
                 // Not a live session. If it is a grace pointer whose key has already expired,
-                // drop the member here rather than leaving it: a rotation removes `rt:{old}`
+                // drop the member rather than leaving it: a rotation removes `rt:{old}`
                 // and adds TWO members — `rt:{new}` and `rp:{old}` — and until now only a full
                 // revoke-all ever removed the second. The `rp:` KEY dies with the grace window
                 // (30 s by default); the MEMBER did not, while `refresh_rotate` re-arms the
@@ -525,10 +524,7 @@ impl RedisStores {
                 // A pointer still inside its window is left alone — that is what lets a
                 // revoke-all also kill a token rotated away moments earlier.
                 if member.starts_with(&grace_prefix) {
-                    let live: bool = conn.exists(format!("{namespace}:{member}")).await?;
-                    if !live {
-                        let _: i64 = conn.srem(&sess_key, member).await?;
-                    }
+                    stale.push(member.as_str());
                 }
                 continue;
             };

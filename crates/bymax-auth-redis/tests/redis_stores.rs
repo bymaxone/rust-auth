@@ -152,6 +152,8 @@ async fn a_failed_detail_read_fails_the_listing_and_prunes_nothing() {
     // fails (WRONGTYPE) whichever order the members come back in.
     assert!(redis.del("auth:sd:h1").await && redis.del("auth:rt:h1").await);
     assert!(redis.del("auth:sd:h2").await && redis.sadd("auth:sd:h2", "x").await);
+    // A grace pointer whose key has expired is dead too, and is not pruned on a failed read either.
+    assert!(redis.sadd("auth:sess:s-fu2", "rp:gone").await);
 
     assert!(stores.list_sessions(kind, &subject("fu2")).await.is_err());
 
@@ -159,7 +161,7 @@ async fn a_failed_detail_read_fails_the_listing_and_prunes_nothing() {
     members.sort();
     assert_eq!(
         members,
-        ["rt:h1", "rt:h2"],
+        ["rp:gone", "rt:h1", "rt:h2"],
         "a failed read must prune nothing"
     );
 }
