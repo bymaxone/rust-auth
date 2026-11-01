@@ -1,6 +1,8 @@
 //! The `BYMAX_REQUIRE_DOCKER` switch: with it set a missing container runtime fails the test, and
-//! without it the test skips and says so. Needs no Docker; the end-to-end case points a real
-//! container start at a daemon that does not exist.
+//! without it the test skips and says so. The decision and the two child-process cases need no
+//! Docker: the children point a real container start at a daemon that does not exist. The probe
+//! they run starts a container like every other container-backed test, so in this process it
+//! needs a runtime, or skips (or fails, with the switch on) without one.
 
 use std::process::Command;
 
