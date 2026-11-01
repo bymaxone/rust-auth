@@ -298,8 +298,8 @@ describe("a cross-site caller of the silent-refresh route is sent to sign in", (
   }
 
   it("still refreshes for an admitted caller and clears the cookies when the refresh fails", async () => {
-    // The control: only the refusal changed. A same-origin caller whose refresh fails gets the
-    // sign-in redirect WITH the three clears, exactly as before.
+    // The control for the refusal above: an admitted caller whose backend refresh fails must get
+    // the sign-in redirect together with all three session-cookie clears.
     const fetchSpy = vi
       .spyOn(globalThis, "fetch")
       .mockResolvedValue(new Response(null, { status: 401 }));
