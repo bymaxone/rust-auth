@@ -150,8 +150,8 @@ async fn reset_password_posts_each_proof_under_its_own_field() {
 
 #[tokio::test]
 async fn logout_names_the_stored_refresh_token_so_the_server_session_ends() {
-    // The server revokes the session the refresh token names; a logout that sent only the access
-    // token cleared the client's copy and left the session redeemable for its whole lifetime.
+    // The server ends the session the refresh token names, so a logout has to send it: the access
+    // token alone does not identify the refresh session.
     let request = capture_request(response(204, "No Content", ""), |client| async move {
         client.store_tokens("acc-token", "ref-token");
         assert!(client.logout().await.is_ok());

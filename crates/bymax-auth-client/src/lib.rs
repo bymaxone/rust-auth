@@ -287,8 +287,8 @@ impl AuthClient {
         let mut request = self
             .post("/auth/logout")
             .header(AUTHORIZATION, format!("Bearer {access}"));
-        // The server ends the session the refresh token names, so it is sent along; without it
-        // only the client's copy is cleared and the session stays redeemable.
+        // The server ends the session the refresh token names, so it is sent along: the access
+        // token alone does not identify the refresh session.
         if let Some(refresh) = self.refresh_token() {
             request = request.body(serde_json::json!({ "refreshToken": refresh }).to_string());
         }

@@ -88,9 +88,9 @@ async fn change_password(
     user: AuthUser,
     ValidatedJson(dto): ValidatedJson<ChangePasswordDto>,
 ) -> Response {
-    // The caller's own session is kept, so its refresh token has to be found on whichever channel
-    // carries it: the refresh cookie (cookie delivery) or the body (bearer delivery). Reading
-    // only the body made a cookie-mode caller revoke their own session along with the rest.
+    // The caller's own session is kept, so its refresh token is sourced from whichever channel
+    // carries it: the refresh cookie (cookie delivery) or the body (bearer delivery). A token that
+    // is absent leaves the caller's session among those revoked.
     let current_refresh = source_refresh_token(
         &cookies,
         &state.config().cookies.refresh_name,
