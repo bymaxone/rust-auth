@@ -52,14 +52,18 @@ async fn a_member_cannot_replace_a_pending_admin_invitation() {
     assert!(pending.is_some());
     let Some(pending) = pending else { return };
 
+    let (events, capture) = crate::log_capture::capture_events();
     let refused = s
         .engine
         .invite(&member, PENDING_EMAIL, "MEMBER", "t1", None)
         .await;
+    drop(capture);
     assert!(
         matches!(refused, Err(AuthError::InsufficientRole)),
         "{refused:?}"
     );
+    // The refusal is recorded where an operator can see it and the caller cannot.
+    assert!(events.contains_at(tracing::Level::WARN, "outranked by the pending invitation"));
 
     // The ADMIN invitation is untouched: still indexed, still a record.
     assert_eq!(indexed(&s).await.as_deref(), Some(pending.as_str()));
@@ -247,12 +251,15 @@ async fn an_index_that_keeps_moving_exhausts_the_retries_and_is_refused() {
     let Some((s, _racing)) = racing_setup(hashes) else { return };
     let admin = seed_admin(&s.users, "admin3@example.com", "ADMIN").await;
 
+    let (events, capture) = crate::log_capture::capture_events();
     let refused = s
         .engine
         .invite(&admin, PENDING_EMAIL, "MEMBER", "t1", None)
         .await;
+    drop(capture);
     assert!(
         matches!(refused, Err(AuthError::InsufficientRole)),
         "{refused:?}"
     );
+    assert!(events.contains_at(tracing::Level::WARN, "kept changing under the rank check"));
 }
