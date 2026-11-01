@@ -3125,9 +3125,17 @@ pub struct MfaRegenerateRecoveryCodesDto {
 pub struct PlatformLoginDto {
     #[garde(email)]
     pub email: String,
-    #[garde(length(max = 128))]
+    /// Not blank (`/\S/` in JavaScript): a password of only whitespace is refused before any key
+    /// derivation runs.
+    #[garde(length(min = 1, max = 128), custom(not_blank))]
     pub password: String,
 }
+
+// Every email field (register, login, forgot/reset password, verify/resend OTP, verify/resend
+// email, platform login, change email, create/revoke invitation) is trimmed and lowercased BEFORE
+// the `email` and length checks, as nest-auth's `@Transform` does with JavaScript's `trim()` and
+// `toLowerCase()`: `"  User@Example.COM "` is the address `user@example.com`. The whitespace set
+// is JavaScript's (it includes U+FEFF and excludes U+0085), not Rust's.
 
 #[derive(Deserialize, Validate)]
 #[serde(deny_unknown_fields)]

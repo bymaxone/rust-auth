@@ -34,6 +34,7 @@ fn no_control_characters(value: &str, _: &()) -> garde::Result {
 }
 
 mod code_formats;
+mod text_rules;
 
 /// `POST /auth/register` body.
 #[derive(Debug, Deserialize, Validate)]
@@ -41,6 +42,7 @@ mod code_formats;
 pub struct RegisterDto {
     /// The email being registered.
     #[garde(email, length(max = 255))]
+    #[serde(deserialize_with = "text_rules::normalized_email")]
     pub email: String,
     /// The plaintext password (8–128 chars).
     #[garde(length(min = 8, max = 128))]
@@ -65,6 +67,7 @@ pub struct RegisterDto {
 pub struct LoginDto {
     /// The login email.
     #[garde(email, length(max = 255))]
+    #[serde(deserialize_with = "text_rules::normalized_email")]
     pub email: String,
     /// The plaintext password (1–128 chars).
     ///
@@ -92,6 +95,7 @@ pub struct LoginDto {
 pub struct ForgotPasswordDto {
     /// The account email (anti-enumeration; the same response regardless of existence).
     #[garde(email, length(max = 255))]
+    #[serde(deserialize_with = "text_rules::normalized_email")]
     pub email: String,
     /// The tenant scope. Optional: a deployment that configures a `TenantIdResolver`
     /// refuses this value, so a client there must omit it. With no resolver configured it is
@@ -143,6 +147,7 @@ pub struct ChangePasswordDto {
 pub struct ResetPasswordDto {
     /// The account email.
     #[garde(email, length(max = 255))]
+    #[serde(deserialize_with = "text_rules::normalized_email")]
     pub email: String,
     /// The new password (8–128 chars).
     #[garde(length(min = 8, max = 128))]
@@ -179,6 +184,7 @@ pub struct ResetPasswordDto {
 pub struct VerifyOtpDto {
     /// The account email.
     #[garde(email, length(max = 255))]
+    #[serde(deserialize_with = "text_rules::normalized_email")]
     pub email: String,
     /// The numeric OTP (4–8 digits).
     #[garde(length(min = 4, max = 8))]
@@ -200,6 +206,7 @@ pub struct VerifyOtpDto {
 pub struct ResendOtpDto {
     /// The account email (anti-enumeration).
     #[garde(email, length(max = 255))]
+    #[serde(deserialize_with = "text_rules::normalized_email")]
     pub email: String,
     /// The tenant scope. Optional: a deployment that configures a `TenantIdResolver`
     /// refuses this value, so a client there must omit it. With no resolver configured it is
@@ -218,6 +225,7 @@ pub struct ResendOtpDto {
 pub struct VerifyEmailDto {
     /// The account email.
     #[garde(email, length(max = 255))]
+    #[serde(deserialize_with = "text_rules::normalized_email")]
     pub email: String,
     /// The verification OTP — exactly 6 digits.
     //
@@ -244,6 +252,7 @@ pub struct VerifyEmailDto {
 pub struct ResendVerificationDto {
     /// The account email (anti-enumeration).
     #[garde(email, length(max = 255))]
+    #[serde(deserialize_with = "text_rules::normalized_email")]
     pub email: String,
     /// The tenant scope. Optional: a deployment that configures a `TenantIdResolver`
     /// refuses this value, so a client there must omit it. With no resolver configured it is
@@ -331,6 +340,7 @@ pub struct MfaRegenerateRecoveryCodesDto {
 pub struct PlatformLoginDto {
     /// The admin email.
     #[garde(email, length(max = 255))]
+    #[serde(deserialize_with = "text_rules::normalized_email")]
     pub email: String,
     /// The plaintext password (1–128 chars).
     ///
@@ -339,7 +349,7 @@ pub struct PlatformLoginDto {
     /// with a validation error rather than an authentication one, while telling an
     /// unauthenticated caller what the policy is before any derivation runs. Rejecting the
     /// empty string still keeps a caller from spending a KDF derivation for free.
-    #[garde(length(min = 1, max = 128))]
+    #[garde(length(min = 1, max = 128), custom(text_rules::not_blank))]
     pub password: String,
 }
 
@@ -350,6 +360,7 @@ pub struct PlatformLoginDto {
 pub struct CreateInvitationDto {
     /// The invitee email.
     #[garde(email, length(max = 255))]
+    #[serde(deserialize_with = "text_rules::normalized_email")]
     pub email: String,
     /// The invited role (validated against the hierarchy by the engine).
     #[garde(length(min = 1, max = 64))]
@@ -368,6 +379,7 @@ pub struct CreateInvitationDto {
 pub struct ChangeEmailDto {
     /// The address to move to.
     #[garde(email, length(max = 255))]
+    #[serde(deserialize_with = "text_rules::normalized_email")]
     pub new_email: String,
     /// The account's current password, re-proved because the address is the recovery
     /// credential. Bounded at 128 to match the hasher's input limit — an unbounded field is a
@@ -400,6 +412,7 @@ pub struct ConfirmEmailChangeDto {
 pub struct RevokeInvitationDto {
     /// The invited address whose pending invitation is being withdrawn.
     #[garde(email, length(max = 255))]
+    #[serde(deserialize_with = "text_rules::normalized_email")]
     pub email: String,
 }
 

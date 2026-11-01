@@ -45,6 +45,9 @@ mod ws_ticket_body;
 #[path = "adapter/mfa_code_shape.rs"]
 mod mfa_code_shape;
 
+#[path = "adapter/email_normalization.rs"]
+mod email_normalization;
+
 #[path = "adapter/mfa_setup_body.rs"]
 mod mfa_setup_body;
 
