@@ -3163,8 +3163,10 @@ pub struct AcceptInvitationDto {
 
 /// Bearer-mode only: the refresh token in the body. In cookie mode it is read
 /// from the refresh cookie and this struct is unused.
+// Unlike every other request body this one does NOT deny unknown fields: nest-auth has no DTO on
+// the routes that take only a refresh token (dashboard and platform refresh and logout,
+// `sessions/revoke-all`) and reads just `refreshToken`, so extra keys are ignored on both.
 #[derive(Deserialize, Validate)]
-#[serde(deny_unknown_fields)]
 pub struct RefreshDto {
     #[garde(skip)]
     pub refresh_token: Option<String>,

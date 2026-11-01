@@ -48,6 +48,9 @@ mod mfa_code_shape;
 #[path = "adapter/email_normalization.rs"]
 mod email_normalization;
 
+#[path = "adapter/refresh_body_shape.rs"]
+mod refresh_body_shape;
+
 #[path = "adapter/mfa_setup_body.rs"]
 mod mfa_setup_body;
 

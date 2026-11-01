@@ -431,10 +431,16 @@ pub struct AcceptInvitationDto {
     pub password: String,
 }
 
-/// `POST /auth/refresh` (and platform refresh) body — bearer/both mode only. In cookie mode
-/// the refresh token is read from the cookie and this body is optional/empty.
+/// The body of the routes that take only a refresh token — dashboard and platform refresh and
+/// logout, and `POST /auth/sessions/revoke-all` — in bearer/both mode. In cookie mode the token
+/// is read from the cookie and this body is optional/empty.
+///
+/// It deliberately does **not** deny unknown fields, unlike every other request body: nest-auth
+/// has no DTO on these routes and reads only `refreshToken`, so a client that sends more keys
+/// must reach the same outcome on both backends. Refusing the body would also be the worse
+/// failure on logout, where an unreadable body is swallowed and leaves the session alive.
 #[derive(Debug, Default, Deserialize, Validate)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[serde(rename_all = "camelCase")]
 pub struct RefreshDto {
     /// The refresh token, present only in bearer/both mode.
     ///
