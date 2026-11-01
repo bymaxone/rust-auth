@@ -605,11 +605,15 @@ impl AuthEngine {
             .await
     }
 
-    /// Revoke the current platform session (`POST /auth/platform/logout`). Best-effort.
+    /// Revoke the current platform session (`POST /auth/platform/logout`): every revocation
+    /// write is attempted and the first failure is answered, so `Ok` means the access token, the
+    /// refresh session and the grace pointer are all gone.
     ///
     /// # Errors
     ///
-    /// Returns [`AuthError::PlatformAuthRequired`] when the platform domain is not enabled.
+    /// Returns [`AuthError::PlatformAuthRequired`] when the platform domain is not enabled, and
+    /// [`AuthError::Internal`] when the session lookup or a revocation write fails; a retry
+    /// finishes whatever the failed attempt left.
     #[cfg(feature = "platform")]
     pub async fn platform_logout(
         &self,

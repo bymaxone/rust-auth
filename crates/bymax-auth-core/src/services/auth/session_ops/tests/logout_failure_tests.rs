@@ -146,3 +146,62 @@ async fn a_session_lookup_that_fails_ends_the_logout_before_any_write() {
     );
     assert!(!session_alive(&h, &auth).await);
 }
+
+#[tokio::test]
+async fn a_refused_session_delete_keeps_the_session_indexed_for_a_later_revoke_all() {
+    // The credential and its index entry go together or not at all: a delete that was refused
+    // leaves the session in the account's index, so the next sign-out-everywhere, which only
+    // reaches indexed credentials, still kills it once the store is healthy again.
+    let Some((h, auth)) = signed_in(None).await else { return };
+
+    h.stores.fail_next_cleanup_writes(1);
+    let outcome = h
+        .engine
+        .logout(&auth.access_token, &auth.refresh_token)
+        .await;
+    assert!(
+        matches!(outcome, Err(AuthError::Internal(_))),
+        "{outcome:?}"
+    );
+    assert!(session_alive(&h, &auth).await);
+
+    assert!(
+        h.engine
+            .revoke_all_sessions("t1", &auth.user.id)
+            .await
+            .is_ok()
+    );
+    assert!(!session_alive(&h, &auth).await);
+    let rotated = h
+        .engine
+        .refresh(&auth.refresh_token, "1.2.3.4", "agent")
+        .await;
+    assert!(matches!(rotated, Err(AuthError::RefreshTokenInvalid)));
+}
+
+#[tokio::test]
+async fn a_retry_names_no_owner_when_the_first_attempt_already_deleted_the_session() {
+    // Documented limitation: when only the blacklist write failed, the first attempt deleted the
+    // refresh session and fired no hook; the retry that completes the logout finds no session,
+    // so there is nobody to name and the hook is not delivered for that logout at all.
+    let spy = Arc::new(LogoutSpy::default());
+    let hooks: Arc<dyn crate::traits::AuthHooks> = spy.clone();
+    let Some((h, auth)) = signed_in(Some(hooks)).await else { return };
+
+    h.stores.fail_next_blacklist_writes(1);
+    assert!(
+        h.engine
+            .logout(&auth.access_token, &auth.refresh_token)
+            .await
+            .is_err()
+    );
+    assert!(
+        h.engine
+            .logout(&auth.access_token, &auth.refresh_token)
+            .await
+            .is_ok()
+    );
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+
+    assert!(spy.subjects.lock().map(|s| s.is_empty()).unwrap_or(false));
+}

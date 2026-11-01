@@ -110,3 +110,26 @@ async fn a_session_lookup_that_fails_ends_the_logout_before_any_write() {
     let after = tokens.verify_platform_access(&auth.access_token).await;
     assert!(matches!(after, Err(AuthError::TokenRevoked)));
 }
+
+#[tokio::test]
+async fn a_refused_session_delete_keeps_the_session_indexed_for_a_later_revoke_all() {
+    // As on the dashboard plane: a refused delete leaves the credential in the admin's index, so
+    // a healthy sign-out-everywhere still kills it.
+    let Some((h, auth)) = signed_in().await else { return };
+    let Some(svc) = h.engine.platform_auth() else { return };
+
+    h.stores.fail_next_cleanup_writes(1);
+    let outcome = svc.logout(&auth.access_token, &auth.refresh_token).await;
+    assert!(
+        matches!(outcome, Err(AuthError::Internal(_))),
+        "{outcome:?}"
+    );
+
+    assert!(
+        svc.revoke_all_platform_sessions(&auth.admin.id)
+            .await
+            .is_ok()
+    );
+    let rotated = svc.refresh(&auth.refresh_token, "1.2.3.4", "agent").await;
+    assert!(matches!(rotated, Err(AuthError::RefreshTokenInvalid)));
+}
