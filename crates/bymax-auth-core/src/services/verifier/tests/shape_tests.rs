@@ -27,17 +27,21 @@ fn a_subject_is_bounded_by_characters_and_never_empty() {
 }
 
 #[test]
-fn the_unbound_warning_is_logged_once_per_flag() {
+fn the_unbound_warning_is_logged_on_the_first_call_and_only_then() {
     let flag = AtomicBool::new(false);
     let (events, capture) = crate::log_capture::capture_events();
+    let logged = || {
+        events
+            .iter()
+            .iter()
+            .filter(|e| e.rendered.contains("tenant binding is not applied"))
+            .count()
+    };
     warn_unbound_once(&flag);
+    // Logged by the call that set the flag, not by a later one.
+    assert_eq!(logged(), 1);
+    assert!(flag.load(Ordering::Relaxed));
     warn_unbound_once(&flag);
     drop(capture);
-    assert!(flag.load(Ordering::Relaxed));
-    let logged = events
-        .iter()
-        .iter()
-        .filter(|e| e.rendered.contains("tenant binding is not applied"))
-        .count();
-    assert_eq!(logged, 1);
+    assert_eq!(logged(), 1);
 }

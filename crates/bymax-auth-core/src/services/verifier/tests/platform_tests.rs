@@ -293,3 +293,27 @@ async fn a_malformed_dashboard_token_on_the_platform_plane_is_judged_by_shape_fi
         "{refused:?}"
     );
 }
+
+#[tokio::test]
+async fn a_malformed_administrator_jti_or_subject_is_refused_even_when_signed() {
+    // Each operand of the shape check is exercised alone, so neither can be dropped.
+    let admins = Arc::new(InMemoryPlatformUserRepository::new());
+    admins.insert(admin("a1", "ACTIVE"));
+    let Some(engine) = engine(&admins) else { return };
+    let bad_jti = PlatformClaims {
+        jti: "abc".to_owned(),
+        ..claims_for("a1")
+    };
+    let long_sub = claims_for(&"x".repeat(257));
+    for claims in [bad_jti, long_sub] {
+        let token = engine
+            .tokens()
+            .issue_platform_access(&claims)
+            .unwrap_or_default();
+        let refused = engine.verify_access(&token, &platform()).await;
+        assert!(
+            matches!(refused, Err(AuthError::TokenInvalid)),
+            "{refused:?}"
+        );
+    }
+}
