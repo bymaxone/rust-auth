@@ -159,8 +159,9 @@ impl<'a> TokenDelivery<'a> {
 
     /// The `SameSite` of the refresh cookie: `Strict` (the long-lived credential's blast-radius
     /// limiter) unless the deployment is cross-site (`None`), where a browser sends no `Strict` or
-    /// `Lax` cookie on the refresh request. `Lax` is never chosen for it: it is withheld on the same
-    /// requests `Strict` is, so relaxing to it would weaken the cookie and fix nothing.
+    /// `Lax` cookie on the refresh request. `Lax` is never chosen for it: the refresh request is a POST,
+    /// which a `Lax` cookie does not accompany across sites either, so relaxing to it would only
+    /// send the cookie on cross-site top-level GET navigations that the refresh route does not serve.
     fn refresh_same_site(&self) -> SameSite {
         match self.cookies().same_site {
             ConfigSameSite::None => SameSite::None,
@@ -228,8 +229,8 @@ impl<'a> TokenDelivery<'a> {
     pub(crate) fn clear_session(&self, cookies: &Cookies) -> Vec<HeaderValue> {
         let c = self.cookies();
         // The clear has to mirror the plant on every attribute the browser matches a deletion
-        // by — name, domain and path — and on `Secure`, so an expiry is never weaker than the
-        // cookie it removes. Clearing a `Domain=`-scoped cookie host-only leaves the real one
+        // by — name, domain and path — and on `Secure` and the refresh cookie's `SameSite`, so an
+        // expiry is never weaker than the cookie it removes. Clearing a `Domain=`-scoped cookie host-only leaves the real one
         // in place, and the user who signed out stays signed in.
         self.write_scopes(cookies, true, &|domain| {
             vec![
@@ -244,6 +245,7 @@ impl<'a> TokenDelivery<'a> {
                     Cookie::build((c.refresh_name.clone(), ""))
                         .path(c.refresh_path.clone())
                         .secure(c.secure)
+                        .same_site(self.refresh_same_site())
                         .build(),
                     domain,
                 ),

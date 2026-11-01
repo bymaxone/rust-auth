@@ -188,3 +188,23 @@ async fn the_expiries_are_not_secure_when_the_planted_cookies_are_not() {
         }
     }
 }
+
+#[tokio::test]
+async fn the_refresh_expiry_carries_the_same_site_the_refresh_cookie_was_issued_with() {
+    // The refresh cookie is `Strict` unless the deployment is cross-site (`None`); its expiry names
+    // the same attribute, so a browser that matches the two sees one cookie being replaced.
+    for (configured, expected) in [
+        (ConfigSS::Lax, "SameSite=Strict"),
+        (ConfigSS::Strict, "SameSite=Strict"),
+        (ConfigSS::None, "SameSite=None"),
+    ] {
+        let planted = set_cookies(cfg(configured), domains(&["example.com"]), Act::Plant).await;
+        let cleared = set_cookies(cfg(configured), domains(&["example.com"]), Act::Clear).await;
+        for line in named(&planted, "refresh_token")
+            .into_iter()
+            .chain(named(&cleared, "refresh_token"))
+        {
+            assert!(line.contains(expected), "{expected}: {line}");
+        }
+    }
+}

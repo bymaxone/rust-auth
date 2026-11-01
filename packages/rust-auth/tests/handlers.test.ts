@@ -1,6 +1,8 @@
 import { NextRequest } from "next/server";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
+import { NO_STORE_CACHE_CONTROL as NO_STORE } from "../src/nextjs/proxy";
+
 import {
   AUTH_ACCESS_COOKIE_NAME,
   AUTH_HAS_SESSION_COOKIE_NAME,
@@ -206,7 +208,6 @@ describe("cross-site callers are refused before any cookie is written", () => {
   const config = { backendUrl: BACKEND, loginPath: "/login" };
 
   const handlers = {
-    silentRefresh: createSilentRefreshHandler(config),
     clientRefresh: createClientRefreshHandler(config),
     logout: createLogoutHandler(config),
   };
@@ -256,5 +257,59 @@ describe("cross-site callers are refused before any cookie is written", () => {
       expect(fetchSpy).toHaveBeenCalledTimes(1);
       fetchSpy.mockRestore();
     }
+  });
+});
+
+/**
+ * The silent-refresh route is the one a person reaches by following a link into the app from
+ * another site after the access token expired, a navigation the browser marks cross-site on every
+ * hop. It is refused all the same, but with a redirect to the sign-in page instead of a bare 403,
+ * which is all that visitor would otherwise see. The property the refusal exists for is kept: no
+ * refresh is attempted, no backend call is made and no `Set-Cookie` is written.
+ */
+describe("a cross-site caller of the silent-refresh route is sent to sign in", () => {
+  const handler = createSilentRefreshHandler({ backendUrl: BACKEND, loginPath: "/login" });
+
+  function from(site?: string): NextRequest {
+    const headers: Record<string, string> = { cookie: `${AUTH_REFRESH_COOKIE_NAME}=r_1` };
+    if (site !== undefined) headers["sec-fetch-site"] = site;
+    return new NextRequest("https://app.example.com/auth/silent-refresh?redirectTo=/dashboard", {
+      headers,
+    });
+  }
+
+  for (const site of ["cross-site", "same-site"]) {
+    it(`redirects a ${site} caller to the sign-in page with no refresh and no Set-Cookie`, async () => {
+      const fetchSpy = vi
+        .spyOn(globalThis, "fetch")
+        .mockRejectedValue(new Error("the guard must refuse before any backend call"));
+
+      const response = await handler(from(site));
+
+      expect(response.status).toBe(307);
+      expect(response.headers.get("location")).toBe(
+        "https://app.example.com/login?reason=expired",
+      );
+      expect(response.headers.get("set-cookie")).toBeNull();
+      expect(response.headers.get("cache-control")).toBe(NO_STORE);
+      expect(fetchSpy).not.toHaveBeenCalled();
+      fetchSpy.mockRestore();
+    });
+  }
+
+  it("still refreshes for an admitted caller and clears the cookies when the refresh fails", async () => {
+    // The control: only the refusal changed. A same-origin caller whose refresh fails gets the
+    // sign-in redirect WITH the three clears, exactly as before.
+    const fetchSpy = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValue(new Response(null, { status: 401 }));
+
+    const response = await handler(from("same-origin"));
+
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+    expect(response.status).toBe(307);
+    expect(response.headers.get("location")).toBe("https://app.example.com/login?reason=expired");
+    expect(response.headers.getSetCookie()).toHaveLength(3);
+    fetchSpy.mockRestore();
   });
 });
