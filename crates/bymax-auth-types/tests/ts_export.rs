@@ -68,7 +68,7 @@ fn shared_dir() -> PathBuf {
 }
 
 /// Every catalog code, in a fixed order, so the generated map is deterministic.
-fn all_error_codes() -> [AuthErrorCode; 38] {
+fn all_error_codes() -> [AuthErrorCode; 41] {
     use AuthErrorCode::*;
     [
         InvalidCredentials,
@@ -106,6 +106,9 @@ fn all_error_codes() -> [AuthErrorCode; 38] {
         OauthFailed,
         OauthEmailMismatch,
         PlatformAuthRequired,
+        ApiKeyInvalid,
+        ApiKeyScopeInsufficient,
+        ApiKeyNotFound,
         Validation,
         TooManyRequests,
         Internal,

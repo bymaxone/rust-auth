@@ -649,7 +649,8 @@
     "totpSecretAtRest": "aes-256-gcm over the BASE32 TEXT of the secret",
     "recoveryCodeDigest": "hex hmac-sha256 of the code under the derived identifier key",
     "otpRecordCode": "hex hmac-sha256 of `{identifier}:{code}` under the derived identifier key",
-    "wsTicket": "64 lowercase hex characters (32 CSPRNG bytes), single-use, at most 30 s and never beyond the minting access token's own expiry"
+    "wsTicket": "64 lowercase hex characters (32 CSPRNG bytes), single-use, at most 30 s and never beyond the minting access token's own expiry",
+    "apiKey": "`{prefix}_{keyId}_{secret}` — prefix `bak` by default, keyId a lowercase canonical UUID, secret 43 base64url characters (32 CSPRNG bytes); stored only as the hex hmac-sha256 of the secret under the pepper"
   },
   "passwordHashFormat": {
     "$comment": [
@@ -803,7 +804,16 @@
     "wsTicket": [
       "ticket",
       "expiresIn"
-    ]
+    ],
+    "passwordResetRequest": {
+      "routes": [
+        "password/forgot-password",
+        "password/resend-otp"
+      ],
+      "status": 200,
+      "body": {},
+      "$comment": "Both routes acknowledge with 200 and an empty JSON object, whether or not the account exists: a body that differed by outcome would be the enumeration oracle the 200 exists to close. Pinned as an object, not left empty, so a client that parses every success body as JSON needs no special case for these two routes."
+    }
   },
   "errorCatalog": {
     "$comment": [
@@ -854,6 +864,9 @@
       "auth.oauth_failed",
       "auth.oauth_email_mismatch",
       "auth.platform_auth_required",
+      "auth.api_key_invalid",
+      "auth.api_key_scope_insufficient",
+      "auth.api_key_not_found",
       "auth.validation",
       "auth.too_many_requests",
       "auth.internal"
@@ -931,6 +944,9 @@
       "auth.oauth_failed": 401,
       "auth.oauth_email_mismatch": 409,
       "auth.platform_auth_required": 401,
+      "auth.api_key_invalid": 401,
+      "auth.api_key_scope_insufficient": 403,
+      "auth.api_key_not_found": 404,
       "auth.internal": 500
     }
   },
@@ -943,5 +959,60 @@
         "details": "object|null"
       }
     }
+  },
+  "apiKeys": {
+    "$comment": [
+      "Scoped service keys for machine callers. Both libraries must mint, parse and verify the",
+      "same key, because a deployment re-issuing keys from one backend may verify them on the other.",
+      "The vector pins the digest function and the grammar; the rest pins behaviour a client can see."
+    ],
+    "keyGrammar": {
+      "separator": "_",
+      "defaultPrefix": "bak",
+      "keyIdLength": 36,
+      "secretLength": 43,
+      "totalLengthWithDefaultPrefix": 84,
+      "parsing": "split on the FIRST two separators only; the prefix and the keyId contain none, the secret may"
+    },
+    "digest": "lowercase hex hmac-sha256 with key = pepper and message = secret, utf-8; labels and scopes are never part of the input",
+    "vector": {
+      "pepper": "conformance-pepper-0123456789abcdefABCDEF",
+      "keyId": "0b8f3c1e-5d2a-4c7e-9a14-6f3e8d2b7a90",
+      "secret": "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8",
+      "key": "bak_0b8f3c1e-5d2a-4c7e-9a14-6f3e8d2b7a90_AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8",
+      "digest": "7e817ed002c5201c7b4d74a620b41f6f889c9332d946a8af28a5153c6e2a8c8f"
+    },
+    "header": "x-api-key by default; read from that header only, never the query string; a repeated header is malformed",
+    "verificationSteps": [
+      "read the header",
+      "parse, substituting a fixed dummy keyId and dummy secret when absent or malformed",
+      "look the keyId up in the store, always",
+      "compute the digest of the secret under the pepper",
+      "compare two 32-byte buffers in constant time, against a fixed dummy digest when there is no row",
+      "only then decide: parsed AND found AND equal AND not revoked AND not expired"
+    ],
+    "validity": "a key is valid strictly before expiresAt, and not at all once revokedAt is set, on every instance and whatever instant revokedAt holds; a date that does not parse counts as lapsed",
+    "scopes": "a key must hold ALL scopes the route declares; no wildcard and no hierarchy; the most specific declaration wins (handler over class); an empty declaration is undeclared and the route is refused",
+    "refusals": {
+      "api_key_invalid": "absent, malformed, unknown, wrong secret, revoked, expired — one answer, no oracle",
+      "api_key_scope_insufficient": "valid key, missing scope",
+      "forbidden": "the route declares no scopes; refused before any credential work"
+    },
+    "auditEvent": {
+      "outcome": ["allowed", "denied"],
+      "reason": [
+        "missing",
+        "malformed",
+        "unknown",
+        "wrong_secret",
+        "revoked",
+        "expired",
+        "scope_insufficient",
+        "route_undeclared",
+        "store_error"
+      ],
+      "fields": ["outcome", "reason", "keyId", "label", "method", "route", "requiredScopes", "ip"]
+    },
+    "lastUsed": "advisory, coalesced per process and flushed in batches; the store write must be monotonic"
   }
 }

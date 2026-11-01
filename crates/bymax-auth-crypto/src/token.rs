@@ -89,7 +89,7 @@ pub fn generate_secure_token(byte_len: usize) -> String {
 ///
 /// Hand-rolled (rather than pulling a runtime hex dependency) because encoding is a
 /// pure, security-insensitive transform: each byte becomes its high then low nibble.
-fn encode_hex(bytes: &[u8]) -> String {
+pub(crate) fn encode_hex(bytes: &[u8]) -> String {
     let mut out = String::with_capacity(bytes.len() * 2);
     for &byte in bytes {
         out.push(HEX_ALPHABET[usize::from(byte >> 4)] as char);
