@@ -92,7 +92,86 @@
     "mfaTempTokenMarker": "mfa",
     "mfaTransitionLock": "mfalock",
     "otpResendCooldown": "resend",
-    "invitationIndex": "invidx"
+    "invitationIndex": "invidx",
+    "userStatus": "us",
+    "userEmailVerified": "uev"
+  },
+  "userStatusCache": {
+    "$comment": [
+      "The account-status cache both libraries read from one Redis. A deployment that runs both",
+      "behind one store shares it, so the key, the value and the invalidation order are part of the",
+      "contract: a delete that stops matching raises nothing and merely defers a suspension or a",
+      "verification by one TTL, and nothing else would notice.",
+      "",
+      "Two entries per account: `us` holds the status string, `uev` holds whether the address is",
+      "verified. Both are keyed by the HMAC of the tenant-scoped DASHBOARD user subject, exactly like",
+      "every other key that names an account (`userSubjectDerivedKeys`). The tenant is in the subject",
+      "because a repository id is unique only within a tenant; the HMAC is there because the store is",
+      "shared and readable, and an account identifier written into a key in the clear is disclosed to",
+      "anyone who can list it. The cache is dashboard-only: the platform status check is uncached, so",
+      "there is no platform subject to derive and a dashboard account can never share a key with a",
+      "platform one.",
+      "",
+      "**Keys of any other shape are not read.** A backend that keys these entries differently, for",
+      "example by the tenant and the user id percent-encoded in the clear, names other keys than this",
+      "one. Both entries are TTL'd cache values, so nothing needs migrating: the first read misses and",
+      "refills. Running two shapes side by side is bounded by `ttl`: an invalidation issued by one",
+      "side deletes a key the other does not read, so a changed status can be served stale for up to",
+      "one TTL, and each account costs one extra repository read. Drain the other shape before this",
+      "one serves to avoid even that."
+    ],
+    "key": "{namespace}:{userStatus|userEmailVerified}:{hmac_sha256(hmacKey, userSubject)}",
+    "userSubject": "the dashboard arm of userSubjectPreimages; this cache has no platform counterpart",
+    "hmacKey": "the identifier-HMAC key of hmacKeyDerivation, and the vectors below use its pinned derivedKeyHex",
+    "statusValue": "the status string exactly as the repository returned it; not case-folded and not trimmed (the blocked-status comparison canonicalizes at read time)",
+    "emailVerifiedValue": {
+      "verified": "1",
+      "unverified": "0"
+    },
+    "emailVerifiedRead": "read, and written on a miss, only when email verification is required; otherwise only the status entry exists",
+    "ttl": {
+      "option": "userStatusCacheTtlSeconds",
+      "default": 60,
+      "appliesTo": "every entry written on a miss, set with the same value"
+    },
+    "fill": "a miss on the status entry, or on the verified entry when it is read, resolves both from one tenant-scoped repository read and writes both back",
+    "invalidateOrder": [
+      "userEmailVerified",
+      "userStatus"
+    ],
+    "invalidateOrderWhy": "the verified entry is deleted first so that a failure between the two deletes leaves the entry whose staleness only costs a repository read; a stale `0` would lock a just-verified account out until it expires",
+    "vectors": [
+      {
+        "tenantId": "tenant-1",
+        "userId": "user-1",
+        "userSubject": "dashboard:8:tenant-1:user-1",
+        "digestHex": "40a3b06eff7ff26d20d5ff7b9f238ddf5858d7f42505bd646acf5ecd3ed9c50b"
+      },
+      {
+        "tenantId": "a:b",
+        "userId": "c",
+        "userSubject": "dashboard:3:a:b:c",
+        "digestHex": "ee454d898fc64c5c6021212945ac239004538d927c35f7b32f544aa0b68eb962"
+      },
+      {
+        "tenantId": "a",
+        "userId": "b:c",
+        "userSubject": "dashboard:1:a:b:c",
+        "digestHex": "98d1d252901b19a3e19ca74c5af81c093a7fc2d866dca141f499eef3887966b7"
+      },
+      {
+        "tenantId": "a\u00e7a\u00ed",
+        "userId": "u1",
+        "userSubject": "dashboard:6:a\u00e7a\u00ed:u1",
+        "digestHex": "e12380df7654737fbd3590f6d49ae2461ce8ed41e862b64dfc92dc460fae358b"
+      },
+      {
+        "tenantId": "t/1 \u00e9",
+        "userId": "u%1+x",
+        "userSubject": "dashboard:6:t/1 \u00e9:u%1+x",
+        "digestHex": "169d23f4def0019c0fcbebb0630aca4635b89f592909ef51a364f8ac330c232a"
+      }
+    ]
   },
   "graceRecoveryWrite": {
     "$comment": [
@@ -234,6 +313,8 @@
     "reauthFailureCounter": "lf:{hmac_sha256(hmacKey, 'reauth:{userSubject}')}",
     "sessionIndex": "{sess|psess}:{hmac_sha256(hmacKey, userSubject)}",
     "tokenEpoch": "{ep|pep}:{hmac_sha256(hmacKey, userSubject)}",
+    "userStatus": "us:{hmac_sha256(hmacKey, userSubject)}",
+    "userEmailVerified": "uev:{hmac_sha256(hmacKey, userSubject)}",
     "$comment": [
       "The keys that derive from `userSubjectPreimages`. A contract detects drift only in what it",
       "lists, so every key that names an ACCOUNT rather than a token belongs here.",

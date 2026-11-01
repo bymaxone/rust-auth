@@ -3071,6 +3071,8 @@ fn the_mfa_subject_preimages_match_the_shared_contract() {
         "reauthFailureCounter",
         "sessionIndex",
         "tokenEpoch",
+        "userStatus",
+        "userEmailVerified",
     ];
     implemented.sort_unstable();
     assert_eq!(

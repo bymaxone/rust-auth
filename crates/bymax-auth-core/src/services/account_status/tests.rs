@@ -10,9 +10,15 @@ use bymax_auth_types::AuthError;
 use crate::config::{AuthConfig, Environment};
 use crate::engine::AuthEngine;
 use crate::services::auth::test_support::{Harness, SeedUser, base_config, harness};
-use crate::traits::{UserRepository, UserStatusCacheStore};
+use crate::traits::{SessionKind, UserRepository, UserStatusCacheStore};
 
 const TENANT: &str = "t1";
+
+/// The subject hash the engine keys one account's cache entries by.
+fn subject(h: &Harness, tenant: &str, user: &str) -> String {
+    h.engine
+        .session_subject(SessionKind::Dashboard, Some(tenant), user)
+}
 
 /// A seeded active account and its id.
 async fn seeded(h: &Harness) -> String {
@@ -68,25 +74,46 @@ async fn an_account_that_is_gone_is_token_invalid_and_is_not_cached() {
     assert!(h.users.remove(&id));
     let gone = h.engine.assert_user_active(&id, TENANT).await;
     assert!(matches!(gone, Err(AuthError::TokenInvalid)), "{gone:?}");
-    let cached = h.stores.get_status(TENANT, &id).await;
+    let cached = h.stores.get_status(&subject(&h, TENANT, &id)).await;
     assert!(matches!(cached, Ok(None)), "{cached:?}");
 }
 
 #[tokio::test]
-async fn the_cache_is_scoped_by_tenant() {
+async fn two_accounts_that_share_an_id_across_tenants_never_share_an_entry() {
     let Some(h) = harness(base_config(), None) else { return };
-    assert!(h.stores.put_status("t1", "u1", "BANNED", 60).await.is_ok());
-    let other = h.stores.get_status("t2", "u1").await;
-    assert!(matches!(other, Ok(None)), "{other:?}");
-    let own = h.stores.get_status("t1", "u1").await;
+    // The same user id in two tenants, and the two splits of one string that percent-encoding
+    // keeps apart: each pair names its own subject, so one entry cannot answer for another.
+    let pairs = [("t1", "u1"), ("t2", "u1"), ("a:b", "c"), ("a", "b:c")];
+    let subjects: Vec<String> = pairs.iter().map(|(t, u)| subject(&h, t, u)).collect();
+    for (i, left) in subjects.iter().enumerate() {
+        for right in &subjects[i + 1..] {
+            assert_ne!(left, right);
+        }
+    }
+    assert!(
+        h.stores
+            .put_status(&subjects[0], "BANNED", 60)
+            .await
+            .is_ok()
+    );
+    for other in &subjects[1..] {
+        let leaked = h.stores.get_status(other).await;
+        assert!(matches!(leaked, Ok(None)), "{leaked:?}");
+    }
+    let own = h.stores.get_status(&subjects[0]).await;
     assert!(matches!(&own, Ok(Some(s)) if s == "BANNED"), "{own:?}");
 }
 
 #[tokio::test]
 async fn an_entry_stops_answering_when_its_ttl_has_run_out() {
     let Some(h) = harness(base_config(), None) else { return };
-    assert!(h.stores.put_status(TENANT, "u1", "ACTIVE", 0).await.is_ok());
-    let expired = h.stores.get_status(TENANT, "u1").await;
+    assert!(
+        h.stores
+            .put_status(&subject(&h, TENANT, "u1"), "ACTIVE", 0)
+            .await
+            .is_ok()
+    );
+    let expired = h.stores.get_status(&subject(&h, TENANT, "u1")).await;
     assert!(matches!(expired, Ok(None)), "{expired:?}");
 }
 
@@ -108,7 +135,7 @@ async fn the_verified_flag_is_cached_only_where_verification_is_required() {
             .await
             .is_ok()
     );
-    let flag = h.stores.get_verified(TENANT, &id).await;
+    let flag = h.stores.get_verified(&subject(&h, TENANT, &id)).await;
     assert!(matches!(flag, Ok(None)), "{flag:?}");
 
     let Some(h) = harness(verification_required(), None) else { return };
@@ -119,7 +146,7 @@ async fn the_verified_flag_is_cached_only_where_verification_is_required() {
             .await
             .is_ok()
     );
-    let flag = h.stores.get_verified(TENANT, &id).await;
+    let flag = h.stores.get_verified(&subject(&h, TENANT, &id)).await;
     assert!(matches!(flag, Ok(Some(true))), "{flag:?}");
 }
 
@@ -203,7 +230,12 @@ async fn the_status_only_gate_does_not_ask_for_the_verified_flag() {
 #[tokio::test]
 async fn an_empty_id_has_nothing_to_invalidate() {
     let Some(h) = harness(base_config(), None) else { return };
-    assert!(h.stores.put_status(TENANT, "", "BANNED", 60).await.is_ok());
+    assert!(
+        h.stores
+            .put_status(&subject(&h, TENANT, ""), "BANNED", 60)
+            .await
+            .is_ok()
+    );
     assert!(h.engine.invalidate_account_status("", TENANT).await.is_ok());
     assert!(
         h.engine
@@ -213,7 +245,7 @@ async fn an_empty_id_has_nothing_to_invalidate() {
     );
     assert!(h.engine.invalidate_account_status("u1", "").await.is_ok());
     // The no-op left the entry in place.
-    let kept = h.stores.get_status(TENANT, "").await;
+    let kept = h.stores.get_status(&subject(&h, TENANT, "")).await;
     assert!(matches!(&kept, Ok(Some(_))), "{kept:?}");
 }
 
@@ -226,19 +258,19 @@ fn down() -> AuthError {
 
 #[async_trait]
 impl UserStatusCacheStore for DownCache {
-    async fn get_status(&self, _: &str, _: &str) -> Result<Option<String>, AuthError> {
+    async fn get_status(&self, _: &str) -> Result<Option<String>, AuthError> {
         Err(down())
     }
-    async fn get_verified(&self, _: &str, _: &str) -> Result<Option<bool>, AuthError> {
+    async fn get_verified(&self, _: &str) -> Result<Option<bool>, AuthError> {
         Err(down())
     }
-    async fn put_status(&self, _: &str, _: &str, _: &str, _: u64) -> Result<(), AuthError> {
+    async fn put_status(&self, _: &str, _: &str, _: u64) -> Result<(), AuthError> {
         Err(down())
     }
-    async fn put_verified(&self, _: &str, _: &str, _: bool, _: u64) -> Result<(), AuthError> {
+    async fn put_verified(&self, _: &str, _: bool, _: u64) -> Result<(), AuthError> {
         Err(down())
     }
-    async fn invalidate(&self, _: &str, _: &str) -> Result<(), AuthError> {
+    async fn invalidate(&self, _: &str) -> Result<(), AuthError> {
         Err(down())
     }
 }

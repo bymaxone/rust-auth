@@ -1,6 +1,7 @@
 //! Testcontainers coverage of the Redis `UserStatusCacheStore`: the keys and values are the ones
-//! nest-auth 1.4.8 writes under the same Redis, every entry carries a TTL, `invalidate` drops
-//! both facts, and two handles on one Redis see each other's entries.
+//! the shared wire contract pins (`{ns}:us:{subject hash}` and `{ns}:uev:{subject hash}`), every
+//! entry carries a TTL, `invalidate` drops both facts, and two handles on one Redis see each
+//! other's entries.
 //!
 //! When Docker is unavailable every case returns early, so a no-Docker `cargo test` still passes.
 
@@ -74,38 +75,33 @@ async fn try_start() -> Option<TestRedis> {
     Some(TestRedis { container, url })
 }
 
+/// A subject hash as the engine derives it: 64 lower-case hex characters.
+const SUBJECT: &str = "40a3b06eff7ff26d20d5ff7b9f238ddf5858d7f42505bd646acf5ecd3ed9c50b";
+/// Another account's subject hash.
+const OTHER: &str = "ee454d898fc64c5c6021212945ac239004538d927c35f7b32f544aa0b68eb962";
+
 #[tokio::test]
-async fn the_entries_are_the_keys_and_values_nest_auth_reads() {
+async fn the_entries_are_the_keys_and_values_the_contract_pins() {
     let Some(redis) = try_start().await else { return };
     let Some(stores) = redis.stores() else { return };
 
-    // `a:b` holds a colon, so the encoded scope is `a%3Ab:u1`, as `encodeURIComponent` gives.
-    assert!(stores.put_status("a:b", "u1", "ACTIVE", 60).await.is_ok());
-    assert!(stores.put_verified("a:b", "u1", false, 60).await.is_ok());
-    assert_eq!(
-        redis.all_keys().await,
-        vec![
-            "auth:uev:a%3Ab:u1".to_owned(),
-            "auth:us:a%3Ab:u1".to_owned()
-        ]
-    );
-    assert_eq!(
-        redis.raw("auth:us:a%3Ab:u1").await.as_deref(),
-        Some("ACTIVE")
-    );
-    assert_eq!(redis.raw("auth:uev:a%3Ab:u1").await.as_deref(), Some("0"));
-    assert!(matches!(stores.get_status("a:b", "u1").await, Ok(Some(s)) if s == "ACTIVE"));
+    assert!(stores.put_status(SUBJECT, "ACTIVE", 60).await.is_ok());
+    assert!(stores.put_verified(SUBJECT, false, 60).await.is_ok());
+    let (status_key, verified_key) = (format!("auth:us:{SUBJECT}"), format!("auth:uev:{SUBJECT}"));
+    let mut expected = vec![verified_key.clone(), status_key.clone()];
+    expected.sort();
+    assert_eq!(redis.all_keys().await, expected);
+    assert_eq!(redis.raw(&status_key).await.as_deref(), Some("ACTIVE"));
+    assert_eq!(redis.raw(&verified_key).await.as_deref(), Some("0"));
+    assert!(matches!(stores.get_status(SUBJECT).await, Ok(Some(s)) if s == "ACTIVE"));
     assert!(matches!(
-        stores.get_verified("a:b", "u1").await,
+        stores.get_verified(SUBJECT).await,
         Ok(Some(false))
     ));
 
-    assert!(stores.put_verified("a:b", "u1", true, 60).await.is_ok());
-    assert_eq!(redis.raw("auth:uev:a%3Ab:u1").await.as_deref(), Some("1"));
-    assert!(matches!(
-        stores.get_verified("a:b", "u1").await,
-        Ok(Some(true))
-    ));
+    assert!(stores.put_verified(SUBJECT, true, 60).await.is_ok());
+    assert_eq!(redis.raw(&verified_key).await.as_deref(), Some("1"));
+    assert!(matches!(stores.get_verified(SUBJECT).await, Ok(Some(true))));
 }
 
 #[tokio::test]
@@ -114,34 +110,28 @@ async fn a_value_written_by_another_implementation_other_than_zero_reads_as_veri
     let Some(stores) = redis.stores() else { return };
     let Some(mut conn) = redis.connection().await else { return };
     let _: () = redis::cmd("SET")
-        .arg("auth:uev:t1:u1")
+        .arg(format!("auth:uev:{SUBJECT}"))
         .arg("yes")
         .query_async(&mut conn)
         .await
         .unwrap_or_default();
-    assert!(matches!(
-        stores.get_verified("t1", "u1").await,
-        Ok(Some(true))
-    ));
-    assert!(matches!(
-        stores.get_verified("t1", "absent").await,
-        Ok(None)
-    ));
+    assert!(matches!(stores.get_verified(SUBJECT).await, Ok(Some(true))));
+    assert!(matches!(stores.get_verified(OTHER).await, Ok(None)));
 }
 
 #[tokio::test]
-async fn every_entry_expires_and_the_two_tenants_with_one_user_id_never_meet() {
+async fn every_entry_expires_and_two_accounts_never_meet() {
     let Some(redis) = try_start().await else { return };
     let Some(stores) = redis.stores() else { return };
 
-    assert!(stores.put_status("t1", "u1", "BANNED", 30).await.is_ok());
-    assert!(stores.put_verified("t1", "u1", true, 30).await.is_ok());
-    for key in ["auth:us:t1:u1", "auth:uev:t1:u1"] {
-        let ttl = redis.ttl(key).await;
+    assert!(stores.put_status(SUBJECT, "BANNED", 30).await.is_ok());
+    assert!(stores.put_verified(SUBJECT, true, 30).await.is_ok());
+    for key in [format!("auth:us:{SUBJECT}"), format!("auth:uev:{SUBJECT}")] {
+        let ttl = redis.ttl(&key).await;
         assert!((1..=30).contains(&ttl), "{key} has TTL {ttl}");
     }
-    assert!(matches!(stores.get_status("t2", "u1").await, Ok(None)));
-    assert!(matches!(stores.get_verified("t2", "u1").await, Ok(None)));
+    assert!(matches!(stores.get_status(OTHER).await, Ok(None)));
+    assert!(matches!(stores.get_verified(OTHER).await, Ok(None)));
 }
 
 #[tokio::test]
@@ -150,14 +140,14 @@ async fn invalidate_drops_both_facts_for_every_handle_on_that_redis() {
     let (Some(first), Some(second)) = (redis.stores(), redis.stores()) else {
         return;
     };
-    assert!(first.put_status("t1", "u1", "ACTIVE", 60).await.is_ok());
-    assert!(first.put_verified("t1", "u1", true, 60).await.is_ok());
-    // A different account's entries survive.
-    assert!(first.put_status("t1", "u2", "ACTIVE", 60).await.is_ok());
+    assert!(first.put_status(SUBJECT, "ACTIVE", 60).await.is_ok());
+    assert!(first.put_verified(SUBJECT, true, 60).await.is_ok());
+    // A different account's entry survives.
+    assert!(first.put_status(OTHER, "ACTIVE", 60).await.is_ok());
 
-    assert!(matches!(second.get_status("t1", "u1").await, Ok(Some(_))));
-    assert!(second.invalidate("t1", "u1").await.is_ok());
-    assert!(matches!(first.get_status("t1", "u1").await, Ok(None)));
-    assert!(matches!(first.get_verified("t1", "u1").await, Ok(None)));
-    assert_eq!(redis.all_keys().await, vec!["auth:us:t1:u2".to_owned()]);
+    assert!(matches!(second.get_status(SUBJECT).await, Ok(Some(_))));
+    assert!(second.invalidate(SUBJECT).await.is_ok());
+    assert!(matches!(first.get_status(SUBJECT).await, Ok(None)));
+    assert!(matches!(first.get_verified(SUBJECT).await, Ok(None)));
+    assert_eq!(redis.all_keys().await, vec![format!("auth:us:{OTHER}")]);
 }
