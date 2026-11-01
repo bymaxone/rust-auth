@@ -565,6 +565,7 @@ mod tests {
         assert!(hooks.after_register(&user, &c).await.is_ok());
         assert!(hooks.after_login(&user, &c).await.is_ok());
         assert!(hooks.after_logout("u1", &c).await.is_ok());
+        assert!(hooks.after_platform_logout("p1", &c).await.is_ok());
         assert!(hooks.after_email_verified(&user, &c).await.is_ok());
         assert!(hooks.after_password_reset(&user, &c).await.is_ok());
         assert!(hooks.after_mfa_enabled(&user, &c).await.is_ok());

@@ -1139,6 +1139,17 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn the_logout_spy_would_see_a_dashboard_logout() {
+        // The "after_logout received nothing" assertion below is only evidence if the spy
+        // records a dashboard logout when one happens. Calling it directly shows that it does.
+        let spy = LogoutSpy::default();
+        let ctx = identity_only_context("u1");
+        assert!(spy.after_logout("u1", &ctx).await.is_ok());
+        let seen = spy.dashboard.lock().map(|s| s.clone()).unwrap_or_default();
+        assert_eq!(seen, vec!["u1".to_owned()]);
+    }
+
+    #[tokio::test]
     async fn logout_notifies_after_platform_logout_and_not_the_dashboard_hook() {
         // The notification is fire-and-forget, so nothing in the logout's own result reflects
         // it — a hook that was never invoked looks exactly like one that was. A deployment
