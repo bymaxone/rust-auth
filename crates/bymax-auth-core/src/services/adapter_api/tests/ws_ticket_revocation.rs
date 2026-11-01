@@ -130,50 +130,20 @@ async fn a_ticket_without_an_identifier_to_check_is_refused() {
 }
 
 #[tokio::test]
-async fn a_dashboard_ticket_with_an_empty_tenant_is_refused_without_a_read() {
-    // The empty tenant names no keyspace, so the answer must not depend on a store read: the
-    // blacklist and epoch of a store that would fail are never consulted.
+async fn a_ticket_that_names_no_usable_tenant_is_refused() {
+    // This engine mints only dashboard tickets, so a snapshot without a tenant, or with an empty
+    // one, was not written by it. Redemption would otherwise hand the socket dashboard claims
+    // whose tenant is the empty string. Every other field is live, and the answer is the one an
+    // unknown ticket gets.
     let Some(h) = harness(base_config(), None) else { return };
-    let ticket = stored(&h, &snapshot(Some(""), "jti-1", 0)).await;
-
-    let redeemed = h.engine.redeem_ws_ticket(&ticket).await;
-    assert!(matches!(redeemed, Err(AuthError::TokenInvalid)));
-}
-
-#[tokio::test]
-async fn a_platform_ticket_is_checked_against_the_platform_plane() {
-    // No tenant on the snapshot means the platform plane: its own blacklist entry and its own
-    // epoch, never the dashboard's.
-    let Some(h) = harness(base_config(), None) else { return };
-    let live = stored(&h, &snapshot(None, "p-jti-live", 0)).await;
-    assert!(h.engine.redeem_ws_ticket(&live).await.is_ok());
-
-    let blacklisted = stored(&h, &snapshot(None, "p-jti-out", 0)).await;
-    assert!(
-        h.engine
-            .session_store()
-            .blacklist_access("p-jti-out", 900)
-            .await
-            .is_ok()
-    );
-    assert!(matches!(
-        h.engine.redeem_ws_ticket(&blacklisted).await,
-        Err(AuthError::TokenInvalid)
-    ));
-
-    let stale = stored(&h, &snapshot(None, "p-jti-stale", 0)).await;
-    let subject = h.engine.session_subject(SessionKind::Platform, None, "u1");
-    assert!(
-        h.engine
-            .session_store()
-            .bump_epoch(SessionKind::Platform, &subject)
-            .await
-            .is_ok()
-    );
-    assert!(matches!(
-        h.engine.redeem_ws_ticket(&stale).await,
-        Err(AuthError::TokenInvalid)
-    ));
+    for tenant in [None, Some("")] {
+        let ticket = stored(&h, &snapshot(tenant, "jti-live", 0)).await;
+        let redeemed = h.engine.redeem_ws_ticket(&ticket).await;
+        assert!(
+            matches!(redeemed, Err(AuthError::TokenInvalid)),
+            "tenant {tenant:?} was redeemed"
+        );
+    }
 }
 
 #[tokio::test]

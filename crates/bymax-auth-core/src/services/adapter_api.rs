@@ -260,7 +260,8 @@ impl AuthEngine {
     ///
     /// # Errors
     ///
-    /// Returns [`AuthError::Internal`] when no WS-ticket store is wired or when the account
+    /// Returns [`AuthError::MfaRequired`] when the session is enrolled in MFA and has not
+    /// cleared its challenge, [`AuthError::Internal`] when no WS-ticket store is wired or when the account
     /// read fails, [`AuthError::TokenInvalid`] when the token has no lifetime left or names an
     /// account that no longer exists, the status-specific error for a blocked account (the snapshot is read from the
     /// account, so its standing is checked here rather than trusted from the token), or a store
@@ -272,6 +273,16 @@ impl AuthEngine {
         let store = self
             .ws_ticket_store()
             .ok_or_else(|| crate::services::internal_error("ws-ticket store not configured"))?;
+
+        // An enrolled session that has not cleared its challenge mints nothing: the ticket opens
+        // a socket that is never re-checked, so it would outlive the challenge it skipped. The
+        // rule is the `MfaSatisfied` extractor's, applied here because the engine is the surface
+        // a host reaches without that extractor, and it is judged before any read, as the
+        // second factor is the first thing nest-auth's `issue` asks.
+        if claims.mfa_enabled && !claims.mfa_verified {
+            tracing::warn!("ws ticket: refused, the session has not satisfied its second factor");
+            return Err(AuthError::MfaRequired);
+        }
 
         // The snapshot is read from the ACCOUNT, not from the token.
         //
@@ -328,8 +339,9 @@ impl AuthEngine {
     /// # Errors
     ///
     /// Returns [`AuthError::Internal`] when no WS-ticket store is wired, [`AuthError::TokenInvalid`]
-    /// for a missing/expired/already-redeemed ticket and for one whose minting token has been
-    /// revoked (a logout or an epoch bump), or a store [`AuthError`].
+    /// for a missing/expired/already-redeemed ticket, for one whose minting token has been
+    /// revoked (a logout or an epoch bump) and for a snapshot that names no tenant, or a store
+    /// [`AuthError`].
     pub async fn redeem_ws_ticket(&self, ticket: &str) -> Result<DashboardClaims, AuthError> {
         let store = self
             .ws_ticket_store()
@@ -349,7 +361,11 @@ impl AuthEngine {
         // from for up to its own TTL, so redemption asks the same two questions the token's
         // verification does. A revoked ticket gets the answer of an unknown one, so a caller
         // cannot tell the two apart.
-        if self.ws_ticket_is_revoked(&snapshot).await? {
+        let Some(tenant) = snapshot.tenant_id.clone().filter(|t| !t.is_empty()) else {
+            tracing::warn!("ws ticket: refused, the snapshot names no tenant");
+            return Err(AuthError::TokenInvalid);
+        };
+        if self.ws_ticket_is_revoked(&snapshot, &tenant).await? {
             tracing::warn!("ws ticket: refused, the token it was minted from is revoked");
             return Err(AuthError::TokenInvalid);
         }
@@ -359,7 +375,7 @@ impl AuthEngine {
             aud: None,
             sub: snapshot.sub,
             jti: new_uuid_v4(),
-            tenant_id: snapshot.tenant_id.unwrap_or_default(),
+            tenant_id: tenant,
             role: snapshot.role,
             token_type: DashboardType::Dashboard,
             status: snapshot.status,
@@ -375,27 +391,24 @@ impl AuthEngine {
 
     /// Whether the token a redeemed ticket was minted from is revoked: no identifier to read it
     /// by, the `rv:{jti}` blacklist (logout), or an account epoch above the ticket's (a password
-    /// reset or sign-out-everywhere).
-    ///
-    /// The plane is the platform one when the snapshot carries no tenant, the dashboard one
-    /// otherwise; a dashboard ticket with an empty tenant names no keyspace and is revoked
-    /// without a read.
-    async fn ws_ticket_is_revoked(&self, snapshot: &WsTicketSnapshot) -> Result<bool, AuthError> {
+    /// reset or sign-out-everywhere). `tenant` is the dashboard tenant the snapshot names, which
+    /// scopes the epoch read.
+    async fn ws_ticket_is_revoked(
+        &self,
+        snapshot: &WsTicketSnapshot,
+        tenant: &str,
+    ) -> Result<bool, AuthError> {
         use crate::traits::SessionKind;
         if snapshot.jti.is_empty() {
             return Ok(true);
         }
-        let (kind, tenant) = match snapshot.tenant_id.as_deref() {
-            None => (SessionKind::Platform, None),
-            Some("") => return Ok(true),
-            Some(tenant) => (SessionKind::Dashboard, Some(tenant)),
-        };
         if self.session_store().is_blacklisted(&snapshot.jti).await? {
             return Ok(true);
         }
+        let subject = self.session_subject(SessionKind::Dashboard, Some(tenant), &snapshot.sub);
         let current = self
             .session_store()
-            .current_epoch(kind, &self.session_subject(kind, tenant, &snapshot.sub))
+            .current_epoch(SessionKind::Dashboard, &subject)
             .await?;
         Ok(current > snapshot.epoch)
     }
@@ -671,6 +684,7 @@ mod tests {
 
     mod verified_gate_tests;
     mod ws_ticket_revocation;
+    mod ws_ticket_second_factor;
 
     /// `current_session_hash` returns `None` for an absent/malformed token and a 64-hex hash
     /// for a well-shaped one.
