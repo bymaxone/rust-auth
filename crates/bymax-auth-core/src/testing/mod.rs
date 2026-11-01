@@ -562,6 +562,9 @@ pub struct InMemoryStores {
     brute_force: Mutex<HashMap<String, (i64, u64)>>,
     /// `(route, bucket hash)` to `(count, when the window opened)`, for the rate-limit counter.
     rate_limits: Mutex<HashMap<(String, String), (i64, std::time::Instant)>>,
+    /// `(tenant, user, "status" | "verified")` to `(value, when it expires)`, for the user-status
+    /// cache.
+    user_status: Mutex<user_status::Entries>,
     /// `(reads still to let through, reads to fail after them)` for `is_locked`, set through
     /// [`InMemoryStores::fail_lockout_reads`]. `(0, 0)` — the default — reads normally.
     forced_lockout_read_failures: Mutex<(usize, usize)>,
@@ -1543,6 +1546,7 @@ impl OAuthProvider for MockOAuthProvider {
 }
 
 mod rate_limit;
+mod user_status;
 
 #[cfg(test)]
 mod tests {

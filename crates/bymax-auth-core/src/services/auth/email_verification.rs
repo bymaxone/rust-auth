@@ -68,6 +68,9 @@ impl AuthEngine {
             .update_email_verified(&user.id, tenant_id, true)
             .await
             .map_err(map_repository_error)?;
+        // The cached flag still says unverified; drop it so the next request sees the change at
+        // once. Best-effort: the OTP is spent and the flag committed, so there is nothing to retry.
+        self.drop_cached_account_facts(&user.id, tenant_id).await;
 
         // Sanitized into a binding rather than inline in the field; see the note in `login`.
         let tenant = log_safe(tenant_id);

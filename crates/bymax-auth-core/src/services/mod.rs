@@ -22,6 +22,7 @@
 
 /// The thin public engine surface the HTTP adapter calls (token verification, role/status
 /// checks, WebSocket ticket mint/redeem). Each method delegates to an existing service.
+mod account_status;
 mod adapter_api;
 
 pub use adapter_api::WS_TICKET_TTL_SECONDS;

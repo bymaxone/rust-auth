@@ -18,7 +18,6 @@ use bymax_auth_types::{PlatformClaims, PlatformLoginResult, RotatedTokens, SafeA
 use bymax_auth_types::PlatformAuthResult;
 
 use crate::engine::AuthEngine;
-use crate::services::auth::map_repository_error;
 #[cfg(feature = "mfa")]
 use crate::services::mfa::{LoginResultMfa, MfaSetupResult};
 use crate::services::session::SessionInfo;
@@ -99,10 +98,12 @@ impl AuthEngine {
         self.hashed_identifier(tenant_id, email)
     }
 
-    /// Assert the dashboard user identified by `sub` is not in a blocked status, fetching the
-    /// current status from the user store and applying the same status gate the login path
-    /// uses (`banned → AccountBanned`, etc.). A subject that no longer exists is treated as an
-    /// invalid token (no enumeration oracle).
+    /// Assert the dashboard user identified by `sub` is not in a blocked status, applying the
+    /// same status gate the login path uses (`banned → AccountBanned`, etc.). The status comes
+    /// from the shared status cache when one is configured and holds it, and from the user store
+    /// otherwise; a change reaches this check within `user_status_cache_ttl`, or at once after
+    /// [`AuthEngine::invalidate_account_status`]. A subject that no longer exists is treated as
+    /// an invalid token (no enumeration oracle).
     ///
     /// `tenant_id` scopes the lookup and callers on the request path must supply it. A
     /// repository id is unique only *within* a tenant — [`crate::traits::UserRepository`] says
@@ -118,7 +119,7 @@ impl AuthEngine {
     /// `AccountSuspended`/`PendingApproval`) for a blocked account, [`AuthError::TokenInvalid`]
     /// for an unknown subject, or a store [`AuthError`] on a repository failure.
     pub async fn assert_user_active(&self, sub: &str, tenant_id: &str) -> Result<(), AuthError> {
-        self.gated_user(sub, tenant_id).await.map(|_| ())
+        self.assert_account_usable(sub, tenant_id, false).await
     }
 
     /// As [`Self::assert_user_active`], and additionally refuse an account whose address is
@@ -138,28 +139,7 @@ impl AuthEngine {
         sub: &str,
         tenant_id: &str,
     ) -> Result<(), AuthError> {
-        let user = self.gated_user(sub, tenant_id).await?;
-        if self.config().config().email_verification.required && !user.email_verified {
-            return Err(AuthError::EmailNotVerified);
-        }
-        Ok(())
-    }
-
-    /// Fetch the account behind `sub` within `tenant_id` and apply the status gate, returning
-    /// it so a caller can apply further gates without a second repository round-trip.
-    async fn gated_user(
-        &self,
-        sub: &str,
-        tenant_id: &str,
-    ) -> Result<bymax_auth_types::AuthUser, AuthError> {
-        let user = self
-            .user_repository()
-            .find_by_id(sub, Some(tenant_id))
-            .await
-            .map_err(map_repository_error)?
-            .ok_or(AuthError::TokenInvalid)?;
-        self.assert_user_not_blocked(&user.status)?;
-        Ok(user)
+        self.assert_account_usable(sub, tenant_id, true).await
     }
 
     /// List the caller's active sessions for the HTTP `GET /auth/sessions` route. The current

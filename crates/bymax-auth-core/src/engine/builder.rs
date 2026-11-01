@@ -22,7 +22,7 @@ use crate::traits::{
     AuthHooks, BruteForceStore, CommonPasswordChecker, EmailProvider, HttpClient, InvitationStore,
     NoOpAuthHooks, NoOpEmailProvider, OAuthProvider, OtpStore, PasswordBreachChecker,
     PasswordResetStore, PlatformUserRepository, RateLimitStore, SessionStore, UserRepository,
-    WsTicketStore,
+    UserStatusCacheStore, WsTicketStore,
 };
 
 /// Assembles an [`AuthEngine`] from a configuration plus the host's trait implementations.
@@ -40,6 +40,7 @@ pub struct AuthEngineBuilder {
     otp_store: Option<Arc<dyn OtpStore>>,
     brute_force_store: Option<Arc<dyn BruteForceStore>>,
     rate_limit_store: Option<Arc<dyn RateLimitStore>>,
+    user_status_cache: Option<Arc<dyn UserStatusCacheStore>>,
     ws_ticket_store: Option<Arc<dyn WsTicketStore>>,
     password_reset_store: Option<Arc<dyn PasswordResetStore>>,
     invitation_store: Option<Arc<dyn InvitationStore>>,
@@ -74,6 +75,7 @@ impl AuthEngineBuilder {
             otp_store: None,
             brute_force_store: None,
             rate_limit_store: None,
+            user_status_cache: None,
             ws_ticket_store: None,
             password_reset_store: None,
             invitation_store: None,
@@ -179,6 +181,14 @@ impl AuthEngineBuilder {
         self
     }
 
+    /// Register the shared cache the per-request account-status gate reads and writes. Without
+    /// one every status check reads the user repository.
+    #[must_use]
+    pub fn user_status_cache(mut self, store: Arc<dyn UserStatusCacheStore>) -> Self {
+        self.user_status_cache = Some(store);
+        self
+    }
+
     /// Set the single-use WebSocket-ticket store (optional).
     #[must_use]
     pub fn ws_ticket_store(mut self, store: Arc<dyn WsTicketStore>) -> Self {
@@ -224,6 +234,7 @@ impl AuthEngineBuilder {
             + OtpStore
             + BruteForceStore
             + RateLimitStore
+            + UserStatusCacheStore
             + WsTicketStore
             + PasswordResetStore
             + InvitationStore
@@ -233,6 +244,7 @@ impl AuthEngineBuilder {
         self.otp_store = Some(stores.clone());
         self.brute_force_store = Some(stores.clone());
         self.rate_limit_store = Some(stores.clone());
+        self.user_status_cache = Some(stores.clone());
         self.ws_ticket_store = Some(stores.clone());
         self.password_reset_store = Some(stores.clone());
         self.invitation_store = Some(stores);
@@ -250,6 +262,7 @@ impl AuthEngineBuilder {
             + OtpStore
             + BruteForceStore
             + RateLimitStore
+            + UserStatusCacheStore
             + WsTicketStore
             + PasswordResetStore
             + InvitationStore
@@ -260,6 +273,7 @@ impl AuthEngineBuilder {
         self.otp_store = Some(stores.clone());
         self.brute_force_store = Some(stores.clone());
         self.rate_limit_store = Some(stores.clone());
+        self.user_status_cache = Some(stores.clone());
         self.ws_ticket_store = Some(stores.clone());
         self.password_reset_store = Some(stores.clone());
         self.invitation_store = Some(stores.clone());
@@ -328,6 +342,7 @@ impl AuthEngineBuilder {
             otp_store,
             brute_force_store,
             rate_limit_store,
+            user_status_cache,
             ws_ticket_store,
             password_reset_store,
             invitation_store,
@@ -552,6 +567,7 @@ impl AuthEngineBuilder {
             otp_store,
             brute_force_store,
             rate_limit_store,
+            user_status_cache,
             ws_ticket_store,
             password_reset_store,
             invitation_store,

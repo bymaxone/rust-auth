@@ -14,6 +14,7 @@ pub mod oauth;
 pub mod rate_limit;
 pub mod repository;
 pub mod store;
+pub mod user_status_cache;
 
 #[cfg(feature = "breach")]
 #[doc(inline)]
@@ -54,3 +55,5 @@ pub use store::{
     ResetContext, RotateOutcome, SessionDetail, SessionKind, SessionRecord, SessionRotation,
     SessionStore, StoredInvitation, TOKEN_EPOCH_RETENTION_SECS, WsTicketSnapshot, WsTicketStore,
 };
+#[doc(inline)]
+pub use user_status_cache::UserStatusCacheStore;

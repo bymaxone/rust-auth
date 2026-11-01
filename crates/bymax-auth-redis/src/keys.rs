@@ -200,6 +200,57 @@ impl NamespacedRedis {
     }
 }
 
+/// Percent-encode `value` exactly as JavaScript's `encodeURIComponent` does: every UTF-8 byte
+/// outside `A-Z a-z 0-9 - _ . ! ~ * ' ( )` becomes `%XX` with uppercase hex.
+///
+/// nest-auth builds the user-status cache keys with that function, and both libraries read the
+/// keyspace from one Redis, so this must not drift to a different escape set (the `percent-encoding`
+/// crate's sets are not the same) or a different case.
+fn encode_uri_component(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for byte in value.bytes() {
+        if byte.is_ascii_alphanumeric() || b"-_.!~*'()".contains(&byte) {
+            out.push(char::from(byte));
+        } else {
+            out.push_str(&format!("%{byte:02X}"));
+        }
+    }
+    out
+}
+
+impl NamespacedRedis {
+    /// The cached account status and cached verified-address flag keys for one account,
+    /// `({namespace}:us:{scope}, {namespace}:uev:{scope})` with
+    /// `scope = {encodeURIComponent(tenant_id)}:{encodeURIComponent(user_id)}`.
+    ///
+    /// Matches nest-auth 1.4.8's `cacheKeysFor` (services/account-status.service.ts) byte for
+    /// byte, because both libraries read this keyspace from one Redis. Each half is encoded
+    /// before the join, so an id holding `:` cannot move the boundary and make two different
+    /// `(tenant, user)` pairs share a key.
+    ///
+    /// Outside [`Prefix`] until the shared contract lists these two prefixes (DEC-075).
+    ///
+    /// The ids sit in the clear here, which the contract's rule for account-naming keys
+    /// (`wire-contract.json`, `userSubjectDerivedKeys`: derive from the tenant-scoped subject by
+    /// HMAC) does not allow. The encoding is injective, so two accounts never share a key, but
+    /// the clear form is nest-auth's current format and this library reads the same Redis. Both
+    /// libraries move these keys onto the HMAC of the subject together (TASK-109), before this
+    /// one's first release; the entries are caches with a TTL, so the move costs one miss per
+    /// account.
+    #[must_use]
+    pub fn user_status_keys(&self, tenant_id: &str, user_id: &str) -> (String, String) {
+        let scope = format!(
+            "{}:{}",
+            encode_uri_component(tenant_id),
+            encode_uri_component(user_id)
+        );
+        (
+            format!("{}:us:{}", self.namespace, scope),
+            format!("{}:uev:{}", self.namespace, scope),
+        )
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -374,6 +425,39 @@ mod tests {
         assert_eq!(
             NamespacedRedis::new("tenant".to_owned()).key(Prefix::Rt, "h"),
             "tenant:rt:h"
+        );
+    }
+
+    #[test]
+    fn the_user_status_keys_match_nest_auth_encode_uri_component_scope() {
+        // nest-auth 1.4.8 `cacheKeysFor`: `us:${enc(tenant)}:${enc(user)}` and `uev:` the same,
+        // with `encodeURIComponent` on each half. The expected strings below are what that
+        // function returns for these inputs.
+        let keys = NamespacedRedis::new("auth");
+        assert_eq!(
+            keys.user_status_keys("t1", "u1"),
+            ("auth:us:t1:u1".to_owned(), "auth:uev:t1:u1".to_owned())
+        );
+        // A `:` inside an id is escaped, so it cannot move the boundary.
+        assert_eq!(keys.user_status_keys("a:b", "c").0, "auth:us:a%3Ab:c");
+        assert_eq!(keys.user_status_keys("a", "b:c").0, "auth:us:a:b%3Ac");
+        assert_ne!(
+            keys.user_status_keys("a:b", "c"),
+            keys.user_status_keys("a", "b:c")
+        );
+        // The characters encodeURIComponent leaves alone, and the ones it escapes (uppercase hex,
+        // UTF-8 bytes for a non-ASCII character).
+        assert_eq!(
+            keys.user_status_keys("A-z_0.!~*'()", "x").0,
+            "auth:us:A-z_0.!~*'():x"
+        );
+        assert_eq!(
+            keys.user_status_keys("a b/é", "x").0,
+            "auth:us:a%20b%2F%C3%A9:x"
+        );
+        assert_eq!(
+            keys.user_status_keys("t", "u#?&=+@$,;").0,
+            "auth:us:t:u%23%3F%26%3D%2B%40%24%2C%3B"
         );
     }
 }

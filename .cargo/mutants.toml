@@ -71,7 +71,7 @@ cap_lints = true
 #    `--all-features`, so the mutated line is never compiled into the suite it is measured
 #    against. It is covered by the `not(feature = "scrypt")` test in the same module, which a
 #    default-feature run exercises.
-# 5. `builder.rs:232` `redis_stores` — the `cfg(not(feature = "mfa"))` twin of the method at
+# 5. `builder.rs:243` `redis_stores` — the `cfg(not(feature = "mfa"))` twin of the method at
 #    line 259, and only one of the two is compiled. Same reason as 4, but the two twins share
 #    a mutant name, so this entry is anchored to the line: excluding by name alone would also
 #    drop the compiled twin's mutant, which the suite does kill. Tell the twins apart by the
@@ -154,7 +154,7 @@ exclude_re = [
     'replace AuthEngine::builder -> AuthEngineBuilder with Default::default\(\)',
     'delete match arm "inactive" in assert_not_blocked',
     'replace == with != in validate_password',
-    'builder\.rs:232:9: replace AuthEngineBuilder::redis_stores',
+    'builder\.rs:243:9: replace AuthEngineBuilder::redis_stores',
     'token_manager\.rs:1147:9: replace TokenManagerService::issue_mfa_temp_token',
     'replace <impl EmailProvider for NoOpEmailProvider>::\w+ -> Result<\(\), EmailError> with Ok\(\(\)\)',
     'replace AuthHooks::\w+ -> Result<\(\), HookError> with Ok\(\(\)\)',

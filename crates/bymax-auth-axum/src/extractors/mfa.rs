@@ -146,6 +146,8 @@ mod tests {
 
         // Banned + MFA pending: the status wins.
         let _ = s.users.update_status(&id, "t1", "BANNED").await;
+        // The host's step after changing an account: drop the cached status.
+        let _ = s.state.engine().invalidate_account_status(&id, "t1").await;
         let mut parts = parts_with_cookie(&token);
         let banned = MfaSatisfied::from_request_parts(&mut parts, &s.state).await;
         assert!(
@@ -177,6 +179,8 @@ mod tests {
         let token = mint_token(&mfa_pending_claims(&id));
 
         let _ = s.users.update_email_verified(&id, "t1", false).await;
+        // The host's step after changing an account: drop the cached status.
+        let _ = s.state.engine().invalidate_account_status(&id, "t1").await;
         let mut parts = parts_with_cookie(&token);
         let unverified = MfaSatisfied::from_request_parts(&mut parts, &s.state).await;
         assert!(
@@ -185,6 +189,8 @@ mod tests {
         );
 
         let _ = s.users.update_email_verified(&id, "t1", true).await;
+        // The host's step after changing an account: drop the cached status.
+        let _ = s.state.engine().invalidate_account_status(&id, "t1").await;
         let mut parts = parts_with_cookie(&token);
         let verified = MfaSatisfied::from_request_parts(&mut parts, &s.state).await;
         assert!(matches!(

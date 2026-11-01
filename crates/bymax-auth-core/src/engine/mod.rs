@@ -23,7 +23,7 @@ use crate::services::token_manager::TokenManagerService;
 use crate::traits::{
     AuthHooks, BruteForceStore, EmailProvider, HttpClient, InvitationStore, OAuthProvider,
     OtpStore, PasswordResetStore, PlatformUserRepository, RateLimitStore, SessionStore,
-    UserRepository, WsTicketStore,
+    UserRepository, UserStatusCacheStore, WsTicketStore,
 };
 
 /// The single composition root. It owns the resolved configuration and the trait objects
@@ -42,6 +42,7 @@ pub struct AuthEngine {
     otp_store: Arc<dyn OtpStore>,
     brute_force_store: Arc<dyn BruteForceStore>,
     rate_limit_store: Option<Arc<dyn RateLimitStore>>,
+    user_status_cache: Option<Arc<dyn UserStatusCacheStore>>,
     ws_ticket_store: Option<Arc<dyn WsTicketStore>>,
     password_reset_store: Option<Arc<dyn PasswordResetStore>>,
     invitation_store: Option<Arc<dyn InvitationStore>>,
@@ -205,6 +206,12 @@ impl AuthEngine {
     #[must_use]
     pub fn rate_limit_store(&self) -> Option<&Arc<dyn RateLimitStore>> {
         self.rate_limit_store.as_ref()
+    }
+
+    /// The shared account-status cache, if one was supplied.
+    #[must_use]
+    pub fn user_status_cache(&self) -> Option<&Arc<dyn UserStatusCacheStore>> {
+        self.user_status_cache.as_ref()
     }
 
     /// The single-use WebSocket-ticket store, if one was supplied.

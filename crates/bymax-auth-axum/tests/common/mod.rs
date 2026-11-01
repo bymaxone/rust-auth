@@ -6,6 +6,8 @@
 //! Every helper here is exercised by the single integration test file that includes this
 //! module, so the crate's no-suppression lint posture holds without a `dead_code` allow.
 
+mod user_status_cache;
+
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
@@ -1225,6 +1227,12 @@ pub async fn enable_mfa_flag(harness: &Harness, user_id: &str) {
 /// Set a user's status (e.g. to a blocked value) for the status-gate tests.
 pub async fn set_status(harness: &Harness, user_id: &str, status: &str) {
     let _ = harness.users.update_status(user_id, "t1", status).await;
+    // What a host does where it changes an account: drop the cached status, or the change
+    // reaches requests only after `user_status_cache_ttl`.
+    let _ = harness
+        .engine
+        .invalidate_account_status(user_id, "t1")
+        .await;
 }
 
 // ---- request / response helpers --------------------------------------------------------

@@ -143,7 +143,10 @@ impl AuthEngine {
     /// status is judged **before** the second factor, so a blocked or deleted account is told
     /// that rather than asked for a challenge it could not use.
     ///
-    /// The status is read from the repository on every call, on both planes.
+    /// The dashboard status comes from the shared status cache when one holds it, so a change
+    /// reaches it within `user_status_cache_ttl` or at once after
+    /// [`AuthEngine::invalidate_account_status`]; the platform plane reads its repository on every
+    /// call.
     ///
     /// # Errors
     ///
