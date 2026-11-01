@@ -194,3 +194,48 @@ fn a_malformed_stored_digest_never_matches_anything_itself_included() {
         assert!(!digests_match(bad, bad), "{bad:?} against itself");
     }
 }
+
+#[test]
+fn a_digest_decodes_to_the_bytes_its_hex_names() {
+    // Every hex digit in both nibble positions: the decode is checked against known bytes, not
+    // only against another decode of the same function.
+    let (bytes, ok) = decode_digest(&"00112233445566778899aabbccddeeff".repeat(2));
+    assert!(ok);
+    let expected: Vec<u8> = (0..2u8)
+        .flat_map(|_| (0..16u8).map(|i| i * 16 + i))
+        .collect();
+    assert_eq!(bytes.to_vec(), expected);
+}
+
+#[test]
+fn digests_that_differ_in_one_nibble_do_not_match() {
+    let base = "0".repeat(DIGEST_HEX_LEN);
+    for position in [0, 1, DIGEST_HEX_LEN - 2, DIGEST_HEX_LEN - 1] {
+        for digit in ['1', '9', 'a', 'f'] {
+            let mut other = base.clone();
+            other.replace_range(position..=position, &digit.to_string());
+            assert!(!digests_match(&base, &other), "{position} {digit}");
+        }
+    }
+    // Two different digits must not decode to the same nibble.
+    assert!(!digests_match(
+        &"1".repeat(DIGEST_HEX_LEN),
+        &"2".repeat(DIGEST_HEX_LEN)
+    ));
+    assert!(!digests_match(
+        &"a".repeat(DIGEST_HEX_LEN),
+        &"b".repeat(DIGEST_HEX_LEN)
+    ));
+}
+
+#[test]
+fn base64url_encodes_every_partial_group_length_as_the_alphabet_dictates() {
+    // Lengths 0..=4 cover the empty input, a 1-byte and a 2-byte remainder, one whole group and
+    // a whole group plus a remainder; the expected strings are RFC 4648 §5 examples.
+    assert_eq!(encode_base64url(b"f"), "Zg");
+    assert_eq!(encode_base64url(b"fo"), "Zm8");
+    assert_eq!(encode_base64url(b"foo"), "Zm9v");
+    assert_eq!(encode_base64url(b"foob"), "Zm9vYg");
+    assert_eq!(encode_base64url(b"fooba"), "Zm9vYmE");
+    assert_eq!(encode_base64url(b"foobar"), "Zm9vYmFy");
+}

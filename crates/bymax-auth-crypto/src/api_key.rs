@@ -131,7 +131,7 @@ fn decode_digest(hex: &str) -> ([u8; DIGEST_LEN], bool) {
     let mut out = [0u8; DIGEST_LEN];
     if well_formed {
         for (slot, pair) in out.iter_mut().zip(bytes.chunks_exact(2)) {
-            *slot = (nibble(pair[0]) << 4) | nibble(pair[1]);
+            *slot = nibble(pair[0]) * 16 + nibble(pair[1]);
         }
     }
     (out, well_formed)
@@ -154,15 +154,12 @@ fn encode_base64url(bytes: &[u8]) -> String {
         let b0 = chunk[0];
         let b1 = chunk.get(1).copied().unwrap_or(0);
         let b2 = chunk.get(2).copied().unwrap_or(0);
-        let group = [
-            b0 >> 2,
-            ((b0 & 0b11) << 4) | (b1 >> 4),
-            ((b1 & 0b1111) << 2) | (b2 >> 6),
-            b2 & 0b11_1111,
-        ];
+        // Three bytes make one 24-bit group, read as four 6-bit indices.
+        let n = usize::from(b0) * 65_536 + usize::from(b1) * 256 + usize::from(b2);
+        let group = [n / 262_144 % 64, n / 4_096 % 64, n / 64 % 64, n % 64];
         // 1 byte yields 2 characters, 2 bytes yield 3, 3 bytes yield 4.
         for &index in &group[..chunk.len() + 1] {
-            out.push(char::from(BASE64URL[usize::from(index)]));
+            out.push(char::from(BASE64URL[index]));
         }
     }
     out
