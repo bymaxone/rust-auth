@@ -228,22 +228,30 @@ impl<'a> TokenDelivery<'a> {
     pub(crate) fn clear_session(&self, cookies: &Cookies) -> Vec<HeaderValue> {
         let c = self.cookies();
         // The clear has to mirror the plant on every attribute the browser matches a deletion
-        // by — name, domain and path. Clearing a `Domain=`-scoped cookie host-only leaves the
-        // real one in place, and the user who signed out stays signed in.
+        // by — name, domain and path — and on `Secure`, so an expiry is never weaker than the
+        // cookie it removes. Clearing a `Domain=`-scoped cookie host-only leaves the real one
+        // in place, and the user who signed out stays signed in.
         self.write_scopes(cookies, true, &|domain| {
             vec![
                 with_domain(
-                    Cookie::build((c.access_name.clone(), "")).path("/").build(),
+                    Cookie::build((c.access_name.clone(), ""))
+                        .path("/")
+                        .secure(c.secure)
+                        .build(),
                     domain,
                 ),
                 with_domain(
                     Cookie::build((c.refresh_name.clone(), ""))
                         .path(c.refresh_path.clone())
+                        .secure(c.secure)
                         .build(),
                     domain,
                 ),
                 with_domain(
-                    Cookie::build((c.signal_name.clone(), "")).path("/").build(),
+                    Cookie::build((c.signal_name.clone(), ""))
+                        .path("/")
+                        .secure(c.secure)
+                        .build(),
                     domain,
                 ),
             ]

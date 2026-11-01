@@ -75,6 +75,13 @@ fn cfg(same_site: ConfigSS) -> ResolvedConfig {
     resolved_config_with(DeliveryMode::Cookie, same_site)
 }
 
+/// A config whose cookies are not `Secure`, as a plain-http development deployment has them.
+fn plain_http() -> ResolvedConfig {
+    let mut config = cfg(ConfigSS::Lax);
+    config.cookies.secure = false;
+    config
+}
+
 fn domains(list: &[&str]) -> Vec<String> {
     list.iter().map(|d| (*d).to_owned()).collect()
 }
@@ -115,6 +122,10 @@ async fn a_logout_clears_the_session_on_every_domain_the_resolver_names() {
         let lines = named(&headers, name);
         assert_eq!(lines.len(), 2, "{name} cleared per domain: {headers:?}");
         assert!(lines.iter().all(|l| l.contains("Max-Age=0")));
+        assert!(
+            lines.iter().all(|l| l.contains("Secure")),
+            "{name} expiry mirrors the plant's Secure attribute: {lines:?}"
+        );
     }
 }
 
@@ -158,5 +169,22 @@ async fn the_mfa_temp_cookie_takes_the_configured_same_site() {
             temp.iter().all(|l| l.contains(expected)),
             "{expected}: {temp:?}"
         );
+    }
+}
+
+#[tokio::test]
+async fn the_expiries_are_not_secure_when_the_planted_cookies_are_not() {
+    let planted = set_cookies(plain_http(), domains(&["example.com"]), Act::Plant).await;
+    let cleared = set_cookies(plain_http(), domains(&["example.com"]), Act::Clear).await;
+    for name in ["access_token", "refresh_token", "has_session"] {
+        for line in named(&planted, name)
+            .into_iter()
+            .chain(named(&cleared, name))
+        {
+            assert!(
+                !line.contains("Secure"),
+                "{name} on a plain-http config: {line}"
+            );
+        }
     }
 }
