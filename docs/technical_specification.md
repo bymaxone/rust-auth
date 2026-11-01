@@ -2906,6 +2906,19 @@ pub struct RequirePlatformRole<R: PlatformRole>(pub PlatformClaims, PhantomData<
   *during* MFA enrolment (`mfa/setup`, `mfa/verify-enable`) deliberately omit
   this extractor — that omission **is** the `@SkipMfa()` semantic.
 
+- **`AuthEngine::verify_access`** — the transport-neutral verifier for a consumer that
+  authenticates outside the extractors (a WebSocket upgrade, an SSE stream, a background
+  consumer). One call runs signature (key rotation, `iss`/`aud`) and expiry, the token type of
+  the plane the caller **names** (`AuthPlane`, never inferred), both revocation channels, claim
+  shape (`jti` a UUID v4, `sub` and tenant 1..256), the tenant binding (dashboard, when
+  `VerifyAccessOptions::request` is given), the account's current status and, last, the
+  second-factor policy. Status is judged before MFA. Every token refusal is `token_invalid`; a
+  dashboard token on the platform plane is `platform_auth_required`. `require_mfa` and
+  `check_status` default to on and are waived only by a caller that has established the same
+  fact elsewhere. The platform arm re-reads the administrator through
+  `AuthEngine::assert_platform_active`, which refuses (never skips) when no platform
+  repository is registered.
+
 - **`SelfOrAdmin`** — the `SelfOrAdminGuard`. A path-parameter-aware extractor:
   resolves `AuthUser` and the `{user_id}` path segment, and admits the request
   when `path.user_id == claims.sub` **or** the user's role satisfies the
