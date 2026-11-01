@@ -105,4 +105,32 @@ mod tests {
             Ok(None)
         ));
     }
+
+    #[tokio::test]
+    async fn the_counter_given_to_the_builder_is_the_one_the_engine_counts_in() {
+        // The session, OTP and brute-force seams come from one store and the counter from
+        // another, so the engine holding a counter at all is the setter's doing: nothing else
+        // supplied one.
+        let seams = Arc::new(InMemoryStores::new());
+        let counter = Arc::new(InMemoryStores::new());
+        let built = AuthEngine::builder()
+            .config(base_config())
+            .environment(Environment::Test)
+            .user_repository(Arc::new(InMemoryUserRepository::new()))
+            .session_store(seams.clone())
+            .otp_store(seams.clone())
+            .brute_force_store(seams)
+            .rate_limit_store(counter)
+            .build();
+        assert!(built.is_ok());
+        let Ok(engine) = built else { return };
+
+        assert!(engine.rate_limit_store().is_some());
+        assert!(matches!(
+            engine
+                .count_rate_limited_request("login", "203.0.113.7", 60)
+                .await,
+            Ok(Some(1))
+        ));
+    }
 }

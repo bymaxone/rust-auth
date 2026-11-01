@@ -200,3 +200,30 @@ async fn the_in_process_fallback_keys_on_the_forwarded_address_when_it_is_truste
     let other = from("198.51.100.8", LOGIN_LIMIT + 1).send(&app).await;
     assert_eq!(other.status, StatusCode::UNAUTHORIZED);
 }
+
+#[tokio::test]
+async fn the_shared_counter_charges_each_forwarded_address_its_own_budget() {
+    let stores = Arc::new(InMemoryStores::new());
+    let counter: Arc<dyn RateLimitStore> = stores.clone();
+    let Some(app) = engine_with_source(&stores, Some(counter), ClientIpSource::TrustedForwardedFor)
+    else {
+        return;
+    };
+    let from = |address: &'static str, attempt: usize| {
+        Req::post("/auth/login")
+            .header(HeaderName::from_static("x-forwarded-for"), address)
+            .json(serde_json::json!({
+                "email": format!("nobody{attempt}@e.com"), "password": "wrong", "tenantId": TENANT
+            }))
+    };
+    for attempt in 0..LOGIN_LIMIT {
+        let answer = from("198.51.100.7", attempt).send(&app).await;
+        assert_eq!(answer.status, StatusCode::UNAUTHORIZED);
+    }
+    let limited = from("198.51.100.7", LOGIN_LIMIT).send(&app).await;
+    assert_eq!(limited.status, StatusCode::TOO_MANY_REQUESTS);
+    // Another forwarded address is another budget, though the peer socket is the same; if every
+    // address collapsed into one bucket this request would be refused too.
+    let other = from("198.51.100.8", LOGIN_LIMIT + 1).send(&app).await;
+    assert_eq!(other.status, StatusCode::UNAUTHORIZED);
+}
