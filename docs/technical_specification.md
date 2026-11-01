@@ -5002,7 +5002,7 @@ The statuses below are **wire** statuses — what a caller actually receives. An
 | --- | --- | --- | --- |
 | `auth.api_key_invalid` | 401 | The presented key is absent, malformed, unknown, wrong, revoked or expired. One answer for all of them, so the response is no oracle for which one it was. | Invalid API key |
 | `auth.api_key_scope_insufficient` | 403 | The key is valid but does not hold every scope the route declares. | API key lacks the required scope |
-| `auth.api_key_not_found` | 404 | An operator-facing call named a key that does not exist or is no longer active. | API key not found |
+| `auth.api_key_not_found` | 404 | The named API key does not exist. | API key not found |
 
 #### Validation (adapter-originated)
 

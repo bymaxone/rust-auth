@@ -184,7 +184,7 @@ pub enum AuthErrorCode {
     /// The API key is valid but does not hold every scope the route declares.
     #[serde(rename = "auth.api_key_scope_insufficient")]
     ApiKeyScopeInsufficient,
-    /// An operator-facing call named an API key that does not exist or is no longer active.
+    /// An operator-facing call named an API key that does not exist.
     #[serde(rename = "auth.api_key_not_found")]
     ApiKeyNotFound,
 
@@ -543,7 +543,7 @@ pub enum AuthError {
     /// The API key does not hold every scope the route declares.
     #[error("api key scope insufficient")]
     ApiKeyScopeInsufficient,
-    /// No active API key with the given id.
+    /// No API key with the given id.
     #[error("api key not found")]
     ApiKeyNotFound,
 
