@@ -196,7 +196,13 @@ export function createSilentRefreshHandler(
 ): (request: NextRequest) => Promise<NextResponse> {
   const resolved = resolveHandlerConfig(config);
   return async (request) => {
-    if (isCrossSiteRequest(request)) return crossSiteRefused();
+    // Refused with a redirect, not a bare 403: a person following a link into the app from another
+    // site after the access token expired reaches this branch too, because the browser marks every
+    // hop of that navigation cross-site. Nothing a caller could extract is written: no refresh, no
+    // backend call and no `Set-Cookie`.
+    if (isCrossSiteRequest(request)) {
+      return buildLoginRedirect(resolved.loginPath, request.nextUrl.origin);
+    }
 
     const origin = request.nextUrl.origin;
     const destination = resolveSafeDestination(
@@ -211,9 +217,7 @@ export function createSilentRefreshHandler(
       request,
     );
     if (!backendResponse || !backendResponse.ok) {
-      const failure = NextResponse.redirect(
-        buildLoginUrl(resolved.loginPath, origin),
-      );
+      const failure = buildLoginRedirect(resolved.loginPath, origin);
       clearSessionCookies(failure, resolved.cookieDomain);
       return failure;
     }
@@ -294,6 +298,17 @@ export function createLogoutHandler(
     clearSessionCookies(response, resolved.cookieDomain);
     return response;
   };
+}
+
+/**
+ * The redirect to the sign-in page, with no cookie touched. A refused cross-site caller gets it
+ * as it is, because writing cookies is exactly what must not happen there; a failed refresh adds
+ * the session clears on top.
+ */
+function buildLoginRedirect(loginPath: string, origin: string): NextResponse {
+  const response = NextResponse.redirect(buildLoginUrl(loginPath, origin));
+  response.headers.set("cache-control", NO_STORE_CACHE_CONTROL);
+  return response;
 }
 
 /** Build a sign-in URL carrying the `expired` reason. */
