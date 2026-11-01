@@ -246,3 +246,50 @@ async fn a_revoked_dashboard_token_on_the_platform_plane_is_still_the_wrong_plan
         "{refused:?}"
     );
 }
+
+#[tokio::test]
+async fn a_revoked_administrator_token_is_token_invalid_not_the_wrong_plane() {
+    let admins = Arc::new(InMemoryPlatformUserRepository::new());
+    admins.insert(admin("a1", "ACTIVE"));
+    let stores = Arc::new(InMemoryStores::new());
+    let Some(engine) = AuthEngine::builder()
+        .config(platform_config())
+        .environment(Environment::Test)
+        .user_repository(Arc::new(InMemoryUserRepository::new()))
+        .platform_user_repository(admins)
+        .redis_stores(stores.clone())
+        .build()
+        .ok()
+    else {
+        return;
+    };
+    let claims = claims_for("a1");
+    let token = engine
+        .tokens()
+        .issue_platform_access(&claims)
+        .unwrap_or_default();
+    assert!(stores.blacklist_access(&claims.jti, 600).await.is_ok());
+    let refused = engine.verify_access(&token, &platform()).await;
+    assert!(
+        matches!(refused, Err(AuthError::TokenInvalid)),
+        "{refused:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_malformed_dashboard_token_on_the_platform_plane_is_judged_by_shape_first() {
+    // nest-auth checks the claim shape before the token type, so a signed token with a malformed
+    // jti is `token_invalid` whichever plane it was presented on.
+    let admins = Arc::new(InMemoryPlatformUserRepository::new());
+    let Some(engine) = engine(&admins) else { return };
+    let malformed = bymax_auth_types::DashboardClaims {
+        jti: "abc".to_owned(),
+        ..super::dashboard_tests::claims_for("u1")
+    };
+    let token = engine.tokens().issue_access(&malformed).unwrap_or_default();
+    let refused = engine.verify_access(&token, &platform()).await;
+    assert!(
+        matches!(refused, Err(AuthError::TokenInvalid)),
+        "{refused:?}"
+    );
+}

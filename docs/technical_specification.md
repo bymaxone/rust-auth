@@ -2908,9 +2908,9 @@ pub struct RequirePlatformRole<R: PlatformRole>(pub PlatformClaims, PhantomData<
 
 - **`AuthEngine::verify_access`** — the transport-neutral verifier for a consumer that
   authenticates outside the extractors (a WebSocket upgrade, an SSE stream, a background
-  consumer). One call runs signature (key rotation, `iss`/`aud`) and expiry, claim shape
-  (`jti` a UUID v4, `sub` and tenant 1..256), the token type of the plane the caller **names**
-  (`AuthPlane`, never inferred), both revocation channels, the tenant binding (dashboard, when
+  consumer). One call runs signature (key rotation, `iss`/`aud`) and expiry, the token type of
+  the plane the caller **names** (`AuthPlane`, never inferred), both revocation channels, claim
+  shape (`jti` a UUID v4, `sub` and tenant 1..256), the tenant binding (dashboard, when
   `VerifyAccessOptions::request` is given), the account's current status and, last, the
   second-factor policy. Status is judged before MFA. Every token refusal is `token_invalid`; a
   dashboard token on the platform plane is `platform_auth_required`. `require_mfa` and

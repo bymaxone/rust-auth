@@ -119,6 +119,11 @@ fn is_bounded_id(value: &str) -> bool {
     !value.is_empty() && value.chars().count() <= MAX_SUBJECT_LEN
 }
 
+/// Whether a verified dashboard token's identifying claims are well formed.
+fn dashboard_shape_ok(claims: &DashboardClaims) -> bool {
+    is_uuid_v4(&claims.jti) && is_bounded_id(&claims.sub) && is_bounded_id(&claims.tenant_id)
+}
+
 /// Collapse every way a token can be refused onto the one opaque answer, keeping the account
 /// and store outcomes the caller must be able to tell apart.
 fn collapse(error: AuthError) -> AuthError {
@@ -132,14 +137,13 @@ impl AuthEngine {
     /// Verify an access token end to end and return its claims tagged with the plane.
     ///
     /// The chain, in order: signature (with key rotation and the `iss`/`aud` binding) and
-    /// expiry; claim shape (`jti` is a UUID v4, `sub` and the tenant are bounded); the token
-    /// type of the named plane; both revocation channels; the tenant binding (dashboard, when a
+    /// expiry; the token type of the named plane; both revocation channels; claim shape (`jti`
+    /// is a UUID v4, `sub` and the tenant are bounded); the tenant binding (dashboard, when a
     /// request is supplied); the account's current status; then the second-factor policy. The
     /// status is judged **before** the second factor, so a blocked or deleted account is told
     /// that rather than asked for a challenge it could not use.
     ///
-    /// The status read is as fresh as `user_status_cache_ttl` allows on the dashboard plane
-    /// and uncached on the platform plane.
+    /// The status is read from the repository on every call, on both planes.
     ///
     /// # Errors
     ///
@@ -174,10 +178,7 @@ impl AuthEngine {
         options: &VerifyAccessOptions<'_>,
     ) -> Result<DashboardClaims, AuthError> {
         let claims = self.verify_access_token(token).await.map_err(collapse)?;
-        if !is_uuid_v4(&claims.jti)
-            || !is_bounded_id(&claims.sub)
-            || !is_bounded_id(&claims.tenant_id)
-        {
+        if !dashboard_shape_ok(&claims) {
             return Err(AuthError::TokenInvalid);
         }
         self.bind_to_request(&claims.tenant_id, options.request)
@@ -224,8 +225,10 @@ impl AuthEngine {
             return collapse(error);
         }
         match self.verify_access_token(token).await {
-            Ok(_) | Err(AuthError::TokenRevoked) => AuthError::PlatformAuthRequired,
-            Err(_) => AuthError::TokenInvalid,
+            // A malformed token is malformed on either plane, so shape is judged before the type.
+            Ok(claims) if dashboard_shape_ok(&claims) => AuthError::PlatformAuthRequired,
+            Err(AuthError::TokenRevoked) => AuthError::PlatformAuthRequired,
+            _ => AuthError::TokenInvalid,
         }
     }
 
