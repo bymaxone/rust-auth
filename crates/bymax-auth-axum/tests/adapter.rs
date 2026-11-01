@@ -36,6 +36,9 @@ mod refresh_channel;
 #[path = "adapter/client_ip.rs"]
 mod client_ip;
 
+#[path = "adapter/mfa_plane.rs"]
+mod mfa_plane;
+
 #[path = "adapter/mfa_setup_body.rs"]
 mod mfa_setup_body;
 
@@ -3012,63 +3015,6 @@ async fn platform_mfa_handler_error_arms_with_a_ghost_admin() {
         .await;
     assert_eq!(recov.status, StatusCode::BAD_REQUEST);
     assert_eq!(recov.json()["error"]["code"], "auth.mfa_not_enabled");
-}
-
-#[tokio::test]
-async fn mfa_and_platform_challenge_context_mismatch_arms() {
-    // A platform temp token submitted to the dashboard challenge (and vice versa) hits the
-    // context-mismatch `None` arm of each challenge handler.
-    let Some(h) = build(EngineSpec {
-        platform: true,
-        mfa: true,
-        ..EngineSpec::default()
-    }) else {
-        return;
-    };
-    let app = router(&h);
-
-    // Enrol a platform admin and obtain a platform MFA temp token via login.
-    let admin = seed_admin(&h, "ctx@e.com", "SUPER_ADMIN").await;
-    let login0 = platform_login(&app, "ctx@e.com").await;
-    let access = platform_access(&login0);
-    let setup = Req::post("/auth/platform/mfa/setup")
-        .bearer(&access)
-        .json(serde_json::json!({ "password": "adminpass123" }))
-        .send(&app)
-        .await;
-    let secret = setup.json()["secret"].as_str().unwrap_or("").to_owned();
-    let recovery = setup.json()["recoveryCodes"][0]
-        .as_str()
-        .unwrap_or("")
-        .to_owned();
-    let _ = Req::post("/auth/platform/mfa/verify-enable")
-        .bearer(&access)
-        .json(serde_json::json!({ "code": current_totp(&secret) }))
-        .send(&app)
-        .await;
-    let _ = admin;
-    let plogin = platform_login(&app, "ctx@e.com").await;
-    let platform_temp = plogin.json()["mfaTempToken"]
-        .as_str()
-        .unwrap_or("")
-        .to_owned();
-
-    // Submit the PLATFORM temp token + a VALID recovery code to the DASHBOARD challenge: the
-    // MFA service succeeds and yields a `Platform` result, so the dashboard handler's
-    // context-mismatch `None` arm fires (`mfa_temp_token_invalid`).
-    if !platform_temp.is_empty() {
-        let mismatch = Req::post("/auth/mfa/challenge")
-            .json(serde_json::json!({ "mfaTempToken": platform_temp, "code": recovery }))
-            .send(&app)
-            .await;
-        assert_eq!(mismatch.status, StatusCode::UNAUTHORIZED);
-        assert_eq!(
-            mismatch.json()["error"]["code"],
-            "auth.mfa_temp_token_invalid"
-        );
-    }
-
-    let _ = recovery;
 }
 
 // ----------------------------------------------------------------------------------------

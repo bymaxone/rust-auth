@@ -101,7 +101,7 @@ fn rig() -> Option<(Harness, Arc<Spy>)> {
 }
 
 /// Seed the administrator `p1`.
-fn seed_admin(h: &Harness) {
+pub(super) fn seed_admin(h: &Harness) {
     h.platform.insert(AuthPlatformUser {
         id: "p1".to_owned(),
         email: "admin@example.com".to_owned(),
@@ -120,7 +120,7 @@ fn seed_admin(h: &Harness) {
 }
 
 /// Enrol the seeded administrator in MFA and return the TOTP secret.
-async fn enrol_admin(h: &Harness) -> Option<String> {
+pub(super) async fn enrol_admin(h: &Harness) -> Option<String> {
     let mfa = h.engine.mfa()?;
     let setup = mfa
         .setup("p1", MfaContext::Platform, None, Some(PASSWORD))
@@ -320,7 +320,7 @@ async fn last_login_moved(h: &Harness, uid: &str) -> bool {
 }
 
 /// Enrol the dashboard user `uid` in MFA under tenant `t1` and return the TOTP secret.
-async fn enrol_user(h: &Harness, uid: &str) -> Option<String> {
+pub(super) async fn enrol_user(h: &Harness, uid: &str) -> Option<String> {
     let mfa = h.engine.mfa()?;
     let setup = mfa
         .setup(uid, MfaContext::Dashboard, Some("t1"), Some(PASSWORD))

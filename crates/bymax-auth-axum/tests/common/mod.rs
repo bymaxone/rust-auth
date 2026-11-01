@@ -82,6 +82,8 @@ pub struct EngineSpec {
     /// The deployment environment the engine is built for. `Test` (the default here) leaves the
     /// cookies without `Secure`; `Production` is what a real deployment resolves to.
     pub environment: Environment,
+    /// Hooks the engine fires; `None` leaves the engine's defaults.
+    pub hooks: Option<Arc<dyn AuthHooks>>,
 }
 
 impl Default for EngineSpec {
@@ -100,6 +102,7 @@ impl Default for EngineSpec {
             trusted_origins: &[],
             cookie_domains: &[],
             environment: Environment::Test,
+            hooks: None,
         }
     }
 }
@@ -375,6 +378,9 @@ pub fn build(spec: EngineSpec) -> Option<Harness> {
     }
     if spec.allow_oauth {
         builder = builder.hooks(Arc::new(AllowOAuthHooks));
+    }
+    if let Some(hooks) = spec.hooks {
+        builder = builder.hooks(hooks);
     }
 
     let engine = Arc::new(builder.build().ok()?);

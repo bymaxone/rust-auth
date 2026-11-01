@@ -37,7 +37,54 @@ impl MfaService {
         ip: &str,
         user_agent: &str,
     ) -> Result<LoginResultMfa, AuthError> {
+        self.challenge_expecting(None, mfa_temp_token, code, ip, user_agent)
+            .await
+    }
+
+    /// [`MfaService::challenge`] for the platform route: a temp token minted for the dashboard is
+    /// refused with [`AuthError::PlatformAuthRequired`] **before** the challenge runs, so the
+    /// refusal spends nothing — no session is created, no last-login time is stamped, no hook
+    /// fires and the token stays redeemable at its own route.
+    ///
+    /// The plane is the token's own `context` claim, read after its signature and expiry are
+    /// verified and before anything is consumed.
+    ///
+    /// # Errors
+    ///
+    /// As [`MfaService::challenge`], plus [`AuthError::PlatformAuthRequired`] for a dashboard
+    /// temp token.
+    pub async fn challenge_platform_only(
+        &self,
+        mfa_temp_token: &str,
+        code: &str,
+        ip: &str,
+        user_agent: &str,
+    ) -> Result<LoginResultMfa, AuthError> {
+        self.challenge_expecting(
+            Some(MfaContext::Platform),
+            mfa_temp_token,
+            code,
+            ip,
+            user_agent,
+        )
+        .await
+    }
+
+    /// The shared body of [`MfaService::challenge`] and [`MfaService::challenge_platform_only`]: verify the
+    /// temp token (not yet consumed), refuse a token of a plane other than `expected` (with `PlatformAuthRequired`, the only plane a route insists on), then route
+    /// by the token's context.
+    async fn challenge_expecting(
+        &self,
+        expected: Option<MfaContext>,
+        mfa_temp_token: &str,
+        code: &str,
+        ip: &str,
+        user_agent: &str,
+    ) -> Result<LoginResultMfa, AuthError> {
         let verified = self.tokens.verify_mfa_temp_token(mfa_temp_token).await?;
+        if expected.is_some_and(|plane| plane != verified.context) {
+            return Err(AuthError::PlatformAuthRequired);
+        }
         match verified.context {
             MfaContext::Dashboard => {
                 self.challenge_dashboard(verified, code, ip, user_agent)

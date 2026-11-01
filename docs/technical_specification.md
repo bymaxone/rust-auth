@@ -2636,7 +2636,8 @@ their ordering reproduces the NestJS guard pipeline.
 | POST   | `/auth/mfa/recovery-codes` | `mfa_regen_recovery`      | `AuthUser`                           | 200     | `MfaRegenerateRecoveryCodesDto`   | mfa     |
 
 > `mfa/challenge` is **public** + carries the MFA temp token in its body (and/or
-> the `mfa_temp_token` cookie); it is the post-login exchange endpoint, so it is
+> the `mfa_temp_token` cookie); it serves a temp token of either plane (a platform token is
+> answered with the platform session in the body, never in cookies); it is the post-login exchange endpoint, so it is
 > exempt from the MFA-required check (nest-auth `@Public() @SkipMfa()`). The
 > management routes (`setup`, `verify-enable`) require an authenticated user but
 > must bypass the MFA-required check so a user *enrolling* MFA is not locked out
@@ -2690,7 +2691,10 @@ their ordering reproduces the NestJS guard pipeline.
 | POST   | `/auth/platform/refresh`        | `platform_refresh` | (refresh token from cookie/body) | 200 | `RefreshDto` (bearer) | platform |
 | DELETE | `/auth/platform/sessions`       | `platform_revoke_all` | `PlatformUser`           | 204     | —                   | platform |
 
-> `platform/login`, `platform/mfa/challenge`, and `platform/refresh` are public.
+> `platform/login`, `platform/mfa/challenge`, and `platform/refresh` are public. A dashboard temp
+> token presented at `platform/mfa/challenge` is refused with `auth.platform_auth_required`
+> **before** the challenge runs, from the token's own `context` claim, so the refusal creates no
+> session, stamps no last-login time, fires no hook and leaves the token redeemable at its own route.
 > The MFA challenge for platform admins lives on this controller (it is the
 > post-login exchange, not an authenticated management action); the temp token
 > carries a `context: platform` discriminant that the engine reads to route
