@@ -26,11 +26,11 @@ fn an_optional_runtime_that_does_not_answer_skips() {
     assert!(outcome.is_none());
 }
 
-/// The body the two child-process cases below run: a real container start against
-/// `DOCKER_HOST`, handled by the gate. Ignored so it only runs when a case asks for it.
+/// A real container start judged by the gate. In this process it starts a container like every
+/// other container-backed test; the two child-process cases below run it with `DOCKER_HOST`
+/// pointing at a daemon that does not exist.
 #[tokio::test]
-#[ignore = "run by the child-process cases, with DOCKER_HOST pointing at a dead daemon"]
-async fn probe_a_container_start_without_a_daemon() {
+async fn a_container_start_is_judged_by_the_gate() {
     let started = Redis::default().with_tag("8").start().await;
     if let Err(error) = started {
         let skipped: Option<u8> = docker_gate::docker_unavailable("redis:8", error);
@@ -43,9 +43,8 @@ fn run_probe(require: bool) -> Option<std::process::Output> {
     let mut child = Command::new(std::env::current_exe().unwrap_or_default());
     child
         .args([
-            "--ignored",
             "--exact",
-            "probe_a_container_start_without_a_daemon",
+            "a_container_start_is_judged_by_the_gate",
             "--nocapture",
         ])
         .env("DOCKER_HOST", DEAD_DAEMON)
