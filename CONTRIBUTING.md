@@ -18,6 +18,27 @@ cargo build --workspace --all-features
 cargo test  --workspace --all-features
 ```
 
+### Tests that need Docker
+
+The Redis integration tests, the axum Redis test and the client end-to-end test start a real
+`redis:8` container. Without a container runtime they skip, printing `skipped: no Docker` on
+stderr, and still report green, which proves nothing. Set `BYMAX_REQUIRE_DOCKER=1` to make a
+missing runtime a failure instead; CI sets it in the `docker e2e` job. Run them the same way
+before you rely on a green result:
+
+```bash
+BYMAX_REQUIRE_DOCKER=1 cargo test -p bymax-auth-redis -p bymax-auth-axum -p bymax-auth-client --all-features
+```
+
+On macOS with Docker Desktop, the `docker` binary is not on the shell `PATH` and the daemon
+socket is not at `/var/run/docker.sock`, so point the tests at both:
+
+```bash
+export PATH="/Applications/Docker.app/Contents/Resources/bin:$PATH"
+export DOCKER_HOST="unix://$HOME/.docker/run/docker.sock"
+docker ps   # must list containers, not an error
+```
+
 ## Quality gates (run before opening a PR)
 
 ```bash
