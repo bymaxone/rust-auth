@@ -102,6 +102,40 @@ fn snapshot() -> WsTicketSnapshot {
 }
 
 #[tokio::test]
+async fn listing_leaves_out_a_damaged_detail_and_prunes_only_a_dead_member() {
+    let Some(redis) = common::try_start().await else {
+        return;
+    };
+    let Some(stores) = redis.stores() else { return };
+    let kind = SessionKind::Dashboard;
+    for hash in ["h1", "h2", "h3", "h4"] {
+        let created = stores
+            .create_session(kind, &subject("lu"), hash, &record("lu"), 3600)
+            .await;
+        assert!(created.is_ok());
+    }
+    // h3: the detail is damaged but its refresh key is live. h4: detail and refresh key are gone.
+    assert!(redis.set_raw("auth:sd:h3", "{broken").await);
+    assert!(redis.del("auth:sd:h4").await && redis.del("auth:rt:h4").await);
+
+    let listed = stores.list_sessions(kind, &subject("lu")).await;
+    let mut hashes: Vec<String> = listed
+        .map(|v| v.into_iter().map(|d| d.session_hash).collect())
+        .unwrap_or_default();
+    hashes.sort();
+    assert_eq!(
+        hashes,
+        ["h1", "h2"],
+        "one damaged record must not hide the others"
+    );
+
+    // Only the dead member left the index; the live session with a damaged detail stays.
+    let mut members = redis.smembers("auth:sess:s-lu").await;
+    members.sort();
+    assert_eq!(members, ["rt:h1", "rt:h2", "rt:h3"]);
+}
+
+#[tokio::test]
 async fn session_create_rotate_grace_revoke_and_blacklist() {
     let Some(redis) = common::try_start().await else {
         return;

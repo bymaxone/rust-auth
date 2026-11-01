@@ -18,6 +18,7 @@ use crate::error::RedisStoreError;
 use crate::keys::Prefix;
 use crate::pool::RedisStores;
 use crate::script;
+use crate::stores::session_listing::{DetailRead, read_detail};
 
 /// The tag the `refresh_rotate` script prepends to a grace-window recovery payload, matching
 /// the literal in `lua/refresh_rotate.lua`.
@@ -37,17 +38,17 @@ const REUSED_TAG: &str = "REUSED:";
 /// listing (and vice versa) on a shared Redis.
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct SessionDetailValue {
+pub(super) struct SessionDetailValue {
     /// Human-readable device/browser string.
-    device: String,
+    pub(super) device: String,
     /// Originating IP.
-    ip: String,
+    pub(super) ip: String,
     /// Session creation time, as Unix milliseconds.
     #[serde(with = "unix_millis")]
-    created_at: OffsetDateTime,
+    pub(super) created_at: OffsetDateTime,
     /// Last observed activity time, as Unix milliseconds.
     #[serde(with = "unix_millis")]
-    last_activity_at: OffsetDateTime,
+    pub(super) last_activity_at: OffsetDateTime,
 }
 
 impl SessionDetailValue {
@@ -533,15 +534,14 @@ impl RedisStores {
             // The detail record is keyed by the BARE hash, so the member's prefix is stripped.
             let sd_key = keys.key(prefixes.sd, hash);
             let raw: Option<String> = conn.get(&sd_key).await?;
-            if let Some(json) = raw {
-                let value: SessionDetailValue = serde_json::from_str(&json)?;
-                details.push(SessionDetail {
-                    session_hash: hash.to_owned(),
-                    device: value.device,
-                    ip: value.ip,
-                    created_at: value.created_at,
-                    last_activity_at: value.last_activity_at,
-                });
+            match read_detail(hash, raw.as_deref()) {
+                DetailRead::Listed(detail) => details.push(detail),
+                // Left out; pruned only if its `rt:` key is gone too (see `DetailRead`).
+                DetailRead::Excluded => {
+                    if !conn.exists::<_, bool>(keys.key(prefixes.rt, hash)).await? {
+                        let _: i64 = conn.srem(&sess_key, member).await?;
+                    }
+                }
             }
         }
         Ok(details)
