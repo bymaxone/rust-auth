@@ -60,8 +60,9 @@ impl AuthEngine {
                 return Ok(approved);
             }
         }
+        let tenant = log_safe(tenant_id);
         tracing::warn!(
-            tenant_id = %log_safe(tenant_id),
+            tenant_id = %tenant,
             "invitation: refused, the pending invitation kept changing under the rank check"
         );
         Err(AuthError::InsufficientRole)
@@ -87,8 +88,9 @@ impl AuthEngine {
                 &self.config().config().roles.hierarchy,
             )
         {
+            let tenant = log_safe(tenant_id);
             tracing::warn!(
-                tenant_id = %log_safe(tenant_id),
+                tenant_id = %tenant,
                 "invitation: refused, outranked by the pending invitation"
             );
             return Err(AuthError::InsufficientRole);
