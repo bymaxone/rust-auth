@@ -103,7 +103,7 @@ async fn a_request_written_in_segments_is_read_whole_and_a_closed_peer_ends_the_
 async fn forgot_password_posts_the_email_and_tenant() {
     // forgot-password must reach the backend: a POST to the route with the JSON body.
     let request = capture_request(response(200, "OK", "{}"), |client| async move {
-        assert!(client.forgot_password("u@e.com", "t1").await.is_ok());
+        assert!(client.forgot_password("u@e.com", Some("t1")).await.is_ok());
     })
     .await
     .unwrap_or_default();
@@ -135,7 +135,7 @@ async fn reset_password_posts_each_proof_under_its_own_field() {
                 email: "u@e.com".to_owned(),
                 new_password: "newglidingwalnut42".to_owned(),
                 proof,
-                tenant_id: "t1".to_owned(),
+                tenant_id: Some("t1".to_owned()),
             };
             assert!(client.reset_password(&input).await.is_ok());
         })
@@ -162,4 +162,73 @@ async fn logout_names_the_stored_refresh_token_so_the_server_session_ends() {
     assert!(request.starts_with("POST /auth/logout "));
     assert!(request.contains("authorization: Bearer acc-token"));
     assert!(request.contains(r#""refreshToken":"ref-token""#));
+}
+
+/// The JSON body of a captured request.
+fn body_of(request: &str) -> serde_json::Value {
+    let body = request.split_once("\r\n\r\n").map_or("", |(_, b)| b);
+    serde_json::from_str(body).unwrap_or(serde_json::Value::Null)
+}
+
+#[tokio::test]
+async fn an_absent_tenant_is_an_absent_key_on_every_call_that_takes_one() {
+    // The server refuses a tenant under a resolver, so "no tenant" has to be a missing key, not a
+    // null or an empty string. Each of the four calls is checked against its own request.
+    let auth = response(200, "OK", &super::tests::auth_body("a", "r"));
+    let none = response(204, "No Content", "");
+
+    let register = capture_request(auth.clone(), |client| async move {
+        let input = RegisterRequest {
+            email: "u@e.com".to_owned(),
+            password: "glidingwalnut42".to_owned(),
+            name: "U".to_owned(),
+            tenant_id: None,
+        };
+        assert!(client.register(&input).await.is_ok());
+    })
+    .await
+    .unwrap_or_default();
+    let login = capture_request(auth, |client| async move {
+        let input = LoginRequest {
+            email: "u@e.com".to_owned(),
+            password: "glidingwalnut42".to_owned(),
+            tenant_id: None,
+        };
+        assert!(client.login(&input).await.is_ok());
+    })
+    .await
+    .unwrap_or_default();
+    let forgot = capture_request(none.clone(), |client| async move {
+        assert!(client.forgot_password("u@e.com", None).await.is_ok());
+    })
+    .await
+    .unwrap_or_default();
+    let reset = capture_request(none, |client| async move {
+        let input = ResetPasswordRequest {
+            email: "u@e.com".to_owned(),
+            new_password: "newglidingwalnut42".to_owned(),
+            proof: ResetPasswordProof::Token("tok".to_owned()),
+            tenant_id: None,
+        };
+        assert!(client.reset_password(&input).await.is_ok());
+    })
+    .await
+    .unwrap_or_default();
+
+    for (name, request) in [
+        ("register", register),
+        ("login", login),
+        ("forgot", forgot),
+        ("reset", reset),
+    ] {
+        let body = body_of(&request);
+        assert!(
+            body.get("email").is_some(),
+            "{name}: the body was not captured"
+        );
+        assert!(
+            body.get("tenantId").is_none(),
+            "{name}: sent a tenantId it was not given"
+        );
+    }
 }

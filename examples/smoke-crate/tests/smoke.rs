@@ -112,7 +112,7 @@ async fn happy_path_register_login_me_refresh_logout() {
             email: EMAIL.to_owned(),
             password: PASSWORD.to_owned(),
             name: "Smoke".to_owned(),
-            tenant_id: TENANT.to_owned(),
+            tenant_id: Some(TENANT.to_owned()),
         })
         .await;
     assert!(matches!(registered, Ok(AuthOutcome::Authenticated(_))));
@@ -124,7 +124,7 @@ async fn happy_path_register_login_me_refresh_logout() {
         .login(&LoginRequest {
             email: EMAIL.to_owned(),
             password: PASSWORD.to_owned(),
-            tenant_id: TENANT.to_owned(),
+            tenant_id: Some(TENANT.to_owned()),
         })
         .await;
     assert!(matches!(login, Ok(AuthOutcome::Authenticated(_))));
@@ -148,7 +148,7 @@ async fn happy_path_register_login_me_refresh_logout() {
         .login(&LoginRequest {
             email: EMAIL.to_owned(),
             password: "wrong-password".to_owned(),
-            tenant_id: TENANT.to_owned(),
+            tenant_id: Some(TENANT.to_owned()),
         })
         .await;
     assert!(matches!(
