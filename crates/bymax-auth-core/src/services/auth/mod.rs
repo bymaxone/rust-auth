@@ -9,6 +9,8 @@
 pub(crate) mod detached;
 mod email_change;
 mod email_verification;
+#[cfg(test)]
+mod hook_delivery_tests;
 mod invitation;
 mod login;
 mod password_reset;

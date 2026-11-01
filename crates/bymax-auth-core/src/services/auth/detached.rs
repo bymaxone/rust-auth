@@ -13,7 +13,11 @@ use bymax_auth_types::{AuthError, SafeAuthUser};
 use crate::RepositoryError;
 use crate::services::auth::map_repository_error;
 use crate::services::password::PasswordService;
-use crate::traits::{AuthHooks, EmailError, EmailProvider, HookContext, HookError, UserRepository};
+use crate::traits::email::SessionInfo;
+use crate::traits::{
+    AuthHooks, EmailError, EmailProvider, HookContext, HookError, LoginFailure, LoginFailureReason,
+    UserRepository,
+};
 
 /// Invoke the `after_register` notification hook.
 pub(crate) async fn run_after_register(
@@ -22,6 +26,72 @@ pub(crate) async fn run_after_register(
     ctx: HookContext,
 ) -> Result<(), HookError> {
     hooks.after_register(&user, &ctx).await
+}
+
+/// Invoke the `on_login_failed` notification hook. The attempt's borrowed fields are owned
+/// here so the hook can run after the refusal has already been sent.
+pub(crate) async fn run_on_login_failed(
+    hooks: Arc<dyn AuthHooks>,
+    email: String,
+    tenant_id: String,
+    user_id: Option<String>,
+    reason: LoginFailureReason,
+    ctx: HookContext,
+) -> Result<(), HookError> {
+    let failure = LoginFailure {
+        email: &email,
+        tenant_id: &tenant_id,
+        user_id: user_id.as_deref(),
+        reason,
+    };
+    hooks.on_login_failed(&failure, &ctx).await
+}
+
+/// Invoke the `on_lockout` notification hook.
+pub(crate) async fn run_on_lockout(
+    hooks: Arc<dyn AuthHooks>,
+    email: String,
+    tenant_id: String,
+    retry_after_seconds: u64,
+    ctx: HookContext,
+) -> Result<(), HookError> {
+    hooks
+        .on_lockout(&email, &tenant_id, retry_after_seconds, &ctx)
+        .await
+}
+
+/// Invoke the `on_new_session` notification hook.
+pub(crate) async fn run_on_new_session(
+    hooks: Arc<dyn AuthHooks>,
+    user: SafeAuthUser,
+    session: SessionInfo,
+    ctx: HookContext,
+) -> Result<(), HookError> {
+    hooks.on_new_session(&user, &session, &ctx).await
+}
+
+/// Invoke the `on_session_evicted` notification hook.
+pub(crate) async fn run_on_session_evicted(
+    hooks: Arc<dyn AuthHooks>,
+    user_id: String,
+    evicted_session_hash: String,
+    ctx: HookContext,
+) -> Result<(), HookError> {
+    hooks
+        .on_session_evicted(&user_id, &evicted_session_hash, &ctx)
+        .await
+}
+
+/// Invoke the `on_refresh_token_reuse_detected` notification hook.
+pub(crate) async fn run_on_refresh_token_reuse_detected(
+    hooks: Arc<dyn AuthHooks>,
+    user_id: String,
+    family_id: String,
+    ctx: HookContext,
+) -> Result<(), HookError> {
+    hooks
+        .on_refresh_token_reuse_detected(&user_id, &family_id, &ctx)
+        .await
 }
 
 /// Invoke the `after_login` notification hook.
@@ -140,6 +210,20 @@ pub(crate) async fn run_send_reset_otp_email(
     provider
         .send_password_reset_otp(&tenant_id, &email, &otp, None)
         .await
+}
+
+/// Test support: wait, bounded, until a detached hook's effect is visible, then give any other
+/// detached task time to show itself, so a test asserting that a hook did NOT fire is still
+/// evidence rather than a race it wins by running first.
+#[cfg(test)]
+pub(crate) async fn settle_until(mut done: impl FnMut() -> bool) {
+    for _ in 0..300 {
+        if done() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 }
 
 #[cfg(test)]

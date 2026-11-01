@@ -25,6 +25,8 @@ use bymax_auth_types::{PlatformAuthResult, PlatformClaims, PlatformType, SafeAut
 
 use zeroize::Zeroizing;
 
+use crate::services::auth::detached::run_on_refresh_token_reuse_detected;
+use crate::services::auth::spawn_guarded;
 use crate::services::session::normalize_session_metadata;
 use crate::services::{internal_error, is_refresh_token_shape, new_uuid_v4, now_offset, now_unix};
 use crate::traits::{
@@ -686,8 +688,7 @@ impl TokenManagerService {
                     family_id = %family,
                     "refresh: token family revoked after reuse detection"
                 );
-                self.fire_reuse_detected(HookPlane::Dashboard, owner_id, &family, ip, user_agent)
-                    .await;
+                self.fire_reuse_detected(HookPlane::Dashboard, owner_id, &family, ip, user_agent);
                 Err(AuthError::RefreshTokenInvalid)
             }
             RotateOutcome::Invalid => {
@@ -924,8 +925,7 @@ impl TokenManagerService {
                     family_id = %family,
                     "platform refresh: token family revoked after reuse detection"
                 );
-                self.fire_reuse_detected(HookPlane::Platform, owner_id, &family, ip, user_agent)
-                    .await;
+                self.fire_reuse_detected(HookPlane::Platform, owner_id, &family, ip, user_agent);
                 Err(AuthError::RefreshTokenInvalid)
             }
             RotateOutcome::Invalid => {
@@ -1331,7 +1331,8 @@ impl TokenManagerService {
         support.store.del_temp(&jti_hash(jti)).await
     }
 
-    /// Fire the fire-and-forget [`AuthHooks::on_refresh_token_reuse_detected`] hook.
+    /// Fire the fire-and-forget [`AuthHooks::on_refresh_token_reuse_detected`] hook, detached
+    /// under the same ceiling as the `after_*` hooks so a slow consumer cannot hold the refusal.
     ///
     /// Skipped when the owner is unknown: a replay of a token whose live key is already gone
     /// leaves nothing to read, and an event naming no account is worse than no event — a
@@ -1339,7 +1340,7 @@ impl TokenManagerService {
     ///
     /// [`AuthHooks::on_refresh_token_reuse_detected`]:
     ///     crate::traits::AuthHooks::on_refresh_token_reuse_detected
-    async fn fire_reuse_detected(
+    fn fire_reuse_detected(
         &self,
         plane: HookPlane,
         user_id: Option<&str>,
@@ -1351,13 +1352,12 @@ impl TokenManagerService {
         // The rotation is handed the origin of the request that presented the token but not the
         // request itself, so the plane and that origin are what the context can honestly carry.
         let ctx = HookContext::detached(plane, user_id, ip, user_agent);
-        if let Err(error) = self
-            .hooks
-            .on_refresh_token_reuse_detected(user_id, family_id, &ctx)
-            .await
-        {
-            tracing::error!(%error, "refresh: reuse hook returned an error (ignored)");
-        }
+        spawn_guarded(run_on_refresh_token_reuse_detected(
+            self.hooks.clone(),
+            user_id.to_owned(),
+            family_id.to_owned(),
+            ctx,
+        ));
     }
 
     /// Refuse a rotation once the login it descends from has outlived the absolute cap.
@@ -1570,6 +1570,7 @@ const TEST_IDENTIFIER_KEY: [u8; 64] = [9u8; 64];
 mod tests {
 
     use super::*;
+    use crate::services::auth::detached::settle_until;
     use crate::testing::InMemoryStores;
     use time::OffsetDateTime;
 
@@ -1853,7 +1854,11 @@ mod tests {
     }
 
     /// A hooks collaborator whose reuse handler always fails, so the swallowed arm is reachable.
-    struct BrokenReuseHook;
+    /// It counts its calls, because the hook runs detached and a test must wait for it.
+    #[derive(Default)]
+    struct BrokenReuseHook {
+        calls: std::sync::atomic::AtomicUsize,
+    }
 
     #[async_trait::async_trait]
     impl crate::traits::AuthHooks for BrokenReuseHook {
@@ -1863,6 +1868,8 @@ mod tests {
             _family_id: &str,
             _ctx: &crate::traits::HookContext,
         ) -> Result<(), crate::traits::HookError> {
+            self.calls
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             Err(crate::traits::HookError::Internal("siem down".into()))
         }
     }
@@ -1874,7 +1881,8 @@ mod tests {
         // replay through. The failure is logged and the refusal stands — swallowed, which is
         // what leaves the arm unreachable against a hook that always succeeds.
         let store = Arc::new(InMemoryStores::new());
-        let svc = service(store.clone()).with_hooks(Arc::new(BrokenReuseHook));
+        let broken = Arc::new(BrokenReuseHook::default());
+        let svc = service(store.clone()).with_hooks(broken.clone());
         let Some(issued) = issued_for(&svc).await else { return };
         let old_hash = RawRefreshToken::from_raw(issued.refresh_token.clone()).redis_hash();
         let Some(_rotated) = rotated_for(&svc, &issued.refresh_token).await else { return };
@@ -1890,6 +1898,11 @@ mod tests {
                 .await,
             Err(AuthError::RefreshTokenInvalid)
         ));
+
+        // The failing hook really ran, detached, after the refusal it could not change.
+        let calls = || broken.calls.load(std::sync::atomic::Ordering::Relaxed);
+        settle_until(|| calls() >= 1).await;
+        assert_eq!(calls(), 1);
     }
 
     /// Records the reuse events the rotation reports.
@@ -1946,6 +1959,7 @@ mod tests {
             Err(AuthError::RefreshTokenInvalid)
         ));
 
+        settle_until(|| spy.calls.lock().map(|c| !c.is_empty()).unwrap_or(false)).await;
         let seen = spy.calls.lock().map(|c| c.clone()).unwrap_or_default();
         assert_eq!(seen.len(), 1, "exactly one reuse event: {seen:?}");
         let owner = user().id;
@@ -2148,6 +2162,7 @@ mod tests {
             Err(AuthError::RefreshTokenInvalid)
         ));
 
+        settle_until(|| spy.calls.lock().map(|c| !c.is_empty()).unwrap_or(false)).await;
         let seen = spy.calls.lock().map(|c| c.clone()).unwrap_or_default();
         assert_eq!(seen.len(), 1, "exactly one platform reuse event: {seen:?}");
         assert!(

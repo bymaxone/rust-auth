@@ -122,7 +122,14 @@ impl AuthEngine {
         // The hook names the user who was signed out, so it only fires when the session told
         // us who that was. A logout for an already-gone session has nobody to name.
         if !user_id.is_empty() {
-            let hook_ctx = identity_only_context(user_id, None, None);
+            // The tenant comes from the session record: a repository id is unique only within
+            // a tenant, so a hook naming just the id cannot be acted on without reaching another
+            // tenant's account.
+            let hook_ctx = identity_only_context(
+                user_id,
+                None,
+                owner.as_ref().and_then(|record| record.tenant_id.clone()),
+            );
             spawn_guarded(run_after_logout(
                 self.hooks().clone(),
                 user_id.to_owned(),
