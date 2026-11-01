@@ -854,6 +854,23 @@ pub trait InvitationStore: Send + Sync {
         ttl_secs: u64,
     ) -> Result<(), AuthError>;
 
+    /// Point the invitee index at `token_hash` only while it still holds exactly `expected`
+    /// (`None` meaning "no entry"), with the invitation's TTL; `true` when this call claimed it.
+    ///
+    /// A compare-and-swap, not a plain write: the caller read the index to decide whether it may
+    /// supersede what it names, and the decision only describes what was read. A claim that
+    /// proceeds regardless could displace an invitation that appeared in between, which the
+    /// caller was never shown to be allowed to destroy. `invitee_hash` is the derived
+    /// identifier — see [`Self::put_invitation_index`].
+    async fn claim_invitation_index(
+        &self,
+        tenant_id: &str,
+        invitee_hash: &str,
+        token_hash: &str,
+        ttl_secs: u64,
+        expected: Option<&str>,
+    ) -> Result<bool, AuthError>;
+
     /// Read the token hash the invitee index points at, leaving the entry in place.
     /// `invitee_hash` is the derived identifier — see [`Self::put_invitation_index`].
     async fn read_invitation_index(

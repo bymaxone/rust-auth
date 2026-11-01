@@ -21,6 +21,9 @@
 
 mod common;
 
+#[path = "adapter/invitation_supersede.rs"]
+mod invitation_supersede;
+
 #[path = "adapter/mfa_rotation.rs"]
 mod mfa_rotation;
 

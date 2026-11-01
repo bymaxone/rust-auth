@@ -1249,6 +1249,23 @@ impl InvitationStore for InMemoryStores {
         Ok(())
     }
 
+    async fn claim_invitation_index(
+        &self,
+        tenant_id: &str,
+        email: &str,
+        token_hash: &str,
+        _ttl_secs: u64,
+        expected: Option<&str>,
+    ) -> Result<bool, AuthError> {
+        let mut index = lock(&self.invitation_index);
+        let key = invitee_key(tenant_id, email);
+        if index.get(&key).map(String::as_str) != expected {
+            return Ok(false);
+        }
+        index.insert(key, token_hash.to_owned());
+        Ok(true)
+    }
+
     async fn read_invitation_index(
         &self,
         tenant_id: &str,

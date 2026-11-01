@@ -907,6 +907,18 @@ impl bymax_auth_core::traits::InvitationStore for FailingStores {
             .put_invitation_index(tenant_id, email, token_hash, ttl_secs)
             .await
     }
+    async fn claim_invitation_index(
+        &self,
+        tenant_id: &str,
+        email: &str,
+        token_hash: &str,
+        ttl_secs: u64,
+        expected: Option<&str>,
+    ) -> Result<bool, bymax_auth_types::AuthError> {
+        self.inner
+            .claim_invitation_index(tenant_id, email, token_hash, ttl_secs, expected)
+            .await
+    }
     async fn read_invitation_index(
         &self,
         tenant_id: &str,
