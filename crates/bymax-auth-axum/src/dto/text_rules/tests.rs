@@ -90,78 +90,103 @@ where
     Some(email(&dto).to_owned())
 }
 
+/// The email each account-flow body holds after deserializing and validating `padded`, by body.
+fn account_emails(padded: &str) -> Vec<(&'static str, Option<String>)> {
+    let pw = "glidingwalnut42";
+    vec![
+        (
+            "RegisterDto",
+            email_after::<RegisterDto>(
+                json!({ "email": padded, "password": pw, "name": "Nm", "tenantId": "t1" }),
+                |d| &d.email,
+            ),
+        ),
+        (
+            "LoginDto",
+            email_after::<LoginDto>(
+                json!({ "email": padded, "password": pw, "tenantId": "t1" }),
+                |d| &d.email,
+            ),
+        ),
+        (
+            "PlatformLoginDto",
+            email_after::<PlatformLoginDto>(json!({ "email": padded, "password": pw }), |d| {
+                &d.email
+            }),
+        ),
+        (
+            "ChangeEmailDto",
+            email_after::<ChangeEmailDto>(
+                json!({ "newEmail": padded, "currentPassword": pw }),
+                |d| &d.new_email,
+            ),
+        ),
+        (
+            "ForgotPasswordDto",
+            email_after::<ForgotPasswordDto>(json!({ "email": padded, "tenantId": "t1" }), |d| {
+                &d.email
+            }),
+        ),
+        (
+            "ResetPasswordDto",
+            email_after::<ResetPasswordDto>(
+                json!({ "email": padded, "newPassword": pw, "otp": "123456", "tenantId": "t1" }),
+                |d| &d.email,
+            ),
+        ),
+    ]
+}
+
+/// The same for the verification and invitation bodies.
+fn verification_and_invitation_emails(padded: &str) -> Vec<(&'static str, Option<String>)> {
+    let with_tenant = |extra: serde_json::Value| {
+        let mut body = json!({ "email": padded, "tenantId": "t1" });
+        if let (Some(base), Some(more)) = (body.as_object_mut(), extra.as_object()) {
+            base.extend(more.clone());
+        }
+        body
+    };
+    vec![
+        (
+            "ResendOtpDto",
+            email_after::<ResendOtpDto>(with_tenant(json!({})), |d| &d.email),
+        ),
+        (
+            "ResendVerificationDto",
+            email_after::<ResendVerificationDto>(with_tenant(json!({})), |d| &d.email),
+        ),
+        (
+            "VerifyOtpDto",
+            email_after::<VerifyOtpDto>(with_tenant(json!({ "otp": "123456" })), |d| &d.email),
+        ),
+        (
+            "VerifyEmailDto",
+            email_after::<VerifyEmailDto>(with_tenant(json!({ "otp": "123456" })), |d| &d.email),
+        ),
+        (
+            "CreateInvitationDto",
+            email_after::<CreateInvitationDto>(json!({ "email": padded, "role": "USER" }), |d| {
+                &d.email
+            }),
+        ),
+        (
+            "RevokeInvitationDto",
+            email_after::<RevokeInvitationDto>(json!({ "email": padded }), |d| &d.email),
+        ),
+    ]
+}
+
 #[test]
 fn every_email_field_is_trimmed_and_lowercased_before_it_is_validated() {
     let padded = "  User@Example.COM  ";
     let want = Some("user@example.com".to_owned());
-    let pw = "glidingwalnut42";
-    assert_eq!(
-        email_after::<RegisterDto>(
-            json!({ "email": padded, "password": pw, "name": "Nm", "tenantId": "t1" }),
-            |d| &d.email
-        ),
-        want
-    );
-    assert_eq!(
-        email_after::<LoginDto>(
-            json!({ "email": padded, "password": pw, "tenantId": "t1" }),
-            |d| &d.email
-        ),
-        want
-    );
-    assert_eq!(
-        email_after::<ForgotPasswordDto>(json!({ "email": padded, "tenantId": "t1" }), |d| &d
-            .email),
-        want
-    );
-    assert_eq!(
-        email_after::<ResendOtpDto>(json!({ "email": padded, "tenantId": "t1" }), |d| &d.email),
-        want
-    );
-    assert_eq!(
-        email_after::<ResendVerificationDto>(json!({ "email": padded, "tenantId": "t1" }), |d| &d
-            .email),
-        want
-    );
-    assert_eq!(
-        email_after::<PlatformLoginDto>(json!({ "email": padded, "password": pw }), |d| &d.email),
-        want
-    );
-    assert_eq!(
-        email_after::<ChangeEmailDto>(json!({ "newEmail": padded, "currentPassword": pw }), |d| &d
-            .new_email),
-        want
-    );
-    assert_eq!(
-        email_after::<ResetPasswordDto>(
-            json!({ "email": padded, "newPassword": pw, "otp": "123456", "tenantId": "t1" }),
-            |d| &d.email
-        ),
-        want
-    );
-    assert_eq!(
-        email_after::<VerifyOtpDto>(
-            json!({ "email": padded, "otp": "123456", "tenantId": "t1" }),
-            |d| &d.email
-        ),
-        want
-    );
-    assert_eq!(
-        email_after::<VerifyEmailDto>(
-            json!({ "email": padded, "otp": "123456", "tenantId": "t1" }),
-            |d| &d.email
-        ),
-        want
-    );
-    assert_eq!(
-        email_after::<CreateInvitationDto>(json!({ "email": padded, "role": "USER" }), |d| &d
-            .email),
-        want
-    );
-    assert_eq!(
-        email_after::<RevokeInvitationDto>(json!({ "email": padded }), |d| &d.email),
-        want
-    );
+    let mut checked = account_emails(padded);
+    checked.extend(verification_and_invitation_emails(padded));
+    // Twelve bodies carry an email; a body missing from the lists would not be wired or tested.
+    assert_eq!(checked.len(), 12);
+    for (body, got) in checked {
+        assert_eq!(got, want, "{body}");
+    }
 }
 
 #[test]
