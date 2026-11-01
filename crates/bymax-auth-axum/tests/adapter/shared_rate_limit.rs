@@ -49,6 +49,15 @@ fn engine_with_source(
     counter: Option<Arc<dyn RateLimitStore>>,
     source: ClientIpSource,
 ) -> Option<Router> {
+    engine_with_config(stores, counter, AxumAuthConfig::new(source))
+}
+
+/// As [`engine`], under an explicit adapter configuration.
+fn engine_with_config(
+    stores: &Arc<InMemoryStores>,
+    counter: Option<Arc<dyn RateLimitStore>>,
+    adapter: AxumAuthConfig,
+) -> Option<Router> {
     let mut config = AuthConfig::default();
     config.jwt.secret = SecretString::from(common::JWT_SECRET.to_owned());
     config.roles.hierarchy = HashMap::from([("USER".to_owned(), Vec::new())]);
@@ -69,7 +78,7 @@ fn engine_with_source(
         built.as_ref().err()
     );
     let built = built.ok()?;
-    Some(AuthRouter::from_engine(Arc::new(built), AxumAuthConfig::new(source)).into_router())
+    Some(AuthRouter::from_engine(Arc::new(built), adapter).into_router())
 }
 
 /// One failed login from the harness's fixed peer address. A different email for every attempt,
@@ -226,4 +235,24 @@ async fn the_shared_counter_charges_each_forwarded_address_its_own_budget() {
     // address collapsed into one bucket this request would be refused too.
     let other = from("198.51.100.8", LOGIN_LIMIT + 1).send(&app).await;
     assert_eq!(other.status, StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn a_route_whose_limit_is_disabled_is_not_limited_without_a_shared_counter_either() {
+    let stores = Arc::new(InMemoryStores::new());
+    let adapter = AxumAuthConfig {
+        rate_limits: bymax_auth_axum::RateLimitConfig {
+            login: None,
+            ..bymax_auth_axum::RateLimitConfig::default()
+        },
+        ..AxumAuthConfig::new(ClientIpSource::PeerAddr)
+    };
+    let Some(app) = engine_with_config(&stores, None, adapter) else { return };
+    // Well past the default window of 5: nothing counts these.
+    for attempt in 0..(LOGIN_LIMIT * 2) {
+        assert_eq!(
+            login_attempt(&app, attempt).await.status,
+            StatusCode::UNAUTHORIZED
+        );
+    }
 }
