@@ -228,15 +228,12 @@ impl NamespacedRedis {
     /// before the join, so an id holding `:` cannot move the boundary and make two different
     /// `(tenant, user)` pairs share a key.
     ///
-    /// Outside [`Prefix`] until the shared contract lists these two prefixes (DEC-075).
-    ///
-    /// The ids sit in the clear here, which the contract's rule for account-naming keys
-    /// (`wire-contract.json`, `userSubjectDerivedKeys`: derive from the tenant-scoped subject by
-    /// HMAC) does not allow. The encoding is injective, so two accounts never share a key, but
-    /// the clear form is nest-auth's current format and this library reads the same Redis. Both
-    /// libraries move these keys onto the HMAC of the subject together (TASK-109), before this
-    /// one's first release; the entries are caches with a TTL, so the move costs one miss per
-    /// account.
+    /// These two prefixes are outside [`Prefix`] because the shared contract does not list them,
+    /// and the ids are in the clear (encoded, so injective, but recoverable), which is not the
+    /// subject-HMAC form the contract's `userSubjectDerivedKeys` requires of account-naming keys.
+    /// The format is fixed by nest-auth's own keys, which it reads and writes under the same
+    /// names on the same Redis, so it must stay byte-identical to them. The entries are caches
+    /// with a TTL, so a later change of format costs one miss per account.
     #[must_use]
     pub fn user_status_keys(&self, tenant_id: &str, user_id: &str) -> (String, String) {
         let scope = format!(

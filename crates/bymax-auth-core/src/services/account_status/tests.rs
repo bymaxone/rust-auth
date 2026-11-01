@@ -124,7 +124,7 @@ async fn the_verified_flag_is_cached_only_where_verification_is_required() {
 }
 
 #[tokio::test]
-async fn a_cached_unverified_flag_refuses_until_invalidated_and_blocked_wins_over_it() {
+async fn a_cached_unverified_flag_refuses_until_the_account_is_invalidated() {
     let Some(h) = harness(verification_required(), None) else { return };
     let id = h
         .seed(SeedUser {
@@ -162,21 +162,29 @@ async fn a_cached_unverified_flag_refuses_until_invalidated_and_blocked_wins_ove
             .await
             .is_ok()
     );
+}
 
-    // A blocked status is reported before the verification requirement.
-    assert!(h.stores.put_verified(TENANT, &id, false, 60).await.is_ok());
-    ban(&h, &id).await;
-    assert!(
-        h.engine
-            .invalidate_account_status(&id, TENANT)
-            .await
-            .is_ok()
-    );
-    assert!(h.stores.put_verified(TENANT, &id, false, 60).await.is_ok());
+#[tokio::test]
+async fn a_blocked_status_is_reported_before_an_unverified_address() {
+    // Both facts refuse this account; the status is the one the caller is told.
+    let Some(h) = harness(verification_required(), None) else { return };
+    let id = h
+        .seed(SeedUser {
+            status: "BANNED".to_owned(),
+            email_verified: false,
+            ..SeedUser::active("b@example.com", "pw123456")
+        })
+        .await;
     let banned = h.engine.assert_user_active_and_verified(&id, TENANT).await;
     assert!(
         matches!(banned, Err(AuthError::AccountBanned)),
         "{banned:?}"
+    );
+    // The same answer from the cache on the second call.
+    let cached = h.engine.assert_user_active_and_verified(&id, TENANT).await;
+    assert!(
+        matches!(cached, Err(AuthError::AccountBanned)),
+        "{cached:?}"
     );
 }
 

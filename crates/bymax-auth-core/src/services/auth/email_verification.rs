@@ -64,13 +64,7 @@ impl AuthEngine {
             None => return Err(AuthError::OtpInvalid),
         };
 
-        self.user_repository()
-            .update_email_verified(&user.id, tenant_id, true)
-            .await
-            .map_err(map_repository_error)?;
-        // The cached flag still says unverified; drop it so the next request sees the change at
-        // once. Best-effort: the OTP is spent and the flag committed, so there is nothing to retry.
-        self.drop_cached_account_facts(&user.id, tenant_id).await;
+        self.mark_email_verified(&user.id, tenant_id).await?;
 
         // Sanitized into a binding rather than inline in the field; see the note in `login`.
         let tenant = log_safe(tenant_id);
@@ -82,6 +76,18 @@ impl AuthEngine {
             safe,
             hook_ctx,
         ));
+        Ok(())
+    }
+
+    /// Commit the verified flag, then drop the cached status so the next request sees it at
+    /// once. The drop is best-effort: the OTP is spent and the flag committed, so a failure to
+    /// reach the cache leaves nothing to retry.
+    async fn mark_email_verified(&self, user_id: &str, tenant_id: &str) -> Result<(), AuthError> {
+        self.user_repository()
+            .update_email_verified(user_id, tenant_id, true)
+            .await
+            .map_err(map_repository_error)?;
+        self.drop_cached_account_facts(user_id, tenant_id).await;
         Ok(())
     }
 
