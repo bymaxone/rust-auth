@@ -1854,7 +1854,11 @@ mod tests {
     }
 
     /// A hooks collaborator whose reuse handler always fails, so the swallowed arm is reachable.
-    struct BrokenReuseHook;
+    /// It counts its calls, because the hook runs detached and a test must wait for it.
+    #[derive(Default)]
+    struct BrokenReuseHook {
+        calls: std::sync::atomic::AtomicUsize,
+    }
 
     #[async_trait::async_trait]
     impl crate::traits::AuthHooks for BrokenReuseHook {
@@ -1864,6 +1868,8 @@ mod tests {
             _family_id: &str,
             _ctx: &crate::traits::HookContext,
         ) -> Result<(), crate::traits::HookError> {
+            self.calls
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             Err(crate::traits::HookError::Internal("siem down".into()))
         }
     }
@@ -1875,7 +1881,8 @@ mod tests {
         // replay through. The failure is logged and the refusal stands — swallowed, which is
         // what leaves the arm unreachable against a hook that always succeeds.
         let store = Arc::new(InMemoryStores::new());
-        let svc = service(store.clone()).with_hooks(Arc::new(BrokenReuseHook));
+        let broken = Arc::new(BrokenReuseHook::default());
+        let svc = service(store.clone()).with_hooks(broken.clone());
         let Some(issued) = issued_for(&svc).await else { return };
         let old_hash = RawRefreshToken::from_raw(issued.refresh_token.clone()).redis_hash();
         let Some(_rotated) = rotated_for(&svc, &issued.refresh_token).await else { return };
@@ -1891,6 +1898,11 @@ mod tests {
                 .await,
             Err(AuthError::RefreshTokenInvalid)
         ));
+
+        // The failing hook really ran, detached, after the refusal it could not change.
+        let calls = || broken.calls.load(std::sync::atomic::Ordering::Relaxed);
+        settle_until(|| calls() >= 1).await;
+        assert_eq!(calls(), 1);
     }
 
     /// Records the reuse events the rotation reports.

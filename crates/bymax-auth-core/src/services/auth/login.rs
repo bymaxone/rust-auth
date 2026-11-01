@@ -970,8 +970,13 @@ mod tests {
         }
     }
 
-    /// Hooks that fail on every failure-side callback, to prove the refusal is unchanged.
-    struct BrokenFailureHooks;
+    /// Hooks that fail on every failure-side callback, to prove the refusal is unchanged. They
+    /// count their calls: the hooks run detached, so a test must wait for them before it can say
+    /// the failing hook really ran.
+    #[derive(Default)]
+    struct BrokenFailureHooks {
+        calls: std::sync::atomic::AtomicUsize,
+    }
 
     #[async_trait::async_trait]
     impl crate::traits::AuthHooks for BrokenFailureHooks {
@@ -980,6 +985,8 @@ mod tests {
             _failure: &LoginFailure<'_>,
             _ctx: &HookContext,
         ) -> Result<(), crate::traits::HookError> {
+            self.calls
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             Err(crate::traits::HookError::Rejected(
                 "siem unreachable".to_owned(),
             ))
@@ -991,6 +998,8 @@ mod tests {
             _retry: u64,
             _ctx: &HookContext,
         ) -> Result<(), crate::traits::HookError> {
+            self.calls
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             Err(crate::traits::HookError::Rejected(
                 "siem unreachable".to_owned(),
             ))
@@ -1289,7 +1298,8 @@ mod tests {
         // is still a refusal, and the lockout still locks.
         let mut cfg = base_config();
         cfg.email_verification.required = false;
-        let Some(h) = harness(cfg, Some(Arc::new(BrokenFailureHooks))) else { return };
+        let broken = Arc::new(BrokenFailureHooks::default());
+        let Some(h) = harness(cfg, Some(broken.clone())) else { return };
         let _ = h
             .seed(SeedUser::active("broken@example.com", "right"))
             .await;
@@ -1306,6 +1316,12 @@ mod tests {
             .login(login_input("broken@example.com", "right"), &ctx())
             .await;
         assert!(matches!(locked, Err(AuthError::AccountLocked { .. })));
+
+        // Five failed attempts, the lockout and the refused sixth: the failing hooks really ran,
+        // each after the refusal it could not change had been sent.
+        let calls = || broken.calls.load(std::sync::atomic::Ordering::Relaxed);
+        settle_until(|| calls() >= 7).await;
+        assert_eq!(calls(), 7);
     }
 
     #[tokio::test]

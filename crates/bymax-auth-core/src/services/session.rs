@@ -599,7 +599,10 @@ mod tests {
     /// A hook spy whose notifications both fail, so the swallow-and-report path is observable.
     /// A host's hook is arbitrary code — a webhook, an audit write — and the library must not
     /// let its failure reach the session it was merely notifying about.
-    struct ErroringHooks;
+    #[derive(Default)]
+    struct ErroringHooks {
+        calls: AtomicUsize,
+    }
 
     #[async_trait::async_trait]
     impl AuthHooks for ErroringHooks {
@@ -609,6 +612,7 @@ mod tests {
             _session: &crate::traits::email::SessionInfo,
             _ctx: &HookContext,
         ) -> Result<(), crate::traits::HookError> {
+            self.calls.fetch_add(1, Ordering::Relaxed);
             Err(crate::traits::HookError::Rejected(
                 "new-session sink unavailable".to_owned(),
             ))
@@ -619,6 +623,7 @@ mod tests {
             _evicted_session_hash: &str,
             _ctx: &HookContext,
         ) -> Result<(), crate::traits::HookError> {
+            self.calls.fetch_add(1, Ordering::Relaxed);
             Err(crate::traits::HookError::Rejected(
                 "eviction sink unavailable".to_owned(),
             ))
@@ -1979,12 +1984,8 @@ mod tests {
 
         // One armed failure for the single over-cap revoke this drives.
         store.fail_next_cleanup_writes(1);
-        let svc = service(
-            store.clone(),
-            users,
-            Arc::new(ErroringHooks),
-            config(1, None),
-        );
+        let erroring = Arc::new(ErroringHooks::default());
+        let svc = service(store.clone(), users, erroring.clone(), config(1, None));
         assert!(
             svc.after_session_created(&new_record, &new, &ctx())
                 .await
@@ -1994,6 +1995,10 @@ mod tests {
         // The refused eviction left the over-cap session in place — the outcome the warning
         // exists to make visible.
         assert!(matches!(svc.list_sessions("t1", &uid, Some(&new)).await, Ok(v) if v.len() == 2));
+
+        // Both failing hooks (new session, eviction) really ran, detached, after the call.
+        settle_until(|| erroring.calls.load(Ordering::Relaxed) >= 2).await;
+        assert_eq!(erroring.calls.load(Ordering::Relaxed), 2);
     }
 
     #[tokio::test]
