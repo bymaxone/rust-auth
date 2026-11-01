@@ -12,8 +12,9 @@ use bymax_auth_core::services::auth::{
 };
 use http::StatusCode;
 use serde_json::json;
+use tower_cookies::Cookies;
 
-use super::RequestMeta;
+use super::{RequestMeta, source_refresh_token};
 use crate::dto::{
     ChangePasswordDto, ForgotPasswordDto, ResendOtpDto, ResetPasswordDto, VerifyOtpDto,
 };
@@ -82,10 +83,19 @@ async fn forgot_password(
 /// holding a stolen session cannot be raced out of the account by the owner changing it.
 async fn change_password(
     State(state): State<AuthState>,
+    cookies: Cookies,
     _status: UserStatus,
     user: AuthUser,
     ValidatedJson(dto): ValidatedJson<ChangePasswordDto>,
 ) -> Response {
+    // The caller's own session is kept, so its refresh token has to be found on whichever channel
+    // carries it: the refresh cookie (cookie delivery) or the body (bearer delivery). Reading
+    // only the body made a cookie-mode caller revoke their own session along with the rest.
+    let current_refresh = source_refresh_token(
+        &cookies,
+        &state.config().cookies.refresh_name,
+        dto.refresh_token.as_deref(),
+    );
     match state
         .engine()
         .change_password(
@@ -93,7 +103,7 @@ async fn change_password(
             &user.0.sub,
             &dto.current_password,
             &dto.new_password,
-            dto.refresh_token.as_deref(),
+            Some(current_refresh.as_str()).filter(|token| !token.is_empty()),
         )
         .await
     {

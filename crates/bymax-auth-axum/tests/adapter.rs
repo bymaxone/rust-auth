@@ -24,6 +24,9 @@ mod common;
 #[path = "adapter/invitation_supersede.rs"]
 mod invitation_supersede;
 
+#[path = "adapter/password_change_session.rs"]
+mod password_change_session;
+
 #[path = "adapter/mfa_rotation.rs"]
 mod mfa_rotation;
 
