@@ -4,7 +4,8 @@
 //! layer, the `Cache-Control: no-store` response stamp (RFC 6749 §5.1 — no auth response is
 //! ever cacheable), sensitive-header redaction (so the credential-bearing headers never
 //! reach trace output), a request-body size cap, and the cookie manager that makes the typed
-//! `CookieJar` available to extractors and the delivery layer. Rate-limit layers are
+//! `CookieJar` available to extractors and the delivery layer. The client address is resolved just
+//! outside the cookie manager, so the rate limiters and the engine context share one answer. Rate-limit layers are
 //! **not** here — they attach per route group (§16). The adapter emits `tracing` spans but
 //! installs **no** subscriber: the consuming application owns subscriber setup.
 
@@ -19,6 +20,7 @@ use tower_http::sensitive_headers::{
 use tower_http::set_header::SetResponseHeaderLayer;
 use tower_http::trace::TraceLayer;
 
+use crate::client_ip::ClientIpPolicy;
 use crate::routes::sensitive_header_names;
 use crate::state::AuthState;
 
@@ -33,6 +35,7 @@ pub(crate) fn apply_middleware(
     state: AuthState,
     max_body_bytes: usize,
     cors: Option<tower_http::cors::CorsLayer>,
+    client_ip: ClientIpPolicy,
 ) -> Router<AuthState> {
     // Redact the credential-bearing request headers from any trace span/event, mirroring
     // nest-auth's `sanitizeHeaders`. The set is sourced from the same `SENSITIVE_HEADERS`
@@ -58,6 +61,11 @@ pub(crate) fn apply_middleware(
         .layer(axum::middleware::from_fn_with_state(
             state,
             crate::trusted_origin::enforce_trusted_origin,
+        ))
+        // The client address is resolved once, before any handler or limiter reads it.
+        .layer(axum::middleware::from_fn_with_state(
+            client_ip,
+            crate::client_ip::resolve_client_ip,
         ))
         .layer(CookieManagerLayer::new())
         .layer(RequestBodyLimitLayer::new(max_body_bytes))

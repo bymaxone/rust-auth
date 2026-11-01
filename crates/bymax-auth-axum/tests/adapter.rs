@@ -33,6 +33,9 @@ mod mfa_rotation;
 #[path = "adapter/refresh_channel.rs"]
 mod refresh_channel;
 
+#[path = "adapter/client_ip.rs"]
+mod client_ip;
+
 #[path = "adapter/mfa_setup_body.rs"]
 mod mfa_setup_body;
 
@@ -47,8 +50,8 @@ mod tenant_binding;
 
 use common::{
     Captured, EngineSpec, Req, TENANT, build, build_oauth_with_failing_state_store,
-    build_oauth_with_redirects, current_totp, enable_mfa_flag, router, seed_admin, seed_user,
-    set_status,
+    build_oauth_with_redirects, current_totp, enable_mfa_flag, router, router_with, seed_admin,
+    seed_user, set_status,
 };
 use http::{HeaderName, Method, StatusCode, header};
 
@@ -110,11 +113,13 @@ async fn always_on_groups_are_mounted_and_optional_groups_are_absent_by_default(
     assert_eq!(sessions.status, StatusCode::NOT_FOUND);
 
     // The router reports exactly the derived groups.
-    let derived = bymax_auth_axum::AuthRouter::from_engine(
+    let Ok(assembled) = bymax_auth_axum::AuthRouter::from_engine(
         h.engine.clone(),
         bymax_auth_axum::AxumAuthConfig::new(bymax_auth_axum::ClientIpSource::PeerAddr),
-    )
-    .groups();
+    ) else {
+        return;
+    };
+    let derived = assembled.groups();
     assert!(derived.auth && derived.password_reset);
     assert!(!derived.sessions && !derived.mfa && !derived.platform && !derived.oauth);
     assert!(!derived.invitations && !derived.platform_mfa);
@@ -1645,7 +1650,7 @@ async fn exceeding_the_login_limit_returns_a_429_envelope_with_retry_after() {
 
 #[tokio::test]
 async fn a_custom_rate_limit_override_changes_the_threshold() {
-    use bymax_auth_axum::{AuthRouter, AxumAuthConfig, RateLimit, RateLimitConfig};
+    use bymax_auth_axum::{AxumAuthConfig, RateLimit, RateLimitConfig};
     // Override the login limit to 1/60s and a per-route disable for register, proving the
     // config knobs flow through.
     let Some(h) = build(EngineSpec::default()) else { return };
@@ -1659,7 +1664,7 @@ async fn a_custom_rate_limit_override_changes_the_threshold() {
         rate_limits: limits,
         ..AxumAuthConfig::new(bymax_auth_axum::ClientIpSource::PeerAddr)
     };
-    let app = AuthRouter::from_engine(h.engine.clone(), config).into_router();
+    let app = router_with(&h, config);
 
     // The first attempt is under the override's threshold, so it is refused on its merits.
     // Pinned as that exact refusal rather than as "not 429": the negation passed on any failure
@@ -1683,15 +1688,18 @@ async fn a_custom_rate_limit_override_changes_the_threshold() {
 
 #[tokio::test]
 async fn custom_config_with_forwarded_for_cors_and_prefix() {
-    use bymax_auth_axum::{AuthRouter, AxumAuthConfig, ClientIpSource};
+    use bymax_auth_axum::{AxumAuthConfig, ClientIpSource};
     let Some(h) = build(EngineSpec::default()) else { return };
     let config = AxumAuthConfig {
         route_prefix: "api/auth".to_owned(),
         client_ip_source: ClientIpSource::TrustedForwardedFor,
         cors: Some(tower_http::cors::CorsLayer::permissive()),
         ..AxumAuthConfig::new(bymax_auth_axum::ClientIpSource::PeerAddr)
-    };
-    let app = AuthRouter::from_engine(h.engine.clone(), config).into_router();
+    }
+    // Trusting the forwarded header needs a statement of which peers are the deployment's own
+    // proxies; the harness peer stands in for one.
+    .is_trusted_proxy(|peer| peer.to_string() == "203.0.113.4");
+    let app = router_with(&h, config);
 
     // The route now lives under the custom prefix.
     let me = Req::get("/api/auth/me").send(&app).await;
@@ -2226,16 +2234,11 @@ async fn an_infrastructure_failure_on_the_callback_does_not_become_an_error_redi
 
 #[tokio::test]
 async fn oauth_callback_redirect_branches() {
-    use bymax_auth_axum::{AuthRouter, AxumAuthConfig};
     use bymax_auth_core::config::TokenDelivery;
     // Build an engine with the three redirect URLs configured.
     let Some(h) = build_oauth_with_redirects() else { return };
     let _ = TokenDelivery::Cookie;
-    let app = AuthRouter::from_engine(
-        h.engine.clone(),
-        AxumAuthConfig::new(bymax_auth_axum::ClientIpSource::PeerAddr),
-    )
-    .into_router();
+    let app = router(&h);
 
     // initiate to get a valid state.
     let initiate = Req::get("/auth/oauth/google?tenantId=t1").send(&app).await;
@@ -2404,13 +2407,13 @@ async fn password_reset_otp_two_step_success_flow() {
 async fn an_oversized_body_is_rejected_as_validation() {
     // A body exceeding the configured limit trips the request-body-limit layer; the
     // `ValidatedJson` extractor maps the rejection to the canonical `auth.validation` envelope.
-    use bymax_auth_axum::{AuthRouter, AxumAuthConfig};
+    use bymax_auth_axum::AxumAuthConfig;
     let Some(h) = build(EngineSpec::default()) else { return };
     let config = AxumAuthConfig {
         max_body_bytes: 16,
         ..AxumAuthConfig::new(bymax_auth_axum::ClientIpSource::PeerAddr)
     };
-    let app = AuthRouter::from_engine(h.engine.clone(), config).into_router();
+    let app = router_with(&h, config);
     let big = "x".repeat(4096);
     let resp = Req::post("/auth/login")
         .json(serde_json::json!({
@@ -2527,11 +2530,7 @@ async fn oauth_callback_with_mfa_user_takes_the_mfa_redirect_branch() {
     use bymax_auth_core::traits::UserRepository;
     let _ = h.users.link_oauth(&id, "google", "mock-123").await;
 
-    let app = bymax_auth_axum::AuthRouter::from_engine(
-        h.engine.clone(),
-        bymax_auth_axum::AxumAuthConfig::new(bymax_auth_axum::ClientIpSource::PeerAddr),
-    )
-    .into_router();
+    let app = router(&h);
 
     let initiate = Req::get("/auth/oauth/google?tenantId=t1").send(&app).await;
     let location = initiate
@@ -2572,10 +2571,12 @@ async fn auth_router_free_function_builds_a_working_router() {
         Ok(engine) => engine,
         Err(_) => return,
     };
-    let app = bymax_auth_axum::auth_router(
+    let Ok(app) = bymax_auth_axum::auth_router(
         engine,
         bymax_auth_axum::AxumAuthConfig::new(bymax_auth_axum::ClientIpSource::PeerAddr),
-    );
+    ) else {
+        return;
+    };
     let me = Req::get("/auth/me").send(&app).await;
     assert_eq!(me.status, StatusCode::UNAUTHORIZED);
 }
@@ -3627,7 +3628,7 @@ fn router_with_one_narrow_limit(harness: &common::Harness, narrow: LimitSetter) 
     }
     narrow(&mut limits, Some(bymax_auth_axum::RateLimit::new(1, 60)));
     config.rate_limits = limits;
-    bymax_auth_axum::AuthRouter::from_engine(harness.engine.clone(), config).into_router()
+    router_with(harness, config)
 }
 
 /// One field of `RateLimitConfig`, as a setter.

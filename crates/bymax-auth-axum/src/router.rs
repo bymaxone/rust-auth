@@ -12,23 +12,29 @@ use axum::Router;
 use axum::body::Body;
 use axum::middleware::from_fn_with_state;
 use axum::routing::MethodRouter;
-use bymax_auth_core::AuthEngine;
+use bymax_auth_core::{AuthEngine, ConfigError};
 use tower_governor::GovernorLayer;
 
+use crate::client_ip::ClientIpPolicy;
 use crate::middleware::apply_middleware;
-use crate::rate_limit::{
-    GovernorConfigKind, RateLimit, build_governor_config, governor_error_to_response,
-};
+use crate::rate_limit::{RateLimit, build_governor_config, governor_error_to_response};
 use crate::shared_limit::Throttle;
-use crate::state::{AuthState, AxumAuthConfig, ResolvedConfig, ResolvedCookies, RouteGroups};
+use crate::state::{
+    AuthState, AxumAuthConfig, ClientIpSource, ResolvedConfig, ResolvedCookies, RouteGroups,
+};
 
 /// Build the auth router from a fully-built [`AuthEngine`] and the adapter configuration.
 /// Mounts only the groups the engine's resolved toggles enabled, nests them under
 /// `route_prefix`, attaches per-route rate-limit layers, and applies the §8.8 middleware
 /// stack. The returned router has its `State` already applied, so it composes directly into
 /// a consumer app via `app.merge(router)` or `app.nest("/api", router)`.
-pub fn auth_router(engine: AuthEngine, config: AxumAuthConfig) -> Router {
-    AuthRouter::from_engine(Arc::new(engine), config).into_router()
+///
+/// # Errors
+///
+/// [`ConfigError::TrustedForwardedForRequiresPredicate`] when `config` trusts
+/// `X-Forwarded-For` without an `is_trusted_proxy` predicate.
+pub fn auth_router(engine: AuthEngine, config: AxumAuthConfig) -> Result<Router, ConfigError> {
+    Ok(AuthRouter::from_engine(Arc::new(engine), config)?.into_router())
 }
 
 /// The assembled router plus the derived route groups, exposed so a consumer can inspect
@@ -42,11 +48,24 @@ impl AuthRouter {
     /// Assemble the router from a shared engine handle and the adapter configuration. Reads
     /// the engine's resolved `ControllerToggles` to derive [`RouteGroups`] and mounts the
     /// matching groups.
-    #[must_use]
-    pub fn from_engine(engine: Arc<AuthEngine>, config: AxumAuthConfig) -> Self {
+    ///
+    /// # Errors
+    ///
+    /// [`ConfigError::TrustedForwardedForRequiresPredicate`] when `config` trusts
+    /// `X-Forwarded-For` without an `is_trusted_proxy` predicate: anyone who reaches the service
+    /// directly would choose their own client address, and with it their own rate-limit key.
+    pub fn from_engine(
+        engine: Arc<AuthEngine>,
+        config: AxumAuthConfig,
+    ) -> Result<Self, ConfigError> {
+        if config.client_ip_source == ClientIpSource::TrustedForwardedFor
+            && config.is_trusted_proxy.is_none()
+        {
+            return Err(ConfigError::TrustedForwardedForRequiresPredicate);
+        }
         let groups = RouteGroups::from_toggles(engine.config().config().controllers);
         let resolved = resolve_config(&engine, &config);
-        let throttle = Throttle::new(resolved.client_ip_source, &engine);
+        let throttle = Throttle::new(&engine);
         let state = AuthState::new(engine, Arc::new(resolved));
 
         let prefix = format!("/{}", config.route_prefix.trim_matches('/'));
@@ -70,10 +89,11 @@ impl AuthRouter {
             state.clone(),
             config.max_body_bytes,
             config.cors.clone(),
+            ClientIpPolicy::new(config.client_ip_source, config.is_trusted_proxy.clone()),
         );
         let router = nested.with_state(state);
 
-        Self { router, groups }
+        Ok(Self { router, groups })
     }
 
     /// The derived route groups (which controllers were mounted).
@@ -189,17 +209,11 @@ pub(crate) fn throttled(
             None => method_router,
         };
     }
-    match build_governor_config(limit, ip_source.source()) {
-        Some(GovernorConfigKind::Peer(config)) => {
+    match build_governor_config(limit) {
+        Some(config) => {
             // The governor keys its state in a map that is only ever inserted into, so each
             // throttled route gets a sweeper. See `spawn_key_gc` for why this is the library's
             // job rather than the consumer's.
-            crate::rate_limit::spawn_key_gc(Arc::clone(&config));
-            let layer =
-                GovernorLayer::<_, _, Body>::new(config).error_handler(governor_error_to_response);
-            method_router.route_layer(layer)
-        }
-        Some(GovernorConfigKind::Smart(config)) => {
             crate::rate_limit::spawn_key_gc(Arc::clone(&config));
             let layer =
                 GovernorLayer::<_, _, Body>::new(config).error_handler(governor_error_to_response);

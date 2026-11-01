@@ -263,6 +263,11 @@ pub enum ConfigError {
         /// The first requirement of the prefix the cookie breaks.
         requirement: String,
     },
+    /// The adapter was told to trust `X-Forwarded-For` but was given no `is_trusted_proxy`
+    /// predicate, so any caller that reaches the service directly could choose its own client
+    /// address, and with it its own rate-limit key.
+    #[error("TrustedForwardedFor requires is_trusted_proxy")]
+    TrustedForwardedForRequiresPredicate,
     /// `cookies.same_site = None` was resolved with an empty `cookies.trusted_origins`, so
     /// every cross-site state-changing request would be rejected.
     #[error("cookies.same_site = None requires a non-empty cookies.trusted_origins")]

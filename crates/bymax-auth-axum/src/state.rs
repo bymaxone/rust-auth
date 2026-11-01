@@ -20,8 +20,16 @@ use crate::rate_limit::RateLimitConfig;
 /// before it reaches the buffering JSON extractor.
 pub const DEFAULT_MAX_BODY_BYTES: usize = 1024 * 1024;
 
-/// How the adapter derives the trusted client IP for the per-route rate limiter (§16.2 /
-/// §16.4).
+/// A deployment's statement of which TCP peers are its own proxies: `true` for a proxy the
+/// deployment runs and vouches for, anything else (including a panic) for everyone.
+///
+/// It is handed the peer's socket address, never a header value. Keep it no wider than the
+/// proxies that really sit in front of the service: a predicate that answers `true` for an
+/// address it should not lets that peer choose the client address.
+pub type TrustedProxyFn = std::sync::Arc<dyn Fn(std::net::IpAddr) -> bool + Send + Sync>;
+
+/// How the adapter derives the client address for the per-route rate limiter and for the
+/// engine context (the session address, the lockout key and the hooks).
 ///
 /// **There is deliberately no default.** The two failure modes are opposite and both are
 /// silent, so a default would pick one for a deployment shape this crate cannot see:
@@ -30,11 +38,13 @@ pub const DEFAULT_MAX_BODY_BYTES: usize = 1024 * 1024;
 ///   directly exposed. Behind ANY proxy it is the *proxy's* address for every client, so all
 ///   of them share one bucket — and a single caller sending five logins in a minute rate-limits
 ///   the entire user base, with no credential.
-/// - [`ClientIpSource::TrustedForwardedFor`] reads the last `X-Forwarded-For` hop. Correct
-///   behind exactly one trusted proxy. Directly exposed it is whatever the caller wrote, and a
-///   limiter whose key the attacker picks enforces nothing.
+/// - [`ClientIpSource::TrustedForwardedFor`] reads `X-Forwarded-For`, but only from a peer that
+///   [`AxumAuthConfig::is_trusted_proxy`] vouches for, and takes the rightmost entry that is not
+///   itself a trusted proxy. It requires that predicate: without one, anyone who reaches the
+///   service directly writes the header and chooses their own address, and with it their own
+///   rate-limit key, so the router refuses to build.
 ///
-/// Nothing detects the mismatch at runtime: both look like a working limiter. So
+/// Nothing detects a mismatch at runtime: both look like a working limiter. So
 /// [`AxumAuthConfig`] has no `Default` either — the value is named at construction, and a
 /// deployment that has not thought about it does not compile.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -42,9 +52,9 @@ pub enum ClientIpSource {
     /// Use the socket peer address only — never read `X-Forwarded-For`. Correct only when the
     /// service is directly exposed; behind a proxy every client shares one bucket.
     PeerAddr,
-    /// Trust the last `X-Forwarded-For` entry (set by a trusted reverse proxy), falling
-    /// back to the peer address when the header is absent or malformed. Correct only behind a
-    /// proxy that overwrites the header.
+    /// Read `X-Forwarded-For` from a trusted peer (see [`AxumAuthConfig::is_trusted_proxy`]),
+    /// falling back to the peer address when the peer is not trusted or the header holds no
+    /// address. Requires the predicate.
     TrustedForwardedFor,
 }
 
@@ -59,8 +69,12 @@ pub struct AxumAuthConfig {
     pub max_body_bytes: usize,
     /// Per-route edge rate-limit configuration; defaults reproduce `AUTH_THROTTLE_CONFIGS`.
     pub rate_limits: RateLimitConfig,
-    /// How the client IP is derived for rate-limit keying (trusted-proxy strategy).
+    /// How the client IP is derived (trusted-proxy strategy).
     pub client_ip_source: ClientIpSource,
+    /// Which TCP peers are the deployment's own proxies. Required by
+    /// [`ClientIpSource::TrustedForwardedFor`], ignored by [`ClientIpSource::PeerAddr`]. Set it
+    /// with [`AxumAuthConfig::is_trusted_proxy`].
+    pub is_trusted_proxy: Option<TrustedProxyFn>,
     /// Optional CORS layer, applied outermost in the middleware stack when set. Off by
     /// default — the consumer supplies a configured [`tower_http::cors::CorsLayer`].
     pub cors: Option<tower_http::cors::CorsLayer>,
@@ -80,8 +94,20 @@ impl AxumAuthConfig {
             max_body_bytes: DEFAULT_MAX_BODY_BYTES,
             rate_limits: RateLimitConfig::default(),
             client_ip_source,
+            is_trusted_proxy: None,
             cors: None,
         }
+    }
+
+    /// Name the TCP peers that are this deployment's own proxies, so `X-Forwarded-For` is
+    /// believed from them and from nobody else. See [`TrustedProxyFn`].
+    #[must_use]
+    pub fn is_trusted_proxy(
+        mut self,
+        predicate: impl Fn(std::net::IpAddr) -> bool + Send + Sync + 'static,
+    ) -> Self {
+        self.is_trusted_proxy = Some(std::sync::Arc::new(predicate));
+        self
     }
 }
 

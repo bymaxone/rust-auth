@@ -347,8 +347,13 @@ async fn main() -> anyhow::Result<()> {
         .oauth_provider(Arc::new(GoogleOAuthProvider::new(google_config, http)))
         .build()?;
 
-    // `ClientIpSource` states how the per-route rate limiter learns the caller's address.
-    let app = auth_router(engine, AxumAuthConfig::new(ClientIpSource::PeerAddr));
+    // `ClientIpSource` states how the caller's address is learned, for the per-route rate limiter
+    // and for the session, lockout and hook context alike. Behind a proxy, name it:
+    //   AxumAuthConfig::new(ClientIpSource::TrustedForwardedFor)
+    //       .is_trusted_proxy(|peer| peer.is_loopback()) // true only for YOUR proxies
+    // `X-Forwarded-For` is then believed only from those peers; without the predicate the
+    // router refuses to build, because a directly reachable caller would pick its own address.
+    let app = auth_router(engine, AxumAuthConfig::new(ClientIpSource::PeerAddr))?;
 
     let listener = tokio::net::TcpListener::bind("0.0.0.0:3000").await?;
     // The rate limiter reads the peer address, so serve with connect info.

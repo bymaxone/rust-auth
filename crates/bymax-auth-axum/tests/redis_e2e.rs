@@ -334,11 +334,13 @@ async fn full_router_against_real_redis() {
         "engine/router setup must succeed once the Redis container is running"
     );
     let Some((engine, users, admins)) = built else { return };
-    let app = AuthRouter::from_engine(
+    let Ok(assembled) = AuthRouter::from_engine(
         engine.clone(),
         AxumAuthConfig::new(ClientIpSource::PeerAddr),
-    )
-    .into_router();
+    ) else {
+        return;
+    };
+    let app = assembled.into_router();
 
     // ---- register → login → refresh → logout → me, all over real Redis -----------------
     let reg = call(
