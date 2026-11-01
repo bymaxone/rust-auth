@@ -26,9 +26,37 @@ use crate::context::RequestContext;
 use crate::traits::email::SessionInfo;
 use crate::traits::oauth::OAuthProfile;
 
+/// The identity plane a hook event belongs to.
+///
+/// The tenant cannot answer this: a platform administrator belongs to no tenant, and the
+/// credential-free projection hooks receive carries an empty tenant for one, while a platform
+/// access token carries no tenant claim at all. A consumer correlating a hook against a live
+/// connection by comparing those two values matches nothing on the platform plane and silently
+/// skips every administrator. Branch on this instead of on the shape of `tenant_id`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HookPlane {
+    /// A tenant-scoped dashboard user.
+    Dashboard,
+    /// A cross-tenant platform administrator, who has no tenant.
+    Platform,
+}
+
+impl HookPlane {
+    /// The stable spelling, for a log line or an event payload.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Dashboard => "dashboard",
+            Self::Platform => "platform",
+        }
+    }
+}
+
 /// The minimal, sanitized request context passed to every hook.
 #[derive(Clone, Debug)]
 pub struct HookContext {
+    /// The identity plane the event belongs to. Set on every context the library builds.
+    pub plane: HookPlane,
     /// Internal user id, present once the user is identified.
     pub user_id: Option<String>,
     /// User email, present once identified.
@@ -101,20 +129,21 @@ pub struct LoginFailure<'a> {
 }
 
 impl HookContext {
-    /// A context for an event that has no request behind it.
+    /// A context for an event that has no [`RequestContext`] behind it.
     ///
-    /// Refresh-token reuse is detected inside the rotation, which carries no
-    /// [`RequestContext`]: the fields that would come from one are absent rather than
-    /// invented, so a consumer reading an empty `ip` knows it was never observed instead of
-    /// trusting a placeholder that looks like an address.
+    /// Refresh-token reuse is detected inside the rotation, which is handed the origin of the
+    /// request that presented the token but not the request itself: the headers and the tenant
+    /// are absent rather than invented, so a consumer reading an empty map knows they were never
+    /// observed instead of trusting a placeholder that looks like data.
     #[must_use]
-    pub fn detached(user_id: &str) -> Self {
+    pub fn detached(plane: HookPlane, user_id: &str, ip: &str, user_agent: &str) -> Self {
         Self {
+            plane,
             user_id: Some(user_id.to_owned()),
             email: None,
             tenant_id: None,
-            ip: String::new(),
-            user_agent: String::new(),
+            ip: ip.to_owned(),
+            user_agent: user_agent.to_owned(),
             sanitized_headers: BTreeMap::new(),
         }
     }
@@ -123,12 +152,14 @@ impl HookContext {
     /// the call site. The sanitized headers are copied across from the request context.
     #[must_use]
     pub fn from_request(
+        plane: HookPlane,
         ctx: &RequestContext,
         user_id: Option<String>,
         email: Option<String>,
         tenant_id: Option<String>,
     ) -> Self {
         Self {
+            plane,
             user_id,
             email,
             tenant_id,
@@ -276,6 +307,26 @@ pub trait AuthHooks: Send + Sync {
     /// Called after a logout.
     async fn after_logout(&self, user_id: &str, ctx: &HookContext) -> Result<(), HookError> {
         let _ = (user_id, ctx);
+        Ok(())
+    }
+
+    /// Called after a platform administrator's session has been invalidated.
+    ///
+    /// Separate from [`AuthHooks::after_logout`] rather than sharing it with a plane marker,
+    /// deliberately: an existing `after_logout` handler was written for dashboard users and may
+    /// look up a tenant, so routing platform events into it would change what that handler
+    /// receives without the handler asking. A distinct method is additive and unambiguous.
+    ///
+    /// The platform service reports a completed logout **only** through this hook. A consumer
+    /// that does not implement it learns nothing when an administrator signs out, which matters
+    /// most for a live platform stream with no other signal to close on. `ctx.plane` is
+    /// [`HookPlane::Platform`] and there is no tenant.
+    async fn after_platform_logout(
+        &self,
+        admin_id: &str,
+        ctx: &HookContext,
+    ) -> Result<(), HookError> {
+        let _ = (admin_id, ctx);
         Ok(())
     }
 
@@ -436,6 +487,7 @@ mod tests {
 
     fn ctx() -> HookContext {
         HookContext {
+            plane: HookPlane::Dashboard,
             user_id: Some("u1".into()),
             email: Some("e@x.io".into()),
             tenant_id: Some("t1".into()),
@@ -536,11 +588,13 @@ mod tests {
         headers.insert("x-trace".to_string(), "abc".to_string());
         let req = RequestContext::new("203.0.113.4", "agent/1.0", headers);
         let hctx = HookContext::from_request(
+            HookPlane::Dashboard,
             &req,
             Some("u1".into()),
             Some("e@x.io".into()),
             Some("t1".into()),
         );
+        assert_eq!(hctx.plane, HookPlane::Dashboard);
         assert_eq!(hctx.user_id.as_deref(), Some("u1"));
         assert_eq!(hctx.email.as_deref(), Some("e@x.io"));
         assert_eq!(hctx.tenant_id.as_deref(), Some("t1"));

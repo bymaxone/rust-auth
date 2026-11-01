@@ -224,26 +224,30 @@ impl MfaService {
     }
 
     /// Fire the fire-and-forget "MFA disabled" notifications: the email (both contexts) and the
-    /// `after_mfa_disabled` hook (dashboard only).
+    /// `after_mfa_disabled` hook (both planes).
     fn notify_disabled(&self, view: &MfaUserView, user_id: &str, ip: &str, user_agent: &str) {
         spawn_guarded(run_send_mfa_disabled(
             self.email.clone(),
             view.email_tenant(),
             view.email.clone(),
         ));
-        if let Some(safe) = view.dashboard_user.clone() {
-            let ctx = self.hook_context(user_id, &view.email, ip, user_agent);
-            spawn_guarded(run_after_mfa_disabled(self.hooks.clone(), safe, ctx));
-        }
+        let ctx = self.hook_context(view.plane(), user_id, &view.email, ip, user_agent);
+        spawn_guarded(run_after_mfa_disabled(
+            self.hooks.clone(),
+            view.hook_user.clone(),
+            ctx,
+        ));
     }
 
-    /// Fire the fire-and-forget `after_mfa_recovery_codes_regenerated` hook (dashboard only;
+    /// Fire the fire-and-forget `after_mfa_recovery_codes_regenerated` hook (both planes;
     /// the plaintext codes are never passed to the hook — they go only to the caller).
     fn notify_regenerated(&self, view: &MfaUserView, user_id: &str, ip: &str, user_agent: &str) {
-        if let Some(safe) = view.dashboard_user.clone() {
-            let ctx = self.hook_context(user_id, &view.email, ip, user_agent);
-            spawn_guarded(run_after_mfa_regenerated(self.hooks.clone(), safe, ctx));
-        }
+        let ctx = self.hook_context(view.plane(), user_id, &view.email, ip, user_agent);
+        spawn_guarded(run_after_mfa_regenerated(
+            self.hooks.clone(),
+            view.hook_user.clone(),
+            ctx,
+        ));
     }
 }
 

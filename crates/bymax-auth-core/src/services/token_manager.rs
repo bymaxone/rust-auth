@@ -28,7 +28,7 @@ use zeroize::Zeroizing;
 use crate::services::session::normalize_session_metadata;
 use crate::services::{internal_error, is_refresh_token_shape, new_uuid_v4, now_offset, now_unix};
 use crate::traits::{
-    AuthHooks, HookContext, RotateOutcome, SessionKind, SessionRecord, SessionRotation,
+    AuthHooks, HookContext, HookPlane, RotateOutcome, SessionKind, SessionRecord, SessionRotation,
     SessionStore,
 };
 
@@ -686,7 +686,8 @@ impl TokenManagerService {
                     family_id = %family,
                     "refresh: token family revoked after reuse detection"
                 );
-                self.fire_reuse_detected(owner_id, &family).await;
+                self.fire_reuse_detected(HookPlane::Dashboard, owner_id, &family, ip, user_agent)
+                    .await;
                 Err(AuthError::RefreshTokenInvalid)
             }
             RotateOutcome::Invalid => {
@@ -923,7 +924,8 @@ impl TokenManagerService {
                     family_id = %family,
                     "platform refresh: token family revoked after reuse detection"
                 );
-                self.fire_reuse_detected(owner_id, &family).await;
+                self.fire_reuse_detected(HookPlane::Platform, owner_id, &family, ip, user_agent)
+                    .await;
                 Err(AuthError::RefreshTokenInvalid)
             }
             RotateOutcome::Invalid => {
@@ -1337,11 +1339,18 @@ impl TokenManagerService {
     ///
     /// [`AuthHooks::on_refresh_token_reuse_detected`]:
     ///     crate::traits::AuthHooks::on_refresh_token_reuse_detected
-    async fn fire_reuse_detected(&self, user_id: Option<&str>, family_id: &str) {
+    async fn fire_reuse_detected(
+        &self,
+        plane: HookPlane,
+        user_id: Option<&str>,
+        family_id: &str,
+        ip: &str,
+        user_agent: &str,
+    ) {
         let Some(user_id) = user_id else { return };
-        // The rotation carries no request context of its own — the identity fields are what
-        // the hook itself already names.
-        let ctx = HookContext::detached(user_id);
+        // The rotation is handed the origin of the request that presented the token but not the
+        // request itself, so the plane and that origin are what the context can honestly carry.
+        let ctx = HookContext::detached(plane, user_id, ip, user_agent);
         if let Err(error) = self
             .hooks
             .on_refresh_token_reuse_detected(user_id, family_id, &ctx)
@@ -1898,13 +1907,14 @@ mod tests {
             ctx: &crate::traits::HookContext,
         ) -> Result<(), crate::traits::HookError> {
             if let Ok(mut calls) = self.calls.lock() {
-                // The context names the account and nothing it never observed: an empty `ip`
-                // is honest about a rotation carrying no request, where a placeholder would
-                // read to a consumer as an address someone actually connected from.
+                // The context names the account, its plane and the origin of the request that
+                // presented the token; the rotation has no request of its own to take more from.
                 calls.push(format!(
-                    "{user_id}:{family_id}:{}:{}",
+                    "{user_id}:{family_id}:{}:{}:{}:{}",
                     ctx.user_id.clone().unwrap_or_default(),
-                    ctx.ip
+                    ctx.plane.as_str(),
+                    ctx.ip,
+                    ctx.user_agent
                 ));
             }
             Ok(())
@@ -1943,9 +1953,12 @@ mod tests {
             seen[0].starts_with(&format!("{owner}:")),
             "the event named no owner: {seen:?}"
         );
-        // The family id is carried through, and the detached context repeats the owner while
-        // inventing no request fields.
-        assert!(seen[0].ends_with(&format!(":{owner}:")), "{seen:?}");
+        // The family id is carried through, and the context repeats the owner, says which plane
+        // it is and carries the origin of the replaying request.
+        assert!(
+            seen[0].ends_with(&format!(":{owner}:dashboard:10.0.0.1:agent/1.0")),
+            "{seen:?}"
+        );
     }
 
     #[tokio::test]
@@ -2139,6 +2152,14 @@ mod tests {
         assert_eq!(seen.len(), 1, "exactly one platform reuse event: {seen:?}");
         assert!(
             seen[0].starts_with(&format!("{}:", platform_admin().id)),
+            "{seen:?}"
+        );
+        // The plane is what a consumer branches on, and the origin is the replaying request's.
+        assert!(
+            seen[0].ends_with(&format!(
+                ":{}:platform:10.0.0.1:agent/1.0",
+                platform_admin().id
+            )),
             "{seen:?}"
         );
     }

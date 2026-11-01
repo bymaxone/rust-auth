@@ -85,7 +85,7 @@ cap_lints = true
 #    Verify after any edit to this file with
 #    `cargo mutants --list | grep redis_stores` — exactly two lines, and the excluded anchor
 #    must be the lower-numbered one.
-# 6. `token_manager.rs:1033` `issue_mfa_temp_token` — the `cfg(not(feature = "mfa"))` twin of
+# 6. `token_manager.rs:1149` `issue_mfa_temp_token` — the `cfg(not(feature = "mfa"))` twin of
 #    the method below it, anchored for the same reason as 5. Re-anchored from 618 on 2026-07-28
 #    when security logging pushed the method down. Re-anchored again from 632 on 2026-08-10,
 #    when the tenant claim was threaded onto the challenge token — and this time the anchor had
@@ -137,12 +137,6 @@ cap_lints = true
 #     pattern matches the TRAIT default only; a real provider's implementation is still mutated,
 #     which is what catches a notice that stops firing. The verification sender next to it is
 #     deliberately NOT defaulted, so it generates no such mutant.
-# 14. `replace > with >= in InMemoryStores::read_fact` — the in-memory status cache treats an entry
-#     as live while `expires > now`; `>=` differs only when a read lands on the exact clock tick
-#     the entry expires on, which no assertion can arrange (two `Instant::now()` calls are
-#     ordinarily distinct ticks, and a test cannot make them equal). A TTL that has already run
-#     out is killed by `an_entry_stops_answering_when_its_ttl_has_run_out`. The pattern is
-#     narrow to this one function and operator.
 #
 #     WIDENED 2026-08-08 from that one method to the three defaulted notices —
 #     `send_password_changed`, `send_email_changed_notification` and `send_new_session_alert`.
@@ -155,13 +149,19 @@ cap_lints = true
 #     those with `Ok(())` skips the send entirely, which the "every send reaches the sink" test
 #     catches. Only the four REQUIRED trait methods (the two that carry a token and the two MFA
 #     notices) have no default at all and so generate no mutant of this shape.
+# 14. `replace > with >= in InMemoryStores::read_fact` — the in-memory status cache treats an entry
+#     as live while `expires > now`; `>=` differs only when a read lands on the exact clock tick
+#     the entry expires on, which no assertion can arrange (two `Instant::now()` calls are
+#     ordinarily distinct ticks, and a test cannot make them equal). A TTL that has already run
+#     out is killed by `an_entry_stops_answering_when_its_ttl_has_run_out`. The pattern is
+#     narrow to this one function and operator.
 exclude_re = [
     'replace \| with \^ in new_uuid_v4',
     'replace AuthEngine::builder -> AuthEngineBuilder with Default::default\(\)',
     'delete match arm "inactive" in assert_not_blocked',
     'replace == with != in validate_password',
     'builder\.rs:243:9: replace AuthEngineBuilder::redis_stores',
-    'token_manager\.rs:1147:9: replace TokenManagerService::issue_mfa_temp_token',
+    'token_manager\.rs:1149:9: replace TokenManagerService::issue_mfa_temp_token',
     'replace <impl EmailProvider for NoOpEmailProvider>::\w+ -> Result<\(\), EmailError> with Ok\(\(\)\)',
     'replace AuthHooks::\w+ -> Result<\(\), HookError> with Ok\(\(\)\)',
     'replace < with <= in MfaService::challenge_platform',

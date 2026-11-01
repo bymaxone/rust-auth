@@ -1652,6 +1652,7 @@ The adapter builds `sanitized_headers` by stripping `authorization`, `cookie`, `
 
 ```rust
 pub struct HookContext {
+    pub plane: HookPlane, // Dashboard | Platform; set on every context the library builds
     pub user_id: Option<String>,
     pub email: Option<String>,
     pub tenant_id: Option<String>,
@@ -1760,7 +1761,7 @@ Algorithm:
 1. Decode the access token **without** verifying (it may already be expired at logout). On decode failure, skip the blacklist step.
 2. Compute `remaining_ttl = exp - now`. If `> 0`, `session_store.blacklist_access(&jti, remaining_ttl)` (the store owns the `rv:` prefix; §12.3).
 3. Revoke the refresh session: `session_hash = sha256(raw_refresh)`; `sessions.revoke_session(SessionKind::Dashboard, user_id, &session_hash)` removes the `rt:` record together with its `sess:` membership and `sd:` detail in one ownership-checked domain call (§12.3 / §12.5.3). Idempotent: `SessionNotFound` is ignored (the session may already have been rotated or evicted); any other error is logged.
-4. Spawn `after_logout(user_id, empty_ctx)` fire-and-forget.
+4. Spawn `after_logout(user_id, empty_ctx)` fire-and-forget (the platform logout spawns `after_platform_logout` instead, with `plane = Platform` and no tenant).
 
 Security: the blacklist closes the window where a stolen, still-valid access token could be replayed after logout; refresh deletion is unconditional.
 Traits/crates: `bymax-auth-jwt` (decode), `SessionStore`, `SessionService`, `AuthHooks`.
@@ -2165,7 +2166,7 @@ Recovery codes: each is 12 random bytes → 24 hex chars, grouped `XXXX-XXXX-XXX
 5. **Atomic completion gate:** `getdel(setup_key)`; if `None`, a concurrent request already completed → `MfaSetupRequired` (prevents duplicate `update_mfa` + duplicate "MFA enabled" email).
 6. `update_mfa(user_id, { mfa_enabled: true, mfa_secret: encrypted_secret, mfa_recovery_codes: hashed_codes })` on the correct repo.
 7. `sessions.revoke_all(kind, user_id)` (the domain op — the `invalidate_user_sessions` Lua, §12.3/§12.5) — force re-auth through the MFA challenge (existing access tokens up to 15 min remain valid; accepted tradeoff).
-8. `email.send_mfa_enabled_notification(...)`; spawn `after_mfa_enabled` fire-and-forget.
+8. `email.send_mfa_enabled_notification(...)`; spawn `after_mfa_enabled` fire-and-forget, on either plane (a platform administrator is passed as a `SafeAuthUser` with an empty `tenant_id` and `email_verified = true`, and `HookContext.plane = Platform`). `after_mfa_disabled` and `after_mfa_recovery_codes_regenerated` do the same.
 
 #### 7.5.3 `challenge`
 
@@ -2178,7 +2179,7 @@ Public, pre-auth (holder has only a temp token) — brute-force runs early.
 6. `reset_failures(&bf_id)`.
 7. Consume the temp token. **TOTP:** the consume was already performed atomically with the anti-replay mark inside step 4's single Lua (§7.5.6). **Recovery code:** `tokens.consume_mfa_temp_token(jti)` runs here (idempotent).
 8. If a recovery code was used, remove it from the stored set (`splice` index out) and `update_mfa` on the correct repo.
-9. Issue full tokens with `mfa_verified = true`: dashboard → `issue_tokens` (+ `create_session` if enabled); platform → `issue_platform_tokens`. Spawn `after_login` fire-and-forget.
+9. Issue full tokens with `mfa_verified = true`: dashboard → `issue_tokens` (+ `create_session` if enabled); platform → `issue_platform_tokens`. Then stamp the last-login time on the account's own repository (`update_last_login`) and spawn `after_login` fire-and-forget, its `HookContext.plane` set to the account's plane. For an MFA account this is the only place the last-login time moves, because the password step stopped at the temp token.
 10. Return the dashboard or platform result.
 
 #### 7.5.4 `disable`
@@ -3384,6 +3385,11 @@ pub trait AuthHooks: Send + Sync {
     async fn after_logout(&self, user_id: &str, ctx: &HookContext)
         -> Result<(), HookError> { let _ = (user_id, ctx); Ok(()) }
 
+    /// A platform administrator's logout. Separate from `after_logout`, which was written for
+    /// tenant users; the platform service reports a completed logout only through this hook.
+    async fn after_platform_logout(&self, admin_id: &str, ctx: &HookContext)
+        -> Result<(), HookError> { let _ = (admin_id, ctx); Ok(()) }
+
     async fn after_email_verified(&self, user: &SafeAuthUser, ctx: &HookContext)
         -> Result<(), HookError> { let _ = (user, ctx); Ok(()) }
 
@@ -3461,6 +3467,9 @@ impl AuthHooks for AppAuthHooks {
 /// Minimal, sanitized HTTP request context passed to every hook.
 #[derive(Clone, Debug)]
 pub struct HookContext {
+    /// The identity plane the event belongs to. A platform administrator has no tenant, so the
+    /// tenant cannot tell the planes apart; branch on this instead.
+    pub plane: HookPlane,
     /// Internal user id, present once the user is identified.
     pub user_id: Option<String>,
     /// User email, present once identified.

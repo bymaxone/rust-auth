@@ -35,7 +35,9 @@ use crate::services::brute_force::BruteForceService;
 use crate::services::password::PasswordService;
 use crate::services::token_manager::TokenManagerService;
 use crate::services::{is_refresh_token_shape, now_unix, to_hex};
-use crate::traits::{AuthHooks, HookContext, PlatformUserRepository, SessionKind, SessionStore};
+use crate::traits::{
+    AuthHooks, HookContext, HookPlane, PlatformUserRepository, SessionKind, SessionStore,
+};
 
 use std::sync::Arc;
 
@@ -355,7 +357,7 @@ impl PlatformAuthService {
         // idempotent, and answering an error would tell a caller whether a token was live.
         if !admin_id.is_empty() {
             let hook_ctx = identity_only_context(admin_id);
-            spawn_guarded(run_after_logout(
+            spawn_guarded(run_after_platform_logout(
                 self.hooks.clone(),
                 admin_id.to_owned(),
                 hook_ctx,
@@ -481,6 +483,7 @@ fn repository_error(error: crate::RepositoryError) -> AuthError {
 /// tenant, so `tenant_id` is `None`.
 fn identity_only_context(admin_id: &str) -> HookContext {
     HookContext {
+        plane: HookPlane::Platform,
         user_id: Some(admin_id.to_owned()),
         email: None,
         tenant_id: None,
@@ -491,7 +494,7 @@ fn identity_only_context(admin_id: &str) -> HookContext {
 }
 
 /// Stamp the admin's last successful login (fire-and-forget).
-async fn run_update_platform_last_login(
+pub(crate) async fn run_update_platform_last_login(
     repo: Arc<dyn PlatformUserRepository>,
     admin_id: String,
 ) -> Result<(), crate::RepositoryError> {
@@ -522,14 +525,15 @@ async fn run_rehash_platform_password(
         .map_err(repository_error)
 }
 
-/// Invoke the `after_logout` notification hook for a platform admin. The hook is domain-neutral
-/// (it takes only the subject id), so it is shared with the dashboard logout.
-async fn run_after_logout(
+/// Invoke the `after_platform_logout` notification hook. It is not `after_logout`, which a
+/// consumer wrote for dashboard users and may answer with a tenant lookup an administrator
+/// cannot satisfy.
+async fn run_after_platform_logout(
     hooks: Arc<dyn AuthHooks>,
     admin_id: String,
     ctx: HookContext,
 ) -> Result<(), crate::traits::HookError> {
-    hooks.after_logout(&admin_id, &ctx).await
+    hooks.after_platform_logout(&admin_id, &ctx).await
 }
 
 #[cfg(test)]
@@ -1102,10 +1106,11 @@ mod tests {
         ));
     }
 
-    /// A hook spy that records the subject of every `after_logout` notification.
+    /// A hook spy that records which logout hook fired, for whom, and on which plane.
     #[derive(Default)]
     struct LogoutSpy {
-        subjects: std::sync::Mutex<Vec<String>>,
+        platform: std::sync::Mutex<Vec<(String, crate::traits::HookPlane, Option<String>)>>,
+        dashboard: std::sync::Mutex<Vec<String>>,
     }
 
     #[async_trait::async_trait]
@@ -1115,19 +1120,32 @@ mod tests {
             user_id: &str,
             _ctx: &HookContext,
         ) -> Result<(), crate::traits::HookError> {
-            if let Ok(mut subjects) = self.subjects.lock() {
-                subjects.push(user_id.to_owned());
+            if let Ok(mut seen) = self.dashboard.lock() {
+                seen.push(user_id.to_owned());
+            }
+            Ok(())
+        }
+
+        async fn after_platform_logout(
+            &self,
+            admin_id: &str,
+            ctx: &HookContext,
+        ) -> Result<(), crate::traits::HookError> {
+            if let Ok(mut seen) = self.platform.lock() {
+                seen.push((admin_id.to_owned(), ctx.plane, ctx.tenant_id.clone()));
             }
             Ok(())
         }
     }
 
     #[tokio::test]
-    async fn logout_notifies_the_after_logout_hook_with_the_admin() {
+    async fn logout_notifies_after_platform_logout_and_not_the_dashboard_hook() {
         // The notification is fire-and-forget, so nothing in the logout's own result reflects
         // it — a hook that was never invoked looks exactly like one that was. A deployment
-        // wires this to send the "signed out on a new device" mail and to close down its own
-        // sessions, so silently dropping it is a real loss.
+        // wires this to close down its own sessions, so silently dropping it is a real loss.
+        // And it is a separate hook from the dashboard's `after_logout`, which a consumer wrote
+        // for tenant users: handing it an administrator would change what it receives without
+        // it having asked.
         let spy = Arc::new(LogoutSpy::default());
         let admins = Arc::new(InMemoryPlatformUserRepository::new());
         let stores = Arc::new(InMemoryStores::new());
@@ -1152,8 +1170,13 @@ mod tests {
         );
         // Long enough for the detached task to have run.
         tokio::time::sleep(Duration::from_millis(500)).await;
-        let seen = spy.subjects.lock().map(|s| s.clone()).unwrap_or_default();
-        assert_eq!(seen, vec![id]);
+        let platform = spy.platform.lock().map(|s| s.clone()).unwrap_or_default();
+        assert_eq!(
+            platform,
+            vec![(id, crate::traits::HookPlane::Platform, None)]
+        );
+        let dashboard = spy.dashboard.lock().map(|s| s.clone()).unwrap_or_default();
+        assert!(dashboard.is_empty(), "after_logout received {dashboard:?}");
     }
 
     #[tokio::test]

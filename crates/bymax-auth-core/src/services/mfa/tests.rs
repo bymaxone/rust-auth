@@ -78,7 +78,7 @@ pub(super) fn build(sessions: bool, wire_platform: bool) -> Option<Harness> {
 
 /// The same harness, with an optional email provider and hooks so the fire-and-forget
 /// notifications the MFA flows emit can be observed.
-fn build_with(
+pub(super) fn build_with(
     sessions: bool,
     wire_platform: bool,
     email: Option<Arc<dyn EmailProvider>>,
@@ -241,6 +241,7 @@ fn sample_safe_user() -> bymax_auth_types::SafeAuthUser {
 /// A sample hook context for the detached-notification helpers.
 fn sample_hook_ctx() -> HookContext {
     HookContext {
+        plane: crate::traits::HookPlane::Dashboard,
         user_id: Some("u1".to_owned()),
         email: Some("u@example.com".to_owned()),
         tenant_id: None,
@@ -4605,6 +4606,7 @@ fn an_mfa_notice_is_attributed_to_the_account_tenant_or_the_platform_plane() {
         mfa_secret: None,
         mfa_recovery_codes: None,
         dashboard_user: Some(sample_safe_user()),
+        hook_user: sample_safe_user(),
         password_hash: None,
     };
     assert_eq!(dashboard.email_tenant(), TENANT);

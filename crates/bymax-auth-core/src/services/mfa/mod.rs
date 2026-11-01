@@ -13,9 +13,12 @@
 //! `mfa` feature.
 
 mod challenge;
+mod hooks;
 mod manage;
 mod setup;
 
+#[cfg(test)]
+mod hook_tests;
 #[cfg(test)]
 mod recovery_tests;
 #[cfg(test)]
@@ -144,6 +147,9 @@ struct MfaUserView {
     /// the list as it stands inside the lock rather than a copy taken before it.
     mfa_recovery_codes: Option<Vec<String>>,
     dashboard_user: Option<SafeAuthUser>,
+    /// The account as hooks receive it, on either plane (a platform administrator carries no
+    /// tenant; see `hooks::platform_hook_user`).
+    hook_user: SafeAuthUser,
     /// The account's stored password hash, or `None` for an account provisioned purely
     /// through OAuth. Enrolment re-authenticates against it; an account without one has
     /// nothing to re-prove here.
@@ -151,6 +157,15 @@ struct MfaUserView {
 }
 
 impl MfaUserView {
+    /// The plane the account belongs to, which `dashboard_user` already encodes.
+    fn plane(&self) -> crate::traits::HookPlane {
+        if self.dashboard_user.is_some() {
+            crate::traits::HookPlane::Dashboard
+        } else {
+            crate::traits::HookPlane::Platform
+        }
+    }
+
     /// The tenant an MFA notice is attributed to at the email port: a dashboard user's own
     /// tenant, or [`PLATFORM_EMAIL_TENANT`] for a cross-tenant admin who carries none.
     ///
@@ -651,6 +666,7 @@ impl MfaService {
                     mfa_secret: user.mfa_secret.clone(),
                     mfa_recovery_codes: user.mfa_recovery_codes.clone(),
                     password_hash: user.password_hash.clone(),
+                    hook_user: SafeAuthUser::from(user.clone()),
                     dashboard_user: Some(SafeAuthUser::from(user)),
                 })
             }
@@ -665,6 +681,7 @@ impl MfaService {
                     .map_err(repository_error)?
                     .ok_or(AuthError::MfaNotEnabled)?;
                 crate::status_gate::assert_not_blocked(&admin.status, &self.blocked_statuses)?;
+                let hook_user = hooks::platform_hook_user(&admin);
                 Ok(MfaUserView {
                     email: admin.email,
                     mfa_enabled: admin.mfa_enabled,
@@ -672,6 +689,7 @@ impl MfaService {
                     mfa_recovery_codes: admin.mfa_recovery_codes,
                     password_hash: Some(admin.password_hash),
                     dashboard_user: None,
+                    hook_user,
                 })
             }
         }
@@ -934,25 +952,6 @@ impl MfaService {
             secret: totp::encode_secret_base32(raw_secret),
             qr_code_uri: totp::provisioning_uri(raw_secret, email, &self.issuer),
             recovery_codes,
-        }
-    }
-
-    /// Build the sanitized hook context for an MFA management operation from the identity
-    /// already proven by the access token plus the request IP/user-agent.
-    fn hook_context(
-        &self,
-        user_id: &str,
-        email: &str,
-        ip: &str,
-        user_agent: &str,
-    ) -> crate::traits::HookContext {
-        crate::traits::HookContext {
-            user_id: Some(user_id.to_owned()),
-            email: Some(email.to_owned()),
-            tenant_id: None,
-            ip: ip.to_owned(),
-            user_agent: user_agent.to_owned(),
-            sanitized_headers: std::collections::BTreeMap::new(),
         }
     }
 }

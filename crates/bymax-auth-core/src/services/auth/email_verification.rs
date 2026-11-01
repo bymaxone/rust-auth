@@ -13,7 +13,7 @@ use crate::engine::AuthEngine;
 use crate::normalize::{log_safe, normalize_email};
 use crate::services::auth::detached::{run_after_email_verified, run_send_verification_email};
 use crate::services::auth::{map_repository_error, normalize_anti_enum, spawn_guarded};
-use crate::traits::{HookContext, OtpPurpose};
+use crate::traits::{HookContext, HookPlane, OtpPurpose};
 
 /// The resend cooldown window, in seconds (§7.1.6).
 const RESEND_COOLDOWN_SECS: u64 = 60;
@@ -182,6 +182,7 @@ impl AuthEngine {
 /// has no originating request context).
 fn verification_context(user_id: &str, email: &str, tenant_id: &str) -> HookContext {
     HookContext {
+        plane: HookPlane::Dashboard,
         user_id: Some(user_id.to_owned()),
         email: Some(email.to_owned()),
         tenant_id: Some(tenant_id.to_owned()),

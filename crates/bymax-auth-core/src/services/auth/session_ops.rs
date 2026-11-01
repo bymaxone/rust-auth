@@ -11,7 +11,7 @@ use crate::engine::AuthEngine;
 use crate::services::auth::detached::{run_after_login, run_after_logout, run_update_last_login};
 use crate::services::auth::{map_repository_error, spawn_guarded};
 use crate::services::{is_refresh_token_shape, now_unix};
-use crate::traits::{HookContext, SessionKind};
+use crate::traits::{HookContext, HookPlane, SessionKind};
 
 /// What a **dashboard** refresh returns: the rotated tokens plus the account behind them.
 ///
@@ -409,6 +409,7 @@ fn identity_only_context(
     tenant_id: Option<String>,
 ) -> HookContext {
     HookContext {
+        plane: HookPlane::Dashboard,
         user_id: Some(user_id.to_owned()),
         email,
         tenant_id,
