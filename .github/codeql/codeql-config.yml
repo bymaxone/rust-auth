@@ -1,0 +1,17 @@
+# CodeQL configuration for .github/workflows/codeql.yml.
+#
+# Test code is not part of what ships, and it is where CodeQL's results are overwhelmingly noise
+# for this repository: the fixtures hold made-up passwords, and a failed assertion formats the
+# value under test into a message, which the hard-coded-value and cleartext-logging queries read
+# as a credential written to a log. Results in these paths are not reported.
+#
+# What this cannot reach: a unit-test module declared INSIDE a library file (`#[cfg(test)] mod
+# tests { .. }` in `src/**/*.rs`) is the same file as the code it tests, so no path separates it.
+# Those results are reviewed and dismissed as "used in tests" one at a time. Moving a test module
+# into its own file (`tests.rs` or `*_tests.rs`) takes it out of reporting.
+#
+# Library code under `src/` is never matched by these patterns.
+paths-ignore:
+  - "**/tests/**"
+  - "**/tests.rs"
+  - "**/*_tests.rs"
