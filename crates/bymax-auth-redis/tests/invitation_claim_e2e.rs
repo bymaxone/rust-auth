@@ -96,6 +96,18 @@ async fn the_claim_proceeds_only_while_the_index_holds_what_was_approved() {
     // The claimed entry carries the invitation's TTL, and tenants do not share an index.
     let ttl = redis.ttl("auth:invidx:t1:cafe").await;
     assert!((1..=600).contains(&ttl), "{ttl}");
+
+    // Claiming again with the hash it already holds renews the TTL: an invite that writes its
+    // record later than its claim renews the index so the record cannot outlive the entry that
+    // names it.
+    assert!(matches!(
+        stores
+            .claim_invitation_index("t1", "cafe", NEW, 6000, Some(NEW))
+            .await,
+        Ok(true)
+    ));
+    let renewed = redis.ttl("auth:invidx:t1:cafe").await;
+    assert!(renewed > 600, "{renewed}");
     assert!(matches!(
         stores.read_invitation_index("t2", "cafe").await,
         Ok(None)

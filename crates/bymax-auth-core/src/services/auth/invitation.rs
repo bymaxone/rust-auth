@@ -150,12 +150,12 @@ impl AuthEngine {
         store.put_invitation(&raw, &invitation, ttl).await?;
         // A revoke or a later invite can move the index between the claim and this write. The
         // record is then live with nothing naming it (or beside a newer one), so it is withdrawn
-        // rather than left redeemable: the address was changed under this invite.
-        if store
-            .read_invitation_index(tenant_id, &invitee_hash)
+        // rather than left redeemable: the address was changed under this invite. The same
+        // compare-and-set renews the index's TTL, which started at the claim: a record written
+        // later than the claim would otherwise outlive the entry that names it.
+        if !store
+            .claim_invitation_index(tenant_id, &invitee_hash, &new_hash, ttl, Some(&new_hash))
             .await?
-            .as_deref()
-            != Some(new_hash.as_str())
         {
             store.delete_invitation_by_hash(&new_hash).await?;
             return Err(AuthError::InsufficientRole);
