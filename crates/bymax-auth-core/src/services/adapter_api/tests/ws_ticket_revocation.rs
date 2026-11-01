@@ -13,7 +13,11 @@ async fn minted(
     h: &crate::services::auth::test_support::Harness,
     claims: &DashboardClaims,
 ) -> String {
-    h.engine.issue_ws_ticket(claims).await.unwrap_or_default()
+    h.engine
+        .issue_ws_ticket(claims)
+        .await
+        .map(|issued| issued.ticket)
+        .unwrap_or_default()
 }
 
 fn dashboard_subject(
@@ -257,7 +261,11 @@ async fn minted_ttls(lifetimes: &[i64]) -> Vec<Option<u64>> {
         let issued = engine.issue_ws_ticket(&claims).await;
         let after = recorder.ttls.lock().map(|t| t.clone()).unwrap_or_default();
         out.push(match issued {
-            Ok(_) => after.get(before).copied(),
+            Ok(minted) => {
+                // The lifetime reported to the caller is the one the store was given.
+                assert_eq!(Some(minted.expires_in), after.get(before).copied());
+                after.get(before).copied()
+            }
             Err(_) => None,
         });
     }

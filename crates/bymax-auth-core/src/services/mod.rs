@@ -25,7 +25,7 @@
 mod account_status;
 mod adapter_api;
 
-pub use adapter_api::WS_TICKET_TTL_SECONDS;
+pub use adapter_api::{IssuedWsTicket, WS_TICKET_TTL_SECONDS};
 pub use verifier::{AuthPlane, VerifiedAccessToken, VerifyAccessOptions};
 
 pub mod auth;
@@ -202,6 +202,18 @@ pub(crate) fn now_unix() -> i64 {
     OffsetDateTime::now_utc().unix_timestamp()
 }
 
+/// The current time as Unix seconds rounded **up**, for a lifetime that must not outlast a
+/// whole-second expiry: measuring from the next second boundary leaves the sub-second remainder
+/// as slack against the delay between reading the clock and the store applying the write.
+pub(crate) fn now_unix_ceil() -> i64 {
+    ceil_unix(OffsetDateTime::now_utc())
+}
+
+/// `at` as Unix seconds, rounded up to the next whole second unless it is exactly on one.
+fn ceil_unix(at: OffsetDateTime) -> i64 {
+    at.unix_timestamp() + i64::from(at.nanosecond() > 0)
+}
+
 /// The current time as an [`OffsetDateTime`], for the session-record `created_at`.
 pub(crate) fn now_offset() -> OffsetDateTime {
     OffsetDateTime::now_utc()
@@ -231,6 +243,32 @@ fn is_lower_hex(byte: u8) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_rounded_up_clock_keeps_a_whole_second_and_rounds_every_fraction_up() {
+        // On the second: unchanged. One nanosecond past it, and almost a full second past it:
+        // both belong to the next second boundary.
+        let on_the_second = OffsetDateTime::UNIX_EPOCH + time::Duration::seconds(100);
+        assert_eq!(ceil_unix(on_the_second), 100);
+        assert_eq!(
+            ceil_unix(on_the_second + time::Duration::nanoseconds(1)),
+            101
+        );
+        assert_eq!(
+            ceil_unix(on_the_second + time::Duration::nanoseconds(999_999_999)),
+            101
+        );
+        assert_eq!(ceil_unix(on_the_second + time::Duration::seconds(1)), 101);
+    }
+
+    #[test]
+    fn the_rounded_up_clock_is_never_behind_the_whole_second_clock() {
+        let (ceil, floor) = (now_unix_ceil(), now_unix());
+        assert!(
+            ceil == floor || ceil == floor + 1,
+            "ceil {ceil} floor {floor}"
+        );
+    }
 
     #[test]
     fn is_refresh_token_shape_accepts_only_64_lowercase_hex() {
