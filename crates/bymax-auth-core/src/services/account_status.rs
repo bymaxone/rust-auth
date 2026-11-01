@@ -6,14 +6,16 @@
 //! status (and, where the deployment requires verification, the verified-address flag) is cached
 //! for `user_status_cache_ttl`: a suspension therefore takes effect within that TTL unless the
 //! host calls [`AuthEngine::invalidate_account_status`] where it changes the account. Mirrors
-//! nest-auth's `AccountStatusService`, whose cache this shares.
+//! nest-auth's `AccountStatusService`, whose cache this shares: the entries are keyed by the
+//! account's subject hash, `hmac_sha256(hmacKey, userSubject)`, as the shared wire contract's
+//! `userStatusCache` pins.
 
 use bymax_auth_types::AuthError;
 
 use crate::engine::AuthEngine;
 use crate::normalize::log_safe;
 use crate::services::auth::map_repository_error;
-use crate::traits::UserStatusCacheStore;
+use crate::traits::{SessionKind, UserStatusCacheStore};
 
 /// What the gate needs to know about an account.
 struct AccountFacts {
@@ -44,11 +46,12 @@ impl AuthEngine {
         want_verified: bool,
     ) -> Result<AccountFacts, AuthError> {
         let cache = self.status_cache();
+        let subject = self.session_subject(SessionKind::Dashboard, Some(tenant_id), sub);
         let (mut status, mut verified) = (None, None);
         if let Some((cache, _)) = cache {
-            status = cache.get_status(tenant_id, sub).await?;
+            status = cache.get_status(&subject).await?;
             if want_verified {
-                verified = cache.get_verified(tenant_id, sub).await?;
+                verified = cache.get_verified(&subject).await?;
             }
         }
         if let (Some(status), true) = (&status, !want_verified || verified.is_some()) {
@@ -64,10 +67,10 @@ impl AuthEngine {
             .map_err(map_repository_error)?
             .ok_or(AuthError::TokenInvalid)?;
         if let Some((cache, ttl)) = cache {
-            cache.put_status(tenant_id, sub, &user.status, ttl).await?;
+            cache.put_status(&subject, &user.status, ttl).await?;
             if self.config().config().email_verification.required {
                 cache
-                    .put_verified(tenant_id, sub, user.email_verified, ttl)
+                    .put_verified(&subject, user.email_verified, ttl)
                     .await?;
             }
         }
@@ -118,7 +121,8 @@ impl AuthEngine {
         if user_id.trim().is_empty() || tenant_id.trim().is_empty() {
             return Ok(());
         }
-        cache.invalidate(tenant_id, user_id).await
+        let subject = self.session_subject(SessionKind::Dashboard, Some(tenant_id), user_id);
+        cache.invalidate(&subject).await
     }
 
     /// [`Self::invalidate_account_status`] for a flow whose irreversible work is already
@@ -138,5 +142,7 @@ impl AuthEngine {
     }
 }
 
+#[cfg(test)]
+mod contract_tests;
 #[cfg(test)]
 mod tests;

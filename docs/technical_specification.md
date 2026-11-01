@@ -2893,21 +2893,21 @@ pub struct RequirePlatformRole<R: PlatformRole>(pub PlatformClaims, PhantomData<
   ```
 
 - **`UserStatus`** — the `UserStatusGuard`. Resolves `AuthUser`, then reads the
-  user's status from the shared status cache (`{ns}:us:{scope}`, with the verified-address
-  flag at `{ns}:uev:{scope}` only where `email_verification.required`, and
-  `scope = encodeURIComponent(tenant_id):encodeURIComponent(user_id)`, TTL
-  `user_status_cache_ttl`), falling back to the tenant-scoped user store on a miss and
-  re-caching. An account that no longer exists is `token_invalid` and is not cached. If the
-  status is in the configured `blocked_statuses`, it rejects with the status-specific code:
-  `AccountBanned` / `AccountInactive` / `AccountSuspended` / `PendingApproval`
-  (all 403); a blocked status is reported before an unverified address. The entries are
-  the ones nest-auth 1.4.8 writes, so both libraries can serve one deployment off one Redis.
-  The cache and its invalidation are engine responsibilities: the extractor calls
-  `AuthEngine::assert_user_active(sub, tenant_id)` with the token's tenant, `verify_email`
-  drops the account's entries best-effort once the flag is committed, and a host that
-  changes an account's status calls `AuthEngine::invalidate_account_status(user_id, tenant_id)`.
-  That narrows the window to one repository read, not to zero: a check already resolving
-  can write the old value back.
+  user's status from the shared status cache (`{ns}:us:{subject}`, with the verified-address
+  flag at `{ns}:uev:{subject}` only where `email_verification.required`, and
+  `subject = hmac_sha256(hmacKey, "dashboard:{utf8 byte length of tenantId}:{tenantId}:{userId}")`
+  in lower-case hex, TTL `user_status_cache_ttl`), falling back to the tenant-scoped user store
+  on a miss and re-caching. An account that no longer exists is `token_invalid` and is not
+  cached. If the status is in the configured `blocked_statuses`, it rejects with the
+  status-specific code: `AccountBanned` / `AccountInactive` / `AccountSuspended` /
+  `PendingApproval` (all 403); a blocked status is reported before an unverified address. The
+  keys and values are pinned by the shared wire contract (`userStatusCache`), so nest-auth and
+  this library can serve one deployment off one Redis. The cache and its invalidation are engine
+  responsibilities: the extractor calls `AuthEngine::assert_user_active(sub, tenant_id)` with the
+  token's tenant, `verify_email` drops the account's entries best-effort once the flag is
+  committed, and a host that changes an account's status calls
+  `AuthEngine::invalidate_account_status(user_id, tenant_id)`. That narrows the window to one
+  repository read, not to zero: a check already resolving can write the old value back.
 
 - **`MfaSatisfied`** — the `MfaRequiredGuard`. Resolves `AuthUser`, then requires
   `claims.mfa_verified == true` when the account has MFA enabled; otherwise
