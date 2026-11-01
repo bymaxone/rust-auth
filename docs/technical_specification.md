@@ -2101,7 +2101,7 @@ Constants: `MAX_IP_LENGTH: usize = 45` (IPv6 max — IP is truncated before stor
 1. `smembers("sess:{subject_hash}")`, keep `rt:` members.
 2. For each, `get("sd:{hash}")`. A detail that is missing or is not a whole record → leave the session out of the result and mark the member **stale**; one such record never fails the listing or hides the others. A failed read of the key is an error and is returned, not treated as stale.
 3. Build `SessionInfo`; `is_current = timing_safe_compare(hash, current_hash.unwrap_or(""))` (a 64-char hash never length-matches `""`, so absent current → all `false`).
-4. `srem` a stale member only when its `rt:{hash}` key is gone too: the detail alone does not say the session is dead, since a live session can have lost or damaged its detail, and it would then vanish from every later listing and from the sweeps that walk this index. nest-auth prunes in the background and this library prunes inline; the rule is the same.
+4. `srem` a stale member only when its `rt:{hash}` key is gone too: the detail alone does not say the session is dead, since a live session can have lost or damaged its detail, and it would then vanish from every later listing and from the sweeps that walk this index. The check and the removal are one Lua script (`session_prune_dead`), so a member whose key appears between them is not dropped. This library prunes inline.
 5. Sort by `created_at` descending (newest first); return.
 
 #### 7.4.4 `revoke_session` (atomic, ownership-checked)

@@ -1,11 +1,14 @@
 //! Reading one session-detail record for a listing: which members surface and which are left out.
 //!
-//! Layer: a pure helper of the session store, kept apart from the Redis calls so the decision is
-//! testable without a server.
+//! Layer: a helper of the session store. The decision is pure, so it is testable without a
+//! server; the one Redis call here removes a dead index member atomically.
 
 use bymax_auth_core::traits::SessionDetail;
 
 use super::session::SessionDetailValue;
+use crate::error::RedisStoreError;
+use crate::pool::RedisStores;
+use crate::script;
 
 /// What reading one `sd:`/`psd:` record means for the listing.
 #[derive(Debug, PartialEq)]
@@ -33,6 +36,29 @@ pub(super) fn read_detail(hash: &str, raw: Option<&str>) -> DetailRead {
             last_activity_at: value.last_activity_at,
         }),
         Err(_) => DetailRead::Excluded,
+    }
+}
+
+impl RedisStores {
+    /// Remove `member` from the index `sess_key` if, and only if, the key `rt_key` it names is
+    /// gone. Existence is the only evidence admitted: a detail that is missing or damaged does
+    /// not make a session dead, and removing a live one from the index lets it outlive a
+    /// sign-out-everywhere.
+    pub(super) async fn prune_dead_member(
+        &self,
+        sess_key: &str,
+        rt_key: &str,
+        member: &str,
+    ) -> Result<(), RedisStoreError> {
+        let mut conn = self.connection().await?;
+        let _removed: i64 = script::SESSION_PRUNE_DEAD
+            .prepare()
+            .key(sess_key)
+            .key(rt_key)
+            .arg(member)
+            .invoke_async(&mut conn)
+            .await?;
+        Ok(())
     }
 }
 

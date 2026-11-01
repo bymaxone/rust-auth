@@ -46,6 +46,10 @@ pub static RECOVER_GRACE: LazyLock<LuaScript> =
 pub static SESSION_REVOKE: LazyLock<LuaScript> =
     LazyLock::new(|| LuaScript::new(include_str!("lua/session_revoke.lua")));
 
+/// `session_prune_dead` — remove a session-index member only if the key it names is gone.
+pub static SESSION_PRUNE_DEAD: LazyLock<LuaScript> =
+    LazyLock::new(|| LuaScript::new(include_str!("lua/session_prune_dead.lua")));
+
 /// `invalidate_user_sessions` — revoke every session for a user in one transaction.
 pub static INVALIDATE_USER_SESSIONS: LazyLock<LuaScript> =
     LazyLock::new(|| LuaScript::new(include_str!("lua/invalidate_user_sessions.lua")));

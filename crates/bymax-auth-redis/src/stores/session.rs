@@ -538,9 +538,8 @@ impl RedisStores {
                 DetailRead::Listed(detail) => details.push(detail),
                 // Left out; pruned only if its `rt:` key is gone too (see `DetailRead`).
                 DetailRead::Excluded => {
-                    if !conn.exists::<_, bool>(keys.key(prefixes.rt, hash)).await? {
-                        let _: i64 = conn.srem(&sess_key, member).await?;
-                    }
+                    let rt_key = keys.key(prefixes.rt, hash);
+                    self.prune_dead_member(&sess_key, &rt_key, member).await?;
                 }
             }
         }
