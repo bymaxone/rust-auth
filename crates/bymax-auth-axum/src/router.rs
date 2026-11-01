@@ -10,6 +10,7 @@ use std::sync::Arc;
 
 use axum::Router;
 use axum::body::Body;
+use axum::middleware::from_fn_with_state;
 use axum::routing::MethodRouter;
 use bymax_auth_core::AuthEngine;
 use tower_governor::GovernorLayer;
@@ -18,6 +19,7 @@ use crate::middleware::apply_middleware;
 use crate::rate_limit::{
     GovernorConfigKind, RateLimit, build_governor_config, governor_error_to_response,
 };
+use crate::shared_limit::Throttle;
 use crate::state::{AuthState, AxumAuthConfig, ResolvedConfig, ResolvedCookies, RouteGroups};
 
 /// Build the auth router from a fully-built [`AuthEngine`] and the adapter configuration.
@@ -44,6 +46,7 @@ impl AuthRouter {
     pub fn from_engine(engine: Arc<AuthEngine>, config: AxumAuthConfig) -> Self {
         let groups = RouteGroups::from_toggles(engine.config().config().controllers);
         let resolved = resolve_config(&engine, &config);
+        let throttle = Throttle::new(resolved.client_ip_source, &engine);
         let state = AuthState::new(engine, Arc::new(resolved));
 
         let prefix = format!("/{}", config.route_prefix.trim_matches('/'));
@@ -51,19 +54,13 @@ impl AuthRouter {
 
         // The always-on groups (still gated by their toggle, which defaults to true).
         if groups.auth {
-            grouped = grouped.merge(crate::routes::auth::routes(
-                &config,
-                state.config().client_ip_source,
-            ));
+            grouped = grouped.merge(crate::routes::auth::routes(&config, &throttle));
         }
         if groups.password_reset {
-            grouped = grouped.merge(crate::routes::password_reset::routes(
-                &config,
-                state.config().client_ip_source,
-            ));
+            grouped = grouped.merge(crate::routes::password_reset::routes(&config, &throttle));
         }
 
-        grouped = mount_optional_groups(grouped, groups, &config, state.config().client_ip_source);
+        grouped = mount_optional_groups(grouped, groups, &config, &throttle);
 
         // Nest the grouped routes under the configured prefix, apply the middleware stack,
         // then bind the shared state so the router is self-contained.
@@ -105,7 +102,7 @@ fn mount_optional_groups(
     mut router: Router<AuthState>,
     groups: RouteGroups,
     config: &AxumAuthConfig,
-    ip_source: crate::state::ClientIpSource,
+    ip_source: &Throttle,
 ) -> Router<AuthState> {
     // Each block is doubly gated: a `#[cfg(feature = …)]` removes the code when the Cargo
     // feature is off, and the runtime toggle removes the routes when the engine did not wire
@@ -183,9 +180,16 @@ fn refresh_max_age_secs(days: u32) -> i64 {
 pub(crate) fn throttled(
     method_router: MethodRouter<AuthState>,
     limit: Option<RateLimit>,
-    ip_source: crate::state::ClientIpSource,
+    ip_source: &Throttle,
 ) -> MethodRouter<AuthState> {
-    match build_governor_config(limit, ip_source) {
+    if ip_source.is_shared() {
+        return match ip_source.shared_state(limit) {
+            Some(state) => method_router
+                .route_layer(from_fn_with_state(state, crate::shared_limit::shared_limit)),
+            None => method_router,
+        };
+    }
+    match build_governor_config(limit, ip_source.source()) {
         Some(GovernorConfigKind::Peer(config)) => {
             // The governor keys its state in a map that is only ever inserted into, so each
             // throttled route gets a sweeper. See `spawn_key_gc` for why this is the library's

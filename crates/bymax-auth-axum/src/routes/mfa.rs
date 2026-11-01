@@ -24,11 +24,12 @@ use crate::dto::{
 use crate::extractors::{AuthUser, VerifiedUser};
 use crate::response::error_response;
 use crate::routes::{CookieDomains, RequestMeta};
-use crate::state::{AuthState, AxumAuthConfig, ClientIpSource};
+use crate::shared_limit::Throttle;
+use crate::state::{AuthState, AxumAuthConfig};
 use crate::validation::ValidatedJson;
 
 /// Assemble the `mfa` group under the `mfa` segment, with per-route rate-limit layers.
-pub(crate) fn routes(config: &AxumAuthConfig, ip_source: ClientIpSource) -> Router<AuthState> {
+pub(crate) fn routes(config: &AxumAuthConfig, ip_source: &Throttle) -> Router<AuthState> {
     let limits = &config.rate_limits;
     Router::new().nest(
         "/mfa",

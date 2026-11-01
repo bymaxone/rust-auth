@@ -19,12 +19,13 @@ use crate::dto::{
 };
 use crate::extractors::{AuthUser, UserStatus};
 use crate::response::{anti_enumerating_outcome, error_response};
-use crate::state::{AuthState, AxumAuthConfig, ClientIpSource};
+use crate::shared_limit::Throttle;
+use crate::state::{AuthState, AxumAuthConfig};
 use crate::validation::ValidatedJson;
 
 /// Assemble the `password_reset` group, scoped under the `password` segment, with per-route
 /// rate-limit layers.
-pub(crate) fn routes(config: &AxumAuthConfig, ip_source: ClientIpSource) -> Router<AuthState> {
+pub(crate) fn routes(config: &AxumAuthConfig, ip_source: &Throttle) -> Router<AuthState> {
     let limits = &config.rate_limits;
     Router::new().nest(
         "/password",

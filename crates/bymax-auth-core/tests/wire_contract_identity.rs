@@ -33,9 +33,10 @@ use bymax_auth_crypto::mac::sha256;
 /// Changing the contract is a two-repository operation by **convention**: change it, re-measure,
 /// and move the constant here and in nest-auth in the same change. Nothing enforces the nest-auth
 /// half — see the limits at the top of this file before trusting this constant to do more than it
-/// does.
+/// does. Both repositories are meant to carry identical contract bytes and the same digest; a
+/// copy that differs from nest-auth's is a divergence to close, not a state to keep.
 const WIRE_CONTRACT_SHA256: &str =
-    "f186512041069e99977cd442d56ed34d13dd1c9c2995d85f5f233c0b43262c79";
+    "922105d3b6b6dc177ee54e6f40965865bca16a295bd4b3153e23951eac9f7f00";
 
 /// The contract, as it sits in the working tree.
 ///

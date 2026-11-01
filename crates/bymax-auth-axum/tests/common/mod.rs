@@ -868,6 +868,18 @@ impl bymax_auth_core::traits::PasswordResetStore for FailingStores {
 }
 
 #[async_trait]
+impl bymax_auth_core::traits::RateLimitStore for FailingStores {
+    async fn hit(
+        &self,
+        route: &str,
+        bucket_hash: &str,
+        window_secs: u64,
+    ) -> Result<i64, bymax_auth_types::AuthError> {
+        self.inner.hit(route, bucket_hash, window_secs).await
+    }
+}
+
+#[async_trait]
 impl bymax_auth_core::traits::InvitationStore for FailingStores {
     async fn put_invitation(
         &self,

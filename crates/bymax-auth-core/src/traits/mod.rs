@@ -11,6 +11,7 @@ pub mod email;
 pub mod hooks;
 pub mod http;
 pub mod oauth;
+pub mod rate_limit;
 pub mod repository;
 pub mod store;
 
@@ -37,6 +38,8 @@ pub use hooks::{
 pub use http::{HttpClient, HttpError, HttpMethod, HttpRequest, HttpResponse};
 #[doc(inline)]
 pub use oauth::{OAuthProfile, OAuthProvider, OAuthProviderError, OAuthProviders, OAuthTokens};
+#[doc(inline)]
+pub use rate_limit::RateLimitStore;
 #[doc(inline)]
 pub use repository::{PlatformUserRepository, UserRepository};
 #[cfg(feature = "mfa")]

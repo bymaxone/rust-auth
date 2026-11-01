@@ -15,11 +15,12 @@ use http::StatusCode;
 use crate::dto::{ChangeEmailDto, ConfirmEmailChangeDto};
 use crate::extractors::{AuthUser, UserStatus};
 use crate::response::error_response;
-use crate::state::{AuthState, AxumAuthConfig, ClientIpSource};
+use crate::shared_limit::Throttle;
+use crate::state::{AuthState, AxumAuthConfig};
 use crate::validation::ValidatedJson;
 
 /// Assemble the `email` group under the `email` segment with per-route limits.
-pub(crate) fn routes(config: &AxumAuthConfig, ip_source: ClientIpSource) -> Router<AuthState> {
+pub(crate) fn routes(config: &AxumAuthConfig, ip_source: &Throttle) -> Router<AuthState> {
     let limits = &config.rate_limits;
     Router::new()
         .route(

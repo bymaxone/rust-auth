@@ -23,12 +23,13 @@ use tower_cookies::Cookies;
 use crate::extractors::{AuthUser, UserStatus};
 use crate::response::error_response;
 use crate::routes::source_refresh_token;
-use crate::state::{AuthState, AxumAuthConfig, ClientIpSource};
+use crate::shared_limit::Throttle;
+use crate::state::{AuthState, AxumAuthConfig};
 
 /// Assemble the `sessions` group with per-route rate limits. The paths are declared directly
 /// (not nested under a `/sessions` prefix) so the list route matches `GET /sessions` exactly
 /// rather than `GET /sessions/` — axum 0.8's `nest` would otherwise require the trailing slash.
-pub(crate) fn routes(config: &AxumAuthConfig, ip_source: ClientIpSource) -> Router<AuthState> {
+pub(crate) fn routes(config: &AxumAuthConfig, ip_source: &Throttle) -> Router<AuthState> {
     let limits = &config.rate_limits;
     Router::new()
         .route(
