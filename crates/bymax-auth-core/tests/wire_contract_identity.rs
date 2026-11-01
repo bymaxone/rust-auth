@@ -36,7 +36,7 @@ use bymax_auth_crypto::mac::sha256;
 /// does. Both repositories are meant to carry identical contract bytes and the same digest; a
 /// copy that differs from nest-auth's is a divergence to close, not a state to keep.
 const WIRE_CONTRACT_SHA256: &str =
-    "c1b3105f5491e472242ecf3e83ffb98b6e2ffac596f2e9b0fefb849fbac774cd";
+    "1f0d0dd280d77718d31efeaa4b3a03c40dbf9ecbb64aa1a3fc5f74a4e60419a8";
 
 /// The contract, as it sits in the working tree.
 ///
@@ -81,4 +81,76 @@ fn the_shared_wire_contract_carries_the_bytes_this_repository_declared() {
          was deliberate, move the constant in the same commit — and move nest-auth's pin too, \
          which nothing here can check for you."
     );
+}
+
+/// The SHA-256 of nest-auth's copy of the contract at the commit this repository last compared
+/// against (nest-auth `c51ced8`), lower-case hex.
+///
+/// It is a constant here because nothing in this suite can fetch the other repository: whoever
+/// re-measures nest-auth's file moves it, in the same commit as [`KNOWN_GAP_POINTERS`].
+const NEST_WIRE_CONTRACT_SHA256: &str =
+    "c1b3105f5491e472242ecf3e83ffb98b6e2ffac596f2e9b0fefb849fbac774cd";
+
+/// What nest-auth's copy has and this one lacks, as JSON pointers (RFC 6901): the API-key
+/// surface this library does not implement yet. The list empties when it does, and from then on
+/// the two copies must be byte-identical.
+const KNOWN_GAP_POINTERS: [&str; 5] = [
+    "/apiKeys",
+    "/credentialFormats/apiKey",
+    "/errorCatalog/statuses/auth.api_key_invalid",
+    "/errorCatalog/statuses/auth.api_key_scope_insufficient",
+    "/errorCatalog/statuses/auth.api_key_not_found",
+];
+
+/// The `errorCatalog.codes` entries nest-auth's copy has and this one lacks (same gap).
+const KNOWN_GAP_CODES: [&str; 3] = [
+    "auth.api_key_invalid",
+    "auth.api_key_scope_insufficient",
+    "auth.api_key_not_found",
+];
+
+fn contract_json() -> serde_json::Value {
+    serde_json::from_slice(&contract_bytes()).unwrap_or(serde_json::Value::Null)
+}
+
+#[test]
+fn this_copy_lacks_exactly_the_parts_the_known_gap_names() {
+    // Fails the day this copy adopts one of the parts without the list shrinking with it, so the
+    // list cannot outlive the gap it describes.
+    let contract = contract_json();
+    assert!(contract.is_object(), "the contract did not parse");
+    for pointer in KNOWN_GAP_POINTERS {
+        assert!(contract.pointer(pointer).is_none(), "{pointer} is present");
+    }
+    let codes = contract
+        .pointer("/errorCatalog/codes")
+        .and_then(|c| c.as_array());
+    for code in KNOWN_GAP_CODES {
+        let present = codes.is_some_and(|c| c.iter().any(|v| v.as_str() == Some(code)));
+        assert!(!present, "{code} is present in errorCatalog.codes");
+    }
+}
+
+#[test]
+fn the_two_copies_differ_exactly_while_a_gap_is_named() {
+    // While the gap is named, this copy must NOT be a full copy of nest-auth's (a whole-file
+    // copy would pull in an API-key surface nothing here implements); once the list is empty it
+    // must BE nest-auth's bytes. This repository cannot see nest-auth's file, so the nest-auth
+    // constant is only as fresh as the last human re-measurement.
+    let hex: String = sha256(&contract_bytes())
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    let gap_named = !KNOWN_GAP_POINTERS.is_empty() || !KNOWN_GAP_CODES.is_empty();
+    if gap_named {
+        assert_ne!(
+            hex, NEST_WIRE_CONTRACT_SHA256,
+            "the gap is named but the copies are equal"
+        );
+    } else {
+        assert_eq!(
+            hex, NEST_WIRE_CONTRACT_SHA256,
+            "no gap is named but the copies differ"
+        );
+    }
 }
