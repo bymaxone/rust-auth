@@ -1683,7 +1683,7 @@ The internal repository row (`AuthUser`) carries `password_hash`, `mfa_secret`, 
 
 The services never touch Redis directly; they depend on the three **domain-level** store traits defined authoritatively in **§12.3** — `SessionStore`, `OtpStore`, `BruteForceStore` — plus the auxiliary single-purpose stores (`MfaStore`, `OAuthStateStore`, `PasswordResetStore`, `InvitationStore`, `UserStatusCache`). These present an intent-named surface keyed by `SessionKind { Dashboard, Platform }`, **not** low-level Redis verbs:
 
-- `SessionStore`: `create_session(kind, subject_hash, …)` · `rotate(kind, …) -> RotateOutcome` · `find_session(kind, …)` · `list_sessions(kind, subject_hash)` · `revoke_session(kind, subject_hash, hash)` · `revoke_all(kind, subject_hash)` · `find_family_owner(kind, family)` · `revoke_family(kind, family, owner_subject_hash)` · `blacklist_access(jti_or_hash, ttl)` · `is_blacklisted(jti_or_hash)`. Every method that names an ACCOUNT takes the `subject_hash` the engine derives (§12.4), never a user id — the store holds no hashing key.
+- `SessionStore`: `create_session(kind, subject_hash, …)` · `rotate(kind, …) -> RotateOutcome` · `find_session(kind, …)` · `list_sessions(kind, subject_hash)` · `list_session_entries(kind, subject_hash)` · `revoke_session(kind, subject_hash, hash)` · `revoke_all(kind, subject_hash)` · `find_family_owner(kind, family)` · `revoke_family(kind, family, owner_subject_hash)` · `blacklist_access(jti_or_hash, ttl)` · `is_blacklisted(jti_or_hash)`. Every method that names an ACCOUNT takes the `subject_hash` the engine derives (§12.4), never a user id — the store holds no hashing key.
 - `OtpStore`: `put(purpose, id, code, ttl)` · `verify(purpose, id, code, max_attempts)` · `try_begin_resend(purpose, id, cooldown)`.
 - `BruteForceStore`: `is_locked(id, max_attempts)` · `record_failure(id, window)` · `reset(id)` · `remaining_lockout_secs(id)`.
 
@@ -2099,6 +2099,7 @@ Constants: `MAX_IP_LENGTH: usize = 45` (IPv6 max — IP is truncated before stor
 #### 7.4.3 `list_sessions`
 
 1. `smembers("sess:{subject_hash}")`, keep `rt:` members.
+   This display listing is not what revocation or the session cap read: `list_session_entries` returns every live `rt:` member with its detail when there is a whole one and without when there is none, and "revoke all other sessions" and the cap (a session without a readable detail is the oldest, so it is evicted first) work from the entries.
 2. For each, `get("sd:{hash}")`. A detail that is missing or is not a whole record → leave the session out of the result and mark the member **stale**; one such record never fails the listing or hides the others. A failed read of the key is an error and is returned, not treated as stale.
 3. Build `SessionInfo`; `is_current = timing_safe_compare(hash, current_hash.unwrap_or(""))` (a 64-char hash never length-matches `""`, so absent current → all `false`).
 4. `srem` a stale member only when its `rt:{hash}` key is gone too: the detail alone does not say the session is dead, since a live session can have lost or damaged its detail, and it would then vanish from every later listing and from the sweeps that walk this index. The check and the removal are one Lua script (`session_prune_dead`), so a member whose key appears between them is not dropped. This library prunes inline.
@@ -4352,6 +4353,8 @@ pub trait SessionStore: Send + Sync {
     async fn find_session(&self, kind: SessionKind, token_hash: &str) -> Result<Option<SessionRecord>, AuthError>;
     /// List all live sessions for a user (SMEMBERS + MGET of detail keys).
     async fn list_sessions(&self, kind: SessionKind, subject_hash: &str) -> Result<Vec<SessionDetail>, AuthError>;
+    /// List every live session, with its detail when the store holds a whole one (`detail: None` otherwise). What revokes or counts sessions reads this; `list_sessions` is the display view. The default derives it from `list_sessions`.
+    async fn list_session_entries(&self, kind: SessionKind, subject_hash: &str) -> Result<Vec<SessionEntry>, AuthError>;
     /// Ownership-checked single revoke (Lua `session_revoke`, §12.5.3) → SESSION_NOT_FOUND if not owned.
     async fn revoke_session(&self, kind: SessionKind, user_id: &str, session_hash: &str) -> Result<(), AuthError>;
     /// Revoke every session for a user in one Lua transaction (`invalidate_user_sessions`).

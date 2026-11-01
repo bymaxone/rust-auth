@@ -9,11 +9,12 @@
 -- ARGV[2..] = candidate members, each the full key suffix `rt:{hash}` / `prt:{hash}`, so the
 --             member names its own key: `{namespace}:{member}`
 --
--- Returns the number of members that were dead and removed.
-local removed = 0
+-- Returns the members that were dead and removed.
+local removed = {}
 for i = 2, #ARGV do
     if redis.call('EXISTS', ARGV[1] .. ':' .. ARGV[i]) == 0 then
-        removed = removed + redis.call('SREM', KEYS[1], ARGV[i])
+        redis.call('SREM', KEYS[1], ARGV[i])
+        removed[#removed + 1] = ARGV[i]
     end
 end
 return removed

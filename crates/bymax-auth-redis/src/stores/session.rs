@@ -5,8 +5,8 @@
 use async_trait::async_trait;
 use bymax_auth_core::traits::store::unix_millis;
 use bymax_auth_core::traits::{
-    RotateOutcome, SessionDetail, SessionKind, SessionRecord, SessionRotation, SessionStore,
-    TOKEN_EPOCH_RETENTION_SECS,
+    RotateOutcome, SessionDetail, SessionEntry, SessionKind, SessionRecord, SessionRotation,
+    SessionStore, TOKEN_EPOCH_RETENTION_SECS,
 };
 use bymax_auth_types::AuthError;
 use deadpool_redis::Connection;
@@ -18,7 +18,6 @@ use crate::error::RedisStoreError;
 use crate::keys::Prefix;
 use crate::pool::RedisStores;
 use crate::script;
-use crate::stores::session_listing::{DetailRead, prune_dead_members, read_detail};
 
 /// The tag the `refresh_rotate` script prepends to a grace-window recovery payload, matching
 /// the literal in `lua/refresh_rotate.lua`.
@@ -66,13 +65,13 @@ impl SessionDetailValue {
 
 /// The prefix sextet selected by a [`SessionKind`]: the refresh-session, grace-pointer,
 /// consumed-family marker, family-index, session-index, and per-session-detail keyspaces.
-struct KindPrefixes {
-    rt: Prefix,
-    rp: Prefix,
+pub(super) struct KindPrefixes {
+    pub(super) rt: Prefix,
+    pub(super) rp: Prefix,
     cf: Prefix,
     fam: Prefix,
-    sess: Prefix,
-    sd: Prefix,
+    pub(super) sess: Prefix,
+    pub(super) sd: Prefix,
 }
 
 /// Build a session-index SET member: the full key **suffix** `{prefix}:{hash}`.
@@ -84,7 +83,7 @@ struct KindPrefixes {
 /// revoke-all could not distinguish a live `rt:` session from an `rp:` rotation grace pointer
 /// and therefore could not delete the latter — leaving a rotated-away refresh token able to
 /// recover a session for its whole grace window after the user logged everything out.
-fn index_member(prefix: Prefix, hash: &str) -> String {
+pub(super) fn index_member(prefix: Prefix, hash: &str) -> String {
     format!("{}:{}", prefix.as_str(), hash)
 }
 
@@ -92,7 +91,7 @@ fn index_member(prefix: Prefix, hash: &str) -> String {
 /// member belongs to another keyspace. Used by listing to keep grace pointers (`rp:`/`prp:`)
 /// out of the user-visible session list and to rebuild the `sd:`/`psd:` detail key, which is
 /// keyed by the bare hash.
-fn live_member_hash(member: &str, live: Prefix) -> Option<&str> {
+pub(super) fn live_member_hash(member: &str, live: Prefix) -> Option<&str> {
     member
         .strip_prefix(live.as_str())
         .and_then(|rest| rest.strip_prefix(':'))
@@ -100,7 +99,7 @@ fn live_member_hash(member: &str, live: Prefix) -> Option<&str> {
 
 /// Map a [`SessionKind`] onto its prefix sextet (`rt`/`rp`/`cf`/`fam`/`sess`/`sd` for dashboard,
 /// `prt`/`prp`/`pcf`/`pfam`/`psess`/`psd` for platform).
-fn kind_prefixes(kind: SessionKind) -> KindPrefixes {
+pub(super) fn kind_prefixes(kind: SessionKind) -> KindPrefixes {
     match kind {
         SessionKind::Dashboard => KindPrefixes {
             rt: Prefix::Rt,
@@ -482,65 +481,6 @@ impl RedisStores {
         }
     }
 
-    /// List a user's live sessions by reading the `sess:` SET and each member's `sd:` detail.
-    ///
-    /// Only `rt:`/`prt:` members are live sessions; the `rp:`/`prp:` rotation grace pointers
-    /// share the index (so `revoke_all` can sweep them) but are not sessions and are filtered
-    /// out here, matching nest-auth's `members.filter(m => m.startsWith('rt:'))`.
-    async fn list_sessions_inner(
-        &self,
-        kind: SessionKind,
-        subject_hash: &str,
-    ) -> Result<Vec<SessionDetail>, RedisStoreError> {
-        let prefixes = kind_prefixes(kind);
-        let keys = self.keys();
-        let sess_key = keys.key(prefixes.sess, subject_hash);
-        let mut conn = self.connection().await?;
-        let members: Vec<String> = conn.smembers(&sess_key).await?;
-        let mut details = Vec::with_capacity(members.len());
-        let mut stale: Vec<&str> = Vec::new();
-        let grace_prefix = format!("{}:", prefixes.rp.as_str());
-        for member in &members {
-            let Some(hash) = live_member_hash(member, prefixes.rt) else {
-                // Not a live session. If it is a grace pointer whose key has already expired,
-                // drop the member rather than leaving it: a rotation removes `rt:{old}`
-                // and adds TWO members — `rt:{new}` and `rp:{old}` — and until now only a full
-                // revoke-all ever removed the second. The `rp:` KEY dies with the grace window
-                // (30 s by default); the MEMBER did not, while `refresh_rotate` re-arms the
-                // set's own TTL on every rotation. The index therefore gained one permanent
-                // ~70-byte entry per refresh and never aged out while the account was in use.
-                //
-                // It is a growth defect with an amplifier attached, because every reader of
-                // this index is linear in its size: this method, `sweep_grace_pointers` (two
-                // sequential round trips per member), and `invalidate_user_sessions`, which
-                // iterates it inside a Lua script and so blocks the whole single-threaded
-                // store. One stolen refresh token rotated at the route limit adds ~14k members
-                // a day to its own index, with no ceiling.
-                //
-                // Pruned from the LIST path rather than from the rotation: the rotation is the
-                // hot path and an O(n) sweep there would trade a slow leak for a slow refresh.
-                // Session-cap enforcement lists too, so a login bounds it.
-                //
-                // A pointer still inside its window is left alone — that is what lets a
-                // revoke-all also kill a token rotated away moments earlier.
-                if member.starts_with(&grace_prefix) {
-                    stale.push(member.as_str());
-                }
-                continue;
-            };
-            // The detail record is keyed by the BARE hash, so the member's prefix is stripped.
-            let sd_key = keys.key(prefixes.sd, hash);
-            let raw: Option<String> = conn.get(&sd_key).await?;
-            match read_detail(hash, raw.as_deref()) {
-                DetailRead::Listed(detail) => details.push(detail),
-                // Left out; pruned once, after every read, only if its `rt:` key is gone too.
-                DetailRead::Excluded => stale.push(member.as_str()),
-            }
-        }
-        prune_dead_members(&mut conn, keys.namespace(), &sess_key, &stale).await?;
-        Ok(details)
-    }
-
     /// Run the ownership-checked `session_revoke` script. Returns whether the hash was owned.
     async fn revoke_session_inner(
         &self,
@@ -797,14 +737,26 @@ impl SessionStore for RedisStores {
             .map_err(AuthError::from)
     }
 
+    async fn list_session_entries(
+        &self,
+        kind: SessionKind,
+        subject_hash: &str,
+    ) -> Result<Vec<SessionEntry>, AuthError> {
+        self.list_session_entries_inner(kind, subject_hash)
+            .await
+            .map_err(AuthError::from)
+    }
+
     async fn list_sessions(
         &self,
         kind: SessionKind,
         subject_hash: &str,
     ) -> Result<Vec<SessionDetail>, AuthError> {
-        self.list_sessions_inner(kind, subject_hash)
-            .await
-            .map_err(AuthError::from)
+        let entries = self.list_session_entries(kind, subject_hash).await?;
+        Ok(entries
+            .into_iter()
+            .filter_map(|entry| entry.detail)
+            .collect())
     }
 
     async fn revoke_session(
