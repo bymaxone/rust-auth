@@ -25,6 +25,7 @@
 mod adapter_api;
 
 pub use adapter_api::WS_TICKET_TTL_SECONDS;
+pub use verifier::{AuthPlane, VerifiedAccessToken, VerifyAccessOptions};
 
 pub mod auth;
 pub mod brute_force;
@@ -40,6 +41,7 @@ mod rate_limit;
 pub mod session;
 mod tenant_binding;
 pub mod token_manager;
+mod verifier;
 
 use bymax_auth_types::{AuthError, MfaContext};
 use time::OffsetDateTime;

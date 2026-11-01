@@ -68,3 +68,4 @@ pub use services::oauth::{OAuthOutcome, OAuthRedirect};
 #[cfg(feature = "platform")]
 #[doc(inline)]
 pub use services::platform::PlatformAuthService;
+pub use services::{AuthPlane, VerifiedAccessToken, VerifyAccessOptions};
