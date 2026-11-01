@@ -98,6 +98,8 @@ mod tests {
         assert!(matches!(ok, Ok(UserStatus(_))));
 
         let _ = s.users.update_status(&id, "t1", "BANNED").await;
+        // The host's step after changing an account: drop the cached status.
+        let _ = s.state.engine().invalidate_account_status(&id, "t1").await;
         let mut parts = parts_with_cookie(&token);
         let denied = UserStatus::from_request_parts(&mut parts, &s.state).await;
         assert!(matches!(
@@ -172,6 +174,8 @@ mod tests {
         ));
 
         let _ = s.users.update_email_verified(&id, "t1", false).await;
+        // The host's step after changing an account: drop the cached status.
+        let _ = s.state.engine().invalidate_account_status(&id, "t1").await;
         let mut parts = parts_with_cookie(&token);
         let denied = VerifiedUser::from_request_parts(&mut parts, &s.state).await;
         assert!(
@@ -181,7 +185,11 @@ mod tests {
 
         // The status half still applies, so the two gates compose rather than replace.
         let _ = s.users.update_email_verified(&id, "t1", true).await;
+        // The host's step after changing an account: drop the cached status.
+        let _ = s.state.engine().invalidate_account_status(&id, "t1").await;
         let _ = s.users.update_status(&id, "t1", "SUSPENDED").await;
+        // The host's step after changing an account: drop the cached status.
+        let _ = s.state.engine().invalidate_account_status(&id, "t1").await;
         let mut parts = parts_with_cookie(&token);
         assert!(matches!(
             VerifiedUser::from_request_parts(&mut parts, &s.state).await,
@@ -206,6 +214,8 @@ mod tests {
         ));
 
         let _ = s.users.update_email_verified(&id, "t1", false).await;
+        // The host's step after changing an account: drop the cached status.
+        let _ = s.state.engine().invalidate_account_status(&id, "t1").await;
         let mut parts = parts_with_cookie(&token);
         let denied = UserStatus::from_request_parts(&mut parts, &s.state).await;
         assert!(
@@ -215,6 +225,8 @@ mod tests {
 
         // A blocked status is refused first, so a banned account is told it is banned.
         let _ = s.users.update_status(&id, "t1", "BANNED").await;
+        // The host's step after changing an account: drop the cached status.
+        let _ = s.state.engine().invalidate_account_status(&id, "t1").await;
         let mut parts = parts_with_cookie(&token);
         assert!(matches!(
             UserStatus::from_request_parts(&mut parts, &s.state).await,

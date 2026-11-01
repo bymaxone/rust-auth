@@ -20,4 +20,5 @@ mod otp;
 mod rate_limit;
 mod session;
 mod single_use;
+mod user_status;
 mod ws_ticket;

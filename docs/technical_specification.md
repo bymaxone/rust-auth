@@ -1101,7 +1101,7 @@ The **Default** column lists `AuthConfig::default()` (≡ `nest_compat_defaults(
 | `route_prefix` | `String` | No | `auth` | |
 | `redis_namespace` | `String` | No | `auth` | All keys prefixed `{ns}:` |
 | `blocked_statuses` | `Vec<String>` | No | `["BANNED","INACTIVE","SUSPENDED"]` | |
-| `user_status_cache_ttl` | `Duration` | No | `60s` | Reserved: no status cache exists yet, so nothing reads it and the status is read from the repository on every request that needs it |
+| `user_status_cache_ttl` | `Duration` | No | `60s` | How long an account's cached status (and, where `email_verification.required`, its verified-address flag) answers the per-request status gate before the repository is read again. A status change reaches requests within this TTL, or at once after `AuthEngine::invalidate_account_status`. `0` turns the cache off. The platform plane is never cached |
 | `controllers.*` | `ControllerToggles` | No | see 5.1.8 | Gates router mounting |
 | `tenant_id_resolver` | `Option<Arc<dyn …>>` | No | `None` | Anti-spoofing |
 | `enforce_tenant_binding` | `bool` | No | `false` | Refuses a token minted for another tenant than the resolver names for the request; requires `tenant_id_resolver` |
@@ -2893,12 +2893,21 @@ pub struct RequirePlatformRole<R: PlatformRole>(pub PlatformClaims, PhantomData<
   ```
 
 - **`UserStatus`** — the `UserStatusGuard`. Resolves `AuthUser`, then reads the
-  user's status from the Redis cache (`us:{sub}`, TTL `user_status_cache_ttl`),
-  falling back to the user store on a miss and re-caching. If the status is in
-  the configured `blocked_statuses`, it rejects with the status-specific code:
+  user's status from the shared status cache (`{ns}:us:{scope}`, with the verified-address
+  flag at `{ns}:uev:{scope}` only where `email_verification.required`, and
+  `scope = encodeURIComponent(tenant_id):encodeURIComponent(user_id)`, TTL
+  `user_status_cache_ttl`), falling back to the tenant-scoped user store on a miss and
+  re-caching. An account that no longer exists is `token_invalid` and is not cached. If the
+  status is in the configured `blocked_statuses`, it rejects with the status-specific code:
   `AccountBanned` / `AccountInactive` / `AccountSuspended` / `PendingApproval`
-  (all 403). The cache and its invalidation-on-`update_status` are engine
-  responsibilities; the extractor calls `AuthEngine::assert_user_active(sub, tenant_id)` with the token's tenant.
+  (all 403); a blocked status is reported before an unverified address. The entries are
+  the ones nest-auth 1.4.8 writes, so both libraries can serve one deployment off one Redis.
+  The cache and its invalidation are engine responsibilities: the extractor calls
+  `AuthEngine::assert_user_active(sub, tenant_id)` with the token's tenant, `verify_email`
+  drops the account's entries best-effort once the flag is committed, and a host that
+  changes an account's status calls `AuthEngine::invalidate_account_status(user_id, tenant_id)`.
+  That narrows the window to one repository read, not to zero: a check already resolving
+  can write the old value back.
 
 - **`MfaSatisfied`** — the `MfaRequiredGuard`. Resolves `AuthUser`, then requires
   `claims.mfa_verified == true` when the account has MFA enabled; otherwise
