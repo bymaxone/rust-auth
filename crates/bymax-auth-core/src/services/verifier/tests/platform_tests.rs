@@ -299,6 +299,8 @@ async fn a_malformed_administrator_jti_or_subject_is_refused_even_when_signed() 
     // Each operand of the shape check is exercised alone, so neither can be dropped.
     let admins = Arc::new(InMemoryPlatformUserRepository::new());
     admins.insert(admin("a1", "ACTIVE"));
+    // An active administrator exists under the long id, so only the bound check can refuse it.
+    admins.insert(admin(&"x".repeat(257), "ACTIVE"));
     let Some(engine) = engine(&admins) else { return };
     let bad_jti = PlatformClaims {
         jti: "abc".to_owned(),

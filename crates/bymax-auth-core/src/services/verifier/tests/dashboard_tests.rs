@@ -36,7 +36,13 @@ pub(super) fn claims_for(sub: &str) -> DashboardClaims {
 
 /// A seeded active account and a signed token for `claims` naming it.
 async fn token_for(h: &Harness, edit: impl FnOnce(&mut DashboardClaims)) -> (String, String) {
-    let id = h.seed(SeedUser::active("v@example.com", "pw123456")).await;
+    // A fresh address per call: seeding the same one twice fails and yields an empty id.
+    static SEEDED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let n = SEEDED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let id = h
+        .seed(SeedUser::active(&format!("v{n}@example.com"), "pw123456"))
+        .await;
+    assert!(!id.is_empty(), "the account must be seeded");
     let mut claims = claims_for(&id);
     edit(&mut claims);
     let token = h.engine.tokens().issue_access(&claims).unwrap_or_default();
@@ -79,12 +85,18 @@ async fn garbage_an_expired_token_and_a_revoked_one_all_answer_token_invalid() {
 }
 
 #[tokio::test]
-async fn a_malformed_jti_or_subject_is_refused_even_when_signed() {
+async fn a_malformed_jti_subject_or_tenant_is_refused_even_when_signed() {
+    // The status check is waived so that an account that does not exist cannot be what refuses
+    // the token: only the shape check can, and each operand of it has a case of its own.
     let Some(h) = harness(base_config(), None) else { return };
     let (_, bad_jti) = token_for(&h, |c| c.jti = "abc".to_owned()).await;
     let (_, long_sub) = token_for(&h, |c| c.sub = "x".repeat(257)).await;
-    for presented in [bad_jti, long_sub] {
-        let refused = h.engine.verify_access(&presented, &dashboard()).await;
+    let (_, long_tenant) = token_for(&h, |c| c.tenant_id = "t".repeat(257)).await;
+    for presented in [bad_jti, long_sub, long_tenant] {
+        let refused = h
+            .engine
+            .verify_access(&presented, &dashboard().check_status(false))
+            .await;
         assert!(
             matches!(refused, Err(AuthError::TokenInvalid)),
             "{refused:?}"
