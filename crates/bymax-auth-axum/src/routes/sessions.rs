@@ -57,7 +57,12 @@ async fn list(
     user: AuthUser,
     cookies: Cookies,
 ) -> Response {
-    let refresh = source_refresh_token(&cookies, &state.config().cookies.refresh_name, None);
+    let refresh = source_refresh_token(
+        state.config().delivery,
+        &cookies,
+        &state.config().cookies.refresh_name,
+        None,
+    );
     let raw = (!refresh.is_empty()).then_some(refresh.as_str());
     match state
         .engine()
@@ -89,6 +94,7 @@ async fn revoke_all(
     // explicitly instead of silently succeeding.
     let dto = crate::routes::parse_optional_refresh_body(&body).unwrap_or_default();
     let refresh = source_refresh_token(
+        state.config().delivery,
         &cookies,
         &state.config().cookies.refresh_name,
         dto.refresh_token.as_deref(),

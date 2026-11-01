@@ -29,6 +29,7 @@ use std::convert::Infallible;
 use std::net::SocketAddr;
 
 use axum::extract::{ConnectInfo, FromRef, FromRequestParts};
+use bymax_auth_core::config::TokenDelivery;
 use bymax_auth_core::context::RequestContext;
 use bymax_auth_types::{AuthError, FieldError};
 use http::HeaderName;
@@ -164,24 +165,37 @@ fn sanitize_headers(parts: &Parts) -> BTreeMap<String, String> {
     map
 }
 
-/// Read the refresh token for a refresh/logout flow: the refresh cookie first, then the
-/// body-supplied value (bearer/both mode). Never a query string. Returns an empty string
-/// when neither channel carries it (the engine treats that as an invalid refresh).
+/// Read the refresh token for a refresh/logout flow from the channel the delivery mode names:
+/// the refresh cookie in `cookie` mode, the body in `bearer` mode, and the cookie first and then
+/// the body in `both`. Never a query string. Returns an empty string when the channel carries
+/// none (the engine treats that as an invalid refresh).
+///
+/// A mode reads exactly its own channel. Reading both in every mode let a `cookie`-mode
+/// deployment accept a token a script put in a body, and a `bearer`-mode one accept a stray
+/// cookie, neither of which that deployment issues or expects.
 pub(crate) fn source_refresh_token(
+    delivery: TokenDelivery,
     cookies: &Cookies,
     refresh_cookie_name: &str,
     body_value: Option<&str>,
 ) -> String {
-    cookies
-        .get(refresh_cookie_name)
-        .map(|cookie| cookie.value().to_owned())
-        .filter(|value| !value.is_empty())
-        .or_else(|| {
-            body_value
-                .map(str::to_owned)
-                .filter(|value| !value.is_empty())
-        })
-        .unwrap_or_default()
+    let from_cookie = || {
+        cookies
+            .get(refresh_cookie_name)
+            .map(|cookie| cookie.value().to_owned())
+            .filter(|value| !value.is_empty())
+    };
+    let from_body = || {
+        body_value
+            .map(str::to_owned)
+            .filter(|value| !value.is_empty())
+    };
+    match delivery {
+        TokenDelivery::Cookie => from_cookie(),
+        TokenDelivery::Bearer => from_body(),
+        TokenDelivery::Both => from_cookie().or_else(from_body),
+    }
+    .unwrap_or_default()
 }
 
 /// Parse an optional refresh body shared by the dashboard and platform refresh handlers: an
@@ -496,21 +510,27 @@ mod tests {
     }
 
     #[test]
-    fn source_refresh_token_prefers_cookie_then_body() {
-        // The cookie wins when present; otherwise the body value is used; empty when neither.
+    fn source_refresh_token_reads_only_the_channel_the_delivery_mode_names() {
         let jar = Cookies::default();
         jar.add(Cookie::new("refresh_token", "from-cookie"));
-        assert_eq!(
-            source_refresh_token(&jar, "refresh_token", Some("from-body")),
-            "from-cookie"
-        );
-
         let empty_jar = Cookies::default();
-        assert_eq!(
-            source_refresh_token(&empty_jar, "refresh_token", Some("from-body")),
-            "from-body"
-        );
-        assert_eq!(source_refresh_token(&empty_jar, "refresh_token", None), "");
+        let body = Some("from-body");
+        // cookie mode: the cookie, and never the body.
+        let cookie =
+            |jar, body| source_refresh_token(TokenDelivery::Cookie, jar, "refresh_token", body);
+        assert_eq!(cookie(&jar, body), "from-cookie");
+        assert_eq!(cookie(&empty_jar, body), "");
+        // bearer mode: the body, and never a stray cookie.
+        let bearer =
+            |jar, body| source_refresh_token(TokenDelivery::Bearer, jar, "refresh_token", body);
+        assert_eq!(bearer(&jar, body), "from-body");
+        assert_eq!(bearer(&jar, None), "");
+        // both: the cookie first, then the body, then nothing.
+        let both =
+            |jar, body| source_refresh_token(TokenDelivery::Both, jar, "refresh_token", body);
+        assert_eq!(both(&jar, body), "from-cookie");
+        assert_eq!(both(&empty_jar, body), "from-body");
+        assert_eq!(both(&empty_jar, None), "");
     }
 
     #[test]

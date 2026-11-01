@@ -9,6 +9,9 @@
 //! ([`JwtConfig::secret`], [`MfaConfig::encryption_key`], [`GoogleOAuthConfig::client_secret`])
 //! are `secrecy::SecretString`, redacted in `Debug`/`Display` and zeroized on drop.
 
+mod cookie_prefix;
+#[cfg(test)]
+mod cookie_prefix_tests;
 mod profiles;
 pub mod resolvers;
 mod validate;

@@ -449,6 +449,10 @@ impl AuthConfig {
             });
         }
 
+        // Rule 20b: a `__Secure-` / `__Host-` cookie name must be one its attributes can satisfy,
+        // or the browser drops every `Set-Cookie` for it without saying so.
+        super::cookie_prefix::validate_cookie_prefixes(&self.cookies, secure_cookies)?;
+
         Ok(secure_cookies)
     }
 

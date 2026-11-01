@@ -30,6 +30,9 @@ mod password_change_session;
 #[path = "adapter/mfa_rotation.rs"]
 mod mfa_rotation;
 
+#[path = "adapter/refresh_channel.rs"]
+mod refresh_channel;
+
 #[path = "adapter/mfa_setup_body.rs"]
 mod mfa_setup_body;
 
