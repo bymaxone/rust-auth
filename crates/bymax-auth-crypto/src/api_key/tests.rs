@@ -31,6 +31,49 @@ fn the_grammar_constants_are_the_ones_the_contract_pins() {
     assert_eq!(grammar["totalLengthWithDefaultPrefix"], total);
 }
 
+/// The field names of a contract object, sorted.
+fn field_names(value: &serde_json::Value) -> Vec<String> {
+    let mut names: Vec<String> = value
+        .as_object()
+        .map(|object| object.keys().cloned().collect())
+        .unwrap_or_default();
+    names.sort();
+    names
+}
+
+#[test]
+fn every_grammar_and_vector_field_is_accounted_for_in_both_directions() {
+    // Set equality against the loaded sections: a field the contract adds fails here until it is
+    // read by a test, and a field it removes fails until the removal is understood.
+    let section = contract();
+    assert_eq!(
+        field_names(&section["keyGrammar"]),
+        [
+            "defaultPrefix",
+            "keyIdLength",
+            "parsing",
+            "secretLength",
+            "separator",
+            "totalLengthWithDefaultPrefix"
+        ]
+    );
+    assert_eq!(
+        field_names(&section["vector"]),
+        ["digest", "key", "keyId", "pepper", "secret"]
+    );
+}
+
+#[test]
+fn the_parsing_rule_is_the_one_the_split_tests_exercise() {
+    // `parsing` is prose, so it cannot be read into an assertion. It is pinned verbatim instead:
+    // a change to its wording fails here, which is the moment to re-read the parse tests above
+    // (the secret may contain the separator; the split is on the first two only).
+    assert_eq!(
+        text(&contract()["keyGrammar"], "parsing"),
+        "split on the FIRST two separators only; the prefix and the keyId contain none, the secret may"
+    );
+}
+
 #[test]
 fn the_contract_vector_formats_parses_and_digests_as_pinned() {
     let vector = &contract()["vector"];
