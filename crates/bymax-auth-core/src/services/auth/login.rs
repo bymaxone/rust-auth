@@ -14,11 +14,12 @@ use crate::context::RequestContext;
 use crate::engine::AuthEngine;
 use crate::normalize::{log_safe, mask_email, normalize_email};
 use crate::services::auth::detached::{
-    run_after_login, run_rehash_password, run_update_last_login,
+    run_after_login, run_on_lockout, run_on_login_failed, run_rehash_password,
+    run_update_last_login,
 };
 use crate::services::auth::{LoginInput, map_repository_error, normalize_anti_enum, spawn_guarded};
 use crate::status_gate::assert_not_blocked;
-use crate::traits::{HookContext, HookPlane, LoginFailure, LoginFailureReason};
+use crate::traits::{HookContext, HookPlane, LoginFailureReason};
 
 impl AuthEngine {
     /// Authenticate email + password, returning either a full session or an MFA challenge.
@@ -69,8 +70,7 @@ impl AuthEngine {
                 None,
                 LoginFailureReason::LockedOut,
                 &hook_ctx,
-            )
-            .await;
+            );
             return Err(error);
         }
         self.hooks()
@@ -162,8 +162,7 @@ impl AuthEngine {
                 Some(&user.id),
                 LoginFailureReason::AccountBlocked,
                 &hook_ctx,
-            )
-            .await;
+            );
             return Err(error);
         }
 
@@ -174,8 +173,7 @@ impl AuthEngine {
                 Some(&user.id),
                 LoginFailureReason::EmailNotVerified,
                 &hook_ctx,
-            )
-            .await;
+            );
             return Err(AuthError::EmailNotVerified);
         }
 
@@ -254,8 +252,7 @@ impl AuthEngine {
             user_id,
             LoginFailureReason::InvalidCredentials,
             hook_ctx,
-        )
-        .await;
+        );
         // Read the lock AFTER recording, so the event fires on the attempt that crosses the
         // threshold rather than on the next one — an attacker who trips the lock and walks
         // away would otherwise never produce it.
@@ -267,11 +264,12 @@ impl AuthEngine {
 
     /// Fire the fire-and-forget [`AuthHooks::on_login_failed`] hook.
     ///
-    /// Swallowed like every other notification hook: a consumer's SIEM being unreachable is
-    /// not an authentication decision, and the refusal the caller receives is unchanged.
+    /// Detached under the same ceiling as the `after_*` hooks and swallowed: a consumer's SIEM
+    /// being slow or unreachable is not an authentication decision, and awaiting it here would
+    /// put its latency on the refusal, a signal of which branch the attempt took.
     ///
     /// [`AuthHooks::on_login_failed`]: crate::traits::AuthHooks::on_login_failed
-    async fn fire_login_failed(
+    fn fire_login_failed(
         &self,
         email: &str,
         tenant_id: &str,
@@ -279,15 +277,14 @@ impl AuthEngine {
         reason: LoginFailureReason,
         hook_ctx: &HookContext,
     ) {
-        let failure = LoginFailure {
-            email,
-            tenant_id,
-            user_id,
+        spawn_guarded(run_on_login_failed(
+            self.hooks().clone(),
+            email.to_owned(),
+            tenant_id.to_owned(),
+            user_id.map(str::to_owned),
             reason,
-        };
-        if let Err(error) = self.hooks().on_login_failed(&failure, hook_ctx).await {
-            tracing::error!(%error, "login: on_login_failed hook returned an error (ignored)");
-        }
+            hook_ctx.clone(),
+        ));
     }
 
     /// Fire [`AuthHooks::on_lockout`] when the failure just recorded closed the window.
@@ -326,13 +323,13 @@ impl AuthEngine {
                 self.brute_force().window_secs()
             }
         };
-        if let Err(error) = self
-            .hooks()
-            .on_lockout(email, tenant_id, retry, hook_ctx)
-            .await
-        {
-            tracing::error!(%error, "login: on_lockout hook returned an error (ignored)");
-        }
+        spawn_guarded(run_on_lockout(
+            self.hooks().clone(),
+            email.to_owned(),
+            tenant_id.to_owned(),
+            retry,
+            hook_ctx.clone(),
+        ));
     }
 
     /// Clear an account's brute-force lockout so the next attempt is judged on its merits.
@@ -448,8 +445,9 @@ mod tests {
     use super::*;
     mod rehash_toggle_tests;
     mod tenant_warning_tests;
+    use crate::services::auth::detached::settle_until;
     use crate::services::auth::test_support::{Harness, SeedUser, base_config, ctx, harness};
-    use crate::traits::UserRepository;
+    use crate::traits::{LoginFailure, UserRepository};
     use std::sync::Arc;
     use std::time::Duration;
 
@@ -1127,6 +1125,7 @@ mod tests {
         ] {
             let _ = h.engine.login(login_input(email, password), &ctx()).await;
         }
+        settle_until(|| spy.seen().len() >= 4).await;
 
         assert_eq!(
             spy.seen(),
@@ -1176,6 +1175,7 @@ mod tests {
             "the store failure changed the answer the caller sees"
         );
 
+        settle_until(|| spy.seen().len() >= 5).await;
         let seen = spy.seen();
         assert!(
             seen.iter().all(|call| !call.starts_with("lockout:")),
@@ -1219,6 +1219,7 @@ mod tests {
             "the store failure changed the answer the caller sees"
         );
 
+        settle_until(|| spy.seen().iter().any(|call| call.starts_with("lockout:"))).await;
         let lockouts: Vec<String> = spy
             .seen()
             .into_iter()
@@ -1250,6 +1251,7 @@ mod tests {
                 .await;
         }
 
+        settle_until(|| spy.seen().iter().any(|call| call.starts_with("lockout:"))).await;
         let lockouts: Vec<String> = spy
             .seen()
             .into_iter()
@@ -1271,6 +1273,10 @@ mod tests {
             .engine
             .login(login_input("lock@example.com", "right"), &ctx())
             .await;
+        settle_until(|| {
+            spy.seen().last().map(String::as_str) == Some("failed:locked_out:lock@example.com:-")
+        })
+        .await;
         assert_eq!(
             spy.seen().last().map(String::as_str),
             Some("failed:locked_out:lock@example.com:-")

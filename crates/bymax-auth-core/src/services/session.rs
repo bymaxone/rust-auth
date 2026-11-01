@@ -16,6 +16,8 @@ use bymax_auth_crypto::compare::constant_time_eq;
 use bymax_auth_types::AuthError;
 
 use crate::config::SessionConfig;
+use crate::services::auth::detached::{run_on_new_session, run_on_session_evicted};
+use crate::services::auth::spawn_guarded;
 use crate::traits::{
     AuthHooks, HookContext, SessionDetail, SessionKind, SessionRecord, SessionRotation,
     SessionStore, UserRepository,
@@ -199,8 +201,7 @@ impl SessionService {
                 // that is not being enforced, which reads as "no error" on every response.
                 tracing::warn!(%error, %user_id, "sessions: eviction of an over-cap session failed");
             }
-            self.fire_session_evicted(user_id, &victim.session_hash, ctx)
-                .await;
+            self.fire_session_evicted(user_id, &victim.session_hash, ctx);
         }
         Ok(())
     }
@@ -382,7 +383,9 @@ impl SessionService {
     }
 
     /// Fire the fire-and-forget new-session hook, projecting the safe user when it can be
-    /// loaded. The hook receives a short (eight-char) session hash, never the full one.
+    /// loaded. The hook receives a short (eight-char) session hash, never the full one, and runs
+    /// detached under the same ceiling as the `after_*` hooks: a slow consumer must not hold the
+    /// login that created the session.
     async fn fire_new_session(&self, record: &SessionRecord, new_hash: &str, ctx: &HookContext) {
         let Ok(Some(user)) = self
             .users
@@ -398,21 +401,25 @@ impl SessionService {
             ip: record.ip.clone(),
             session_hash: short_hash(new_hash),
         };
-        // Errors are swallowed: a slow or failing notification must never affect the session.
-        if let Err(error) = self.hooks.on_new_session(&safe, &session, ctx).await {
-            tracing::error!(%error, "sessions: on_new_session hook returned an error (ignored)");
-        }
+        spawn_guarded(run_on_new_session(
+            self.hooks.clone(),
+            safe,
+            session,
+            ctx.clone(),
+        ));
     }
 
-    /// Fire the fire-and-forget session-evicted hook with the short (eight-char) evicted hash.
-    async fn fire_session_evicted(&self, user_id: &str, evicted_hash: &str, ctx: &HookContext) {
-        if let Err(error) = self
-            .hooks
-            .on_session_evicted(user_id, &short_hash(evicted_hash), ctx)
-            .await
-        {
-            tracing::error!(%error, "sessions: on_session_evicted hook returned an error (ignored)");
-        }
+    /// Fire the fire-and-forget session-evicted hook with the evicted session's stored hash,
+    /// the SHA-256 of its refresh token. That is the form a consumer can correlate with the
+    /// session it listed or stored, and it cannot be used to act as the session: the raw token
+    /// is what authorizes anything. Detached, like every notification hook.
+    fn fire_session_evicted(&self, user_id: &str, evicted_hash: &str, ctx: &HookContext) {
+        spawn_guarded(run_on_session_evicted(
+            self.hooks.clone(),
+            user_id.to_owned(),
+            evicted_hash.to_owned(),
+            ctx.clone(),
+        ));
     }
 }
 
@@ -539,6 +546,7 @@ mod tests {
     use super::*;
     use crate::config::resolvers::MaxSessionsResolver;
     use crate::config::{AuthConfig, EvictionStrategy};
+    use crate::services::auth::detached::settle_until;
     use crate::testing::{InMemoryStores, InMemoryUserRepository};
     use crate::traits::{NoOpAuthHooks, RotateOutcome};
     use bymax_auth_types::{AuthUser, CreateUserData};
@@ -552,6 +560,11 @@ mod tests {
     struct CountingHooks {
         new_sessions: AtomicUsize,
         evictions: AtomicUsize,
+        /// The hash each eviction was reported with, checked by the test: an assertion inside a
+        /// detached hook would panic in a task the test never joins.
+        evicted_hashes: std::sync::Mutex<Vec<String>>,
+        /// The hash each new session was reported with.
+        new_hashes: std::sync::Mutex<Vec<String>>,
     }
 
     #[async_trait::async_trait]
@@ -562,8 +575,9 @@ mod tests {
             session: &crate::traits::email::SessionInfo,
             _ctx: &HookContext,
         ) -> Result<(), crate::traits::HookError> {
-            // The hook must receive only a short hash, never a full 64-char one.
-            assert!(session.session_hash.len() <= 8);
+            if let Ok(mut hashes) = self.new_hashes.lock() {
+                hashes.push(session.session_hash.clone());
+            }
             self.new_sessions.fetch_add(1, Ordering::Relaxed);
             Ok(())
         }
@@ -573,7 +587,9 @@ mod tests {
             evicted_session_hash: &str,
             _ctx: &HookContext,
         ) -> Result<(), crate::traits::HookError> {
-            assert!(evicted_session_hash.len() <= 8);
+            if let Ok(mut hashes) = self.evicted_hashes.lock() {
+                hashes.push(evicted_session_hash.to_owned());
+            }
             self.evictions.fetch_add(1, Ordering::Relaxed);
             Ok(())
         }
@@ -865,8 +881,32 @@ mod tests {
                 .iter()
                 .any(|s| s.session_hash == new && s.is_current)
         );
+        settle_until(|| {
+            hooks.evictions.load(Ordering::Relaxed) >= 1
+                && hooks.new_sessions.load(Ordering::Relaxed) >= 1
+        })
+        .await;
         assert_eq!(hooks.new_sessions.load(Ordering::Relaxed), 1);
         assert_eq!(hooks.evictions.load(Ordering::Relaxed), 1);
+        // The eviction hook is told the evicted session's stored hash in full, so a consumer can
+        // correlate it with a session it listed; the new-session hook gets only the short form.
+        let evicted = hooks
+            .evicted_hashes
+            .lock()
+            .map(|h| h.clone())
+            .unwrap_or_default();
+        assert_eq!(evicted, vec![old.clone()]);
+        let created = hooks
+            .new_hashes
+            .lock()
+            .map(|h| h.clone())
+            .unwrap_or_default();
+        assert_eq!(created.len(), 1);
+        assert!(
+            created
+                .iter()
+                .all(|h| h.len() == 8 && new.starts_with(h.as_str()))
+        );
     }
 
     #[tokio::test]
@@ -892,6 +932,7 @@ mod tests {
         );
         let svc = service(store, users, hooks.clone(), config(5, None));
         assert!(svc.after_session_created(&rec, &only, &ctx()).await.is_ok());
+        settle_until(|| hooks.new_sessions.load(Ordering::Relaxed) >= 1).await;
         assert_eq!(hooks.evictions.load(Ordering::Relaxed), 0);
         assert_eq!(hooks.new_sessions.load(Ordering::Relaxed), 1);
     }
@@ -943,6 +984,11 @@ mod tests {
         );
         let remaining = svc.list_sessions("t1", &uid, Some(&new)).await;
         assert!(matches!(&remaining, Ok(v) if v.len() == 1 && v[0].session_hash == new));
+        settle_until(|| {
+            hooks.evictions.load(Ordering::Relaxed) >= 1
+                && hooks.new_sessions.load(Ordering::Relaxed) >= 1
+        })
+        .await;
         assert_eq!(hooks.evictions.load(Ordering::Relaxed), 1);
         assert_eq!(hooks.new_sessions.load(Ordering::Relaxed), 1);
     }
@@ -995,6 +1041,11 @@ mod tests {
         );
         let remaining = svc.list_sessions("t1", &uid, Some(&new)).await;
         assert!(matches!(&remaining, Ok(v) if v.len() == 1 && v[0].session_hash == new));
+        settle_until(|| {
+            hooks.evictions.load(Ordering::Relaxed) >= 2
+                && hooks.new_sessions.load(Ordering::Relaxed) >= 1
+        })
+        .await;
         assert_eq!(hooks.evictions.load(Ordering::Relaxed), 2);
         assert_eq!(hooks.new_sessions.load(Ordering::Relaxed), 1);
     }
