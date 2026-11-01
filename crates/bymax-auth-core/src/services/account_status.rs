@@ -106,8 +106,7 @@ impl AuthEngine {
     /// # Errors
     ///
     /// A store [`AuthError`] when the cache cannot be reached. Flows that call this after their
-    /// own work is committed log that failure instead of surfacing it (see
-    /// [`Self::drop_cached_account_facts`]).
+    /// own work is committed log that failure instead of surfacing it.
     pub async fn invalidate_account_status(
         &self,
         user_id: &str,
