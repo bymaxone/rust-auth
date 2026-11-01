@@ -1201,6 +1201,8 @@ pub enum ConfigError {
     SameSiteNoneRequiresSecure,
     #[error("route_prefix '{prefix}' requires cookies.refresh_cookie_path to be set explicitly")]
     RefreshPathMismatch { prefix: String },
+    #[error("{option} is '{name}' but its prefix requires {requirement}")]
+    CookiePrefixUnsatisfied { option: &'static str, name: String, requirement: String },
     #[error("controllers.oauth is enabled but no OAuth provider was registered")]
     OAuthToggleWithoutProvider,
     #[error("a UserRepository is required")]
@@ -1235,6 +1237,7 @@ Validation rules, in the order applied (parity with `resolveOptions`):
 | 18 | `success`/`mfa`/`error` redirect URLs are https or `/`-relative in production, and — when `oauth.redirect_allowlist` is non-empty — every `*_redirect_url` and provider `callback_url` resolves to an allowlisted host | `OAuthRedirectInsecure` / `OAuthRedirectNotAllowlisted` |
 | 19 | `cookies.same_site = None` ⇒ `secure_cookies` resolved `true` | `SameSiteNoneRequiresSecure` |
 | 20 | `route_prefix != "auth"` ⇒ `cookies.refresh_cookie_path` set | `RefreshPathMismatch` |
+| 20b | a cookie name starting `__Secure-` ⇒ `secure_cookies` resolved `true`; starting `__Host-` ⇒ also `Path=/` (the refresh cookie uses `cookies.refresh_cookie_path`) and no `cookies.resolve_domains` — a browser drops a `Set-Cookie` that breaks its prefix | `CookiePrefixUnsatisfied` |
 | 21 | `controllers.oauth` ⇒ at least one OAuth provider registered | `OAuthToggleWithoutProvider` |
 | 22 | `UserRepository` supplied | `MissingUserRepository` |
 | 23 | session/OTP/brute-force stores supplied | `MissingStores` |

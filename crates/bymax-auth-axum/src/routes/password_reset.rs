@@ -92,6 +92,7 @@ async fn change_password(
     // carries it: the refresh cookie (cookie delivery) or the body (bearer delivery). A token that
     // is absent leaves the caller's session among those revoked.
     let current_refresh = source_refresh_token(
+        state.config().delivery,
         &cookies,
         &state.config().cookies.refresh_name,
         dto.refresh_token.as_deref(),

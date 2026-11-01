@@ -138,6 +138,7 @@ async fn logout(
     // the session alive — the cookie channel still gets its chance.
     let dto = parse_optional_refresh_body(&body).unwrap_or_default();
     let refresh = source_refresh_token(
+        state.config().delivery,
         &cookies,
         &state.config().cookies.refresh_name,
         dto.refresh_token.as_deref(),
@@ -166,8 +167,12 @@ async fn refresh(
         Err(error) => return error_response(&error),
     };
     let body_refresh = dto.refresh_token.as_deref();
-    let refresh =
-        source_refresh_token(&cookies, &state.config().cookies.refresh_name, body_refresh);
+    let refresh = source_refresh_token(
+        state.config().delivery,
+        &cookies,
+        &state.config().cookies.refresh_name,
+        body_refresh,
+    );
     let refreshed = match state
         .engine()
         .refresh(&refresh, &ctx.ip, &ctx.user_agent)

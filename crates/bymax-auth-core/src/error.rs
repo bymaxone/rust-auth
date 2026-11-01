@@ -250,6 +250,19 @@ pub enum ConfigError {
     /// browsers reject.
     #[error("cookies.same_site = None requires secure_cookies = true")]
     SameSiteNoneRequiresSecure,
+    /// A cookie name carries a `__Secure-` or `__Host-` prefix that the cookie's attributes
+    /// cannot satisfy, so a browser would drop every `Set-Cookie` for it.
+    #[error(
+        "{option} is '{name}' but its prefix requires {requirement}; a browser drops a Set-Cookie that breaks the prefix"
+    )]
+    CookiePrefixUnsatisfied {
+        /// The configuration option that names the cookie.
+        option: &'static str,
+        /// The configured cookie name.
+        name: String,
+        /// The first requirement of the prefix the cookie breaks.
+        requirement: String,
+    },
     /// `cookies.same_site = None` was resolved with an empty `cookies.trusted_origins`, so
     /// every cross-site state-changing request would be rejected.
     #[error("cookies.same_site = None requires a non-empty cookies.trusted_origins")]
