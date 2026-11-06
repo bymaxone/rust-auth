@@ -3207,7 +3207,7 @@ answers `400` `Validation failed` with a `content-type` detail (the contract's
 limit, in a response mapper just outside the body-limit layer, not in a filter in front of routing
 as nest-auth does; the status, code, message and `details` are what the contract pins, and they
 are the same on every route. The refresh, logout and revoke-all routes read an optional body
-leniently (they ignore the `Content-Type`), but a body they cannot read answers the same envelopes.
+leniently (they ignore the `Content-Type`): refresh answers the envelopes for a body that is not JSON, while logout and revoke-all ignore one; all three answer the envelope for a body over the limit or one that cannot be read.
 
 ---
 
