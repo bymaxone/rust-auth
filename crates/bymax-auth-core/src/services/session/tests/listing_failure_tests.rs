@@ -1,6 +1,7 @@
 //! The concurrent-session cap runs after the new session is committed, so a listing the store
 //! cannot answer leaves that session alone and the login that created it succeeds.
 
+use super::damaged_detail_tests::DamagedDetails;
 use super::*;
 
 /// Store two sessions for one user under a cap of one: `old` and the just-created `new`.
@@ -142,4 +143,79 @@ async fn the_unenforced_cap_is_reported_once_with_its_cause_and_without_a_hash()
     for secret in [old, new, subject(&uid)] {
         assert!(!events.contains(&secret), "{secret} must not be logged");
     }
+}
+
+/// A host store's error: its `Display` is the message its author meant for a log, while its
+/// `Debug` carries the session details it was holding.
+struct HostStoreError {
+    session_detail: &'static str,
+}
+
+impl std::fmt::Debug for HostStoreError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("HostStoreError")
+            .field("session_detail", &self.session_detail)
+            .finish()
+    }
+}
+
+impl std::fmt::Display for HostStoreError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("host store unavailable")
+    }
+}
+
+impl std::error::Error for HostStoreError {}
+
+#[tokio::test]
+async fn a_host_stores_error_is_logged_by_its_display_chain_not_its_debug() {
+    const MARKER: &str = "MARKER-203.0.113.9-Pixel-7";
+    let inner = Arc::new(InMemoryStores::new());
+    let users = Arc::new(InMemoryUserRepository::new());
+    let uid = seed_user(&users, "caphost").await;
+    let (_old, new, new_record) = two_sessions_over_a_cap_of_one(&inner, &uid).await;
+    let store = Arc::new(
+        DamagedDetails::new(inner.clone(), &[]).failing_entries_with(|| {
+            AuthError::Internal(Box::new(HostStoreError {
+                session_detail: MARKER,
+            }))
+        }),
+    );
+    let svc = SessionService::new(
+        store,
+        users,
+        Arc::new(CountingHooks::default()),
+        config(1, None),
+        3600,
+        zeroize::Zeroizing::new(TEST_IDENTIFIER_KEY),
+    );
+
+    let (events, guard) = crate::log_capture::capture_events();
+    assert!(
+        svc.after_session_created(&new_record, &new, &ctx())
+            .await
+            .is_ok()
+    );
+    drop(guard);
+
+    let reported: Vec<_> = events
+        .iter()
+        .into_iter()
+        .filter(|event| event.rendered.contains("the session cap was not enforced"))
+        .collect();
+    assert_eq!(reported.len(), 1, "{reported:?}");
+    // The error and each source, by `Display`, joined: what the error's author chose to say.
+    assert!(
+        reported[0]
+            .rendered
+            .contains("error=internal error: host store unavailable"),
+        "{}",
+        reported[0].rendered
+    );
+    // What `Debug` would add - the held session details - must not reach the log.
+    assert!(
+        !events.contains(MARKER),
+        "the Debug marker was logged: {}",
+        reported[0].rendered
+    );
 }

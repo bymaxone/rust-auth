@@ -8,19 +8,34 @@ use std::sync::Mutex;
 use super::*;
 use crate::traits::{SessionDetail, SessionEntry, SessionRotation};
 
-/// An in-memory store that hides chosen sessions' details.
-struct DamagedDetails {
+/// Builds the error a failing entries listing returns.
+type ListingError = Box<dyn Fn() -> AuthError + Send + Sync>;
+
+/// An in-memory store that hides chosen sessions' details, and can make the entries listing
+/// fail with an error of the test's choosing.
+pub(super) struct DamagedDetails {
     inner: Arc<InMemoryStores>,
     damaged: Mutex<HashSet<String>>,
+    listing_error: Option<ListingError>,
 }
 
 impl DamagedDetails {
-    fn new(inner: Arc<InMemoryStores>, damaged: &[&str]) -> Self {
+    pub(super) fn new(inner: Arc<InMemoryStores>, damaged: &[&str]) -> Self {
         let damaged = damaged.iter().map(|hash| (*hash).to_owned()).collect();
         Self {
             inner,
             damaged: Mutex::new(damaged),
+            listing_error: None,
         }
+    }
+
+    /// Make every `list_session_entries` call fail with the error `make` builds.
+    pub(super) fn failing_entries_with(
+        mut self,
+        make: impl Fn() -> AuthError + Send + Sync + 'static,
+    ) -> Self {
+        self.listing_error = Some(Box::new(make));
+        self
     }
 
     fn is_damaged(&self, hash: &str) -> bool {
@@ -47,6 +62,9 @@ impl SessionStore for DamagedDetails {
         kind: SessionKind,
         subject_hash: &str,
     ) -> Result<Vec<SessionEntry>, AuthError> {
+        if let Some(make) = &self.listing_error {
+            return Err(make());
+        }
         let all = self.inner.list_sessions(kind, subject_hash).await?;
         Ok(all
             .into_iter()

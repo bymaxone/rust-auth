@@ -61,6 +61,26 @@ pub(crate) fn internal_error(context: &'static str) -> AuthError {
 
 /// Keep the first failure of a logout's revocation writes, and report every one of them.
 ///
+/// The text an operator reads for `error`: its `Display` and then each `source()` in turn,
+/// joined with `": "`.
+///
+/// `Display` is what an error's author chose to say, so it is the part safe to log. `Debug` is
+/// not: a store's error type may derive it over the session details it was holding, and
+/// `serde_json`'s echoes the value it could not read. `AuthError::Internal` displays as
+/// "internal error" and carries the cause as its source, so the chain is what makes a logged
+/// failure diagnosable. The walk stops after [`ERROR_CHAIN_DEPTH`] links, so a source that
+/// refers back to itself cannot stall the caller.
+pub(crate) fn error_chain(error: &(dyn std::error::Error + 'static)) -> String {
+    std::iter::successors(Some(error), |link| link.source())
+        .take(ERROR_CHAIN_DEPTH)
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join(": ")
+}
+
+/// The most links [`error_chain`] renders.
+const ERROR_CHAIN_DEPTH: usize = 8;
+
 /// A logout attempts all of its writes (the access-token blacklist, the refresh-session delete,
 /// the grace-pointer delete) whatever an earlier one did, so one refused write never leaves a
 /// later one unattempted; it then answers the first failure. The cause is logged and the answer
@@ -368,5 +388,69 @@ mod tests {
         // forward — a smoke test that the time source is wired, not a precision assertion.
         assert!(now_unix() > 1_600_000_000);
         assert!(now_offset().unix_timestamp() > 1_600_000_000);
+    }
+
+    /// An error with one source, whose `Debug` differs from its `Display`.
+    #[derive(Debug)]
+    struct Link {
+        text: &'static str,
+        source: Option<Box<Link>>,
+    }
+
+    impl std::fmt::Display for Link {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str(self.text)
+        }
+    }
+
+    impl std::error::Error for Link {
+        fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+            self.source
+                .as_deref()
+                .map(|link| link as &(dyn std::error::Error + 'static))
+        }
+    }
+
+    #[test]
+    fn error_chain_joins_each_display_with_its_sources_in_order() {
+        let error = Link {
+            text: "outer",
+            source: Some(Box::new(Link {
+                text: "middle",
+                source: Some(Box::new(Link {
+                    text: "inner",
+                    source: None,
+                })),
+            })),
+        };
+        assert_eq!(error_chain(&error), "outer: middle: inner");
+        // An error with no source is just its own text, and the engine's opaque internal error
+        // shows its cause after "internal error".
+        assert_eq!(
+            error_chain(&Link {
+                text: "alone",
+                source: None
+            }),
+            "alone"
+        );
+        assert_eq!(
+            error_chain(&internal_error("the cause")),
+            "internal error: the cause"
+        );
+    }
+
+    #[test]
+    fn error_chain_stops_after_the_depth_limit() {
+        let mut error = Link {
+            text: "link",
+            source: None,
+        };
+        for _ in 0..(ERROR_CHAIN_DEPTH * 2) {
+            error = Link {
+                text: "link",
+                source: Some(Box::new(error)),
+            };
+        }
+        assert_eq!(error_chain(&error).split(": ").count(), ERROR_CHAIN_DEPTH);
     }
 }
