@@ -28,6 +28,7 @@ use crate::response::error_response;
 use crate::routes::{PresentedPlatformAccessToken, RequestMeta, parse_optional_refresh_body};
 use crate::shared_limit::Throttle;
 use crate::state::{AuthState, AxumAuthConfig};
+use crate::validation::RequestBytes;
 use crate::validation::ValidatedJson;
 
 /// Assemble the `platform` group under the `platform` segment with per-route rate limits.
@@ -150,7 +151,7 @@ async fn me(State(state): State<AuthState>, user: PlatformUser) -> Response {
 async fn logout(
     State(state): State<AuthState>,
     PresentedPlatformAccessToken(access_token): PresentedPlatformAccessToken,
-    body: axum::body::Bytes,
+    RequestBytes(body): RequestBytes,
 ) -> Response {
     // An unparseable body degrades to "no token" rather than blocking the revocation of the
     // access JTI. A store failure is answered, not swallowed, as the dashboard logout does.
@@ -172,11 +173,11 @@ async fn logout(
 async fn refresh(
     State(state): State<AuthState>,
     RequestMeta(ctx): RequestMeta,
-    body: axum::body::Bytes,
+    RequestBytes(body): RequestBytes,
 ) -> Response {
     let dto = match parse_optional_refresh_body(&body) {
         Ok(dto) => dto,
-        Err(error) => return error_response(&error),
+        Err(rejection) => return rejection.into_response(),
     };
     let refresh = dto.refresh_token.unwrap_or_default();
     // One fallible sequence, one error arm. Split in two, the second arm could only fire if the

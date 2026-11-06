@@ -32,6 +32,7 @@ mod router;
 mod routes;
 mod shared_limit;
 mod state;
+mod transport;
 mod trusted_origin;
 mod validation;
 
@@ -58,6 +59,7 @@ pub use router::{AuthRouter, auth_router};
 pub use state::{
     AuthState, AxumAuthConfig, ClientIpSource, DEFAULT_MAX_BODY_BYTES, RouteGroups, TrustedProxyFn,
 };
+pub use transport::BodyRejection;
 pub use validation::{ValidatedJson, ValidatedQuery};
 
 #[cfg(feature = "platform")]

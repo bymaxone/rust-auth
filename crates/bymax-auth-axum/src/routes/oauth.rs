@@ -4,7 +4,7 @@
 //! never request-derived (no open-redirect).
 
 use axum::Router;
-use axum::extract::{Path, State};
+use axum::extract::State;
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use bymax_auth_core::OAuthOutcome;
@@ -17,6 +17,7 @@ use crate::response::error_response;
 use crate::routes::{CookieDomains, RequestMeta};
 use crate::shared_limit::Throttle;
 use crate::state::{AuthState, AxumAuthConfig};
+use crate::validation::PathParam;
 use crate::validation::ValidatedQuery;
 
 /// The `?error=` short-code surfaced on an error redirect (§11.4): the suffix of the OAuth
@@ -70,7 +71,7 @@ pub(crate) fn routes(config: &AxumAuthConfig, ip_source: &Throttle) -> Router<Au
 async fn initiate(
     State(state): State<AuthState>,
     cookies: Cookies,
-    Path(provider): Path<String>,
+    PathParam(provider): PathParam<String>,
     RequestMeta(ctx): RequestMeta,
     ValidatedQuery(query): ValidatedQuery<OAuthInitiateQuery>,
 ) -> Response {
@@ -98,7 +99,7 @@ async fn callback(
     State(state): State<AuthState>,
     cookies: Cookies,
     CookieDomains(domains): CookieDomains,
-    Path(provider): Path<String>,
+    PathParam(provider): PathParam<String>,
     RequestMeta(ctx): RequestMeta,
     ValidatedQuery(query): ValidatedQuery<OAuthCallbackQuery>,
 ) -> Response {

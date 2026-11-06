@@ -18,6 +18,7 @@ use crate::response::error_response;
 use crate::routes::RequestMeta;
 use crate::shared_limit::Throttle;
 use crate::state::{AuthState, AxumAuthConfig};
+use crate::validation::RequestBytes;
 use crate::validation::ValidatedJson;
 
 /// Assemble the `platform_mfa` group under the `platform/mfa` segment, reusing the dashboard
@@ -51,7 +52,7 @@ async fn setup(
     State(state): State<AuthState>,
     user: PlatformUser,
     headers: http::HeaderMap,
-    body: axum::body::Bytes,
+    RequestBytes(body): RequestBytes,
 ) -> Response {
     // See the dashboard route: the password body is optional on the wire and the engine is
     // what decides whether this account needs one.

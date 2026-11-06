@@ -12,7 +12,7 @@
 
 use axum::Json;
 use axum::Router;
-use axum::extract::{Path, State};
+use axum::extract::State;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post};
 use bymax_auth_core::services::session::SessionInfo;
@@ -25,6 +25,7 @@ use crate::response::error_response;
 use crate::routes::source_refresh_token;
 use crate::shared_limit::Throttle;
 use crate::state::{AuthState, AxumAuthConfig};
+use crate::validation::{PathParam, RequestBytes};
 
 /// Assemble the `sessions` group with per-route rate limits. The paths are declared directly
 /// (not nested under a `/sessions` prefix) so the list route matches `GET /sessions` exactly
@@ -84,7 +85,7 @@ async fn revoke_all(
     _status: UserStatus,
     user: AuthUser,
     cookies: Cookies,
-    body: axum::body::Bytes,
+    RequestBytes(body): RequestBytes,
 ) -> Response {
     // The body channel matters as much as the cookie: a bearer-mode deployment plants no
     // cookies at all, so reading only the jar meant this route could never identify the
@@ -115,7 +116,7 @@ async fn revoke_one(
     State(state): State<AuthState>,
     _status: UserStatus,
     user: AuthUser,
-    Path(id): Path<String>,
+    PathParam(id): PathParam<String>,
 ) -> Response {
     match state
         .engine()

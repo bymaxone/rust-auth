@@ -24,6 +24,7 @@ use crate::routes::{
 };
 use crate::shared_limit::Throttle;
 use crate::state::{AuthState, AxumAuthConfig};
+use crate::validation::RequestBytes;
 use crate::validation::ValidatedJson;
 
 /// Assemble the `auth` group with per-route rate-limit layers.
@@ -131,7 +132,7 @@ async fn logout(
     cookies: Cookies,
     CookieDomains(domains): CookieDomains,
     PresentedAccessToken(access_token): PresentedAccessToken,
-    body: axum::body::Bytes,
+    RequestBytes(body): RequestBytes,
 ) -> Response {
     // Logout is idempotent end to end, so an unparseable body degrades to "no body-supplied
     // token" rather than 400-ing and leaving the session alive — the cookie channel still gets
@@ -162,13 +163,13 @@ async fn refresh(
     cookies: Cookies,
     CookieDomains(domains): CookieDomains,
     RequestMeta(ctx): RequestMeta,
-    body: axum::body::Bytes,
+    RequestBytes(body): RequestBytes,
 ) -> Response {
     // The refresh body is optional (cookie mode sends none). Parse it leniently: an empty
     // body yields no body-supplied token, a present body must be a valid `RefreshDto`.
     let dto = match parse_optional_refresh_body(&body) {
         Ok(dto) => dto,
-        Err(error) => return error_response(&error),
+        Err(rejection) => return rejection.into_response(),
     };
     let body_refresh = dto.refresh_token.as_deref();
     let refresh = source_refresh_token(

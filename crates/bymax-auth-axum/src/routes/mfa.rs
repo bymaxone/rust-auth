@@ -27,6 +27,7 @@ use crate::response::error_response;
 use crate::routes::{CookieDomains, RequestMeta};
 use crate::shared_limit::Throttle;
 use crate::state::{AuthState, AxumAuthConfig};
+use crate::validation::RequestBytes;
 use crate::validation::ValidatedJson;
 
 /// Assemble the `mfa` group under the `mfa` segment, with per-route rate-limit layers.
@@ -77,7 +78,7 @@ async fn setup(
     // part of signing in, not of managing the factor.
     _gate: VerifiedUser,
     headers: http::HeaderMap,
-    body: axum::body::Bytes,
+    RequestBytes(body): RequestBytes,
 ) -> Response {
     // The body carries the account password. It is optional on the wire — an OAuth-only
     // account has none — so an empty body is the same request as `{}`: no password supplied,

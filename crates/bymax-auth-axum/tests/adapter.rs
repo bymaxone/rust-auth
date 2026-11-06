@@ -66,6 +66,9 @@ mod shared_rate_limit;
 #[path = "adapter/session_cap_listing.rs"]
 mod session_cap_listing;
 
+#[path = "adapter/transport_errors.rs"]
+mod transport_errors;
+
 #[path = "adapter/status_gates.rs"]
 mod status_gates;
 
@@ -2428,9 +2431,11 @@ async fn password_reset_otp_two_step_success_flow() {
 }
 
 #[tokio::test]
-async fn an_oversized_body_is_rejected_as_validation() {
+async fn an_oversized_body_is_rejected_as_payload_too_large() {
     // A body exceeding the configured limit trips the request-body-limit layer; the
-    // `ValidatedJson` extractor maps the rejection to the canonical `auth.validation` envelope.
+    // `ValidatedJson` extractor maps the rejection to the `auth.validation` envelope with the
+    // status the shared contract's `transportErrors` pins for it (413, not the 400 of an
+    // ordinary validation failure).
     use bymax_auth_axum::AxumAuthConfig;
     let Some(h) = build(EngineSpec::default()) else { return };
     let config = AxumAuthConfig {
@@ -2445,8 +2450,9 @@ async fn an_oversized_body_is_rejected_as_validation() {
         }))
         .send(&app)
         .await;
-    assert_eq!(resp.status, StatusCode::BAD_REQUEST);
+    assert_eq!(resp.status, StatusCode::PAYLOAD_TOO_LARGE);
     assert_eq!(resp.json()["error"]["code"], "auth.validation");
+    assert_eq!(resp.json()["error"]["message"], "Request entity too large");
 }
 
 /// A realistically shaped invitation token: 64 hex characters, exactly what the engine
