@@ -170,7 +170,7 @@ impl SessionService {
                 // One line per login, carrying the store's error and the user id. A
                 // partial list would evict the wrong sessions, so none is evicted.
                 tracing::warn!(
-                    %error,
+                    error = ?error,
                     %user_id,
                     "sessions: the session cap was not enforced, the user's sessions could not be listed"
                 );

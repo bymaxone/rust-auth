@@ -100,3 +100,46 @@ async fn the_next_login_enforces_the_cap_again() {
         vec![old]
     );
 }
+
+#[tokio::test]
+async fn the_unenforced_cap_is_reported_once_with_its_cause_and_without_a_hash() {
+    let store = Arc::new(InMemoryStores::new());
+    let users = Arc::new(InMemoryUserRepository::new());
+    let uid = seed_user(&users, "capwarn").await;
+    let hooks = Arc::new(CountingHooks::default());
+    let (old, new, new_record) = two_sessions_over_a_cap_of_one(&store, &uid).await;
+    let svc = service(store.clone(), users, hooks, config(1, None));
+
+    store.fail_next_session_listings(1);
+    let (events, guard) = crate::log_capture::capture_events();
+    assert!(
+        svc.after_session_created(&new_record, &new, &ctx())
+            .await
+            .is_ok()
+    );
+    drop(guard);
+
+    let reported: Vec<_> = events
+        .iter()
+        .into_iter()
+        .filter(|event| event.rendered.contains("the session cap was not enforced"))
+        .collect();
+    assert_eq!(reported.len(), 1, "one line per login: {reported:?}");
+    let line = &reported[0];
+    assert_eq!(line.level, tracing::Level::WARN);
+    // The cause is what an operator needs: AuthError's Display alone prints just "internal error".
+    assert!(
+        line.rendered.contains("forced session listing failure"),
+        "{}",
+        line.rendered
+    );
+    assert!(
+        line.rendered.contains(&format!("user_id={uid}")),
+        "{}",
+        line.rendered
+    );
+    // No session hash and no account subject hash reaches the log.
+    for secret in [old, new, subject(&uid)] {
+        assert!(!events.contains(&secret), "{secret} must not be logged");
+    }
+}
