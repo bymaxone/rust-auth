@@ -32,6 +32,16 @@ pub(crate) enum Transport {
 }
 
 impl Transport {
+    /// The kind for a body that could not be read, from the status axum reports for it: a body
+    /// over the limit is [`Transport::TooLarge`], any other failure keeps its own status.
+    pub(crate) fn from_body_status(status: StatusCode) -> Self {
+        if status == StatusCode::PAYLOAD_TOO_LARGE {
+            Self::TooLarge
+        } else {
+            Self::Malformed(status)
+        }
+    }
+
     /// The HTTP status of this kind.
     pub(crate) fn status(self) -> StatusCode {
         match self {
@@ -196,6 +206,22 @@ mod tests {
         let other = Transport::Malformed(StatusCode::REQUEST_TIMEOUT);
         assert!(own_status_messages.contains(other.message()));
         assert!(other.status().is_client_error());
+    }
+
+    #[test]
+    fn a_body_failure_is_too_large_only_when_the_status_says_so() {
+        assert_eq!(
+            Transport::from_body_status(StatusCode::PAYLOAD_TOO_LARGE),
+            Transport::TooLarge
+        );
+        assert_eq!(
+            Transport::from_body_status(StatusCode::BAD_REQUEST),
+            Transport::Malformed(StatusCode::BAD_REQUEST)
+        );
+        assert_eq!(
+            Transport::from_body_status(StatusCode::REQUEST_TIMEOUT),
+            Transport::Malformed(StatusCode::REQUEST_TIMEOUT)
+        );
     }
 
     #[tokio::test]

@@ -264,10 +264,7 @@ fn run_garde<T: Validate<Context = ()>>(value: &T) -> Result<(), AuthRejection> 
 /// axum's own text is never used, so the library's envelope answers instead of a plain-text
 /// default.
 pub(crate) fn map_bytes_rejection(rejection: BytesRejection) -> BodyRejection {
-    match rejection.status() {
-        StatusCode::PAYLOAD_TOO_LARGE => Transport::TooLarge.into(),
-        status => Transport::Malformed(status).into(),
-    }
+    Transport::from_body_status(rejection.status()).into()
 }
 
 /// A path parameter, for the routes that read one. It differs from axum's own `Path` only in how
@@ -353,6 +350,91 @@ mod tests {
         let ok =
             deserialize_json::<LoginDto>(br#"{"email":"a@e.com","password":"p","tenantId":"t1"}"#);
         assert!(ok.is_ok());
+    }
+
+    fn header_map(pairs: &[(&'static str, &'static [u8])]) -> http::HeaderMap {
+        let mut map = http::HeaderMap::new();
+        for (name, value) in pairs {
+            if let Ok(value) = http::HeaderValue::from_bytes(value) {
+                map.append(http::HeaderName::from_static(name), value);
+            }
+        }
+        map
+    }
+
+    #[test]
+    fn only_utf8_or_an_unstated_charset_is_readable() {
+        for readable in [
+            &b"application/json"[..],
+            b"application/json; charset=utf-8",
+            b"application/json; charset=UTF-8",
+            b"application/json;charset=\"utf-8\"",
+            b"application/json; boundary=x; charset=utf-8",
+            // A parameter without a value names no charset.
+            b"application/json; flag",
+        ] {
+            assert!(
+                charset_is_utf8(&header_map(&[("content-type", readable)])),
+                "{}",
+                String::from_utf8_lossy(readable)
+            );
+        }
+        for unreadable in [
+            &b"application/json; charset=nope"[..],
+            b"application/json; charset=utf8",
+            b"application/json; charset = UTF-16",
+            b"application/json; charset=\"latin1\"",
+        ] {
+            assert!(
+                !charset_is_utf8(&header_map(&[("content-type", unreadable)])),
+                "{}",
+                String::from_utf8_lossy(unreadable)
+            );
+        }
+        // No `Content-Type` at all states no charset.
+        assert!(charset_is_utf8(&http::HeaderMap::new()));
+    }
+
+    #[test]
+    fn only_the_identity_encoding_is_readable() {
+        assert!(encoding_is_identity(&http::HeaderMap::new()));
+        for readable in [&b"identity"[..], b"Identity", b"identity, identity"] {
+            assert!(encoding_is_identity(&header_map(&[(
+                "content-encoding",
+                readable
+            )])));
+        }
+        for unreadable in [&b"gzip"[..], b"identity, gzip", b"br", b"\xFF"] {
+            assert!(!encoding_is_identity(&header_map(&[(
+                "content-encoding",
+                unreadable
+            )])));
+        }
+        // Every `Content-Encoding` header counts, not only the first.
+        assert!(!encoding_is_identity(&header_map(&[
+            ("content-encoding", b"identity"),
+            ("content-encoding", b"gzip"),
+        ])));
+    }
+
+    #[tokio::test]
+    async fn a_route_whose_path_parameter_was_not_captured_is_the_adapters_fault() {
+        use tower::ServiceExt;
+        // A handler that asks for a path parameter on a route that declares none: the router
+        // never captured it, which is the adapter's mistake and must not read as a bad request.
+        let app = axum::Router::new().route(
+            "/none",
+            axum::routing::get(|PathParam(value): PathParam<String>| async move { value }),
+        );
+        let request = Request::builder()
+            .uri("/none")
+            .body(axum::body::Body::empty());
+        let Ok(request) = request else { return };
+        let response = match app.oneshot(request).await {
+            Ok(response) => response,
+            Err(never) => match never {},
+        };
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
     }
 
     #[test]
