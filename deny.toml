@@ -14,6 +14,7 @@ all-features = true
 # unmaintained crate (not just workspace-direct ones), and yanked versions are
 # errors. `ignore` records intentional, reviewed exceptions; each carries the reason it
 # is safe and the condition for removing it.
+# `cargo audit` does not read this file: keep the list identical to `.cargo/audit.toml`.
 unmaintained = "all"
 yanked = "deny"
 ignore = [
