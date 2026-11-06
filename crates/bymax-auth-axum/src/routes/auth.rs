@@ -133,9 +133,11 @@ async fn logout(
     PresentedAccessToken(access_token): PresentedAccessToken,
     body: axum::body::Bytes,
 ) -> Response {
-    // Logout is best-effort and idempotent end to end (the engine swallows store failures), so
-    // an unparseable body degrades to "no body-supplied token" rather than 400-ing and leaving
-    // the session alive — the cookie channel still gets its chance.
+    // Logout is idempotent end to end, so an unparseable body degrades to "no body-supplied
+    // token" rather than 400-ing and leaving the session alive — the cookie channel still gets
+    // its chance. A store failure is not swallowed: the engine attempts every revocation write
+    // and answers the first failure, and the response then keeps the auth cookies so the client
+    // still holds the credentials it needs to retry.
     let dto = parse_optional_refresh_body(&body).unwrap_or_default();
     let refresh = source_refresh_token(
         state.config().delivery,
@@ -143,7 +145,9 @@ async fn logout(
         &state.config().cookies.refresh_name,
         dto.refresh_token.as_deref(),
     );
-    let _ = state.engine().logout(&access_token, &refresh).await;
+    if let Err(error) = state.engine().logout(&access_token, &refresh).await {
+        return error_response(&error);
+    }
     let extras = TokenDelivery::with_domains(state.config(), &domains).clear_session(&cookies);
     with_extra_cookies(StatusCode::NO_CONTENT.into_response(), extras)
 }

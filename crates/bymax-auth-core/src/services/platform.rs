@@ -34,7 +34,7 @@ use crate::services::auth::{normalize_anti_enum, spawn_guarded};
 use crate::services::brute_force::BruteForceService;
 use crate::services::password::PasswordService;
 use crate::services::token_manager::TokenManagerService;
-use crate::services::{is_refresh_token_shape, now_unix, to_hex};
+use crate::services::{is_refresh_token_shape, note_logout_failure, now_unix, to_hex};
 use crate::traits::{
     AuthHooks, HookContext, HookPlane, PlatformUserRepository, SessionKind, SessionStore,
 };
@@ -288,12 +288,14 @@ impl PlatformAuthService {
 
     /// Revoke the current platform session: blacklist the access token's `jti` for its
     /// remaining lifetime — only when the token actually verifies as a platform token — and
-    /// delete BOTH the primary refresh session and any rotation grace pointer for it. Idempotent
-    /// and best-effort: a logout is never blocked by a store failure.
+    /// delete BOTH the primary refresh session and any rotation grace pointer for it.
     ///
     /// # Errors
     ///
-    /// The `Result` is reserved for forward compatibility and currently always returns `Ok`.
+    /// Attempts every revocation write whatever an earlier one did, then answers the first
+    /// failure as [`AuthError::Internal`]: a success is answered only when the access token, the
+    /// refresh session and the grace pointer are all gone. A session already rotated or evicted
+    /// is not a failure, so a retry finishes whatever the first attempt left.
     pub async fn logout(&self, access_token: &str, raw_refresh: &str) -> Result<String, AuthError> {
         // The stored session names its owner. Presenting the refresh token proves possession;
         // the record proves whose it is. The admin id used to come from the route's
@@ -304,14 +306,21 @@ impl PlatformAuthService {
         // for exactly this; the platform plane kept the old shape.
         let admin_id = if is_refresh_token_shape(raw_refresh) {
             let hash = RawRefreshToken::from_raw(raw_refresh.to_owned()).redis_hash();
-            self.session_store
+            // A lookup that fails ends the logout before any write: the owner is unknown, so
+            // the writes that follow could not be aimed.
+            let found = self
+                .session_store
                 .find_session(SessionKind::Platform, &hash)
-                .await?
-                .map(|record| record.user_id)
-                .unwrap_or_default()
+                .await
+                .map_err(|error| {
+                    tracing::warn!(%error, "logout: session lookup failed");
+                    crate::services::internal_error("a logout could not read its session")
+                })?;
+            found.map(|record| record.user_id).unwrap_or_default()
         } else {
             String::new()
         };
+        let mut failure = None;
         let admin_id = admin_id.as_str();
 
         // Blacklist only a token that actually verifies as a PLATFORM token: a forged token
@@ -320,36 +329,25 @@ impl PlatformAuthService {
         // logout path. The expiry is waived — an expired token is the normal case at logout —
         // but the signature is not: the `jti` decides which token gets blacklisted, so reading
         // it unverified would let a caller revoke one they do not own by naming its id.
-        // Best-effort — a store failure must not block the logout.
         if let Ok(claims) = self
             .tokens
             .verify_platform_access_ignoring_expiry(access_token)
         {
             let ttl = u64::try_from(claims.exp.saturating_sub(now_unix())).unwrap_or(0);
-            let _ = self.tokens.revoke_access(&claims.jti, ttl).await;
+            let revoked = self.tokens.revoke_access(&claims.jti, ttl).await;
+            note_logout_failure(
+                &mut failure,
+                "logout: access token revocation failed",
+                revoked,
+            );
         }
 
-        // Clean BOTH the primary and the grace refresh keys for the presented token, against the
-        // PLATFORM keyspace. The ownership-checked revoke deletes the primary `prt:`/`psd:` keys
-        // and the `psess:` membership in one atomic step; the grace-pointer delete then removes
-        // any `prp:` recovery pointer keyed by this same hash — so a token logged out within its
-        // grace window cannot still rotate into a fresh session. Both are best-effort: a store
-        // failure (or a `SessionNotFound` for an already-rotated token) must never block logout.
-        // A malformed/oversized token is skipped before hashing — it owns no session anyway.
         if is_refresh_token_shape(raw_refresh) {
-            let session_hash = RawRefreshToken::from_raw(raw_refresh.to_owned()).redis_hash();
-            let _ = self
-                .session_store
-                .revoke_session(
-                    SessionKind::Platform,
-                    &self.session_subject(admin_id),
-                    &session_hash,
-                )
+            self.revoke_logout_session(raw_refresh, admin_id, &mut failure)
                 .await;
-            let _ = self
-                .session_store
-                .delete_grace_pointer(SessionKind::Platform, &session_hash)
-                .await;
+        }
+        if let Some(error) = failure {
+            return Err(error);
         }
 
         // No live session matched the presented token — already signed out, or expired. There
@@ -364,6 +362,39 @@ impl PlatformAuthService {
             ));
         }
         Ok(admin_id.to_owned())
+    }
+
+    /// Delete BOTH the primary and the grace refresh keys for the presented token, against the
+    /// PLATFORM keyspace. The ownership-checked revoke deletes the primary `prt:`/`psd:` keys and
+    /// the `psess:` membership in one atomic step; the grace-pointer delete then removes any
+    /// `prp:` recovery pointer keyed by this same hash, so a token logged out within its grace
+    /// window cannot still rotate into a fresh session. Both are attempted whatever the other
+    /// did; `SessionNotFound` (already rotated or evicted) is not recorded.
+    async fn revoke_logout_session(
+        &self,
+        raw_refresh: &str,
+        admin_id: &str,
+        failure: &mut Option<AuthError>,
+    ) {
+        let session_hash = RawRefreshToken::from_raw(raw_refresh.to_owned()).redis_hash();
+        let revoked = self
+            .session_store
+            .revoke_session(
+                SessionKind::Platform,
+                &self.session_subject(admin_id),
+                &session_hash,
+            )
+            .await;
+        let revoked = match revoked {
+            Err(AuthError::SessionNotFound) => Ok(()),
+            other => other,
+        };
+        note_logout_failure(failure, "logout: session cleanup failed", revoked);
+        let grace = self
+            .session_store
+            .delete_grace_pointer(SessionKind::Platform, &session_hash)
+            .await;
+        note_logout_failure(failure, "logout: grace pointer cleanup failed", grace);
     }
 
     /// Atomically invalidate EVERY platform session for the admin (the "log out everywhere"
@@ -540,6 +571,7 @@ async fn run_after_platform_logout(
 mod tests {
     use super::*;
     mod enrolment_rotation_tests;
+    mod logout_failure_tests;
     use crate::config::{AuthConfig, Environment};
     use crate::context::RequestContext;
     use crate::engine::AuthEngine;
@@ -595,6 +627,7 @@ mod tests {
     struct PlatformHarness {
         engine: AuthEngine,
         admins: Arc<InMemoryPlatformUserRepository>,
+        stores: Arc<InMemoryStores>,
     }
 
     /// Build a platform harness from `cfg`. Returns `None` if assembly somehow fails, so callers
@@ -607,10 +640,14 @@ mod tests {
             .environment(Environment::Test)
             .user_repository(Arc::new(crate::testing::InMemoryUserRepository::new()))
             .platform_user_repository(admins.clone())
-            .redis_stores(stores)
+            .redis_stores(stores.clone())
             .build()
             .ok()?;
-        Some(PlatformHarness { engine, admins })
+        Some(PlatformHarness {
+            engine,
+            admins,
+            stores,
+        })
     }
 
     /// Hash a plaintext password with the compiled hasher, for seeding an admin's stored hash.
