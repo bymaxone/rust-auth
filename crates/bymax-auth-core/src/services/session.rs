@@ -169,11 +169,8 @@ impl SessionService {
             Err(error) => {
                 // One line per login, carrying the store's error chain (by `Display`) and the
                 // user id. A partial list would evict the wrong sessions, so none is evicted.
-                tracing::warn!(
-                    error = %crate::services::error_chain(&error),
-                    %user_id,
-                    "sessions: the session cap was not enforced, the user's sessions could not be listed"
-                );
+                let cause = crate::services::error_chain(&error);
+                tracing::warn!(%cause, %user_id, "sessions: the session cap was not enforced");
                 return;
             }
         };

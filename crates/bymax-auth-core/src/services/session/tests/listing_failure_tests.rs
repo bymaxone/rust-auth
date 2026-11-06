@@ -208,7 +208,7 @@ async fn a_host_stores_error_is_logged_by_its_display_chain_not_its_debug() {
     assert!(
         reported[0]
             .rendered
-            .contains("error=internal error: host store unavailable"),
+            .contains("cause=internal error: host store unavailable"),
         "{}",
         reported[0].rendered
     );
