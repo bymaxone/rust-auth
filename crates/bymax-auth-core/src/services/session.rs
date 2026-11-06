@@ -120,7 +120,7 @@ impl SessionService {
     ///
     /// # Errors
     ///
-    /// None today. The new session is already committed when this runs, so neither a failed
+    /// None. The new session is already committed when this runs, so neither a failed
     /// listing (the cap is then not enforced and nobody is evicted) nor a failed eviction may
     /// fail the login that scheduled it: the client would be refused tokens for a session that
     /// stays live.
@@ -167,7 +167,7 @@ impl SessionService {
         {
             Ok(sessions) => sessions,
             Err(error) => {
-                // One line per login, no key or hash: the cause is the store's own error. A
+                // One line per login, carrying the store's error and the user id. A
                 // partial list would evict the wrong sessions, so none is evicted.
                 tracing::warn!(
                     %error,

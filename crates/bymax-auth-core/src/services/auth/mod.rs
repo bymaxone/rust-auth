@@ -325,8 +325,9 @@ impl AuthEngine {
     ///
     /// # Errors
     ///
-    /// Returns a store [`AuthError`] only on an infrastructure failure listing the user's
-    /// sessions; eviction itself is best-effort.
+    /// None from the cap: the session is already committed, so neither a listing the store
+    /// cannot answer (the cap is then left unenforced and nobody is evicted) nor a failed
+    /// eviction fails the operation that issued it.
     pub(crate) async fn enforce_sessions_after_issue(
         &self,
         result: &AuthResult,
