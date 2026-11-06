@@ -12,10 +12,13 @@ all-features = true
 # and unsound advisories are always denied by cargo-deny and cannot be weakened
 # here, so only the configurable knobs are set: `unmaintained = "all"` flags every
 # unmaintained crate (not just workspace-direct ones), and yanked versions are
-# errors. `ignore` records intentional, reviewed exceptions (none yet).
+# errors. `ignore` records intentional, reviewed exceptions; each carries the reason it
+# is safe and the condition for removing it.
 unmaintained = "all"
 yanked = "deny"
-ignore = []
+ignore = [
+    { id = "RUSTSEC-2026-0440", reason = "`astral-tokio-tar` is unmaintained and is reached only as a dev-dependency through `testcontainers` (the container-backed integration tests): `cargo tree -e normal -i astral-tokio-tar` prints no path, with or without `--target all`, so no published crate depends on it. No maintained replacement exists and the latest `testcontainers` still requires it. Remove this entry when `testcontainers` drops the crate." },
+]
 
 [licenses]
 # Permissive licenses only. Every copyleft family (GPL/AGPL/LGPL/MPL) is denied by
