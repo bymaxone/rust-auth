@@ -120,15 +120,17 @@ impl SessionService {
     ///
     /// # Errors
     ///
-    /// Returns a store [`AuthError`] only on an infrastructure failure listing the user's
-    /// sessions; eviction itself is best-effort (the new session is already committed).
+    /// None today. The new session is already committed when this runs, so neither a failed
+    /// listing (the cap is then not enforced and nobody is evicted) nor a failed eviction may
+    /// fail the login that scheduled it: the client would be refused tokens for a session that
+    /// stays live.
     pub async fn after_session_created(
         &self,
         record: &SessionRecord,
         new_hash: &str,
         ctx: &HookContext,
     ) -> Result<(), AuthError> {
-        self.enforce_session_limit(record, new_hash, ctx).await?;
+        self.enforce_session_limit(record, new_hash, ctx).await;
         self.fire_new_session(record, new_hash, ctx).await;
         Ok(())
     }
@@ -143,26 +145,38 @@ impl SessionService {
     /// the ownership-checked revoke); that hardening is a store-side concern and is documented
     /// here as the required upgrade path.
     ///
-    /// # Errors
-    ///
-    /// Returns a store [`AuthError`] if the user's sessions cannot be listed; the per-victim
-    /// revoke is best-effort (a failure is swallowed, not propagated).
+    /// Never fails. A listing that cannot be read leaves the cap unenforced for this login
+    /// (nobody is evicted, so the user may stay over the cap until a later login) and the
+    /// per-victim revoke is best-effort; either way the already committed session stands.
     async fn enforce_session_limit(
         &self,
         record: &SessionRecord,
         new_hash: &str,
         ctx: &HookContext,
-    ) -> Result<(), AuthError> {
+    ) {
         let user_id = &record.user_id;
         // The record's own tenant, not a re-resolved one: this is the session that was just
         // written, so it names the account the cap is being enforced for.
         let subject = self.subject(record.tenant_id.as_deref(), user_id);
         // The entries, not the display listing: a session whose detail is damaged or missing is
         // still a live session, so it counts against the cap and can be evicted.
-        let mut sessions = self
+        let mut sessions = match self
             .store
             .list_session_entries(SessionKind::Dashboard, &subject)
-            .await?;
+            .await
+        {
+            Ok(sessions) => sessions,
+            Err(error) => {
+                // One line per login, no key or hash: the cause is the store's own error. A
+                // partial list would evict the wrong sessions, so none is evicted.
+                tracing::warn!(
+                    %error,
+                    %user_id,
+                    "sessions: the session cap was not enforced, the user's sessions could not be listed"
+                );
+                return;
+            }
+        };
         // Clamp the resolved cap to at least 1. A cap of 0 is unenforceable here: eviction
         // always excludes the just-created session, so a literal 0 would leave the user one
         // over an impossible "zero" cap forever. Treating 0 as 1 keeps the just-created session
@@ -181,7 +195,7 @@ impl SessionService {
             .len()
             .saturating_sub(usize::try_from(limit).unwrap_or(usize::MAX));
         if over == 0 {
-            return Ok(());
+            return;
         }
 
         // Choose the oldest `over` sessions, excluding the just-created one, and evict them.
@@ -206,7 +220,6 @@ impl SessionService {
             }
             self.fire_session_evicted(user_id, &victim.session_hash, ctx);
         }
-        Ok(())
     }
 
     /// Resolve the per-user concurrent-session cap: the optional resolver wins when it is
@@ -550,6 +563,7 @@ mod tests {
     const TEST_IDENTIFIER_KEY: [u8; 64] = [9u8; 64];
 
     mod damaged_detail_tests;
+    mod listing_failure_tests;
 
     use super::*;
     use crate::config::resolvers::MaxSessionsResolver;

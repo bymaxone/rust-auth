@@ -530,6 +530,9 @@ pub struct InMemoryStores {
     /// Armed count of `find_session` calls that must fail with a backend error, set through
     /// [`InMemoryStores::fail_next_session_lookups`].
     forced_session_lookup_failures: Mutex<usize>,
+    /// Armed count of `list_sessions` calls (and so of the default `list_session_entries`) that
+    /// must fail with a backend error, set through [`InMemoryStores::fail_next_session_listings`].
+    forced_session_listing_failures: Mutex<usize>,
     /// Armed count of `blacklist_access` calls that must fail with a backend error, set through
     /// [`InMemoryStores::fail_next_blacklist_writes`].
     forced_blacklist_failures: Mutex<usize>,
@@ -634,6 +637,13 @@ impl InMemoryStores {
     /// resolves the session's owner by, which has to fail closed before any write.
     pub fn fail_next_session_lookups(&self, count: usize) {
         *lock(&self.forced_session_lookup_failures) = count;
+    }
+
+    /// Make the next `count` session listings fail with a backend error: the read the
+    /// concurrent-session cap lists a user's sessions by, refused while the session that was
+    /// just created is already stored.
+    pub fn fail_next_session_listings(&self, count: usize) {
+        *lock(&self.forced_session_listing_failures) = count;
     }
 
     /// Make the next `count` `blacklist_access` calls fail with a backend error: the write a
@@ -916,6 +926,15 @@ impl SessionStore for InMemoryStores {
         kind: SessionKind,
         subject_hash: &str,
     ) -> Result<Vec<SessionDetail>, AuthError> {
+        {
+            let mut armed = lock(&self.forced_session_listing_failures);
+            if *armed > 0 {
+                *armed -= 1;
+                return Err(crate::services::internal_error(
+                    "forced session listing failure",
+                ));
+            }
+        }
         Ok(lock(&self.session_index)
             .get(&(kind, subject_hash.to_owned()))
             .cloned()
