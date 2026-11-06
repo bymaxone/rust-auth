@@ -49,7 +49,13 @@ fn engine_with_source(
     counter: Option<Arc<dyn RateLimitStore>>,
     source: ClientIpSource,
 ) -> Option<Router> {
-    engine_with_config(stores, counter, AxumAuthConfig::new(source))
+    let mut adapter = AxumAuthConfig::new(source);
+    // Without a shared counter the in-process limiter answers, on the real clock: give it the
+    // slow refill so a slow run cannot hand the sixth request a restored cell.
+    if counter.is_none() {
+        adapter.rate_limits = common::slow_refill_rate_limits();
+    }
+    engine_with_config(stores, counter, adapter)
 }
 
 /// As [`engine`], under an explicit adapter configuration.
@@ -259,4 +265,35 @@ async fn a_route_whose_limit_is_disabled_is_not_limited_without_a_shared_counter
             StatusCode::UNAUTHORIZED
         );
     }
+}
+
+#[test]
+fn the_contract_default_for_login_is_five_per_sixty_seconds() {
+    // The default the other tests in this file widen: pinned by value, so widening it for a test
+    // never changes what a deployment gets.
+    assert_eq!(
+        bymax_auth_axum::RateLimitConfig::default().login,
+        Some(bymax_auth_axum::RateLimit::new(5, 60))
+    );
+}
+
+#[test]
+fn the_in_process_limiter_tests_use_a_refill_a_run_cannot_cross() {
+    // Same burst as the contract, one restored cell per hour at least: the six-request tests
+    // assert a refusal that a refill during the run would turn into a 401 (CI took 256 s for this
+    // suite; the refill of the default is 12 s). Ten minutes is far over any run and far under
+    // the hour, so tightening this by accident fails here and not as a flake somewhere else.
+    let limit = common::slow_refill_rate_limits().login;
+    assert!(
+        limit.is_some(),
+        "the helper must keep the login limit enabled"
+    );
+    let burst = limit.map_or(0, |l| u64::from(l.burst));
+    let per_seconds = limit.map_or(0, |l| l.per_seconds);
+    assert_eq!(burst, 5, "the burst is the contract's");
+    assert!(
+        per_seconds / burst.max(1) >= 600,
+        "one cell must take at least ten minutes to come back, got {} s",
+        per_seconds / burst.max(1)
+    );
 }

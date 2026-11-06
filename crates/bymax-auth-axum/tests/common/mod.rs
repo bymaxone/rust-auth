@@ -469,6 +469,22 @@ pub fn build_oauth_with_failing_state_store() -> Option<Harness> {
     })
 }
 
+/// The burst the contract names for `POST /auth/login` (5), with a refill so slow that no test
+/// run can cross it: one cell per hour instead of one per 12 s.
+///
+/// The in-process limiter restores a cell every `window / burst` seconds on the real clock, and
+/// `tower_governor` accepts no other clock, so a test asserting "the sixth request is refused" is
+/// right only while its first five finish inside that interval. Each failed login costs a
+/// password verification, which a loaded runner can stretch past 12 s in total. A test that counts
+/// on the in-process limiter builds its adapter with these limits; the contract default is pinned
+/// separately, by value.
+pub fn slow_refill_rate_limits() -> bymax_auth_axum::RateLimitConfig {
+    bymax_auth_axum::RateLimitConfig {
+        login: Some(bymax_auth_axum::RateLimit::new(5, 5 * 3600)),
+        ..bymax_auth_axum::RateLimitConfig::default()
+    }
+}
+
 /// Assemble the adapter router for the harness engine, keyed on the socket peer address.
 pub fn router(harness: &Harness) -> Router {
     router_with(
