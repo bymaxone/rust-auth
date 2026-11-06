@@ -10,15 +10,25 @@ use super::*;
 /// The harness peer's address (see `common::PEER`).
 const PROXY: &str = "203.0.113.4";
 
-/// A forwarded-for deployment whose only proxy is the harness peer.
+/// A forwarded-for deployment whose only proxy is the harness peer. The limits refill slowly
+/// (see `common::slow_refill_rate_limits`), so the tests that count refused logins never race the
+/// limiter's real-time refill.
 fn behind_the_proxy() -> AxumAuthConfig {
-    AxumAuthConfig::new(ClientIpSource::TrustedForwardedFor)
-        .is_trusted_proxy(|peer| peer.to_string() == PROXY)
+    AxumAuthConfig {
+        rate_limits: common::slow_refill_rate_limits(),
+        ..AxumAuthConfig::new(ClientIpSource::TrustedForwardedFor)
+    }
+    .is_trusted_proxy(|peer| peer.to_string() == PROXY)
 }
 
-/// A forwarded-for deployment that vouches for nobody.
+/// A forwarded-for deployment that vouches for nobody, with the slow-refill limits of
+/// [`behind_the_proxy`].
 fn trusting_no_peer() -> AxumAuthConfig {
-    AxumAuthConfig::new(ClientIpSource::TrustedForwardedFor).is_trusted_proxy(|_| false)
+    AxumAuthConfig {
+        rate_limits: common::slow_refill_rate_limits(),
+        ..AxumAuthConfig::new(ClientIpSource::TrustedForwardedFor)
+    }
+    .is_trusted_proxy(|_| false)
 }
 
 /// Log in as `email` with `forwarded` as the `X-Forwarded-For` header and return the address the
