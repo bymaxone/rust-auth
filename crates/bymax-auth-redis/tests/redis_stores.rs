@@ -11,6 +11,8 @@
 //! and passes.
 
 mod common;
+#[path = "redis_stores/session_listing.rs"]
+mod session_listing;
 
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;

@@ -19,8 +19,8 @@ use crate::config::SessionConfig;
 use crate::services::auth::detached::{run_on_new_session, run_on_session_evicted};
 use crate::services::auth::spawn_guarded;
 use crate::traits::{
-    AuthHooks, HookContext, SessionDetail, SessionKind, SessionRecord, SessionRotation,
-    SessionStore, UserRepository,
+    AuthHooks, HookContext, SessionDetail, SessionEntry, SessionKind, SessionRecord,
+    SessionRotation, SessionStore, UserRepository,
 };
 
 /// The maximum stored IP length, in **bytes**: a maximal IPv6 textual address is 45 ASCII
@@ -157,9 +157,11 @@ impl SessionService {
         // The record's own tenant, not a re-resolved one: this is the session that was just
         // written, so it names the account the cap is being enforced for.
         let subject = self.subject(record.tenant_id.as_deref(), user_id);
+        // The entries, not the display listing: a session whose detail is damaged or missing is
+        // still a live session, so it counts against the cap and can be evicted.
         let mut sessions = self
             .store
-            .list_sessions(SessionKind::Dashboard, &subject)
+            .list_session_entries(SessionKind::Dashboard, &subject)
             .await?;
         // Clamp the resolved cap to at least 1. A cap of 0 is unenforceable here: eviction
         // always excludes the just-created session, so a literal 0 would leave the user one
@@ -170,9 +172,10 @@ impl SessionService {
             .await
             .max(1);
 
-        // Sort oldest-first so the FIFO victims are the front of the list. A session whose
-        // detail vanished is treated as oldest by the store's epoch fallback already.
-        sessions.sort_by_key(|detail| detail.created_at);
+        // Sort oldest-first so the FIFO victims are the front of the list. A session with no
+        // readable detail has no creation time to order by and is treated as the oldest
+        // (`None` sorts before every `Some`), so it is evicted first.
+        sessions.sort_by_key(|entry| entry.detail.as_ref().map(|detail| detail.created_at));
 
         let over = sessions
             .len()
@@ -182,9 +185,9 @@ impl SessionService {
         }
 
         // Choose the oldest `over` sessions, excluding the just-created one, and evict them.
-        let victims: Vec<SessionDetail> = sessions
+        let victims: Vec<SessionEntry> = sessions
             .into_iter()
-            .filter(|detail| !constant_time_eq(detail.session_hash.as_bytes(), new_hash.as_bytes()))
+            .filter(|entry| !constant_time_eq(entry.session_hash.as_bytes(), new_hash.as_bytes()))
             .take(over)
             .collect();
         for victim in victims {
@@ -305,18 +308,20 @@ impl SessionService {
             return Err(AuthError::SessionNotFound);
         }
         let subject = self.subject(Some(tenant_id), user_id);
+        // The entries, not the display listing: the sessions to revoke are the ones the index
+        // names, so a session whose detail is damaged or missing is revoked like any other.
         let sessions = self
             .store
-            .list_sessions(SessionKind::Dashboard, &subject)
+            .list_session_entries(SessionKind::Dashboard, &subject)
             .await?;
-        for detail in sessions {
+        for entry in sessions {
             // Skip the caller's own session (constant-time compare on the fixed-length hashes).
-            if constant_time_eq(detail.session_hash.as_bytes(), current_hash.as_bytes()) {
+            if constant_time_eq(entry.session_hash.as_bytes(), current_hash.as_bytes()) {
                 continue;
             }
             match self
                 .store
-                .revoke_session(SessionKind::Dashboard, &subject, &detail.session_hash)
+                .revoke_session(SessionKind::Dashboard, &subject, &entry.session_hash)
                 .await
             {
                 Ok(()) | Err(AuthError::SessionNotFound) => {}
@@ -543,6 +548,8 @@ mod tests {
     /// The identifier-hashing key these fixtures derive the session subject under. Fixed so a
     /// test can recompute the subject and name the exact index a flow wrote to.
     const TEST_IDENTIFIER_KEY: [u8; 64] = [9u8; 64];
+
+    mod damaged_detail_tests;
 
     use super::*;
     use crate::config::resolvers::MaxSessionsResolver;

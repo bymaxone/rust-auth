@@ -19,6 +19,7 @@ mod oauth;
 mod otp;
 mod rate_limit;
 mod session;
+mod session_listing;
 mod single_use;
 mod user_status;
 mod ws_ticket;
