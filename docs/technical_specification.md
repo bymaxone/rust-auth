@@ -2089,6 +2089,7 @@ Constants: `MAX_IP_LENGTH: usize = 45` (IPv6 max — IP is truncated before stor
 #### 7.4.2 `enforce_session_limit` (FIFO eviction)
 
 1. `members = smembers("sess:{subject_hash}")`; keep only `rt:`-prefixed (exclude `rp:` grace pointers).
+   A listing the store cannot answer is not a login failure: the new session is already committed, so the cap is left unenforced for this login, **no session is evicted** (a partial list would evict the wrong ones), the error and each of its causes (by `Display`, never `Debug`) and the user id are logged once, and the new-session hook still fires. The user may stay over the cap until a later login lists normally.
 2. `limit = resolve_session_limit(user_id)` — calls `config.sessions.max_sessions_resolver(user)` if set, else `default_max_sessions`; falls back to default if the user is missing or the resolver errors.
 3. If `rt_members.len() <= limit`, return.
 4. For each `rt:` member, read `sd:{hash}.created_at` (missing/unparseable → treated as oldest, `0`). Sort ascending by `created_at`.

@@ -63,6 +63,9 @@ mod mfa_setup_body;
 #[path = "adapter/shared_rate_limit.rs"]
 mod shared_rate_limit;
 
+#[path = "adapter/session_cap_listing.rs"]
+mod session_cap_listing;
+
 #[path = "adapter/status_gates.rs"]
 mod status_gates;
 
