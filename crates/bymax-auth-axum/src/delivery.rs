@@ -289,15 +289,19 @@ impl<'a> TokenDelivery<'a> {
     }
 
     /// Clear the OAuth `state` cookie once its callback has been handled, reusing the exact
-    /// `Path` it was planted with. The cookie is single-use: a stale one left behind would
-    /// never match the next flow's freshly minted state, turning one failed login into a
-    /// permanently broken one.
+    /// `Path` it was planted with and carrying the attributes the plant has (`HttpOnly`,
+    /// `Secure` as configured, `SameSite=Lax`), so the expiry is never weaker than the cookie
+    /// it removes. The cookie is single-use: a stale one left behind would never match the
+    /// next flow's freshly minted state, turning one failed login into a permanently broken one.
     #[cfg(feature = "oauth")]
     pub(crate) fn clear_oauth_state_cookie(&self, cookies: &Cookies) {
         use bymax_auth_types::constants::OAUTH_STATE_COOKIE_NAME;
         cookies.remove(
             Cookie::build((OAUTH_STATE_COOKIE_NAME.to_owned(), ""))
                 .path("/")
+                .http_only(true)
+                .secure(self.cookies().secure)
+                .same_site(SameSite::Lax)
                 .build(),
         );
     }
@@ -323,7 +327,9 @@ impl<'a> TokenDelivery<'a> {
     }
 
     /// Clear the ephemeral MFA-temp cookie, reusing the exact `Path` [`set_mfa_temp_cookie`]
-    /// scoped it to (a mismatched path leaves a ghost cookie the browser keeps sending).
+    /// scoped it to (a mismatched path leaves a ghost cookie the browser keeps sending) and
+    /// the attributes the plant has (`HttpOnly`, `Secure` as configured, the configured
+    /// `SameSite`), so the expiry is never weaker than the cookie it removes.
     ///
     /// The challenge handler applies nest-auth's clearing policy verbatim (see
     /// `mfa.controller.ts`): clear on SUCCESS (the JWT was consumed) and on
@@ -337,9 +343,13 @@ impl<'a> TokenDelivery<'a> {
     #[cfg(feature = "mfa")]
     pub(crate) fn clear_mfa_temp_cookie(&self, cookies: &Cookies) {
         use bymax_auth_types::constants::MFA_TEMP_COOKIE_NAME;
+        let c = self.cookies();
         cookies.remove(
             Cookie::build((MFA_TEMP_COOKIE_NAME.to_owned(), ""))
-                .path(self.cookies().mfa_temp_path.clone())
+                .path(c.mfa_temp_path.clone())
+                .http_only(true)
+                .secure(c.secure)
+                .same_site(map_same_site(c.same_site))
                 .build(),
         );
     }
@@ -764,3 +774,6 @@ mod tests {
 
 #[cfg(test)]
 mod domain_tests;
+
+#[cfg(all(test, any(feature = "oauth", feature = "mfa")))]
+mod state_cookie_clear_tests;
