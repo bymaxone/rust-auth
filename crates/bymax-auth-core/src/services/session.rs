@@ -289,6 +289,52 @@ impl SessionService {
             .await
     }
 
+    /// The hash of the live session a presented refresh-token hash stands for.
+    ///
+    /// The hash itself when it is a live member of the caller's own session index. Otherwise,
+    /// when the token rotated away moments ago, the one session its grace pointer names, provided
+    /// that session is also a live member of the same index: a pointer left behind by a revoked
+    /// session, or planted under another account, names nothing. It is one hop, and the pointer
+    /// is read once and neither consumed nor extended, so a token past its grace window is still
+    /// refused.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AuthError::SessionNotFound`] when `presented_hash` is malformed, or is neither
+    /// a live session of this account nor the predecessor of one, or a store [`AuthError`] on an
+    /// infrastructure failure.
+    pub async fn resolve_live_session(
+        &self,
+        tenant_id: &str,
+        user_id: &str,
+        presented_hash: &str,
+    ) -> Result<String, AuthError> {
+        if !is_session_hash(presented_hash) {
+            return Err(AuthError::SessionNotFound);
+        }
+        let subject = self.subject(Some(tenant_id), user_id);
+        let entries = self
+            .store
+            .list_session_entries(SessionKind::Dashboard, &subject)
+            .await?;
+        let is_live = |hash: &str| {
+            entries
+                .iter()
+                .any(|entry| constant_time_eq(entry.session_hash.as_bytes(), hash.as_bytes()))
+        };
+        if is_live(presented_hash) {
+            return Ok(presented_hash.to_owned());
+        }
+        match self
+            .store
+            .grace_successor(SessionKind::Dashboard, presented_hash)
+            .await?
+        {
+            Some(successor) if is_live(&successor) => Ok(successor),
+            _ => Err(AuthError::SessionNotFound),
+        }
+    }
+
     /// Revoke every session for the user except `current_hash` (a "log out everywhere else"
     /// action). A `SessionNotFound` for a victim (a concurrent logout already removed it) is
     /// swallowed; any other store error is propagated.
@@ -307,7 +353,8 @@ impl SessionService {
     ///
     /// # Errors
     ///
-    /// Returns [`AuthError::SessionNotFound`] when `current_hash` is malformed, or a store
+    /// Returns [`AuthError::SessionNotFound`] when `current_hash` is malformed or names no live
+    /// session of this account (see [`SessionService::resolve_live_session`]), or a store
     /// [`AuthError`] on an infrastructure failure listing or revoking a session.
     pub async fn revoke_all_except_current(
         &self,
@@ -315,9 +362,13 @@ impl SessionService {
         user_id: &str,
         current_hash: &str,
     ) -> Result<(), AuthError> {
-        if !is_session_hash(current_hash) {
-            return Err(AuthError::SessionNotFound);
-        }
+        // The session to keep is settled before anything is revoked, so a token that names no
+        // live session of this account changes nothing; one that rotated away stands for its
+        // successor.
+        let kept = self
+            .resolve_live_session(tenant_id, user_id, current_hash)
+            .await?;
+        let current_hash = kept.as_str();
         let subject = self.subject(Some(tenant_id), user_id);
         // The entries, not the display listing: the sessions to revoke are the ones the index
         // names, so a session whose detail is damaged or missing is revoked like any other.
@@ -563,6 +614,7 @@ mod tests {
     mod damaged_detail_tests;
     mod eviction_failure_tests;
     mod listing_failure_tests;
+    mod live_session_tests;
 
     use super::*;
     use crate::config::resolvers::MaxSessionsResolver;
@@ -1684,15 +1736,16 @@ mod tests {
             _kind: SessionKind,
             _subject_hash: &str,
         ) -> Result<Vec<SessionDetail>, AuthError> {
-            // One session whose hash is not the caller's current, so the service attempts a
-            // revoke (which then fails with a backend error).
-            Ok(vec![SessionDetail {
-                session_hash: "f".repeat(64),
+            // The caller's own session, which the sweep requires to be live, and one other whose
+            // revoke then fails with a backend error.
+            let session = |session_hash: String| SessionDetail {
+                session_hash,
                 device: "Chrome".to_owned(),
                 ip: "1.2.3.4".to_owned(),
                 created_at: OffsetDateTime::UNIX_EPOCH,
                 last_activity_at: OffsetDateTime::UNIX_EPOCH,
-            }])
+            };
+            Ok(vec![session(hash("aaaa")), session("f".repeat(64))])
         }
         async fn revoke_session(
             &self,

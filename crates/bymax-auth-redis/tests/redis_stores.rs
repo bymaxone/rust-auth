@@ -11,6 +11,8 @@
 //! and passes.
 
 mod common;
+#[path = "redis_stores/grace_successor.rs"]
+mod grace_successor;
 #[path = "redis_stores/session_listing.rs"]
 mod session_listing;
 

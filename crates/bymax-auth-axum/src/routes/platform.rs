@@ -25,7 +25,8 @@ use crate::delivery::TokenDelivery;
 use crate::dto::{MfaChallengeDto, PlatformLoginDto};
 use crate::extractors::PlatformUser;
 use crate::response::error_response;
-use crate::routes::{PresentedPlatformAccessToken, RequestMeta, parse_optional_refresh_body};
+use crate::routes::refresh_body::parse_refresh_body;
+use crate::routes::{PresentedPlatformAccessToken, RequestMeta};
 use crate::shared_limit::Throttle;
 use crate::state::{AuthState, AxumAuthConfig};
 use crate::validation::RequestBytes;
@@ -153,10 +154,13 @@ async fn logout(
     PresentedPlatformAccessToken(access_token): PresentedPlatformAccessToken,
     RequestBytes(body): RequestBytes,
 ) -> Response {
-    // An unparseable body degrades to "no token" rather than blocking the revocation of the
-    // access JTI. A store failure is answered, not swallowed, as the dashboard logout does.
-    let dto = parse_optional_refresh_body(&body).unwrap_or_default();
-    let refresh = dto.refresh_token.unwrap_or_default();
+    // Platform delivery is always bearer, so the body is always read: one that is not a
+    // refresh-token body is refused before anything is revoked. A store failure is answered, not
+    // swallowed, as the dashboard logout does.
+    let refresh = match parse_refresh_body(&body, true) {
+        Ok(token) => token.unwrap_or_default(),
+        Err(rejection) => return rejection.into_response(),
+    };
     match state
         .engine()
         .platform_logout(&access_token, &refresh)
@@ -175,11 +179,10 @@ async fn refresh(
     RequestMeta(ctx): RequestMeta,
     RequestBytes(body): RequestBytes,
 ) -> Response {
-    let dto = match parse_optional_refresh_body(&body) {
-        Ok(dto) => dto,
+    let refresh = match parse_refresh_body(&body, true) {
+        Ok(token) => token.unwrap_or_default(),
         Err(rejection) => return rejection.into_response(),
     };
-    let refresh = dto.refresh_token.unwrap_or_default();
     // One fallible sequence, one error arm. Split in two, the second arm could only fire if the
     // admin vanished between the rotation and the re-read a microsecond later — the rotation
     // itself re-reads and refuses a missing or blocked one — so it was an arm no test could

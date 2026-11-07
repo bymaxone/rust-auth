@@ -627,6 +627,17 @@ impl AuthEngine {
         }
         self.brute_force().reset(&bf_id).await?;
 
+        // The session to keep is settled before the password changes: a presented token that
+        // names no live session of this account would otherwise write the new credential and
+        // then keep nothing. A token that rotated away stands for its successor.
+        let kept = match current_refresh {
+            Some(raw) => Some(
+                self.resolve_current_session(tenant_id, user_id, raw)
+                    .await?,
+            ),
+            None => None,
+        };
+
         self.passwords()
             .assert_acceptable(new_password, "newPassword")
             .await?;
@@ -639,27 +650,62 @@ impl AuthEngine {
         // Sessions go only after the password is durably written, for the same reason the reset
         // flow orders it that way: a crash between the two leaves stale refresh tokens alive
         // until their TTL, but the old password is already dead.
-        match current_refresh.filter(|raw| is_refresh_token_shape(raw)) {
-            Some(raw) => {
-                let hash = RawRefreshToken::from_raw(raw.to_owned()).redis_hash();
-                self.sessions()
-                    .revoke_all_except_current(tenant_id, user_id, &hash)
-                    .await?;
-            }
-            None => {
-                let subject =
-                    self.session_subject(SessionKind::Dashboard, Some(tenant_id), user_id);
-                self.session_store()
-                    .revoke_all(SessionKind::Dashboard, &subject)
-                    .await?;
-                self.session_store()
-                    .bump_epoch(SessionKind::Dashboard, &subject)
-                    .await?;
-            }
-        }
+        self.end_other_sessions(tenant_id, user_id, kept.as_deref())
+            .await?;
 
         tracing::info!(user_id = %user_id, "password change: completed, other sessions revoked");
         self.notify_password_changed(tenant_id, user_id).await;
+        Ok(())
+    }
+
+    /// The hash of the live session a presented refresh token stands for, settled before the
+    /// password is written. A malformed token, or one that names no live session of the
+    /// account, is [`AuthError::SessionNotFound`].
+    async fn resolve_current_session(
+        &self,
+        tenant_id: &str,
+        user_id: &str,
+        raw: &str,
+    ) -> Result<String, AuthError> {
+        if !is_refresh_token_shape(raw) {
+            return Err(AuthError::SessionNotFound);
+        }
+        let presented = RawRefreshToken::from_raw(raw.to_owned()).redis_hash();
+        self.sessions()
+            .resolve_live_session(tenant_id, user_id, &presented)
+            .await
+    }
+
+    /// Ends every session but `kept`, once the new password is already written.
+    ///
+    /// With no session to keep every session ends. A kept session can rotate away while the new
+    /// password is being hashed; the sweep follows it to its successor, and when it cannot be
+    /// followed there is no current session left to spare, so every session ends and the epoch
+    /// advances: the cleanup that makes the change safe is never aborted by the session it was
+    /// told to spare. Any other failure of the sweep propagates.
+    async fn end_other_sessions(
+        &self,
+        tenant_id: &str,
+        user_id: &str,
+        kept: Option<&str>,
+    ) -> Result<(), AuthError> {
+        if let Some(kept) = kept {
+            match self
+                .sessions()
+                .revoke_all_except_current(tenant_id, user_id, kept)
+                .await
+            {
+                Err(AuthError::SessionNotFound) => {}
+                other => return other,
+            }
+        }
+        let subject = self.session_subject(SessionKind::Dashboard, Some(tenant_id), user_id);
+        self.session_store()
+            .revoke_all(SessionKind::Dashboard, &subject)
+            .await?;
+        self.session_store()
+            .bump_epoch(SessionKind::Dashboard, &subject)
+            .await?;
         Ok(())
     }
 
