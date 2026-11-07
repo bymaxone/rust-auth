@@ -18,10 +18,8 @@ use crate::delivery::{TokenDelivery, user_body, with_extra_cookies};
 use crate::dto::{LoginDto, RegisterDto, ResendVerificationDto, VerifyEmailDto};
 use crate::extractors::AuthUser;
 use crate::response::{anti_enumerating_outcome, error_response};
-use crate::routes::{
-    CookieDomains, PresentedAccessToken, RequestMeta, parse_optional_refresh_body,
-    source_refresh_token,
-};
+use crate::routes::refresh_body::{parse_refresh_body, reads_body};
+use crate::routes::{CookieDomains, PresentedAccessToken, RequestMeta, source_refresh_token};
 use crate::shared_limit::Throttle;
 use crate::state::{AuthState, AxumAuthConfig};
 use crate::validation::RequestBytes;
@@ -134,17 +132,21 @@ async fn logout(
     PresentedAccessToken(access_token): PresentedAccessToken,
     RequestBytes(body): RequestBytes,
 ) -> Response {
-    // Logout is idempotent end to end, so an unparseable body degrades to "no body-supplied
-    // token" rather than 400-ing and leaving the session alive — the cookie channel still gets
-    // its chance. A store failure is not swallowed: the engine attempts every revocation write
-    // and answers the first failure, and the response then keeps the auth cookies so the client
-    // still holds the credentials it needs to retry.
-    let dto = parse_optional_refresh_body(&body).unwrap_or_default();
+    // A body the delivery mode reads is refused before anything is revoked when it is not the
+    // shape a refresh-token body has: a client that believes it signed out must not be told so
+    // while the session it named stays alive. A store failure is not swallowed either: the engine
+    // attempts every revocation write and answers the first failure, and the response then keeps
+    // the auth cookies so the client still holds the credentials it needs to retry.
+    let delivery = state.config().delivery;
+    let body_token = match parse_refresh_body(&body, reads_body(delivery)) {
+        Ok(token) => token,
+        Err(rejection) => return rejection.into_response(),
+    };
     let refresh = source_refresh_token(
-        state.config().delivery,
+        delivery,
         &cookies,
         &state.config().cookies.refresh_name,
-        dto.refresh_token.as_deref(),
+        body_token.as_deref(),
     );
     if let Err(error) = state.engine().logout(&access_token, &refresh).await {
         return error_response(&error);
@@ -165,18 +167,18 @@ async fn refresh(
     RequestMeta(ctx): RequestMeta,
     RequestBytes(body): RequestBytes,
 ) -> Response {
-    // The refresh body is optional (cookie mode sends none). Parse it leniently: an empty
-    // body yields no body-supplied token, a present body must be a valid `RefreshDto`.
-    let dto = match parse_optional_refresh_body(&body) {
-        Ok(dto) => dto,
+    // The refresh body is optional (cookie mode sends none): an empty body is no token, and a
+    // body the delivery mode reads must be the shape a refresh-token body has.
+    let delivery = state.config().delivery;
+    let body_token = match parse_refresh_body(&body, reads_body(delivery)) {
+        Ok(token) => token,
         Err(rejection) => return rejection.into_response(),
     };
-    let body_refresh = dto.refresh_token.as_deref();
     let refresh = source_refresh_token(
-        state.config().delivery,
+        delivery,
         &cookies,
         &state.config().cookies.refresh_name,
-        body_refresh,
+        body_token.as_deref(),
     );
     let refreshed = match state
         .engine()

@@ -42,6 +42,10 @@ fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
+/// What a rotation grace pointer holds: the owner's subject hash, the recovered record and the
+/// successor session's hash.
+type GracePointer = (String, SessionRecord, String);
+
 /// An in-memory [`UserRepository`] backed by a `Mutex<HashMap>` keyed on user id.
 #[derive(Debug, Default)]
 pub struct InMemoryUserRepository {
@@ -505,13 +509,13 @@ pub struct InMemoryStores {
     /// of divergence that lets a test pass against the double and the deployment misbehave.
     session_index: Mutex<HashMap<(SessionKind, String), Vec<SessionDetail>>>,
     /// `rp:`/`prp:` — rotation grace pointers, keyed by `(kind, old_hash)` and carrying the
-    /// owner's subject hash beside the recovered record.
+    /// owner's subject hash, the recovered record and the successor's hash.
     ///
     /// The subject is stored rather than recomputed because this double holds no hashing key,
     /// and both `revoke_all` and `sweep_grace_pointers` have to find every pointer ONE account
     /// owns — the real store finds them as members of that account's `sess:` set, which is the
     /// same question asked a different way.
-    grace: Mutex<HashMap<(SessionKind, String), (String, SessionRecord)>>,
+    grace: Mutex<HashMap<(SessionKind, String), GracePointer>>,
     /// `cf:` consumed-token markers: an already-rotated token's hash → the family it belonged
     /// to. Outlives the grace pointer (which the real store keys with the shorter grace TTL),
     /// so a post-grace replay of the consumed token is detected as a reuse rather than a plain
@@ -563,6 +567,9 @@ pub struct InMemoryStores {
     /// The refresh TTL the last `rotate` was given, in seconds — the session-touch path's
     /// copy of the same lifetime, wired separately from the token manager's.
     last_rotate_ttl_secs: Mutex<Option<u64>>,
+    /// How many times `grace_successor` read a rotation grace pointer, so a test can assert a
+    /// resolution reads it once and a live session never reads it at all.
+    grace_reads: AtomicU64,
     /// The TTL the last `create_session` was given, in seconds. The real store turns this
     /// into the key's expiry — the only thing that makes a session end on its own — so it is
     /// recorded rather than discarded, and read back through [`InMemoryStores::peek_session_ttl`].
@@ -744,6 +751,12 @@ impl InMemoryStores {
         lock(&self.invitations).len()
     }
 
+    /// How many rotation grace pointers `grace_successor` has been asked to read.
+    #[must_use]
+    pub fn grace_pointer_reads(&self) -> u64 {
+        self.grace_reads.load(Ordering::SeqCst)
+    }
+
     /// The refresh TTL the last rotation was stored with, in seconds. A test-only inspection
     /// helper, for the same reason as [`InMemoryStores::peek_session_ttl`].
     #[must_use]
@@ -852,7 +865,11 @@ impl SessionStore for InMemoryStores {
             );
             lock(&self.grace).insert(
                 (kind, rotation.old_hash.clone()),
-                (rotation.subject_hash.clone(), rotation.new_record.clone()),
+                (
+                    rotation.subject_hash.clone(),
+                    rotation.new_record.clone(),
+                    rotation.new_hash.clone(),
+                ),
             );
             let mut index = lock(&self.session_index);
             if let Some(details) = index.get_mut(&(kind, rotation.subject_hash.clone())) {
@@ -892,7 +909,7 @@ impl SessionStore for InMemoryStores {
         // nest-auth's end-to-end tier run against, so a weaker rule here would let a divergence
         // ship unnoticed. A record that names no family recovers as
         // before.
-        if let Some((_subject, recovered)) =
+        if let Some((_subject, recovered, _successor)) =
             lock(&self.grace).remove(&(kind, rotation.old_hash.clone()))
         {
             if recovered.family_id.is_empty()
@@ -982,6 +999,18 @@ impl SessionStore for InMemoryStores {
         Ok(())
     }
 
+    async fn grace_successor(
+        &self,
+        kind: SessionKind,
+        session_hash: &str,
+    ) -> Result<Option<String>, AuthError> {
+        self.take_forced_failure()?;
+        self.grace_reads.fetch_add(1, Ordering::SeqCst);
+        Ok(lock(&self.grace)
+            .get(&(kind, session_hash.to_owned()))
+            .map(|(_, _, successor)| successor.clone()))
+    }
+
     async fn sweep_grace_pointers(
         &self,
         kind: SessionKind,
@@ -992,7 +1021,7 @@ impl SessionStore for InMemoryStores {
         // members out of the account's session index, and each pointer here carries the subject
         // whose index it was added to, so the in-memory twin filters on that.
         lock(&self.grace)
-            .retain(|(entry_kind, _), (owner, _)| *entry_kind != kind || owner != subject_hash);
+            .retain(|(entry_kind, _), (owner, _, _)| *entry_kind != kind || owner != subject_hash);
         Ok(())
     }
 
@@ -1010,7 +1039,7 @@ impl SessionStore for InMemoryStores {
         // double that keeps them is *weaker* than production: a token inside its grace window
         // would still recover a session after "sign out everywhere", a password reset, or an
         // MFA change, which is the exact property those flows exist to guarantee.
-        lock(&self.grace).retain(|(k, _), (owner, _)| *k != kind || owner != subject_hash);
+        lock(&self.grace).retain(|(k, _), (owner, _, _)| *k != kind || owner != subject_hash);
         Ok(())
     }
 

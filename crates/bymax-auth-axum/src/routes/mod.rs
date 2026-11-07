@@ -8,6 +8,7 @@
 
 pub(crate) mod auth;
 pub(crate) mod password_reset;
+pub(crate) mod refresh_body;
 
 pub(crate) mod email_change;
 
@@ -37,10 +38,8 @@ use http::request::Parts;
 use tower_cookies::Cookies;
 
 use crate::client_ip::ResolvedClientIp;
-use crate::dto::RefreshDto;
 use crate::extractors::source_access_token;
 use crate::state::AuthState;
-use crate::transport::BodyRejection;
 
 /// The set of request headers that must never enter a `RequestContext`'s sanitized map.
 /// Lowercased to match the normalized header keys. This is the single source of truth for
@@ -208,20 +207,6 @@ pub(crate) fn source_refresh_token(
     .unwrap_or_default()
 }
 
-/// Parse an optional refresh body shared by the dashboard and platform refresh handlers: an
-/// empty body yields a default [`RefreshDto`] (no body-supplied token, the cookie-mode case);
-/// a present body must deserialize as a valid `RefreshDto` (unknown keys are ignored). A body
-/// that is not a JSON object or array, or does not parse, answers "Malformed request"; one that
-/// parses but whose token is not a string answers `auth.validation` with a fixed message. Both
-/// come from [`crate::validation::deserialize_json`], so neither repeats the request, and both
-/// refresh paths share one parsing rule and one envelope.
-pub(crate) fn parse_optional_refresh_body(bytes: &[u8]) -> Result<RefreshDto, BodyRejection> {
-    if bytes.is_empty() {
-        return Ok(RefreshDto::default());
-    }
-    crate::validation::deserialize_json::<RefreshDto>(bytes)
-}
-
 /// A handler extractor that resolves an owned [`RequestContext`] from the request parts
 /// (IP, `User-Agent`, sanitized headers) without consuming the body. Infallible — an absent
 /// IP/UA degrades to empty strings.
@@ -343,8 +328,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use axum::response::IntoResponse;
-    use http::{Request, StatusCode};
+    use http::Request;
     use tower_cookies::{Cookie, Cookies};
 
     fn parts_with(headers: &[(&'static str, &str)]) -> Parts {
@@ -495,40 +479,6 @@ mod tests {
             .unwrap_or_default()
             .into_parts();
         assert!(client_ip(&parts).is_empty());
-    }
-
-    #[test]
-    fn parse_optional_refresh_body_handles_empty_present_and_malformed() {
-        // Empty body → default DTO (no body token); a valid JSON body deserializes the
-        // token; a malformed body → `auth.validation` with the `body` field detail (the
-        // serde message), the shared shape the dashboard and platform handlers both surface.
-        assert!(matches!(
-            parse_optional_refresh_body(b""),
-            Ok(dto) if dto.refresh_token.is_none()
-        ));
-        assert!(matches!(
-            parse_optional_refresh_body(br#"{"refreshToken":"r1"}"#),
-            Ok(dto) if dto.refresh_token.as_deref() == Some("r1")
-        ));
-        // A key the body does not read is ignored, as on nest-auth's DTO-less routes.
-        assert!(matches!(
-            parse_optional_refresh_body(br#"{"refreshToken":"r1","extra":true}"#),
-            Ok(dto) if dto.refresh_token.as_deref() == Some("r1")
-        ));
-        // A body that is not JSON answers the transport envelope, never serde's text.
-        assert_eq!(
-            parse_optional_refresh_body(b"{ not json")
-                .err()
-                .map(|rejection| rejection.into_response().status()),
-            Some(StatusCode::BAD_REQUEST)
-        );
-        // A token of the wrong type is a validation error with a fixed message.
-        assert_eq!(
-            parse_optional_refresh_body(br#"{"refreshToken":5}"#)
-                .err()
-                .map(|rejection| rejection.into_response().status()),
-            Some(StatusCode::BAD_REQUEST)
-        );
     }
 
     #[test]

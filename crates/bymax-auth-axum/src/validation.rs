@@ -297,7 +297,7 @@ where
 }
 
 /// The raw request body, for the routes that read an optional one themselves
-/// (`parse_optional_refresh_body`, [`validate_optional_json`]). It differs from axum's own
+/// (`parse_refresh_body`, [`validate_optional_json`]). It differs from axum's own
 /// `Bytes` only in how it fails: a body over the limit or one that cannot be read answers the
 /// transport envelope, not a plain-text default.
 pub(crate) struct RequestBytes(pub(crate) axum::body::Bytes);
