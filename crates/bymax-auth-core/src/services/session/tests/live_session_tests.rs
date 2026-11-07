@@ -184,3 +184,13 @@ async fn revoke_all_except_current_with_an_unknown_token_changes_nothing() {
         .unwrap_or_default();
     assert_eq!(live.len(), 1, "no session was revoked");
 }
+
+#[tokio::test]
+async fn a_store_that_keeps_no_readable_pointer_names_no_successor() {
+    // `FailingRevokeStore` does not implement `grace_successor`, so this is the trait's default:
+    // a rotated token then names no session.
+    let outcome = super::FailingRevokeStore
+        .grace_successor(SessionKind::Dashboard, &hash("aaaa"))
+        .await;
+    assert!(matches!(outcome, Ok(None)));
+}
