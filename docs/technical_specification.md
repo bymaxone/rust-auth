@@ -4732,7 +4732,7 @@ pub enum LoginResultMfa {
 }
 ```
 
-Each `*Type` is a unit-variant enum with a fixed `#[serde(rename_all)]` mapping so a wrong discriminator fails deserialization rather than silently mis-typing a token. The guard additionally asserts the runtime `token_type` matches the endpoint class (dashboard guard rejects a platform token with `AuthError::PlatformAuthRequired` and vice-versa; MFA-temp tokens are accepted only by the challenge endpoint). `JwtClaims` is a sealed trait implemented by the three structs that exposes `exp()`/`iat()` to the temporal-claims validation.
+Each `*Type` is a unit-variant enum with a fixed `#[serde(rename_all)]` mapping so a wrong discriminator fails deserialization rather than silently mis-typing a token. The guard additionally asserts the runtime `token_type` matches the endpoint class (a platform token on a dashboard route is `AuthError::TokenInvalid`; what a platform route answers for a token of another kind is the table in 8.3.7; MFA-temp tokens are accepted only by the challenge endpoint). `JwtClaims` is a sealed trait implemented by the three structs that exposes `exp()`/`iat()` to the temporal-claims validation.
 
 **Not a JWT claim:** `emailVerified` is deliberately absent from the access token (matching nest-auth). Verification state is read from the user record (`/me` or the registration response), so flipping a user to verified does not require re-issuing tokens.
 
