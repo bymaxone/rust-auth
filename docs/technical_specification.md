@@ -2960,15 +2960,19 @@ pub struct RequirePlatformRole<R: PlatformRole>(pub PlatformClaims, PhantomData<
   when that id `== claims.sub` **or** the user's role satisfies the
   configured admin role. The id-equality check is the primary IDOR defense;
   consumers using non-UUID ids supply their own id parsing. The id is the
-  `user_id` capture, else the `id` one, whatever else the route captures. When it refuses, and
-  when the route captures neither, it answers `auth.insufficient_role` (403).
+  `user_id` capture, else the `id` one, whatever else the route captures, and must be one
+  non-empty segment. A `tenant_id`, `tenantId` or `tenant` capture must equal the caller's
+  tenant, and is checked first, before either branch: an id is unique only within its tenant, so
+  neither the owner check nor the admin override may reach across tenants. Several tenant
+  captures must all agree with it. Whatever it refuses (a foreign tenant, an empty or
+  multi-segment id, a route that captures no id), it answers `auth.insufficient_role` (403).
 
   **Guard error codes against nest-auth** (the wire contract pins the vocabulary, not which
   guard answers which code, so this table is the record):
 
   | Cause | Code both libraries answer |
   | --- | --- |
-  | `SelfOrAdmin`: neither the owner nor an admin; or the route captures neither `user_id` nor `id` | `auth.insufficient_role` (403) |
+  | `SelfOrAdmin`: neither the owner nor an admin; a tenant capture that is not the caller's; or an id that is missing, empty or multi-segment | `auth.insufficient_role` (403) |
   | Platform guard: no token, or an unreadable, forged, expired or revoked token | `auth.token_invalid` (401) |
   | Platform guard: a validly signed, well-formed dashboard or MFA-challenge token (revoked or not: its kind is decided before any store read) | `auth.platform_auth_required` (401) |
   | Platform guard: a store failure during a platform token's revocation check | `auth.internal` (500) |
