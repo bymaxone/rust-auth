@@ -571,10 +571,10 @@ impl MfaService {
             MfaContext::Dashboard,
             Some(user.tenant_id.as_str()),
             |current| {
-                // The account stopped having MFA while this challenge was in flight — a `disable`
-                // that has already completed. Writing here would re-enable it with the pre-disable
-                // secret, so the code stays spent (its `rcu:` claim already stands) and nothing is
-                // written back.
+                // The stored secret is no longer the one this challenge opened, or MFA is off: a
+                // `disable` has completed, with or without a new enrolment after it. Writing here
+                // would put the pre-disable secret back, so the code stays spent (its `rcu:` claim
+                // already stands) and nothing is written.
                 if !user
                     .mfa_secret
                     .as_deref()
