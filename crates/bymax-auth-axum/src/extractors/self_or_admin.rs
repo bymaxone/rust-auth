@@ -23,7 +23,8 @@ pub trait AdminRole {
 /// (the primary IDOR defense) **or** the caller's role satisfies `A` (the admin override).
 /// Carries the verified claims. Rejects with `insufficient_role` (403) when neither holds and
 /// when the path segment is absent (a route misuse — `SelfOrAdmin` must be mounted on a
-/// `/{user_id}` path).
+/// `/{user_id}` path with no other capture: a route with several captures cannot be read as
+/// one id, so every caller is refused there).
 #[derive(Debug, Clone)]
 pub struct SelfOrAdmin<A: AdminRole>(pub DashboardClaims, pub PhantomData<A>);
 

@@ -87,7 +87,9 @@ impl AuthEngine {
     /// **dashboard** token is [`AuthError::PlatformAuthRequired`], so a caller can tell the other
     /// context's token from a malformed one, and every other refusal (an unreadable, forged,
     /// expired or revoked token) is the one opaque [`AuthError::TokenInvalid`]. A store failure
-    /// keeps its own error.
+    /// while checking a platform token's revocation keeps its own error; one while explaining a
+    /// dashboard token's refusal is answered as [`AuthError::TokenInvalid`], the token being refused
+    /// either way.
     ///
     /// # Errors
     ///
