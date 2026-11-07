@@ -146,18 +146,54 @@ describe("createClientRefreshHandler", () => {
 });
 
 describe("createLogoutHandler", () => {
-  // Logout is best-effort against the backend but unconditional locally: whatever the backend
-  // answers, the browser must end up without session cookies.
-  it("clears the session cookies even when the backend call fails", async () => {
+  // The browser is signed out locally only when the backend either revoked the session or had
+  // nothing to revoke. A refused request (a 4xx) is the second case: there is no session left to
+  // keep, so the cookies go.
+  it.each([200, 204, 401, 404])(
+    "clears the session cookies when the backend answers %i",
+    async (status) => {
+      vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(null, { status })));
+
+      const response = await createLogoutHandler({ backendUrl: BACKEND })(requestWith());
+
+      expect(response.status).toBe(200);
+      await expect(response.json()).resolves.toEqual({ ok: true });
+      const cleared = setCookies(response).join(" ");
+      expect(cleared).toContain(`${AUTH_ACCESS_COOKIE_NAME}=`);
+      expect(cleared).toContain(`${AUTH_HAS_SESSION_COOKIE_NAME}=`);
+      expect(cleared).toContain(`${AUTH_REFRESH_COOKIE_NAME}=`);
+    },
+  );
+
+  // A backend that failed to revoke leaves the session alive. Clearing the browser's cookies then
+  // would report a sign-out that did not happen and strand a live session the user can no longer
+  // end, so the failure is answered as it came and nothing is cleared.
+  it.each([500, 502, 503])(
+    "answers %i with the same status and clears nothing when the backend failed",
+    async (status) => {
+      vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response("boom", { status })));
+
+      const response = await createLogoutHandler({ backendUrl: BACKEND })(requestWith());
+
+      expect(response.status).toBe(status);
+      expect(setCookies(response)).toEqual([]);
+      expect(response.headers.get("cache-control")).toBe(NO_STORE);
+      await expect(response.json()).resolves.toEqual({
+        error: { code: "auth.internal", message: "Logout could not be completed." },
+      });
+    },
+  );
+
+  // The same holds when the backend cannot be reached at all: nothing was revoked.
+  it("answers 502 and clears nothing when the backend is unreachable", async () => {
     vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new Error("ECONNREFUSED")));
 
     const response = await createLogoutHandler({ backendUrl: BACKEND })(requestWith());
 
-    expect(response.status).toBe(200);
-    await expect(response.json()).resolves.toEqual({ ok: true });
-    const cleared = setCookies(response).join(" ");
-    expect(cleared).toContain(`${AUTH_ACCESS_COOKIE_NAME}=`);
-    expect(cleared).toContain(`${AUTH_REFRESH_COOKIE_NAME}=`);
+    expect(response.status).toBe(502);
+    expect(setCookies(response)).toEqual([]);
+    expect(response.headers.get("cache-control")).toBe(NO_STORE);
+    expect(response.headers.get("location")).toBeNull();
   });
 
   // The backend logout must be reached at the mounted prefix, not at the default one: a

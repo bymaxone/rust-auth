@@ -280,8 +280,14 @@ export function createClientRefreshHandler(
 }
 
 /**
- * Build the logout route handler: best-effort proxy a backend logout, then clear the local
- * session cookies and resolve `200`.
+ * Build the logout route handler: proxy a backend logout, then clear the local session cookies
+ * and resolve `200`.
+ *
+ * The cookies are cleared only when the backend either revoked the session or refused the
+ * request (a status below 500, which leaves no session of this caller to keep). A backend that
+ * answered `5xx` is answered with that same status, and one that could not be reached with
+ * `502`; neither clears a cookie, because the session may still be alive and the browser would
+ * otherwise report a sign-out that did not happen.
  *
  * @param config - The handler configuration; see {@link AuthHandlerConfig}.
  * @returns A Next route handler.
@@ -293,11 +299,27 @@ export function createLogoutHandler(
   return async (request) => {
     if (isCrossSiteRequest(request)) return crossSiteRefused();
 
-    await callBackend(resolved, AUTH_ROUTES.LOGOUT, request);
+    const backendResponse = await callBackend(resolved, AUTH_ROUTES.LOGOUT, request);
+    if (!backendResponse) return logoutFailed(502);
+    if (backendResponse.status >= 500) return logoutFailed(backendResponse.status);
+
     const response = NextResponse.json({ ok: true }, { status: 200 });
     clearSessionCookies(response, resolved.cookieDomain);
     return response;
   };
+}
+
+/** The answer to a logout the backend did not complete: its status, the error envelope, no cookie. */
+function logoutFailed(status: number): NextResponse {
+  return NextResponse.json(
+    {
+      error: {
+        code: AUTH_ERROR_CODES.INTERNAL,
+        message: "Logout could not be completed.",
+      },
+    },
+    { status, headers: { "cache-control": NO_STORE_CACHE_CONTROL } },
+  );
 }
 
 /**
