@@ -61,3 +61,47 @@ async fn the_listed_routes_answer_the_contract_body_for_a_known_and_an_unknown_a
         );
     }
 }
+
+/// The keys of the contract's `failures` object: the rules this crate implements and tests.
+const FAILURE_RULES: [&str; 5] = ["after", "before", "cooldown", "floor", "floorMs"];
+
+#[test]
+fn the_contract_failure_rules_are_exactly_the_ones_this_crate_implements() {
+    let entry = contract_entry();
+    let named: std::collections::BTreeSet<String> = entry["failures"]
+        .as_object()
+        .map(|rules| rules.keys().cloned().collect())
+        .unwrap_or_default();
+    let implemented: std::collections::BTreeSet<String> = FAILURE_RULES
+        .iter()
+        .map(|rule| (*rule).to_owned())
+        .collect();
+    assert_eq!(
+        named, implemented,
+        "a rule added to the contract must fail here until it is implemented and tested"
+    );
+    assert_eq!(entry["failures"]["floorMs"].as_u64(), Some(300));
+}
+
+#[tokio::test]
+async fn every_exit_of_both_routes_waits_the_contract_floor_a_cooldown_hit_included() {
+    let entry = contract_entry();
+    let floor =
+        std::time::Duration::from_millis(entry["failures"]["floorMs"].as_u64().unwrap_or(0));
+    let Some(h) = build(EngineSpec::default()) else { return };
+    let app = router(&h);
+    seed_user(&h, "known@e.com", "glidingwalnut42", "USER").await;
+
+    for route in contract_routes(&entry) {
+        // The second call of each pair is the cooldown hit.
+        for attempt in 0..2 {
+            let started = std::time::Instant::now();
+            let resp = Req::post(&route)
+                .json(serde_json::json!({ "email": "known@e.com", "tenantId": TENANT }))
+                .send(&app)
+                .await;
+            assert_eq!(resp.status.as_u16(), 200, "{route} attempt {attempt}");
+            assert!(started.elapsed() >= floor, "{route} attempt {attempt}");
+        }
+    }
+}

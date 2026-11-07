@@ -37,10 +37,10 @@ const VERIFIED_TOKEN_TTL_SECONDS: u64 = 300;
 /// so an entry point that can be called freely converts the 5-attempt ceiling into 5 attempts
 /// *per call*, and a six-digit code stops being a secret. Both doors therefore draw on one
 /// budget under one key.
-const RESEND_COOLDOWN_SECS: u64 = 60;
+pub(super) const RESEND_COOLDOWN_SECS: u64 = 60;
 
 /// The bytes of entropy in a reset link / verified token before hex-encoding (256-bit).
-const RESET_TOKEN_BYTES: usize = 32;
+pub(super) const RESET_TOKEN_BYTES: usize = 32;
 
 /// Input to initiate a reset: the account email and its tenant scope.
 #[derive(Clone, Debug)]
@@ -150,61 +150,10 @@ impl AuthEngine {
         // Run the fallible body, then normalize the elapsed time on EVERY exit — including an
         // infrastructure error — before returning, so a backend failure cannot be told apart
         // from a normal response by latency.
-        let outcome = self.initiate_reset_inner(&tenant_id, &email).await;
+        let method = self.config().config().password_reset.method;
+        let outcome = self.begin_reset_request(&tenant_id, &email, method).await;
         normalize_anti_enum(started).await;
         outcome
-    }
-
-    /// The fallible body of [`AuthEngine::initiate_reset`], separated so the caller can apply
-    /// the anti-enumeration timing floor to every exit path (success and infra error alike).
-    ///
-    /// Takes the RESOLVED tenant and the normalized email as plain arguments rather than the
-    /// input struct: the struct's `tenant_id` is what the caller asked for, and a resolver may
-    /// have overruled it. Keeping only the resolved value in scope is what makes reading the
-    /// wrong one impossible rather than merely unlikely.
-    async fn initiate_reset_inner(&self, tenant_id: &str, email: &str) -> Result<(), AuthError> {
-        let config = self.config().config();
-
-        // The SAME cooldown `resend_reset_otp` claims, under the same key, so the two entry
-        // points share one budget rather than one throttling itself while the other hands out
-        // fresh sends for free. Two things depended on that: every issuance rewrites the OTP
-        // record with `attempts: 0`, so an untimed initiate turns the 5-attempt ceiling into
-        // 5 attempts *per call* — an unbounded supply of guesses at a six-digit code — and each
-        // call also mails the victim, which is a mail bomb aimed at an address the caller merely
-        // has to know. A cooldown hit is a silent success, and the caller's anti-enumeration
-        // floor still applies, so the throttle does not itself answer whether the account exists.
-        let identifier = self.hashed_identifier(tenant_id, email);
-        if !self
-            .otp()
-            .try_begin_resend(OtpPurpose::PasswordReset, &identifier, RESEND_COOLDOWN_SECS)
-            .await?
-        {
-            return Ok(());
-        }
-
-        // Look up the account; an unknown email or a blocked account takes no visible branch.
-        if let Some(user) = crate::services::auth::tenant_scoped(
-            self.user_repository()
-                .find_by_email(email, tenant_id)
-                .await
-                .map_err(map_repository_error)?,
-            tenant_id,
-        ) && self.assert_user_not_blocked(&user.status).is_ok()
-        {
-            // Dispatch by configured method. Both paths are best-effort: a store or send
-            // failure is logged and dropped so the uniform response is never perturbed.
-            let issued = match config.password_reset.method {
-                ResetMethod::Otp => self.send_reset_otp(tenant_id, email).await,
-                ResetMethod::Token => self.send_reset_token(&user, email, tenant_id).await,
-            };
-            if let Err(error) = issued {
-                // No account, address or tenant in the line: it must read the same whichever
-                // account the failure belonged to.
-                let cause = crate::services::error_chain(&error);
-                tracing::warn!(%cause, "password reset: the proof could not be issued");
-            }
-        }
-        Ok(())
     }
 
     /// Reset the password using exactly one proof. The method config decides which proof is
@@ -450,107 +399,11 @@ impl AuthEngine {
         // Run the fallible body, then normalize the elapsed time on EVERY exit — the cooldown
         // short-circuit, the success path, and any infrastructure error — so a backend failure
         // cannot be distinguished from a normal response by latency.
-        let outcome = self.resend_reset_otp_inner(&tenant_id, &email).await;
+        let outcome = self
+            .begin_reset_request(&tenant_id, &email, ResetMethod::Otp)
+            .await;
         normalize_anti_enum(started).await;
         outcome
-    }
-
-    /// The fallible body of [`AuthEngine::resend_reset_otp`], separated so the caller applies
-    /// the anti-enumeration timing floor to every exit path (success and infra error alike).
-    ///
-    /// Takes the resolved tenant and normalized email directly, for the reason
-    /// [`AuthEngine::initiate_reset_inner`] does.
-    async fn resend_reset_otp_inner(&self, tenant_id: &str, email: &str) -> Result<(), AuthError> {
-        let identifier = self.hashed_identifier(tenant_id, email);
-
-        // Atomic cooldown gate — a second resend inside the window is a silent success.
-        if !self
-            .otp()
-            .try_begin_resend(OtpPurpose::PasswordReset, &identifier, RESEND_COOLDOWN_SECS)
-            .await?
-        {
-            return Ok(());
-        }
-
-        if let Some(user) = crate::services::auth::tenant_scoped(
-            self.user_repository()
-                .find_by_email(email, tenant_id)
-                .await
-                .map_err(map_repository_error)?,
-            tenant_id,
-        ) && self.assert_user_not_blocked(&user.status).is_ok()
-        {
-            // Best-effort: a store/dispatch failure must not change the uniform response.
-            let _ = self.send_reset_otp(tenant_id, email).await;
-        }
-        Ok(())
-    }
-
-    /// Generate, store, and dispatch a reset OTP. The store write is reported to the caller
-    /// (which ignores it on the anti-enumerating paths); the email send is fire-and-forget so
-    /// its round-trip never perturbs the normalized timing.
-    async fn send_reset_otp(&self, tenant_id: &str, email: &str) -> Result<(), AuthError> {
-        let identifier = self.hashed_identifier(tenant_id, email);
-        let length = self.config().config().password_reset.otp_length;
-        let otp = self.otp().generate(length);
-        let ttl = self.config().config().password_reset.otp_ttl.as_secs();
-        self.otp()
-            .store(OtpPurpose::PasswordReset, &identifier, &otp, ttl)
-            .await?;
-        spawn_guarded(crate::services::auth::detached::run_send_reset_otp_email(
-            self.email_provider().clone(),
-            tenant_id.to_owned(),
-            email.to_owned(),
-            otp,
-        ));
-        Ok(())
-    }
-
-    /// Generate, store, and dispatch a reset link token. On a send failure the stored token is
-    /// deleted so an undeliverable token does not linger in a Redis snapshot. The send is
-    /// blocking here (not fire-and-forget) precisely so its failure can drive the cleanup.
-    async fn send_reset_token(
-        &self,
-        user: &AuthUser,
-        email: &str,
-        tenant_id: &str,
-    ) -> Result<(), AuthError> {
-        let Some(store) = self.password_reset_store() else {
-            // A misconfiguration: the token method is selected but no `pw_reset:` store is wired.
-            // Surfaced to the caller, whose log line carries it, so a deployment running the
-            // token method without its store is observable without a second line here.
-            return Err(crate::services::internal_error(
-                "password reset store not configured",
-            ));
-        };
-        let raw = generate_secure_token(RESET_TOKEN_BYTES);
-        let ttl = self.config().config().password_reset.token_ttl.as_secs();
-        let context = ResetContext {
-            user_id: user.id.clone(),
-            email: email.to_owned(),
-            tenant_id: tenant_id.to_owned(),
-            password_fingerprint: password_fingerprint(user),
-        };
-        store.put_token(&raw, &context, ttl).await?;
-
-        // On a delivery failure, clean up the stored token so it cannot linger unusable.
-        if self
-            .email_provider()
-            .send_password_reset_token(tenant_id, email, &raw, None)
-            .await
-            .is_err()
-        {
-            // The caller must not learn that the address exists, so the failure is swallowed on
-            // the response path — which makes the log the only place an operator can see that
-            // reset links are not reaching anyone.
-            tracing::error!(user_id = %user.id, "password reset: token delivery failed");
-            if let Err(error) = store.delete_token(&raw).await {
-                // The rollback is what keeps an undeliverable token from lingering in a Redis
-                // snapshot for its whole TTL.
-                tracing::error!(%error, "password reset: rollback of the stored token failed");
-            }
-        }
-        Ok(())
     }
 
     /// Apply the verified reset: hash the new password, persist it, then revoke every session.
@@ -920,6 +773,8 @@ mod tests {
     use bymax_auth_types::{AuthResult, CreateUserData, LoginResult};
     use std::time::Duration;
     use time::OffsetDateTime;
+
+    mod request_failure_tests;
 
     fn token_harness() -> Option<Harness> {
         let mut cfg = base_config();
@@ -2218,10 +2073,9 @@ mod tests {
         // …and again with the rollback itself refused. The caller still sees the same
         // anti-enumerating success — it must not learn that the address exists, let alone that
         // the store is down — so the log is the only place a token now stranded in Redis for
-        // its whole TTL can surface at all. The first initiate claimed the resend cooldown, so
-        // release it: otherwise this second call returns before reaching the send at all, and
-        // the rollback branch under test never runs.
-        assert!(stores.expire_resend_cooldown(
+        // its whole TTL can surface at all. The failed delivery released the resend cooldown, so
+        // this second call reaches the send and the rollback branch under test runs.
+        assert!(!stores.resend_cooldown_held(
             OtpPurpose::PasswordReset,
             &engine.hashed_identifier("t1", "fail@example.com")
         ));

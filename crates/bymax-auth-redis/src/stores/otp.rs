@@ -119,6 +119,23 @@ impl RedisStores {
             .await?;
         Ok(set.is_some())
     }
+
+    /// Release the cooldown window (`DEL`); a window that is not held is a no-op.
+    async fn release_resend_inner(
+        &self,
+        purpose: OtpPurpose,
+        identifier: &str,
+    ) -> Result<(), RedisStoreError> {
+        let key = self
+            .keys()
+            .key(Prefix::Resend, &purpose_segment(purpose, identifier));
+        let mut conn = self.connection().await?;
+        redis::cmd("DEL")
+            .arg(&key)
+            .query_async::<i64>(&mut conn)
+            .await?;
+        Ok(())
+    }
 }
 
 #[async_trait]
@@ -156,6 +173,12 @@ impl OtpStore for RedisStores {
         cooldown_secs: u64,
     ) -> Result<bool, AuthError> {
         self.try_begin_resend_inner(purpose, identifier, cooldown_secs)
+            .await
+            .map_err(AuthError::from)
+    }
+
+    async fn release_resend(&self, purpose: OtpPurpose, identifier: &str) -> Result<(), AuthError> {
+        self.release_resend_inner(purpose, identifier)
             .await
             .map_err(AuthError::from)
     }

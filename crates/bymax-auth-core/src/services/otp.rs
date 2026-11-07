@@ -127,6 +127,25 @@ impl OtpService {
             .try_begin_resend(purpose, identifier, cooldown_secs)
             .await
     }
+
+    /// Release a cooldown [`OtpService::try_begin_resend`] took.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AuthError`] on a store failure.
+    pub async fn release_resend(
+        &self,
+        purpose: OtpPurpose,
+        identifier: &str,
+    ) -> Result<(), AuthError> {
+        self.store.release_resend(purpose, identifier).await
+    }
+
+    /// The store the service runs over, for a detached task that has to release a cooldown
+    /// after the response has been returned.
+    pub(crate) fn store_handle(&self) -> Arc<dyn OtpStore> {
+        Arc::clone(&self.store)
+    }
 }
 
 /// Map a random byte to a uniform decimal digit, or `None` for a byte that must be rejected
@@ -302,6 +321,63 @@ mod tests {
             .checked_sub(Duration::from_millis(MIN_VERIFY_MS * 4))
             .unwrap_or_else(Instant::now);
         normalize_timing(above).await;
+    }
+
+    /// A store that implements only the required methods, so every default is the trait's own.
+    struct BareStore;
+
+    #[async_trait::async_trait]
+    impl OtpStore for BareStore {
+        async fn put(&self, _: OtpPurpose, _: &str, _: &str, _: u64) -> Result<(), AuthError> {
+            Ok(())
+        }
+
+        async fn verify(&self, _: OtpPurpose, _: &str, _: &str, _: u32) -> Result<(), AuthError> {
+            Ok(())
+        }
+
+        async fn try_begin_resend(
+            &self,
+            _: OtpPurpose,
+            _: &str,
+            _: u64,
+        ) -> Result<bool, AuthError> {
+            Ok(true)
+        }
+    }
+
+    #[tokio::test]
+    async fn a_released_cooldown_can_be_taken_again() {
+        let svc = service(Arc::new(InMemoryStores::new()));
+        let purpose = OtpPurpose::PasswordReset;
+        assert!(matches!(
+            svc.try_begin_resend(purpose, "id", 60).await,
+            Ok(true)
+        ));
+        assert!(svc.release_resend(purpose, "id").await.is_ok());
+        assert!(matches!(
+            svc.try_begin_resend(purpose, "id", 60).await,
+            Ok(true)
+        ));
+        // Releasing a cooldown that is not held is a no-op.
+        assert!(svc.release_resend(purpose, "other").await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn a_store_that_cannot_release_a_cooldown_leaves_it_to_run_out() {
+        // The trait default releases nothing and says so by succeeding.
+        let svc = OtpService::new(Arc::new(BareStore), Zeroizing::new(TEST_KEY));
+        assert!(
+            svc.release_resend(OtpPurpose::PasswordReset, "id")
+                .await
+                .is_ok()
+        );
+        assert!(
+            svc.store_handle()
+                .release_resend(OtpPurpose::PasswordReset, "id")
+                .await
+                .is_ok()
+        );
     }
 
     #[tokio::test]

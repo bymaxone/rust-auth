@@ -19,6 +19,7 @@ mod password_reset;
 #[cfg(test)]
 mod refresh_tenant_tests;
 mod register;
+mod reset_request;
 mod session_ops;
 
 pub use invitation::AcceptInvitationInput;
