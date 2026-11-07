@@ -119,16 +119,17 @@ impl AuthEngine {
     /// Initiate a password reset. The **account-state outcome is always `Ok(())`** — the body
     /// is identical whether or not the account exists, is blocked, or the email send fails —
     /// and the ≥ 300 ms anti-enumeration timing floor is honored on **every** path, so neither
-    /// the response nor the latency reveals account existence. An **infrastructure failure**
-    /// (the account lookup or persisting the proof is unreachable) is still surfaced as an
-    /// [`AuthError`]; only the account state never changes the outcome.
+    /// the response nor the latency reveals account existence. A failure **before** the account
+    /// is known (the resend-cooldown store, the account lookup) is surfaced as an [`AuthError`];
+    /// one **after** it (storing or sending the proof) is logged and the `Ok(())` stands. The
+    /// cooldown the request took is released on any failure.
     ///
     /// # Errors
     ///
-    /// Returns a store [`AuthError`] only on an infrastructure failure (the account lookup or
-    /// persisting the proof); account state never changes the otherwise-`Ok(())` outcome. The
-    /// timing floor is applied before the error is returned, so an infra error stays
-    /// latency-indistinguishable from a normal response.
+    /// Returns a store [`AuthError`] only when the resend-cooldown store or the account lookup
+    /// fails; account state never changes the otherwise-`Ok(())` outcome. The timing floor is
+    /// applied before the error is returned, so an infra error stays latency-indistinguishable
+    /// from a normal response.
     pub async fn initiate_reset(
         &self,
         input: ForgotPasswordInput,

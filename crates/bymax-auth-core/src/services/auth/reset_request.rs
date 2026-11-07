@@ -18,7 +18,7 @@ use super::password_reset::{RESEND_COOLDOWN_SECS, RESET_TOKEN_BYTES, password_fi
 use crate::config::ResetMethod;
 use crate::engine::AuthEngine;
 use crate::services::auth::detached::run_send_reset_otp_email;
-use crate::services::auth::{map_repository_error, spawn_guarded};
+use crate::services::auth::{map_repository_error, spawn_guarded_or_else};
 use crate::traits::{OtpPurpose, ResetContext};
 
 impl AuthEngine {
@@ -98,7 +98,7 @@ impl AuthEngine {
 
     /// Generate, store, and dispatch a reset OTP. The store write is reported to the caller; the
     /// email send is fire-and-forget so its round-trip never perturbs the normalized timing, and
-    /// a send that fails releases the cooldown from the detached task.
+    /// a send that fails or hangs past the ceiling releases the cooldown from the detached task.
     async fn send_reset_otp(
         &self,
         tenant_id: &str,
@@ -118,16 +118,15 @@ impl AuthEngine {
             email.to_owned(),
             identifier.to_owned(),
         );
-        spawn_guarded(async move {
-            let sent = run_send_reset_otp_email(provider, tenant_id, email, otp).await;
-            if sent.is_err() {
+        spawn_guarded_or_else(
+            run_send_reset_otp_email(provider, tenant_id, email, otp),
+            async move {
                 // Best effort: a failed release leaves the cooldown to run out.
                 let _ = store
                     .release_resend(OtpPurpose::PasswordReset, &identifier)
                     .await;
-            }
-            sent
-        });
+            },
+        );
         Ok(())
     }
 

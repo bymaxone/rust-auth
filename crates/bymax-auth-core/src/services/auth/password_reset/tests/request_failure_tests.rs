@@ -21,8 +21,21 @@ enum Entry {
 
 const ENTRIES: [Entry; 2] = [Entry::Initiate, Entry::Resend];
 
-/// An email provider whose every send fails, to drive the delivery-failure branches.
-struct DownMailer;
+/// An email provider whose reset sends fail, or never return when `hang_otp` is set, to drive the
+/// delivery-failure branches.
+struct DownMailer {
+    hang_otp: bool,
+}
+
+impl DownMailer {
+    fn failing() -> Self {
+        Self { hang_otp: false }
+    }
+
+    fn hanging() -> Self {
+        Self { hang_otp: true }
+    }
+}
 
 #[async_trait::async_trait]
 impl EmailProvider for DownMailer {
@@ -43,6 +56,9 @@ impl EmailProvider for DownMailer {
         _otp: &str,
         _locale: Option<&str>,
     ) -> Result<(), EmailError> {
+        if self.hang_otp {
+            std::future::pending::<()>().await;
+        }
         Err(EmailError::Delivery("down".into()))
     }
 
@@ -184,7 +200,9 @@ async fn released_soon(rig: &Rig, email: &str) -> bool {
 #[tokio::test]
 async fn a_failing_cooldown_gate_answers_500_after_the_floor() {
     for entry in ENTRIES {
-        let Some(rig) = rig(ResetMethod::Otp, Arc::new(DownMailer), false).await else { return };
+        let Some(rig) = rig(ResetMethod::Otp, Arc::new(DownMailer::failing()), false).await else {
+            return;
+        };
         rig.stores.fail_next_resend_gates(1);
 
         let (outcome, took) = request(&rig, entry, REGISTERED).await;
@@ -204,7 +222,9 @@ async fn a_failing_cooldown_gate_answers_500_after_the_floor() {
 #[tokio::test]
 async fn a_failing_account_lookup_answers_500_after_the_floor_and_releases_the_cooldown() {
     for entry in ENTRIES {
-        let Some(rig) = rig(ResetMethod::Otp, Arc::new(DownMailer), true).await else { return };
+        let Some(rig) = rig(ResetMethod::Otp, Arc::new(DownMailer::failing()), true).await else {
+            return;
+        };
 
         let (outcome, took) = request(&rig, entry, REGISTERED).await;
 
@@ -223,7 +243,9 @@ async fn a_failing_account_lookup_answers_500_after_the_floor_and_releases_the_c
 #[tokio::test]
 async fn a_code_that_could_not_be_stored_keeps_the_200_logs_it_and_releases_the_cooldown() {
     for entry in ENTRIES {
-        let Some(rig) = rig(ResetMethod::Otp, Arc::new(DownMailer), false).await else { return };
+        let Some(rig) = rig(ResetMethod::Otp, Arc::new(DownMailer::failing()), false).await else {
+            return;
+        };
         rig.stores.fail_next_otp_puts(1);
 
         let (events, guard) = crate::log_capture::capture_events();
@@ -252,7 +274,9 @@ async fn a_code_that_could_not_be_stored_keeps_the_200_logs_it_and_releases_the_
 #[tokio::test]
 async fn a_code_that_could_not_be_sent_keeps_the_200_and_releases_the_cooldown() {
     for entry in ENTRIES {
-        let Some(rig) = rig(ResetMethod::Otp, Arc::new(DownMailer), false).await else { return };
+        let Some(rig) = rig(ResetMethod::Otp, Arc::new(DownMailer::failing()), false).await else {
+            return;
+        };
 
         let (outcome, took) = request(&rig, entry, REGISTERED).await;
 
@@ -268,7 +292,9 @@ async fn a_code_that_could_not_be_sent_keeps_the_200_and_releases_the_cooldown()
 
 #[tokio::test]
 async fn a_reset_link_that_could_not_be_sent_keeps_the_200_and_releases_the_cooldown() {
-    let Some(rig) = rig(ResetMethod::Token, Arc::new(DownMailer), false).await else { return };
+    let Some(rig) = rig(ResetMethod::Token, Arc::new(DownMailer::failing()), false).await else {
+        return;
+    };
 
     let (outcome, took) = request(&rig, Entry::Initiate, REGISTERED).await;
 
@@ -309,7 +335,9 @@ async fn a_request_that_fails_nothing_keeps_its_cooldown_and_a_hit_waits_the_flo
 #[tokio::test]
 async fn a_cooldown_that_cannot_be_released_is_logged_and_the_original_error_stands() {
     for entry in ENTRIES {
-        let Some(rig) = rig(ResetMethod::Otp, Arc::new(DownMailer), true).await else { return };
+        let Some(rig) = rig(ResetMethod::Otp, Arc::new(DownMailer::failing()), true).await else {
+            return;
+        };
         rig.stores.fail_next_resend_releases(1);
 
         let (events, guard) = crate::log_capture::capture_events();
@@ -335,4 +363,27 @@ async fn a_cooldown_that_cannot_be_released_is_logged_and_the_original_error_sta
             "{entry:?}: it runs out by itself"
         );
     }
+}
+
+#[tokio::test]
+async fn a_send_that_never_returns_releases_the_cooldown_when_the_ceiling_abandons_it() {
+    let Some(rig) = rig(ResetMethod::Otp, Arc::new(DownMailer::hanging()), false).await else {
+        return;
+    };
+
+    let (outcome, took) = request(&rig, Entry::Initiate, REGISTERED).await;
+
+    assert!(outcome.is_ok(), "{outcome:?}");
+    assert!(took >= FLOOR, "{took:?}");
+    assert!(cooldown_held(&rig, REGISTERED), "the send is still running");
+    // The ceiling is DETACHED_TASK_TIMEOUT; the cooldown is released once it abandons the send.
+    let mut released = false;
+    for _ in 0..80 {
+        if !cooldown_held(&rig, REGISTERED) {
+            released = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(released, "still held after the ceiling");
 }
