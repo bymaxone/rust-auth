@@ -13,6 +13,8 @@ use bymax_auth_types::{AuthError, MfaContext};
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 
+pub use super::logout_owner::LogoutOwner;
+
 /// Selects the identity domain a store operation targets, which in turn selects the Redis
 /// prefix pair (`rt`/`prt`, `rp`/`prp`, `sess`/`psess`, `sd`/`psd`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -509,6 +511,51 @@ pub trait SessionStore: Send + Sync {
         subject_hash: &str,
         session_hash: &str,
     ) -> Result<(), AuthError>;
+
+    /// Record whom a failed logout attempt was ending, under the refresh token's hash
+    /// (`lp:`/`plp:`), for `ttl_secs`.
+    ///
+    /// A logout attempt that fails a revocation write still deletes the refresh session, so the
+    /// retry that completes the logout would find no record to say whose it was. This marker is
+    /// that record. Best effort: the caller logs a failure and raises the logout's own.
+    ///
+    /// The default stores nothing, which is the safe reading for a store that keeps no such
+    /// marker: a retry then names no owner and announces nothing.
+    async fn put_logout_pending(
+        &self,
+        _kind: SessionKind,
+        _session_hash: &str,
+        _owner: &LogoutOwner,
+        _ttl_secs: u64,
+    ) -> Result<(), AuthError> {
+        Ok(())
+    }
+
+    /// Read the owner a failed logout attempt recorded for this refresh-token hash, or `None`
+    /// when there is none (or it is unreadable). A single read: it does not remove the marker.
+    ///
+    /// The default answers `None`, matching the default of
+    /// [`SessionStore::put_logout_pending`].
+    async fn read_logout_pending(
+        &self,
+        _kind: SessionKind,
+        _session_hash: &str,
+    ) -> Result<Option<LogoutOwner>, AuthError> {
+        Ok(None)
+    }
+
+    /// Remove the marker for this refresh-token hash and report whether THIS call removed it.
+    ///
+    /// The atomic delete is the claim: of several retries racing to complete one logout, exactly
+    /// one gets `true`, and only that one announces it. Idempotent, and `false` when no marker
+    /// exists. The default has nothing to remove.
+    async fn claim_logout_pending(
+        &self,
+        _kind: SessionKind,
+        _session_hash: &str,
+    ) -> Result<bool, AuthError> {
+        Ok(false)
+    }
 
     /// Delete the rotation grace pointer for a refresh-token hash (`rp:`/`prp:`), if any, so a
     /// just-rotated token cannot still recover a session through the grace window after the

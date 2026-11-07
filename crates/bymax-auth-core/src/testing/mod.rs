@@ -28,8 +28,8 @@ use time::OffsetDateTime;
 use crate::RepositoryError;
 use crate::traits::{
     BruteForceStore, EmailChangeContext, HttpClient, HttpError, HttpRequest, HttpResponse,
-    InvitationStore, OAuthProfile, OAuthProvider, OAuthProviderError, OAuthTokens, OtpPurpose,
-    OtpStore, PasswordResetStore, PlatformUserRepository, ResetContext, RotateOutcome,
+    InvitationStore, LogoutOwner, OAuthProfile, OAuthProvider, OAuthProviderError, OAuthTokens,
+    OtpPurpose, OtpStore, PasswordResetStore, PlatformUserRepository, ResetContext, RotateOutcome,
     SessionDetail, SessionKind, SessionRecord, SessionRotation, SessionStore, StoredInvitation,
     UserRepository, WsTicketSnapshot, WsTicketStore,
 };
@@ -540,6 +540,8 @@ pub struct InMemoryStores {
     /// owns — the real store finds them as members of that account's `sess:` set, which is the
     /// same question asked a different way.
     grace: Mutex<HashMap<(SessionKind, String), GracePointer>>,
+    /// `lp:`/`plp:` pending-logout markers and the failures armed against them.
+    logout_pending: logout_pending::Double,
     /// `cf:` consumed-token markers: an already-rotated token's hash → the family it belonged
     /// to. Outlives the grace pointer (which the real store keys with the shorter grace TTL),
     /// so a post-grace replay of the consumed token is detected as a reuse rather than a plain
@@ -1018,6 +1020,32 @@ impl SessionStore for InMemoryStores {
         }
         lock(&self.sessions).remove(&(kind, session_hash.to_owned()));
         Ok(())
+    }
+
+    async fn put_logout_pending(
+        &self,
+        kind: SessionKind,
+        session_hash: &str,
+        owner: &LogoutOwner,
+        ttl_secs: u64,
+    ) -> Result<(), AuthError> {
+        self.put_pending(kind, session_hash, owner, ttl_secs)
+    }
+
+    async fn read_logout_pending(
+        &self,
+        kind: SessionKind,
+        session_hash: &str,
+    ) -> Result<Option<LogoutOwner>, AuthError> {
+        self.read_pending(kind, session_hash)
+    }
+
+    async fn claim_logout_pending(
+        &self,
+        kind: SessionKind,
+        session_hash: &str,
+    ) -> Result<bool, AuthError> {
+        self.claim_pending(kind, session_hash)
     }
 
     async fn delete_grace_pointer(
@@ -1682,6 +1710,7 @@ impl OAuthProvider for MockOAuthProvider {
     }
 }
 
+mod logout_pending;
 mod rate_limit;
 mod user_status;
 

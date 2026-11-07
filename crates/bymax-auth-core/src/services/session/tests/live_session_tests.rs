@@ -194,3 +194,26 @@ async fn a_store_that_keeps_no_readable_pointer_names_no_successor() {
         .await;
     assert!(matches!(outcome, Ok(None)));
 }
+
+#[tokio::test]
+async fn a_store_that_keeps_no_logout_marker_stores_reads_and_claims_nothing() {
+    // `FailingRevokeStore` implements none of the pending-logout methods, so these are the
+    // trait's defaults: nothing is stored, nothing is read back, and there is nothing to claim.
+    let owner = crate::traits::LogoutOwner {
+        user_id: "u1".to_owned(),
+        tenant_id: None,
+    };
+    let store = super::FailingRevokeStore;
+    let put = store
+        .put_logout_pending(SessionKind::Dashboard, &hash("aaaa"), &owner, 300)
+        .await;
+    let read = store
+        .read_logout_pending(SessionKind::Dashboard, &hash("aaaa"))
+        .await;
+    let claim = store
+        .claim_logout_pending(SessionKind::Dashboard, &hash("aaaa"))
+        .await;
+    assert!(matches!(put, Ok(())));
+    assert!(matches!(read, Ok(None)));
+    assert!(matches!(claim, Ok(false)));
+}

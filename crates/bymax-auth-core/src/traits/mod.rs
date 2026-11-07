@@ -10,6 +10,7 @@ pub mod default_email;
 pub mod email;
 pub mod hooks;
 pub mod http;
+mod logout_owner;
 pub mod oauth;
 pub mod rate_limit;
 pub mod repository;
@@ -51,10 +52,10 @@ pub use store::MfaStore;
 pub use store::OAuthStateStore;
 #[doc(inline)]
 pub use store::{
-    BruteForceStore, EmailChangeContext, InvitationStore, OtpPurpose, OtpStore, PasswordResetStore,
-    ResetContext, RotateOutcome, SessionDetail, SessionEntry, SessionKind, SessionRecord,
-    SessionRotation, SessionStore, StoredInvitation, TOKEN_EPOCH_RETENTION_SECS, WsTicketSnapshot,
-    WsTicketStore,
+    BruteForceStore, EmailChangeContext, InvitationStore, LogoutOwner, OtpPurpose, OtpStore,
+    PasswordResetStore, ResetContext, RotateOutcome, SessionDetail, SessionEntry, SessionKind,
+    SessionRecord, SessionRotation, SessionStore, StoredInvitation, TOKEN_EPOCH_RETENTION_SECS,
+    WsTicketSnapshot, WsTicketStore,
 };
 #[doc(inline)]
 pub use user_status_cache::UserStatusCacheStore;
