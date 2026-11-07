@@ -1491,7 +1491,7 @@ mod tests {
         for environment in [Environment::Development, Environment::Test] {
             assert_eq!(cfg.validate(environment).ok(), Some(false));
         }
-        // Unset and `true` are unchanged in production.
+        // Both an unset value and `true` resolve to secure cookies in production.
         cfg.secure_cookies = None;
         assert_eq!(cfg.validate(Environment::Production).ok(), Some(true));
         cfg.secure_cookies = Some(true);
