@@ -2966,7 +2966,7 @@ pub struct RequirePlatformRole<R: PlatformRole>(pub PlatformClaims, PhantomData<
   neither the owner check nor the admin override may reach across tenants. Several tenant
   captures must all agree with it. Whatever it refuses (a foreign tenant, an empty or
   multi-segment id, a route that captures no id), it answers `auth.insufficient_role` (403).
-  Only those three names are read as a tenant: a route that names it another way, or reuses a
+  Only those names are read as a tenant: a route that names it another way, or reuses a
   capture name at two nesting levels (the guard sees the innermost value), is bound by the
   handler, not by this guard.
 
