@@ -21,9 +21,10 @@ pub trait AdminRole {
 
 /// Admits the request when the `{user_id}` path segment equals the caller's `sub`
 /// (the primary IDOR defense) **or** the caller's role satisfies `A` (the admin override).
-/// Carries the verified claims. Rejects with `forbidden` (403) when neither holds, and with
-/// `token_invalid` when the path segment is absent (a route misuse — `SelfOrAdmin` must be
-/// mounted on a `/{user_id}` path).
+/// Carries the verified claims. Rejects with `insufficient_role` (403) when neither holds and
+/// when the path segment is absent (a route misuse — `SelfOrAdmin` must be mounted on a
+/// `/{user_id}` path with no other capture: a route with several captures cannot be read as
+/// one id, so every caller is refused there).
 #[derive(Debug, Clone)]
 pub struct SelfOrAdmin<A: AdminRole>(pub DashboardClaims, pub PhantomData<A>);
 
@@ -39,18 +40,18 @@ where
         let auth_state = AuthState::from_ref(state);
         let claims = verified_dashboard_claims(parts, &auth_state).await?;
 
-        // The `{user_id}` capture must be present; its absence is a routing error, mapped to
-        // `token_invalid` so it never silently admits.
+        // The `{user_id}` capture must be present; its absence is a routing error, refused as a
+        // role failure so it never silently admits.
         let Path(user_id) = Path::<String>::from_request_parts(parts, state)
             .await
-            .map_err(|_| AuthRejection(AuthError::TokenInvalid))?;
+            .map_err(|_| AuthRejection(AuthError::InsufficientRole))?;
 
         let is_self = user_id == claims.sub;
         let is_admin = auth_state.engine().role_satisfies(&claims.role, A::NAME);
         if is_self || is_admin {
             Ok(Self(claims, PhantomData))
         } else {
-            Err(AuthRejection(AuthError::Forbidden))
+            Err(AuthRejection(AuthError::InsufficientRole))
         }
     }
 }
@@ -119,7 +120,7 @@ mod tests {
     #[tokio::test]
     async fn missing_user_id_path_segment_is_a_routing_error() {
         // Mounted on a route without a `{user_id}` capture, the `Path<String>` extraction fails
-        // and the guard maps it to `token_invalid` (401) rather than silently admitting — the
+        // and the guard refuses as a role failure (403) rather than silently admitting — the
         // absent-path-segment arm.
         let Some(s) = scaffold(TokenDelivery::Cookie) else { return };
         let user_id = seed(&s.users, "noseg@e.com", "USER").await;
@@ -139,6 +140,6 @@ mod tests {
             .await
             .map(|response| response.status())
             .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
-        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert_eq!(status, StatusCode::FORBIDDEN);
     }
 }

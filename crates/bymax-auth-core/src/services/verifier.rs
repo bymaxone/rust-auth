@@ -223,7 +223,11 @@ impl AuthEngine {
     /// `PlatformAuthRequired`, so a caller can tell "the other context's token" from "a malformed
     /// one"; everything else collapses to the opaque answer.
     #[cfg(feature = "platform")]
-    async fn explain_platform_refusal(&self, token: &str, error: AuthError) -> AuthError {
+    pub(crate) async fn explain_platform_refusal(
+        &self,
+        token: &str,
+        error: AuthError,
+    ) -> AuthError {
         if !matches!(error, AuthError::TokenInvalid) {
             return collapse(error);
         }

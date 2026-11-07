@@ -14,8 +14,10 @@ use crate::state::AuthState;
 /// Verify the platform access token once per request, caching the claims on
 /// `parts.extensions`. The token is sourced from the `Authorization: Bearer` header only —
 /// never a cookie, and never a query string, since platform sessions carry no cookie at all.
-/// A dashboard token presented here fails the `type == platform` assertion and is mapped to
-/// `PlatformAuthRequired`.
+///
+/// A validly signed dashboard token presented here is `PlatformAuthRequired`; every other
+/// refusal, an absent token included, is the one opaque `TokenInvalid`, and a store failure
+/// during the revocation check keeps its own error so an outage surfaces as a 500.
 async fn verified_platform_claims(
     parts: &mut Parts,
     state: &AuthState,
@@ -23,33 +25,10 @@ async fn verified_platform_claims(
     if let Some(cached) = parts.extensions.get::<PlatformClaims>() {
         return Ok(cached.clone());
     }
-    let token = source_platform_access_token(parts).ok_or(AuthError::PlatformAuthRequired)?;
-    let claims = state
-        .engine()
-        .verify_platform_token(&token)
-        .await
-        .map_err(map_platform_verify_error)?;
+    let token = source_platform_access_token(parts).ok_or(AuthError::TokenInvalid)?;
+    let claims = state.engine().verify_platform_request_token(&token).await?;
     parts.extensions.insert(claims.clone());
     Ok(claims)
-}
-
-/// Map a `verify_platform_token` failure to the boundary error, discriminating token-auth
-/// failures from internal/infra failures the same way the dashboard guard does.
-///
-/// Only the token-authentication outcomes — an invalid/malformed/wrong-type token
-/// ([`AuthError::TokenInvalid`]), an expired token ([`AuthError::TokenExpired`]), or a revoked
-/// one ([`AuthError::TokenRevoked`]) — collapse to [`AuthError::PlatformAuthRequired`] (401),
-/// since a dashboard or otherwise non-platform token presented here is "platform auth
-/// required". Every other variant (notably [`AuthError::Internal`] from a store/Redis failure
-/// during the `rv:{jti}` revocation check) is propagated unchanged, so an infrastructure
-/// outage surfaces as a 500 rather than being masked as an auth failure.
-fn map_platform_verify_error(error: AuthError) -> AuthError {
-    match error {
-        AuthError::TokenInvalid | AuthError::TokenExpired | AuthError::TokenRevoked => {
-            AuthError::PlatformAuthRequired
-        }
-        other => other,
-    }
 }
 
 /// Verified platform access-token claims (`type == platform`, no `tenantId`). A dashboard
@@ -138,31 +117,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn map_platform_verify_error_masks_token_failures_and_propagates_internal() {
-        // The three token-authentication outcomes collapse to `platform_auth_required` (a
-        // dashboard/non-platform/expired/revoked token presented here is simply "not authed").
-        assert!(matches!(
-            map_platform_verify_error(AuthError::TokenInvalid),
-            AuthError::PlatformAuthRequired
-        ));
-        assert!(matches!(
-            map_platform_verify_error(AuthError::TokenExpired),
-            AuthError::PlatformAuthRequired
-        ));
-        assert!(matches!(
-            map_platform_verify_error(AuthError::TokenRevoked),
-            AuthError::PlatformAuthRequired
-        ));
-        // An internal/infra failure (e.g. Redis down during the revocation check) is propagated
-        // unchanged, so it surfaces as a 500 rather than being masked as a 401.
-        let internal = AuthError::Internal(Box::new(std::io::Error::other("redis down")));
-        assert!(matches!(
-            map_platform_verify_error(internal),
-            AuthError::Internal(_)
-        ));
-    }
-
     #[tokio::test]
     async fn platform_user_accepts_platform_token_and_rejects_dashboard_token() {
         // A platform token on the bearer header resolves; a dashboard token there is
@@ -185,13 +139,10 @@ mod tests {
             Err(AuthRejection(AuthError::PlatformAuthRequired))
         ));
 
-        // An absent token is also `platform_auth_required`.
+        // An absent token is the opaque `token_invalid`, as it is for a malformed one.
         let mut empty = parts_empty();
         let none = PlatformUser::from_request_parts(&mut empty, &s.state).await;
-        assert!(matches!(
-            none,
-            Err(AuthRejection(AuthError::PlatformAuthRequired))
-        ));
+        assert!(matches!(none, Err(AuthRejection(AuthError::TokenInvalid))));
     }
 
     #[tokio::test]
@@ -206,7 +157,7 @@ mod tests {
         let refused = PlatformUser::from_request_parts(&mut cookie_parts, &s.state).await;
         assert!(matches!(
             refused,
-            Err(AuthRejection(AuthError::PlatformAuthRequired))
+            Err(AuthRejection(AuthError::TokenInvalid))
         ));
 
         let mut header_parts = parts_with_bearer(&token);

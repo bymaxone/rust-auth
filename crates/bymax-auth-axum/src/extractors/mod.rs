@@ -15,6 +15,9 @@ mod role;
 mod self_or_admin;
 mod status;
 
+#[cfg(all(test, feature = "platform"))]
+mod error_code_tests;
+
 #[cfg(feature = "platform")]
 mod platform;
 

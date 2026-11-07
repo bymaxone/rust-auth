@@ -3193,16 +3193,14 @@ async fn platform_extractor_propagates_internal_errors_but_masks_token_failures(
     assert_eq!(internal.json()["error"]["code"], "auth.internal");
 
     // A token-auth failure (a malformed/invalid token) never reaches the revocation check, so it
-    // still collapses to `platform_auth_required` (401) — the masking is correct for THIS case.
+    // collapses to the opaque `token_invalid` (401) — the masking is correct for THIS case, and
+    // `platform_auth_required` is kept for a validly signed token of the wrong kind.
     let invalid = Req::get("/auth/platform/me")
         .bearer("not-a-jwt")
         .send(&app)
         .await;
     assert_eq!(invalid.status, StatusCode::UNAUTHORIZED);
-    assert_eq!(
-        invalid.json()["error"]["code"],
-        "auth.platform_auth_required"
-    );
+    assert_eq!(invalid.json()["error"]["code"], "auth.token_invalid");
 }
 
 // ---------------------------------------------------------------------------
