@@ -141,7 +141,7 @@ fn charset_is_utf8(headers: &http::HeaderMap) -> bool {
 }
 
 /// Whether every `Content-Encoding` the request names is `identity`.
-fn encoding_is_identity(headers: &http::HeaderMap) -> bool {
+pub(crate) fn encoding_is_identity(headers: &http::HeaderMap) -> bool {
     headers
         .get_all(http::header::CONTENT_ENCODING)
         .iter()

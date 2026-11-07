@@ -1045,9 +1045,14 @@
         "message": "Request entity too large"
       },
       {
-        "condition": "body-parser type charset.unsupported or encoding.unsupported",
+        "condition": "body-parser type charset.unsupported or encoding.unsupported, or any Content-Encoding other than identity on a library route, refused by the library itself before the handler whatever the host's body parser would have decompressed",
         "status": 415,
         "message": "Unsupported media type"
+      },
+      {
+        "condition": "a 400 the body parser raises with no type of its own, such as a body that claims to be compressed and is not, refused before routing",
+        "status": 400,
+        "message": "Malformed request"
       }
     ],
     "contentTypeMismatch": {
@@ -1057,5 +1062,53 @@
       "message": "Validation failed",
       "details": "one entry per failed field, each naming the field and a rule message; no entry carries a request value (a field name can be a key the client sent)"
     }
+  },
+  "requestEncoding": {
+    "note": [
+      "Which library routes refuse a request body that declares a Content-Encoding other than",
+      "`identity`, answering the `transportErrors` 415 row. The scope is the same in both libraries:",
+      "a route not listed under `unchecked` or `whenBody` is strict, so a route added later is checked",
+      "until someone decides it should not be. Routes are written as `METHOD path` relative to the",
+      "route prefix. A request with no Content-Encoding, or only `identity`, is never refused.",
+      "",
+      "`whenBody` routes accept an empty body, which takes the default DTO, so they refuse only a",
+      "request that carries one: a non-zero Content-Length or a Transfer-Encoding. A path-only or",
+      "query-only route is never checked: no request of the methods in `methodsNeverChecked` is."
+    ],
+    "methodsNeverChecked": ["GET", "HEAD", "OPTIONS", "DELETE"],
+    "strict": [
+      "POST register",
+      "POST login",
+      "POST verify-email",
+      "POST resend-verification",
+      "POST password/forgot-password",
+      "POST password/reset-password",
+      "POST password/change",
+      "POST password/verify-otp",
+      "POST password/resend-otp",
+      "POST email/change",
+      "POST email/change/confirm",
+      "POST mfa/verify-enable",
+      "POST mfa/challenge",
+      "POST mfa/disable",
+      "POST mfa/recovery-codes",
+      "POST platform/login",
+      "POST platform/mfa/challenge",
+      "POST platform/mfa/verify-enable",
+      "POST platform/mfa/disable",
+      "POST platform/mfa/recovery-codes",
+      "POST invitations",
+      "POST invitations/revoke",
+      "POST invitations/accept"
+    ],
+    "whenBody": ["POST mfa/setup", "POST platform/mfa/setup"],
+    "unchecked": [
+      "POST logout",
+      "POST refresh",
+      "POST ws-ticket",
+      "POST platform/logout",
+      "POST platform/refresh",
+      "POST sessions/revoke-all"
+    ]
   }
 }

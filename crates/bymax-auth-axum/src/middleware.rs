@@ -36,6 +36,7 @@ pub(crate) fn apply_middleware(
     max_body_bytes: usize,
     cors: Option<tower_http::cors::CorsLayer>,
     client_ip: ClientIpPolicy,
+    encoding: crate::encoding_policy::EncodingPolicy,
 ) -> Router<AuthState> {
     // Redact the credential-bearing request headers from any trace span/event, mirroring
     // nest-auth's `sanitizeHeaders`. The set is sourced from the same `SENSITIVE_HEADERS`
@@ -66,6 +67,12 @@ pub(crate) fn apply_middleware(
         .layer(axum::middleware::from_fn_with_state(
             client_ip,
             crate::client_ip::resolve_client_ip,
+        ))
+        // A request declaring an encoding the adapter does not decode is refused here, outside
+        // every route layer: it reaches neither authentication nor a rate limiter.
+        .layer(axum::middleware::from_fn_with_state(
+            encoding,
+            crate::encoding_policy::refuse_undecoded_body,
         ))
         .layer(CookieManagerLayer::new())
         .layer(RequestBodyLimitLayer::new(max_body_bytes))

@@ -3952,3 +3952,6 @@ async fn a_structurally_valid_proof_the_configured_method_does_not_accept_is_ref
         "auth.password_reset_token_invalid"
     );
 }
+
+#[path = "adapter/request_encoding.rs"]
+mod request_encoding;

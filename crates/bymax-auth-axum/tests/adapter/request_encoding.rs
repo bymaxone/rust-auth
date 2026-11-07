@@ -1,0 +1,244 @@
+//! Which routes refuse a request body that declares a `Content-Encoding` other than `identity`
+//! is read from the shared contract's `requestEncoding` section: every route the section lists
+//! behaves as its list says, with a signed-in caller so the check is reached rather than an
+//! authentication refusal. Shares the fixtures of the parent test file.
+
+use std::collections::BTreeSet;
+
+use super::*;
+
+/// The `requestEncoding` section of the shared wire contract.
+fn section() -> serde_json::Value {
+    let path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../conformance/wire-contract.json"
+    );
+    let raw = std::fs::read_to_string(path).unwrap_or_default();
+    let root: serde_json::Value = serde_json::from_str(&raw).unwrap_or(serde_json::Value::Null);
+    root["requestEncoding"].clone()
+}
+
+/// One list of the section as a set of `METHOD path` strings.
+fn routes(list: &str) -> BTreeSet<String> {
+    section()[list]
+        .as_array()
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|item| item.as_str().map(str::to_owned))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// The credentials a request to either plane needs, so the encoding check is reached rather than
+/// an authentication refusal.
+struct Credentials {
+    dashboard: String,
+    platform: String,
+}
+
+/// A router with every optional surface on, so every route the contract names is mounted, and a
+/// signed-in account for each plane.
+async fn every_surface() -> Option<(axum::Router, Credentials)> {
+    let harness = build(EngineSpec {
+        mfa: true,
+        platform: true,
+        invitations: true,
+        email_change: true,
+        sessions: true,
+        ..EngineSpec::default()
+    })?;
+    let app = router(&harness);
+    seed_user(&harness, "enc@example.com", "glidingwalnut42", "USER").await;
+    let dashboard = login(&app, "enc@example.com", "glidingwalnut42")
+        .await
+        .cookie_value("access_token")
+        .unwrap_or_default();
+    let admin = common::seed_admin(&harness, "encadmin@example.com", "SUPPORT").await;
+    let platform = common::mint_platform_token(&admin, "SUPPORT");
+    Some((
+        app,
+        Credentials {
+            dashboard,
+            platform,
+        },
+    ))
+}
+
+/// A gzip-declared JSON body of `body`, with the `Content-Length` a real client sends (the test
+/// harness sets none).
+fn with_gzip_body(request: Req, body: &[u8]) -> Req {
+    request
+        .raw_body(body.to_vec(), "application/json")
+        .header(http::header::CONTENT_LENGTH, &body.len().to_string())
+        .header(http::header::CONTENT_ENCODING, "gzip")
+}
+
+/// A `METHOD path` string as a request under the route prefix, with a gzip-declared body.
+fn gzip_request(route: &str, body: &[u8], credentials: &Credentials) -> Req {
+    let (method, path) = route.split_once(' ').unwrap_or(("POST", route));
+    let method = method.parse().unwrap_or(http::Method::POST);
+    let request = with_gzip_body(Req::new(method, &format!("/auth/{path}")), body);
+    if path.starts_with("platform/") {
+        request.bearer(&credentials.platform)
+    } else {
+        request.cookie("access_token", &credentials.dashboard)
+    }
+}
+
+#[tokio::test]
+async fn a_strict_route_refuses_a_declared_encoding() {
+    let Some((app, credentials)) = every_surface().await else {
+        return;
+    };
+    let strict = routes("strict");
+    assert!(!strict.is_empty(), "the contract lists no strict routes");
+    for route in &strict {
+        let response = gzip_request(route, b"{}", &credentials).send(&app).await;
+        assert_eq!(
+            response.status,
+            StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            "{route}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn an_unchecked_route_does_not_refuse_a_declared_encoding() {
+    let Some((app, credentials)) = every_surface().await else {
+        return;
+    };
+    let unchecked = routes("unchecked");
+    assert!(
+        !unchecked.is_empty(),
+        "the contract lists no unchecked routes"
+    );
+    for route in &unchecked {
+        let response = gzip_request(route, b"{}", &credentials).send(&app).await;
+        assert_ne!(
+            response.status,
+            StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            "{route}"
+        );
+        assert_ne!(
+            response.status,
+            StatusCode::NOT_FOUND,
+            "{route} is not mounted"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_when_body_route_refuses_only_a_request_that_carries_a_body() {
+    let Some((app, credentials)) = every_surface().await else {
+        return;
+    };
+    let when_body = routes("whenBody");
+    assert!(
+        !when_body.is_empty(),
+        "the contract lists no whenBody routes"
+    );
+    for route in &when_body {
+        let with_body = gzip_request(route, b"{}", &credentials).send(&app).await;
+        assert_eq!(
+            with_body.status,
+            StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            "{route}"
+        );
+        let empty = gzip_request(route, b"", &credentials).send(&app).await;
+        assert_ne!(empty.status, StatusCode::UNSUPPORTED_MEDIA_TYPE, "{route}");
+    }
+}
+
+#[tokio::test]
+async fn a_method_the_contract_never_checks_is_not_refused() {
+    let Some((app, credentials)) = every_surface().await else {
+        return;
+    };
+    let methods = section()["methodsNeverChecked"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    assert!(!methods.is_empty(), "the contract lists no methods");
+    for method in methods.iter().filter_map(|method| method.as_str()) {
+        let route = format!("{method} me");
+        let response = gzip_request(&route, b"{}", &credentials).send(&app).await;
+        assert_ne!(
+            response.status,
+            StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            "{route}"
+        );
+    }
+}
+
+/// The strict and `whenBody` routes that sit behind authentication, as the adapter answers them
+/// to a caller with no credentials at all.
+const BEHIND_AUTHENTICATION: [&str; 8] = [
+    "POST email/change",
+    "POST invitations",
+    "POST invitations/revoke",
+    "POST mfa/disable",
+    "POST mfa/recovery-codes",
+    "POST mfa/verify-enable",
+    "POST password/change",
+    "POST mfa/setup",
+];
+
+#[tokio::test]
+async fn a_refused_encoding_is_answered_before_authentication() {
+    let Some((app, _credentials)) = every_surface().await else {
+        return;
+    };
+    let strict = routes("strict");
+    let when_body = routes("whenBody");
+    for route in BEHIND_AUTHENTICATION {
+        assert!(
+            strict.contains(route) || when_body.contains(route),
+            "{route} is not a route the contract checks"
+        );
+        let (method, path) = route.split_once(' ').unwrap_or(("POST", route));
+        let request = Req::new(
+            method.parse().unwrap_or(http::Method::POST),
+            &format!("/auth/{path}"),
+        );
+        let response = with_gzip_body(request, b"{}").send(&app).await;
+        assert_eq!(
+            response.status,
+            StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            "{route}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_refused_encoding_spends_no_rate_limit_budget() {
+    let Some(h) = build(EngineSpec::default()) else {
+        return;
+    };
+    let config = bymax_auth_axum::AxumAuthConfig {
+        rate_limits: common::slow_refill_rate_limits(),
+        ..bymax_auth_axum::AxumAuthConfig::new(bymax_auth_axum::ClientIpSource::PeerAddr)
+    };
+    let app = router_with(&h, config);
+    // Many more refused requests than the login allowance of five: none may answer 429.
+    for attempt in 0..12 {
+        let response = Req::post("/auth/login")
+            .raw_body(b"{}".to_vec(), "application/json")
+            .header(http::header::CONTENT_ENCODING, "gzip")
+            .send(&app)
+            .await;
+        assert_eq!(
+            response.status,
+            StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            "attempt {attempt}"
+        );
+    }
+    // The allowance is intact: a readable request is still answered by the handler (a
+    // credential refusal), not by the limiter.
+    let readable = Req::post("/auth/login")
+        .json(serde_json::json!({"email": "nobody@e.com", "password": "glidingwalnut42", "tenantId": "t1"}))
+        .send(&app)
+        .await;
+    assert_ne!(readable.status, StatusCode::TOO_MANY_REQUESTS);
+}
