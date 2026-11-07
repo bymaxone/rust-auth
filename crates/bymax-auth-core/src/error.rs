@@ -250,6 +250,13 @@ pub enum ConfigError {
     /// browsers reject.
     #[error("cookies.same_site = None requires secure_cookies = true")]
     SameSiteNoneRequiresSecure,
+    /// `secure_cookies = false` was set for a production deployment, which is also what an
+    /// unset `environment` resolves to. A session cookie without `Secure` travels over plain
+    /// HTTP, and a TLS-terminating proxy does not change that for the browser's side.
+    #[error(
+        "secure_cookies is false but environment is 'production' (the default when unset). A session cookie without the Secure attribute is sent over plain HTTP. Set secure_cookies = true (a TLS-terminating proxy still serves HTTPS to the browser), or declare the Development or Test environment for local HTTP."
+    )]
+    SecureCookiesRequiredInProduction,
     /// A cookie name carries a `__Secure-` or `__Host-` prefix that the cookie's attributes
     /// cannot satisfy, so a browser would drop every `Set-Cookie` for it.
     #[error(
