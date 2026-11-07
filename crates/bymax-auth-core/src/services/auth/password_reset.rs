@@ -121,8 +121,8 @@ impl AuthEngine {
     /// and the ≥ 300 ms anti-enumeration timing floor is honored on **every** path, so neither
     /// the response nor the latency reveals account existence. A failure **before** the account
     /// is known (the resend-cooldown store, the account lookup) is surfaced as an [`AuthError`];
-    /// one **after** it (storing or sending the proof) is logged and the `Ok(())` stands. The
-    /// cooldown the request took is released on any failure.
+    /// one **after** it (storing or sending the proof) is logged and the `Ok(())` stands. When the
+    /// cooldown is released is recorded in the specification (7.8.4).
     ///
     /// # Errors
     ///

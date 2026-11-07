@@ -155,22 +155,17 @@ type GuardedFuture<T, E> = Pin<Box<dyn Future<Output = Result<T, E>> + Send>>;
 /// Await `future` under `timeout`, swallowing and logging any error, timeout, or success —
 /// the body of a fire-and-forget side-effect. Kept separate from the spawn so its three
 /// outcome arms are directly unit-testable without a detached task.
-///
-/// Answers whether the side-effect succeeded, so a caller that must undo something on any other
-/// outcome (an error or the timeout) can do it.
-pub(crate) async fn run_guarded<T, E>(timeout: Duration, future: GuardedFuture<T, E>) -> bool
+pub(crate) async fn run_guarded<T, E>(timeout: Duration, future: GuardedFuture<T, E>)
 where
     E: fmt::Display,
 {
     match tokio::time::timeout(timeout, future).await {
-        Ok(Ok(_)) => true,
+        Ok(Ok(_)) => {}
         Ok(Err(error)) => {
             tracing::warn!(%error, "detached auth side-effect returned an error (ignored)");
-            false
         }
         Err(_) => {
             tracing::warn!("detached auth side-effect exceeded the timeout ceiling (ignored)");
-            false
         }
     }
 }
@@ -184,24 +179,6 @@ where
     E: fmt::Display + Send + 'static,
 {
     tokio::spawn(run_guarded(DETACHED_TASK_TIMEOUT, Box::pin(future)));
-}
-
-/// [`spawn_guarded`] for a side-effect that leaves something to undo when it does not succeed:
-/// `on_failure` runs after an error, after the timeout ceiling abandoned the side-effect (which
-/// drops it before it can clean up after itself).
-pub(crate) fn spawn_guarded_or_else<F, T, E, C>(future: F, on_failure: C)
-where
-    F: Future<Output = Result<T, E>> + Send + 'static,
-    T: Send + 'static,
-    E: fmt::Display + Send + 'static,
-    C: Future<Output = ()> + Send + 'static,
-{
-    tokio::spawn(async move {
-        let guarded = tokio::spawn(run_guarded(DETACHED_TASK_TIMEOUT, Box::pin(future)));
-        if !guarded.await.unwrap_or(false) {
-            on_failure.await;
-        }
-    });
 }
 
 /// Sleep, if necessary, until at least [`ANTI_ENUM_MIN_MS`] have elapsed since `started`,

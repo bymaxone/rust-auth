@@ -1,11 +1,15 @@
 //! What a reset request does when a step fails: a failure before the account is known answers
 //! `500` after the floor, a failure after it is logged and the `200` stands, and the resend
-//! cooldown the request took is released on any failure. Driven through both entry points,
-//! which share the cooldown key.
+//! cooldown is released only for a failure the request itself observes. Driven through both
+//! entry points, which share the cooldown key.
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+use tokio::sync::Semaphore;
 
 use super::*;
+use crate::services::auth::DETACHED_TASK_TIMEOUT;
 use crate::testing::{InMemoryStores, InMemoryUserRepository};
 use crate::traits::{EmailError, EmailProvider, InviteData, SessionInfo, UserRepository};
 
@@ -21,19 +25,37 @@ enum Entry {
 
 const ENTRIES: [Entry; 2] = [Entry::Initiate, Entry::Resend];
 
-/// An email provider whose reset sends fail, or never return when `hang` is set, to drive the
-/// delivery-failure branches.
+/// An email provider whose reset sends fail, or never return when `hang` is set, or wait for a
+/// permit from `gate` before failing, to drive the delivery-failure branches. `failed` counts the
+/// code sends that have failed, so a test knows a late failure has landed.
 struct DownMailer {
     hang: bool,
+    gate: Option<Arc<Semaphore>>,
+    failed: Arc<AtomicUsize>,
 }
 
 impl DownMailer {
     fn failing() -> Self {
-        Self { hang: false }
+        Self {
+            hang: false,
+            gate: None,
+            failed: Arc::new(AtomicUsize::new(0)),
+        }
     }
 
     fn hanging() -> Self {
-        Self { hang: true }
+        Self {
+            hang: true,
+            ..Self::failing()
+        }
+    }
+
+    /// Every code send waits for a permit of `gate`, then fails.
+    fn gated(gate: Arc<Semaphore>) -> Self {
+        Self {
+            gate: Some(gate),
+            ..Self::failing()
+        }
     }
 }
 
@@ -62,6 +84,12 @@ impl EmailProvider for DownMailer {
         if self.hang {
             std::future::pending::<()>().await;
         }
+        if let Some(gate) = &self.gate
+            && let Ok(permit) = gate.acquire().await
+        {
+            permit.forget();
+        }
+        self.failed.fetch_add(1, Ordering::SeqCst);
         Err(EmailError::Delivery("down".into()))
     }
 
@@ -188,11 +216,12 @@ fn cooldown_held(rig: &Rig, email: &str) -> bool {
         .resend_cooldown_held(OtpPurpose::PasswordReset, &identifier)
 }
 
-/// Wait, bounded, until the cooldown for `email` is released; a detached send releases it after
-/// the response has been returned.
-async fn released_soon(rig: &Rig, email: &str) -> bool {
+/// Wait, bounded, until `count` code sends have failed.
+async fn landed(failed: &AtomicUsize, count: usize) -> bool {
     for _ in 0..100 {
-        if !cooldown_held(rig, email) {
+        if failed.load(Ordering::SeqCst) >= count {
+            // Give the detached task the moment it needs to finish what follows the failure.
+            tokio::time::sleep(Duration::from_millis(100)).await;
             return true;
         }
         tokio::time::sleep(Duration::from_millis(20)).await;
@@ -275,20 +304,58 @@ async fn a_code_that_could_not_be_stored_keeps_the_200_logs_it_and_releases_the_
 }
 
 #[tokio::test]
-async fn a_code_that_could_not_be_sent_keeps_the_200_and_releases_the_cooldown() {
+async fn a_code_that_could_not_be_sent_keeps_the_200_and_the_cooldown() {
     for entry in ENTRIES {
-        let Some(rig) = rig(ResetMethod::Otp, Arc::new(DownMailer::failing()), false).await else {
-            return;
-        };
+        let mailer = DownMailer::failing();
+        let failed = mailer.failed.clone();
+        let Some(rig) = rig(ResetMethod::Otp, Arc::new(mailer), false).await else { return };
 
         let (outcome, took) = request(&rig, entry, REGISTERED).await;
 
         assert!(outcome.is_ok(), "{entry:?}: {outcome:?}");
         assert!(took >= FLOOR, "{entry:?}: {took:?}");
-        // The send runs detached, so its failure releases the cooldown after the response.
+        // The send runs detached and fails after the response; a failure the request did not
+        // observe never touches the cooldown.
+        assert!(landed(&failed, 1).await, "{entry:?}: the send never failed");
         assert!(
-            released_soon(&rig, REGISTERED).await,
-            "{entry:?}: still held"
+            cooldown_held(&rig, REGISTERED),
+            "{entry:?}: a late failure released it"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_late_send_failure_never_deletes_the_cooldown_of_a_later_request() {
+    for entry in ENTRIES {
+        let gate = Arc::new(Semaphore::new(0));
+        let mailer = DownMailer::gated(gate.clone());
+        let failed = mailer.failed.clone();
+        let Some(rig) = rig(ResetMethod::Otp, Arc::new(mailer), false).await else { return };
+
+        // Request A takes the cooldown and its send waits; the window then ends and request B
+        // takes a fresh cooldown; only then do both sends fail.
+        let (first, _) = request(&rig, entry, REGISTERED).await;
+        assert!(first.is_ok(), "{entry:?}: {first:?}");
+        let identifier = rig.engine.hashed_identifier("t1", REGISTERED);
+        assert!(
+            rig.stores
+                .expire_resend_cooldown(OtpPurpose::PasswordReset, &identifier)
+        );
+        let (second, _) = request(&rig, entry, REGISTERED).await;
+        assert!(second.is_ok(), "{entry:?}: {second:?}");
+        assert!(
+            cooldown_held(&rig, REGISTERED),
+            "{entry:?}: B holds the cooldown"
+        );
+
+        gate.add_permits(2);
+        assert!(
+            landed(&failed, 2).await,
+            "{entry:?}: both sends should have failed"
+        );
+        assert!(
+            cooldown_held(&rig, REGISTERED),
+            "{entry:?}: A's late failure deleted B's"
         );
     }
 }
@@ -369,7 +436,7 @@ async fn a_cooldown_that_cannot_be_released_is_logged_and_the_original_error_sta
 }
 
 #[tokio::test]
-async fn a_send_that_never_returns_releases_the_cooldown_when_the_ceiling_abandons_it() {
+async fn a_send_that_never_returns_leaves_the_cooldown_when_the_ceiling_abandons_it() {
     let Some(rig) = rig(ResetMethod::Otp, Arc::new(DownMailer::hanging()), false).await else {
         return;
     };
@@ -379,16 +446,10 @@ async fn a_send_that_never_returns_releases_the_cooldown_when_the_ceiling_abando
     assert!(outcome.is_ok(), "{outcome:?}");
     assert!(took >= FLOOR, "{took:?}");
     assert!(cooldown_held(&rig, REGISTERED), "the send is still running");
-    // The ceiling is DETACHED_TASK_TIMEOUT; the cooldown is released once it abandons the send.
-    let mut released = false;
-    for _ in 0..80 {
-        if !cooldown_held(&rig, REGISTERED) {
-            released = true;
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
-    assert!(released, "still held after the ceiling");
+    // The detached-task ceiling abandons the send after DETACHED_TASK_TIMEOUT; the request has
+    // long returned, so the cooldown is not its to release.
+    tokio::time::sleep(DETACHED_TASK_TIMEOUT + Duration::from_millis(700)).await;
+    assert!(cooldown_held(&rig, REGISTERED), "the ceiling released it");
 }
 
 #[tokio::test]

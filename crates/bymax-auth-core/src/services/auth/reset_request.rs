@@ -8,8 +8,9 @@
 //! every address, so it is surfaced and the caller answers `500` after the floor. A failure AFTER
 //! it is known (issuing or storing the proof, sending it) happens only for a registered address,
 //! so a `5xx` there would answer the enumeration question: it is logged and the uniform `Ok(())`
-//! stands. The cooldown a request took is released on any failure, so the retry a failure invites
-//! is not refused for the rest of the window.
+//! stands. The cooldown a request took is released when the request itself observes the failure
+//! (see the failure rule in the specification, 7.8.4), so the retry that failure invites is not
+//! refused; the failure of the detached code send never releases it.
 
 use bymax_auth_crypto::token::generate_secure_token;
 use bymax_auth_types::{AuthError, AuthUser};
@@ -18,7 +19,7 @@ use super::password_reset::{RESEND_COOLDOWN_SECS, RESET_TOKEN_BYTES, password_fi
 use crate::config::ResetMethod;
 use crate::engine::AuthEngine;
 use crate::services::auth::detached::run_send_reset_otp_email;
-use crate::services::auth::{DETACHED_TASK_TIMEOUT, map_repository_error, spawn_guarded_or_else};
+use crate::services::auth::{DETACHED_TASK_TIMEOUT, map_repository_error, spawn_guarded};
 use crate::traits::{OtpPurpose, ResetContext};
 
 impl AuthEngine {
@@ -98,7 +99,8 @@ impl AuthEngine {
 
     /// Generate, store, and dispatch a reset OTP. The store write is reported to the caller; the
     /// email send is fire-and-forget so its round-trip never perturbs the normalized timing, and
-    /// a send that fails or hangs past the ceiling releases the cooldown from the detached task.
+    /// a failure of it, which the request does not observe, never touches the cooldown: a release
+    /// from a detached task could delete the cooldown of a later request.
     async fn send_reset_otp(
         &self,
         tenant_id: &str,
@@ -111,22 +113,12 @@ impl AuthEngine {
         self.otp()
             .store(OtpPurpose::PasswordReset, identifier, &otp, ttl)
             .await?;
-        let provider = self.email_provider().clone();
-        let store = self.otp().store_handle();
-        let (tenant_id, email, identifier) = (
+        spawn_guarded(run_send_reset_otp_email(
+            self.email_provider().clone(),
             tenant_id.to_owned(),
             email.to_owned(),
-            identifier.to_owned(),
-        );
-        spawn_guarded_or_else(
-            run_send_reset_otp_email(provider, tenant_id, email, otp),
-            async move {
-                // Best effort: a failed release leaves the cooldown to run out.
-                let _ = store
-                    .release_resend(OtpPurpose::PasswordReset, &identifier)
-                    .await;
-            },
-        );
+            otp,
+        ));
         Ok(())
     }
 

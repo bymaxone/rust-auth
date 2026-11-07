@@ -140,12 +140,6 @@ impl OtpService {
     ) -> Result<(), AuthError> {
         self.store.release_resend(purpose, identifier).await
     }
-
-    /// The store the service runs over, for a detached task that has to release a cooldown
-    /// after the response has been returned.
-    pub(crate) fn store_handle(&self) -> Arc<dyn OtpStore> {
-        Arc::clone(&self.store)
-    }
 }
 
 /// Map a random byte to a uniform decimal digit, or `None` for a byte that must be rejected
@@ -377,12 +371,6 @@ mod tests {
         ));
         assert!(
             svc.release_resend(OtpPurpose::PasswordReset, "id")
-                .await
-                .is_ok()
-        );
-        assert!(
-            svc.store_handle()
-                .release_resend(OtpPurpose::PasswordReset, "id")
                 .await
                 .is_ok()
         );
