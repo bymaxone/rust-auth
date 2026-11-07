@@ -249,16 +249,15 @@ pub enum DeliveryErrorPolicy {
     /// failed user request. The default.
     #[default]
     Swallow,
-    /// Log the failure and return it, restoring the error for the two flows that react to one:
-    /// the reset path deletes an undelivered token early instead of leaving it to its TTL, and
-    /// the email-change path lets a failed verification send surface rather than recording
-    /// "sent".
+    /// Log the failure and return it, restoring the error for the three flows that react to one:
+    /// the reset path deletes an undelivered token early instead of leaving it to its TTL, the
+    /// email-change path lets a failed verification send surface rather than recording "sent",
+    /// and the invitation flow reports the failed send (a `500`) while keeping the stored
+    /// invitation.
     ///
-    /// It does NOT turn a channel outage into a failed user operation elsewhere. Every other
-    /// send is already handled by its caller — the MFA and password-changed notices are
-    /// detached through `spawn_guarded`, and the invitation flow catches the error and leaves
-    /// the invitation standing. So the choice is narrower than it looks: `Rethrow` buys the
-    /// cleanup on those two flows, and costs nothing on the rest.
+    /// It does NOT turn a channel outage into a failed user operation elsewhere: the MFA and
+    /// password-changed notices are detached through `spawn_guarded`, so their errors are never
+    /// seen by the request.
     Rethrow,
 }
 
