@@ -3356,6 +3356,141 @@ async fn a_secret_stored_under_a_retired_key_still_opens_and_is_rewritten() {
 }
 
 #[tokio::test]
+async fn a_platform_totp_challenge_rewrites_a_secret_stored_under_a_retired_key() {
+    // The platform plane keeps its secrets under the same key as the dashboard, so a rotation
+    // drains there too: otherwise every platform administrator's secret stays under the retired
+    // key and that key has to stay configured forever.
+    let retired_bytes = [3u8; 32];
+    let retired_b64 = base64::engine::general_purpose::STANDARD.encode(retired_bytes);
+    let Some(h) = build_full(
+        false,
+        true,
+        None,
+        None,
+        vec![SecretString::from(retired_b64)],
+    ) else {
+        return;
+    };
+    let mut old_deps = service_deps(Arc::new(InMemoryStores::new()), h.users.clone());
+    old_deps.encryption_key = zeroize::Zeroizing::new(retired_bytes);
+    let Ok((raw_secret, _codes, data)) = MfaService::new(old_deps).generate_setup_material() else {
+        return;
+    };
+    let stored_under_retired = data.encrypted_secret.clone();
+    h.platform.insert(AuthPlatformUser {
+        id: "p-rot".to_owned(),
+        email: "rotating@example.com".to_owned(),
+        name: "Admin".to_owned(),
+        password_hash: admin_password_hash(),
+        role: "SUPER_ADMIN".to_owned(),
+        status: "ACTIVE".to_owned(),
+        mfa_enabled: true,
+        mfa_secret: Some(stored_under_retired.clone()),
+        mfa_recovery_codes: Some(data.hashed_codes),
+        platform_id: None,
+        last_login_at: None,
+        updated_at: OffsetDateTime::UNIX_EPOCH,
+        created_at: OffsetDateTime::UNIX_EPOCH,
+    });
+    let Some(mfa) = h.engine.mfa() else { return };
+    let Ok(temp) = h
+        .engine
+        .tokens()
+        .issue_mfa_temp_token("p-rot", MfaContext::Platform, None)
+        .await
+    else {
+        return;
+    };
+    let code = raw_code(&raw_secret, now_secs());
+    assert!(matches!(
+        mfa.challenge(&temp, &code, "1.2.3.4", "ua").await,
+        Ok(LoginResultMfa::Platform(_))
+    ));
+
+    // The stored record was rewritten: a service holding ONLY the current key now opens it.
+    let Ok(Some(after)) = h.platform.find_by_id("p-rot").await else {
+        return;
+    };
+    let rewritten = after.mfa_secret.unwrap_or_default();
+    assert_ne!(rewritten, stored_under_retired);
+    let strict = service_over(Arc::new(InMemoryStores::new()), h.users.clone());
+    assert_eq!(
+        strict.decrypt_secret(&rewritten).as_deref(),
+        Some(raw_secret.as_slice())
+    );
+}
+
+#[tokio::test]
+async fn a_platform_recovery_challenge_rewrites_a_secret_stored_under_a_retired_key() {
+    // The recovery-code path splices the spent digest out of the stored set; the write carries
+    // the secret too, and it must carry the one under the current key.
+    let retired_bytes = [3u8; 32];
+    let retired_b64 = base64::engine::general_purpose::STANDARD.encode(retired_bytes);
+    let Some(h) = build_full(
+        false,
+        true,
+        None,
+        None,
+        vec![SecretString::from(retired_b64)],
+    ) else {
+        return;
+    };
+    // The recovery digests are derived from the engine's own keys, so the material comes from the
+    // engine's service; only the secret's ciphertext is produced under the RETIRED key.
+    let Some(mfa) = h.engine.mfa() else { return };
+    let Ok((raw_secret, codes, data)) = mfa.generate_setup_material() else {
+        return;
+    };
+    let mut old_deps = service_deps(Arc::new(InMemoryStores::new()), h.users.clone());
+    old_deps.encryption_key = zeroize::Zeroizing::new(retired_bytes);
+    let Ok(stored_under_retired) = MfaService::new(old_deps).reencrypt_secret(&raw_secret) else {
+        return;
+    };
+    let digests = data.hashed_codes.len();
+    h.platform.insert(AuthPlatformUser {
+        id: "p-rec".to_owned(),
+        email: "recovering@example.com".to_owned(),
+        name: "Admin".to_owned(),
+        password_hash: admin_password_hash(),
+        role: "SUPER_ADMIN".to_owned(),
+        status: "ACTIVE".to_owned(),
+        mfa_enabled: true,
+        mfa_secret: Some(stored_under_retired.clone()),
+        mfa_recovery_codes: Some(data.hashed_codes),
+        platform_id: None,
+        last_login_at: None,
+        updated_at: OffsetDateTime::UNIX_EPOCH,
+        created_at: OffsetDateTime::UNIX_EPOCH,
+    });
+    let Ok(temp) = h
+        .engine
+        .tokens()
+        .issue_mfa_temp_token("p-rec", MfaContext::Platform, None)
+        .await
+    else {
+        return;
+    };
+    let Some(code) = codes.first() else { return };
+    assert!(matches!(
+        mfa.challenge(&temp, code, "1.2.3.4", "ua").await,
+        Ok(LoginResultMfa::Platform(_))
+    ));
+
+    let Ok(Some(after)) = h.platform.find_by_id("p-rec").await else {
+        return;
+    };
+    // The spent code is gone and the secret is under the current key.
+    assert_eq!(after.mfa_recovery_codes.map(|c| c.len()), Some(digests - 1));
+    let rewritten = after.mfa_secret.unwrap_or_default();
+    assert_ne!(rewritten, stored_under_retired);
+    let strict = service_over(Arc::new(InMemoryStores::new()), h.users.clone());
+    assert_eq!(
+        strict.decrypt_secret(&rewritten).as_deref(),
+        Some(raw_secret.as_slice())
+    );
+}
+
+#[tokio::test]
 async fn a_totp_challenge_rewrites_a_secret_stored_under_a_retired_key() {
     // The rewrite has to happen on the TOTP path too, which persists nothing on its own —
     // otherwise the rotation never drains for a user who only ever uses their authenticator,

@@ -193,13 +193,15 @@ impl AuthEngine {
         {
             // Dispatch by configured method. Both paths are best-effort: a store or send
             // failure is logged and dropped so the uniform response is never perturbed.
-            match config.password_reset.method {
-                ResetMethod::Otp => {
-                    let _ = self.send_reset_otp(tenant_id, email).await;
-                }
-                ResetMethod::Token => {
-                    let _ = self.send_reset_token(&user, email, tenant_id).await;
-                }
+            let issued = match config.password_reset.method {
+                ResetMethod::Otp => self.send_reset_otp(tenant_id, email).await,
+                ResetMethod::Token => self.send_reset_token(&user, email, tenant_id).await,
+            };
+            if let Err(error) = issued {
+                // No account, address or tenant in the line: it must read the same whichever
+                // account the failure belonged to.
+                let cause = crate::services::error_chain(&error);
+                tracing::warn!(%cause, "password reset: the proof could not be issued");
             }
         }
         Ok(())
@@ -1432,6 +1434,41 @@ mod tests {
             ht.engine.reset_password(otp_to_token, &ctx()).await,
             Err(AuthError::PasswordResetTokenInvalid)
         ));
+    }
+
+    #[tokio::test]
+    async fn a_reset_code_that_could_not_be_stored_is_logged_without_naming_the_account() {
+        // The caller still gets the uniform success, so the failure is invisible to it; the log
+        // line is the only place an operator can learn that no code is being stored. It carries
+        // the cause and nothing that identifies the account, so it reads the same whichever
+        // account it belonged to.
+        let Some(h) = otp_harness() else { return };
+        let _ = h.seed(SeedUser::active("logged@example.com", "pw")).await;
+        h.stores.fail_next_otp_puts(1);
+
+        let (events, guard) = crate::log_capture::capture_events();
+        let outcome = h
+            .engine
+            .initiate_reset(forgot("logged@example.com"), &ctx())
+            .await;
+        drop(guard);
+
+        assert!(outcome.is_ok(), "the response stays uniform: {outcome:?}");
+        let reported: Vec<_> = events
+            .iter()
+            .into_iter()
+            .filter(|event| event.rendered.contains("the proof could not be issued"))
+            .collect();
+        assert_eq!(reported.len(), 1, "{reported:?}");
+        let line = &reported[0].rendered;
+        assert!(
+            line.contains("cause=internal error: otp store unavailable"),
+            "{line}"
+        );
+        assert!(
+            !events.contains("logged@example.com"),
+            "the address was logged: {line}"
+        );
     }
 
     #[tokio::test]

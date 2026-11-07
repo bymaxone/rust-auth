@@ -554,6 +554,8 @@ pub struct InMemoryStores {
     /// half-done, and the caller has to hear about it. A store that always succeeds leaves that
     /// propagation unasserted.
     forced_epoch_bump_failures: Mutex<usize>,
+    /// Armed count of OTP `put` calls that must fail with a backend error.
+    forced_otp_put_failures: Mutex<usize>,
     /// `ep:`/`pep:` per-account token epoch (generation counter), keyed by
     /// `(kind, subject_hash)`. A bump invalidates every access token stamped below the new
     /// value. Absent reads as `0`.
@@ -631,6 +633,13 @@ impl InMemoryStores {
     /// affected call; the default of zero leaves every call behaving normally.
     pub fn fail_next_cleanup_writes(&self, count: usize) {
         *lock(&self.forced_write_failures) = count;
+    }
+
+    /// Make the next `count` OTP `put` calls fail with a backend error, the write that stores a
+    /// password-reset or verification code. The flows that deliberately drop that failure to keep
+    /// their response uniform are unreachable against a store that always succeeds.
+    pub fn fail_next_otp_puts(&self, count: usize) {
+        *lock(&self.forced_otp_put_failures) = count;
     }
 
     /// Make the next `count` `find_session` calls fail with a backend error: the read a logout
@@ -1115,6 +1124,13 @@ impl OtpStore for InMemoryStores {
         code: &str,
         _ttl_secs: u64,
     ) -> Result<(), AuthError> {
+        {
+            let mut remaining = lock(&self.forced_otp_put_failures);
+            if *remaining > 0 {
+                *remaining -= 1;
+                return Err(AuthError::Internal("otp store unavailable".into()));
+            }
+        }
         lock(&self.otps).insert((purpose, identifier.to_owned()), (code.to_owned(), 0));
         Ok(())
     }

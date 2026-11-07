@@ -318,7 +318,9 @@ impl MfaService {
         let Some(encrypted_secret) = admin.mfa_secret.clone().filter(|_| admin.mfa_enabled) else {
             return Err(AuthError::MfaNotEnabled);
         };
-        let Some(raw_secret) = self.decrypt_secret(&encrypted_secret) else {
+        let Some((raw_secret, under_retired_key)) =
+            self.decrypt_secret_with_rotation(&encrypted_secret)
+        else {
             return Err(AuthError::TokenInvalid);
         };
 
@@ -371,6 +373,13 @@ impl MfaService {
         // Success: clear the failure counter and, for a recovery code, splice it out so it is
         // single-use, persisting the smaller set through the PLATFORM repository.
         self.brute_force.reset(&bf_id).await?;
+        // A secret that opened under a retired key is rewritten under the current one, as on the
+        // dashboard plane, so the rotation drains and the retired key can be dropped.
+        let stored_secret = if under_retired_key {
+            self.reencrypt_secret(&raw_secret)?
+        } else {
+            encrypted_secret.clone()
+        };
         if let Some(index) = recovery_index {
             // The platform twin of the dashboard splice, serialized and re-located by value
             // against the record inside the lock for exactly the same reasons.
@@ -384,7 +393,22 @@ impl MfaService {
                     .as_ref()
                     .and_then(|d| codes.iter().position(|c| c == d))?;
                 codes.remove(live);
-                Some((true, Some(encrypted_secret), Some(codes)))
+                Some((true, Some(stored_secret), Some(codes)))
+            })
+            .await?;
+        } else if under_retired_key {
+            // A TOTP challenge persists nothing on its own, so the rewrite needs its own write,
+            // serialized like every other transition and carrying the code list from the record
+            // inside the lock so it cannot roll back a concurrent regenerate.
+            self.transition_mfa_record(&admin.id, MfaContext::Platform, None, |current| {
+                if !current.mfa_enabled {
+                    return None;
+                }
+                Some((
+                    true,
+                    Some(stored_secret),
+                    current.mfa_recovery_codes.clone(),
+                ))
             })
             .await?;
         }
