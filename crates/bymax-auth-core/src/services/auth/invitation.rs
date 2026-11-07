@@ -68,7 +68,9 @@ impl AuthEngine {
     /// does not hold a role at least as high, [`AuthError::TokenInvalid`] when the inviter no
     /// longer exists or does not live in the tenant being invited into (the read is scoped to
     /// it), [`AuthError::InsufficientRole`] again when a repository that ignored the scope
-    /// handed back a row from another tenant, or a store [`AuthError`].
+    /// handed back a row from another tenant, a store [`AuthError`], or [`AuthError::Internal`]
+    /// with a fixed description when the invitation email could not be sent; the invitation stays
+    /// stored and inviting the address again supersedes it.
     pub async fn invite(
         &self,
         inviter_user_id: &str,
@@ -163,13 +165,20 @@ impl AuthEngine {
             invite_token: raw,
             expires_at,
         };
-        // Best-effort delivery: a send failure does not roll back the persisted invitation.
-        if let Err(error) = self
+        // A send failure is reported, and the stored invitation stays: the email may have been
+        // delivered despite the error, and a retry supersedes the record. Nothing the channel
+        // wrote is kept, in the error or the log: a relay can quote the body it rejected, and
+        // that body carries the raw invitation token.
+        if self
             .email_provider()
             .send_invitation(tenant_id, &email, &invite_data, None)
             .await
+            .is_err()
         {
-            tracing::error!(%error, "invitation: delivery failed (the invitation stands)");
+            tracing::error!("invitation: delivery failed (the invitation stands)");
+            return Err(crate::services::internal_error(
+                "invitation delivery failed",
+            ));
         }
         let tenant = log_safe(tenant_id);
         tracing::info!(tenant_id = %tenant, role = %invitation.role, "invitation: created");
@@ -475,6 +484,7 @@ pub(super) fn has_role(
 #[cfg(test)]
 mod tests {
     use super::*;
+    mod send_failure_tests;
     mod structural_guard_tests;
     mod supersede_tests;
     use crate::config::{AuthConfig, Environment};
@@ -1069,8 +1079,8 @@ mod tests {
         assert!(dbg.contains("Ada"));
     }
 
-    /// An email provider whose invitation send always fails, so the best-effort delivery path
-    /// is observable. Every other method succeeds — only the send under test errors.
+    /// An email provider whose invitation send always fails, so the send-failure path is
+    /// observable. Every other method succeeds — only the send under test errors.
     #[tokio::test]
     async fn the_failing_invite_double_answers_the_address_change_send() {
         // The double exists to fail ONE send. Everything else about it succeeding is the
@@ -1166,11 +1176,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn an_undeliverable_invitation_still_stands() {
-        // Delivery is best-effort by design: the invitation is already persisted, and rolling
-        // it back on a transient SMTP failure would destroy a token the inviter can still
-        // resend. So the failure cannot surface to the caller — which makes the log the only
-        // signal that invitations are being created and never arriving.
+    async fn an_undeliverable_invitation_is_reported_and_still_stands() {
+        // The invitation is already persisted, and rolling it back on a transient SMTP failure
+        // would destroy a token the invitee may already hold if the relay delivered despite the
+        // error. So the record stays, and the failure is reported to the caller, who can invite
+        // the address again to supersede it. The content of the report and of the log is pinned
+        // in `send_failure_tests`.
         let Some(s) = setup(invite_config()) else { return };
         let users = Arc::new(InMemoryUserRepository::new());
         let stores = Arc::new(InMemoryStores::new());
@@ -1185,11 +1196,20 @@ mod tests {
         let admin = seed_admin(&users, "sender@example.com", "ADMIN").await;
         drop(s);
 
+        let outcome = engine
+            .invite(&admin, "unreachable@example.com", "MEMBER", "t1", None)
+            .await;
         assert!(
-            engine
-                .invite(&admin, "unreachable@example.com", "MEMBER", "t1", None)
+            matches!(outcome, Err(AuthError::Internal(_))),
+            "{outcome:?}"
+        );
+        let pending = engine.invitee_identifier("unreachable@example.com");
+        assert!(
+            stores
+                .read_invitation_index("t1", &pending)
                 .await
-                .is_ok()
+                .is_ok_and(|named| named.is_some()),
+            "the invitation must stay stored"
         );
 
         // Exercise every method of the double so its object-safe surface is fully covered: the

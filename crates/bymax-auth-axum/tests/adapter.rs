@@ -57,6 +57,9 @@ mod password_reset_request_body;
 #[path = "adapter/platform_guard_outage.rs"]
 mod platform_guard_outage;
 
+#[path = "adapter/invitation_send_failure.rs"]
+mod invitation_send_failure;
+
 #[path = "adapter/refresh_body_shape.rs"]
 mod refresh_body_shape;
 
