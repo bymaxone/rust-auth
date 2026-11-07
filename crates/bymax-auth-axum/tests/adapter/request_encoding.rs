@@ -242,3 +242,43 @@ async fn a_refused_encoding_spends_no_rate_limit_budget() {
         .await;
     assert_ne!(readable.status, StatusCode::TOO_MANY_REQUESTS);
 }
+
+#[tokio::test]
+async fn a_refused_encoding_is_answered_whatever_the_declared_length() {
+    let Some(h) = build(EngineSpec::default()) else {
+        return;
+    };
+    let config = bymax_auth_axum::AxumAuthConfig {
+        max_body_bytes: 1024,
+        ..bymax_auth_axum::AxumAuthConfig::new(bymax_auth_axum::ClientIpSource::PeerAddr)
+    };
+    let app = router_with(&h, config);
+    // A declared length far over the limit: the encoding is still what the request is refused for.
+    let request = Req::post("/auth/login")
+        .raw_body(b"{}".to_vec(), "application/json")
+        .header(http::header::CONTENT_LENGTH, "4096")
+        .header(http::header::CONTENT_ENCODING, "gzip");
+    let response = request.send(&app).await;
+    assert_eq!(response.status, StatusCode::UNSUPPORTED_MEDIA_TYPE);
+}
+
+#[tokio::test]
+async fn the_policy_follows_a_custom_route_prefix() {
+    let Some(h) = build(EngineSpec::default()) else {
+        return;
+    };
+    let config = bymax_auth_axum::AxumAuthConfig {
+        route_prefix: "/api/v1/auth/".to_owned(),
+        ..bymax_auth_axum::AxumAuthConfig::new(bymax_auth_axum::ClientIpSource::PeerAddr)
+    };
+    let app = router_with(&h, config);
+    let checked = Req::post("/api/v1/auth/login");
+    let refused = with_gzip_body(checked, b"{}").send(&app).await;
+    assert_eq!(refused.status, StatusCode::UNSUPPORTED_MEDIA_TYPE);
+    // An unchecked route stays unchecked under the same prefix.
+    let exempt = with_gzip_body(Req::post("/api/v1/auth/logout"), b"{}")
+        .send(&app)
+        .await;
+    assert_ne!(exempt.status, StatusCode::UNSUPPORTED_MEDIA_TYPE);
+    assert_ne!(exempt.status, StatusCode::NOT_FOUND);
+}

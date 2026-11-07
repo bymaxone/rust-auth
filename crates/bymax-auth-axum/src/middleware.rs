@@ -68,18 +68,19 @@ pub(crate) fn apply_middleware(
             client_ip,
             crate::client_ip::resolve_client_ip,
         ))
-        // A request declaring an encoding the adapter does not decode is refused here, outside
-        // every route layer: it reaches neither authentication nor a rate limiter.
-        .layer(axum::middleware::from_fn_with_state(
-            encoding,
-            crate::encoding_policy::refuse_undecoded_body,
-        ))
         .layer(CookieManagerLayer::new())
         .layer(RequestBodyLimitLayer::new(max_body_bytes))
         // The limit layer refuses a declared length over the limit with a plain-text `413`,
         // before any extractor runs: give it the library's envelope like every other refusal.
         .layer(axum::middleware::map_response(
             crate::transport::envelope_for_layer_payload_too_large,
+        ))
+        // A request declaring an encoding the adapter does not decode is refused outside every
+        // route layer and outside the body limit: it reaches neither authentication nor a rate
+        // limiter, and its declared length does not change the answer.
+        .layer(axum::middleware::from_fn_with_state(
+            encoding,
+            crate::encoding_policy::refuse_undecoded_body,
         ))
         .layer(sensitive)
         .layer(sensitive_out)
