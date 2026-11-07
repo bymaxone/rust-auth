@@ -32,6 +32,10 @@ pub trait AdminRole {
 /// and an admin of one tenant is no admin of another. Rejects with `insufficient_role` (403)
 /// when neither holds, when a named tenant differs, and when the id is missing, empty or not one
 /// segment (a route misuse).
+///
+/// Only those three names are read as a tenant. A route that names the tenant any other way
+/// (`{org}`, `{tenant-id}`) is not bound by this guard and the handler has to bind it, and a
+/// capture name reused at two nesting levels is seen once, with the innermost value.
 #[derive(Debug, Clone)]
 pub struct SelfOrAdmin<A: AdminRole>(pub DashboardClaims, pub PhantomData<A>);
 
