@@ -436,6 +436,14 @@ impl AuthConfig {
             return Err(ConfigError::SameSiteNoneRequiresSecure);
         }
 
+        // Rule 19a: a production deployment may not turn `Secure` off. It runs after rule 19, so
+        // a deployment that breaks both is told about the one that explains why a browser would
+        // drop the cookie. The explicit `false` is the only way to get here: unset resolves to
+        // `true` in production.
+        if environment == Environment::Production && self.secure_cookies == Some(false) {
+            return Err(ConfigError::SecureCookiesRequiredInProduction);
+        }
+
         // Rule 19b: the trusted-origin allow-list and the SameSite posture must agree. The
         // list only ever matters under `None` — the one posture where the browser sends the
         // session cookie on a cross-site request — so either half without the other is a
@@ -1469,6 +1477,47 @@ mod tests {
         // SameSite=None is fine once cookies are secure and an origin is named.
         cfg.secure_cookies = Some(true);
         assert!(cfg.validate(Environment::Production).is_ok());
+    }
+
+    #[test]
+    fn production_refuses_secure_cookies_switched_off() {
+        let mut cfg = valid_config();
+        cfg.secure_cookies = Some(false);
+        assert!(matches!(
+            cfg.validate(Environment::Production),
+            Err(ConfigError::SecureCookiesRequiredInProduction)
+        ));
+        // The two ways to run on plain HTTP are the declared non-production environments.
+        for environment in [Environment::Development, Environment::Test] {
+            assert_eq!(cfg.validate(environment).ok(), Some(false));
+        }
+        // Both an unset value and `true` resolve to secure cookies in production.
+        cfg.secure_cookies = None;
+        assert_eq!(cfg.validate(Environment::Production).ok(), Some(true));
+        cfg.secure_cookies = Some(true);
+        assert_eq!(cfg.validate(Environment::Production).ok(), Some(true));
+    }
+
+    #[test]
+    fn samesite_none_without_secure_is_reported_before_the_production_rule() {
+        let mut cfg = valid_config();
+        cfg.cookies.same_site = SameSite::None;
+        cfg.cookies.trusted_origins = vec!["https://app.example.com".to_owned()];
+        cfg.secure_cookies = Some(false);
+        assert!(matches!(
+            cfg.validate(Environment::Production),
+            Err(ConfigError::SameSiteNoneRequiresSecure)
+        ));
+    }
+
+    #[test]
+    fn the_production_message_opens_with_the_sentence_nest_auth_holds() {
+        // The first sentence is held byte-identical across the libraries, with the field
+        // name in each library's spelling; only the remedy is localized.
+        let text = ConfigError::SecureCookiesRequiredInProduction.to_string();
+        assert!(text.starts_with(
+            "secure_cookies is false but environment is 'production' (the default when unset)."
+        ));
     }
 
     #[cfg(feature = "argon2")]

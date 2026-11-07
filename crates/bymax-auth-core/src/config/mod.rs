@@ -634,6 +634,11 @@ pub struct AuthConfig {
     /// Token-delivery mode.
     pub token_delivery: TokenDelivery,
     /// Explicit secure-cookie override; `None` resolves from [`Environment`] at `build()`.
+    ///
+    /// `Some(false)` is refused unless the environment is `Development` or `Test`
+    /// ([`crate::ConfigError::SecureCookiesRequiredInProduction`]): a session cookie without `Secure`
+    /// travels over plain HTTP, and a TLS-terminating proxy does not change that for the
+    /// browser's side of the connection.
     pub secure_cookies: Option<bool>,
     /// Cookie names, paths, and policy.
     pub cookies: CookieConfig,
