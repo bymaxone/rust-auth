@@ -293,7 +293,7 @@ pub enum DeliveryErrorPolicy {
 /// recipient never got, and an invitation stays stored while its inviter is not told the link
 /// was not sent. A deployment that wants the error back on those flows builds the provider with
 /// [`DeliveryErrorPolicy::Rethrow`], whose documentation lists them. That does not make an
-/// outage fail anything else: every other send is detached, so the request never sees its error.
+/// outage fail anything else: every other send is detached or caught by its caller, so the request never sees its error.
 pub struct DefaultAuthEmailProvider {
     /// The channel every message goes out through.
     sink: Arc<dyn AuthEmailSink>,
