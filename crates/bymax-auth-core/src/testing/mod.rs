@@ -28,8 +28,8 @@ use time::OffsetDateTime;
 use crate::RepositoryError;
 use crate::traits::{
     BruteForceStore, EmailChangeContext, HttpClient, HttpError, HttpRequest, HttpResponse,
-    InvitationStore, OAuthProfile, OAuthProvider, OAuthProviderError, OAuthTokens, OtpPurpose,
-    OtpStore, PasswordResetStore, PlatformUserRepository, ResetContext, RotateOutcome,
+    InvitationStore, LogoutOwner, OAuthProfile, OAuthProvider, OAuthProviderError, OAuthTokens,
+    OtpPurpose, OtpStore, PasswordResetStore, PlatformUserRepository, ResetContext, RotateOutcome,
     SessionDetail, SessionKind, SessionRecord, SessionRotation, SessionStore, StoredInvitation,
     UserRepository, WsTicketSnapshot, WsTicketStore,
 };
@@ -540,6 +540,11 @@ pub struct InMemoryStores {
     /// owns — the real store finds them as members of that account's `sess:` set, which is the
     /// same question asked a different way.
     grace: Mutex<HashMap<(SessionKind, String), GracePointer>>,
+    /// `lp:`/`plp:` — the owner a failed logout attempt recorded under the refresh token's hash,
+    /// with the TTL it was written with so a test can read the rule back.
+    logout_pending: Mutex<HashMap<(SessionKind, String), (LogoutOwner, u64)>>,
+    /// Logout-pending operations to let through, then to fail, in that order.
+    logout_pending_failures: Mutex<(usize, usize)>,
     /// `cf:` consumed-token markers: an already-rotated token's hash → the family it belonged
     /// to. Outlives the grace pointer (which the real store keys with the shorter grace TTL),
     /// so a post-grace replay of the consumed token is detected as a reuse rather than a plain
@@ -766,6 +771,43 @@ impl InMemoryStores {
         }
         *remaining -= 1;
         Err(AuthError::Internal("session store unavailable".into()))
+    }
+
+    /// Let the next `skip` logout-pending operations (a write, a read or a claim, in the order the
+    /// flow issues them) through, then fail `count` of them with a backend error.
+    ///
+    /// `skip` is what lets a test reach one particular operation of a logout: a retry reads the
+    /// marker first and claims it last.
+    pub fn fail_logout_pending_ops(&self, skip: usize, count: usize) {
+        *lock(&self.logout_pending_failures) = (skip, count);
+    }
+
+    /// Consume one armed logout-pending failure, if this operation is the one to fail.
+    fn take_logout_pending_failure(&self) -> Result<(), AuthError> {
+        let mut armed = lock(&self.logout_pending_failures);
+        if armed.0 > 0 {
+            armed.0 -= 1;
+            return Ok(());
+        }
+        if armed.1 == 0 {
+            return Ok(());
+        }
+        armed.1 -= 1;
+        Err(AuthError::Internal(
+            "logout pending store unavailable".into(),
+        ))
+    }
+
+    /// The owner and TTL a failed logout recorded under `session_hash`, without removing it.
+    #[must_use]
+    pub fn peek_logout_pending(
+        &self,
+        kind: SessionKind,
+        session_hash: &str,
+    ) -> Option<(LogoutOwner, u64)> {
+        lock(&self.logout_pending)
+            .get(&(kind, session_hash.to_owned()))
+            .cloned()
     }
 
     /// The TTL the last created session was stored with, in seconds. A test-only inspection
@@ -1018,6 +1060,41 @@ impl SessionStore for InMemoryStores {
         }
         lock(&self.sessions).remove(&(kind, session_hash.to_owned()));
         Ok(())
+    }
+
+    async fn put_logout_pending(
+        &self,
+        kind: SessionKind,
+        session_hash: &str,
+        owner: &LogoutOwner,
+        ttl_secs: u64,
+    ) -> Result<(), AuthError> {
+        self.take_logout_pending_failure()?;
+        lock(&self.logout_pending)
+            .insert((kind, session_hash.to_owned()), (owner.clone(), ttl_secs));
+        Ok(())
+    }
+
+    async fn read_logout_pending(
+        &self,
+        kind: SessionKind,
+        session_hash: &str,
+    ) -> Result<Option<LogoutOwner>, AuthError> {
+        self.take_logout_pending_failure()?;
+        Ok(lock(&self.logout_pending)
+            .get(&(kind, session_hash.to_owned()))
+            .map(|(owner, _)| owner.clone()))
+    }
+
+    async fn claim_logout_pending(
+        &self,
+        kind: SessionKind,
+        session_hash: &str,
+    ) -> Result<bool, AuthError> {
+        self.take_logout_pending_failure()?;
+        Ok(lock(&self.logout_pending)
+            .remove(&(kind, session_hash.to_owned()))
+            .is_some())
     }
 
     async fn delete_grace_pointer(

@@ -24,6 +24,7 @@
 /// checks, WebSocket ticket mint/redeem). Each method delegates to an existing service.
 mod account_status;
 mod adapter_api;
+mod logout_pending;
 
 pub use adapter_api::{IssuedWsTicket, WS_TICKET_TTL_SECONDS};
 pub use verifier::{AuthPlane, VerifiedAccessToken, VerifyAccessOptions};

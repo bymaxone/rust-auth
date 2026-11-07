@@ -61,6 +61,23 @@ impl OtpPurpose {
     }
 }
 
+/// Whom a logout belonged to, as the failure path of a logout records it for the retry that
+/// completes it.
+///
+/// A hint, never a credential and never a session: it authenticates nothing, and the owner it
+/// names was read from the library's own session record, not from a token's claims. `tenant_id`
+/// is omitted from the stored form when the session record carried none, and is always absent on
+/// the platform plane. JSON is camelCase for byte-parity with nest-auth.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LogoutOwner {
+    /// The account whose session the logout was ending.
+    pub user_id: String,
+    /// The account's tenant, when its session record carried one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tenant_id: Option<String>,
+}
+
 /// The stored refresh-session record. Holds everything needed to reissue an access token
 /// without a database hit. `tenant_id` is absent for platform sessions. JSON is camelCase
 /// for byte-parity with nest-auth payloads already in Redis.
@@ -509,6 +526,51 @@ pub trait SessionStore: Send + Sync {
         subject_hash: &str,
         session_hash: &str,
     ) -> Result<(), AuthError>;
+
+    /// Record whom a failed logout attempt was ending, under the refresh token's hash
+    /// (`lp:`/`plp:`), for `ttl_secs`.
+    ///
+    /// A logout attempt that fails a revocation write still deletes the refresh session, so the
+    /// retry that completes the logout would find no record to say whose it was. This marker is
+    /// that record. Best effort: the caller logs a failure and raises the logout's own.
+    ///
+    /// The default stores nothing, which is the safe reading for a store that keeps no such
+    /// marker: a retry then names no owner and announces nothing.
+    async fn put_logout_pending(
+        &self,
+        _kind: SessionKind,
+        _session_hash: &str,
+        _owner: &LogoutOwner,
+        _ttl_secs: u64,
+    ) -> Result<(), AuthError> {
+        Ok(())
+    }
+
+    /// Read the owner a failed logout attempt recorded for this refresh-token hash, or `None`
+    /// when there is none (or it is unreadable). A single read: it does not remove the marker.
+    ///
+    /// The default answers `None`, matching the default of
+    /// [`SessionStore::put_logout_pending`].
+    async fn read_logout_pending(
+        &self,
+        _kind: SessionKind,
+        _session_hash: &str,
+    ) -> Result<Option<LogoutOwner>, AuthError> {
+        Ok(None)
+    }
+
+    /// Remove the marker for this refresh-token hash and report whether THIS call removed it.
+    ///
+    /// The atomic delete is the claim: of several retries racing to complete one logout, exactly
+    /// one gets `true`, and only that one announces it. Idempotent, and `false` when no marker
+    /// exists. The default has nothing to remove.
+    async fn claim_logout_pending(
+        &self,
+        _kind: SessionKind,
+        _session_hash: &str,
+    ) -> Result<bool, AuthError> {
+        Ok(false)
+    }
 
     /// Delete the rotation grace pointer for a refresh-token hash (`rp:`/`prp:`), if any, so a
     /// just-rotated token cannot still recover a session through the grace window after the

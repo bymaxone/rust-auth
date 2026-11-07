@@ -32,11 +32,15 @@ use bymax_auth_types::{
 use crate::normalize::{mask_email, normalize_email};
 use crate::services::auth::{normalize_anti_enum, spawn_guarded};
 use crate::services::brute_force::BruteForceService;
+use crate::services::logout_pending::{
+    marker_ttl_secs, remember_failed_attempt, resolve_owner, settle_completed,
+};
 use crate::services::password::PasswordService;
 use crate::services::token_manager::TokenManagerService;
 use crate::services::{is_refresh_token_shape, note_logout_failure, now_unix, to_hex};
 use crate::traits::{
-    AuthHooks, HookContext, HookPlane, PlatformUserRepository, SessionKind, SessionStore,
+    AuthHooks, HookContext, HookPlane, LogoutOwner, PlatformUserRepository, SessionKind,
+    SessionStore,
 };
 
 use std::sync::Arc;
@@ -302,66 +306,86 @@ impl PlatformAuthService {
         // `PlatformUser` extractor — which is why the route refused an EXPIRED access token,
         // so an operator who stepped away for longer than the access lifetime could not sign
         // out at all and the refresh session of the highest-privilege identity in the system
-        // stayed live on a console they believed they had left. The dashboard plane was fixed
-        // for exactly this; the platform plane kept the old shape.
-        let admin_id = if is_refresh_token_shape(raw_refresh) {
-            let hash = RawRefreshToken::from_raw(raw_refresh.to_owned()).redis_hash();
-            // A lookup that fails ends the logout before any write: the owner is unknown, so
-            // the writes that follow could not be aimed.
-            let found = self
-                .session_store
-                .find_session(SessionKind::Platform, &hash)
-                .await
-                .map_err(|error| {
-                    tracing::warn!(%error, "logout: session lookup failed");
-                    crate::services::internal_error("a logout could not read its session")
-                })?;
-            found.map(|record| record.user_id).unwrap_or_default()
-        } else {
-            String::new()
-        };
+        // stayed live on a console they believed they had left.
+        let session_hash = is_refresh_token_shape(raw_refresh)
+            .then(|| RawRefreshToken::from_raw(raw_refresh.to_owned()).redis_hash());
+        let live = self.logout_live_owner(session_hash.as_deref()).await?;
+        let store = self.session_store.as_ref();
+        let hash = session_hash.as_deref();
+        let resolved = resolve_owner(store, SessionKind::Platform, hash, live).await?;
+        let admin_id = resolved.owner.as_ref().map_or("", |o| o.user_id.as_str());
         let mut failure = None;
-        let admin_id = admin_id.as_str();
 
-        // Blacklist only a token that actually verifies as a PLATFORM token: a forged token
-        // needs no revocation, and a dashboard token can never verify here (the platform
-        // discriminator rejects it), so a dashboard `jti` can never pollute the platform-session
-        // logout path. The expiry is waived — an expired token is the normal case at logout —
-        // but the signature is not: the `jti` decides which token gets blacklisted, so reading
-        // it unverified would let a caller revoke one they do not own by naming its id.
+        self.blacklist_logout_access_token(access_token, &mut failure)
+            .await;
+        if is_refresh_token_shape(raw_refresh) {
+            self.revoke_logout_session(raw_refresh, admin_id, &mut failure)
+                .await;
+        }
+        if let Some(error) = failure {
+            let ttl = marker_ttl_secs(self.tokens.access_ttl());
+            remember_failed_attempt(store, SessionKind::Platform, hash, &resolved, ttl).await;
+            return Err(error);
+        }
+        // No owner means no live session matched and no failed attempt left a marker: already
+        // signed out, or expired. There is no identity to hand the hook, and logout stays a
+        // success either way: it is idempotent, and answering an error would tell a caller
+        // whether a token was live.
+        let announce = settle_completed(store, SessionKind::Platform, hash, &resolved).await?;
+        if let (true, Some(owner)) = (announce, &resolved.owner) {
+            let hook_ctx = identity_only_context(&owner.user_id);
+            spawn_guarded(run_after_platform_logout(
+                self.hooks.clone(),
+                owner.user_id.clone(),
+                hook_ctx,
+            ));
+        }
+        Ok(admin_id.to_owned())
+    }
+
+    /// The admin the live platform refresh session names, or `None` when the session is gone.
+    ///
+    /// A lookup that fails ends the logout before any write: the owner is unknown, so the
+    /// writes that follow could not be aimed.
+    async fn logout_live_owner(
+        &self,
+        session_hash: Option<&str>,
+    ) -> Result<Option<LogoutOwner>, AuthError> {
+        let Some(hash) = session_hash else {
+            return Ok(None);
+        };
+        let found = self
+            .session_store
+            .find_session(SessionKind::Platform, hash)
+            .await
+            .map_err(|error| {
+                tracing::warn!(%error, "logout: session lookup failed");
+                crate::services::internal_error("a logout could not read its session")
+            })?;
+        Ok(found.map(|record| LogoutOwner {
+            user_id: record.user_id,
+            tenant_id: None,
+        }))
+    }
+
+    /// Blacklist the access token's `jti` for its remaining lifetime, only when it verifies as a
+    /// PLATFORM token: a forged token needs no revocation, and a dashboard token can never verify
+    /// here (the platform discriminator rejects it), so a dashboard `jti` can never pollute the
+    /// platform-session logout path. Expiry is waived and the signature is not, since the `jti`
+    /// decides which token gets blacklisted.
+    async fn blacklist_logout_access_token(
+        &self,
+        access_token: &str,
+        failure: &mut Option<AuthError>,
+    ) {
         if let Ok(claims) = self
             .tokens
             .verify_platform_access_ignoring_expiry(access_token)
         {
             let ttl = u64::try_from(claims.exp.saturating_sub(now_unix())).unwrap_or(0);
             let revoked = self.tokens.revoke_access(&claims.jti, ttl).await;
-            note_logout_failure(
-                &mut failure,
-                "logout: access token revocation failed",
-                revoked,
-            );
+            note_logout_failure(failure, "logout: access token revocation failed", revoked);
         }
-
-        if is_refresh_token_shape(raw_refresh) {
-            self.revoke_logout_session(raw_refresh, admin_id, &mut failure)
-                .await;
-        }
-        if let Some(error) = failure {
-            return Err(error);
-        }
-
-        // No live session matched the presented token — already signed out, or expired. There
-        // is no identity to hand the hook, and logout stays a success either way: it is
-        // idempotent, and answering an error would tell a caller whether a token was live.
-        if !admin_id.is_empty() {
-            let hook_ctx = identity_only_context(admin_id);
-            spawn_guarded(run_after_platform_logout(
-                self.hooks.clone(),
-                admin_id.to_owned(),
-                hook_ctx,
-            ));
-        }
-        Ok(admin_id.to_owned())
     }
 
     /// Delete BOTH the primary and the grace refresh keys for the presented token, against the
@@ -572,6 +596,7 @@ mod tests {
     use super::*;
     mod enrolment_rotation_tests;
     mod logout_failure_tests;
+    mod logout_pending_tests;
     use crate::config::{AuthConfig, Environment};
     use crate::context::RequestContext;
     use crate::engine::AuthEngine;
@@ -633,16 +658,26 @@ mod tests {
     /// Build a platform harness from `cfg`. Returns `None` if assembly somehow fails, so callers
     /// stay panic-free with `let-else`.
     fn harness(cfg: AuthConfig) -> Option<PlatformHarness> {
+        harness_with_hooks(cfg, None)
+    }
+
+    /// The same harness, with `hooks` registered when given.
+    fn harness_with_hooks(
+        cfg: AuthConfig,
+        hooks: Option<Arc<dyn AuthHooks>>,
+    ) -> Option<PlatformHarness> {
         let admins = Arc::new(InMemoryPlatformUserRepository::new());
         let stores = Arc::new(InMemoryStores::new());
-        let engine = AuthEngine::builder()
+        let mut builder = AuthEngine::builder()
             .config(cfg)
             .environment(Environment::Test)
             .user_repository(Arc::new(crate::testing::InMemoryUserRepository::new()))
             .platform_user_repository(admins.clone())
-            .redis_stores(stores.clone())
-            .build()
-            .ok()?;
+            .redis_stores(stores.clone());
+        if let Some(hooks) = hooks {
+            builder = builder.hooks(hooks);
+        }
+        let engine = builder.build().ok()?;
         Some(PlatformHarness {
             engine,
             admins,

@@ -68,6 +68,7 @@
     "dashboardFamilyIndex": "fam",
     "dashboardSessionIndex": "sess",
     "dashboardSessionDetail": "sd",
+    "dashboardLogoutPending": "lp",
     "dashboardTokenEpoch": "ep",
     "platformRefreshSession": "prt",
     "platformGracePointer": "prp",
@@ -75,6 +76,7 @@
     "platformFamilyIndex": "pfam",
     "platformSessionIndex": "psess",
     "platformSessionDetail": "psd",
+    "platformLogoutPending": "plp",
     "platformTokenEpoch": "pep",
     "accessTokenBlacklist": "rv",
     "failedLoginCounter": "lf",
@@ -601,6 +603,17 @@
       "jti": "string, non-empty; the jti of the access token that minted the ticket — the key of the per-token blacklist rv:{jti}",
       "epoch": "non-negative integer; the token epoch stamped on the minting access token, 0 when it carried none",
       "$comment": "A verified-identity SNAPSHOT, never a token: no signature, no expiry of its own. The socket it authorizes cannot be turned back into a session. Redemption is a single-use GETDEL, so a captured upgrade URL is worthless once the socket opens. jti and epoch are identifiers, not credentials: they are the two keys the revocation channels are read by, so redemption is refused exactly when the minting token would be — blacklisted, or stamped below the user's current epoch. A record missing either, or carrying them malformed, is not a ticket."
+    },
+    "logoutPending": {
+      "key": "lp:{sha256(refreshToken)} on the dashboard plane, plp:{sha256(refreshToken)} on the platform plane",
+      "fields": ["userId", "tenantId"],
+      "tenantId": "omitted from the record entirely when the session record carried none, always on the platform plane",
+      "ttl": "the configured access-token lifetime in seconds, rounded up, and never less than 300",
+      "writer": "only a logout attempt that FAILED a revocation write and had read its owner from the live refresh session; best effort, written before the failure is raised; never written on the success path and never by a retry that read only the marker",
+      "reader": "a logout whose refresh session is gone reads the owner from this record instead",
+      "claim": "a logout that completes with no failure removes the key; when the owner came from this record the afterLogout hook fires only if that removal removed the key, so racing retries announce once; when the owner came from the live session the hook fires regardless and any stale record is removed",
+      "guarantee": "exactly-once for sequential retries; at-least-once when attempts of one logout run concurrently (attempts that all read the live session each announce on completing, and a failed attempt slower than a successful one can write its marker after that one cleared it, leaving a marker a later retry claims)",
+      "$comment": "A hint to whom a logout belonged, never a credential and never a session: it cannot authenticate anything, and the owner it names was read from the library's own session record, not from a token's claims. It exists because a failed attempt deletes the refresh session whatever else it could not write, so the retry that completes the logout would otherwise have no record to say whose it was."
     },
     "emailChangeContext": {
       "key": "ec:{sha256(token)}",
