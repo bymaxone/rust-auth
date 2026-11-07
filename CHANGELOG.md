@@ -12,7 +12,7 @@ version bump.
 
 ### Changed
 
-- **BREAKING (behaviour): a failed invitation email is reported instead of swallowed.** `invite` logged a send failure and returned success, so `POST /auth/invitations` answered `204` and the inviter never learned the link had not been sent. It now returns `AuthError::Internal` with a fixed description, which the adapter answers as `500 auth.internal` with the generic body. Nothing the mail channel wrote reaches the error, its source chain or the log (one fixed line), because a relay can quote the body it rejected and that body carries the raw invitation token. The stored invitation is kept, since the email may have been delivered despite the error, and inviting the address again supersedes it. **Apply:** a host that relied on the invite route succeeding while its mailer was down must handle the `500`; the invitation is stored and a retry supersedes it.
+- **BREAKING (behaviour): a failed invitation email is reported instead of swallowed.** `invite` logged a send failure and returned success, so `POST /auth/invitations` answered `204` and the inviter never learned the link had not been sent. It now returns `AuthError::Internal` with a fixed description, which the adapter answers as `500 auth.internal` with the generic body. Nothing the mail channel wrote reaches the error, its source chain or the log (one fixed line), because a relay can quote the body it rejected and that body carries the raw invitation token. The stored invitation is kept, since the email may have been delivered despite the error, and inviting the address again supersedes it. The shipped `DefaultAuthEmailProvider` applies `DeliveryErrorPolicy::Swallow` by default, so with it the provider reports success and `invite` sees no failure; the `500` appears with a custom provider or the `Rethrow` policy. **Apply:** a host that relied on the invite route succeeding while its mailer was down must handle the `500`; the invitation is stored and a retry supersedes it.
 
 - **BREAKING (behaviour): the platform guard names a validly signed MFA-challenge token, and decides the kind of any other-kind token before it reads a store; `SelfOrAdmin` reads its id from a route with several captures.** A validly signed MFA-challenge token on a platform route is now `auth.platform_auth_required`, as a dashboard token is and as nest-auth answers, instead of `auth.token_invalid`. The kind of a dashboard or MFA-challenge token is now decided from its signature alone, so a revoked one is `auth.platform_auth_required` too and an outage of the revocation store changes nothing about it; a store failure while checking a *platform* token keeps surfacing as a `500 auth.internal`. `SelfOrAdmin` read exactly one path capture and refused every caller on a route with more than one, the owner included; it now reads the `user_id` capture, else `id`, whatever else the route captures, as one non-empty segment. A route that names a tenant (`tenant_id`, `tenantId` or `tenant`) is bound to the caller's tenant before either branch, so neither the owner check nor the admin override reaches into another tenant, several tenant captures must all agree, and anything it refuses answers `auth.insufficient_role`; this is the rule both libraries apply. `UserRepository::update_mfa` and `PlatformUserRepository::update_mfa` now document that the call must stay well under the 10 s MFA transition lock, because a stall past it lets two MFA writes reorder. **Apply:** a client that treated an MFA-challenge token on a platform route as `auth.token_invalid` should expect `auth.platform_auth_required`; a host whose `update_mfa` can take close to ten seconds must bound it.
 
@@ -451,12 +451,11 @@ version bump.
   owns the escaping of every dynamic value it interpolates. That is what makes a real `<a>`
   link possible, and it means an override must not trust the provider to escape its markup.
 
-  `DeliveryErrorPolicy::Rethrow` restores the error for the two flows that react to one (the
+  `DeliveryErrorPolicy::Rethrow` restores the error for the flows that react to one (the
   reset path deletes an undelivered token early rather than leaving it to its TTL; the
-  email-change path refuses to record "verification sent"). It does not turn an outage into a
-  failed user operation elsewhere: the MFA and password-changed notices are detached through
-  `spawn_guarded`, and the invitation flow catches the error and leaves the invitation
-  standing.
+  email-change path refuses to record "verification sent"; the invitation path answers
+  `500 auth.internal`). It does not turn an outage into a failed user operation elsewhere: the
+  MFA and password-changed notices are detached through `spawn_guarded`.
 
   Mirrors nest-auth's provider of the same name, so the two libraries send the same messages
   from the same events.

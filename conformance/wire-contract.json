@@ -829,7 +829,7 @@
   "failures": {
     "before": "A failure before the account is known (the resend-cooldown store, the account lookup) answers 500 auth.internal after the floor: it is the same for every address, so it tells the caller nothing about one.",
     "after": "A failure after the account is known (issuing or storing the code) is logged and the 200 acknowledgement stands: it happens only for a registered address, so a 5xx would answer the enumeration question.",
-    "cooldown": "The resend cooldown a request took is released on any failure, so the retry a 500 invites is not refused for the rest of the window; a request that fails nothing leaves it in place.",
+    "cooldown": "The resend cooldown a request took is released when the request itself observes the failure: the account lookup, the code or token store, or a send awaited inside the request. The retry a 500 invites is then not refused for the rest of the window. A send that fails after the response has left is detached from the request and never releases it, because a release from there is a delete by key that can remove a later request's fresh cooldown. A request that fails nothing leaves the cooldown in place.",
     "floorMs": 300,
     "floor": "Every exit waits until floorMs have passed since the request began, a cooldown hit and a 500 included, so releasing the cooldown for registered accounts opens no timing difference."
   }
