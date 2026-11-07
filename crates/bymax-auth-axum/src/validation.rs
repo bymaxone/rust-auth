@@ -422,22 +422,14 @@ mod tests {
     #[cfg(any(feature = "sessions", feature = "oauth"))]
     #[tokio::test]
     async fn a_route_whose_path_parameter_was_not_captured_is_the_adapters_fault() {
-        use tower::ServiceExt;
-        // A handler that asks for a path parameter on a route that declares none: the router
-        // never captured it, which is the adapter's mistake and must not read as a bad request.
-        let app = axum::Router::new().route(
-            "/none",
-            axum::routing::get(|PathParam(value): PathParam<String>| async move { value }),
-        );
-        let request = Request::builder()
-            .uri("/none")
-            .body(axum::body::Body::empty());
-        let Ok(request) = request else { return };
-        let response = match app.oneshot(request).await {
-            Ok(response) => response,
-            Err(never) => match never {},
-        };
-        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        // A request that no route matched carries no captured parameters: asking for one is the
+        // adapter's mistake and must not read as a bad request.
+        let (mut parts, _body) = Request::new(axum::body::Body::empty()).into_parts();
+        let rejection = PathParam::<String>::from_request_parts(&mut parts, &())
+            .await
+            .err();
+        let status = rejection.map(|rejection| rejection.into_response().status());
+        assert_eq!(status, Some(StatusCode::INTERNAL_SERVER_ERROR));
     }
 
     #[test]
