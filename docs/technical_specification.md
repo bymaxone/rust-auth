@@ -1686,7 +1686,7 @@ The internal repository row (`AuthUser`) carries `password_hash`, `mfa_secret`, 
 The services never touch Redis directly; they depend on the three **domain-level** store traits defined authoritatively in **§12.3** — `SessionStore`, `OtpStore`, `BruteForceStore` — plus the auxiliary single-purpose stores (`MfaStore`, `OAuthStateStore`, `PasswordResetStore`, `InvitationStore`, `UserStatusCache`). These present an intent-named surface keyed by `SessionKind { Dashboard, Platform }`, **not** low-level Redis verbs:
 
 - `SessionStore`: `create_session(kind, subject_hash, …)` · `rotate(kind, …) -> RotateOutcome` · `find_session(kind, …)` · `list_sessions(kind, subject_hash)` · `list_session_entries(kind, subject_hash)` · `revoke_session(kind, subject_hash, hash)` · `revoke_all(kind, subject_hash)` · `find_family_owner(kind, family)` · `revoke_family(kind, family, owner_subject_hash)` · `blacklist_access(jti_or_hash, ttl)` · `is_blacklisted(jti_or_hash)`. Every method that names an ACCOUNT takes the `subject_hash` the engine derives (§12.4), never a user id — the store holds no hashing key.
-- `OtpStore`: `put(purpose, id, code, ttl)` · `verify(purpose, id, code, max_attempts)` · `try_begin_resend(purpose, id, cooldown)`.
+- `OtpStore`: `put(purpose, id, code, ttl)` · `verify(purpose, id, code, max_attempts)` · `try_begin_resend(purpose, id, cooldown)` · `release_resend(purpose, id)` (default: releases nothing).
 - `BruteForceStore`: `is_locked(id, max_attempts)` · `record_failure(id, window)` · `reset(id)` · `remaining_lockout_secs(id)`.
 
 The key prefixes (`rt:`/`prt:`, `rp:`/`prp:`, `sess:`/`psess:`, `sd:`/`psd:`, `rv:`, `otp:`, `lf:`, …), the stored JSON value shapes, the `{namespace}:` prefixing, and the atomic Lua scripts are **implementation details owned by the `bymax-auth-redis` store impl** and catalogued in §12.4/§12.5 — they are never exposed on the trait. Where an algorithm below mentions a Redis-level step (e.g. adding a member to the `sess:` set, writing an `sd:` detail record, planting an `rp:` grace pointer), that describes the *internal* behavior of the corresponding domain method in the §12 store, not an additional trait method the service calls. Access-token revocation is therefore always `blacklist_access` / `is_blacklisted` — never a low-level `set_revoked` / `is_revoked`.
@@ -2325,6 +2325,8 @@ Exactly one proof field must be present.
 #### 7.8.4 `resend_otp`
 
 Anti-enumeration + atomic 60 s cooldown via `otp.try_begin_resend(OtpPurpose::PasswordReset, &id, 60)` (the `OtpStore` cooldown gate on `resend:password_reset:{id}`, §12.3); same structure as §7.1.6 resend; always ≥ `ANTI_ENUM_MIN_MS`.
+
+**Failure rule, shared by `initiate_reset` and `resend_otp`** (the two draw on one cooldown under one key; `conformance/wire-contract.json` `responseBodies.passwordResetRequest.failures`). A failure *before* the account is known — the cooldown gate, the account lookup — is the same for every address and answers `500 auth.internal` after the floor. A failure *after* it is known — storing the code or the reset token, or sending it — happens only for a registered address, so it is logged (cause only, no account, address or tenant) and the `200` stands: a `5xx` there would answer the enumeration question. The cooldown a request took is released on any failure (`OtpStore::release_resend`, `DEL` of the `resend` key; the OTP send runs detached and releases it from there, also when the detached-task ceiling abandons a send that never returns; the reset-link send is awaited inside the request but bounded by the same 5 s ceiling, so a release after a failed send lands well inside the 60 s window; the release is an unconditional `DEL`, which is only sound for that reason. The release after a failed account lookup runs when the host repository returns, so a repository that fails after more than 60 s can delete a later request's fresh cooldown and let one extra email out; keeping the lookup's own timeout under the cooldown is the host's obligation), so the retry a failure invites is not refused for the rest of the window; a request that fails nothing leaves it in place. Every exit, a cooldown hit and a `500` included, waits until `ANTI_ENUM_MIN_MS` (300) have passed since the request began.
 
 #### 7.8.5 `apply_password_reset` (private)
 
@@ -4442,6 +4444,8 @@ pub trait OtpStore: Send + Sync {
     async fn verify(&self, purpose: OtpPurpose, identifier: &str, code: &str, max_attempts: u32) -> Result<(), AuthError>;
     /// SET NX EX cooldown gate; false if a resend happened within the window.
     async fn try_begin_resend(&self, purpose: OtpPurpose, identifier: &str, cooldown_secs: u64) -> Result<bool, AuthError>;
+    /// Release a cooldown `try_begin_resend` took, so a failed request does not leave its caller refused. Default: releases nothing.
+    async fn release_resend(&self, purpose: OtpPurpose, identifier: &str) -> Result<(), AuthError> { Ok(()) }
 }
 
 /// Fixed-window failed-attempt counters keyed by HMAC(`dashboard:{tenant}:{email}`) (`lf:`).

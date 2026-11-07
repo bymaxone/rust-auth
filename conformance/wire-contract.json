@@ -825,7 +825,14 @@
       ],
       "status": 200,
       "body": {},
-      "$comment": "Both routes acknowledge with 200 and an empty JSON object, whether or not the account exists: a body that differed by outcome would be the enumeration oracle the 200 exists to close. Pinned as an object, not left empty, so a client that parses every success body as JSON needs no special case for these two routes."
+      "$comment": "Both routes acknowledge with 200 and an empty JSON object, whether or not the account exists: a body that differed by outcome would be the enumeration oracle the 200 exists to close. Pinned as an object, not left empty, so a client that parses every success body as JSON needs no special case for these two routes.",
+  "failures": {
+    "before": "A failure before the account is known (the resend-cooldown store, the account lookup) answers 500 auth.internal after the floor: it is the same for every address, so it tells the caller nothing about one.",
+    "after": "A failure after the account is known (issuing or storing the code) is logged and the 200 acknowledgement stands: it happens only for a registered address, so a 5xx would answer the enumeration question.",
+    "cooldown": "The resend cooldown a request took is released on any failure, so the retry a 500 invites is not refused for the rest of the window; a request that fails nothing leaves it in place.",
+    "floorMs": 300,
+    "floor": "Every exit waits until floorMs have passed since the request began, a cooldown hit and a 500 included, so releasing the cooldown for registered accounts opens no timing difference."
+  }
     }
   },
   "errorCatalog": {

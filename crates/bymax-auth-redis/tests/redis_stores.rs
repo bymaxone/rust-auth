@@ -1353,6 +1353,14 @@ async fn otp_put_verify_outcomes_and_resend() {
         stores.try_begin_resend(purpose, "id1", 60).await,
         Ok(false)
     ));
+
+    // A released cooldown can be taken again, and releasing one that is not held is a no-op.
+    assert!(stores.release_resend(purpose, "id1").await.is_ok());
+    assert!(matches!(
+        stores.try_begin_resend(purpose, "id1", 60).await,
+        Ok(true)
+    ));
+    assert!(stores.release_resend(purpose, "never-held").await.is_ok());
 }
 
 #[tokio::test]

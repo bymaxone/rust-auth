@@ -730,6 +730,20 @@ pub trait OtpStore: Send + Sync {
         identifier: &str,
         cooldown_secs: u64,
     ) -> Result<bool, AuthError>;
+
+    /// Release a cooldown [`OtpStore::try_begin_resend`] took, so a request that failed does not
+    /// leave its caller refused for the rest of the window. Idempotent: a no-op when no cooldown
+    /// is held.
+    ///
+    /// The default releases nothing, which is the safe reading for a store that cannot: the
+    /// cooldown then simply runs out.
+    async fn release_resend(
+        &self,
+        _purpose: OtpPurpose,
+        _identifier: &str,
+    ) -> Result<(), AuthError> {
+        Ok(())
+    }
 }
 
 /// Fixed-window failed-attempt counters keyed by an HMAC of `tenant:email`.

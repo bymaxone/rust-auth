@@ -586,6 +586,10 @@ pub struct InMemoryStores {
     forced_epoch_bump_failures: Mutex<usize>,
     /// Armed count of OTP `put` calls that must fail with a backend error.
     forced_otp_put_failures: Mutex<usize>,
+    /// Armed count of resend-cooldown gate calls that must fail with a backend error.
+    forced_resend_gate_failures: Mutex<usize>,
+    /// Armed count of resend-cooldown release calls that must fail with a backend error.
+    forced_resend_release_failures: Mutex<usize>,
     /// Runs when the next MFA transition lock is granted, so a test can change the account in
     /// the one window a transition re-reads across.
     on_mfa_lock: Mutex<Boundary>,
@@ -1255,7 +1259,14 @@ impl OtpStore for InMemoryStores {
         identifier: &str,
         _cooldown_secs: u64,
     ) -> Result<bool, AuthError> {
+        self.take_resend_gate_failure()?;
         Ok(lock(&self.resend).insert((purpose, identifier.to_owned())))
+    }
+
+    async fn release_resend(&self, purpose: OtpPurpose, identifier: &str) -> Result<(), AuthError> {
+        self.take_resend_release_failure()?;
+        self.expire_resend_cooldown(purpose, identifier);
+        Ok(())
     }
 }
 
@@ -1711,6 +1722,7 @@ impl OAuthProvider for MockOAuthProvider {
 }
 
 mod logout_pending;
+mod otp_cooldown;
 mod rate_limit;
 mod user_status;
 
