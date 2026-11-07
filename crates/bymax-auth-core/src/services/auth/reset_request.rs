@@ -8,8 +8,9 @@
 //! every address, so it is surfaced and the caller answers `500` after the floor. A failure AFTER
 //! it is known (issuing or storing the proof, sending it) happens only for a registered address,
 //! so a `5xx` there would answer the enumeration question: it is logged and the uniform `Ok(())`
-//! stands. The cooldown a request took is released on any failure, so the retry a failure invites
-//! is not refused for the rest of the window.
+//! stands. The cooldown a request took is released when the request itself observes the failure
+//! (see the failure rule in the specification, 7.8.4), so the retry that failure invites is not
+//! refused; the failure of the detached code send never releases it.
 
 use bymax_auth_crypto::token::generate_secure_token;
 use bymax_auth_types::{AuthError, AuthUser};

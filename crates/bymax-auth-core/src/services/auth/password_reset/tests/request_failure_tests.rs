@@ -1,7 +1,7 @@
 //! What a reset request does when a step fails: a failure before the account is known answers
 //! `500` after the floor, a failure after it is logged and the `200` stands, and the resend
-//! cooldown the request took is released on any failure. Driven through both entry points,
-//! which share the cooldown key.
+//! cooldown is released only for a failure the request itself observes. Driven through both
+//! entry points, which share the cooldown key.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
