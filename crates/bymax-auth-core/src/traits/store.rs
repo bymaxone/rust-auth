@@ -521,6 +521,23 @@ pub trait SessionStore: Send + Sync {
         session_hash: &str,
     ) -> Result<(), AuthError>;
 
+    /// The hash of the session a refresh-token hash was rotated into, read from its rotation
+    /// grace pointer (`rp:`/`prp:`), or `None` when no pointer names one.
+    ///
+    /// A single read: the pointer is neither consumed nor extended, so asking never changes what
+    /// a later rotation of the same token would do. The answer is only a hash: whether that
+    /// session is still live, and the caller's own, is the caller's question to settle.
+    ///
+    /// The default answers `None`, which is the safe reading for a store that keeps no pointer
+    /// it can read back: a rotated token then names no session.
+    async fn grace_successor(
+        &self,
+        _kind: SessionKind,
+        _session_hash: &str,
+    ) -> Result<Option<String>, AuthError> {
+        Ok(None)
+    }
+
     /// Delete **every** rotation grace pointer the user's session index names, removing each
     /// from the index as it goes. Idempotent: a user with no pointers is a no-op.
     ///

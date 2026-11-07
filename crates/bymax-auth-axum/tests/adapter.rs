@@ -782,8 +782,8 @@ async fn bearer_mode_logout_revokes_the_refresh_session_from_the_body() {
 
 #[tokio::test]
 async fn logout_without_any_refresh_token_still_succeeds() {
-    // Logout stays best-effort and idempotent: neither an absent body nor an unparseable one
-    // blocks it (the access JTI is still blacklisted), so a client can always end its session.
+    // An absent body never blocks a logout (the access JTI is still blacklisted), so a client
+    // can always end its session; a body no parser accepts is refused instead of ignored.
     let spec = EngineSpec {
         delivery: bymax_auth_core::config::TokenDelivery::Bearer,
         ..EngineSpec::default()
@@ -813,7 +813,11 @@ async fn logout_without_any_refresh_token_still_succeeds() {
         .raw_body(b"{not json".to_vec(), "application/json")
         .send(&app)
         .await;
-    assert_eq!(junk.status, StatusCode::NO_CONTENT);
+    // A body no parser accepts is refused before anything is revoked: the caller is told the
+    // request was not understood, and its session is still alive.
+    assert_eq!(junk.status, StatusCode::BAD_REQUEST);
+    let still = Req::get("/auth/me").bearer(&access2).send(&app).await;
+    assert_eq!(still.status, StatusCode::OK);
 }
 
 #[tokio::test]
@@ -3955,3 +3959,6 @@ async fn a_structurally_valid_proof_the_configured_method_does_not_accept_is_ref
 
 #[path = "adapter/request_encoding.rs"]
 mod request_encoding;
+
+#[path = "adapter/refresh_token_matrix.rs"]
+mod refresh_token_matrix;

@@ -22,6 +22,7 @@ use tower_cookies::Cookies;
 
 use crate::extractors::{AuthUser, UserStatus};
 use crate::response::error_response;
+use crate::routes::refresh_body::{parse_refresh_body, reads_body};
 use crate::routes::source_refresh_token;
 use crate::shared_limit::Throttle;
 use crate::state::{AuthState, AxumAuthConfig};
@@ -90,15 +91,18 @@ async fn revoke_all(
     // The body channel matters as much as the cookie: a bearer-mode deployment plants no
     // cookies at all, so reading only the jar meant this route could never identify the
     // caller's current session — and it answered 204 having revoked nothing. `logout` and
-    // `refresh` both accept the token either way for exactly this reason. An unparseable body
-    // degrades to "no body-supplied token" rather than 400-ing, which the engine then refuses
-    // explicitly instead of silently succeeding.
-    let dto = crate::routes::parse_optional_refresh_body(&body).unwrap_or_default();
+    // `refresh` both accept the token either way for exactly this reason. A body the delivery
+    // mode reads is refused before anything is revoked when it is not a refresh-token body.
+    let delivery = state.config().delivery;
+    let body_token = match parse_refresh_body(&body, reads_body(delivery)) {
+        Ok(token) => token,
+        Err(rejection) => return rejection.into_response(),
+    };
     let refresh = source_refresh_token(
-        state.config().delivery,
+        delivery,
         &cookies,
         &state.config().cookies.refresh_name,
-        dto.refresh_token.as_deref(),
+        body_token.as_deref(),
     );
     let raw = (!refresh.is_empty()).then_some(refresh.as_str());
     match state

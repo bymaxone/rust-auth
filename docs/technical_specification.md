@@ -3208,8 +3208,9 @@ answers `400` `Validation failed` with a `content-type` detail (the contract's
 `ValidatedQuery` and the crate's raw-body and path extractors) and, for a declared length over the
 limit, in a response mapper just outside the body-limit layer, not in a filter in front of routing
 as nest-auth does; the status, code, message and `details` are what the contract pins, and they
-are the same on every route. The refresh, logout and revoke-all routes read an optional body
-leniently (they ignore the `Content-Type`): refresh answers the envelopes for a body that is not JSON, while logout and revoke-all ignore one; all three answer the envelope for a body over the limit or one that cannot be read.
+are the same on every route. The refresh, logout, revoke-all and platform
+refresh and logout routes read an optional body that carries a refresh token (they ignore the
+`Content-Type`), under one rule in §8.4.3.
 
 **Which routes refuse a declared `Content-Encoding`.** The scope is the contract's
 `requestEncoding` section: every route is checked except those listed as `unchecked` (the routes
@@ -3218,6 +3219,32 @@ a body (a non-zero `Content-Length` or a `Transfer-Encoding`). `GET`, `HEAD`, `O
 `DELETE` are never checked. The check is a layer outside every route layer, so a refused request
 reaches neither authentication nor a rate limiter: it answers `415` whatever the caller's
 credentials, and it spends no rate-limit budget.
+
+#### 8.4.3 The refresh-token body
+
+Refresh, logout, revoke-all and the platform refresh and logout take the caller's refresh token
+from the cookie or from an optional JSON body, depending on the delivery mode: `cookie` reads the
+cookie, `bearer` reads the body, `both` reads the cookie and then the body. Platform delivery is
+always bearer. A body the mode reads is held to one rule:
+
+| `refreshToken` in the body | Result |
+| --- | --- |
+| absent, or JSON `null`, or an empty body | no token |
+| a string of 1 to 2048 characters | the token |
+| anything else (an empty string, a longer one, a number, a boolean, an object, an array) | `400` `auth.validation` with a detail on `refreshToken`, before the route does anything |
+| a body that is not JSON, or whose root is not an object | `400` "Malformed request" |
+
+Where the mode reads the cookie (dashboard `cookie` delivery) a value in the body is ignored, but a
+body that is not a JSON object or array is still refused. A refused logout or revoke-all revokes nothing.
+
+`POST /auth/sessions/revoke-all` and `POST /auth/password/change` keep the caller's own session
+and end the rest, so they have to know which one it is. A presented token stands for a live
+session of the caller's own account, or, when it rotated away inside its grace window, for the one
+live session its grace pointer (`rp:{hash}`) names: one hop, read once, never consumed or
+extended, and the successor has to be a live member of the same account's session index. A token
+that is neither is `404` `auth.session_not_found`, before anything changes. The password change
+checks the current password first, then the session, then writes. When the session to keep cannot
+be resolved after the new password is written, every session ends and the epoch advances.
 
 ---
 

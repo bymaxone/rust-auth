@@ -437,8 +437,8 @@ pub struct AcceptInvitationDto {
 ///
 /// It deliberately does **not** deny unknown fields, unlike every other request body: nest-auth
 /// has no DTO on these routes and reads only `refreshToken`, so a client that sends more keys
-/// must reach the same outcome on both backends. Refusing the body would also be the worse
-/// failure on logout, where an unreadable body is swallowed and leaves the session alive.
+/// must reach the same outcome on both backends. The routes read the body through
+/// `parse_refresh_body`, which applies the bounds below and ignores every other key.
 #[derive(Debug, Default, Deserialize, Validate)]
 #[serde(rename_all = "camelCase")]
 pub struct RefreshDto {

@@ -6,6 +6,8 @@
 //! shared input DTOs, the small mapping helpers, and the cross-cutting concerns
 //! (tenant resolution, the status gate, hook context, and fire-and-forget dispatch).
 
+#[cfg(test)]
+mod change_password_session_tests;
 pub(crate) mod detached;
 mod email_change;
 mod email_verification;

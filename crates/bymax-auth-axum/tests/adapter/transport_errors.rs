@@ -250,7 +250,13 @@ async fn a_missing_or_wrong_content_type_stays_a_validation_error_naming_the_fie
 
 #[tokio::test]
 async fn the_refresh_body_never_echoes_what_it_could_not_read() {
-    let Some(h) = build(EngineSpec::default()) else { return };
+    // Bearer delivery reads the token from the body; cookie delivery ignores the field.
+    let Some(h) = build(EngineSpec {
+        delivery: bymax_auth_core::config::TokenDelivery::Bearer,
+        ..EngineSpec::default()
+    }) else {
+        return;
+    };
     let app = small_body_router(&h);
     // Valid JSON whose token is not a string: the shape error, with a fixed message.
     let wrong_type = Req::post("/auth/refresh")

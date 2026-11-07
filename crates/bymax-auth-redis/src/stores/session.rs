@@ -87,6 +87,18 @@ pub(super) fn index_member(prefix: Prefix, hash: &str) -> String {
     format!("{}:{}", prefix.as_str(), hash)
 }
 
+/// The successor hash at the front of a grace-pointer value (`{successorHash}:{record}`), or
+/// `None` when the value has no colon or its first part is not a 64-character lower-case hex
+/// hash.
+fn successor_of_pointer(pointer: &str) -> Option<String> {
+    let (successor, _record) = pointer.split_once(':')?;
+    let is_hash = successor.len() == 64
+        && successor
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte));
+    is_hash.then(|| successor.to_owned())
+}
+
 /// Recover the bare session hash from a **live-session** index member, or `None` when the
 /// member belongs to another keyspace. Used by listing to keep grace pointers (`rp:`/`prp:`)
 /// out of the user-visible session list and to rebuild the `sd:`/`psd:` detail key, which is
@@ -526,6 +538,27 @@ impl RedisStores {
         Ok(())
     }
 
+    /// Read the successor hash a rotation grace pointer names: one `GET`, never a `GETDEL` or an
+    /// `EXPIRE`, so asking neither consumes the pointer nor extends the window.
+    ///
+    /// The value is `{successorHash}:{record}`, split on the FIRST colon exactly as
+    /// `refresh_rotate.lua` writes it. A value with no colon, or whose first part is not a
+    /// 64-character lower-case hex hash, names nothing.
+    async fn grace_successor_inner(
+        &self,
+        kind: SessionKind,
+        session_hash: &str,
+    ) -> Result<Option<String>, RedisStoreError> {
+        let prefixes = kind_prefixes(kind);
+        let rp_key = self.keys().key(prefixes.rp, session_hash);
+        let mut conn = self.connection().await?;
+        let pointer: Option<String> = redis::cmd("GET")
+            .arg(&rp_key)
+            .query_async(&mut conn)
+            .await?;
+        Ok(pointer.as_deref().and_then(successor_of_pointer))
+    }
+
     /// Delete every `rp:`/`prp:` member the user's session index names, removing each from the
     /// index as it goes.
     ///
@@ -799,6 +832,16 @@ impl SessionStore for RedisStores {
             .map_err(AuthError::from)
     }
 
+    async fn grace_successor(
+        &self,
+        kind: SessionKind,
+        session_hash: &str,
+    ) -> Result<Option<String>, AuthError> {
+        self.grace_successor_inner(kind, session_hash)
+            .await
+            .map_err(AuthError::from)
+    }
+
     async fn sweep_grace_pointers(
         &self,
         kind: SessionKind,
@@ -1000,6 +1043,31 @@ mod tests {
         assert_eq!(index_member(Prefix::Prp, "deadbeef"), "prp:deadbeef");
         // A bare hash is never a valid member — the regression this format replaced.
         assert_ne!(index_member(Prefix::Rt, "deadbeef"), "deadbeef");
+    }
+
+    #[test]
+    fn a_pointer_names_its_successor_only_when_the_value_leads_with_a_hash() {
+        let hash = "ab".repeat(32);
+        assert_eq!(
+            successor_of_pointer(&format!("{hash}:{{\"userId\":\"u\"}}")),
+            Some(hash.clone())
+        );
+        // The split is on the FIRST colon: a record that itself holds colons does not move it.
+        assert_eq!(
+            successor_of_pointer(&format!("{hash}:a:b:c")),
+            Some(hash.clone())
+        );
+        for value in [
+            "",
+            "no-colon",
+            &hash,
+            &format!("{}:x", "AB".repeat(32)),
+            &format!("{}:x", "ab".repeat(31)),
+            &format!("{}g:x", "a".repeat(63)),
+            ":x",
+        ] {
+            assert_eq!(successor_of_pointer(value), None, "{value:?}");
+        }
     }
 
     #[test]
