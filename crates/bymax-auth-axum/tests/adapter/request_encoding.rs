@@ -172,31 +172,19 @@ async fn a_method_the_contract_never_checks_is_not_refused() {
     }
 }
 
-/// The strict and `whenBody` routes that sit behind authentication, as the adapter answers them
-/// to a caller with no credentials at all.
-const BEHIND_AUTHENTICATION: [&str; 8] = [
-    "POST email/change",
-    "POST invitations",
-    "POST invitations/revoke",
-    "POST mfa/disable",
-    "POST mfa/recovery-codes",
-    "POST mfa/verify-enable",
-    "POST password/change",
-    "POST mfa/setup",
-];
-
 #[tokio::test]
 async fn a_refused_encoding_is_answered_before_authentication() {
     let Some((app, _credentials)) = every_surface().await else {
         return;
     };
-    let strict = routes("strict");
-    let when_body = routes("whenBody");
-    for route in BEHIND_AUTHENTICATION {
-        assert!(
-            strict.contains(route) || when_body.contains(route),
-            "{route} is not a route the contract checks"
-        );
+    // Every route that checks the encoding, with no credentials at all: a route behind
+    // authentication must still answer the encoding refusal, not the authentication one.
+    let checked: BTreeSet<String> = routes("strict")
+        .union(&routes("whenBody"))
+        .cloned()
+        .collect();
+    assert!(!checked.is_empty(), "the contract checks no routes");
+    for route in &checked {
         let (method, path) = route.split_once(' ').unwrap_or(("POST", route));
         let request = Req::new(
             method.parse().unwrap_or(http::Method::POST),
