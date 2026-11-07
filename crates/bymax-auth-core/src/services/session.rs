@@ -213,7 +213,8 @@ impl SessionService {
             {
                 // Swallowed, but visible: a store that keeps refusing the eviction is a cap
                 // that is not being enforced, which reads as "no error" on every response.
-                tracing::warn!(%error, %user_id, "sessions: eviction of an over-cap session failed");
+                let cause = crate::services::error_chain(&error);
+                tracing::warn!(%cause, %user_id, "sessions: eviction of an over-cap session failed");
             }
             self.fire_session_evicted(user_id, &victim.session_hash, ctx);
         }
@@ -560,6 +561,7 @@ mod tests {
     const TEST_IDENTIFIER_KEY: [u8; 64] = [9u8; 64];
 
     mod damaged_detail_tests;
+    mod eviction_failure_tests;
     mod listing_failure_tests;
 
     use super::*;

@@ -17,6 +17,7 @@ pub(super) struct DamagedDetails {
     inner: Arc<InMemoryStores>,
     damaged: Mutex<HashSet<String>>,
     listing_error: Option<ListingError>,
+    revoke_error: Option<ListingError>,
 }
 
 impl DamagedDetails {
@@ -26,6 +27,7 @@ impl DamagedDetails {
             inner,
             damaged: Mutex::new(damaged),
             listing_error: None,
+            revoke_error: None,
         }
     }
 
@@ -35,6 +37,15 @@ impl DamagedDetails {
         make: impl Fn() -> AuthError + Send + Sync + 'static,
     ) -> Self {
         self.listing_error = Some(Box::new(make));
+        self
+    }
+
+    /// Make every `revoke_session` call fail with the error `make` builds.
+    pub(super) fn failing_revokes_with(
+        mut self,
+        make: impl Fn() -> AuthError + Send + Sync + 'static,
+    ) -> Self {
+        self.revoke_error = Some(Box::new(make));
         self
     }
 
@@ -123,6 +134,9 @@ impl SessionStore for DamagedDetails {
         subject_hash: &str,
         session_hash: &str,
     ) -> Result<(), AuthError> {
+        if let Some(make) = &self.revoke_error {
+            return Err(make());
+        }
         self.inner
             .revoke_session(kind, subject_hash, session_hash)
             .await
