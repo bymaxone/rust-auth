@@ -3211,8 +3211,7 @@ leniently (they ignore the `Content-Type`): refresh answers the envelopes for a 
 
 **Which routes refuse a declared `Content-Encoding`.** The scope is the contract's
 `requestEncoding` section: every route is checked except those listed as `unchecked` (the routes
-that read their own body or none: logout, refresh, ws-ticket, platform logout and refresh,
-sessions revoke-all), and the two MFA setup routes (`whenBody`) refuse only a request that carries
+that read their own body or none), and the `whenBody` routes refuse only a request that carries
 a body (a non-zero `Content-Length` or a `Transfer-Encoding`). `GET`, `HEAD`, `OPTIONS` and
 `DELETE` are never checked. The check is a layer outside every route layer, so a refused request
 reaches neither authentication nor a rate limiter: it answers `415` whatever the caller's
