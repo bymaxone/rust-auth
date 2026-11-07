@@ -148,18 +148,19 @@ export function useSession(): UseSessionResult {
 }
 
 /**
- * Whether a failed logout still left the caller signed out.
+ * Whether a failed logout is one the provider should look behind.
  *
- * The logout route clears the session cookies for any answer below `500` except a throttled
- * call, so after a `4xx` the session is gone and the provider has to say so now. A throttled
- * call (`429`), a `5xx` and a transport failure revoked nothing: the state the provider holds is
- * still the truth, and asking again would only load a service that is already refusing.
+ * A `4xx` means the server answered and refused (the session may already have been gone), so the
+ * user the provider holds can be stale and revalidating reads the truth. A throttled call
+ * (`429`), a `5xx` and a transport failure mean the server could not act on the request: the
+ * session may still be alive, the state held is still the best answer, and asking again would
+ * only load a service that is already refusing.
  *
  * The failure is read by its `status`, not by `instanceof AuthClientError`: the `./react` and
  * `./client` bundles are built without code splitting, so each carries its own copy of the class
  * and an instance thrown by one is not an instance of the other.
  */
-function logoutEndedSession(failure: unknown): boolean {
+function logoutWorthRevalidating(failure: unknown): boolean {
   const status = (failure as { status?: unknown } | null)?.status;
   return typeof status === "number" && status >= 400 && status < 500 && status !== 429;
 }
@@ -183,8 +184,8 @@ export interface UseAuthResult {
   register: (data: RegisterInput) => Promise<AuthResult>;
   /**
    * Sign out, then revalidate the (now anonymous) session. A logout refused with a `4xx` other
-   * than `429` revalidates too, since the route signed the caller out anyway, and then rejects
-   * with the error; a `429`, a `5xx` or a transport failure rejects and keeps the state.
+   * than `429` revalidates too, then rejects with the error; a `429`, a `5xx` or a transport
+   * failure rejects and keeps the state.
    */
   logout: () => Promise<void>;
   /** Begin a password reset; `tenantId` is passed through as given, per {@link login}. */
@@ -229,7 +230,7 @@ export function useAuth(): UseAuthResult {
     try {
       await client.logout();
     } catch (failure) {
-      if (logoutEndedSession(failure)) await refresh();
+      if (logoutWorthRevalidating(failure)) await refresh();
       throw failure;
     }
     await refresh();

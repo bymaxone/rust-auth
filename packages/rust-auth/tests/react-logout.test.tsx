@@ -8,11 +8,10 @@ import { AuthProvider, useAuth } from "../src/react/index";
 import type { AuthUserClient } from "../src/shared/auth-user.types";
 
 /**
- * What the provider does with the session after `useAuth().logout()` fails. The Next.js logout
- * route clears the cookies for any answer below 500 except a throttled call, so after such a
- * refusal the session is gone and the provider must say so now rather than at the next interval;
- * after a throttled call, a `5xx` or a transport failure nothing was revoked and the state it
- * holds is still the truth.
+ * What the provider does with the session after `useAuth().logout()` fails. After a `4xx` the
+ * server answered and refused, so the user the provider holds can be stale and it revalidates at
+ * once; after a throttled call, a `5xx` or a transport failure the server could not act, and the
+ * state it holds is kept.
  */
 
 /** A safe-user fixture. */
@@ -63,7 +62,7 @@ afterEach(() => {
 });
 
 describe("useAuth().logout after a failed logout", () => {
-  // The route answered below 500 and cleared the cookies, so the user is signed out already.
+  // The server answered and refused, so the user held here can be stale.
   it.each([400, 401, 403, 404, 499])(
     "revalidates at once and still rejects when the logout is refused with %i",
     async (status) => {
@@ -90,8 +89,8 @@ describe("useAuth().logout after a failed logout", () => {
     expect(client.getMe).toHaveBeenCalledTimes(2);
   });
 
-  // A throttled call revoked nothing, and neither did a backend that failed or could not be
-  // reached; asking the session again would only add load to a service that is already refusing.
+  // The server could not act on these, so the state held is still the best answer; asking the
+  // session again would only add load to a service that is already refusing.
   it.each([
     ["a throttled call (429)", new AuthClientError("slow down", 429)],
     ["a server failure (500)", new AuthClientError("boom", 500)],
