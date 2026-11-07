@@ -3235,7 +3235,7 @@ always bearer. A body the mode reads is held to one rule:
 | a body that is not JSON, or whose root is not an object | `400` "Malformed request" |
 
 Where the mode reads the cookie (dashboard `cookie` delivery) a value in the body is ignored, but a
-body no parser accepts is still refused. A refused logout or revoke-all revokes nothing.
+body that is not a JSON object or array is still refused. A refused logout or revoke-all revokes nothing.
 
 `POST /auth/sessions/revoke-all` and `POST /auth/password/change` keep the caller's own session
 and end the rest, so they have to know which one it is. A presented token stands for a live
