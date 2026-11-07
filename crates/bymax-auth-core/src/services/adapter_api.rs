@@ -74,9 +74,8 @@ impl AuthEngine {
     ///
     /// # Errors
     ///
-    /// As [`AuthEngine::verify_access_token`], but a dashboard token presented here yields
-    /// [`AuthError::TokenInvalid`]; [`AuthEngine::verify_platform_request_token`] answers it as
-    /// `PlatformAuthRequired`.
+    /// As [`AuthEngine::verify_access_token`], but a token of another kind presented here yields
+    /// [`AuthError::TokenInvalid`]; [`AuthEngine::verify_platform_request_token`] explains it.
     #[cfg(feature = "platform")]
     pub async fn verify_platform_token(&self, token: &str) -> Result<PlatformClaims, AuthError> {
         self.tokens().verify_platform_access(token).await

@@ -31,9 +31,9 @@ async fn verified_platform_claims(
     Ok(claims)
 }
 
-/// Verified platform access-token claims (`type == platform`, no `tenantId`). A dashboard
-/// token presented here rejects with `platform_auth_required` (401), mirroring
-/// `JwtPlatformGuard`; isolation is enforced by the `type` claim, not a separate key.
+/// Verified platform access-token claims (`type == platform`, no `tenantId`). What each refusal
+/// answers is recorded once, in the guard error-code table of the specification (section 8.3.7);
+/// isolation is enforced by the `type` claim, not a separate key.
 #[derive(Debug, Clone)]
 pub struct PlatformUser(pub PlatformClaims);
 
