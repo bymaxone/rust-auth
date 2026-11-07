@@ -2962,9 +2962,8 @@ pub struct RequirePlatformRole<R: PlatformRole>(pub PlatformClaims, PhantomData<
   when `path.user_id == claims.sub` **or** the user's role satisfies the
   configured admin role. The id-equality check is the primary IDOR defense;
   consumers using non-UUID ids supply their own id parsing. The id is the
-  `user_id` capture, else the `id` one, whatever else the route captures (as nest reads
-  `userId ?? id`). When it refuses, and when the route captures neither, it answers
-  `auth.insufficient_role` (403), as the nest-auth guard does.
+  `user_id` capture, else the `id` one, whatever else the route captures. When it refuses, and
+  when the route captures neither, it answers `auth.insufficient_role` (403).
 
   **Guard error codes against nest-auth** (the wire contract pins the vocabulary, not which
   guard answers which code, so this table is the record):
