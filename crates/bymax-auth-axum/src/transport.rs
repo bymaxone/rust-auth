@@ -185,32 +185,19 @@ mod tests {
             }
         }
 
-        // Fixed-status rows are compared to the pairs this adapter answers with a fixed status,
-        // exactly and in both directions.
-        let ours: BTreeSet<(u16, String)> = answered()
-            .into_iter()
-            .filter(|(status, _)| *status != StatusCode::BAD_REQUEST.as_u16())
-            .collect();
-        let contract_fixed: BTreeSet<(u16, String)> = fixed
-            .iter()
-            .filter(|(status, _)| *status != StatusCode::BAD_REQUEST.as_u16())
-            .cloned()
-            .collect();
-        assert_eq!(ours, contract_fixed, "fixed-status rows differ");
+        // Every fixed-status row and every pair this adapter answers: one exact set, no status
+        // set apart, compared in both directions.
+        assert_eq!(answered(), fixed, "fixed-status rows differ");
 
-        // The `Malformed` kind takes its status from the error. Its message is the single row
-        // whose status the contract leaves open, and every 4xx it can carry is a client error.
+        // The row whose status is the error's own 4xx names one message, and that message is the
+        // one `Malformed` carries whatever 4xx it holds.
         let malformed = Transport::Malformed(StatusCode::BAD_REQUEST)
             .message()
             .to_owned();
-        let open_rows: BTreeSet<String> = own_status_messages;
-        assert_eq!(open_rows, BTreeSet::from([malformed.clone()]));
-        // The `400` pair is the contract's malformed-JSON row, which names the same message.
-        let bad_request_pair = (StatusCode::BAD_REQUEST.as_u16(), malformed);
-        assert!(fixed.contains(&bad_request_pair));
+        assert_eq!(own_status_messages, BTreeSet::from([malformed.clone()]));
         let other = Transport::Malformed(StatusCode::REQUEST_TIMEOUT);
         assert!(other.status().is_client_error());
-        assert_eq!(other.message(), bad_request_pair.1);
+        assert_eq!(other.message(), malformed);
     }
 
     #[test]
