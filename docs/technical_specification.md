@@ -5729,6 +5729,8 @@ export function useAuth(): {
 export function useAuthStatus(): { isAuthenticated: boolean; isLoading: boolean }
 ```
 
+`useAuth().logout()` revalidates the session after a successful logout. When the logout is refused with a `4xx` other than `429` it revalidates at once and then rejects with the same error, because the Next.js logout route clears the session cookies for any answer below `500` except a throttled call, so the caller is already signed out. A `429`, a `5xx` or a transport failure rejects and keeps the state, since nothing was revoked. The failure is read by its `status`, not by `instanceof AuthClientError`: the `./react` and `./client` bundles are built without code splitting and each carries its own copy of the class.
+
 #### 18.1.4 `./nextjs` — proxy, route handlers, JWT edge helpers (peer deps: next ^16, react ^19)
 
 Identical factory signatures to nest-auth. The only internal change is that the
