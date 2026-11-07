@@ -321,3 +321,60 @@ async fn an_undecodable_path_parameter_answers_malformed_request() {
         &["Invalid URL", "provider", "UTF-8"],
     );
 }
+
+#[tokio::test]
+async fn an_mfa_setup_body_never_echoes_what_it_could_not_read() {
+    let Some(h) = build(EngineSpec {
+        mfa: true,
+        ..EngineSpec::default()
+    }) else {
+        return;
+    };
+    let app = small_body_router(&h);
+    seed_user(&h, "setup@e.com", "glidingwalnut42", "USER").await;
+    let access = login(&app, "setup@e.com", "glidingwalnut42")
+        .await
+        .cookie_value("access_token")
+        .unwrap_or_default();
+    let setup = |body: String, content_type: &'static str| {
+        Req::post("/auth/mfa/setup")
+            .cookie("access_token", &access)
+            .raw_body(body.into_bytes(), content_type)
+    };
+    // Not JSON: the transport envelope.
+    let garbage = setup(format!("\"{MARKER}\""), "application/json")
+        .send(&app)
+        .await;
+    assert_transport(
+        &garbage,
+        StatusCode::BAD_REQUEST,
+        "Malformed request",
+        &[MARKER],
+    );
+    // JSON of the wrong shape: the validation envelope, with a fixed detail.
+    let shaped = setup(format!(r#"{{"{MARKER}":1}}"#), "application/json")
+        .send(&app)
+        .await;
+    assert_eq!(shaped.status, StatusCode::BAD_REQUEST, "{}", text(&shaped));
+    assert_eq!(shaped.json()["error"]["message"], "Validation failed");
+    assert_eq!(shaped.json()["error"]["details"][0]["field"], "body");
+    assert!(!text(&shaped).contains(MARKER), "{}", text(&shaped));
+    // A charset the adapter cannot read.
+    let charset = setup("{}".to_owned(), "application/json; charset=nope")
+        .send(&app)
+        .await;
+    assert_transport(
+        &charset,
+        StatusCode::UNSUPPORTED_MEDIA_TYPE,
+        "Unsupported media type",
+        &["nope"],
+    );
+    // Over the limit, on a route that buffers the body itself.
+    let over = setup("a".repeat(4096), "application/json").send(&app).await;
+    assert_transport(
+        &over,
+        StatusCode::PAYLOAD_TOO_LARGE,
+        "Request entity too large",
+        &[],
+    );
+}

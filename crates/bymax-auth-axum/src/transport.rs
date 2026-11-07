@@ -196,11 +196,9 @@ mod tests {
         // This adapter -> the contract: every answer is a fixed row, or the message of the row
         // whose status is the error's own.
         for (status, message) in &answered {
-            assert!(
-                fixed.contains(&(*status, message.clone()))
-                    || own_status_messages.contains(message),
-                "({status}, {message}) is answered and the contract has no such row"
-            );
+            let fixed_row = fixed.contains(&(*status, message.clone()));
+            let own_row = own_status_messages.contains(message);
+            assert!(fixed_row || own_row, "unlisted: {status} {message}");
         }
         // A `Malformed` carrying another 4xx keeps the message of the own-status row.
         let other = Transport::Malformed(StatusCode::REQUEST_TIMEOUT);

@@ -373,10 +373,10 @@ mod tests {
             // A parameter without a value names no charset.
             b"application/json; flag",
         ] {
+            let label = String::from_utf8_lossy(readable);
             assert!(
                 charset_is_utf8(&header_map(&[("content-type", readable)])),
-                "{}",
-                String::from_utf8_lossy(readable)
+                "{label}"
             );
         }
         for unreadable in [
@@ -385,10 +385,10 @@ mod tests {
             b"application/json; charset = UTF-16",
             b"application/json; charset=\"latin1\"",
         ] {
+            let label = String::from_utf8_lossy(unreadable);
             assert!(
                 !charset_is_utf8(&header_map(&[("content-type", unreadable)])),
-                "{}",
-                String::from_utf8_lossy(unreadable)
+                "{label}"
             );
         }
         // No `Content-Type` at all states no charset.
