@@ -2892,8 +2892,7 @@ The platform twin of `AuthUser`: validates the platform access JWT, asserting
 `claims.token_type == "platform"`. A validly signed dashboard or MFA-challenge token presented
 here is rejected with `AuthError::PlatformAuthRequired` (401), decided from its signature
 before any store read; every other refusal (no token, an unreadable, forged or expired token,
-a revoked platform token) is the opaque `AuthError::TokenInvalid` (401), exactly as
-`JwtPlatformGuard` answers. A store failure during a platform token's revocation check is a 500.
+a revoked platform token) is the opaque `AuthError::TokenInvalid` (401). A store failure during a platform token's revocation check is a 500.
 The secret is shared with the dashboard guard; isolation is enforced by the
 `token_type` claim, not by a separate key.
 
