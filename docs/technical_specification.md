@@ -2977,10 +2977,8 @@ pub struct RequirePlatformRole<R: PlatformRole>(pub PlatformClaims, PhantomData<
 
   Not mirrored, and why: nest's `SelfOrAdminGuard` also refuses an upper-case 64-hex route
   value with `auth.token_invalid`, because its routes carry session hashes in the same
-  parameter; here a session hash is validated by the session routes themselves and `SelfOrAdmin`
-  only ever compares a user id. A validly signed MFA-challenge token on a platform route is
-  `auth.platform_auth_required` in nest and `auth.token_invalid` here, which only a core change
-  to the platform explanation can close.
+  parameter; `SelfOrAdmin` here only ever compares a user id. A validly signed MFA-challenge token on a platform route is
+  `auth.platform_auth_required` in nest and `auth.token_invalid` here.
 
 These compose: a route equivalent to nest-auth's
 `@UseGuards(JwtAuthGuard, UserStatusGuard, MfaRequiredGuard) @Roles('OWNER')`
