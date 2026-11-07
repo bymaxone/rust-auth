@@ -206,6 +206,10 @@ async fn self_or_admin_reads_the_id_whatever_else_the_route_captures() {
     let other = self_or_admin_code(&s, route, "/tenants/t1/users/other-id", &token).await;
     assert_eq!(other.as_deref(), Some("auth.insufficient_role"));
 
+    // A capture that cannot be decoded is a refusal like a missing one, never an admission.
+    let undecodable = self_or_admin_code(&s, route, "/tenants/t1/users/%FF", &token).await;
+    assert_eq!(undecodable.as_deref(), Some("auth.insufficient_role"));
+
     // A route that names its capture `id` is read the same way; `user_id` wins when both exist.
     let by_id = format!("/sessions/t1/{user_id}");
     assert_eq!(
