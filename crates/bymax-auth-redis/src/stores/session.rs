@@ -5,8 +5,8 @@
 use async_trait::async_trait;
 use bymax_auth_core::traits::store::unix_millis;
 use bymax_auth_core::traits::{
-    RotateOutcome, SessionDetail, SessionEntry, SessionKind, SessionRecord, SessionRotation,
-    SessionStore, TOKEN_EPOCH_RETENTION_SECS,
+    LogoutOwner, RotateOutcome, SessionDetail, SessionEntry, SessionKind, SessionRecord,
+    SessionRotation, SessionStore, TOKEN_EPOCH_RETENTION_SECS,
 };
 use bymax_auth_types::AuthError;
 use deadpool_redis::Connection;
@@ -828,6 +828,38 @@ impl SessionStore for RedisStores {
         session_hash: &str,
     ) -> Result<(), AuthError> {
         self.delete_grace_pointer_inner(kind, session_hash)
+            .await
+            .map_err(AuthError::from)
+    }
+
+    async fn put_logout_pending(
+        &self,
+        kind: SessionKind,
+        session_hash: &str,
+        owner: &LogoutOwner,
+        ttl_secs: u64,
+    ) -> Result<(), AuthError> {
+        self.put_marker(kind, session_hash, owner, ttl_secs)
+            .await
+            .map_err(AuthError::from)
+    }
+
+    async fn read_logout_pending(
+        &self,
+        kind: SessionKind,
+        session_hash: &str,
+    ) -> Result<Option<LogoutOwner>, AuthError> {
+        self.read_marker(kind, session_hash)
+            .await
+            .map_err(AuthError::from)
+    }
+
+    async fn claim_logout_pending(
+        &self,
+        kind: SessionKind,
+        session_hash: &str,
+    ) -> Result<bool, AuthError> {
+        self.claim_marker(kind, session_hash)
             .await
             .map_err(AuthError::from)
     }

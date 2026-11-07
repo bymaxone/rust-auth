@@ -17,11 +17,20 @@ async fn session_alive(h: &Harness, auth: &AuthResult) -> bool {
 }
 
 /// A harness with email verification off and an account signed in.
-async fn signed_in(
+pub(super) async fn signed_in(
     hooks: Option<Arc<dyn crate::traits::AuthHooks>>,
+) -> Option<(Harness, AuthResult)> {
+    signed_in_with(hooks, |_| ()).await
+}
+
+/// The same harness after `tune` has adjusted the engine configuration.
+pub(super) async fn signed_in_with(
+    hooks: Option<Arc<dyn crate::traits::AuthHooks>>,
+    tune: impl FnOnce(&mut crate::config::AuthConfig),
 ) -> Option<(Harness, AuthResult)> {
     let mut cfg = base_config();
     cfg.email_verification.required = false;
+    tune(&mut cfg);
     let h = harness(cfg, hooks)?;
     let (_id, auth) = logged_in(&h, "out@example.com", "pw").await?;
     Some((h, auth))
@@ -180,28 +189,28 @@ async fn a_refused_session_delete_keeps_the_session_indexed_for_a_later_revoke_a
 }
 
 #[tokio::test]
-async fn a_retry_names_no_owner_when_the_first_attempt_already_deleted_the_session() {
-    // Documented limitation: when only the blacklist write failed, the first attempt deleted the
-    // refresh session and fired no hook; the retry that completes the logout finds no session,
-    // so there is nobody to name and the hook is not delivered for that logout at all.
+async fn a_retry_after_a_failed_attempt_names_the_owner_and_announces_once() {
+    // When only the blacklist write failed, the first attempt deleted the refresh session and
+    // fired no hook. It left a marker naming the owner, so the retry that completes the logout
+    // announces it, and a further logout of the same token announces nothing more.
     let spy = Arc::new(LogoutSpy::default());
     let hooks: Arc<dyn crate::traits::AuthHooks> = spy.clone();
     let Some((h, auth)) = signed_in(Some(hooks)).await else { return };
 
     h.stores.fail_next_blacklist_writes(1);
-    assert!(
-        h.engine
+    let first = h
+        .engine
+        .logout(&auth.access_token, &auth.refresh_token)
+        .await;
+    assert!(first.is_err());
+    for _ in 0..2 {
+        let outcome = h
+            .engine
             .logout(&auth.access_token, &auth.refresh_token)
-            .await
-            .is_err()
-    );
-    assert!(
-        h.engine
-            .logout(&auth.access_token, &auth.refresh_token)
-            .await
-            .is_ok()
-    );
-    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
-
-    assert!(spy.subjects.lock().map(|s| s.is_empty()).unwrap_or(false));
+            .await;
+        assert!(outcome.is_ok());
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    }
+    let announced = spy.subjects.lock().map(|s| s.clone()).unwrap_or_default();
+    assert_eq!(announced.len(), 1, "{announced:?}");
 }

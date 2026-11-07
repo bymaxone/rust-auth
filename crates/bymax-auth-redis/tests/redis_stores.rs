@@ -13,6 +13,8 @@
 mod common;
 #[path = "redis_stores/grace_successor.rs"]
 mod grace_successor;
+#[path = "redis_stores/logout_pending.rs"]
+mod logout_pending;
 #[path = "redis_stores/session_listing.rs"]
 mod session_listing;
 

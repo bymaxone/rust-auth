@@ -51,10 +51,10 @@ pub use store::MfaStore;
 pub use store::OAuthStateStore;
 #[doc(inline)]
 pub use store::{
-    BruteForceStore, EmailChangeContext, InvitationStore, OtpPurpose, OtpStore, PasswordResetStore,
-    ResetContext, RotateOutcome, SessionDetail, SessionEntry, SessionKind, SessionRecord,
-    SessionRotation, SessionStore, StoredInvitation, TOKEN_EPOCH_RETENTION_SECS, WsTicketSnapshot,
-    WsTicketStore,
+    BruteForceStore, EmailChangeContext, InvitationStore, LogoutOwner, OtpPurpose, OtpStore,
+    PasswordResetStore, ResetContext, RotateOutcome, SessionDetail, SessionEntry, SessionKind,
+    SessionRecord, SessionRotation, SessionStore, StoredInvitation, TOKEN_EPOCH_RETENTION_SECS,
+    WsTicketSnapshot, WsTicketStore,
 };
 #[doc(inline)]
 pub use user_status_cache::UserStatusCacheStore;

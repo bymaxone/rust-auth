@@ -717,6 +717,11 @@ impl TokenManagerService {
         }
     }
 
+    /// The lifetime of an access token, which bounds how long a pending-logout marker is kept.
+    pub(crate) fn access_ttl(&self) -> Duration {
+        self.access_ttl
+    }
+
     /// Sign a platform access JWT (HS256). The claims carry NO `tenant_id` (the platform
     /// identity domain is never tenant-scoped) and a fresh `jti`.
     ///

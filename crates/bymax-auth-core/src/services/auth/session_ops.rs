@@ -10,8 +10,11 @@ use crate::context::to_safe_user;
 use crate::engine::AuthEngine;
 use crate::services::auth::detached::{run_after_login, run_after_logout, run_update_last_login};
 use crate::services::auth::{map_repository_error, spawn_guarded};
+use crate::services::logout_pending::{
+    ResolvedOwner, marker_ttl_secs, remember_failed_attempt, resolve_owner, settle_completed,
+};
 use crate::services::{is_refresh_token_shape, note_logout_failure, now_unix};
-use crate::traits::{HookContext, HookPlane, SessionKind};
+use crate::traits::{HookContext, HookPlane, LogoutOwner, SessionKind};
 
 /// What a **dashboard** refresh returns: the rotated tokens plus the account behind them.
 ///
@@ -62,61 +65,97 @@ impl AuthEngine {
         // when the token is allowed to be absent.
         let session_hash = is_refresh_token_shape(raw_refresh)
             .then(|| RawRefreshToken::from_raw(raw_refresh.to_owned()).redis_hash());
-        // The record, not just its `user_id`: the session index this logout has to prune is
-        // keyed by the TENANT-SCOPED subject, and the record is the only thing on this path
-        // that carries the tenant — the access token is allowed to be absent. A lookup that
-        // fails ends the logout before any write: the owner is unknown, so the writes that
-        // follow could not be aimed.
-        let owner = match &session_hash {
-            Some(hash) => self
-                .session_store()
-                .find_session(SessionKind::Dashboard, hash)
-                .await
-                .map_err(|error| {
-                    tracing::warn!(%error, "logout: session lookup failed");
-                    crate::services::internal_error("a logout could not read its session")
-                })?,
-            None => None,
-        };
+        let live = self.logout_live_owner(session_hash.as_deref()).await?;
+        let store = self.session_store().as_ref();
+        let hash = session_hash.as_deref();
+        let resolved = resolve_owner(store, SessionKind::Dashboard, hash, live).await?;
         let mut failure = None;
-        let user_id = owner.as_ref().map_or("", |record| record.user_id.as_str());
 
-        if let Ok(claims) = self.tokens().verify_access_ignoring_expiry(access_token) {
-            // Blacklist for the token's residual lifetime only. `try_from` clamps to `0` if
-            // the token lapsed in the window between `verify_access` and this clock read, so a
-            // stale token can never be handed a positive (extended) TTL.
-            let ttl = u64::try_from(claims.exp.saturating_sub(now_unix())).unwrap_or(0);
-            let revoked = self.tokens().revoke_access(&claims.jti, ttl).await;
-            note_logout_failure(
-                &mut failure,
-                "logout: access token revocation failed",
-                revoked,
-            );
-        }
-
+        self.blacklist_logout_access_token(access_token, &mut failure)
+            .await;
         if let Some(session_hash) = &session_hash {
-            self.revoke_logout_session(session_hash, owner.as_ref(), &mut failure)
+            self.revoke_logout_session(session_hash, resolved.owner.as_ref(), &mut failure)
                 .await;
         }
         if let Some(error) = failure {
+            let ttl = marker_ttl_secs(self.tokens().access_ttl());
+            remember_failed_attempt(store, SessionKind::Dashboard, hash, &resolved, ttl).await;
             return Err(error);
         }
+        self.announce_completed_logout(hash, &resolved).await
+    }
 
+    /// The owner the live refresh session names, or `None` when the session is gone.
+    ///
+    /// The record, not just its `user_id`: the session index a logout has to prune is keyed by the
+    /// TENANT-SCOPED subject, and the record is the only thing on this path that carries the
+    /// tenant — the access token is allowed to be absent. A lookup that fails ends the logout
+    /// before any write: the owner is unknown, so the writes that follow could not be aimed.
+    async fn logout_live_owner(
+        &self,
+        session_hash: Option<&str>,
+    ) -> Result<Option<LogoutOwner>, AuthError> {
+        let Some(hash) = session_hash else {
+            return Ok(None);
+        };
+        let found = self
+            .session_store()
+            .find_session(SessionKind::Dashboard, hash)
+            .await
+            .map_err(|error| {
+                tracing::warn!(%error, "logout: session lookup failed");
+                crate::services::internal_error("a logout could not read its session")
+            })?;
+        Ok(found.map(|record| LogoutOwner {
+            user_id: record.user_id,
+            tenant_id: record.tenant_id,
+        }))
+    }
+
+    /// Blacklist the access token's `jti` for its remaining lifetime, when its signature verifies.
+    ///
+    /// Only the residual lifetime: `try_from` clamps to `0` if the token lapsed in the window
+    /// between `verify_access` and this clock read, so a stale token can never be handed a
+    /// positive (extended) TTL. Expiry is waived and the signature is not, since the `jti`
+    /// decides which token gets blacklisted.
+    async fn blacklist_logout_access_token(
+        &self,
+        access_token: &str,
+        failure: &mut Option<AuthError>,
+    ) {
+        if let Ok(claims) = self.tokens().verify_access_ignoring_expiry(access_token) {
+            let ttl = u64::try_from(claims.exp.saturating_sub(now_unix())).unwrap_or(0);
+            let revoked = self.tokens().revoke_access(&claims.jti, ttl).await;
+            note_logout_failure(failure, "logout: access token revocation failed", revoked);
+        }
+    }
+
+    /// Settle a logout whose every write succeeded, and announce it to the host when it is the
+    /// one that owns the announcement.
+    ///
+    /// The hook names the user who was signed out, so it only fires when the session or a
+    /// failed earlier attempt told us who that was. The tenant comes from the same place: a
+    /// repository id is unique only within a tenant, so a hook naming just the id cannot be acted
+    /// on without reaching another tenant's account.
+    async fn announce_completed_logout(
+        &self,
+        session_hash: Option<&str>,
+        resolved: &ResolvedOwner,
+    ) -> Result<(), AuthError> {
+        let store = self.session_store().as_ref();
+        let ttl = marker_ttl_secs(self.tokens().access_ttl());
+        let announce =
+            settle_completed(store, SessionKind::Dashboard, session_hash, resolved, ttl).await?;
+        let user_id = resolved
+            .owner
+            .as_ref()
+            .map_or("", |owner| owner.user_id.as_str());
         tracing::info!(%user_id, "logout: session closed");
-        // The hook names the user who was signed out, so it only fires when the session told
-        // us who that was. A logout for an already-gone session has nobody to name.
-        if !user_id.is_empty() {
-            // The tenant comes from the session record: a repository id is unique only within
-            // a tenant, so a hook naming just the id cannot be acted on without reaching another
-            // tenant's account.
-            let hook_ctx = identity_only_context(
-                user_id,
-                None,
-                owner.as_ref().and_then(|record| record.tenant_id.clone()),
-            );
+        if let (true, Some(owner)) = (announce, &resolved.owner) {
+            let hook_ctx = identity_only_context(&owner.user_id, None, owner.tenant_id.clone());
             spawn_guarded(run_after_logout(
                 self.hooks().clone(),
-                user_id.to_owned(),
+                owner.user_id.clone(),
                 hook_ctx,
             ));
         }
@@ -132,13 +171,13 @@ impl AuthEngine {
     async fn revoke_logout_session(
         &self,
         session_hash: &str,
-        owner: Option<&crate::traits::SessionRecord>,
+        owner: Option<&LogoutOwner>,
         failure: &mut Option<AuthError>,
     ) {
         let subject = self.session_subject(
             SessionKind::Dashboard,
-            owner.and_then(|record| record.tenant_id.as_deref()),
-            owner.map_or("", |record| record.user_id.as_str()),
+            owner.and_then(|owner| owner.tenant_id.as_deref()),
+            owner.map_or("", |owner| owner.user_id.as_str()),
         );
         let revoked = self
             .session_store()
@@ -448,6 +487,7 @@ mod tests {
     use super::*;
     mod logout_failure_tests;
     mod logout_hook_tests;
+    mod logout_pending_tests;
     use crate::services::auth::LoginInput;
     use crate::services::auth::test_support::{Harness, SeedUser, base_config, ctx, harness};
     use crate::traits::{SessionRecord, SessionStore as _, UserRepository as _};

@@ -12,6 +12,7 @@
 //! into the engine's [`bymax_auth_types::AuthError`] at the boundary.
 
 mod brute_force;
+mod logout_pending;
 #[cfg(feature = "mfa")]
 mod mfa;
 #[cfg(feature = "oauth")]

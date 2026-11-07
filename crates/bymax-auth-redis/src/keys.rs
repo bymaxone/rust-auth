@@ -39,6 +39,10 @@ pub enum Prefix {
     Pep,
     /// Dashboard rotation grace pointer (`rp`).
     Rp,
+    /// Dashboard logout-pending owner marker (`lp`), keyed by `sha256(refreshToken)`. Written only
+    /// by a logout attempt that failed a revocation write, so the retry that completes the logout
+    /// can still name its owner after the failed attempt deleted the refresh session.
+    Lp,
     /// Dashboard consumed-token family marker for reuse detection (`cf`).
     Cf,
     /// Dashboard refresh-token family index SET (`fam`). Its members are bare `sha256` hashes,
@@ -92,6 +96,8 @@ pub enum Prefix {
     Prt,
     /// Platform rotation grace pointer (`prp`).
     Prp,
+    /// Platform logout-pending owner marker (`plp`), the platform twin of [`Prefix::Lp`].
+    Plp,
     /// Platform consumed-token family marker for reuse detection (`pcf`).
     Pcf,
     /// Platform refresh-token family index SET (`pfam`). Members are bare `sha256` hashes, as
@@ -128,6 +134,7 @@ impl Prefix {
             Self::Ep => "ep",
             Self::Pep => "pep",
             Self::Rp => "rp",
+            Self::Lp => "lp",
             Self::Cf => "cf",
             Self::Fam => "fam",
             Self::Sess => "sess",
@@ -147,6 +154,7 @@ impl Prefix {
             Self::Uev => "uev",
             Self::Prt => "prt",
             Self::Prp => "prp",
+            Self::Plp => "plp",
             Self::Pcf => "pcf",
             Self::Pfam => "pfam",
             Self::Psess => "psess",
@@ -231,15 +239,12 @@ mod tests {
             .to_owned()
     }
 
-    #[test]
-    fn every_prefix_matches_the_shared_wire_contract() {
-        // The prefix each keyspace writes IS the contract with the sibling implementation. A
-        // rename landing on one side only splits the keyspace: a reset link emailed by one
-        // backend becomes invisible to the other, and a session index written by one is never
-        // swept by the other.
-        for (name, prefix) in [
+    /// Every name `redisKeyPrefixes` carries and the prefix this crate writes for it.
+    fn modelled_prefixes() -> [(&'static str, Prefix); 35] {
+        [
             ("dashboardRefreshSession", Prefix::Rt),
             ("dashboardGracePointer", Prefix::Rp),
+            ("dashboardLogoutPending", Prefix::Lp),
             ("dashboardConsumedFamilyMarker", Prefix::Cf),
             ("dashboardFamilyIndex", Prefix::Fam),
             ("dashboardSessionIndex", Prefix::Sess),
@@ -247,6 +252,7 @@ mod tests {
             ("dashboardTokenEpoch", Prefix::Ep),
             ("platformRefreshSession", Prefix::Prt),
             ("platformGracePointer", Prefix::Prp),
+            ("platformLogoutPending", Prefix::Plp),
             ("platformConsumedFamilyMarker", Prefix::Pcf),
             ("platformFamilyIndex", Prefix::Pfam),
             ("platformSessionIndex", Prefix::Psess),
@@ -255,21 +261,70 @@ mod tests {
             ("accessTokenBlacklist", Prefix::Rv),
             ("failedLoginCounter", Prefix::Lf),
             ("oneTimePassword", Prefix::Otp),
+            ("otpResendCooldown", Prefix::Resend),
             ("passwordResetToken", Prefix::PwReset),
             ("passwordResetVerifiedToken", Prefix::PwVtok),
             ("totpReplayMarker", Prefix::Tu),
+            ("recoveryCodeClaim", Prefix::Rcu),
+            ("recentAuthMarker", Prefix::Ra),
+            ("pendingMfaSetup", Prefix::MfaSetup),
+            ("mfaTempTokenMarker", Prefix::Mfa),
+            ("mfaTransitionLock", Prefix::Mfalock),
             ("oauthState", Prefix::Os),
             ("wsTicket", Prefix::Wst),
             ("invitation", Prefix::Inv),
+            ("invitationIndex", Prefix::Invidx),
+            ("emailChangeToken", Prefix::Ec),
             ("userStatus", Prefix::Us),
             ("userEmailVerified", Prefix::Uev),
-        ] {
+        ]
+    }
+
+    /// The names the `redisKeyPrefixes` section of the shared contract carries.
+    fn contract_prefix_names() -> std::collections::BTreeSet<String> {
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../conformance/wire-contract.json"
+        );
+        let raw = std::fs::read_to_string(path).unwrap_or_default();
+        let root: serde_json::Value = serde_json::from_str(&raw).unwrap_or(serde_json::Value::Null);
+        root["redisKeyPrefixes"]
+            .as_object()
+            .map(|section| {
+                section
+                    .keys()
+                    .filter(|name| !name.starts_with('$'))
+                    .cloned()
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn every_prefix_matches_the_shared_wire_contract() {
+        // The prefix each keyspace writes IS the contract with the sibling implementation. A
+        // rename landing on one side only splits the keyspace: a reset link emailed by one
+        // backend becomes invisible to the other, and a session index written by one is never
+        // swept by the other.
+        for (name, prefix) in modelled_prefixes() {
             assert_eq!(
                 contract_value("redisKeyPrefixes", name),
                 prefix.as_str(),
                 "prefix for {name} drifted from the shared contract"
             );
         }
+    }
+
+    #[test]
+    fn the_contract_and_this_crate_name_the_same_prefixes_in_both_directions() {
+        // A prefix the contract adds must fail the build until it is modelled, and one removed
+        // from the contract until the removal is understood: a hand-written subset would pass
+        // with the omitted keys unimplemented.
+        let modelled: std::collections::BTreeSet<String> = modelled_prefixes()
+            .iter()
+            .map(|(name, _)| (*name).to_owned())
+            .collect();
+        assert_eq!(modelled, contract_prefix_names());
     }
 
     #[test]
