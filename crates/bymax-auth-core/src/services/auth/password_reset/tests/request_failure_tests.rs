@@ -21,19 +21,19 @@ enum Entry {
 
 const ENTRIES: [Entry; 2] = [Entry::Initiate, Entry::Resend];
 
-/// An email provider whose reset sends fail, or never return when `hang_otp` is set, to drive the
+/// An email provider whose reset sends fail, or never return when `hang` is set, to drive the
 /// delivery-failure branches.
 struct DownMailer {
-    hang_otp: bool,
+    hang: bool,
 }
 
 impl DownMailer {
     fn failing() -> Self {
-        Self { hang_otp: false }
+        Self { hang: false }
     }
 
     fn hanging() -> Self {
-        Self { hang_otp: true }
+        Self { hang: true }
     }
 }
 
@@ -46,6 +46,9 @@ impl EmailProvider for DownMailer {
         _token: &str,
         _locale: Option<&str>,
     ) -> Result<(), EmailError> {
+        if self.hang {
+            std::future::pending::<()>().await;
+        }
         Err(EmailError::Delivery("down".into()))
     }
 
@@ -56,7 +59,7 @@ impl EmailProvider for DownMailer {
         _otp: &str,
         _locale: Option<&str>,
     ) -> Result<(), EmailError> {
-        if self.hang_otp {
+        if self.hang {
             std::future::pending::<()>().await;
         }
         Err(EmailError::Delivery("down".into()))
@@ -386,4 +389,23 @@ async fn a_send_that_never_returns_releases_the_cooldown_when_the_ceiling_abando
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
     assert!(released, "still held after the ceiling");
+}
+
+#[tokio::test]
+async fn a_reset_link_send_that_never_returns_is_bounded_and_releases_the_cooldown() {
+    let Some(rig) = rig(ResetMethod::Token, Arc::new(DownMailer::hanging()), false).await else {
+        return;
+    };
+
+    let (outcome, took) = request(&rig, Entry::Initiate, REGISTERED).await;
+
+    // The link is sent inside the request, so the ceiling bounds how long the response waits:
+    // the release has to land well inside the cooldown window or it could delete a later
+    // request's cooldown.
+    assert!(outcome.is_ok(), "{outcome:?}");
+    assert!(took >= FLOOR && took < Duration::from_secs(30), "{took:?}");
+    assert!(
+        !cooldown_held(&rig, REGISTERED),
+        "released before the response"
+    );
 }

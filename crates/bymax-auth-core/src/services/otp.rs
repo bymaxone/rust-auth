@@ -367,6 +367,14 @@ mod tests {
     async fn a_store_that_cannot_release_a_cooldown_leaves_it_to_run_out() {
         // The trait default releases nothing and says so by succeeding.
         let svc = OtpService::new(Arc::new(BareStore), Zeroizing::new(TEST_KEY));
+        // The required methods answer as the double says, so the double itself is exercised.
+        let purpose = OtpPurpose::PasswordReset;
+        assert!(svc.store(purpose, "id", "123456", 60).await.is_ok());
+        assert!(svc.verify(purpose, "id", "123456").await.is_ok());
+        assert!(matches!(
+            svc.try_begin_resend(purpose, "id", 60).await,
+            Ok(true)
+        ));
         assert!(
             svc.release_resend(OtpPurpose::PasswordReset, "id")
                 .await

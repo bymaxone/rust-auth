@@ -18,7 +18,7 @@ use super::password_reset::{RESEND_COOLDOWN_SECS, RESET_TOKEN_BYTES, password_fi
 use crate::config::ResetMethod;
 use crate::engine::AuthEngine;
 use crate::services::auth::detached::run_send_reset_otp_email;
-use crate::services::auth::{map_repository_error, spawn_guarded_or_else};
+use crate::services::auth::{DETACHED_TASK_TIMEOUT, map_repository_error, spawn_guarded_or_else};
 use crate::traits::{OtpPurpose, ResetContext};
 
 impl AuthEngine {
@@ -158,11 +158,16 @@ impl AuthEngine {
         };
         store.put_token(&raw, &context, ttl).await?;
 
-        let sent = self
-            .email_provider()
-            .send_password_reset_token(tenant_id, email, &raw, None)
-            .await;
-        if sent.is_err() {
+        // Bounded by the detached-task ceiling: the send is awaited inside the request, and the
+        // failure path releases the cooldown, which must land well inside the cooldown window or
+        // it could delete the cooldown of a later request.
+        let sent = tokio::time::timeout(
+            DETACHED_TASK_TIMEOUT,
+            self.email_provider()
+                .send_password_reset_token(tenant_id, email, &raw, None),
+        )
+        .await;
+        if !matches!(sent, Ok(Ok(()))) {
             if let Err(error) = store.delete_token(&raw).await {
                 // The rollback is what keeps an undeliverable token from lingering in a Redis
                 // snapshot for its whole TTL; the caller's line reports the delivery failure.
