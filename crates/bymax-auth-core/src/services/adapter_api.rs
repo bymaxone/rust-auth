@@ -83,17 +83,15 @@ impl AuthEngine {
     }
 
     /// As [`AuthEngine::verify_platform_token`], but a refusal is answered the way
-    /// [`AuthEngine::verify_access`] answers it on the platform plane: a validly signed
-    /// **dashboard** token is [`AuthError::PlatformAuthRequired`], so a caller can tell the other
-    /// context's token from a malformed one, and every other refusal (an unreadable, forged,
-    /// expired or revoked token) is the one opaque [`AuthError::TokenInvalid`]. A store failure
-    /// while checking a platform token's revocation keeps its own error; one while explaining a
-    /// dashboard token's refusal is answered as [`AuthError::TokenInvalid`], the token being refused
-    /// either way.
+    /// [`AuthEngine::verify_access`] answers it on the platform plane (its `# Errors` section
+    /// lists which refusal is [`AuthError::PlatformAuthRequired`] and which the opaque
+    /// [`AuthError::TokenInvalid`]). A store failure while checking a platform token's revocation
+    /// keeps its own error; one while explaining a dashboard token's refusal is answered as
+    /// [`AuthError::TokenInvalid`], the token being refused either way.
     ///
     /// # Errors
     ///
-    /// The refusals above, or a store [`AuthError`] when a revocation lookup fails.
+    /// The refusals described above, or a store [`AuthError`] when a revocation lookup fails.
     #[cfg(feature = "platform")]
     pub async fn verify_platform_request_token(
         &self,
