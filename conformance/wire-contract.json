@@ -1014,5 +1014,48 @@
       "fields": ["outcome", "reason", "keyId", "label", "method", "route", "requiredScopes", "ip"]
     },
     "lastUsed": "advisory, coalesced per process and flushed in batches; the store write must be monotonic"
+  },
+  "transportErrors": {
+    "note": [
+      "Requests refused by the HTTP layer before any route handler ran. They answer the library's",
+      "own envelope under `auth.validation`, with the status the transport itself reports, which is",
+      "why this is a table of its own: `errorCatalog.statuses` holds ONE status per code and",
+      "`auth.validation` stays 400 there. The message is fixed per row and never repeats the",
+      "parser's text or any part of the request; `details` is null.",
+      "",
+      "Detection is on the error's stable `type` and its own 4xx `status`, never on message text.",
+      "A malformed JSON body and an undecodable path reach the filter as a bare 400 whose cause is",
+      "gone, so they are recognised by having happened before a route matched."
+    ],
+    "envelope": { "code": "auth.validation", "details": null },
+    "rows": [
+      {
+        "condition": "malformed JSON body (body-parser type entity.parse.failed, or the bare 400 Nest makes of it; a bare string or number included), or an undecodable path, refused before routing",
+        "status": 400,
+        "message": "Malformed request"
+      },
+      {
+        "condition": "body-parser type entity.verify.failed, request.aborted, request.size.invalid or querystring.parse.rangeError",
+        "status": "the error's own 4xx status",
+        "message": "Malformed request"
+      },
+      {
+        "condition": "body-parser type entity.too.large or parameters.too.many",
+        "status": 413,
+        "message": "Request entity too large"
+      },
+      {
+        "condition": "body-parser type charset.unsupported or encoding.unsupported",
+        "status": 415,
+        "message": "Unsupported media type"
+      }
+    ],
+    "contentTypeMismatch": {
+      "condition": "a JSON route called with Content-Type text/plain, or with none",
+      "status": 400,
+      "code": "auth.validation",
+      "message": "Validation failed",
+      "details": "one entry per failed field, each naming the field and a rule message; no entry carries a request value (a field name can be a key the client sent)"
+    }
   }
 }

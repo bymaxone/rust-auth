@@ -3180,6 +3180,35 @@ pub struct RefreshDto {
 The OAuth query DTOs (`OAuthInitiateQuery`, `OAuthCallbackQuery`) are defined in
 §11 alongside the OAuth flow.
 
+#### 8.4.2 Requests the transport refuses
+
+A request the HTTP layer cannot read answers the shared contract's `transportErrors` section:
+`auth.validation` with a **fixed** message per kind, `details: null`, and no part of the request
+(not the body, a key, a header value or the query string). The messages are the contract's
+(`conformance/wire-contract.json`, which this repository holds byte-identical with nest-auth):
+
+| Request | Status | Message |
+| --- | --- | --- |
+| A body that is not JSON, or whose root is not an object or array (a bare string, number or literal, or no body), or a path parameter that does not decode | `400` | `Malformed request` |
+| A body that cannot be read, other than for size | the failure's own `4xx` | `Malformed request` |
+| A body over `max_body_bytes` (declared by `Content-Length` or found while reading) | `413` | `Request entity too large` |
+| A charset other than UTF-8, or a `Content-Encoding` other than `identity` | `415` | `Unsupported media type` |
+
+A body that is JSON but does not fit the route (an unknown key, a value of the wrong type, a
+missing key) answers the ordinary validation envelope (§8.6) with one `body` detail and the fixed
+message `Request body does not match the expected shape.`; a query string that does not fit
+answers a `query` detail with a fixed message in the same way. `garde` rule messages name the
+field and the rule, never the value. A route given `text/plain`, or no `Content-Type`, still
+answers `400` `Validation failed` with a `content-type` detail (the contract's
+`contentTypeMismatch`).
+
+*Where this adapter produces them:* in the body, path and query extractors (`ValidatedJson`,
+`ValidatedQuery` and the crate's raw-body and path extractors) and, for a declared length over the
+limit, in a response mapper just outside the body-limit layer, not in a filter in front of routing
+as nest-auth does; the status, code, message and `details` are what the contract pins, and they
+are the same on every route. The refresh, logout and revoke-all routes read an optional body
+leniently (they ignore the `Content-Type`): refresh answers the envelopes for a body that is not JSON, while logout and revoke-all ignore one; all three answer the envelope for a body over the limit or one that cannot be read.
+
 ---
 
 ### 8.5 Token delivery in handlers

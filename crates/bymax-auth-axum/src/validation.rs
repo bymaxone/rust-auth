@@ -4,7 +4,10 @@
 //! Both deserialize with `serde` (the DTO's `#[serde(deny_unknown_fields)]` is the
 //! `forbidNonWhitelisted` analogue — an unexpected field 400s), then run the DTO's `garde`
 //! validation, mapping any failure to [`AuthError::Validation`] (400) with the per-field
-//! messages under `error.details`. `ValidatedJson<T>` reads the body, so it implements
+//! messages under `error.details`. No message repeats the request: serde's own text names the
+//! offending value, key and type, so a body that parses as JSON but does not fit answers a fixed
+//! message, and a body the adapter cannot read answers the transport envelope
+//! ([`crate::transport`]). `ValidatedJson<T>` reads the body, so it implements
 //! `FromRequest` and must be the **last** handler argument; `ValidatedQuery<T>` reads only
 //! the URI, so it implements `FromRequestParts` and may appear in any position.
 
@@ -12,10 +15,19 @@ use axum::extract::rejection::BytesRejection;
 use axum::extract::{FromRequest, FromRequestParts, Request};
 use bymax_auth_types::{AuthError, FieldError};
 use garde::Validate;
+use http::StatusCode;
 use http::request::Parts;
 use serde::de::DeserializeOwned;
 
 use crate::response::AuthRejection;
+use crate::transport::{BodyRejection, Transport};
+
+/// What a body that is JSON but does not fit the route answers, in place of serde's text (which
+/// repeats the value, the key or the type the client sent).
+const BODY_SHAPE_MESSAGE: &str = "Request body does not match the expected shape.";
+
+/// What a query string that does not fit the route answers, in place of serde's text.
+const QUERY_SHAPE_MESSAGE: &str = "Query string does not match the expected shape.";
 
 /// Body extractor: deserialize JSON into `T` (rejecting unknown fields), run `T`'s `garde`
 /// validation, and yield `ValidatedJson(T)`. Any deserialization or validation failure
@@ -34,7 +46,7 @@ where
     T: DeserializeOwned + Validate<Context = ()>,
     S: Send + Sync,
 {
-    type Rejection = AuthRejection;
+    type Rejection = BodyRejection;
 
     async fn from_request(req: Request, state: &S) -> Result<Self, Self::Rejection> {
         // The `Content-Type` has to say JSON, and that is a CSRF control rather than tidiness.
@@ -47,7 +59,7 @@ where
         //
         // It is also a wire divergence: nest-auth runs behind Nest's `express.json()`, which
         // parses only `application/json`, so the same request 400s there and succeeded here.
-        require_json_content_type(req.headers())?;
+        require_readable_json(req.headers())?;
 
         // Buffer the body ourselves (rather than via axum's `Json`) so a malformed body and
         // an unknown field both render as the canonical `auth.validation` envelope instead
@@ -63,11 +75,11 @@ where
 
 /// Refuse a body whose `Content-Type` is not JSON.
 ///
-/// Accepts `application/json` and the structured-suffix family (`application/…+json`), with any
-/// parameters (`; charset=utf-8`) ignored, and compares case-insensitively — RFC 9110 §8.3 makes
-/// the type and subtype case-insensitive. An ABSENT header is refused too: it is not a shape any
-/// JSON client produces, and admitting it would leave the preflight-free path open to anyone who
-/// simply omits the header.
+/// Accepts `application/json` and the structured-suffix family (`application/…+json`), judging
+/// only the media type (the parameters are [`require_readable_json`]'s), and compares
+/// case-insensitively — RFC 9110 §8.3 makes the type and subtype case-insensitive. An ABSENT
+/// header is refused too: it is not a shape any JSON client produces, and admitting it would
+/// leave the preflight-free path open to anyone who simply omits the header.
 fn require_json_content_type(headers: &http::HeaderMap) -> Result<(), AuthRejection> {
     let is_json = headers
         .get(http::header::CONTENT_TYPE)
@@ -94,6 +106,53 @@ fn require_json_content_type(headers: &http::HeaderMap) -> Result<(), AuthReject
     }
 }
 
+/// Refuse a body the adapter cannot read as JSON: the media type has to be JSON
+/// ([`require_json_content_type`], a `400`), the charset has to be UTF-8 or unstated, and the
+/// content encoding has to be identity or unstated (both a `415`: the adapter does not decode
+/// anything else, so reading the bytes as UTF-8 JSON would be guessing).
+fn require_readable_json(headers: &http::HeaderMap) -> Result<(), BodyRejection> {
+    require_json_content_type(headers)?;
+    if !charset_is_utf8(headers) || !encoding_is_identity(headers) {
+        return Err(Transport::UnsupportedMedia.into());
+    }
+    Ok(())
+}
+
+/// Whether the `Content-Type` states no charset or states UTF-8 (compared case-insensitively,
+/// with the value optionally quoted). Only `utf-8` is accepted: `utf8` and every other label are
+/// charsets the adapter would have to decode.
+fn charset_is_utf8(headers: &http::HeaderMap) -> bool {
+    let Some(value) = headers
+        .get(http::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+    else {
+        return true;
+    };
+    value.split(';').skip(1).all(|parameter| {
+        let Some((name, charset)) = parameter.split_once('=') else {
+            return true;
+        };
+        !name.trim().eq_ignore_ascii_case("charset")
+            || charset
+                .trim()
+                .trim_matches('"')
+                .eq_ignore_ascii_case("utf-8")
+    })
+}
+
+/// Whether every `Content-Encoding` the request names is `identity`.
+fn encoding_is_identity(headers: &http::HeaderMap) -> bool {
+    headers
+        .get_all(http::header::CONTENT_ENCODING)
+        .iter()
+        .all(|value| {
+            value.to_str().is_ok_and(|list| {
+                list.split(',')
+                    .all(|coding| coding.trim().eq_ignore_ascii_case("identity"))
+            })
+        })
+}
+
 /// Parse an OPTIONAL JSON body into `T`, running `T`'s `garde` rules when one is present.
 ///
 /// The MFA-setup routes accept a body that may be absent — an OAuth-only account has no password
@@ -106,21 +165,22 @@ fn require_json_content_type(headers: &http::HeaderMap) -> Result<(), AuthReject
 ///
 /// An empty body still means "nothing supplied"; anything else must be well-formed JSON of the
 /// declared shape, and must say so in its `Content-Type` for the reason
-/// [`require_json_content_type`] gives.
+/// [`require_json_content_type`] gives, in a charset and encoding [`require_readable_json`]
+/// accepts.
 // Only the MFA-setup routes take an optional body, and they compile only with the `mfa`
 // feature — so without it this is dead code, and the workspace builds with `-D warnings`.
 #[cfg(feature = "mfa")]
 pub(crate) fn validate_optional_json<T>(
     headers: &http::HeaderMap,
     bytes: &[u8],
-) -> Result<T, AuthRejection>
+) -> Result<T, BodyRejection>
 where
     T: Default + DeserializeOwned + Validate<Context = ()>,
 {
     if bytes.is_empty() {
         return Ok(T::default());
     }
-    require_json_content_type(headers)?;
+    require_readable_json(headers)?;
     let value = deserialize_json::<T>(bytes)?;
     run_garde(&value)?;
     Ok(value)
@@ -141,27 +201,41 @@ where
     }
 }
 
-/// Deserialize a JSON body into `T`, mapping any serde error (syntax, type, missing or
-/// unknown field) to the single canonical `auth.validation` envelope. The serde message is
-/// surfaced under the synthetic `body` field, never the wire bytes.
-fn deserialize_json<T: DeserializeOwned>(bytes: &[u8]) -> Result<T, AuthRejection> {
-    serde_json::from_slice::<T>(bytes).map_err(|error| {
-        AuthRejection(AuthError::Validation {
+/// Deserialize a JSON body into `T`.
+///
+/// A body that is not a JSON object or array at its root (a bare string, number or literal, or
+/// no body at all), or that does not parse, answers the transport envelope's "Malformed
+/// request": nest-auth's body parser accepts only an object or an array at the root and refuses
+/// the rest the same way. A body that parses but does not fit `T` (an unknown key, a value of
+/// the wrong type, a missing key) answers `auth.validation` with a fixed message under the
+/// synthetic `body` field. serde's own text is never used: it names the offending value, key
+/// and type, which are the client's.
+pub(crate) fn deserialize_json<T: DeserializeOwned>(bytes: &[u8]) -> Result<T, BodyRejection> {
+    let first = bytes
+        .iter()
+        .find(|byte| !matches!(byte, b' ' | b'\t' | b'\n' | b'\r'));
+    if !matches!(first, Some(b'{' | b'[')) {
+        return Err(Transport::Malformed(StatusCode::BAD_REQUEST).into());
+    }
+    serde_json::from_slice::<T>(bytes).map_err(|error| match error.classify() {
+        serde_json::error::Category::Data => BodyRejection::from(AuthError::Validation {
             details: vec![FieldError {
                 field: "body".to_owned(),
-                message: error.to_string(),
+                message: BODY_SHAPE_MESSAGE.to_owned(),
             }],
-        })
+        }),
+        _ => Transport::Malformed(StatusCode::BAD_REQUEST).into(),
     })
 }
 
-/// Deserialize a query string into `T`, mapping any failure to `auth.validation`.
+/// Deserialize a query string into `T`, mapping any failure to `auth.validation` with a fixed
+/// message (serde's text names the offending key and value).
 fn deserialize_query<T: DeserializeOwned>(query: &str) -> Result<T, AuthRejection> {
-    serde_urlencoded::from_str::<T>(query).map_err(|error| {
+    serde_urlencoded::from_str::<T>(query).map_err(|_| {
         AuthRejection(AuthError::Validation {
             details: vec![FieldError {
                 field: "query".to_owned(),
-                message: error.to_string(),
+                message: QUERY_SHAPE_MESSAGE.to_owned(),
             }],
         })
     })
@@ -185,35 +259,177 @@ fn run_garde<T: Validate<Context = ()>>(value: &T) -> Result<(), AuthRejection> 
     }
 }
 
-/// Map axum's body-buffering rejection (e.g. the request-body limit was exceeded) onto the
-/// canonical validation envelope, so even an oversized body fails as `auth.validation`
-/// rather than axum's default response.
-fn map_bytes_rejection(rejection: BytesRejection) -> AuthRejection {
-    AuthRejection(AuthError::Validation {
-        details: vec![FieldError {
-            field: "body".to_owned(),
-            message: rejection.body_text(),
-        }],
-    })
+/// Map axum's body-buffering rejection onto the transport envelope: a body over the limit is
+/// the `413` kind, and any other failure to read the body keeps the `4xx` axum reports for it.
+/// axum's own text is never used, so the library's envelope answers instead of a plain-text
+/// default.
+pub(crate) fn map_bytes_rejection(rejection: BytesRejection) -> BodyRejection {
+    Transport::from_body_status(rejection.status()).into()
+}
+
+/// A path parameter, for the routes that read one. It differs from axum's own `Path` only in how
+/// it fails: a parameter that cannot be decoded (invalid UTF-8 after percent-decoding) answers
+/// the transport envelope's "Malformed request", not axum's plain-text "Invalid URL: ..." text.
+#[cfg(any(feature = "sessions", feature = "oauth"))]
+pub(crate) struct PathParam<T>(pub(crate) T);
+
+#[cfg(any(feature = "sessions", feature = "oauth"))]
+impl<T, S> FromRequestParts<S> for PathParam<T>
+where
+    T: DeserializeOwned + Send,
+    S: Send + Sync,
+{
+    type Rejection = BodyRejection;
+
+    async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
+        axum::extract::Path::<T>::from_request_parts(parts, state)
+            .await
+            .map(|axum::extract::Path(value)| Self(value))
+            .map_err(|rejection| match rejection.status() {
+                status if status.is_client_error() => Transport::Malformed(status).into(),
+                // The route declares a parameter the router did not capture: the adapter's own
+                // fault, not the client's, so it must not read as a malformed request.
+                _ => BodyRejection::from(AuthError::Internal(Box::new(std::io::Error::other(
+                    "a route's path parameter was not captured",
+                )))),
+            })
+    }
+}
+
+/// The raw request body, for the routes that read an optional one themselves
+/// (`parse_optional_refresh_body`, [`validate_optional_json`]). It differs from axum's own
+/// `Bytes` only in how it fails: a body over the limit or one that cannot be read answers the
+/// transport envelope, not a plain-text default.
+pub(crate) struct RequestBytes(pub(crate) axum::body::Bytes);
+
+impl<S> FromRequest<S> for RequestBytes
+where
+    S: Send + Sync,
+{
+    type Rejection = BodyRejection;
+
+    async fn from_request(req: Request, state: &S) -> Result<Self, Self::Rejection> {
+        axum::body::Bytes::from_request(req, state)
+            .await
+            .map(Self)
+            .map_err(map_bytes_rejection)
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::dto::{LoginDto, OAuthCallbackQuery, OAuthInitiateQuery};
+    use axum::response::IntoResponse;
 
     #[test]
-    fn deserialize_json_maps_serde_errors_to_validation() {
-        // A malformed body is `auth.validation` with the `body` field detail.
-        let err = deserialize_json::<LoginDto>(b"{ not json").err();
-        assert!(matches!(
-            err,
-            Some(AuthRejection(AuthError::Validation { details })) if details[0].field == "body"
-        ));
+    fn deserialize_json_separates_unreadable_bodies_from_ones_of_the_wrong_shape() {
+        // A body that is not JSON, or not an object at its root, is "Malformed request".
+        for body in [
+            &b"{ not json"[..],
+            b"\"abc\"",
+            b"42",
+            b"true",
+            b"null",
+            b"",
+            b"   ",
+            b"{",
+        ] {
+            let err = deserialize_json::<LoginDto>(body).err();
+            assert!(
+                matches!(
+                    err.map(|e| e.into_response().status()),
+                    Some(StatusCode::BAD_REQUEST)
+                ),
+                "{body:?}"
+            );
+        }
+        // Valid JSON of the wrong shape is `auth.validation` with a fixed `body` detail.
+        let wrong = deserialize_json::<LoginDto>(br#"{"email":5}"#).err();
+        let body = wrong.map(|e| e.into_response());
+        assert!(body.is_some_and(|r| r.status() == StatusCode::BAD_REQUEST));
         // A well-formed body deserializes.
         let ok =
             deserialize_json::<LoginDto>(br#"{"email":"a@e.com","password":"p","tenantId":"t1"}"#);
         assert!(ok.is_ok());
+    }
+
+    fn header_map(pairs: &[(&'static str, &'static [u8])]) -> http::HeaderMap {
+        let mut map = http::HeaderMap::new();
+        for (name, value) in pairs {
+            if let Ok(value) = http::HeaderValue::from_bytes(value) {
+                map.append(http::HeaderName::from_static(name), value);
+            }
+        }
+        map
+    }
+
+    #[test]
+    fn only_utf8_or_an_unstated_charset_is_readable() {
+        for readable in [
+            &b"application/json"[..],
+            b"application/json; charset=utf-8",
+            b"application/json; charset=UTF-8",
+            b"application/json;charset=\"utf-8\"",
+            b"application/json; boundary=x; charset=utf-8",
+            // A parameter without a value names no charset.
+            b"application/json; flag",
+        ] {
+            let label = String::from_utf8_lossy(readable);
+            assert!(
+                charset_is_utf8(&header_map(&[("content-type", readable)])),
+                "{label}"
+            );
+        }
+        for unreadable in [
+            &b"application/json; charset=nope"[..],
+            b"application/json; charset=utf8",
+            b"application/json; charset = UTF-16",
+            b"application/json; charset=\"latin1\"",
+        ] {
+            let label = String::from_utf8_lossy(unreadable);
+            assert!(
+                !charset_is_utf8(&header_map(&[("content-type", unreadable)])),
+                "{label}"
+            );
+        }
+        // No `Content-Type` at all states no charset.
+        assert!(charset_is_utf8(&http::HeaderMap::new()));
+    }
+
+    #[test]
+    fn only_the_identity_encoding_is_readable() {
+        assert!(encoding_is_identity(&http::HeaderMap::new()));
+        for readable in [&b"identity"[..], b"Identity", b"identity, identity"] {
+            assert!(encoding_is_identity(&header_map(&[(
+                "content-encoding",
+                readable
+            )])));
+        }
+        for unreadable in [&b"gzip"[..], b"identity, gzip", b"br", b"\xFF"] {
+            assert!(!encoding_is_identity(&header_map(&[(
+                "content-encoding",
+                unreadable
+            )])));
+        }
+        // Every `Content-Encoding` header counts, not only the first.
+        assert!(!encoding_is_identity(&header_map(&[
+            ("content-encoding", b"identity"),
+            ("content-encoding", b"gzip"),
+        ])));
+    }
+
+    #[cfg(any(feature = "sessions", feature = "oauth"))]
+    #[tokio::test]
+    async fn a_route_whose_path_parameter_was_not_captured_is_the_adapters_fault() {
+        // A request that no route matched carries no captured parameters: asking for one is the
+        // adapter's mistake and must not read as a bad request.
+        let (mut parts, _body) = Request::new(axum::body::Body::empty()).into_parts();
+        let rejection = PathParam::<String>::from_request_parts(&mut parts, &())
+            .await
+            .err();
+        let status = rejection.map(|rejection| rejection.into_response().status());
+        assert_eq!(status, Some(StatusCode::INTERNAL_SERVER_ERROR));
     }
 
     #[test]

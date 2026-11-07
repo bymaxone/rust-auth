@@ -69,6 +69,11 @@ pub(crate) fn apply_middleware(
         ))
         .layer(CookieManagerLayer::new())
         .layer(RequestBodyLimitLayer::new(max_body_bytes))
+        // The limit layer refuses a declared length over the limit with a plain-text `413`,
+        // before any extractor runs: give it the library's envelope like every other refusal.
+        .layer(axum::middleware::map_response(
+            crate::transport::envelope_for_layer_payload_too_large,
+        ))
         .layer(sensitive)
         .layer(sensitive_out)
         // Every response of every route this router serves is stamped `Cache-Control:

@@ -31,7 +31,6 @@ use std::net::SocketAddr;
 use axum::extract::{ConnectInfo, FromRef, FromRequestParts};
 use bymax_auth_core::config::TokenDelivery;
 use bymax_auth_core::context::RequestContext;
-use bymax_auth_types::{AuthError, FieldError};
 use http::HeaderName;
 use http::header;
 use http::request::Parts;
@@ -41,6 +40,7 @@ use crate::client_ip::ResolvedClientIp;
 use crate::dto::RefreshDto;
 use crate::extractors::source_access_token;
 use crate::state::AuthState;
+use crate::transport::BodyRejection;
 
 /// The set of request headers that must never enter a `RequestContext`'s sanitized map.
 /// Lowercased to match the normalized header keys. This is the single source of truth for
@@ -210,20 +210,16 @@ pub(crate) fn source_refresh_token(
 
 /// Parse an optional refresh body shared by the dashboard and platform refresh handlers: an
 /// empty body yields a default [`RefreshDto`] (no body-supplied token, the cookie-mode case);
-/// a present body must deserialize as a valid `RefreshDto` (unknown keys are ignored). On a
-/// malformed body it returns an `auth.validation` error whose `body` detail surfaces the
-/// serde parse message — a body-shape diagnostic that leaks no secret. Both refresh paths use
-/// this one helper so the parsing rule and the error envelope stay identical.
-pub(crate) fn parse_optional_refresh_body(bytes: &[u8]) -> Result<RefreshDto, AuthError> {
+/// a present body must deserialize as a valid `RefreshDto` (unknown keys are ignored). A body
+/// that is not a JSON object or array, or does not parse, answers "Malformed request"; one that
+/// parses but whose token is not a string answers `auth.validation` with a fixed message. Both
+/// come from [`crate::validation::deserialize_json`], so neither repeats the request, and both
+/// refresh paths share one parsing rule and one envelope.
+pub(crate) fn parse_optional_refresh_body(bytes: &[u8]) -> Result<RefreshDto, BodyRejection> {
     if bytes.is_empty() {
         return Ok(RefreshDto::default());
     }
-    serde_json::from_slice::<RefreshDto>(bytes).map_err(|error| AuthError::Validation {
-        details: vec![FieldError {
-            field: "body".to_owned(),
-            message: error.to_string(),
-        }],
-    })
+    crate::validation::deserialize_json::<RefreshDto>(bytes)
 }
 
 /// A handler extractor that resolves an owned [`RequestContext`] from the request parts
@@ -347,7 +343,8 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use http::Request;
+    use axum::response::IntoResponse;
+    use http::{Request, StatusCode};
     use tower_cookies::{Cookie, Cookies};
 
     fn parts_with(headers: &[(&'static str, &str)]) -> Parts {
@@ -518,10 +515,20 @@ mod tests {
             parse_optional_refresh_body(br#"{"refreshToken":"r1","extra":true}"#),
             Ok(dto) if dto.refresh_token.as_deref() == Some("r1")
         ));
-        assert!(matches!(
-            parse_optional_refresh_body(b"{ not json"),
-            Err(AuthError::Validation { details }) if details[0].field == "body"
-        ));
+        // A body that is not JSON answers the transport envelope, never serde's text.
+        assert_eq!(
+            parse_optional_refresh_body(b"{ not json")
+                .err()
+                .map(|rejection| rejection.into_response().status()),
+            Some(StatusCode::BAD_REQUEST)
+        );
+        // A token of the wrong type is a validation error with a fixed message.
+        assert_eq!(
+            parse_optional_refresh_body(br#"{"refreshToken":5}"#)
+                .err()
+                .map(|rejection| rejection.into_response().status()),
+            Some(StatusCode::BAD_REQUEST)
+        );
     }
 
     #[test]
