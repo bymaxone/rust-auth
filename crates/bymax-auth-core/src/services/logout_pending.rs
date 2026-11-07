@@ -110,8 +110,8 @@ pub(crate) async fn remember_failed_attempt(
 ///
 /// A claim that cannot be made answers an error, so the client retries: announcing without
 /// the claim could announce twice. The same holds for a stale marker that cannot be removed
-/// and cannot be shown absent; the live owner is then recorded under `ttl_secs` before the
-/// error, so the retry can still announce.
+/// and cannot be shown absent; the live owner is then recorded under `ttl_secs`, best effort
+/// like every marker write, before the error, so the retry can still announce.
 pub(crate) async fn settle_completed(
     store: &dyn SessionStore,
     kind: SessionKind,
@@ -145,7 +145,8 @@ pub(crate) async fn settle_completed(
 /// logout again, so the logout is announced only when a second read shows no marker is left.
 /// Otherwise it answers an error: the session is already gone, and the retry settles it from
 /// the marker, announcing once. When the second read fails too, whether a marker is left is
-/// unknown, so the owner is recorded again before the error; a retry then has one to claim.
+/// unknown, so the owner is recorded again, best effort, before the error; a retry then has
+/// one to claim unless that write fails too.
 async fn confirm_no_stale_marker(
     store: &dyn SessionStore,
     kind: SessionKind,
