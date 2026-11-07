@@ -284,10 +284,11 @@ export function createClientRefreshHandler(
  * and resolve `200`.
  *
  * The cookies are cleared only when the backend either revoked the session or refused the
- * request (a status below 500, which leaves no session of this caller to keep). A backend that
- * answered `5xx` is answered with that same status, and one that could not be reached with
- * `502`; neither clears a cookie, because the session may still be alive and the browser would
- * otherwise report a sign-out that did not happen.
+ * request for a reason that leaves no session of this caller to keep (a status below 500, other
+ * than a throttled call). A backend that answered `5xx` is answered with that same status, one
+ * that throttled the call with `429` and its `Retry-After`, and one that could not be reached
+ * with `502`; none of them clears a cookie, because the session may still be alive and the
+ * browser would otherwise report a sign-out that did not happen.
  *
  * @param config - The handler configuration; see {@link AuthHandlerConfig}.
  * @returns A Next route handler.
@@ -299,9 +300,22 @@ export function createLogoutHandler(
   return async (request) => {
     if (isCrossSiteRequest(request)) return crossSiteRefused();
 
-    const backendResponse = await callBackend(resolved, AUTH_ROUTES.LOGOUT, request);
-    if (!backendResponse) return logoutFailed(502);
-    if (backendResponse.status >= 500) return logoutFailed(backendResponse.status);
+    const backendResponse = await callBackend(
+      resolved,
+      AUTH_ROUTES.LOGOUT,
+      request,
+    );
+    if (!backendResponse) return logoutFailed(502, AUTH_ERROR_CODES.INTERNAL);
+    if (backendResponse.status === THROTTLED_STATUS) {
+      return logoutFailed(
+        THROTTLED_STATUS,
+        AUTH_ERROR_CODES.TOO_MANY_REQUESTS,
+        backendResponse.headers.get("retry-after"),
+      );
+    }
+    if (backendResponse.status >= 500) {
+      return logoutFailed(backendResponse.status, AUTH_ERROR_CODES.INTERNAL);
+    }
 
     const response = NextResponse.json({ ok: true }, { status: 200 });
     clearSessionCookies(response, resolved.cookieDomain);
@@ -309,16 +323,23 @@ export function createLogoutHandler(
   };
 }
 
-/** The answer to a logout the backend did not complete: its status, the error envelope, no cookie. */
-function logoutFailed(status: number): NextResponse {
+/** The status the backend answers a throttled call with, before the logout handler runs. */
+const THROTTLED_STATUS = 429;
+
+/**
+ * The answer to a logout the backend did not complete: its status, the error envelope with the
+ * code that names why, `Retry-After` when the backend sent one, and no cookie.
+ */
+function logoutFailed(
+  status: number,
+  code: string,
+  retryAfter: string | null = null,
+): NextResponse {
+  const headers = new Headers({ "cache-control": NO_STORE_CACHE_CONTROL });
+  if (retryAfter !== null) headers.set("retry-after", retryAfter);
   return NextResponse.json(
-    {
-      error: {
-        code: AUTH_ERROR_CODES.INTERNAL,
-        message: "Logout could not be completed.",
-      },
-    },
-    { status, headers: { "cache-control": NO_STORE_CACHE_CONTROL } },
+    { error: { code, message: "Logout could not be completed." } },
+    { status, headers },
   );
 }
 

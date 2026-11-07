@@ -149,7 +149,7 @@ describe("createLogoutHandler", () => {
   // The browser is signed out locally only when the backend either revoked the session or had
   // nothing to revoke. A refused request (a 4xx) is the second case: there is no session left to
   // keep, so the cookies go.
-  it.each([200, 204, 401, 404])(
+  it.each([200, 204, 401, 404, 499])(
     "clears the session cookies when the backend answers %i",
     async (status) => {
       vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(null, { status })));
@@ -183,6 +183,22 @@ describe("createLogoutHandler", () => {
       });
     },
   );
+
+  // The route is throttled in front of the logout handler, so a throttled call never revoked
+  // anything: the session is alive and the cookies are the only way left to end it.
+  it("answers 429 with its Retry-After and clears nothing when the backend throttled the call", async () => {
+    const throttled = new Response("slow down", { status: 429, headers: { "retry-after": "42" } });
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(throttled));
+
+    const response = await createLogoutHandler({ backendUrl: BACKEND })(requestWith());
+
+    expect(response.status).toBe(429);
+    expect(response.headers.get("retry-after")).toBe("42");
+    expect(setCookies(response)).toEqual([]);
+    await expect(response.json()).resolves.toEqual({
+      error: { code: "auth.too_many_requests", message: "Logout could not be completed." },
+    });
+  });
 
   // The same holds when the backend cannot be reached at all: nothing was revoked.
   it("answers 502 and clears nothing when the backend is unreachable", async () => {
