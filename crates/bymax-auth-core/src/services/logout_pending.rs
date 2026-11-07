@@ -110,12 +110,14 @@ pub(crate) async fn remember_failed_attempt(
 ///
 /// A claim that cannot be made answers an error, so the client retries: announcing without
 /// the claim could announce twice. The same holds for a stale marker that cannot be removed
-/// and cannot be shown absent.
+/// and cannot be shown absent; the live owner is then recorded under `ttl_secs` before the
+/// error, so the retry can still announce.
 pub(crate) async fn settle_completed(
     store: &dyn SessionStore,
     kind: SessionKind,
     session_hash: Option<&str>,
     resolved: &ResolvedOwner,
+    ttl_secs: u64,
 ) -> Result<bool, AuthError> {
     let announce = resolved.owner.is_some();
     let Some(hash) = session_hash.filter(|_| announce) else {
@@ -133,27 +135,35 @@ pub(crate) async fn settle_completed(
     }
     match store.claim_logout_pending(kind, hash).await {
         Ok(_) => Ok(true),
-        Err(error) => confirm_no_stale_marker(store, kind, hash, &error).await,
+        Err(error) => {
+            confirm_no_stale_marker(store, kind, hash, &error, (resolved, ttl_secs)).await
+        }
     }
 }
 
 /// A stale marker whose removal failed would let a later retry claim it and announce the same
 /// logout again, so the logout is announced only when a second read shows no marker is left.
 /// Otherwise it answers an error: the session is already gone, and the retry settles it from
-/// the marker, announcing once.
+/// the marker, announcing once. When the second read fails too, whether a marker is left is
+/// unknown, so the owner is recorded again before the error; a retry then has one to claim.
 async fn confirm_no_stale_marker(
     store: &dyn SessionStore,
     kind: SessionKind,
     hash: &str,
     removal: &AuthError,
+    (resolved, ttl_secs): (&ResolvedOwner, u64),
 ) -> Result<bool, AuthError> {
     let cause = crate::services::error_chain(removal);
     tracing::warn!(%cause, "logout: a stale pending owner could not be removed");
+    let refused =
+        || crate::services::internal_error("a logout could not remove its stale pending owner");
     match store.read_logout_pending(kind, hash).await {
         Ok(None) => Ok(true),
-        Ok(Some(_)) | Err(_) => Err(crate::services::internal_error(
-            "a logout could not remove its stale pending owner",
-        )),
+        Ok(Some(_)) => Err(refused()),
+        Err(_) => {
+            remember_failed_attempt(store, kind, Some(hash), resolved, ttl_secs).await;
+            Err(refused())
+        }
     }
 }
 

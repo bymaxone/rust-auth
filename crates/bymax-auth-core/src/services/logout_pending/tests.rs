@@ -154,21 +154,21 @@ async fn a_marker_owner_announces_only_for_the_call_that_removed_the_marker() {
     };
     let kind = SessionKind::Dashboard;
     assert_eq!(
-        settle_completed(&store, kind, Some(HASH), &marked)
+        settle_completed(&store, kind, Some(HASH), &marked, 900)
             .await
             .ok(),
         Some(true)
     );
     // A racing retry that read the marker before it was removed finds it gone.
     assert_eq!(
-        settle_completed(&store, kind, Some(HASH), &marked)
+        settle_completed(&store, kind, Some(HASH), &marked, 900)
             .await
             .ok(),
         Some(false)
     );
     mark(&store, 900).await;
     store.fail_logout_pending_ops(0, 1);
-    let unclaimable = settle_completed(&store, kind, Some(HASH), &marked).await;
+    let unclaimable = settle_completed(&store, kind, Some(HASH), &marked, 900).await;
     assert!(matches!(unclaimable, Err(AuthError::Internal(_))));
 }
 
@@ -178,7 +178,9 @@ async fn a_live_owner_announces_regardless_and_clears_a_stale_marker() {
     mark(&store, 900).await;
     let live = ResolvedOwner::live(Some(owner()));
     assert_eq!(
-        settle_completed(&store, kind, Some(HASH), &live).await.ok(),
+        settle_completed(&store, kind, Some(HASH), &live, 900)
+            .await
+            .ok(),
         Some(true)
     );
     assert_eq!(store.peek_logout_pending(kind, HASH), None);
@@ -191,27 +193,35 @@ async fn a_stale_marker_that_cannot_be_removed_is_announced_only_when_shown_abse
     // No marker was there to remove, so a failed removal leaves nothing a retry could claim.
     store.fail_logout_pending_ops(0, 1);
     assert_eq!(
-        settle_completed(&store, kind, Some(HASH), &live).await.ok(),
+        settle_completed(&store, kind, Some(HASH), &live, 900)
+            .await
+            .ok(),
         Some(true)
     );
     // A marker that is still there would be claimed, and announced again, by a later retry.
     mark(&store, 900).await;
     store.fail_logout_pending_ops(0, 1);
-    let stale = settle_completed(&store, kind, Some(HASH), &live).await;
+    let stale = settle_completed(&store, kind, Some(HASH), &live, 900).await;
     assert!(matches!(stale, Err(AuthError::Internal(_))));
     assert!(store.peek_logout_pending(kind, HASH).is_some());
-    // Neither the removal nor the second read answered: the marker cannot be shown absent.
+    // Neither the removal nor the second read answered: the marker cannot be shown absent, so the
+    // owner is recorded again for the retry to claim.
+    assert_eq!(
+        store.claim_logout_pending(kind, HASH).await.ok(),
+        Some(true)
+    );
     store.fail_logout_pending_ops(0, 2);
-    let unknown = settle_completed(&store, kind, Some(HASH), &live).await;
+    let unknown = settle_completed(&store, kind, Some(HASH), &live, 450).await;
     assert!(matches!(unknown, Err(AuthError::Internal(_))));
+    assert_eq!(store.peek_logout_pending(kind, HASH), Some((owner(), 450)));
 }
 
 #[tokio::test]
 async fn a_logout_with_no_owner_announces_nothing() {
     let store = store();
     let nobody = ResolvedOwner::live(None);
-    let settled = settle_completed(&store, SessionKind::Dashboard, Some(HASH), &nobody).await;
+    let settled = settle_completed(&store, SessionKind::Dashboard, Some(HASH), &nobody, 900).await;
     assert_eq!(settled.ok(), Some(false));
-    let no_hash = settle_completed(&store, SessionKind::Dashboard, None, &nobody).await;
+    let no_hash = settle_completed(&store, SessionKind::Dashboard, None, &nobody, 900).await;
     assert_eq!(no_hash.ok(), Some(false));
 }

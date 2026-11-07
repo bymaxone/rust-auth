@@ -165,3 +165,28 @@ async fn a_stale_marker_that_survives_a_completed_platform_logout_is_announced_b
     );
     assert_eq!(announced(&spy).await, 1);
 }
+
+#[tokio::test]
+async fn an_unconfirmable_removal_keeps_the_admin_for_the_retry_to_announce() {
+    let Some((h, auth, spy)) = watched().await else { return };
+    let Some(svc) = h.engine.platform_auth() else { return };
+    // No marker exists. The delete succeeds, then the marker removal and its confirming read fail.
+    h.stores.fail_logout_pending_ops(0, 2);
+    assert!(
+        svc.logout(&auth.access_token, &auth.refresh_token)
+            .await
+            .is_err()
+    );
+    assert_eq!(announced(&spy).await, 0);
+    assert!(
+        svc.logout(&auth.access_token, &auth.refresh_token)
+            .await
+            .is_ok()
+    );
+    assert!(
+        svc.logout(&auth.access_token, &auth.refresh_token)
+            .await
+            .is_ok()
+    );
+    assert_eq!(announced(&spy).await, 1);
+}

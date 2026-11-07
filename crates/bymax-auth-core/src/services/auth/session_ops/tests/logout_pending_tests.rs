@@ -221,3 +221,30 @@ async fn a_stale_marker_that_survives_a_completed_logout_is_announced_by_the_ret
     );
     assert_eq!(announced(&spy).await, 1);
 }
+
+#[tokio::test]
+async fn an_unconfirmable_removal_keeps_the_owner_for_the_retry_to_announce() {
+    let Some((h, auth, spy)) = watched().await else { return };
+    // No marker exists. The delete succeeds, then the marker removal and its confirming read fail.
+    h.stores.fail_logout_pending_ops(0, 2);
+    assert!(
+        h.engine
+            .logout(&auth.access_token, &auth.refresh_token)
+            .await
+            .is_err()
+    );
+    assert_eq!(announced(&spy).await, 0);
+    assert!(
+        h.engine
+            .logout(&auth.access_token, &auth.refresh_token)
+            .await
+            .is_ok()
+    );
+    assert!(
+        h.engine
+            .logout(&auth.access_token, &auth.refresh_token)
+            .await
+            .is_ok()
+    );
+    assert_eq!(announced(&spy).await, 1);
+}

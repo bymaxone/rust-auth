@@ -331,7 +331,8 @@ impl PlatformAuthService {
         // signed out, or expired. There is no identity to hand the hook, and logout stays a
         // success either way: it is idempotent, and answering an error would tell a caller
         // whether a token was live.
-        let announce = settle_completed(store, SessionKind::Platform, hash, &resolved).await?;
+        let ttl = marker_ttl_secs(self.tokens.access_ttl());
+        let announce = settle_completed(store, SessionKind::Platform, hash, &resolved, ttl).await?;
         if let (true, Some(owner)) = (announce, &resolved.owner) {
             let hook_ctx = identity_only_context(&owner.user_id);
             spawn_guarded(run_after_platform_logout(

@@ -143,8 +143,9 @@ impl AuthEngine {
         resolved: &ResolvedOwner,
     ) -> Result<(), AuthError> {
         let store = self.session_store().as_ref();
+        let ttl = marker_ttl_secs(self.tokens().access_ttl());
         let announce =
-            settle_completed(store, SessionKind::Dashboard, session_hash, resolved).await?;
+            settle_completed(store, SessionKind::Dashboard, session_hash, resolved, ttl).await?;
         let user_id = resolved
             .owner
             .as_ref()
