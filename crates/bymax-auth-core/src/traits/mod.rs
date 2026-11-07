@@ -10,6 +10,7 @@ pub mod default_email;
 pub mod email;
 pub mod hooks;
 pub mod http;
+mod logout_owner;
 pub mod oauth;
 pub mod rate_limit;
 pub mod repository;
