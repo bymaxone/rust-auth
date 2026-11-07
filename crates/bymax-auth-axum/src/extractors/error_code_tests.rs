@@ -114,14 +114,18 @@ async fn self_or_admin_code(s: &Scaffold, route: &str, uri: &str, token: &str) -
         request.headers_mut().insert(http::header::COOKIE, value);
     }
     let response = app.oneshot(request).await.ok()?;
-    if response.status().is_success() {
+    let status = response.status();
+    if status.is_success() {
         return None;
     }
     let bytes = axum::body::to_bytes(response.into_body(), 4096)
         .await
         .ok()?;
-    let body: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
-    body["error"]["code"].as_str().map(str::to_owned)
+    let code = serde_json::from_slice::<serde_json::Value>(&bytes)
+        .ok()
+        .and_then(|body| body["error"]["code"].as_str().map(str::to_owned));
+    // A refusal that carries no code (a 404 from the router) must not read as an admission.
+    Some(code.unwrap_or_else(|| format!("status {status}")))
 }
 
 #[tokio::test]
@@ -142,14 +146,9 @@ async fn self_or_admin_answers_insufficient_role_when_it_refuses() {
     assert_eq!(own, None);
 }
 
-#[tokio::test]
-async fn a_valid_mfa_challenge_token_on_a_platform_route_is_token_invalid_unlike_nest() {
-    // A known difference, recorded in the specification: nest-auth's platform guard answers
-    // `auth.platform_auth_required` for any validly signed token whose type is not `platform`,
-    // the MFA-challenge token included. Here only a dashboard token is told apart; closing this
-    // takes a change to the core platform explanation, and this case then flips.
-    let Some(s) = scaffold(TokenDelivery::Cookie) else { return };
-    let challenge = bymax_auth_types::MfaTempClaims {
+/// An MFA-challenge token for a platform administrator, valid until `exp`.
+fn challenge_claims(exp: i64) -> bymax_auth_types::MfaTempClaims {
+    bymax_auth_types::MfaTempClaims {
         sub: "admin-1".to_owned(),
         jti: "6f1d5c2e-8f3a-4b1e-9a57-0c1d2e3f4a5b".to_owned(),
         token_type: bymax_auth_types::MfaTempType::MfaChallenge,
@@ -157,15 +156,209 @@ async fn a_valid_mfa_challenge_token_on_a_platform_route_is_token_invalid_unlike
         tenant_id: None,
         epoch: 0,
         iat: 1_700_000_000,
-        exp: 4_700_000_000,
+        exp,
         iss: None,
         aud: None,
+    }
+}
+
+#[tokio::test]
+async fn a_validly_signed_mfa_challenge_token_on_a_platform_route_is_platform_auth_required() {
+    // The same rule as a dashboard token: signed by this deployment but not a platform token.
+    let Some(s) = scaffold(TokenDelivery::Cookie) else { return };
+
+    let token = mint_token(&challenge_claims(4_700_000_000));
+    let refusal = platform_refusal(&s, parts_with_bearer(&token)).await;
+
+    assert!(
+        matches!(refusal, Some(AuthError::PlatformAuthRequired)),
+        "{refusal:?}"
+    );
+}
+
+#[tokio::test]
+async fn an_unsigned_or_expired_mfa_challenge_token_on_a_platform_route_is_token_invalid() {
+    let Some(s) = scaffold(TokenDelivery::Cookie) else { return };
+
+    let foreign_key = bymax_auth_jwt::HsKey::from_bytes(b"ffffffffffffffffffffffffffffffff");
+    let forged =
+        bymax_auth_jwt::sign(&challenge_claims(4_700_000_000), &foreign_key).unwrap_or_default();
+    let forged = platform_refusal(&s, parts_with_bearer(&forged)).await;
+    assert!(
+        matches!(forged, Some(AuthError::TokenInvalid)),
+        "{forged:?}"
+    );
+
+    let expired = mint_token(&challenge_claims(1_700_000_100));
+    let expired = platform_refusal(&s, parts_with_bearer(&expired)).await;
+    assert!(
+        matches!(expired, Some(AuthError::TokenInvalid)),
+        "{expired:?}"
+    );
+}
+
+#[tokio::test]
+async fn self_or_admin_reads_the_id_whatever_else_the_route_captures() {
+    let Some(s) = scaffold(TokenDelivery::Cookie) else { return };
+    let user_id = seed(&s.users, "multi@e.com", "USER").await;
+    let token = dashboard_token(&s, &user_id).await;
+    let route = "/tenants/{tenant}/users/{user_id}";
+
+    // The owner is admitted and someone else's id is refused, with a second capture present.
+    let own = self_or_admin_code(&s, route, &format!("/tenants/t1/users/{user_id}"), &token).await;
+    assert_eq!(own, None);
+    let other = self_or_admin_code(&s, route, "/tenants/t1/users/other-id", &token).await;
+    assert_eq!(other.as_deref(), Some("auth.insufficient_role"));
+
+    // A capture that cannot be decoded is a refusal like a missing one, never an admission.
+    let undecodable = self_or_admin_code(&s, route, "/tenants/t1/users/%FF", &token).await;
+    assert_eq!(undecodable.as_deref(), Some("auth.insufficient_role"));
+
+    // A route that names its capture `id` is read the same way; `user_id` wins when both exist.
+    let by_id = format!("/sessions/t1/{user_id}");
+    assert_eq!(
+        self_or_admin_code(&s, "/sessions/{tenant}/{id}", &by_id, &token).await,
+        None
+    );
+    let both = format!("/pairs/{user_id}/other-id");
+    assert_eq!(
+        self_or_admin_code(&s, "/pairs/{user_id}/{id}", &both, &token).await,
+        None
+    );
+}
+
+#[tokio::test]
+async fn a_signed_token_of_another_kind_with_a_malformed_identity_is_token_invalid() {
+    // A malformed token is malformed on either plane, so the claim shape is judged before the
+    // kind: a validly signed challenge or dashboard token whose `jti` is not a UUID v4 is the
+    // opaque `token_invalid`, not `platform_auth_required`.
+    let Some(s) = scaffold(TokenDelivery::Cookie) else { return };
+
+    let mut challenge = challenge_claims(4_700_000_000);
+    challenge.jti = "not-a-uuid".to_owned();
+    let challenge = platform_refusal(&s, parts_with_bearer(&mint_token(&challenge))).await;
+    assert!(
+        matches!(challenge, Some(AuthError::TokenInvalid)),
+        "{challenge:?}"
+    );
+
+    let mut dashboard = bymax_auth_types::DashboardClaims {
+        iss: None,
+        aud: None,
+        sub: "someone".to_owned(),
+        jti: "not-a-uuid".to_owned(),
+        tenant_id: "t1".to_owned(),
+        role: "USER".to_owned(),
+        token_type: bymax_auth_types::DashboardType::Dashboard,
+        status: "ACTIVE".to_owned(),
+        mfa_enabled: false,
+        mfa_verified: false,
+        iat: 1_700_000_000,
+        exp: 4_700_000_000,
+        epoch: 0,
     };
-
-    let refusal = platform_refusal(&s, parts_with_bearer(&mint_token(&challenge))).await;
-
+    let refusal = platform_refusal(&s, parts_with_bearer(&mint_token(&dashboard))).await;
     assert!(
         matches!(refusal, Some(AuthError::TokenInvalid)),
         "{refusal:?}"
+    );
+
+    // The same token with a well-formed jti is the other kind.
+    dashboard.jti = "6f1d5c2e-8f3a-4b1e-9a57-0c1d2e3f4a5b".to_owned();
+    let other_kind = platform_refusal(&s, parts_with_bearer(&mint_token(&dashboard))).await;
+    assert!(
+        matches!(other_kind, Some(AuthError::PlatformAuthRequired)),
+        "{other_kind:?}"
+    );
+}
+
+#[tokio::test]
+async fn self_or_admin_binds_a_tenant_the_route_names_to_the_callers_tenant() {
+    let Some(s) = scaffold(TokenDelivery::Cookie) else { return };
+    let user_id = seed(&s.users, "bound@e.com", "USER").await;
+    let user = dashboard_token(&s, &user_id).await;
+    let admin_id = seed(&s.users, "bound-admin@e.com", "ADMIN").await;
+    let admin = dashboard_token(&s, &admin_id).await;
+
+    // Every spelling of a tenant capture is held to the tenant the token carries ("t1").
+    for (route, own, foreign) in [
+        (
+            "/tenants/{tenant}/users/{user_id}",
+            format!("/tenants/t1/users/{user_id}"),
+            format!("/tenants/t2/users/{user_id}"),
+        ),
+        (
+            "/a/{tenant_id}/u/{user_id}",
+            format!("/a/t1/u/{user_id}"),
+            format!("/a/t2/u/{user_id}"),
+        ),
+        (
+            "/b/{tenantId}/u/{id}",
+            format!("/b/t1/u/{user_id}"),
+            format!("/b/t2/u/{user_id}"),
+        ),
+    ] {
+        let same = self_or_admin_code(&s, route, &own, &user).await;
+        assert_eq!(same, None, "{route}: the same tenant is admitted");
+        let other = self_or_admin_code(&s, route, &foreign, &user).await;
+        assert_eq!(
+            other.as_deref(),
+            Some("auth.insufficient_role"),
+            "{route}: self"
+        );
+        // An admin of this tenant is no admin of another one.
+        let admin_other = self_or_admin_code(&s, route, &foreign, &admin).await;
+        assert_eq!(
+            admin_other.as_deref(),
+            Some("auth.insufficient_role"),
+            "{route}: admin"
+        );
+        let admin_same = self_or_admin_code(&s, route, &own, &admin).await;
+        assert_eq!(admin_same, None, "{route}: admin of the same tenant");
+    }
+}
+
+#[tokio::test]
+async fn self_or_admin_refuses_disagreeing_empty_and_non_scalar_captures() {
+    let Some(s) = scaffold(TokenDelivery::Cookie) else { return };
+    let user_id = seed(&s.users, "edge@e.com", "USER").await;
+    let user = dashboard_token(&s, &user_id).await;
+    let admin_id = seed(&s.users, "edge-admin@e.com", "ADMIN").await;
+    let admin = dashboard_token(&s, &admin_id).await;
+    let refused = Some("auth.insufficient_role".to_owned());
+
+    // Several tenant captures must all be the caller's tenant: one that disagrees refuses, and
+    // so does a tenant that is not one segment ("t1/x" can never equal a tenant id).
+    let two = "/x/{tenant}/{tenant_id}/{user_id}";
+    let agree = format!("/x/t1/t1/{user_id}");
+    assert_eq!(self_or_admin_code(&s, two, &agree, &user).await, None);
+    let disagree = format!("/x/t1/t2/{user_id}");
+    assert_eq!(self_or_admin_code(&s, two, &disagree, &user).await, refused);
+    assert_eq!(
+        self_or_admin_code(&s, two, &disagree, &admin).await,
+        refused
+    );
+    let wild = "/w/{user_id}/{*tenant}";
+    let nested = format!("/w/{user_id}/t1/extra");
+    assert_eq!(self_or_admin_code(&s, wild, &nested, &user).await, refused);
+
+    // An id that is not one segment is refused even for an admin: the override must not turn
+    // a path nobody resolved to a user into an admission.
+    let id_wild = "/i/{*user_id}";
+    assert_eq!(
+        self_or_admin_code(&s, id_wild, "/i/a/b", &admin).await,
+        refused
+    );
+    assert_eq!(
+        self_or_admin_code(&s, id_wild, "/i/%2F", &admin).await,
+        refused
+    );
+    let own = format!("/i/{user_id}");
+    assert_eq!(self_or_admin_code(&s, id_wild, &own, &user).await, None);
+    // An empty id never matches a route capture, and a route that does not match is no admission.
+    let empty = self_or_admin_code(&s, id_wild, "/i/", &admin).await;
+    assert!(
+        empty.is_some(),
+        "an empty id is not an admission: {empty:?}"
     );
 }

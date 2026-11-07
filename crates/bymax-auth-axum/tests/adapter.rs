@@ -54,6 +54,9 @@ mod email_normalization;
 #[path = "adapter/password_reset_request_body.rs"]
 mod password_reset_request_body;
 
+#[path = "adapter/platform_guard_outage.rs"]
+mod platform_guard_outage;
+
 #[path = "adapter/refresh_body_shape.rs"]
 mod refresh_body_shape;
 

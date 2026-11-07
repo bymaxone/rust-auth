@@ -1,7 +1,8 @@
 //! [`SelfOrAdmin<A>`] (§8.3.7): the `SelfOrAdminGuard` equivalent — a path-parameter-aware
-//! extractor that admits the request when the `{user_id}` path segment equals the caller's
-//! `sub`, or the caller's role satisfies the configured admin role.
+//! extractor that admits the request when the id it reads from the path (see [`SelfOrAdmin`])
+//! equals the caller's `sub`, or the caller's role satisfies the configured admin role.
 
+use std::collections::HashMap;
 use std::marker::PhantomData;
 
 use axum::extract::{FromRef, FromRequestParts, Path};
@@ -12,6 +13,10 @@ use crate::extractors::verified_dashboard_claims;
 use crate::response::AuthRejection;
 use crate::state::AuthState;
 
+/// The route captures read as the tenant a request targets, in the spellings the library's own
+/// routes and a host's are likely to use.
+const TENANT_CAPTURES: [&str; 3] = ["tenant_id", "tenantId", "tenant"];
+
 /// Marker for the admin dashboard role that bypasses the self-only check; `NAME` matches a
 /// key in the configured dashboard role hierarchy.
 pub trait AdminRole {
@@ -19,12 +24,18 @@ pub trait AdminRole {
     const NAME: &'static str;
 }
 
-/// Admits the request when the `{user_id}` path segment equals the caller's `sub`
+/// Admits the request when the `{user_id}` path capture (else `{id}`) equals the caller's `sub`
 /// (the primary IDOR defense) **or** the caller's role satisfies `A` (the admin override).
-/// Carries the verified claims. Rejects with `insufficient_role` (403) when neither holds and
-/// when the path segment is absent (a route misuse — `SelfOrAdmin` must be mounted on a
-/// `/{user_id}` path with no other capture: a route with several captures cannot be read as
-/// one id, so every caller is refused there).
+/// Carries the verified claims. The id must be one non-empty segment. Other captures on the
+/// route are ignored, with one exception: a `{tenant_id}`, `{tenantId}` or `{tenant}` capture
+/// must equal the caller's tenant, checked first, because an id means nothing outside its tenant
+/// and an admin of one tenant is no admin of another. Rejects with `insufficient_role` (403)
+/// when neither holds, when a named tenant differs, and when the id is missing, empty or not one
+/// segment (a route misuse).
+///
+/// Only those three names are read as a tenant. A route that names the tenant any other way
+/// (`{org}`, `{tenant-id}`) is not bound by this guard and the handler has to bind it, and a
+/// capture name reused at two nesting levels is seen once, with the innermost value.
 #[derive(Debug, Clone)]
 pub struct SelfOrAdmin<A: AdminRole>(pub DashboardClaims, pub PhantomData<A>);
 
@@ -40,13 +51,31 @@ where
         let auth_state = AuthState::from_ref(state);
         let claims = verified_dashboard_claims(parts, &auth_state).await?;
 
-        // The `{user_id}` capture must be present; its absence is a routing error, refused as a
-        // role failure so it never silently admits.
-        let Path(user_id) = Path::<String>::from_request_parts(parts, state)
+        // Every capture of the route, whatever its number; a route misuse that yields none is
+        // refused as a role failure so it never silently admits.
+        let Path(captures) = Path::<HashMap<String, String>>::from_request_parts(parts, state)
             .await
             .map_err(|_| AuthRejection(AuthError::InsufficientRole))?;
+        // The tenant comes first, so a cross-tenant request never reaches the role branch. A
+        // tenant the route names is the tenant the caller must belong to: an id is unique only
+        // within a tenant, so neither the owner check nor the admin override may reach across.
+        // Every spelling present is held to it, so captures that disagree are refused.
+        if TENANT_CAPTURES
+            .iter()
+            .filter_map(|name| captures.get(*name))
+            .any(|tenant| *tenant != claims.tenant_id)
+        {
+            return Err(AuthRejection(AuthError::InsufficientRole));
+        }
+        // The id is one non-empty segment: an empty or multi-segment value (a wildcard
+        // capture, or an encoded `/`) names no user and is refused even for an admin.
+        let user_id = captures
+            .get("user_id")
+            .or_else(|| captures.get("id"))
+            .filter(|id| !id.is_empty() && !id.contains('/'))
+            .ok_or(AuthRejection(AuthError::InsufficientRole))?;
 
-        let is_self = user_id == claims.sub;
+        let is_self = *user_id == claims.sub;
         let is_admin = auth_state.engine().role_satisfies(&claims.role, A::NAME);
         if is_self || is_admin {
             Ok(Self(claims, PhantomData))

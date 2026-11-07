@@ -74,9 +74,8 @@ impl AuthEngine {
     ///
     /// # Errors
     ///
-    /// As [`AuthEngine::verify_access_token`], but a dashboard token presented here yields
-    /// [`AuthError::TokenInvalid`]; [`AuthEngine::verify_platform_request_token`] answers it as
-    /// `PlatformAuthRequired`.
+    /// As [`AuthEngine::verify_access_token`], but a token of another kind presented here yields
+    /// [`AuthError::TokenInvalid`]; [`AuthEngine::verify_platform_request_token`] explains it.
     #[cfg(feature = "platform")]
     pub async fn verify_platform_token(&self, token: &str) -> Result<PlatformClaims, AuthError> {
         self.tokens().verify_platform_access(token).await
@@ -86,8 +85,8 @@ impl AuthEngine {
     /// [`AuthEngine::verify_access`] answers it on the platform plane (its `# Errors` section
     /// lists which refusal is [`AuthError::PlatformAuthRequired`] and which the opaque
     /// [`AuthError::TokenInvalid`]). A store failure while checking a platform token's revocation
-    /// keeps its own error; one while explaining a dashboard token's refusal is answered as
-    /// [`AuthError::TokenInvalid`], the token being refused either way.
+    /// keeps its own error; the kind of any other token is decided without a store read, so an
+    /// outage cannot change it.
     ///
     /// # Errors
     ///
@@ -99,7 +98,7 @@ impl AuthEngine {
     ) -> Result<PlatformClaims, AuthError> {
         match self.verify_platform_token(token).await {
             Ok(claims) => Ok(claims),
-            Err(error) => Err(self.explain_platform_refusal(token, error).await),
+            Err(error) => Err(self.explain_platform_refusal(token, error)),
         }
     }
 

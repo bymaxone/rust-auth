@@ -76,6 +76,15 @@ pub trait UserRepository: Send + Sync {
     ///
     /// The read side was scoped first and on its own it is not enough: scoping the lookup
     /// guarantees the flow REASONS about the right account, not that it WRITES to it.
+    ///
+    /// **Bound the time this call can take.** Every MFA transition holds a per-account lock of
+    /// 10 seconds (`mfalock`, pinned by the shared wire contract) around its read and this
+    /// write, and the repository offers no compare-and-set. An `update_mfa` that stalls past
+    /// the lock's life lets a second transition take the lock, read the record the first one
+    /// has not yet replaced and write over it, or be written over by the stalled call when it
+    /// finally lands, which reorders the two writes: a spent recovery code can come back, or a
+    /// disabled factor can be re-enabled. Keep the call, including the connection acquisition,
+    /// well under that bound, and fail it rather than let it hang.
     async fn update_mfa(
         &self,
         id: &str,
@@ -190,6 +199,10 @@ pub trait PlatformUserRepository: Send + Sync {
 
     /// Apply a new TOTP MFA configuration. The caller has already encrypted the secret
     /// (AES-256-GCM) and keyed-hashed the recovery codes (HMAC-SHA-256).
+    ///
+    /// **Bound the time this call can take**, for the reason given on
+    /// [`UserRepository::update_mfa`]: the 10-second per-account transition lock around it is
+    /// the only thing ordering two MFA writes.
     async fn update_mfa(
         &self,
         id: &str,

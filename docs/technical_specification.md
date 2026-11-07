@@ -2810,7 +2810,7 @@ where
 | `PlatformRolesGuard` + `@PlatformRoles(...)` | `RequirePlatformRole<R>`    | role hierarchy check against platform hierarchy                            |
 | `UserStatusGuard`                | `UserStatus` (or folded into `AuthUser`)| Redis-cached blocked-status check                                          |
 | `MfaRequiredGuard`               | `MfaSatisfied`                          | require `mfa_verified` claim when account has MFA                          |
-| `SelfOrAdminGuard`               | `SelfOrAdmin` (path-param aware)        | allow when `path.user_id == claims.sub` or role ≥ admin                    |
+| `SelfOrAdminGuard`               | `SelfOrAdmin` (path-param aware)        | allow when the path id (8.3.7) `== claims.sub` or role ≥ admin                    |
 | `@CurrentUser()`                 | `CurrentUser` (param)                   | the verified claims as a handler parameter                                 |
 | `@CurrentUser('sub')`            | `CurrentUser` + field access            | read a single claim off `CurrentUser`                                      |
 | `@Public()`                      | **absence** of `AuthUser` in the handler| public = the handler simply does not request an auth extractor            |
@@ -2889,10 +2889,8 @@ take just `RequireRole<Admin>` and read `.0`.
 #### 8.3.5 `PlatformUser`
 
 The platform twin of `AuthUser`: validates the platform access JWT, asserting
-`claims.token_type == "platform"`. A validly signed dashboard token presented here is
-rejected with `AuthError::PlatformAuthRequired` (401); every other refusal (no token, an
-unreadable, forged, expired or revoked token) is the opaque `AuthError::TokenInvalid` (401),
-exactly as `JwtPlatformGuard` answers. A store failure during the revocation check is a 500.
+`claims.token_type == "platform"`. What each refusal answers is recorded once, in the guard
+error-code table of 8.3.7.
 The secret is shared with the dashboard guard; isolation is enforced by the
 `token_type` claim, not by a separate key.
 
@@ -2950,36 +2948,41 @@ pub struct RequirePlatformRole<R: PlatformRole>(pub PlatformClaims, PhantomData<
   the plane the caller **names** (`AuthPlane`, never inferred), both revocation channels, claim
   shape (`jti` a UUID v4, `sub` and tenant 1..256), the tenant binding (dashboard, when
   `VerifyAccessOptions::request` is given), the account's current status and, last, the
-  second-factor policy. Status is judged before MFA. Every token refusal is `token_invalid`; a
-  dashboard token on the platform plane is `platform_auth_required`. `require_mfa` and
+  second-factor policy. Status is judged before MFA. Every token refusal is `token_invalid`, except the
+  other-kind answer on the platform plane that the guard error-code table below records. `require_mfa` and
   `check_status` default to on and are waived only by a caller that has established the same
   fact elsewhere. The platform arm re-reads the administrator through
   `AuthEngine::assert_platform_active`, which refuses (never skips) when no platform
   repository is registered.
 
 - **`SelfOrAdmin`** — the `SelfOrAdminGuard`. A path-parameter-aware extractor:
-  resolves `AuthUser` and the `{user_id}` path segment, and admits the request
-  when `path.user_id == claims.sub` **or** the user's role satisfies the
+  resolves `AuthUser` and the path id described below, and admits the request
+  when that id `== claims.sub` **or** the user's role satisfies the
   configured admin role. The id-equality check is the primary IDOR defense;
-  consumers using non-UUID ids supply their own id parsing. When it refuses, and when the
-  route has no `{user_id}` segment, it answers `auth.insufficient_role` (403), as the nest-auth
-  guard does. The extractor reads exactly one path capture, so a route with several is refused for
-  every caller.
+  consumers using non-UUID ids supply their own id parsing. The id is the
+  `user_id` capture, else the `id` one, whatever else the route captures, and must be one
+  non-empty segment. A `tenant_id`, `tenantId` or `tenant` capture must equal the caller's
+  tenant, and is checked first, before either branch: an id is unique only within its tenant, so
+  neither the owner check nor the admin override may reach across tenants. Several tenant
+  captures must all agree with it. Whatever it refuses (a foreign tenant, an empty or
+  multi-segment id, a route that captures no id), it answers `auth.insufficient_role` (403).
+  Only those names are read as a tenant: a route that names it another way, or reuses a
+  capture name at two nesting levels (the guard sees the innermost value), is bound by the
+  handler, not by this guard.
 
   **Guard error codes against nest-auth** (the wire contract pins the vocabulary, not which
   guard answers which code, so this table is the record):
 
   | Cause | Code both libraries answer |
   | --- | --- |
-  | `SelfOrAdmin`: neither the owner nor an admin; or no id segment on the route | `auth.insufficient_role` (403) |
+  | `SelfOrAdmin`: neither the owner nor an admin; a tenant capture that is not the caller's; or an id that is missing, empty or multi-segment | `auth.insufficient_role` (403) |
   | Platform guard: no token, or an unreadable, forged, expired or revoked token | `auth.token_invalid` (401) |
-  | Platform guard: a validly signed dashboard token | `auth.platform_auth_required` (401) |
-  | Platform guard: a store failure during the revocation check | `auth.internal` (500) |
+  | Platform guard: a validly signed, well-formed dashboard or MFA-challenge token (revoked or not: its kind is decided before any store read) | `auth.platform_auth_required` (401) |
+  | Platform guard: a store failure during a platform token's revocation check | `auth.internal` (500) |
 
-  Not mirrored, and why: nest's `SelfOrAdminGuard` also refuses an upper-case 64-hex route
-  value with `auth.token_invalid`, because its routes carry session hashes in the same
-  parameter; `SelfOrAdmin` here only ever compares a user id. A validly signed MFA-challenge token on a platform route is
-  `auth.platform_auth_required` in nest and `auth.token_invalid` here.
+  Not mirrored, and why: nest's `SelfOrAdminGuard` also refuses an upper-case 64-hex route value
+  with `auth.token_invalid`, because it is also mounted where the parameter is a session hash;
+  this guard only ever compares a user id.
 
 These compose: a route equivalent to nest-auth's
 `@UseGuards(JwtAuthGuard, UserStatusGuard, MfaRequiredGuard) @Roles('OWNER')`
@@ -4736,7 +4739,7 @@ pub enum LoginResultMfa {
 }
 ```
 
-Each `*Type` is a unit-variant enum with a fixed `#[serde(rename_all)]` mapping so a wrong discriminator fails deserialization rather than silently mis-typing a token. The guard additionally asserts the runtime `token_type` matches the endpoint class (dashboard guard rejects a platform token with `AuthError::PlatformAuthRequired` and vice-versa; MFA-temp tokens are accepted only by the challenge endpoint). `JwtClaims` is a sealed trait implemented by the three structs that exposes `exp()`/`iat()` to the temporal-claims validation.
+Each `*Type` is a unit-variant enum with a fixed `#[serde(rename_all)]` mapping so a wrong discriminator fails deserialization rather than silently mis-typing a token. The guard additionally asserts the runtime `token_type` matches the endpoint class (a platform token on a dashboard route is `AuthError::TokenInvalid`; what a platform route answers for a token of another kind is the table in 8.3.7; MFA-temp tokens are accepted only by the challenge endpoint). `JwtClaims` is a sealed trait implemented by the three structs that exposes `exp()`/`iat()` to the temporal-claims validation.
 
 **Not a JWT claim:** `emailVerified` is deliberately absent from the access token (matching nest-auth). Verification state is read from the user record (`/me` or the registration response), so flipping a user to verified does not require re-issuing tokens.
 
@@ -5092,7 +5095,7 @@ The statuses below are **wire** statuses — what a caller actually receives. An
 
 | Code | HTTP | When raised | Client message |
 | --- | --- | --- | --- |
-| `auth.platform_auth_required` | 401 | Platform endpoint reached with a dashboard JWT (`token_type` mismatch). | Platform authentication required |
+| `auth.platform_auth_required` | 401 | Platform endpoint reached with a token of another kind (`token_type` mismatch; see 8.3.7). | Platform authentication required |
 
 #### Service API keys
 

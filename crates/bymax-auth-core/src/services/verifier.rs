@@ -152,8 +152,9 @@ impl AuthEngine {
     ///
     /// [`AuthError::TokenInvalid`] when the signature, expiry, claim shape, token type,
     /// revocation state or tenant binding refuses the token (one opaque answer);
-    /// [`AuthError::PlatformAuthRequired`] when a dashboard token is presented on the platform
-    /// plane; the matching `Account*`/[`AuthError::EmailNotVerified`] code when the account is no
+    /// [`AuthError::PlatformAuthRequired`] when a validly signed, well-formed dashboard or
+    /// MFA-challenge token is presented on the platform plane (revoked or not: its kind is decided
+    /// before any store read); the matching `Account*`/[`AuthError::EmailNotVerified`] code when the account is no
     /// longer usable; [`AuthError::MfaRequired`] when the account is usable, has MFA enabled and
     /// this token predates its challenge; a store [`AuthError`] when a lookup fails.
     pub async fn verify_access(
@@ -205,7 +206,7 @@ impl AuthEngine {
     ) -> Result<PlatformClaims, AuthError> {
         let claims = match self.verify_platform_token(token).await {
             Ok(claims) => claims,
-            Err(error) => return Err(self.explain_platform_refusal(token, error).await),
+            Err(error) => return Err(self.explain_platform_refusal(token, error)),
         };
         if !is_uuid_v4(&claims.jti) || !is_bounded_id(&claims.sub) {
             return Err(AuthError::TokenInvalid);
@@ -219,23 +220,32 @@ impl AuthEngine {
         Ok(claims)
     }
 
-    /// Why a platform-plane verification failed: a validly signed **dashboard** token answers
+    /// Why a platform-plane verification failed: a validly signed token of **another kind** this
+    /// deployment issues (a dashboard access token, an MFA-challenge token) answers
     /// `PlatformAuthRequired`, so a caller can tell "the other context's token" from "a malformed
     /// one"; everything else collapses to the opaque answer.
+    ///
+    /// The kind is decided on the signature alone, before any store read: a revoked dashboard
+    /// token is still the other context's token, and an outage of the revocation store changes
+    /// nothing about which kind a token is. A store failure on the platform token itself is not
+    /// explained away: it keeps its own error.
     #[cfg(feature = "platform")]
-    pub(crate) async fn explain_platform_refusal(
-        &self,
-        token: &str,
-        error: AuthError,
-    ) -> AuthError {
+    pub(crate) fn explain_platform_refusal(&self, token: &str, error: AuthError) -> AuthError {
         if !matches!(error, AuthError::TokenInvalid) {
             return collapse(error);
         }
-        match self.verify_access_token(token).await {
-            // A malformed token is malformed on either plane, so shape is judged before the type.
-            Ok(claims) if dashboard_shape_ok(&claims) => AuthError::PlatformAuthRequired,
-            Err(AuthError::TokenRevoked) => AuthError::PlatformAuthRequired,
-            _ => AuthError::TokenInvalid,
+        let tokens = self.tokens();
+        // A malformed token is malformed on either plane, so shape is judged before the type.
+        let other_kind = match tokens.signed_dashboard_claims(token) {
+            Some(claims) => dashboard_shape_ok(&claims),
+            None => tokens
+                .signed_mfa_challenge_claims(token)
+                .is_some_and(|claims| is_uuid_v4(&claims.jti) && is_bounded_id(&claims.sub)),
+        };
+        if other_kind {
+            AuthError::PlatformAuthRequired
+        } else {
+            AuthError::TokenInvalid
         }
     }
 

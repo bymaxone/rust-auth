@@ -15,9 +15,9 @@ use crate::state::AuthState;
 /// `parts.extensions`. The token is sourced from the `Authorization: Bearer` header only —
 /// never a cookie, and never a query string, since platform sessions carry no cookie at all.
 ///
-/// A validly signed dashboard token presented here is `PlatformAuthRequired`; every other
-/// refusal, an absent token included, is the one opaque `TokenInvalid`, and a store failure
-/// during the revocation check keeps its own error so an outage surfaces as a 500.
+/// What each refusal answers is recorded once, in the guard error-code table of the
+/// specification (section 8.3.7); a store failure during a platform token's revocation check
+/// keeps its own error so an outage surfaces as a 500.
 async fn verified_platform_claims(
     parts: &mut Parts,
     state: &AuthState,
@@ -31,9 +31,9 @@ async fn verified_platform_claims(
     Ok(claims)
 }
 
-/// Verified platform access-token claims (`type == platform`, no `tenantId`). A dashboard
-/// token presented here rejects with `platform_auth_required` (401), mirroring
-/// `JwtPlatformGuard`; isolation is enforced by the `type` claim, not a separate key.
+/// Verified platform access-token claims (`type == platform`, no `tenantId`). What each refusal
+/// answers is recorded once, in the guard error-code table of the specification (section 8.3.7);
+/// isolation is enforced by the `type` claim, not a separate key.
 #[derive(Debug, Clone)]
 pub struct PlatformUser(pub PlatformClaims);
 
