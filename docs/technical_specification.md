@@ -2889,10 +2889,11 @@ take just `RequireRole<Admin>` and read `.0`.
 #### 8.3.5 `PlatformUser`
 
 The platform twin of `AuthUser`: validates the platform access JWT, asserting
-`claims.token_type == "platform"`. A validly signed dashboard token presented here is
-rejected with `AuthError::PlatformAuthRequired` (401); every other refusal (no token, an
-unreadable, forged, expired or revoked token) is the opaque `AuthError::TokenInvalid` (401),
-exactly as `JwtPlatformGuard` answers. A store failure during the revocation check is a 500.
+`claims.token_type == "platform"`. A validly signed dashboard or MFA-challenge token presented
+here is rejected with `AuthError::PlatformAuthRequired` (401), decided from its signature
+before any store read; every other refusal (no token, an unreadable, forged or expired token,
+a revoked platform token) is the opaque `AuthError::TokenInvalid` (401), exactly as
+`JwtPlatformGuard` answers. A store failure during a platform token's revocation check is a 500.
 The secret is shared with the dashboard guard; isolation is enforced by the
 `token_type` claim, not by a separate key.
 
@@ -2950,8 +2951,9 @@ pub struct RequirePlatformRole<R: PlatformRole>(pub PlatformClaims, PhantomData<
   the plane the caller **names** (`AuthPlane`, never inferred), both revocation channels, claim
   shape (`jti` a UUID v4, `sub` and tenant 1..256), the tenant binding (dashboard, when
   `VerifyAccessOptions::request` is given), the account's current status and, last, the
-  second-factor policy. Status is judged before MFA. Every token refusal is `token_invalid`; a
-  dashboard token on the platform plane is `platform_auth_required`. `require_mfa` and
+  second-factor policy. Status is judged before MFA. Every token refusal is `token_invalid`, except that a
+  validly signed, well-formed dashboard or MFA-challenge token on the platform plane is
+  `platform_auth_required`. `require_mfa` and
   `check_status` default to on and are waived only by a caller that has established the same
   fact elsewhere. The platform arm re-reads the administrator through
   `AuthEngine::assert_platform_active`, which refuses (never skips) when no platform
@@ -5090,7 +5092,7 @@ The statuses below are **wire** statuses — what a caller actually receives. An
 
 | Code | HTTP | When raised | Client message |
 | --- | --- | --- | --- |
-| `auth.platform_auth_required` | 401 | Platform endpoint reached with a dashboard JWT (`token_type` mismatch). | Platform authentication required |
+| `auth.platform_auth_required` | 401 | Platform endpoint reached with a dashboard or MFA-challenge JWT (`token_type` mismatch). | Platform authentication required |
 
 #### Service API keys
 
