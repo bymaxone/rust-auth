@@ -182,12 +182,28 @@ async fn a_live_owner_announces_regardless_and_clears_a_stale_marker() {
         Some(true)
     );
     assert_eq!(store.peek_logout_pending(kind, HASH), None);
-    // A stale marker that cannot be removed does not stop the announcement.
+}
+
+#[tokio::test]
+async fn a_stale_marker_that_cannot_be_removed_is_announced_only_when_shown_absent() {
+    let (store, kind) = (store(), SessionKind::Dashboard);
+    let live = ResolvedOwner::live(Some(owner()));
+    // No marker was there to remove, so a failed removal leaves nothing a retry could claim.
     store.fail_logout_pending_ops(0, 1);
     assert_eq!(
         settle_completed(&store, kind, Some(HASH), &live).await.ok(),
         Some(true)
     );
+    // A marker that is still there would be claimed, and announced again, by a later retry.
+    mark(&store, 900).await;
+    store.fail_logout_pending_ops(0, 1);
+    let stale = settle_completed(&store, kind, Some(HASH), &live).await;
+    assert!(matches!(stale, Err(AuthError::Internal(_))));
+    assert!(store.peek_logout_pending(kind, HASH).is_some());
+    // Neither the removal nor the second read answered: the marker cannot be shown absent.
+    store.fail_logout_pending_ops(0, 2);
+    let unknown = settle_completed(&store, kind, Some(HASH), &live).await;
+    assert!(matches!(unknown, Err(AuthError::Internal(_))));
 }
 
 #[tokio::test]

@@ -68,7 +68,6 @@ impl SessionDetailValue {
 pub(super) struct KindPrefixes {
     pub(super) rt: Prefix,
     pub(super) rp: Prefix,
-    lp: Prefix,
     cf: Prefix,
     fam: Prefix,
     pub(super) sess: Prefix,
@@ -117,7 +116,6 @@ pub(super) fn kind_prefixes(kind: SessionKind) -> KindPrefixes {
         SessionKind::Dashboard => KindPrefixes {
             rt: Prefix::Rt,
             rp: Prefix::Rp,
-            lp: Prefix::Lp,
             cf: Prefix::Cf,
             fam: Prefix::Fam,
             sess: Prefix::Sess,
@@ -126,7 +124,6 @@ pub(super) fn kind_prefixes(kind: SessionKind) -> KindPrefixes {
         SessionKind::Platform => KindPrefixes {
             rt: Prefix::Prt,
             rp: Prefix::Prp,
-            lp: Prefix::Plp,
             cf: Prefix::Pcf,
             fam: Prefix::Pfam,
             sess: Prefix::Psess,
@@ -541,55 +538,6 @@ impl RedisStores {
         Ok(())
     }
 
-    /// Record whom a failed logout was ending: `SET lp:{hash} {json} EX ttl` (`plp:` on the platform
-    /// plane). The stored form is `{"userId":..,"tenantId":..}` with `tenantId` omitted when the
-    /// session record carried none, byte-identical to what nest-auth writes.
-    async fn put_logout_pending_inner(
-        &self,
-        kind: SessionKind,
-        session_hash: &str,
-        owner: &LogoutOwner,
-        ttl_secs: u64,
-    ) -> Result<(), RedisStoreError> {
-        let key = self.keys().key(kind_prefixes(kind).lp, session_hash);
-        let value = serde_json::to_string(owner)?;
-        let mut conn = self.connection().await?;
-        redis::cmd("SET")
-            .arg(&key)
-            .arg(value)
-            .arg("EX")
-            .arg(ttl_secs.max(1))
-            .query_async::<()>(&mut conn)
-            .await?;
-        Ok(())
-    }
-
-    /// Read the owner a failed logout recorded: one `GET`, leaving the marker in place. A value
-    /// that does not decode is no owner: a hint that cannot be read names nobody.
-    async fn read_logout_pending_inner(
-        &self,
-        kind: SessionKind,
-        session_hash: &str,
-    ) -> Result<Option<LogoutOwner>, RedisStoreError> {
-        let key = self.keys().key(kind_prefixes(kind).lp, session_hash);
-        let mut conn = self.connection().await?;
-        let raw: Option<String> = redis::cmd("GET").arg(&key).query_async(&mut conn).await?;
-        Ok(raw.and_then(|value| serde_json::from_str(&value).ok()))
-    }
-
-    /// Remove the marker and report whether this call removed it: `DEL` answers the number of keys
-    /// it removed, so of several callers racing to claim one marker exactly one sees `1`.
-    async fn claim_logout_pending_inner(
-        &self,
-        kind: SessionKind,
-        session_hash: &str,
-    ) -> Result<bool, RedisStoreError> {
-        let key = self.keys().key(kind_prefixes(kind).lp, session_hash);
-        let mut conn = self.connection().await?;
-        let removed: i64 = redis::cmd("DEL").arg(&key).query_async(&mut conn).await?;
-        Ok(removed > 0)
-    }
-
     /// Read the successor hash a rotation grace pointer names: one `GET`, never a `GETDEL` or an
     /// `EXPIRE`, so asking neither consumes the pointer nor extends the window.
     ///
@@ -891,7 +839,7 @@ impl SessionStore for RedisStores {
         owner: &LogoutOwner,
         ttl_secs: u64,
     ) -> Result<(), AuthError> {
-        self.put_logout_pending_inner(kind, session_hash, owner, ttl_secs)
+        self.put_marker(kind, session_hash, owner, ttl_secs)
             .await
             .map_err(AuthError::from)
     }
@@ -901,7 +849,7 @@ impl SessionStore for RedisStores {
         kind: SessionKind,
         session_hash: &str,
     ) -> Result<Option<LogoutOwner>, AuthError> {
-        self.read_logout_pending_inner(kind, session_hash)
+        self.read_marker(kind, session_hash)
             .await
             .map_err(AuthError::from)
     }
@@ -911,7 +859,7 @@ impl SessionStore for RedisStores {
         kind: SessionKind,
         session_hash: &str,
     ) -> Result<bool, AuthError> {
-        self.claim_logout_pending_inner(kind, session_hash)
+        self.claim_marker(kind, session_hash)
             .await
             .map_err(AuthError::from)
     }

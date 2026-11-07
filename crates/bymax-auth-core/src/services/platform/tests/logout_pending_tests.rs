@@ -132,3 +132,36 @@ async fn an_unreadable_marker_ends_the_platform_retry_before_any_write() {
             .is_ok()
     );
 }
+
+#[tokio::test]
+async fn a_stale_marker_that_survives_a_completed_platform_logout_is_announced_by_the_retry_alone()
+{
+    let Some((h, auth, spy)) = watched().await else { return };
+    let Some(svc) = h.engine.platform_auth() else { return };
+    h.stores.fail_next_cleanup_writes(1);
+    assert!(
+        svc.logout(&auth.access_token, &auth.refresh_token)
+            .await
+            .is_err()
+    );
+    // The failed delete left the session live and a marker beside it; this attempt deletes the
+    // session, and removing the marker then fails.
+    h.stores.fail_logout_pending_ops(0, 1);
+    assert!(
+        svc.logout(&auth.access_token, &auth.refresh_token)
+            .await
+            .is_err()
+    );
+    assert_eq!(announced(&spy).await, 0);
+    assert!(
+        svc.logout(&auth.access_token, &auth.refresh_token)
+            .await
+            .is_ok()
+    );
+    assert!(
+        svc.logout(&auth.access_token, &auth.refresh_token)
+            .await
+            .is_ok()
+    );
+    assert_eq!(announced(&spy).await, 1);
+}

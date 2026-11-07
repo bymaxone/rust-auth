@@ -186,3 +186,38 @@ async fn an_unclaimable_marker_fails_the_retry_and_announces_only_once_it_can() 
     );
     assert_eq!(announced(&spy).await, 1);
 }
+
+#[tokio::test]
+async fn a_stale_marker_that_survives_a_completed_logout_is_announced_by_the_retry_alone() {
+    let Some((h, auth, spy)) = watched().await else { return };
+    h.stores.fail_next_cleanup_writes(1);
+    assert!(
+        h.engine
+            .logout(&auth.access_token, &auth.refresh_token)
+            .await
+            .is_err()
+    );
+    // The failed delete left the session live and a marker beside it; this attempt deletes the
+    // session, and removing the marker then fails.
+    h.stores.fail_logout_pending_ops(0, 1);
+    assert!(
+        h.engine
+            .logout(&auth.access_token, &auth.refresh_token)
+            .await
+            .is_err()
+    );
+    assert_eq!(announced(&spy).await, 0);
+    assert!(
+        h.engine
+            .logout(&auth.access_token, &auth.refresh_token)
+            .await
+            .is_ok()
+    );
+    assert!(
+        h.engine
+            .logout(&auth.access_token, &auth.refresh_token)
+            .await
+            .is_ok()
+    );
+    assert_eq!(announced(&spy).await, 1);
+}
