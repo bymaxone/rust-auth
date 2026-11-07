@@ -551,6 +551,16 @@ impl TokenManagerService {
             .session_store
             .find_session(SessionKind::Dashboard, &old_hash)
             .await?;
+        // A dashboard session names its tenant: its subject, its claims and the account the
+        // refresh re-reads all hang off it. A record that names none (an older or foreign
+        // writer's) is refused BEFORE anything is rotated, so the presented token and its record
+        // stay as they were and no successor is stored that no client holds.
+        if live.as_ref().is_some_and(|record| !names_a_tenant(record)) {
+            tracing::warn!(
+                "refresh: a dashboard session record names no tenant, so it cannot rotate"
+            );
+            return Err(AuthError::RefreshTokenInvalid);
+        }
         let seed = live.unwrap_or_else(|| placeholder_record(ip, user_agent));
         self.assert_within_absolute_lifetime(&seed)?;
         let new_record = identity_record(&seed, ip, user_agent);
@@ -599,6 +609,15 @@ impl TokenManagerService {
                 // inside its grace window: the cap ends normal rotation and the one remaining
                 // door stays open.
                 self.assert_within_absolute_lifetime(&recovered)?;
+                // A recovered record that names no tenant is refused here for the reason a live
+                // one is refused before rotation. The script has already spent the single-shot
+                // pointer; nothing is written.
+                if !names_a_tenant(&recovered) {
+                    tracing::warn!(
+                        "refresh: a recovered dashboard session names no tenant, so it cannot be recovered"
+                    );
+                    return Err(AuthError::RefreshTokenInvalid);
+                }
                 // Lost the rotation race: mint a fresh session for the recovered identity
                 // rather than re-planting a grace pointer.
                 let fresh = RawRefreshToken::generate();
@@ -1487,6 +1506,15 @@ fn map_jwt_error(error: bymax_auth_jwt::JwtError) -> AuthError {
         bymax_auth_jwt::JwtError::Expired => AuthError::TokenExpired,
         _ => AuthError::TokenInvalid,
     }
+}
+
+/// Whether a dashboard session record names a non-empty tenant, which its subject, its claims and
+/// the account a refresh re-reads all hang off.
+fn names_a_tenant(record: &SessionRecord) -> bool {
+    record
+        .tenant_id
+        .as_deref()
+        .is_some_and(|tenant| !tenant.is_empty())
 }
 
 /// Build a fresh refresh-session record for a rotation, carrying the seed identity and

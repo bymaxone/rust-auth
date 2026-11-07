@@ -46,6 +46,21 @@ fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 /// successor session's hash.
 type GracePointer = (String, SessionRecord, String);
 
+/// A one-shot action a test hands the store to run at a chosen boundary. It has no useful
+/// `Debug` form, so the store's derived `Debug` prints only that one is armed.
+#[derive(Default)]
+struct Boundary(Option<Box<dyn FnOnce() + Send>>);
+
+impl std::fmt::Debug for Boundary {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(if self.0.is_some() {
+            "Boundary(armed)"
+        } else {
+            "Boundary(none)"
+        })
+    }
+}
+
 /// An in-memory [`UserRepository`] backed by a `Mutex<HashMap>` keyed on user id.
 #[derive(Debug, Default)]
 pub struct InMemoryUserRepository {
@@ -84,6 +99,15 @@ impl InMemoryUserRepository {
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Replace the stored MFA secret of `user_id` synchronously, leaving every other field as it
+    /// is: the change a holder's re-enrolment makes, for a test that has to land it inside a
+    /// window an async call cannot be awaited in.
+    pub fn replace_mfa_secret(&self, user_id: &str, secret: &str) {
+        if let Some(user) = lock(&self.users).get_mut(user_id) {
+            user.mfa_secret = Some(secret.to_owned());
+        }
     }
 
     /// Make `find_by_email` ignore its `tenant_id`, as a misconfigured consumer repository
@@ -558,6 +582,11 @@ pub struct InMemoryStores {
     /// half-done, and the caller has to hear about it. A store that always succeeds leaves that
     /// propagation unasserted.
     forced_epoch_bump_failures: Mutex<usize>,
+    /// Armed count of OTP `put` calls that must fail with a backend error.
+    forced_otp_put_failures: Mutex<usize>,
+    /// Runs when the next MFA transition lock is granted, so a test can change the account in
+    /// the one window a transition re-reads across.
+    on_mfa_lock: Mutex<Boundary>,
     /// `ep:`/`pep:` per-account token epoch (generation counter), keyed by
     /// `(kind, subject_hash)`. A bump invalidates every access token stamped below the new
     /// value. Absent reads as `0`.
@@ -640,6 +669,13 @@ impl InMemoryStores {
         *lock(&self.forced_write_failures) = count;
     }
 
+    /// Make the next `count` OTP `put` calls fail with a backend error, the write that stores a
+    /// password-reset or verification code. The flows that deliberately drop that failure to keep
+    /// their response uniform are unreachable against a store that always succeeds.
+    pub fn fail_next_otp_puts(&self, count: usize) {
+        *lock(&self.forced_otp_put_failures) = count;
+    }
+
     /// Make the next `count` `find_session` calls fail with a backend error: the read a logout
     /// resolves the session's owner by, which has to fail closed before any write.
     pub fn fail_next_session_lookups(&self, count: usize) {
@@ -670,6 +706,12 @@ impl InMemoryStores {
     /// in the one window `transition_mfa_record` re-reads across.
     pub fn raise_on_next_mfa_lock(&self, flag: Arc<AtomicBool>) {
         *lock(&self.disable_mfa_on_lock) = Some(flag);
+    }
+
+    /// Run `action` when the next MFA transition lock is granted: after the challenge has read
+    /// and verified, before the transition re-reads, which is where a concurrent change lands.
+    pub fn run_on_next_mfa_lock(&self, action: impl FnOnce() + Send + 'static) {
+        lock(&self.on_mfa_lock).0 = Some(Box::new(action));
     }
 
     /// Fail the next `count` `bump_epoch` calls. The bump is the second half of a device
@@ -1144,6 +1186,13 @@ impl OtpStore for InMemoryStores {
         code: &str,
         _ttl_secs: u64,
     ) -> Result<(), AuthError> {
+        {
+            let mut remaining = lock(&self.forced_otp_put_failures);
+            if *remaining > 0 {
+                *remaining -= 1;
+                return Err(AuthError::Internal("otp store unavailable".into()));
+            }
+        }
         lock(&self.otps).insert((purpose, identifier.to_owned()), (code.to_owned(), 0));
         Ok(())
     }
@@ -1465,6 +1514,10 @@ impl crate::traits::MfaStore for InMemoryStores {
                 if let Some(flag) = lock(&self.disable_mfa_on_lock).take() {
                     flag.store(true, Ordering::SeqCst);
                 }
+                let action = lock(&self.on_mfa_lock).0.take();
+                if let Some(action) = action {
+                    action();
+                }
                 Ok(true)
             }
         }
@@ -1634,6 +1687,14 @@ mod user_status;
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_store_prints_whether_a_boundary_action_is_armed() {
+        let stores = InMemoryStores::new();
+        assert!(format!("{stores:?}").contains("Boundary(none)"));
+        stores.run_on_next_mfa_lock(|| ());
+        assert!(format!("{stores:?}").contains("Boundary(armed)"));
+    }
+
     use super::*;
     use std::sync::Arc;
 

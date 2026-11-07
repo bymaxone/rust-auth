@@ -225,7 +225,7 @@ impl MfaService {
             encrypted_secret.clone()
         };
         if let Some(index) = recovery_index {
-            self.splice_recovery_code(&user, &stored_secret, index)
+            self.splice_recovery_code(&user, &raw_secret, &stored_secret, index)
                 .await?;
         } else if under_retired_key {
             // A TOTP challenge persists nothing on its own, so the rewrite needs its own write.
@@ -236,7 +236,7 @@ impl MfaService {
                 MfaContext::Dashboard,
                 Some(user.tenant_id.as_str()),
                 |current| {
-                    if !current.mfa_enabled {
+                    if !self.holds_challenged_secret(current, &raw_secret) {
                         return None;
                     }
                     Some((
@@ -318,7 +318,9 @@ impl MfaService {
         let Some(encrypted_secret) = admin.mfa_secret.clone().filter(|_| admin.mfa_enabled) else {
             return Err(AuthError::MfaNotEnabled);
         };
-        let Some(raw_secret) = self.decrypt_secret(&encrypted_secret) else {
+        let Some((raw_secret, under_retired_key)) =
+            self.decrypt_secret_with_rotation(&encrypted_secret)
+        else {
             return Err(AuthError::TokenInvalid);
         };
 
@@ -371,12 +373,19 @@ impl MfaService {
         // Success: clear the failure counter and, for a recovery code, splice it out so it is
         // single-use, persisting the smaller set through the PLATFORM repository.
         self.brute_force.reset(&bf_id).await?;
+        // A secret that opened under a retired key is rewritten under the current one, as on the
+        // dashboard plane, so the rotation drains and the retired key can be dropped.
+        let stored_secret = if under_retired_key {
+            self.reencrypt_secret(&raw_secret)?
+        } else {
+            encrypted_secret.clone()
+        };
         if let Some(index) = recovery_index {
             // The platform twin of the dashboard splice, serialized and re-located by value
             // against the record inside the lock for exactly the same reasons.
             let spent = recovery_codes.get(index).cloned();
             self.transition_mfa_record(&admin.id, MfaContext::Platform, None, |current| {
-                if !current.mfa_enabled {
+                if !self.holds_challenged_secret(current, &raw_secret) {
                     return None;
                 }
                 let mut codes = current.mfa_recovery_codes.clone().unwrap_or_default();
@@ -384,7 +393,22 @@ impl MfaService {
                     .as_ref()
                     .and_then(|d| codes.iter().position(|c| c == d))?;
                 codes.remove(live);
-                Some((true, Some(encrypted_secret), Some(codes)))
+                Some((true, Some(stored_secret), Some(codes)))
+            })
+            .await?;
+        } else if under_retired_key {
+            // A TOTP challenge persists nothing on its own, so the rewrite needs its own write,
+            // serialized like every other transition and carrying the code list from the record
+            // inside the lock so it cannot roll back a concurrent regenerate.
+            self.transition_mfa_record(&admin.id, MfaContext::Platform, None, |current| {
+                if !self.holds_challenged_secret(current, &raw_secret) {
+                    return None;
+                }
+                Some((
+                    true,
+                    Some(stored_secret),
+                    current.mfa_recovery_codes.clone(),
+                ))
             })
             .await?;
         }
@@ -532,6 +556,7 @@ impl MfaService {
     async fn splice_recovery_code(
         &self,
         user: &AuthUser,
+        challenged: &[u8],
         encrypted_secret: &str,
         index: usize,
     ) -> Result<(), AuthError> {
@@ -547,11 +572,11 @@ impl MfaService {
             MfaContext::Dashboard,
             Some(user.tenant_id.as_str()),
             |current| {
-                // The account stopped having MFA while this challenge was in flight — a `disable`
-                // that has already completed. Writing here would re-enable it with the pre-disable
-                // secret, so the code stays spent (its `rcu:` claim already stands) and nothing is
-                // written back.
-                if !current.mfa_enabled {
+                // The stored secret is no longer the one this challenge opened, or MFA is off: a
+                // `disable` has completed, with or without a new enrolment after it. Writing here
+                // would put the pre-disable secret back, so the code stays spent (its `rcu:` claim
+                // already stands) and nothing is written.
+                if !self.holds_challenged_secret(current, challenged) {
                     return None;
                 }
                 let mut codes = current.mfa_recovery_codes.clone().unwrap_or_default();

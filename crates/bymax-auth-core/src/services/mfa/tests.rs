@@ -66,7 +66,7 @@ pub(super) struct Harness {
     pub(super) users: Arc<InMemoryUserRepository>,
     pub(super) platform: Arc<InMemoryPlatformUserRepository>,
     /// The same stores the engine holds, so a test can arm the transition-lock window.
-    stores: Arc<InMemoryStores>,
+    pub(super) stores: Arc<InMemoryStores>,
 }
 
 /// Build the harness. `sessions` toggles session tracking; `wire_platform` wires a platform
@@ -89,7 +89,7 @@ pub(super) fn build_with(
 
 /// The same harness with a retired MFA encryption key configured, so a secret written under
 /// that key still opens through the engine's own flows.
-fn build_rotating(retired_b64: String) -> Option<Harness> {
+pub(super) fn build_rotating(retired_b64: String) -> Option<Harness> {
     build_full(
         true,
         false,
@@ -100,7 +100,7 @@ fn build_rotating(retired_b64: String) -> Option<Harness> {
 }
 
 /// The harness builder every variant above delegates to.
-fn build_full(
+pub(super) fn build_full(
     sessions: bool,
     wire_platform: bool,
     email: Option<Arc<dyn EmailProvider>>,
@@ -177,7 +177,7 @@ pub(super) async fn login_temp_token(engine: &AuthEngine, email: &str) -> Option
 /// The current Unix time in seconds, captured once so a test that needs several distinct
 /// codes computes them all against one stable base (a per-call clock read could drift across a
 /// 30 s step boundary mid-test and collide two offsets, defeating anti-replay).
-fn now_secs() -> i64 {
+pub(super) fn now_secs() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
@@ -198,7 +198,7 @@ pub(super) fn code(secret_b32: &str, offset_secs: i64) -> String {
 }
 
 /// A valid TOTP code for raw secret bytes at the absolute Unix time `at_unix`.
-fn raw_code(raw: &[u8], at_unix: i64) -> String {
+pub(super) fn raw_code(raw: &[u8], at_unix: i64) -> String {
     let when = u64::try_from(at_unix.max(0)).unwrap_or(0);
     format!("{:06}", bymax_auth_crypto::totp::totp(raw, when, 30, 6))
 }
@@ -2357,7 +2357,10 @@ fn service_with_previous_keys(
     MfaService::new(deps)
 }
 
-fn service_deps(store: Arc<dyn MfaStore>, users: Arc<dyn UserRepository>) -> MfaServiceDeps {
+pub(super) fn service_deps(
+    store: Arc<dyn MfaStore>,
+    users: Arc<dyn UserRepository>,
+) -> MfaServiceDeps {
     let inmem = Arc::new(InMemoryStores::new());
     let session_store: Arc<dyn SessionStore> = inmem.clone();
     let brute_force_store: Arc<dyn BruteForceStore> = inmem;
@@ -2414,7 +2417,7 @@ fn service_deps(store: Arc<dyn MfaStore>, users: Arc<dyn UserRepository>) -> Mfa
     }
 }
 
-fn service_over(store: Arc<dyn MfaStore>, users: Arc<dyn UserRepository>) -> MfaService {
+pub(super) fn service_over(store: Arc<dyn MfaStore>, users: Arc<dyn UserRepository>) -> MfaService {
     MfaService::new(service_deps(store, users))
 }
 

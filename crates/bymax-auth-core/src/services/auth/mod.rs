@@ -16,6 +16,8 @@ mod hook_delivery_tests;
 mod invitation;
 mod login;
 mod password_reset;
+#[cfg(test)]
+mod refresh_tenant_tests;
 mod register;
 mod session_ops;
 
