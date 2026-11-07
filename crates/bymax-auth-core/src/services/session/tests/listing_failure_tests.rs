@@ -5,7 +5,7 @@ use super::damaged_detail_tests::DamagedDetails;
 use super::*;
 
 /// Store two sessions for one user under a cap of one: `old` and the just-created `new`.
-async fn two_sessions_over_a_cap_of_one(
+pub(super) async fn two_sessions_over_a_cap_of_one(
     store: &InMemoryStores,
     uid: &str,
 ) -> (String, String, SessionRecord) {
@@ -147,8 +147,8 @@ async fn the_unenforced_cap_is_reported_once_with_its_cause_and_without_a_hash()
 
 /// A host store's error: its `Display` is the message its author meant for a log, while its
 /// `Debug` carries the session details it was holding.
-struct HostStoreError {
-    session_detail: &'static str,
+pub(super) struct HostStoreError {
+    pub(super) session_detail: &'static str,
 }
 
 impl std::fmt::Debug for HostStoreError {

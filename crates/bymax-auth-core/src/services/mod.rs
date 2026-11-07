@@ -90,7 +90,8 @@ pub(crate) fn note_logout_failure(
     result: Result<(), AuthError>,
 ) {
     if let Err(error) = result {
-        tracing::warn!(%error, "{step}");
+        let cause = error_chain(&error);
+        tracing::warn!(%cause, "{step}");
         first.get_or_insert_with(|| internal_error("a logout revocation write failed"));
     }
 }
@@ -435,6 +436,44 @@ mod tests {
         assert_eq!(
             error_chain(&internal_error("the cause")),
             "internal error: the cause"
+        );
+    }
+
+    #[test]
+    fn a_failed_logout_write_is_logged_with_its_cause_and_answers_generically() {
+        let mut first = None;
+        let (events, guard) = crate::log_capture::capture_events();
+        note_logout_failure(&mut first, "logout: an ok step", Ok(()));
+        note_logout_failure(
+            &mut first,
+            "logout: session cleanup failed",
+            Err(internal_error("redis refused the write")),
+        );
+        note_logout_failure(
+            &mut first,
+            "logout: a later step failed",
+            Err(internal_error("a second failure")),
+        );
+        drop(guard);
+
+        // The first failure's cause is on the log line for its own step; a step that succeeded
+        // logs nothing.
+        let reported: Vec<_> = events.iter().into_iter().collect();
+        assert_eq!(reported.len(), 2, "{reported:?}");
+        let first_line = &reported[0].rendered;
+        assert!(
+            first_line.contains("logout: session cleanup failed"),
+            "{first_line}"
+        );
+        assert!(
+            first_line.contains("cause=internal error: redis refused the write"),
+            "{first_line}"
+        );
+        // The caller still gets the generic answer for the first failure, not the cause.
+        let answer = first.map(|error| error_chain(&error));
+        assert_eq!(
+            answer.as_deref(),
+            Some("internal error: a logout revocation write failed")
         );
     }
 
