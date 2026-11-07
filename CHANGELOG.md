@@ -451,12 +451,11 @@ version bump.
   owns the escaping of every dynamic value it interpolates. That is what makes a real `<a>`
   link possible, and it means an override must not trust the provider to escape its markup.
 
-  `DeliveryErrorPolicy::Rethrow` restores the error for the two flows that react to one (the
+  `DeliveryErrorPolicy::Rethrow` restores the error for the flows that react to one (the
   reset path deletes an undelivered token early rather than leaving it to its TTL; the
-  email-change path refuses to record "verification sent"). It does not turn an outage into a
-  failed user operation elsewhere: the MFA and password-changed notices are detached through
-  `spawn_guarded`, and the invitation flow catches the error and leaves the invitation
-  standing.
+  email-change path refuses to record "verification sent"; the invitation path answers
+  `500 auth.internal`). It does not turn an outage into a failed user operation elsewhere: the
+  MFA and password-changed notices are detached through `spawn_guarded`.
 
   Mirrors nest-auth's provider of the same name, so the two libraries send the same messages
   from the same events.

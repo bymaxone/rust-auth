@@ -287,15 +287,13 @@ pub enum DeliveryErrorPolicy {
 /// each into a failed request over a message that is a notification rather than the operation
 /// itself. The failure is logged and the flow continues.
 ///
-/// That choice has a cost worth stating, because two flows react to an `Err` from the port. A
-/// reset-token send that fails lets the reset flow delete the stored token early rather than
-/// leave it to its TTL; and the email-change flow surfaces a failed verification send instead of
-/// recording "verification sent". Under the default both degrade gracefully rather than break:
-/// the reset token still expires at its TTL and was never delivered to anyone, and the change
-/// still requires the verification the recipient never got, so it cannot complete. A deployment
-/// that wants the error back on those two flows builds the provider with
-/// [`DeliveryErrorPolicy::Rethrow`]. That does not make an outage fail anything else: the other
-/// sends are already detached or caught by their callers.
+/// That choice has a cost worth stating, because some flows react to an `Err` from the port.
+/// Under the default they degrade gracefully rather than break: a reset token that was never
+/// delivered still expires at its TTL, an address change still requires the verification the
+/// recipient never got, and an invitation stays stored while its inviter is not told the link
+/// was not sent. A deployment that wants the error back on those flows builds the provider with
+/// [`DeliveryErrorPolicy::Rethrow`], whose documentation lists them. That does not make an
+/// outage fail anything else: every other send is detached, so the request never sees its error.
 pub struct DefaultAuthEmailProvider {
     /// The channel every message goes out through.
     sink: Arc<dyn AuthEmailSink>,
@@ -851,7 +849,7 @@ mod tests {
     #[tokio::test]
     async fn a_delivery_failure_is_swallowed_by_default_and_returned_on_rethrow() {
         // The default keeps a down channel from failing the user's action; `Rethrow` restores
-        // the error for the two flows that clean up when a send fails.
+        // the error for the flows that react to one.
         let sink = Arc::new(RecordingSink::new(true));
         let swallowing = DefaultAuthEmailProvider::new(sink.clone());
         assert!(
