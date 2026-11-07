@@ -2810,7 +2810,7 @@ where
 | `PlatformRolesGuard` + `@PlatformRoles(...)` | `RequirePlatformRole<R>`    | role hierarchy check against platform hierarchy                            |
 | `UserStatusGuard`                | `UserStatus` (or folded into `AuthUser`)| Redis-cached blocked-status check                                          |
 | `MfaRequiredGuard`               | `MfaSatisfied`                          | require `mfa_verified` claim when account has MFA                          |
-| `SelfOrAdminGuard`               | `SelfOrAdmin` (path-param aware)        | allow when `path.user_id == claims.sub` or role ≥ admin                    |
+| `SelfOrAdminGuard`               | `SelfOrAdmin` (path-param aware)        | allow when the path id (8.3.7) `== claims.sub` or role ≥ admin                    |
 | `@CurrentUser()`                 | `CurrentUser` (param)                   | the verified claims as a handler parameter                                 |
 | `@CurrentUser('sub')`            | `CurrentUser` + field access            | read a single claim off `CurrentUser`                                      |
 | `@Public()`                      | **absence** of `AuthUser` in the handler| public = the handler simply does not request an auth extractor            |
@@ -2956,8 +2956,8 @@ pub struct RequirePlatformRole<R: PlatformRole>(pub PlatformClaims, PhantomData<
   repository is registered.
 
 - **`SelfOrAdmin`** — the `SelfOrAdminGuard`. A path-parameter-aware extractor:
-  resolves `AuthUser` and the `{user_id}` path segment, and admits the request
-  when `path.user_id == claims.sub` **or** the user's role satisfies the
+  resolves `AuthUser` and the path id described below, and admits the request
+  when that id `== claims.sub` **or** the user's role satisfies the
   configured admin role. The id-equality check is the primary IDOR defense;
   consumers using non-UUID ids supply their own id parsing. The id is the
   `user_id` capture, else the `id` one, whatever else the route captures. When it refuses, and

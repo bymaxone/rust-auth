@@ -172,7 +172,7 @@ pub enum AuthErrorCode {
     OauthEmailMismatch,
 
     // Platform
-    /// Platform endpoint reached with a dashboard JWT (`token_type` mismatch).
+    /// Platform endpoint reached with a token of another kind (`token_type` mismatch).
     #[serde(rename = "auth.platform_auth_required")]
     PlatformAuthRequired,
 
@@ -532,7 +532,7 @@ pub enum AuthError {
     OauthEmailMismatch,
 
     // Platform
-    /// Platform endpoint reached with a dashboard token.
+    /// Platform endpoint reached with a token of another kind.
     #[error("platform auth required")]
     PlatformAuthRequired,
 

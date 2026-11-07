@@ -1,6 +1,6 @@
 //! [`SelfOrAdmin<A>`] (§8.3.7): the `SelfOrAdminGuard` equivalent — a path-parameter-aware
-//! extractor that admits the request when the `{user_id}` path segment equals the caller's
-//! `sub`, or the caller's role satisfies the configured admin role.
+//! extractor that admits the request when the id it reads from the path (see [`SelfOrAdmin`])
+//! equals the caller's `sub`, or the caller's role satisfies the configured admin role.
 
 use std::collections::HashMap;
 use std::marker::PhantomData;
