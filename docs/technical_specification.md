@@ -3209,6 +3209,14 @@ as nest-auth does; the status, code, message and `details` are what the contract
 are the same on every route. The refresh, logout and revoke-all routes read an optional body
 leniently (they ignore the `Content-Type`): refresh answers the envelopes for a body that is not JSON, while logout and revoke-all ignore one; all three answer the envelope for a body over the limit or one that cannot be read.
 
+**Which routes refuse a declared `Content-Encoding`.** The scope is the contract's
+`requestEncoding` section: every route is checked except those listed as `unchecked` (the routes
+that read their own body or none), and the `whenBody` routes refuse only a request that carries
+a body (a non-zero `Content-Length` or a `Transfer-Encoding`). `GET`, `HEAD`, `OPTIONS` and
+`DELETE` are never checked. The check is a layer outside every route layer, so a refused request
+reaches neither authentication nor a rate limiter: it answers `415` whatever the caller's
+credentials, and it spends no rate-limit budget.
+
 ---
 
 ### 8.5 Token delivery in handlers

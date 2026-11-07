@@ -24,6 +24,7 @@
 mod client_ip;
 mod delivery;
 mod dto;
+mod encoding_policy;
 mod extractors;
 mod middleware;
 mod rate_limit;

@@ -90,6 +90,7 @@ impl AuthRouter {
             config.max_body_bytes,
             config.cors.clone(),
             ClientIpPolicy::new(config.client_ip_source, config.is_trusted_proxy.clone()),
+            crate::encoding_policy::EncodingPolicy::new(&prefix),
         );
         let router = nested.with_state(state);
 
