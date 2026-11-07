@@ -236,7 +236,7 @@ impl MfaService {
                 MfaContext::Dashboard,
                 Some(user.tenant_id.as_str()),
                 |current| {
-                    if !current.mfa_enabled {
+                    if !super::holds_challenged_secret(current, &encrypted_secret) {
                         return None;
                     }
                     Some((
@@ -385,7 +385,7 @@ impl MfaService {
             // against the record inside the lock for exactly the same reasons.
             let spent = recovery_codes.get(index).cloned();
             self.transition_mfa_record(&admin.id, MfaContext::Platform, None, |current| {
-                if !current.mfa_enabled {
+                if !super::holds_challenged_secret(current, &encrypted_secret) {
                     return None;
                 }
                 let mut codes = current.mfa_recovery_codes.clone().unwrap_or_default();
@@ -401,7 +401,7 @@ impl MfaService {
             // serialized like every other transition and carrying the code list from the record
             // inside the lock so it cannot roll back a concurrent regenerate.
             self.transition_mfa_record(&admin.id, MfaContext::Platform, None, |current| {
-                if !current.mfa_enabled {
+                if !super::holds_challenged_secret(current, &encrypted_secret) {
                     return None;
                 }
                 Some((
@@ -575,7 +575,11 @@ impl MfaService {
                 // that has already completed. Writing here would re-enable it with the pre-disable
                 // secret, so the code stays spent (its `rcu:` claim already stands) and nothing is
                 // written back.
-                if !current.mfa_enabled {
+                if !user
+                    .mfa_secret
+                    .as_deref()
+                    .is_some_and(|challenged| super::holds_challenged_secret(current, challenged))
+                {
                     return None;
                 }
                 let mut codes = current.mfa_recovery_codes.clone().unwrap_or_default();

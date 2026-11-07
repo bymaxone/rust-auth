@@ -46,6 +46,21 @@ fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 /// successor session's hash.
 type GracePointer = (String, SessionRecord, String);
 
+/// A one-shot action a test hands the store to run at a chosen boundary. It has no useful
+/// `Debug` form, so the store's derived `Debug` prints only that one is armed.
+#[derive(Default)]
+struct Boundary(Option<Box<dyn FnOnce() + Send>>);
+
+impl std::fmt::Debug for Boundary {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(if self.0.is_some() {
+            "Boundary(armed)"
+        } else {
+            "Boundary(none)"
+        })
+    }
+}
+
 /// An in-memory [`UserRepository`] backed by a `Mutex<HashMap>` keyed on user id.
 #[derive(Debug, Default)]
 pub struct InMemoryUserRepository {
@@ -84,6 +99,15 @@ impl InMemoryUserRepository {
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Replace the stored MFA secret of `user_id` synchronously, leaving every other field as it
+    /// is: the change a holder's re-enrolment makes, for a test that has to land it inside a
+    /// window an async call cannot be awaited in.
+    pub fn replace_mfa_secret(&self, user_id: &str, secret: &str) {
+        if let Some(user) = lock(&self.users).get_mut(user_id) {
+            user.mfa_secret = Some(secret.to_owned());
+        }
     }
 
     /// Make `find_by_email` ignore its `tenant_id`, as a misconfigured consumer repository
@@ -560,6 +584,9 @@ pub struct InMemoryStores {
     forced_epoch_bump_failures: Mutex<usize>,
     /// Armed count of OTP `put` calls that must fail with a backend error.
     forced_otp_put_failures: Mutex<usize>,
+    /// Runs when the next MFA transition lock is granted, so a test can change the account in
+    /// the one window a transition re-reads across.
+    on_mfa_lock: Mutex<Boundary>,
     /// `ep:`/`pep:` per-account token epoch (generation counter), keyed by
     /// `(kind, subject_hash)`. A bump invalidates every access token stamped below the new
     /// value. Absent reads as `0`.
@@ -679,6 +706,12 @@ impl InMemoryStores {
     /// in the one window `transition_mfa_record` re-reads across.
     pub fn raise_on_next_mfa_lock(&self, flag: Arc<AtomicBool>) {
         *lock(&self.disable_mfa_on_lock) = Some(flag);
+    }
+
+    /// Run `action` when the next MFA transition lock is granted: after the challenge has read
+    /// and verified, before the transition re-reads, which is where a concurrent change lands.
+    pub fn run_on_next_mfa_lock(&self, action: impl FnOnce() + Send + 'static) {
+        lock(&self.on_mfa_lock).0 = Some(Box::new(action));
     }
 
     /// Fail the next `count` `bump_epoch` calls. The bump is the second half of a device
@@ -1480,6 +1513,10 @@ impl crate::traits::MfaStore for InMemoryStores {
                 // flag models: the `disable` is supposed to land inside a lock somebody holds.
                 if let Some(flag) = lock(&self.disable_mfa_on_lock).take() {
                     flag.store(true, Ordering::SeqCst);
+                }
+                let action = lock(&self.on_mfa_lock).0.take();
+                if let Some(action) = action {
+                    action();
                 }
                 Ok(true)
             }

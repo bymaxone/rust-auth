@@ -553,9 +553,8 @@ impl TokenManagerService {
             .await?;
         // A dashboard session names its tenant: its subject, its claims and the account the
         // refresh re-reads all hang off it. A record that names none (an older or foreign
-        // writer's) is refused BEFORE anything is rotated, leaving the presented token and its
-        // record as they were rather than consuming the token and storing a successor that no
-        // client holds.
+        // writer's) is refused BEFORE anything is rotated, so the presented token and its record
+        // stay as they were and no successor is stored that no client holds.
         if live.as_ref().is_some_and(|record| !names_a_tenant(record)) {
             tracing::warn!(
                 "refresh: a dashboard session record names no tenant, so it cannot rotate"

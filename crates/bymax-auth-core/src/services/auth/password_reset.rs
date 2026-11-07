@@ -517,9 +517,8 @@ impl AuthEngine {
     ) -> Result<(), AuthError> {
         let Some(store) = self.password_reset_store() else {
             // A misconfiguration: the token method is selected but no `pw_reset:` store is wired.
-            // Surfaced to the caller (which swallows it on the anti-enumerating path) and
-            // logged so a deployment running the token method without its store is observable.
-            tracing::warn!("password reset token method selected but no PasswordResetStore wired");
+            // Surfaced to the caller, whose log line carries it, so a deployment running the
+            // token method without its store is observable without a second line here.
             return Err(crate::services::internal_error(
                 "password reset store not configured",
             ));
