@@ -1338,6 +1338,7 @@ impl TokenManagerService {
     ///
     /// For a caller that has to tell "a token of another kind that we issued" from "something
     /// unreadable" before it spends a store read, which is the platform guard's question.
+    #[cfg(feature = "platform")]
     pub(crate) fn signed_dashboard_claims(&self, token: &str) -> Option<DashboardClaims> {
         self.verify_rotating::<DashboardClaims>(token).ok()
     }
@@ -1345,6 +1346,7 @@ impl TokenManagerService {
     /// As [`Self::signed_dashboard_claims`], for an MFA-challenge token. Its single-use marker is
     /// not consulted: this answers whether the token is ours and live, not whether it can still
     /// be redeemed.
+    #[cfg(feature = "platform")]
     pub(crate) fn signed_mfa_challenge_claims(&self, token: &str) -> Option<MfaTempClaims> {
         self.verify_rotating::<MfaTempClaims>(token).ok()
     }

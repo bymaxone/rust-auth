@@ -218,3 +218,48 @@ async fn self_or_admin_reads_the_id_whatever_else_the_route_captures() {
         None
     );
 }
+
+#[tokio::test]
+async fn a_signed_token_of_another_kind_with_a_malformed_identity_is_token_invalid() {
+    // A malformed token is malformed on either plane, so the claim shape is judged before the
+    // kind: a validly signed challenge or dashboard token whose `jti` is not a UUID v4 is the
+    // opaque `token_invalid`, not `platform_auth_required`.
+    let Some(s) = scaffold(TokenDelivery::Cookie) else { return };
+
+    let mut challenge = challenge_claims(4_700_000_000);
+    challenge.jti = "not-a-uuid".to_owned();
+    let challenge = platform_refusal(&s, parts_with_bearer(&mint_token(&challenge))).await;
+    assert!(
+        matches!(challenge, Some(AuthError::TokenInvalid)),
+        "{challenge:?}"
+    );
+
+    let mut dashboard = bymax_auth_types::DashboardClaims {
+        iss: None,
+        aud: None,
+        sub: "someone".to_owned(),
+        jti: "not-a-uuid".to_owned(),
+        tenant_id: "t1".to_owned(),
+        role: "USER".to_owned(),
+        token_type: bymax_auth_types::DashboardType::Dashboard,
+        status: "ACTIVE".to_owned(),
+        mfa_enabled: false,
+        mfa_verified: false,
+        iat: 1_700_000_000,
+        exp: 4_700_000_000,
+        epoch: 0,
+    };
+    let refusal = platform_refusal(&s, parts_with_bearer(&mint_token(&dashboard))).await;
+    assert!(
+        matches!(refusal, Some(AuthError::TokenInvalid)),
+        "{refusal:?}"
+    );
+
+    // The same token with a well-formed jti is the other kind.
+    dashboard.jti = "6f1d5c2e-8f3a-4b1e-9a57-0c1d2e3f4a5b".to_owned();
+    let other_kind = platform_refusal(&s, parts_with_bearer(&mint_token(&dashboard))).await;
+    assert!(
+        matches!(other_kind, Some(AuthError::PlatformAuthRequired)),
+        "{other_kind:?}"
+    );
+}
