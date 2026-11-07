@@ -270,8 +270,10 @@ pub(crate) fn map_bytes_rejection(rejection: BytesRejection) -> BodyRejection {
 /// A path parameter, for the routes that read one. It differs from axum's own `Path` only in how
 /// it fails: a parameter that cannot be decoded (invalid UTF-8 after percent-decoding) answers
 /// the transport envelope's "Malformed request", not axum's plain-text "Invalid URL: ..." text.
+#[cfg(any(feature = "sessions", feature = "oauth"))]
 pub(crate) struct PathParam<T>(pub(crate) T);
 
+#[cfg(any(feature = "sessions", feature = "oauth"))]
 impl<T, S> FromRequestParts<S> for PathParam<T>
 where
     T: DeserializeOwned + Send,
@@ -417,6 +419,7 @@ mod tests {
         ])));
     }
 
+    #[cfg(any(feature = "sessions", feature = "oauth"))]
     #[tokio::test]
     async fn a_route_whose_path_parameter_was_not_captured_is_the_adapters_fault() {
         use tower::ServiceExt;

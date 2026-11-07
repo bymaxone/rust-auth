@@ -185,25 +185,32 @@ mod tests {
             }
         }
 
-        // The contract -> this adapter: every fixed-status row is answered with that exact pair.
-        let answered = answered();
-        for pair in &fixed {
-            assert!(
-                answered.contains(pair),
-                "{pair:?} is in the contract and not answered"
-            );
-        }
-        // This adapter -> the contract: every answer is a fixed row, or the message of the row
-        // whose status is the error's own.
-        for (status, message) in &answered {
-            let fixed_row = fixed.contains(&(*status, message.clone()));
-            let own_row = own_status_messages.contains(message);
-            assert!(fixed_row || own_row, "unlisted: {status} {message}");
-        }
-        // A `Malformed` carrying another 4xx keeps the message of the own-status row.
+        // Fixed-status rows are compared to the pairs this adapter answers with a fixed status,
+        // exactly and in both directions.
+        let ours: BTreeSet<(u16, String)> = answered()
+            .into_iter()
+            .filter(|(status, _)| *status != StatusCode::BAD_REQUEST.as_u16())
+            .collect();
+        let contract_fixed: BTreeSet<(u16, String)> = fixed
+            .iter()
+            .filter(|(status, _)| *status != StatusCode::BAD_REQUEST.as_u16())
+            .cloned()
+            .collect();
+        assert_eq!(ours, contract_fixed, "fixed-status rows differ");
+
+        // The `Malformed` kind takes its status from the error. Its message is the single row
+        // whose status the contract leaves open, and every 4xx it can carry is a client error.
+        let malformed = Transport::Malformed(StatusCode::BAD_REQUEST)
+            .message()
+            .to_owned();
+        let open_rows: BTreeSet<String> = own_status_messages;
+        assert_eq!(open_rows, BTreeSet::from([malformed.clone()]));
+        // The `400` pair is the contract's malformed-JSON row, which names the same message.
+        let bad_request_pair = (StatusCode::BAD_REQUEST.as_u16(), malformed);
+        assert!(fixed.contains(&bad_request_pair));
         let other = Transport::Malformed(StatusCode::REQUEST_TIMEOUT);
-        assert!(own_status_messages.contains(other.message()));
         assert!(other.status().is_client_error());
+        assert_eq!(other.message(), bad_request_pair.1);
     }
 
     #[test]
