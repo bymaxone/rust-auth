@@ -2963,8 +2963,8 @@ pub struct RequirePlatformRole<R: PlatformRole>(pub PlatformClaims, PhantomData<
   configured admin role. The id-equality check is the primary IDOR defense;
   consumers using non-UUID ids supply their own id parsing. When it refuses, and when the
   route has no `{user_id}` segment, it answers `auth.insufficient_role` (403), as the nest-auth
-  guard does. The extractor reads exactly one path capture, so a route with several is refused for
-  every caller.
+  guard does. The id is the `user_id` capture, else the `id` one, whatever else the route
+  captures (as nest reads `userId ?? id`).
 
   **Guard error codes against nest-auth** (the wire contract pins the vocabulary, not which
   guard answers which code, so this table is the record):
@@ -2973,13 +2973,12 @@ pub struct RequirePlatformRole<R: PlatformRole>(pub PlatformClaims, PhantomData<
   | --- | --- |
   | `SelfOrAdmin`: neither the owner nor an admin; or no id segment on the route | `auth.insufficient_role` (403) |
   | Platform guard: no token, or an unreadable, forged, expired or revoked token | `auth.token_invalid` (401) |
-  | Platform guard: a validly signed dashboard token | `auth.platform_auth_required` (401) |
-  | Platform guard: a store failure during the revocation check | `auth.internal` (500) |
+  | Platform guard: a validly signed, well-formed dashboard or MFA-challenge token (revoked or not: its kind is decided before any store read) | `auth.platform_auth_required` (401) |
+  | Platform guard: a store failure during a platform token's revocation check | `auth.internal` (500) |
 
-  Not mirrored, and why: nest's `SelfOrAdminGuard` also refuses an upper-case 64-hex route
-  value with `auth.token_invalid`, because its routes carry session hashes in the same
-  parameter; `SelfOrAdmin` here only ever compares a user id. A validly signed MFA-challenge token on a platform route is
-  `auth.platform_auth_required` in nest and `auth.token_invalid` here.
+  Not mirrored, and why: nest's `SelfOrAdminGuard` also refuses an upper-case 64-hex route value
+  with `auth.token_invalid`, because it is also mounted where the parameter is a session hash;
+  no route of this library uses `SelfOrAdmin` that way, and it only ever compares a user id.
 
 These compose: a route equivalent to nest-auth's
 `@UseGuards(JwtAuthGuard, UserStatusGuard, MfaRequiredGuard) @Roles('OWNER')`

@@ -1332,6 +1332,23 @@ impl TokenManagerService {
         })
     }
 
+    /// The claims of a **dashboard** access token that this deployment signed and that has not
+    /// expired, judged on the signature, expiry and `iss`/`aud` binding alone: no revocation or
+    /// epoch read, so a store outage cannot change the answer.
+    ///
+    /// For a caller that has to tell "a token of another kind that we issued" from "something
+    /// unreadable" before it spends a store read, which is the platform guard's question.
+    pub(crate) fn signed_dashboard_claims(&self, token: &str) -> Option<DashboardClaims> {
+        self.verify_rotating::<DashboardClaims>(token).ok()
+    }
+
+    /// As [`Self::signed_dashboard_claims`], for an MFA-challenge token. Its single-use marker is
+    /// not consulted: this answers whether the token is ours and live, not whether it can still
+    /// be redeemed.
+    pub(crate) fn signed_mfa_challenge_claims(&self, token: &str) -> Option<MfaTempClaims> {
+        self.verify_rotating::<MfaTempClaims>(token).ok()
+    }
+
     /// Consume an MFA temp token by deleting its `mfa:{sha256(jti)}` marker, reporting whether
     /// **this** call was the one that removed it. Called only after the submitted code is
     /// confirmed valid (§7.5.3). For the TOTP path the consume is fused with the anti-replay

@@ -142,14 +142,9 @@ async fn self_or_admin_answers_insufficient_role_when_it_refuses() {
     assert_eq!(own, None);
 }
 
-#[tokio::test]
-async fn a_valid_mfa_challenge_token_on_a_platform_route_is_token_invalid_unlike_nest() {
-    // A known difference, recorded in the specification: nest-auth's platform guard answers
-    // `auth.platform_auth_required` for any validly signed token whose type is not `platform`,
-    // the MFA-challenge token included. Here only a dashboard token is told apart; closing this
-    // takes a change to the core platform explanation, and this case then flips.
-    let Some(s) = scaffold(TokenDelivery::Cookie) else { return };
-    let challenge = bymax_auth_types::MfaTempClaims {
+/// An MFA-challenge token for a platform administrator, valid until `exp`.
+fn challenge_claims(exp: i64) -> bymax_auth_types::MfaTempClaims {
+    bymax_auth_types::MfaTempClaims {
         sub: "admin-1".to_owned(),
         jti: "6f1d5c2e-8f3a-4b1e-9a57-0c1d2e3f4a5b".to_owned(),
         token_type: bymax_auth_types::MfaTempType::MfaChallenge,
@@ -157,15 +152,69 @@ async fn a_valid_mfa_challenge_token_on_a_platform_route_is_token_invalid_unlike
         tenant_id: None,
         epoch: 0,
         iat: 1_700_000_000,
-        exp: 4_700_000_000,
+        exp,
         iss: None,
         aud: None,
-    };
+    }
+}
 
-    let refusal = platform_refusal(&s, parts_with_bearer(&mint_token(&challenge))).await;
+#[tokio::test]
+async fn a_validly_signed_mfa_challenge_token_on_a_platform_route_is_platform_auth_required() {
+    // The same rule as a dashboard token: signed by this deployment but not a platform token.
+    let Some(s) = scaffold(TokenDelivery::Cookie) else { return };
+
+    let token = mint_token(&challenge_claims(4_700_000_000));
+    let refusal = platform_refusal(&s, parts_with_bearer(&token)).await;
 
     assert!(
-        matches!(refusal, Some(AuthError::TokenInvalid)),
+        matches!(refusal, Some(AuthError::PlatformAuthRequired)),
         "{refusal:?}"
+    );
+}
+
+#[tokio::test]
+async fn an_unsigned_or_expired_mfa_challenge_token_on_a_platform_route_is_token_invalid() {
+    let Some(s) = scaffold(TokenDelivery::Cookie) else { return };
+
+    let foreign_key = bymax_auth_jwt::HsKey::from_bytes(b"ffffffffffffffffffffffffffffffff");
+    let forged =
+        bymax_auth_jwt::sign(&challenge_claims(4_700_000_000), &foreign_key).unwrap_or_default();
+    let forged = platform_refusal(&s, parts_with_bearer(&forged)).await;
+    assert!(
+        matches!(forged, Some(AuthError::TokenInvalid)),
+        "{forged:?}"
+    );
+
+    let expired = mint_token(&challenge_claims(1_700_000_100));
+    let expired = platform_refusal(&s, parts_with_bearer(&expired)).await;
+    assert!(
+        matches!(expired, Some(AuthError::TokenInvalid)),
+        "{expired:?}"
+    );
+}
+
+#[tokio::test]
+async fn self_or_admin_reads_the_id_whatever_else_the_route_captures() {
+    let Some(s) = scaffold(TokenDelivery::Cookie) else { return };
+    let user_id = seed(&s.users, "multi@e.com", "USER").await;
+    let token = dashboard_token(&s, &user_id).await;
+    let route = "/tenants/{tenant}/users/{user_id}";
+
+    // The owner is admitted and someone else's id is refused, with a second capture present.
+    let own = self_or_admin_code(&s, route, &format!("/tenants/t1/users/{user_id}"), &token).await;
+    assert_eq!(own, None);
+    let other = self_or_admin_code(&s, route, "/tenants/t1/users/other-id", &token).await;
+    assert_eq!(other.as_deref(), Some("auth.insufficient_role"));
+
+    // A route that names its capture `id` is read the same way; `user_id` wins when both exist.
+    let by_id = format!("/sessions/t1/{user_id}");
+    assert_eq!(
+        self_or_admin_code(&s, "/sessions/{tenant}/{id}", &by_id, &token).await,
+        None
+    );
+    let both = format!("/pairs/{user_id}/other-id");
+    assert_eq!(
+        self_or_admin_code(&s, "/pairs/{user_id}/{id}", &both, &token).await,
+        None
     );
 }
