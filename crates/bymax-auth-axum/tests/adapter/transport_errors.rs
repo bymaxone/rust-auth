@@ -189,7 +189,7 @@ async fn a_charset_or_encoding_the_adapter_cannot_read_answers_415() {
             &["nope", "utf-16", "latin1"],
         );
     }
-    let encoded = login_request(body.clone(), "application/json")
+    let encoded = login_request(body, "application/json")
         .header(header::CONTENT_ENCODING, "gzip")
         .send(&app)
         .await;
@@ -199,7 +199,12 @@ async fn a_charset_or_encoding_the_adapter_cannot_read_answers_415() {
         "Unsupported media type",
         &["gzip"],
     );
-    // What the adapter can read is still read: utf-8 in any spelling, and an identity encoding.
+}
+
+#[tokio::test]
+async fn utf8_in_any_spelling_and_the_identity_encoding_are_still_read() {
+    let Some(h) = build(EngineSpec::default()) else { return };
+    let app = small_body_router(&h);
     for content_type in [
         "application/json",
         "application/json; charset=utf-8",
@@ -217,10 +222,13 @@ async fn a_charset_or_encoding_the_adapter_cannot_read_answers_415() {
             .await;
         assert_eq!(answer.status, StatusCode::UNAUTHORIZED, "{content_type}");
     }
-    let identity = login_request(body, "application/json")
-        .header(header::CONTENT_ENCODING, "identity")
-        .send(&app)
-        .await;
+    let identity = login_request(
+        br#"{"email":"identity@e.com","password":"wrongwrong1","tenantId":"t1"}"#.to_vec(),
+        "application/json",
+    )
+    .header(header::CONTENT_ENCODING, "identity")
+    .send(&app)
+    .await;
     assert_eq!(identity.status, StatusCode::UNAUTHORIZED);
 }
 
@@ -322,27 +330,34 @@ async fn an_undecodable_path_parameter_answers_malformed_request() {
     );
 }
 
+/// A router, and the access cookie of an email-verified account, for `POST /auth/mfa/setup`.
+async fn mfa_setup_session(h: &common::Harness) -> (axum::Router, String) {
+    let app = small_body_router(h);
+    seed_user(h, "setup@e.com", "glidingwalnut42", "USER").await;
+    let access = login(&app, "setup@e.com", "glidingwalnut42")
+        .await
+        .cookie_value("access_token")
+        .unwrap_or_default();
+    (app, access)
+}
+
+fn mfa_setup_request(access: &str, body: String, content_type: &'static str) -> Req {
+    Req::post("/auth/mfa/setup")
+        .cookie("access_token", access)
+        .raw_body(body.into_bytes(), content_type)
+}
+
 #[tokio::test]
-async fn an_mfa_setup_body_never_echoes_what_it_could_not_read() {
+async fn an_mfa_setup_body_that_does_not_parse_never_echoes_what_it_held() {
     let Some(h) = build(EngineSpec {
         mfa: true,
         ..EngineSpec::default()
     }) else {
         return;
     };
-    let app = small_body_router(&h);
-    seed_user(&h, "setup@e.com", "glidingwalnut42", "USER").await;
-    let access = login(&app, "setup@e.com", "glidingwalnut42")
-        .await
-        .cookie_value("access_token")
-        .unwrap_or_default();
-    let setup = |body: String, content_type: &'static str| {
-        Req::post("/auth/mfa/setup")
-            .cookie("access_token", &access)
-            .raw_body(body.into_bytes(), content_type)
-    };
+    let (app, access) = mfa_setup_session(&h).await;
     // Not JSON: the transport envelope.
-    let garbage = setup(format!("\"{MARKER}\""), "application/json")
+    let garbage = mfa_setup_request(&access, format!("\"{MARKER}\""), "application/json")
         .send(&app)
         .await;
     assert_transport(
@@ -352,15 +367,26 @@ async fn an_mfa_setup_body_never_echoes_what_it_could_not_read() {
         &[MARKER],
     );
     // JSON of the wrong shape: the validation envelope, with a fixed detail.
-    let shaped = setup(format!(r#"{{"{MARKER}":1}}"#), "application/json")
+    let shaped = mfa_setup_request(&access, format!(r#"{{"{MARKER}":1}}"#), "application/json")
         .send(&app)
         .await;
     assert_eq!(shaped.status, StatusCode::BAD_REQUEST, "{}", text(&shaped));
     assert_eq!(shaped.json()["error"]["message"], "Validation failed");
     assert_eq!(shaped.json()["error"]["details"][0]["field"], "body");
     assert!(!text(&shaped).contains(MARKER), "{}", text(&shaped));
+}
+
+#[tokio::test]
+async fn an_mfa_setup_body_in_an_unreadable_form_or_too_large_is_refused() {
+    let Some(h) = build(EngineSpec {
+        mfa: true,
+        ..EngineSpec::default()
+    }) else {
+        return;
+    };
+    let (app, access) = mfa_setup_session(&h).await;
     // A charset the adapter cannot read.
-    let charset = setup("{}".to_owned(), "application/json; charset=nope")
+    let charset = mfa_setup_request(&access, "{}".to_owned(), "application/json; charset=nope")
         .send(&app)
         .await;
     assert_transport(
@@ -369,8 +395,10 @@ async fn an_mfa_setup_body_never_echoes_what_it_could_not_read() {
         "Unsupported media type",
         &["nope"],
     );
-    // Over the limit, on a route that buffers the body itself.
-    let over = setup("a".repeat(4096), "application/json").send(&app).await;
+    // Over the limit, with no declared length, on a route that buffers the body itself.
+    let over = mfa_setup_request(&access, "a".repeat(4096), "application/json")
+        .send(&app)
+        .await;
     assert_transport(
         &over,
         StatusCode::PAYLOAD_TOO_LARGE,
