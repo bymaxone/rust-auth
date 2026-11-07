@@ -1070,6 +1070,8 @@
       "a route not listed under `unchecked` or `whenBody` is strict, so a route added later is checked",
       "until someone decides it should not be. Routes are written as `METHOD path` relative to the",
       "route prefix. A request with no Content-Encoding, or only `identity`, is never refused.",
+      "The refusal happens before authentication and rate limiting; a refused request consumes no",
+      "rate-limit budget.",
       "",
       "`whenBody` routes accept an empty body, which takes the default DTO, so they refuse only a",
       "request that carries one: a non-zero Content-Length or a Transfer-Encoding. A path-only or",
