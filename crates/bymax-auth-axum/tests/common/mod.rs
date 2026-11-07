@@ -147,9 +147,17 @@ pub fn hash_password(plain: &str) -> String {
 pub struct CapturingEmails {
     verification: Mutex<Option<String>>,
     password_reset: Mutex<Option<String>>,
+    /// When set, every invitation send fails with an error that quotes the raw token.
+    invitation_failure: std::sync::atomic::AtomicBool,
 }
 
 impl CapturingEmails {
+    /// Make every later invitation send fail, the way a relay quoting the rejected body would.
+    pub fn fail_invitations(&self) {
+        self.invitation_failure
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
     /// Wait for the detached send to deliver the verification code, up to a deadline.
     ///
     /// The engine mails fire-and-forget, so reading the mailbox the instant a route returns is
@@ -260,9 +268,18 @@ impl bymax_auth_core::traits::EmailProvider for CapturingEmails {
         &self,
         _tenant_id: &str,
         _email: &str,
-        _invite: &bymax_auth_core::traits::InviteData,
+        invite: &bymax_auth_core::traits::InviteData,
         _locale: Option<&str>,
     ) -> Result<(), bymax_auth_core::traits::EmailError> {
+        if self
+            .invitation_failure
+            .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            let quoted = format!("relay rejected the body: token={}", invite.invite_token);
+            return Err(bymax_auth_core::traits::EmailError::Delivery(Box::new(
+                std::io::Error::other(quoted),
+            )));
+        }
         Ok(())
     }
 }
