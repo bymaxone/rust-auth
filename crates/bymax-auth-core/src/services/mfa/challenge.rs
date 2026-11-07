@@ -225,7 +225,7 @@ impl MfaService {
             encrypted_secret.clone()
         };
         if let Some(index) = recovery_index {
-            self.splice_recovery_code(&user, &stored_secret, index)
+            self.splice_recovery_code(&user, &raw_secret, &stored_secret, index)
                 .await?;
         } else if under_retired_key {
             // A TOTP challenge persists nothing on its own, so the rewrite needs its own write.
@@ -236,7 +236,7 @@ impl MfaService {
                 MfaContext::Dashboard,
                 Some(user.tenant_id.as_str()),
                 |current| {
-                    if !super::holds_challenged_secret(current, &encrypted_secret) {
+                    if !self.holds_challenged_secret(current, &raw_secret) {
                         return None;
                     }
                     Some((
@@ -385,7 +385,7 @@ impl MfaService {
             // against the record inside the lock for exactly the same reasons.
             let spent = recovery_codes.get(index).cloned();
             self.transition_mfa_record(&admin.id, MfaContext::Platform, None, |current| {
-                if !super::holds_challenged_secret(current, &encrypted_secret) {
+                if !self.holds_challenged_secret(current, &raw_secret) {
                     return None;
                 }
                 let mut codes = current.mfa_recovery_codes.clone().unwrap_or_default();
@@ -401,7 +401,7 @@ impl MfaService {
             // serialized like every other transition and carrying the code list from the record
             // inside the lock so it cannot roll back a concurrent regenerate.
             self.transition_mfa_record(&admin.id, MfaContext::Platform, None, |current| {
-                if !super::holds_challenged_secret(current, &encrypted_secret) {
+                if !self.holds_challenged_secret(current, &raw_secret) {
                     return None;
                 }
                 Some((
@@ -556,6 +556,7 @@ impl MfaService {
     async fn splice_recovery_code(
         &self,
         user: &AuthUser,
+        challenged: &[u8],
         encrypted_secret: &str,
         index: usize,
     ) -> Result<(), AuthError> {
@@ -575,11 +576,7 @@ impl MfaService {
                 // `disable` has completed, with or without a new enrolment after it. Writing here
                 // would put the pre-disable secret back, so the code stays spent (its `rcu:` claim
                 // already stands) and nothing is written.
-                if !user
-                    .mfa_secret
-                    .as_deref()
-                    .is_some_and(|challenged| super::holds_challenged_secret(current, challenged))
-                {
+                if !self.holds_challenged_secret(current, challenged) {
                     return None;
                 }
                 let mut codes = current.mfa_recovery_codes.clone().unwrap_or_default();

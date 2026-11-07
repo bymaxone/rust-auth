@@ -1687,6 +1687,14 @@ mod user_status;
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_store_prints_whether_a_boundary_action_is_armed() {
+        let stores = InMemoryStores::new();
+        assert!(format!("{stores:?}").contains("Boundary(none)"));
+        stores.run_on_next_mfa_lock(|| ());
+        assert!(format!("{stores:?}").contains("Boundary(armed)"));
+    }
+
     use super::*;
     use std::sync::Arc;
 

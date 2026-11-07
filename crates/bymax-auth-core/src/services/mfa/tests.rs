@@ -3360,47 +3360,17 @@ async fn a_platform_totp_challenge_rewrites_a_secret_stored_under_a_retired_key(
     // The platform plane keeps its secrets under the same key as the dashboard, so a rotation
     // drains there too: otherwise every platform administrator's secret stays under the retired
     // key and that key has to stay configured forever.
-    let retired_bytes = [3u8; 32];
-    let retired_b64 = base64::engine::general_purpose::STANDARD.encode(retired_bytes);
-    let Some(h) = build_full(
-        false,
-        true,
-        None,
-        None,
-        vec![SecretString::from(retired_b64)],
-    ) else {
+    let Some((h, retired_bytes)) = retired_platform_harness() else {
         return;
     };
-    let mut old_deps = service_deps(Arc::new(InMemoryStores::new()), h.users.clone());
-    old_deps.encryption_key = zeroize::Zeroizing::new(retired_bytes);
-    let Ok((raw_secret, _codes, data)) = MfaService::new(old_deps).generate_setup_material() else {
+    let Some((raw_secret, _codes, admin)) = retired_key_admin(&h, "p-rot", retired_bytes) else {
         return;
     };
-    let stored_under_retired = data.encrypted_secret.clone();
-    h.platform.insert(AuthPlatformUser {
-        id: "p-rot".to_owned(),
-        email: "rotating@example.com".to_owned(),
-        name: "Admin".to_owned(),
-        password_hash: admin_password_hash(),
-        role: "SUPER_ADMIN".to_owned(),
-        status: "ACTIVE".to_owned(),
-        mfa_enabled: true,
-        mfa_secret: Some(stored_under_retired.clone()),
-        mfa_recovery_codes: Some(data.hashed_codes),
-        platform_id: None,
-        last_login_at: None,
-        updated_at: OffsetDateTime::UNIX_EPOCH,
-        created_at: OffsetDateTime::UNIX_EPOCH,
-    });
+    let stored_under_retired = admin.mfa_secret.clone().unwrap_or_default();
+    let Some(temp) = platform_temp_token(&h, "p-rot").await else {
+        return;
+    };
     let Some(mfa) = h.engine.mfa() else { return };
-    let Ok(temp) = h
-        .engine
-        .tokens()
-        .issue_mfa_temp_token("p-rot", MfaContext::Platform, None)
-        .await
-    else {
-        return;
-    };
     let code = raw_code(&raw_secret, now_secs());
     assert!(matches!(
         mfa.challenge(&temp, &code, "1.2.3.4", "ua").await,
@@ -3424,52 +3394,18 @@ async fn a_platform_totp_challenge_rewrites_a_secret_stored_under_a_retired_key(
 async fn a_platform_recovery_challenge_rewrites_a_secret_stored_under_a_retired_key() {
     // The recovery-code path splices the spent digest out of the stored set; the write carries
     // the secret too, and it must carry the one under the current key.
-    let retired_bytes = [3u8; 32];
-    let retired_b64 = base64::engine::general_purpose::STANDARD.encode(retired_bytes);
-    let Some(h) = build_full(
-        false,
-        true,
-        None,
-        None,
-        vec![SecretString::from(retired_b64)],
-    ) else {
+    let Some((h, retired_bytes)) = retired_platform_harness() else {
         return;
     };
-    // The recovery digests are derived from the engine's own keys, so the material comes from the
-    // engine's service; only the secret's ciphertext is produced under the RETIRED key.
+    let Some((raw_secret, codes, admin)) = retired_key_admin(&h, "p-rec", retired_bytes) else {
+        return;
+    };
+    let before = admin.mfa_recovery_codes.as_ref().map(Vec::len);
+    let stored_under_retired = admin.mfa_secret.clone().unwrap_or_default();
+    let Some(temp) = platform_temp_token(&h, "p-rec").await else {
+        return;
+    };
     let Some(mfa) = h.engine.mfa() else { return };
-    let Ok((raw_secret, codes, data)) = mfa.generate_setup_material() else {
-        return;
-    };
-    let mut old_deps = service_deps(Arc::new(InMemoryStores::new()), h.users.clone());
-    old_deps.encryption_key = zeroize::Zeroizing::new(retired_bytes);
-    let Ok(stored_under_retired) = MfaService::new(old_deps).reencrypt_secret(&raw_secret) else {
-        return;
-    };
-    let digests = data.hashed_codes.len();
-    h.platform.insert(AuthPlatformUser {
-        id: "p-rec".to_owned(),
-        email: "recovering@example.com".to_owned(),
-        name: "Admin".to_owned(),
-        password_hash: admin_password_hash(),
-        role: "SUPER_ADMIN".to_owned(),
-        status: "ACTIVE".to_owned(),
-        mfa_enabled: true,
-        mfa_secret: Some(stored_under_retired.clone()),
-        mfa_recovery_codes: Some(data.hashed_codes),
-        platform_id: None,
-        last_login_at: None,
-        updated_at: OffsetDateTime::UNIX_EPOCH,
-        created_at: OffsetDateTime::UNIX_EPOCH,
-    });
-    let Ok(temp) = h
-        .engine
-        .tokens()
-        .issue_mfa_temp_token("p-rec", MfaContext::Platform, None)
-        .await
-    else {
-        return;
-    };
     let Some(code) = codes.first() else { return };
     assert!(matches!(
         mfa.challenge(&temp, code, "1.2.3.4", "ua").await,
@@ -3480,7 +3416,10 @@ async fn a_platform_recovery_challenge_rewrites_a_secret_stored_under_a_retired_
         return;
     };
     // The spent code is gone and the secret is under the current key.
-    assert_eq!(after.mfa_recovery_codes.map(|c| c.len()), Some(digests - 1));
+    assert_eq!(
+        after.mfa_recovery_codes.map(|c| c.len()),
+        before.map(|n| n - 1)
+    );
     let rewritten = after.mfa_secret.unwrap_or_default();
     assert_ne!(rewritten, stored_under_retired);
     let strict = service_over(Arc::new(InMemoryStores::new()), h.users.clone());
@@ -3488,6 +3427,23 @@ async fn a_platform_recovery_challenge_rewrites_a_secret_stored_under_a_retired_
         strict.decrypt_secret(&rewritten).as_deref(),
         Some(raw_secret.as_slice())
     );
+}
+
+/// A platform-enabled harness that holds a retired MFA key, and the bytes of that key.
+fn retired_platform_harness() -> Option<(Harness, [u8; 32])> {
+    let retired_bytes = [3u8; 32];
+    let retired_b64 = base64::engine::general_purpose::STANDARD.encode(retired_bytes);
+    let keys = vec![SecretString::from(retired_b64)];
+    build_full(false, true, None, None, keys).map(|h| (h, retired_bytes))
+}
+
+/// A platform MFA temp token for `admin_id`, what a platform login hands an MFA-enabled admin.
+async fn platform_temp_token(h: &Harness, admin_id: &str) -> Option<String> {
+    h.engine
+        .tokens()
+        .issue_mfa_temp_token(admin_id, MfaContext::Platform, None)
+        .await
+        .ok()
 }
 
 /// A platform admin whose secret is stored under the RETIRED key, with the plain TOTP secret.
@@ -3679,6 +3635,87 @@ async fn dashboard_challenge_across_a_re_enrolment(use_recovery: bool) -> Option
     assert!(matches!(outcome, Ok(LoginResultMfa::Dashboard(_))));
     let after = h.users.find_by_id(&uid, None).await.ok()??;
     Some((after.mfa_secret.unwrap_or_default(), replacement))
+}
+
+#[tokio::test]
+async fn a_sibling_rewrite_of_the_same_secret_does_not_stop_a_platform_splice() {
+    // Two challenges can read the same retired-key secret. The first re-encrypts it, which
+    // changes the ciphertext and not the enrolled factor; the second is a recovery-code
+    // challenge and must still remove its spent digest, or the code comes back once its
+    // five-minute claim expires.
+    let Some((h, retired_bytes)) = retired_platform_harness() else {
+        return;
+    };
+    let Some((raw_secret, codes, admin)) = retired_key_admin(&h, "p-sib", retired_bytes) else {
+        return;
+    };
+    let before = admin.mfa_recovery_codes.as_ref().map(Vec::len);
+    let Some(mfa) = h.engine.mfa() else { return };
+    let Ok(rewritten) = mfa.reencrypt_secret(&raw_secret) else {
+        return;
+    };
+    let Some(temp) = platform_temp_token(&h, "p-sib").await else {
+        return;
+    };
+    let platform = h.platform.clone();
+    h.stores.run_on_next_mfa_lock(move || {
+        platform.insert(AuthPlatformUser {
+            mfa_secret: Some(rewritten),
+            ..admin
+        });
+    });
+    let Some(code) = codes.first() else { return };
+    assert!(matches!(
+        mfa.challenge(&temp, code, "1.2.3.4", "ua").await,
+        Ok(LoginResultMfa::Platform(_))
+    ));
+    let Ok(Some(after)) = h.platform.find_by_id("p-sib").await else {
+        return;
+    };
+    assert_eq!(
+        after.mfa_recovery_codes.map(|c| c.len()),
+        before.map(|n| n - 1)
+    );
+}
+
+#[tokio::test]
+async fn a_sibling_rewrite_of_the_same_secret_does_not_stop_a_dashboard_splice() {
+    let retired_bytes = [3u8; 32];
+    let retired_b64 = base64::engine::general_purpose::STANDARD.encode(retired_bytes);
+    let Some(h) = build_rotating(retired_b64) else {
+        return;
+    };
+    let Some((raw_secret, codes, uid)) =
+        retired_key_user(&h, "dash-sib@example.com", retired_bytes).await
+    else {
+        return;
+    };
+    let Some(mfa) = h.engine.mfa() else { return };
+    let Ok(rewritten) = mfa.reencrypt_secret(&raw_secret) else {
+        return;
+    };
+    let Some(temp) = login_temp_token(&h.engine, "dash-sib@example.com").await else {
+        return;
+    };
+    let Ok(Some(before)) = h.users.find_by_id(&uid, None).await else {
+        return;
+    };
+    let count = before.mfa_recovery_codes.map(|c| c.len());
+    let (users, user_id) = (h.users.clone(), uid.clone());
+    h.stores
+        .run_on_next_mfa_lock(move || users.replace_mfa_secret(&user_id, &rewritten));
+    let Some(code) = codes.first() else { return };
+    assert!(matches!(
+        mfa.challenge(&temp, code, "1.2.3.4", "ua").await,
+        Ok(LoginResultMfa::Dashboard(_))
+    ));
+    let Ok(Some(after)) = h.users.find_by_id(&uid, None).await else {
+        return;
+    };
+    assert_eq!(
+        after.mfa_recovery_codes.map(|c| c.len()),
+        count.map(|n| n - 1)
+    );
 }
 
 #[tokio::test]

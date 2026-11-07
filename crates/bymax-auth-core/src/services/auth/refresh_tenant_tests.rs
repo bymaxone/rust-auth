@@ -98,59 +98,70 @@ async fn a_session_record_with_no_tenant_is_refused_before_it_rotates() {
     }
 }
 
-#[tokio::test]
-async fn a_recovered_session_with_no_tenant_is_refused_and_writes_nothing() {
-    let Some((engine, stores, user_id)) = fixture().await else {
-        return;
-    };
-    // A session that rotated into a successor whose record names no tenant, so presenting the
-    // old token takes the grace path with a tenant-less recovered record.
-    let raw = "a".repeat(64);
-    let (old, new) = (
-        RawRefreshToken::from_raw(raw.clone()).redis_hash(),
-        "b".repeat(64),
-    );
-    let subject = engine.session_subject(SessionKind::Dashboard, Some("t1"), &user_id);
+/// Store a session for `user_id` under `raw` that has since rotated into a successor whose record
+/// names no tenant, so presenting `raw` takes the grace path with a tenant-less recovered record.
+async fn rotated_into_a_tenantless_successor(
+    engine: &AuthEngine,
+    stores: &InMemoryStores,
+    user_id: &str,
+    raw: &str,
+) {
+    let old = RawRefreshToken::from_raw(raw.to_owned()).redis_hash();
+    let subject = engine.session_subject(SessionKind::Dashboard, Some("t1"), user_id);
     let created = stores
         .create_session(
             SessionKind::Dashboard,
             &subject,
             &old,
-            &record(&user_id, Some("t1".to_owned())),
+            &record(user_id, Some("t1".to_owned())),
             3600,
         )
         .await;
     assert!(created.is_ok());
     let rotation = SessionRotation {
-        old_hash: old.clone(),
-        new_hash: new,
+        old_hash: old,
+        new_hash: "b".repeat(64),
         new_raw: String::new(),
-        new_record: record(&user_id, None),
+        new_record: record(user_id, None),
         subject_hash: subject,
         refresh_ttl: 3600,
         grace_ttl: 30,
     };
-    assert!(
-        stores
-            .rotate(SessionKind::Dashboard, &rotation)
-            .await
-            .is_ok()
-    );
+    let rotated = stores.rotate(SessionKind::Dashboard, &rotation).await;
+    assert!(rotated.is_ok());
+}
 
-    // The tenant-less subject already holds one session (a legacy record), which is what lets a
-    // recovery write into that index at all: without it the store refuses the write for a
-    // different reason and this test would pass whatever the refresh does.
-    let tenantless = engine.session_subject(SessionKind::Dashboard, None, &user_id);
+/// Give the tenant-less subject one session of its own (a legacy record). That is what lets a
+/// recovery write into that index at all: without it the store refuses the write for a different
+/// reason and the grace test would pass whatever the refresh does.
+async fn seed_a_legacy_tenantless_session(
+    engine: &AuthEngine,
+    stores: &InMemoryStores,
+    user_id: &str,
+) -> String {
+    let tenantless = engine.session_subject(SessionKind::Dashboard, None, user_id);
     let legacy = stores
         .create_session(
             SessionKind::Dashboard,
             &tenantless,
             &"e".repeat(64),
-            &record(&user_id, None),
+            &record(user_id, None),
             3600,
         )
         .await;
     assert!(legacy.is_ok());
+    tenantless
+}
+
+#[tokio::test]
+async fn a_recovered_session_with_no_tenant_is_refused_and_writes_nothing() {
+    let Some((engine, stores, user_id)) = fixture().await else {
+        return;
+    };
+    let raw = "a".repeat(64);
+    rotated_into_a_tenantless_successor(&engine, &stores, &user_id, &raw).await;
+    let tenantless = seed_a_legacy_tenantless_session(&engine, &stores, &user_id).await;
+
     let outcome = engine.refresh(&raw, "1.2.3.4", "ua").await;
     assert!(outcome.is_err(), "a tenant-less recovery must be refused");
     // Only the legacy session is there: the recovery wrote nothing. (A second attempt would be

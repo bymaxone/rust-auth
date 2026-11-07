@@ -138,16 +138,6 @@ struct MfaSetupData {
     encrypted_plain_codes: String,
 }
 
-/// Whether the stored record still holds the secret a challenge opened, with MFA still enabled.
-///
-/// A challenge reads the account, verifies a code against its secret, and only then writes under
-/// the transition lock. Between the read and the lock the holder can disable MFA and enrol again
-/// with a new secret; a write built from the earlier read would put the OLD secret back, which is
-/// the factor they just replaced. The write is abandoned when the secret is not the one opened.
-fn holds_challenged_secret(current: &MfaUserView, challenged: &str) -> bool {
-    current.mfa_enabled && current.mfa_secret.as_deref() == Some(challenged)
-}
-
 /// A context-agnostic view of the MFA-relevant fields of the challenged account, plus the
 /// credential-free dashboard projection when the context is `Dashboard` (used to issue tokens
 /// and fire the user-facing hooks). For a `Platform` context `dashboard_user` is `None`.
@@ -578,6 +568,27 @@ impl MfaService {
     fn decrypt_secret(&self, wire: &str) -> Option<Vec<u8>> {
         self.decrypt_secret_with_rotation(wire)
             .map(|(secret, _)| secret)
+    }
+
+    /// Whether the stored record still holds the secret a challenge opened, with MFA still
+    /// enabled.
+    ///
+    /// A challenge reads the account, verifies a code against its secret, and only then writes
+    /// under the transition lock. Between the read and the lock the holder can disable MFA and
+    /// enrol again with a new secret; a write built from the earlier read would put the OLD
+    /// secret back, which is the factor they just replaced. The write is abandoned when the
+    /// stored secret is not the one opened.
+    ///
+    /// The comparison is on the DECRYPTED secret, not the ciphertext: a sibling challenge that
+    /// only re-encrypts the same secret under the current key changes the ciphertext and not the
+    /// enrolled factor, and must not stop a recovery-code splice from being written.
+    fn holds_challenged_secret(&self, current: &MfaUserView, challenged: &[u8]) -> bool {
+        current.mfa_enabled
+            && current
+                .mfa_secret
+                .as_deref()
+                .and_then(|wire| self.decrypt_secret(wire))
+                .is_some_and(|stored| constant_time_eq(&stored, challenged))
     }
 
     /// As [`Self::decrypt_secret`], also reporting whether a key RETIRED by a rotation produced
