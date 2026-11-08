@@ -5,7 +5,7 @@ use time::{Duration, OffsetDateTime};
 
 use super::InMemoryApiKeyRepository;
 use crate::RepositoryError;
-use crate::traits::{ApiKeyRepository, NewApiKey};
+use crate::traits::{ApiKeyRepository, ApiKeySummary, NewApiKey};
 
 fn new_key(id: &str, label: &str, now: OffsetDateTime) -> NewApiKey {
     NewApiKey {
@@ -97,6 +97,50 @@ async fn listing_by_label_returns_every_key_oldest_first() -> Result<(), Reposit
 
     let ids: Vec<&str> = listed.iter().map(|k| k.id.as_str()).collect();
     assert_eq!(ids, ["a", "b"]);
+    Ok(())
+}
+
+#[tokio::test]
+async fn keys_issued_at_the_same_instant_list_in_id_order() -> Result<(), RepositoryError> {
+    let repo = InMemoryApiKeyRepository::new();
+    let now = OffsetDateTime::now_utc();
+    // Sixteen ties, so a listing that fell back on the map's own order would come out sorted
+    // only by a chance of one in 16!.
+    let ids: Vec<String> = (0..16)
+        .map(|n| format!("key-{:02}", (n * 7) % 16))
+        .collect();
+    for id in &ids {
+        repo.create(new_key(id, "billing", now)).await?;
+    }
+
+    let listed: Vec<String> = repo
+        .list_by_label("billing")
+        .await?
+        .into_iter()
+        .map(|key| key.id)
+        .collect();
+
+    let mut expected = ids;
+    expected.sort();
+    assert_eq!(listed, expected);
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_summary_carries_everything_but_the_digest() -> Result<(), RepositoryError> {
+    let repo = InMemoryApiKeyRepository::new();
+    let now = OffsetDateTime::now_utc();
+    let stored = repo.create(new_key("a", "billing", now)).await?;
+
+    let summary = ApiKeySummary::from(stored.clone());
+
+    assert_eq!(summary.id, stored.id);
+    assert_eq!(summary.label, stored.label);
+    assert_eq!(summary.scopes, stored.scopes);
+    assert_eq!(summary.created_at, stored.created_at);
+    assert_eq!(summary.expires_at, stored.expires_at);
+    assert_eq!(summary.revoked_at, stored.revoked_at);
+    assert_eq!(summary.last_used_at, stored.last_used_at);
     Ok(())
 }
 

@@ -42,7 +42,7 @@ impl InMemoryApiKeyRepository {
     /// The stored row, bypassing the failure switch and the read counter.
     #[must_use]
     pub fn row(&self, id: &str) -> Option<ApiKey> {
-        self.rows.lock().ok()?.get(id).cloned()
+        self.rows().get(id).cloned()
     }
 
     fn check(&self) -> Result<(), RepositoryError> {
@@ -52,10 +52,12 @@ impl InMemoryApiKeyRepository {
         Ok(())
     }
 
-    fn rows(&self) -> Result<std::sync::MutexGuard<'_, HashMap<String, ApiKey>>, RepositoryError> {
+    /// The rows. A panic in another test thread must not turn every later call into an error, so
+    /// a poisoned lock is read through.
+    fn rows(&self) -> std::sync::MutexGuard<'_, HashMap<String, ApiKey>> {
         self.rows
             .lock()
-            .map_err(|_| RepositoryError::Backend("api key store lock poisoned".into()))
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 }
 
@@ -64,7 +66,7 @@ impl ApiKeyRepository for InMemoryApiKeyRepository {
     async fn find_by_id(&self, id: &str) -> Result<Option<ApiKey>, RepositoryError> {
         self.reads.fetch_add(1, Ordering::SeqCst);
         self.check()?;
-        Ok(self.rows()?.get(id).cloned())
+        Ok(self.rows().get(id).cloned())
     }
 
     async fn create(&self, row: NewApiKey) -> Result<ApiKey, RepositoryError> {
@@ -79,7 +81,7 @@ impl ApiKeyRepository for InMemoryApiKeyRepository {
             revoked_at: None,
             last_used_at: None,
         };
-        let mut rows = self.rows()?;
+        let mut rows = self.rows();
         if rows.contains_key(&stored.id) {
             return Err(RepositoryError::Conflict(
                 "api key id already exists".into(),
@@ -92,7 +94,7 @@ impl ApiKeyRepository for InMemoryApiKeyRepository {
     async fn mark_revoked(&self, id: &str, at: OffsetDateTime) -> Result<bool, RepositoryError> {
         self.check()?;
         Ok(self
-            .rows()?
+            .rows()
             .get_mut(id)
             .map(|key| {
                 key.revoked_at.get_or_insert(at);
@@ -103,7 +105,7 @@ impl ApiKeyRepository for InMemoryApiKeyRepository {
     async fn set_expiry(&self, id: &str, at: OffsetDateTime) -> Result<bool, RepositoryError> {
         self.check()?;
         Ok(self
-            .rows()?
+            .rows()
             .get_mut(id)
             .map(|key| key.expires_at = Some(at))
             .is_some())
@@ -114,7 +116,7 @@ impl ApiKeyRepository for InMemoryApiKeyRepository {
         entries: &[(String, OffsetDateTime)],
     ) -> Result<(), RepositoryError> {
         self.check()?;
-        let mut rows = self.rows()?;
+        let mut rows = self.rows();
         for (id, at) in entries {
             if let Some(key) = rows.get_mut(id)
                 && key.last_used_at.is_none_or(|seen| seen < *at)
@@ -128,7 +130,7 @@ impl ApiKeyRepository for InMemoryApiKeyRepository {
     async fn list_by_label(&self, label: &str) -> Result<Vec<ApiKey>, RepositoryError> {
         self.check()?;
         let mut keys: Vec<ApiKey> = self
-            .rows()?
+            .rows()
             .values()
             .filter(|key| key.label == label)
             .cloned()

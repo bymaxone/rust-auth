@@ -5,40 +5,12 @@
 //! the bar of the signing secret and must not be shared with another key the deployment holds,
 //! since a key reused across purposes is one leak away from all of them.
 
-use std::collections::HashSet;
 use std::time::Duration;
 
-use secrecy::{ExposeSecret, SecretString};
+use secrecy::SecretString;
 
 use super::AuthConfig;
-use super::validate::{MIN_SECRET_ENTROPY, MIN_SECRET_LEN, shannon_entropy};
 use crate::error::ConfigError;
-
-/// Headers a key may not be read from, so it never travels through a path built for something
-/// else.
-const RESERVED_HEADERS: &[&str] = &[
-    "authorization",
-    "proxy-authorization",
-    "cookie",
-    "set-cookie",
-    "user-agent",
-    "origin",
-    "sec-fetch-site",
-    "content-encoding",
-    "content-length",
-    "transfer-encoding",
-    "x-forwarded-for",
-    "x-forwarded-host",
-    "x-real-ip",
-    "x-original-forwarded-for",
-    "host",
-];
-
-/// The longest a scope name may be.
-const MAX_SCOPE_LEN: usize = 64;
-
-/// The range `last_used_flush` must fall in, in seconds.
-const FLUSH_RANGE_SECS: std::ops::RangeInclusive<u64> = 1..=3600;
 
 /// What a failing audit hook does to the request it audits.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -107,120 +79,163 @@ pub(super) fn validate_api_keys(config: &AuthConfig) -> Result<(), ConfigError> 
     if !group.enabled {
         return Ok(());
     }
-    if !cfg!(feature = "api-keys") {
-        return Err(ConfigError::ApiKeysFeatureDisabled);
-    }
-    validate_pepper(config)?;
-    validate_scopes(&group.scopes)?;
-    validate_transport(&group.header, &group.prefix)?;
-    if !FLUSH_RANGE_SECS.contains(&group.last_used_flush.as_secs())
-        || group.last_used_flush.subsec_nanos() != 0
-    {
-        return Err(ConfigError::ApiKeysFlushInterval {
-            millis: group.last_used_flush.as_millis(),
-        });
-    }
-    Ok(())
+    // Without the feature nothing could verify a key, so enabling the group is refused outright.
+    #[cfg(not(feature = "api-keys"))]
+    return Err(ConfigError::ApiKeysFeatureDisabled);
+    #[cfg(feature = "api-keys")]
+    rules::validate_enabled(config)
 }
 
-/// The pepper clears the signing secret's bar and equals no other key the deployment holds.
-fn validate_pepper(config: &AuthConfig) -> Result<(), ConfigError> {
-    let pepper = config.api_keys.pepper.expose_secret();
-    let len = pepper.chars().count();
-    if len < MIN_SECRET_LEN {
-        return Err(ConfigError::ApiKeysPepperTooShort { len });
+#[cfg(feature = "api-keys")]
+mod rules {
+    use std::collections::HashSet;
+
+    use secrecy::ExposeSecret;
+
+    use super::{AuthConfig, ConfigError};
+    use crate::config::validate::{MIN_SECRET_ENTROPY, MIN_SECRET_LEN, shannon_entropy};
+
+    /// Headers a key may not be read from, so it never travels through a path built for something
+    /// else.
+    const RESERVED_HEADERS: &[&str] = &[
+        "authorization",
+        "proxy-authorization",
+        "cookie",
+        "set-cookie",
+        "user-agent",
+        "origin",
+        "sec-fetch-site",
+        "content-encoding",
+        "content-length",
+        "transfer-encoding",
+        "x-forwarded-for",
+        "x-forwarded-host",
+        "x-real-ip",
+        "x-original-forwarded-for",
+        "host",
+    ];
+
+    /// The longest a scope name may be.
+    const MAX_SCOPE_LEN: usize = 64;
+
+    /// The range `last_used_flush` must fall in, in seconds.
+    const FLUSH_RANGE_SECS: std::ops::RangeInclusive<u64> = 1..=3600;
+
+    /// The rules that apply once the group is on and the feature is compiled in.
+    pub(super) fn validate_enabled(config: &AuthConfig) -> Result<(), ConfigError> {
+        let group = &config.api_keys;
+        validate_pepper(config)?;
+        validate_scopes(&group.scopes)?;
+        validate_transport(&group.header, &group.prefix)?;
+        if !FLUSH_RANGE_SECS.contains(&group.last_used_flush.as_secs())
+            || group.last_used_flush.subsec_nanos() != 0
+        {
+            return Err(ConfigError::ApiKeysFlushInterval {
+                millis: group.last_used_flush.as_millis(),
+            });
+        }
+        Ok(())
     }
-    let entropy = shannon_entropy(pepper);
-    if entropy < MIN_SECRET_ENTROPY {
-        return Err(ConfigError::ApiKeysPepperLowEntropy { entropy });
-    }
-    let mut others: Vec<(&'static str, &str)> =
-        vec![("jwt.secret", config.jwt.secret.expose_secret())];
-    others.extend(
-        config
-            .jwt
-            .previous_secrets
-            .iter()
-            .map(|s| ("a retired jwt secret", s.expose_secret())),
-    );
-    if let Some(key) = &config.identifier_key {
-        others.push(("identifier_key", key.expose_secret()));
-    }
-    if let Some(mfa) = &config.mfa {
-        others.push(("an MFA encryption key", mfa.encryption_key.expose_secret()));
+
+    /// The pepper clears the signing secret's bar and equals no other key the deployment holds.
+    fn validate_pepper(config: &AuthConfig) -> Result<(), ConfigError> {
+        let pepper = config.api_keys.pepper.expose_secret();
+        let len = pepper.chars().count();
+        if len < MIN_SECRET_LEN {
+            return Err(ConfigError::ApiKeysPepperTooShort { len });
+        }
+        let entropy = shannon_entropy(pepper);
+        if entropy < MIN_SECRET_ENTROPY {
+            return Err(ConfigError::ApiKeysPepperLowEntropy { entropy });
+        }
+        let mut others: Vec<(&'static str, &str)> =
+            vec![("jwt.secret", config.jwt.secret.expose_secret())];
         others.extend(
-            mfa.previous_encryption_keys
+            config
+                .jwt
+                .previous_secrets
                 .iter()
-                .map(|k| ("an MFA encryption key", k.expose_secret())),
+                .map(|s| ("a retired jwt secret", s.expose_secret())),
         );
-    }
-    match others.into_iter().find(|(_, value)| *value == pepper) {
-        Some((reused, _)) => Err(ConfigError::ApiKeysPepperReused { reused }),
-        None => Ok(()),
-    }
-}
-
-/// The scope vocabulary is non-empty, well-formed and free of repeats.
-fn validate_scopes(scopes: &[String]) -> Result<(), ConfigError> {
-    if scopes.is_empty() {
-        return Err(ConfigError::ApiKeysScopes {
-            index: None,
-            reason: "must be a non-empty list: it is the closed vocabulary every issued key is checked against",
-        });
-    }
-    let mut seen: HashSet<&str> = HashSet::new();
-    for (index, scope) in scopes.iter().enumerate() {
-        if !is_scope_name(scope) {
-            return Err(ConfigError::ApiKeysScopes {
-                index: Some(index),
-                reason: "must be 1 to 64 characters of letters, digits and ':', '.', '_', '-', starting with a letter or digit",
-            });
+        if let Some(key) = &config.identifier_key {
+            others.push(("identifier_key", key.expose_secret()));
         }
-        if !seen.insert(scope.as_str()) {
-            return Err(ConfigError::ApiKeysScopes {
-                index: Some(index),
-                reason: "repeats an earlier scope",
-            });
+        if let Some(mfa) = &config.mfa {
+            others.push(("an MFA encryption key", mfa.encryption_key.expose_secret()));
+            others.extend(
+                mfa.previous_encryption_keys
+                    .iter()
+                    .map(|k| ("an MFA encryption key", k.expose_secret())),
+            );
+        }
+        match others.into_iter().find(|(_, value)| *value == pepper) {
+            Some((reused, _)) => Err(ConfigError::ApiKeysPepperReused { reused }),
+            None => Ok(()),
         }
     }
-    Ok(())
-}
 
-/// Whether `scope` is a well-formed scope name.
-fn is_scope_name(scope: &str) -> bool {
-    let mut chars = scope.chars();
-    chars.next().is_some_and(|c| c.is_ascii_alphanumeric())
-        && scope.len() <= MAX_SCOPE_LEN
-        && scope
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, ':' | '.' | '_' | '-'))
-}
+    /// The scope vocabulary is non-empty, well-formed and free of repeats.
+    fn validate_scopes(scopes: &[String]) -> Result<(), ConfigError> {
+        if scopes.is_empty() {
+            return Err(ConfigError::ApiKeysScopes {
+                index: None,
+                reason: "must be a non-empty list: it is the closed vocabulary every issued key is checked against",
+            });
+        }
+        let mut seen: HashSet<&str> = HashSet::new();
+        for (index, scope) in scopes.iter().enumerate() {
+            if !is_scope_name(scope) {
+                return Err(ConfigError::ApiKeysScopes {
+                    index: Some(index),
+                    reason: "must be 1 to 64 characters of letters, digits and ':', '.', '_', '-', starting with a letter or digit",
+                });
+            }
+            if !seen.insert(scope.as_str()) {
+                return Err(ConfigError::ApiKeysScopes {
+                    index: Some(index),
+                    reason: "repeats an earlier scope",
+                });
+            }
+        }
+        Ok(())
+    }
 
-/// The header and prefix are ones the key grammar and the transport can carry.
-fn validate_transport(header: &str, prefix: &str) -> Result<(), ConfigError> {
-    let header_ok = !header.is_empty()
-        && header.len() <= 64
-        && header
-            .chars()
-            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
-        && !header.starts_with('-')
-        && !RESERVED_HEADERS.contains(&header);
-    if !header_ok {
-        return Err(ConfigError::ApiKeysTransport {
-            field: "header",
-            reason: "must be a lowercase header name other than one the library reads or derives a field from (authorization, cookie, user-agent, origin, the forwarded-address headers and the like)",
-        });
+    /// Whether `scope` is a well-formed scope name.
+    fn is_scope_name(scope: &str) -> bool {
+        let mut chars = scope.chars();
+        chars.next().is_some_and(|c| c.is_ascii_alphanumeric())
+            && scope.len() <= MAX_SCOPE_LEN
+            && scope
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, ':' | '.' | '_' | '-'))
     }
-    let prefix_ok = (2..=16).contains(&prefix.len())
-        && prefix.starts_with(|c: char| c.is_ascii_lowercase())
-        && prefix
-            .chars()
-            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit());
-    if !prefix_ok {
-        return Err(ConfigError::ApiKeysTransport {
-            field: "prefix",
-            reason: "must be 2 to 16 lowercase letters and digits starting with a letter; an underscore is not allowed, it separates the parts of a key",
-        });
+
+    /// The header and prefix are ones the key grammar and the transport can carry.
+    fn validate_transport(header: &str, prefix: &str) -> Result<(), ConfigError> {
+        let header_ok = !header.is_empty()
+            && header.len() <= 64
+            && header
+                .chars()
+                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+            && !header.starts_with('-')
+            && !RESERVED_HEADERS.contains(&header);
+        if !header_ok {
+            return Err(ConfigError::ApiKeysTransport {
+                field: "header",
+                reason: "must be a lowercase header name other than one the library reads or derives a field from (authorization, cookie, user-agent, origin, the forwarded-address headers and the like)",
+            });
+        }
+        let prefix_ok = (2..=16).contains(&prefix.len())
+            && prefix.starts_with(|c: char| c.is_ascii_lowercase())
+            && prefix
+                .chars()
+                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit());
+        if !prefix_ok {
+            return Err(ConfigError::ApiKeysTransport {
+                field: "prefix",
+                reason: "must be 2 to 16 lowercase letters and digits starting with a letter; an underscore is not allowed, it separates the parts of a key",
+            });
+        }
+        Ok(())
     }
-    Ok(())
 }
