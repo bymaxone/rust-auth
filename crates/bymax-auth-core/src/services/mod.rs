@@ -29,6 +29,8 @@ mod logout_pending;
 pub use adapter_api::{IssuedWsTicket, WS_TICKET_TTL_SECONDS};
 pub use verifier::{AuthPlane, VerifiedAccessToken, VerifyAccessOptions};
 
+#[cfg(feature = "api-keys")]
+pub mod api_key;
 pub mod auth;
 pub mod brute_force;
 #[cfg(feature = "mfa")]

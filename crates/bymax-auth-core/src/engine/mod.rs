@@ -67,9 +67,9 @@ pub struct AuthEngine {
     /// `config.platform.enabled`.
     #[cfg(feature = "platform")]
     platform_auth: Option<crate::services::platform::PlatformAuthService>,
-    /// The service API-key repository, present exactly when `api_keys.enabled`.
+    /// The service API-key runtime, present exactly when `api_keys.enabled`.
     #[cfg(feature = "api-keys")]
-    api_key_repository: Option<Arc<dyn crate::traits::ApiKeyRepository>>,
+    api_keys: Option<crate::services::api_key::ApiKeyRuntime>,
 }
 
 impl AuthEngine {
@@ -195,7 +195,13 @@ impl AuthEngine {
     #[cfg(feature = "api-keys")]
     #[must_use]
     pub fn api_key_repository(&self) -> Option<&Arc<dyn crate::traits::ApiKeyRepository>> {
-        self.api_key_repository.as_ref()
+        self.api_keys.as_ref().map(|runtime| &runtime.repository)
+    }
+
+    /// The service API-key runtime, when the group is enabled.
+    #[cfg(feature = "api-keys")]
+    pub(crate) fn api_keys(&self) -> Option<&crate::services::api_key::ApiKeyRuntime> {
+        self.api_keys.as_ref()
     }
 
     /// The refresh-session store.

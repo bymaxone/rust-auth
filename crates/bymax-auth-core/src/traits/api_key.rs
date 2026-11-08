@@ -118,9 +118,14 @@ pub trait ApiKeyRepository: Send + Sync {
     /// is already revoked is not an error.
     async fn mark_revoked(&self, id: &str, at: OffsetDateTime) -> Result<bool, RepositoryError>;
 
-    /// Set when a key stops verifying, so an old key can be retired after an overlap.
-    /// `Ok(false)` when no such key exists.
-    async fn set_expiry(&self, id: &str, at: OffsetDateTime) -> Result<bool, RepositoryError>;
+    /// Make a key stop verifying no later than `at`, so an old key can be retired after an
+    /// overlap. `Ok(false)` when no such key exists.
+    ///
+    /// MUST be an atomic minimum, never an assignment: the stored expiry becomes the earlier of
+    /// its current value and `at` (`LEAST(expires_at, :at)`, or a `WHERE expires_at IS NULL OR
+    /// expires_at > :at` guard). Two rotations of the same key read the same row, and a late
+    /// write from the one with the longer overlap must not push back the deadline the other set.
+    async fn limit_expiry(&self, id: &str, at: OffsetDateTime) -> Result<bool, RepositoryError>;
 
     /// Record when keys were last used, in one batch.
     ///

@@ -47,7 +47,7 @@ async fn a_duplicate_id_is_a_conflict() -> Result<(), RepositoryError> {
 }
 
 #[tokio::test]
-async fn revoking_and_expiring_keep_the_row_readable() -> Result<(), RepositoryError> {
+async fn revoking_and_limiting_the_expiry_keep_the_row_readable() -> Result<(), RepositoryError> {
     let repo = InMemoryApiKeyRepository::new();
     let now = OffsetDateTime::now_utc();
     repo.create(new_key("a", "billing", now)).await?;
@@ -55,7 +55,7 @@ async fn revoking_and_expiring_keep_the_row_readable() -> Result<(), RepositoryE
     assert!(repo.mark_revoked("a", now).await?);
     // A second revocation is not an error and does not move the first instant.
     assert!(repo.mark_revoked("a", now + Duration::hours(1)).await?);
-    assert!(repo.set_expiry("a", now + Duration::days(1)).await?);
+    assert!(repo.limit_expiry("a", now + Duration::days(1)).await?);
 
     let row = repo.find_by_id("a").await?;
     assert_eq!(row.as_ref().and_then(|k| k.revoked_at), Some(now));
@@ -64,7 +64,7 @@ async fn revoking_and_expiring_keep_the_row_readable() -> Result<(), RepositoryE
         Some(now + Duration::days(1))
     );
     assert!(!repo.mark_revoked("nope", now).await?);
-    assert!(!repo.set_expiry("nope", now).await?);
+    assert!(!repo.limit_expiry("nope", now).await?);
     Ok(())
 }
 
@@ -156,10 +156,34 @@ async fn a_failing_repository_answers_every_call_with_a_backend_error() {
     ));
     assert!(repo.create(new_key("a", "x", now)).await.is_err());
     assert!(repo.mark_revoked("a", now).await.is_err());
-    assert!(repo.set_expiry("a", now).await.is_err());
+    assert!(repo.limit_expiry("a", now).await.is_err());
     assert!(repo.touch_last_used(&[]).await.is_err());
     assert!(repo.list_by_label("x").await.is_err());
 
     repo.set_failing(false);
     assert!(repo.find_by_id("a").await.is_ok());
+}
+
+#[tokio::test]
+async fn limiting_the_expiry_only_ever_moves_it_earlier() -> Result<(), RepositoryError> {
+    let repo = InMemoryApiKeyRepository::new();
+    let now = OffsetDateTime::now_utc();
+    repo.create(new_key("a", "billing", now)).await?;
+
+    // The shorter limit lands first, then a stale caller with a longer one: the shorter stays.
+    repo.limit_expiry("a", now + Duration::seconds(60)).await?;
+    repo.limit_expiry("a", now + Duration::seconds(3600))
+        .await?;
+    assert_eq!(
+        repo.row("a").and_then(|k| k.expires_at),
+        Some(now + Duration::seconds(60))
+    );
+
+    // And an earlier one still wins.
+    repo.limit_expiry("a", now + Duration::seconds(5)).await?;
+    assert_eq!(
+        repo.row("a").and_then(|k| k.expires_at),
+        Some(now + Duration::seconds(5))
+    );
+    Ok(())
 }
