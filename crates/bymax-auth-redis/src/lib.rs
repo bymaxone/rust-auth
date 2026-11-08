@@ -20,6 +20,8 @@
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 
+#[cfg(test)]
+mod contract_tests;
 mod error;
 mod keys;
 mod pool;

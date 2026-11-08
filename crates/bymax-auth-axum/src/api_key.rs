@@ -53,7 +53,8 @@ pub struct ApiKeyScopesLayer {
 ///
 /// # Errors
 ///
-/// [`ConfigError::ApiKeyGuardWithoutApiKeys`] when the engine's `api_keys` group is off.
+/// [`ConfigError::ApiKeyGuardWithoutApiKeys`] when the engine's `api_keys` group is off, and
+/// [`ConfigError::ApiKeyGuardUndeclaredScope`] when a declared scope is not in `api_keys.scopes`.
 pub fn require_api_key_scopes(
     state: &AuthState,
     scopes: &'static [&'static str],
@@ -65,6 +66,13 @@ pub fn require_api_key_scopes(
         .ok()
         .filter(|_| state.engine().api_key_repository().is_some())
         .ok_or(ConfigError::ApiKeyGuardWithoutApiKeys)?;
+    // A scope outside the vocabulary can never be held, so the route would refuse every key.
+    if let Some(index) = scopes
+        .iter()
+        .position(|scope| !config.scopes.iter().any(|known| known == scope))
+    {
+        return Err(ConfigError::ApiKeyGuardUndeclaredScope { index });
+    }
     Ok(ApiKeyScopesLayer {
         state: state.clone(),
         header,

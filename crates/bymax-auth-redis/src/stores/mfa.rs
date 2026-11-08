@@ -19,6 +19,10 @@ use crate::keys::Prefix;
 use crate::pool::RedisStores;
 use crate::script;
 
+/// The value of a single-use marker (`tu:` and `rcu:`): presence is the whole meaning, so the
+/// value only has to be the one the shared wire contract spells for `recoveryCodeClaim`.
+pub(crate) const SINGLE_USE_MARKER_VALUE: &str = "1";
+
 impl RedisStores {
     /// `SET mfa_setup:{user_id_hash} value NX EX ttl` — store the pending-setup record only
     /// when absent, returning whether this call created it.
@@ -136,7 +140,8 @@ impl RedisStores {
         id: &str,
         ttl: u64,
     ) -> Result<bool, RedisStoreError> {
-        self.set_nx_value(prefix, id, "1", ttl).await
+        self.set_nx_value(prefix, id, SINGLE_USE_MARKER_VALUE, ttl)
+            .await
     }
 
     /// `SET {prefix}:{id} value NX EX ttl` — the same claim, with a value that will be read

@@ -1117,6 +1117,19 @@ The **Default** column lists `AuthConfig::default()` (≡ `nest_compat_defaults(
 | `tenant_id_resolver` | `Option<Arc<dyn …>>` | No | `None` | Anti-spoofing |
 | `enforce_tenant_binding` | `bool` | No | `false` | Refuses a token minted for another tenant than the resolver names for the request; requires `tenant_id_resolver` |
 
+> **Open divergence from nest-auth: the tenant binding reads `Host` only.** With
+> `enforce_tenant_binding`, the host the `tenant_id_resolver` receives is the request's `Host`
+> header. The adapter strips `X-Forwarded-Host` from the headers it hands to the resolver and to
+> hooks (it is client-chosen unless a proxy sets it), and there is no opt-in to read it.
+> `@bymax-one/nest-auth` 1.4.11 added `isTrustedProxy`, which approves the immediate TCP peer; when
+> it answers `true`, the first element of a single `X-Forwarded-Host` replaces `Host`. Nest applies
+> that only to the WebSocket upgrade and stream verification, where it has to compute the hostname
+> itself; on its HTTP routes Express resolves `req.hostname` from its own `trust proxy` setting.
+> Behind a proxy that rewrites `Host` (nginx's default `Host $proxy_host`), a rust-auth deployment
+> therefore sees the proxy's hostname: the binding fails closed, refusing the request, and never
+> admits a tenant the client chose. The workaround is for the proxy to pass `Host` through
+> (`proxy_set_header Host $host`). A peer-approved opt-in would close the gap; it is not built.
+
 ### 5.4 Builder usage
 
 The builder separates **required** collaborators (enforced before `build()` can succeed) from **optional** ones (defaulted to no-op or unconfigured). Required: `AuthConfig` (with `jwt` + `roles`), a `UserRepository`, and the Redis-backed stores (`SessionStore`, `OtpStore`, `BruteForceStore`) — most deployments satisfy the three stores with a single `bymax-auth-redis` adapter. Optional: `EmailProvider` (defaults to `NoOpEmailProvider`), `AuthHooks` (defaults to `NoOpAuthHooks`), `PlatformUserRepository` (required only when `platform.enabled`), and OAuth providers.
@@ -2548,7 +2561,7 @@ runtime sense (`api_keys.enabled`, §5.3). There are no HTTP routes that manage 
 rotate or revoke one is the host's decision, made through `AuthEngine`.
 
 **Key grammar and digest.** A key is `{prefix}_{keyId}_{secret}`: a prefix of 2 to 16 lowercase
-letters and digits (default `bak`), a lowercase canonical UUID, and 43 unpadded base64url characters
+letters and digits starting with a letter (default `bak`), a lowercase canonical UUID, and 43 unpadded base64url characters
 (32 random bytes). It is split on the first two separators only, because the secret may itself
 contain `_`. Only `hex(hmac_sha256(pepper, secret))` is stored, over the secret **as the string
 presented**: two base64url spellings of the same bytes are two different keys. Labels and scopes are
@@ -3577,7 +3590,9 @@ envelope or passes the request on carrying a `CurrentApiKey` (id, label, scopes;
 
 Every value of the key header is marked sensitive on the request, so a `Debug` print shows
 `Sensitive`. Building the layer, or the flush task, over an engine whose `api_keys` group is off is
-`ConfigError::ApiKeyGuardWithoutApiKeys`.
+`ConfigError::ApiKeyGuardWithoutApiKeys`. A layer that declares a scope absent from
+`api_keys.scopes` is `ConfigError::ApiKeyGuardUndeclaredScope { index }` at construction, naming
+the position and never the value; the empty list stays the fail-closed layer described above.
 
 `spawn_api_key_flush` is the adapter-owned task that calls `flush_api_key_last_used` every
 `api_keys.last_used_flush` and once more on `ApiKeyFlushTask::shutdown`, which reports whether the
@@ -4447,8 +4462,9 @@ honoring the three configured redirect URLs (`success_redirect_url`,
 | `Authenticated`                              | `success_redirect_url` = None | **200** with the delivered auth body (SPA/API flow)                      |
 | `MfaChallenge`                               | `mfa_redirect_url` = Some     | set the `mfa_temp_token` cookie, then **302** to that URL                 |
 | `MfaChallenge`                               | `mfa_redirect_url` = None     | set the cookie + **200** `{ mfaRequired: true, mfaTempToken }`            |
-| `Err(AuthError)` (an `OAuthFailed`-family)   | `error_redirect_url` = Some   | **302** to that URL with `?error=<short_code>` appended (see §11.4)       |
+| `Err(AuthError)` other than `Internal`       | `error_redirect_url` = Some   | **302** to that URL with `?error=<short_code>` appended (see §11.4)       |
 | `Err(AuthError)`                             | `error_redirect_url` = None   | propagate the error → standard JSON envelope (§8.6)                       |
+| `Err(AuthError::Internal)`                   | any                           | **500** standard JSON envelope, never a redirect (an outage is not a refusal) |
 
 The MFA temp cookie is `HttpOnly`, `Secure` (from `secure_cookies`), `SameSite`
 (from config), path-scoped to the MFA challenge path (default `/auth/mfa`), with
@@ -4489,8 +4505,12 @@ provider. This defends the authorization code against interception even if
 | `auth.oauth_email_mismatch`   | 409  | Reserved for the email-conflict case (provider email collides with an account that resolves to a different identity); surfaced by `on_oauth_login`/store as appropriate. |
 
 When redirecting on error, the handler surfaces only the **short suffix** of the
-code (`oauth_failed`, not `auth.oauth_failed`) as the `?error=` parameter, so the
-internal `auth.` namespace is not exposed in user-facing URLs.
+refusal's own wire code (`oauth_email_mismatch`, `account_banned`, `oauth_failed`; never
+`auth.oauth_failed`) as the `?error=` parameter, so the internal `auth.` namespace is not
+exposed in user-facing URLs. Every refusal is redirected, not only `auth.oauth_failed`,
+exactly as `@bymax-one/nest-auth` does for any `AuthException`; an `Internal` failure is
+not a refusal and stays a 500 that monitoring sees. A provider's own `error` response
+and a callback without a `code` are reported as `oauth_failed`.
 
 **Open-redirect safety.** The three redirect URLs (`success_redirect_url`,
 `mfa_redirect_url`, `error_redirect_url`) and the provider `callback_url` are

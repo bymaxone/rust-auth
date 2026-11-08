@@ -2251,7 +2251,7 @@ async fn a_provider_error_callback_is_an_oauth_failure_not_a_validation_error() 
 async fn an_infrastructure_failure_on_the_callback_does_not_become_an_error_redirect() {
     // The error redirect exists to explain a refusal to a user. A store that is down is not a
     // refusal: dressing it up as `?error=oauth_failed` would tell the user to try again while
-    // hiding an outage from whatever watches 5xx. Only an `OauthFailed` gets the redirect.
+    // hiding an outage from whatever watches 5xx. Only a refusal gets the redirect.
     let Some(h) = build_oauth_with_failing_state_store() else { return };
     let app = router(&h);
 
@@ -2316,6 +2316,59 @@ async fn oauth_callback_redirect_branches() {
         .unwrap_or("")
         .to_owned();
     assert!(err_location.contains("error=oauth_failed"));
+}
+
+#[tokio::test]
+async fn a_refusal_other_than_oauth_failed_redirects_with_its_own_code() {
+    use bymax_auth_core::traits::UserRepository;
+    use bymax_auth_types::CreateUserData;
+    // nest-auth redirects ANY refusal it names to the error URL with that refusal's code, so a
+    // browser told only `oauth_failed` for an email collision would be told something false.
+    let Some(h) = build_oauth_with_redirects() else { return };
+    let seeded = h
+        .users
+        .create(CreateUserData {
+            email: "mock@example.com".to_owned(),
+            name: "Existing".to_owned(),
+            password_hash: None,
+            role: None,
+            status: Some("ACTIVE".to_owned()),
+            tenant_id: "t1".to_owned(),
+            email_verified: Some(true),
+        })
+        .await;
+    assert!(seeded.is_ok());
+    let app = router(&h);
+
+    let initiate = Req::get("/auth/oauth/google?tenantId=t1").send(&app).await;
+    let location = initiate
+        .headers
+        .get(header::LOCATION)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_owned();
+    let state = location
+        .split("state=")
+        .nth(1)
+        .and_then(|s| s.split('&').next())
+        .unwrap_or("")
+        .to_owned();
+
+    let callback = Req::get(&format!(
+        "/auth/oauth/google/callback?code=abc&state={state}"
+    ))
+    .cookie("oauth_state", &state)
+    .send(&app)
+    .await;
+
+    assert_eq!(callback.status, StatusCode::FOUND);
+    let target = callback
+        .headers
+        .get(header::LOCATION)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    assert_eq!(target, "http://localhost/error?error=oauth_email_mismatch");
+    assert!(!callback.has_cookie_value("access_token"));
 }
 
 // ----------------------------------------------------------------------------------------

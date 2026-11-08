@@ -20,8 +20,8 @@ use crate::state::{AuthState, AxumAuthConfig};
 use crate::validation::PathParam;
 use crate::validation::ValidatedQuery;
 
-/// The `?error=` short-code surfaced on an error redirect (§11.4): the suffix of the OAuth
-/// failure code, never the `auth.`-namespaced form.
+/// The short code used when an error's wire code cannot be read, the fallback nest-auth uses
+/// (§11.4).
 const OAUTH_ERROR_SHORT_CODE: &str = "oauth_failed";
 
 /// Build a `302 Found` redirect to `url`, matching nest-auth's redirect status byte-for-byte
@@ -39,16 +39,26 @@ fn found(url: &str) -> Response {
     }
 }
 
-/// The response for an OAuth refusal: the configured error redirect when there is one, the
-/// `auth.oauth_failed` envelope otherwise. One helper so the provider's own error response and
-/// a failed exchange cannot drift apart in status, code, or destination.
-fn oauth_failure(state: &AuthState) -> Response {
+/// The `?error=` value for a refusal: the wire code of `error` without its `auth.` namespace
+/// (`auth.oauth_email_mismatch` becomes `oauth_email_mismatch`), read from the same envelope a
+/// JSON response would carry, so a redirect can never name a code the API would not.
+fn error_short_code(error: &bymax_auth_types::AuthError) -> String {
+    let wire = serde_json::to_value(error.to_envelope().error.code).unwrap_or_default();
+    let code = wire.as_str().unwrap_or(OAUTH_ERROR_SHORT_CODE);
+    code.split_once('.').unwrap_or(("", code)).1.to_owned()
+}
+
+/// The response for an OAuth refusal: the configured error redirect carrying the refusal's own
+/// short code when there is one, the error's JSON envelope otherwise. One helper so the
+/// provider's own error response and a failed exchange cannot drift apart in status, code, or
+/// destination.
+fn oauth_failure(state: &AuthState, error: &bymax_auth_types::AuthError) -> Response {
     match state
         .engine()
-        .oauth_error_redirect_url(OAUTH_ERROR_SHORT_CODE)
+        .oauth_error_redirect_url(&error_short_code(error))
     {
         Some(url) => found(&url),
-        None => error_response(&bymax_auth_types::AuthError::OauthFailed),
+        None => error_response(error),
     }
 }
 
@@ -128,7 +138,7 @@ async fn callback(
             error = provider_error,
             "oauth callback carried a provider error or no code"
         );
-        return oauth_failure(&state);
+        return oauth_failure(&state, &bymax_auth_types::AuthError::OauthFailed);
     };
 
     let outcome = state
@@ -158,14 +168,11 @@ async fn callback(
                 None => delivery.deliver_mfa_challenge(&challenge),
             }
         }
-        Err(error) => {
-            // Only an `OauthFailed`-family error is converted to an error redirect; any other
-            // (e.g. an internal transport failure) propagates so monitoring sees it.
-            if matches!(error, bymax_auth_types::AuthError::OauthFailed) {
-                return oauth_failure(&state);
-            }
-            error_response(&error)
-        }
+        // Every refusal the library names is explained to the browser with its own code, as nest
+        // does for any `AuthException`; an internal failure is not a refusal, so it stays a 5xx
+        // that monitoring sees instead of a tidy `?error=` redirect.
+        Err(error @ bymax_auth_types::AuthError::Internal(_)) => error_response(&error),
+        Err(error) => oauth_failure(&state, &error),
     }
 }
 
