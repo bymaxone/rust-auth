@@ -726,7 +726,6 @@ pub struct AuthConfig {
     pub invitations: InvitationConfig,
     pub oauth: OAuthConfig,
     pub route_prefix: String,
-    pub redis_namespace: String,
     pub blocked_statuses: Vec<String>,
     pub user_status_cache_ttl: Duration,
     pub controllers: ControllerToggles,
@@ -1105,7 +1104,6 @@ The **Default** column lists `AuthConfig::default()` (≡ `nest_compat_defaults(
 | `oauth.redirect_allowlist` | `Vec<String>` | No | `[]` | Permitted redirect/callback hosts (§11.4) |
 | `oauth.google` | `Option<GoogleOAuthConfig>` | Cond. | `None` | Built-in Google provider |
 | `route_prefix` | `String` | No | `auth` | |
-| `redis_namespace` | `String` | No | `auth` | All keys prefixed `{ns}:` |
 | `blocked_statuses` | `Vec<String>` | No | `["BANNED","INACTIVE","SUSPENDED"]` | |
 | `user_status_cache_ttl` | `Duration` | No | `60s` | How long an account's cached status (and, where `email_verification.required`, its verified-address flag) answers the per-request status gate before the repository is read again. A status change reaches requests within this TTL, or at once after `AuthEngine::invalidate_account_status`. `0` turns the cache off. The platform plane is never cached |
 | `controllers.*` | `ControllerToggles` | No | see 5.1.8 | Gates router mounting |
@@ -1290,7 +1288,7 @@ Multi-tenant deployments derive tenant scope from the request context, never fro
 
 - **Single-tenant deployments may omit the resolver.** With no resolver configured, the tenant is the one the caller names in the request — the engine holds no static default and invents none, and a request naming none is refused with `AuthError::Validation` on `tenantId` rather than scoped to a stand-in. A single-tenant app therefore sends one constant value, which is the correct mode for it. **Multi-tenant deployments must configure a resolver** so that scope comes from the request context rather than the body; this is a coherence expectation, not a convention left to discipline.
 
-- **Every tenant-scoped query carries the tenant id.** The resolved tenant id is threaded into all `UserRepository` reads and writes (§6.2) — `find_by_email`, `find_by_oauth_id`, and the tenant-scoped `find_by_id` — so the storage layer enforces isolation (and, where available, database row-level security); a cross-tenant lookup must return `Ok(None)`, never another tenant's row. Mutable store state (sessions, OTPs, brute-force counters, OAuth state) is namespaced (`redis_namespace` plus the derived keys of §5.5) so per-tenant records cannot collide.
+- **Every tenant-scoped query carries the tenant id.** The resolved tenant id is threaded into all `UserRepository` reads and writes (§6.2) — `find_by_email`, `find_by_oauth_id`, and the tenant-scoped `find_by_id` — so the storage layer enforces isolation (and, where available, database row-level security); a cross-tenant lookup must return `Ok(None)`, never another tenant's row. Mutable store state (sessions, OTPs, brute-force counters, OAuth state) is namespaced (the namespace passed to `RedisStores::connect` plus the derived keys of §5.5) so per-tenant records cannot collide.
 
 - **Tenant and platform are separate identity domains with separate role hierarchies.** `roles.hierarchy` governs dashboard/tenant users (`AuthUser`); `roles.platform_hierarchy` governs platform administrators (`AuthPlatformUser`), who are **not tenant-scoped at all** (§6.3) and authenticate through a distinct surface (the platform routes of §5.6). The two hierarchies are validated independently (§5.5, rules 5–8) and never share roles by accident: a tenant role grants nothing on the platform side, and vice versa.
 
@@ -4415,7 +4413,7 @@ pub trait RedisConn: Send + Sync + Clone + 'static {
 
 ### 12.2 Namespace prefixing
 
-Every key is transparently prefixed with `{namespace}:`. The namespace comes from resolved configuration (`redis_namespace`, default **`auth`**) and is applied in exactly one place — the namespaced wrapper — so no call site ever constructs a raw key.
+Every key is transparently prefixed with `{namespace}:`. The namespace is the argument of `RedisStores::connect` (conventionally `auth`); `AuthConfig` carries no copy of it. It is applied in exactly one place — the namespaced wrapper — so no call site ever constructs a raw key.
 
 ```rust
 /// Wraps a `RedisConn`, prepending `{namespace}:` to every key before it reaches Redis.

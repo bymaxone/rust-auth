@@ -40,7 +40,6 @@ impl AuthConfig {
             email_change: EmailChangeConfig::default(),
             oauth: OAuthConfig::default(),
             route_prefix: "auth".to_owned(),
-            redis_namespace: "auth".to_owned(),
             blocked_statuses: vec![
                 "BANNED".to_owned(),
                 "INACTIVE".to_owned(),
@@ -99,7 +98,6 @@ mod tests {
         assert_eq!(cfg.password.scrypt.cost_factor, 1 << 17);
         assert_eq!(cfg.sessions.default_max_sessions, 5);
         assert_eq!(cfg.route_prefix, "auth");
-        assert_eq!(cfg.redis_namespace, "auth");
         assert_eq!(cfg.user_status_cache_ttl, Duration::from_secs(60));
         assert_eq!(
             cfg.blocked_statuses,

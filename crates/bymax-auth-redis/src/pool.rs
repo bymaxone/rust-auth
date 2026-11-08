@@ -21,7 +21,12 @@ pub struct RedisStores {
 }
 
 impl RedisStores {
-    /// Build a pool from a Redis URL and a key namespace (default `auth`).
+    /// Build a pool from a Redis URL and a key namespace (conventionally `auth`).
+    ///
+    /// This argument is the only place the namespace is set: every key is prefixed
+    /// `{namespace}:`, and `AuthConfig` carries no namespace of its own to disagree with it.
+    /// Two deployments sharing a Redis, or this library and `@bymax-one/nest-auth`, must pass
+    /// the same value to see one keyspace.
     ///
     /// The pool is created lazily — connections are established on first use — so this does
     /// not perform any network I/O. It returns an error only when the URL is malformed or

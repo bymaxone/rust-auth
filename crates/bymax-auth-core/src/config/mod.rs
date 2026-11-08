@@ -682,8 +682,6 @@ pub struct AuthConfig {
     pub oauth: OAuthConfig,
     /// Route prefix, default `auth`.
     pub route_prefix: String,
-    /// Redis namespace, default `auth`; all keys prefixed `{ns}:`.
-    pub redis_namespace: String,
     /// Statuses that block login, default `["BANNED", "INACTIVE", "SUSPENDED"]`.
     pub blocked_statuses: Vec<String>,
     /// User-status cache TTL (status-revocation latency), default 60s.
