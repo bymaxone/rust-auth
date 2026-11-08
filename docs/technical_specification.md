@@ -2541,8 +2541,7 @@ Traits/crates: `bymax-auth-types` (`AuthResult`, `PlatformAuthResult`, `SafeAuth
 All cross-store mutations follow the security-before-availability ordering established above (credential change before session invalidation; uniqueness/status/verification gates before KDF work; brute-force ordering invariant). Every `after_*`/`on_*` hook is fire-and-forget; only `before_register` (and OAuth's `on_oauth_login`) can block a flow.
 ### 7.13 Service API keys (feature `api-keys`)
 
-Scoped keys for machine callers, mirrored from nest-auth and held to the shared wire contract's
-`apiKeys` section. The feature is **off by default** in both the Cargo sense (`api-keys`) and the
+Scoped keys for machine callers, held to the shared wire contract's `apiKeys` section. The feature is **off by default** in both the Cargo sense (`api-keys`) and the
 runtime sense (`api_keys.enabled`, §5.3). There are no HTTP routes that manage keys: who may mint,
 rotate or revoke one is the host's decision, made through `AuthEngine`.
 
@@ -3576,8 +3575,7 @@ envelope or passes the request on carrying a `CurrentApiKey` (id, label, scopes;
 
 Every value of the key header is marked sensitive on the request, so a `Debug` print shows
 `Sensitive`. Building the layer, or the flush task, over an engine whose `api_keys` group is off is
-`ConfigError::ApiKeyGuardWithoutApiKeys`. The client address is the one the adapter's client-address
-layer stored, or the TCP peer when that layer did not run.
+`ConfigError::ApiKeyGuardWithoutApiKeys`.
 
 `spawn_api_key_flush` is the adapter-owned task that calls `flush_api_key_last_used` every
 `api_keys.last_used_flush` and once more on `ApiKeyFlushTask::shutdown`, which reports whether the

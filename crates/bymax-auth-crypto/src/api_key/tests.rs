@@ -283,22 +283,44 @@ fn base64url_encodes_every_partial_group_length_as_the_alphabet_dictates() {
     assert_eq!(encode_base64url(b"foobar"), "Zm9vYmFy");
 }
 
+/// The 32 bytes a lenient base64url decoder reads from a 43-character secret: the first 256 of its
+/// 258 bits, the last two being padding that a decoder ignores.
+fn decoded(secret: &str) -> Vec<u8> {
+    let bits: Vec<bool> = secret
+        .bytes()
+        .flat_map(|c| {
+            let value = BASE64URL.iter().position(|&a| a == c).unwrap_or(0);
+            (0..6).rev().map(move |shift| (value >> shift) & 1 == 1)
+        })
+        .collect();
+    bits.chunks(8)
+        .take(32)
+        .map(|byte| {
+            byte.iter()
+                .fold(0_u8, |acc, &bit| (acc << 1) | u8::from(bit))
+        })
+        .collect()
+}
+
 #[test]
 fn the_digest_is_over_the_secret_string_not_the_bytes_it_decodes_to() {
-    // 43 base64url characters carry 258 bits for 256 bits of key: the last character's two low bits
-    // are ignored by a decoder, so `A` and `B` there are two spellings of the same 32 bytes. Both
-    // are valid secrets, and they must be two different keys.
+    // A 43-character secret carries 258 bits for 256 bits of key, so the last character's two low
+    // bits are ignored by a decoder: flipping one gives a second, valid spelling of the same 32
+    // bytes. The two must be two different keys, because the digest is over the string.
     let vector = &contract()["vector"];
     let pepper = text(vector, "pepper");
     let secret = text(vector, "secret");
     let (stem, last) = secret.split_at(secret.len() - 1);
-    let respelled = format!("{stem}{}", if last == "A" { "B" } else { "A" });
+    let index = BASE64URL
+        .iter()
+        .position(|&a| last.as_bytes() == [a])
+        .unwrap_or(0);
+    let respelled = format!("{stem}{}", char::from(BASE64URL[index ^ 1]));
 
-    assert_eq!(respelled.len(), secret.len());
     assert_ne!(respelled, secret);
+    assert_eq!(decoded(&respelled), decoded(&secret), "the same 32 bytes");
     assert_ne!(digest(&respelled, &pepper), digest(&secret, &pepper));
-    let key_id = text(vector, "keyId");
-    let presented = format(DEFAULT_PREFIX, &key_id, &respelled);
+    let presented = format(DEFAULT_PREFIX, &text(vector, "keyId"), &respelled);
     assert!(
         parse(&presented, DEFAULT_PREFIX).is_some(),
         "the respelling is a valid key shape"

@@ -1,8 +1,7 @@
 //! The service-key behaviour the shared wire contract pins, read from the contract and compared in
 //! both directions, so a section or a refusal the contract adds fails here until it is implemented
 //! and one it drops fails until the removal is understood. The grammar, the digest vector and the
-//! audit names are pinned next to the code that owns them (`bymax_auth_crypto::api_key`,
-//! `traits::api_key_event`); this file pins what is left.
+//! audit names are pinned next to the code that owns them; this file pins what is left.
 
 use std::collections::BTreeSet;
 
@@ -30,10 +29,8 @@ fn set(names: &[&str]) -> BTreeSet<String> {
 
 #[test]
 fn every_section_of_the_api_keys_contract_is_accounted_for() {
-    // Each name is read by a test in this crate or in `bymax-auth-crypto`: `keyGrammar`, `digest`
-    // and `vector` by the crypto tests, `auditEvent` by `api_key_event_tests`, `header`,
-    // `refusals`, `verificationSteps` below, and `validity`, `scopes` and `lastUsed` by the
-    // verifier, access and last-used tests.
+    // A section added to or dropped from the contract fails here until someone decides which
+    // test or behaviour owns it.
     assert_eq!(
         keys_of(&contract()["apiKeys"]),
         set(&[
