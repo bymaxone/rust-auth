@@ -5,10 +5,13 @@
 
 #[test]
 fn the_facade_exposes_the_api_key_adapter_when_both_features_are_on() {
-    let layer = bymax_auth::axum::require_api_key_scopes;
-    let flush = bymax_auth::axum::spawn_api_key_flush;
-    let _extractor: Option<bymax_auth::axum::CurrentApiKey> = None;
+    // Naming the items is the assertion: without the forwarding this does not compile.
+    let items = (
+        bymax_auth::axum::require_api_key_scopes,
+        bymax_auth::axum::spawn_api_key_flush,
+    );
+    let extractor: Option<bymax_auth::axum::CurrentApiKey> = None;
 
-    // Taking the items by name is the assertion: the test fails to compile without them.
-    assert_ne!(layer as usize, flush as usize);
+    std::hint::black_box(items);
+    assert!(extractor.is_none());
 }
