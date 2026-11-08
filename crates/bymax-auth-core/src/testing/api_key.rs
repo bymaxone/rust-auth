@@ -128,12 +128,12 @@ impl ApiKeyRepository for InMemoryApiKeyRepository {
             .is_some())
     }
 
-    async fn set_expiry(&self, id: &str, at: OffsetDateTime) -> Result<bool, RepositoryError> {
+    async fn limit_expiry(&self, id: &str, at: OffsetDateTime) -> Result<bool, RepositoryError> {
         self.check()?;
         Ok(self
             .rows()
             .get_mut(id)
-            .map(|key| key.expires_at = Some(at))
+            .map(|key| key.expires_at = Some(key.expires_at.map_or(at, |own| own.min(at))))
             .is_some())
     }
 

@@ -415,3 +415,22 @@ async fn every_entry_point_answers_internal_when_api_keys_are_off() -> TestResul
     ));
     Ok(())
 }
+
+#[tokio::test]
+async fn a_longer_overlap_never_pushes_back_the_deadline_a_shorter_one_set() -> TestResult {
+    let f = fixture(ApiKeyAuditMode::BestEffort)?;
+    let old = f.issue(&["admin"]).await?;
+
+    f.engine
+        .rotate_api_key(&old.record.id, RotateApiKeyInput::new(60))
+        .await?;
+    f.engine
+        .rotate_api_key(&old.record.id, RotateApiKeyInput::new(3600))
+        .await?;
+
+    assert_eq!(
+        f.repo.row(&old.record.id).and_then(|r| r.expires_at),
+        Some(f.clock_now() + Duration::seconds(60))
+    );
+    Ok(())
+}

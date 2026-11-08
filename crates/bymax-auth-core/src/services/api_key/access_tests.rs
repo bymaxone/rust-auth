@@ -211,9 +211,9 @@ async fn a_required_audit_that_never_returns_is_a_refusal() {
     };
     let fails = async { Err::<(), HookError>(HookError::Rejected("no".to_owned())) };
 
-    assert!(run_required_audit(Duration::from_millis(20), async { Ok(()) }).await);
-    assert!(!run_required_audit(Duration::from_millis(20), hangs).await);
-    assert!(!run_required_audit(Duration::from_millis(20), fails).await);
+    assert!(run_required_audit(Duration::from_millis(20), Box::pin(async { Ok(()) })).await);
+    assert!(!run_required_audit(Duration::from_millis(20), Box::pin(hangs)).await);
+    assert!(!run_required_audit(Duration::from_millis(20), Box::pin(fails)).await);
 }
 
 #[tokio::test]

@@ -8,6 +8,7 @@
 
 use std::collections::BTreeMap;
 use std::future::Future;
+use std::pin::Pin;
 use std::time::Duration;
 
 use bymax_auth_types::AuthError;
@@ -176,23 +177,24 @@ impl Guarded<'_> {
 
         let hooks = self.engine.hooks().clone();
         if self.runtime.audit_mode == crate::config::ApiKeyAuditMode::Required {
-            return run_required_audit(
-                DETACHED_TASK_TIMEOUT,
-                hooks.on_api_key_request(&event, &hook_ctx),
-            )
-            .await;
+            let call = Box::pin(hooks.on_api_key_request(&event, &hook_ctx));
+            return run_required_audit(DETACHED_TASK_TIMEOUT, call).await;
         }
         spawn_guarded(async move { hooks.on_api_key_request(&event, &hook_ctx).await });
         true
     }
 }
 
+/// The audit hook's call, type-erased.
+pub(super) type AuditFuture<'a> = Pin<Box<dyn Future<Output = Result<(), HookError>> + Send + 'a>>;
+
 /// Await the audit hook of a `Required` audit under `timeout`: `true` only when it succeeded in time.
 /// A failure and a hook that never returns are both a refusal to admit the request.
-pub(super) async fn run_required_audit(
-    timeout: Duration,
-    call: impl Future<Output = Result<(), HookError>>,
-) -> bool {
+///
+/// The future is boxed so the function is compiled once: a generic parameter would give each
+/// call site its own copy, and a copy that never reaches the timeout or error arm counts as
+/// uncovered however well another copy is tested.
+pub(super) async fn run_required_audit(timeout: Duration, call: AuditFuture<'_>) -> bool {
     match tokio::time::timeout(timeout, call).await {
         Ok(Ok(())) => true,
         Ok(Err(error)) => {

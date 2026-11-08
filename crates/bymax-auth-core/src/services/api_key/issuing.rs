@@ -188,9 +188,8 @@ impl ApiKeyRuntime {
         } else {
             let retire_at =
                 now + Duration::seconds(i64::try_from(input.overlap_seconds).unwrap_or(i64::MAX));
-            let sooner = old.expires_at.map_or(retire_at, |own| own.min(retire_at));
             self.repository
-                .set_expiry(&old.id, sooner)
+                .limit_expiry(&old.id, retire_at)
                 .await
                 .map_err(internal)?;
         }
