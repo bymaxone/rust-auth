@@ -77,8 +77,8 @@ fn every_feature_shared_with_an_adapter_is_forwarded_to_it() {
 
 #[test]
 fn the_flows_the_adapters_gate_are_among_the_forwarded_ones() {
-    // Guards the check above against passing vacuously: these are the features the adapters
-    // gate today, so the shared set must contain them.
+    // Guards the check above against passing vacuously: these are features the axum adapter
+    // gates, so the set shared with the facade must contain them.
     let facade = features(&read("Cargo.toml"));
     let axum = features(&read("../bymax-auth-axum/Cargo.toml"));
     for flow in [
