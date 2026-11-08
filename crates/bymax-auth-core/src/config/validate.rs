@@ -633,7 +633,7 @@ const MAX_BLOCKLIST_ENTRIES: usize = 10_000;
 const MAX_BLOCKLIST_ENTRY_CHARS: usize = 128;
 
 /// Validate `password.blocklist`: bounded in size, each entry bounded and not reducing to
-/// nothing (an empty reduction would refuse every password that reduces to nothing).
+/// nothing (such an entry names no word, so it can only be a mistake).
 fn validate_blocklist(blocklist: &[String]) -> Result<(), ConfigError> {
     if blocklist.len() > MAX_BLOCKLIST_ENTRIES {
         return Err(ConfigError::PasswordBlocklistSize {

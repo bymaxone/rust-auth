@@ -137,12 +137,13 @@ pub struct PasswordConfig {
     /// deployment's own product, company and domain names, which are exactly the words its
     /// users reach for and which no general corpus contains (ASVS v5 §6.2.11).
     ///
-    /// Entries are reduced the way a candidate is (lowercased, leet undone, trailing digits
-    /// dropped), so listing `Acme` also refuses `Acme2024!` and `@cme123`. Ignored when a screen
-    /// is supplied with `AuthEngineBuilder::breach_checker`: that screen owns the decision.
+    /// Entries are reduced the way a candidate is (lowercased, trailing digits and
+    /// punctuation dropped, leet undone), so listing `Acme` also refuses `Acme2024!` and
+    /// `@cme123`. Ignored when a screen is supplied with `AuthEngineBuilder::breach_checker`:
+    /// that screen owns the decision.
     ///
-    /// Validated at startup: at most 10 000 entries, each at most 128 characters and not
-    /// reducing to nothing. Default: empty.
+    /// Bounded at startup (see `ConfigError::PasswordBlocklistSize` and
+    /// `ConfigError::PasswordBlocklistEntry`). Default: empty.
     pub blocklist: Vec<String>,
     /// scrypt parameters.
     pub scrypt: ScryptParams,

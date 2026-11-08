@@ -172,8 +172,8 @@ pub enum ConfigError {
         /// The rejected iteration count.
         got: u32,
     },
-    /// An entry of `password.blocklist` is longer than the bound or reduces to nothing, which
-    /// would refuse every password that reduces to nothing.
+    /// An entry of `password.blocklist` is longer than the bound or reduces to nothing, so it
+    /// names no word.
     #[error("password.blocklist entry {index} {reason}")]
     PasswordBlocklistEntry {
         /// The position of the rejected entry.
