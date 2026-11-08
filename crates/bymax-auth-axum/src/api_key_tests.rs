@@ -10,7 +10,7 @@ use axum::Router;
 use axum::body::Body;
 use axum::routing::get;
 use bymax_auth_core::config::{ApiKeyAuditMode, TokenDelivery};
-use bymax_auth_core::services::api_key::IssueApiKeyInput;
+use bymax_auth_core::services::api_key::{ApiKeyClock, IssueApiKeyInput};
 use bymax_auth_core::testing::{
     InMemoryApiKeyRepository, InMemoryStores, InMemoryUserRepository, ManualApiKeyClock,
 };
@@ -73,6 +73,7 @@ impl Audit {
 }
 
 struct Harness {
+    clock: Arc<ManualApiKeyClock>,
     state: AuthState,
     engine: Arc<AuthEngine>,
     repo: Arc<InMemoryApiKeyRepository>,
@@ -90,6 +91,7 @@ fn harness(tweak: impl FnOnce(&mut AuthConfig)) -> Result<Harness, ConfigError> 
     tweak(&mut config);
     let repo = Arc::new(InMemoryApiKeyRepository::new());
     let audit = Arc::new(Audit::default());
+    let clock = Arc::new(ManualApiKeyClock::new(OffsetDateTime::now_utc()));
     let engine = Arc::new(
         AuthEngine::builder()
             .config(config)
@@ -98,7 +100,7 @@ fn harness(tweak: impl FnOnce(&mut AuthConfig)) -> Result<Harness, ConfigError> 
             .redis_stores(Arc::new(InMemoryStores::new()))
             .hooks(audit.clone())
             .api_key_repository(repo.clone())
-            .api_key_clock(Arc::new(ManualApiKeyClock::new(OffsetDateTime::now_utc())))
+            .api_key_clock(clock.clone())
             .build()?,
     );
     let state = AuthState::new(
@@ -109,6 +111,7 @@ fn harness(tweak: impl FnOnce(&mut AuthConfig)) -> Result<Harness, ConfigError> 
         )),
     );
     Ok(Harness {
+        clock,
         state,
         engine,
         repo,
@@ -380,11 +383,16 @@ async fn the_flush_task_writes_on_its_period_and_once_more_on_shutdown() -> Test
     let after_period = h.repo.row(&id).and_then(|r| r.last_used_at);
     assert!(after_period.is_some(), "the period flush wrote the instant");
 
-    h.repo.set_failing(true);
+    // A later use is recorded, then the store goes down for a whole period: the write fails and the
+    // instant stays queued, so the final flush on shutdown writes it.
+    h.clock.advance(time::Duration::minutes(1));
     answer(&router, request("/reports/1", Some(&key))).await;
+    h.repo.set_failing(true);
     tokio::time::sleep(Duration::from_secs(31)).await;
+    assert_eq!(h.repo.row(&id).and_then(|r| r.last_used_at), after_period);
     h.repo.set_failing(false);
     assert!(task.shutdown().await, "the task ends normally");
-    assert!(h.repo.row(&id).and_then(|r| r.last_used_at) >= after_period);
+    let written = h.repo.row(&id).and_then(|r| r.last_used_at);
+    assert_eq!(written, Some(h.clock.now()));
     Ok(())
 }
