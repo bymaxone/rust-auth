@@ -1065,10 +1065,10 @@ The **Default** column lists `AuthConfig::default()` (≡ `nest_compat_defaults(
 | `api_keys.enabled` | `bool` | No | `false` | Scoped service API keys for machine callers. Needs the `api-keys` cargo feature and an `ApiKeyRepository` on the builder; either without the other is a startup error (`ConfigError::ApiKeysFeatureDisabled`, `ApiKeysRepositoryRequired`, `ApiKeysRepositoryUnused`). Nothing below is checked while it is `false` |
 | `api_keys.pepper` | `SecretString` | Cond. | — | HMAC key every digest is computed under; same strength bar as `jwt.secret` (32 characters, 3.5 bits/char). Must equal none of `jwt.secret`, a retired JWT secret, `identifier_key`, `mfa.encryption_key` or a retired MFA key (`ApiKeysPepperReused`). Changing it makes every issued key unverifiable |
 | `api_keys.scopes` | `Vec<String>` | Cond. | — | The closed vocabulary: non-empty, distinct, each 1 to 64 characters of letters, digits and `: . _ -` starting with a letter or digit (`ApiKeysScopes`) |
-| `api_keys.header` | `String` | No | `x-api-key` | Lowercase header name the key is read from, never the query string; not a header the library reads or derives a field from (`ApiKeysTransport`) |
+| `api_keys.header` | `String` | No | `x-api-key` | Lowercase header name the key is read from, never the query string; not a reserved header such as `authorization` or `cookie` (`ApiKeysTransport`) |
 | `api_keys.prefix` | `String` | No | `bak` | Key prefix, 2 to 16 lowercase letters and digits starting with a letter, no underscore (`ApiKeysTransport`) |
-| `api_keys.last_used_flush` | `Duration` | No | `60s` | Flush interval of the coalesced last-used timestamps, a whole number of seconds from 1 to 3600 (`ApiKeysFlushInterval`) |
-| `api_keys.audit_mode` | `ApiKeyAuditMode` | No | `BestEffort` | `Required` awaits the audit hook and denies the request when it fails |
+| `api_keys.last_used_flush` | `Duration` | No | `60s` | Flush interval of the last-used timestamps, a whole number of seconds from 1 to 3600 (`ApiKeysFlushInterval`) |
+| `api_keys.audit_mode` | `ApiKeyAuditMode` | No | `BestEffort` | `Required`: a failing audit hook denies the request it audits; `BestEffort`: a failing hook never changes the answer |
 | `password.scrypt.cost_factor` | `u32` | No | `131072` | Power of 2, min `16384` |
 | `password.scrypt.block_size` | `u32` | No | `8` | scrypt r |
 | `password.scrypt.parallelization` | `u32` | No | `1` | scrypt p |

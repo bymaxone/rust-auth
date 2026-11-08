@@ -3,7 +3,7 @@
 //! The host implements [`ApiKeyRepository`] against its own store, as it does for users.
 //! Nothing stored here is reversible: a row carries the HMAC digest of the secret and never the
 //! secret. Validity is decided by the library, not the store, so a revoked or expired row is
-//! still returned by [`ApiKeyRepository::find_by_id`] and every refusal takes the same steps.
+//! still returned by [`ApiKeyRepository::find_by_id`].
 
 use async_trait::async_trait;
 use time::OffsetDateTime;
@@ -20,8 +20,7 @@ pub struct ApiKey {
     pub label: String,
     /// Lowercase hex HMAC-SHA-256 of the secret under the pepper, 64 characters.
     pub digest: String,
-    /// The scopes this key holds. A route is admitted only when the key holds every scope it
-    /// declares.
+    /// The scopes this key holds.
     pub scopes: Vec<String>,
     /// When the key was issued.
     pub created_at: OffsetDateTime,
@@ -29,7 +28,7 @@ pub struct ApiKey {
     pub expires_at: Option<OffsetDateTime>,
     /// When set, the key no longer verifies, whatever instant it holds.
     pub revoked_at: Option<OffsetDateTime>,
-    /// The last time the key verified. Advisory and coalesced: see
+    /// The last time the key verified. Advisory: see
     /// [`ApiKeyRepository::touch_last_used`].
     pub last_used_at: Option<OffsetDateTime>,
 }
@@ -119,8 +118,8 @@ pub trait ApiKeyRepository: Send + Sync {
     /// is already revoked is not an error.
     async fn mark_revoked(&self, id: &str, at: OffsetDateTime) -> Result<bool, RepositoryError>;
 
-    /// Set when a key stops verifying, which rotation uses to retire the old key after an
-    /// overlap. `Ok(false)` when no such key exists.
+    /// Set when a key stops verifying, so an old key can be retired after an overlap.
+    /// `Ok(false)` when no such key exists.
     async fn set_expiry(&self, id: &str, at: OffsetDateTime) -> Result<bool, RepositoryError>;
 
     /// Record when keys were last used, in one batch.

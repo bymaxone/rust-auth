@@ -1,7 +1,7 @@
 //! Configuration of scoped service API keys and its startup validation (layer: configuration).
 //!
-//! Keys are stored only as an HMAC-SHA-256 digest under the pepper, so changing the pepper makes
-//! every issued key unverifiable: it means re-issuing all of them. The pepper is therefore held to
+//! The pepper is the HMAC-SHA-256 key of the key digests, so changing it makes every issued key
+//! unverifiable: it means re-issuing all of them. The pepper is therefore held to
 //! the bar of the signing secret and must not be shared with another key the deployment holds,
 //! since a key reused across purposes is one leak away from all of them.
 
@@ -14,8 +14,8 @@ use super::AuthConfig;
 use super::validate::{MIN_SECRET_ENTROPY, MIN_SECRET_LEN, shannon_entropy};
 use crate::error::ConfigError;
 
-/// Headers a key may not be read from: every one the library reads or derives a field from, so a
-/// key never travels through a path built for something else.
+/// Headers a key may not be read from, so it never travels through a path built for something
+/// else.
 const RESERVED_HEADERS: &[&str] = &[
     "authorization",
     "proxy-authorization",
@@ -43,12 +43,11 @@ const FLUSH_RANGE_SECS: std::ops::RangeInclusive<u64> = 1..=3600;
 /// What a failing audit hook does to the request it audits.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum ApiKeyAuditMode {
-    /// The hook is fired without being awaited and its failure is logged: an audit outage never
-    /// changes an answer.
+    /// A failing audit hook never changes an answer; the failure is only logged.
     #[default]
     BestEffort,
-    /// The hook is awaited, and if it fails the request is DENIED. For hosts whose audit row is a
-    /// record they must have.
+    /// A failing audit hook DENIES the request it audits. For hosts whose audit row is a record
+    /// they must have.
     Required,
 }
 
@@ -71,7 +70,7 @@ pub struct ApiKeysConfig {
     /// database that stores the digests.
     pub pepper: SecretString,
     /// The closed vocabulary of scopes: 1 to 64 characters of letters, digits and `: . _ -`,
-    /// starting with a letter or digit. Issuing a key with any scope outside it is refused.
+    /// starting with a letter or digit. A key may hold only scopes from it.
     pub scopes: Vec<String>,
     /// The header the key is read from, lowercase. Never the query string. Default `x-api-key`.
     pub header: String,
@@ -79,8 +78,8 @@ pub struct ApiKeysConfig {
     /// letter, no underscore (the underscore separates the parts of a key). A literal prefix lets
     /// secret scanners find leaked keys. Default `bak`.
     pub prefix: String,
-    /// How often the last-used timestamps coalesced in memory are flushed to the store in one
-    /// batch, 1 to 3600 seconds. A crash loses at most one window of `last_used_at`. Default 60s.
+    /// How often last-used timestamps are flushed to the store in one batch, a whole number of
+    /// seconds from 1 to 3600. Default 60s.
     pub last_used_flush: Duration,
     /// What a failing audit hook does to the request it audits. Default best-effort.
     pub audit_mode: ApiKeyAuditMode,

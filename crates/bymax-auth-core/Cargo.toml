@@ -81,7 +81,7 @@ oauth-reqwest = ["oauth", "dep:reqwest"]
 platform = []
 invitations = []
 # Scoped service API keys for machine callers. Off by default: without it the repository
-# port, the verifier and the service are not compiled, and `api_keys.enabled = true` is refused.
+# port is not compiled, and `api_keys.enabled = true` is refused.
 api-keys = []
 # Exposes the in-memory trait doubles (`InMemoryUserRepository`, `InMemoryStores`, the
 # mock OAuth/HTTP clients) for downstream integration tests and this crate's own tests.

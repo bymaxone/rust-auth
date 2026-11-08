@@ -1,6 +1,6 @@
 //! The in-memory [`ApiKeyRepository`]: a `Mutex<HashMap>` keyed on the row id, with the
-//! monotonic last-used write the trait demands, a read counter so a test can pin how many rows a
-//! verification read, and a switch that makes every call fail like a datastore outage.
+//! monotonic last-used write the trait demands, a read counter so a test can pin how many times
+//! `find_by_id` ran, and a switch that makes every call fail like a datastore outage.
 
 use std::collections::HashMap;
 use std::sync::Mutex;
