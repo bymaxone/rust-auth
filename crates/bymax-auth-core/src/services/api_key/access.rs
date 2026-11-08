@@ -61,70 +61,77 @@ impl AuthEngine {
         route: &ApiKeyRoute<'_>,
         ctx: &RequestContext,
     ) -> Result<ApiKeyPrincipal, AuthError> {
-        let runtime = self.enabled_api_keys()?;
-
+        let guarded = Guarded {
+            engine: self,
+            runtime: self.enabled_api_keys()?,
+            route,
+            ctx,
+        };
         if route.required_scopes.is_empty() {
-            tracing::error!(
-                method = %log_safe(route.method),
-                route = %log_safe(route.pattern),
-                "api-key: route is guarded but declares no scopes; refused"
-            );
-            let _ = self
-                .audit_api_key(
-                    runtime,
-                    route,
-                    ctx,
-                    &denied(ApiKeyDenyReason::RouteUndeclared),
-                )
-                .await;
-            return Err(AuthError::Forbidden);
+            return Err(guarded.undeclared_route().await);
         }
+        let key = guarded.verified_key(header).await?;
+        guarded.admit(key).await
+    }
+}
 
-        let verdict = match runtime.verify(header).await {
-            Ok(verdict) => verdict,
+/// One guarded request: the engine, the runtime and what the adapter said about the request.
+struct Guarded<'a> {
+    engine: &'a AuthEngine,
+    runtime: &'a ApiKeyRuntime,
+    route: &'a ApiKeyRoute<'a>,
+    ctx: &'a RequestContext,
+}
+
+impl Guarded<'_> {
+    /// The route is guarded but declares no scopes: a configuration error, refused before the
+    /// key is read.
+    async fn undeclared_route(&self) -> AuthError {
+        // Bound first: a call inside a `tracing` field expression is not evaluated without an
+        // installed subscriber, which would leave these lines unexercised.
+        let method = log_safe(self.route.method);
+        let pattern = log_safe(self.route.pattern);
+        tracing::error!(%method, route = %pattern, "api-key: route is guarded but declares no scopes; refused");
+        self.refuse(ApiKeyDenyReason::RouteUndeclared, None).await;
+        AuthError::Forbidden
+    }
+
+    /// Read and verify the presented key: the row when it is valid, otherwise the error to answer
+    /// with (after auditing the refusal).
+    async fn verified_key(&self, header: Option<&str>) -> Result<ApiKey, AuthError> {
+        match self.runtime.verify(header).await {
+            Ok(ApiKeyVerdict::Accepted(key)) => Ok(key),
+            Ok(ApiKeyVerdict::Rejected { reason, key }) => {
+                self.refuse(deny_reason(reason), key.as_ref()).await;
+                Err(AuthError::ApiKeyInvalid)
+            }
             Err(error) => {
                 tracing::error!(error = %error, "api-key: key store unavailable");
-                let _ = self
-                    .audit_api_key(runtime, route, ctx, &denied(ApiKeyDenyReason::StoreError))
-                    .await;
-                return Err(AuthError::Internal(Box::new(error)));
+                self.refuse(ApiKeyDenyReason::StoreError, None).await;
+                Err(AuthError::Internal(Box::new(error)))
             }
-        };
+        }
+    }
 
-        let key = match verdict {
-            ApiKeyVerdict::Accepted(key) => key,
-            ApiKeyVerdict::Rejected { reason, key } => {
-                let audited = Verdict {
-                    outcome: ApiKeyOutcome::Denied,
-                    reason: Some(deny_reason(reason)),
-                    key: key.as_ref(),
-                };
-                let _ = self.audit_api_key(runtime, route, ctx, &audited).await;
-                return Err(AuthError::ApiKeyInvalid);
-            }
-        };
-
-        if !route
+    /// A valid key is admitted when it holds EVERY declared scope and the audit allows it.
+    async fn admit(&self, key: ApiKey) -> Result<ApiKeyPrincipal, AuthError> {
+        let holds_all = self
+            .route
             .required_scopes
             .iter()
-            .all(|scope| key.scopes.iter().any(|held| held == scope))
-        {
-            let audited = Verdict {
-                outcome: ApiKeyOutcome::Denied,
-                reason: Some(ApiKeyDenyReason::ScopeInsufficient),
-                key: Some(&key),
-            };
-            let _ = self.audit_api_key(runtime, route, ctx, &audited).await;
+            .all(|scope| key.scopes.iter().any(|held| held == scope));
+        if !holds_all {
+            self.refuse(ApiKeyDenyReason::ScopeInsufficient, Some(&key))
+                .await;
             return Err(AuthError::ApiKeyScopeInsufficient);
         }
-
         let allowed = Verdict {
             outcome: ApiKeyOutcome::Allowed,
             reason: None,
             key: Some(&key),
         };
         // In `Required` mode a request whose audit row could not be written is not admitted.
-        if !self.audit_api_key(runtime, route, ctx, &allowed).await {
+        if !self.audit(&allowed).await {
             return Err(AuthError::Internal("api-key audit hook failed".into()));
         }
         Ok(ApiKeyPrincipal {
@@ -134,16 +141,21 @@ impl AuthEngine {
         })
     }
 
+    /// Audit a refusal. The answer is already decided, so the audit's own outcome never changes it.
+    async fn refuse(&self, reason: ApiKeyDenyReason, key: Option<&ApiKey>) {
+        let verdict = Verdict {
+            outcome: ApiKeyOutcome::Denied,
+            reason: Some(reason),
+            key,
+        };
+        let _ = self.audit(&verdict).await;
+    }
+
     /// Fire the audit hook for one request. Returns whether the request may proceed: always
     /// `true` in best-effort mode (the hook is detached and a failure is only logged), and in
     /// `Required` mode `true` only when the awaited hook succeeded within the detached-task ceiling.
-    async fn audit_api_key(
-        &self,
-        runtime: &ApiKeyRuntime,
-        route: &ApiKeyRoute<'_>,
-        ctx: &RequestContext,
-        verdict: &Verdict<'_>,
-    ) -> bool {
+    async fn audit(&self, verdict: &Verdict<'_>) -> bool {
+        let (route, ctx) = (self.route, self.ctx);
         let event = ApiKeyAccessEvent {
             outcome: verdict.outcome,
             reason: verdict.reason,
@@ -160,10 +172,10 @@ impl AuthEngine {
         };
         let mut hook_ctx = HookContext::from_request(HookPlane::ApiKey, ctx, None, None, None);
         // The key's own header is dropped so a key can never be copied into an audit row.
-        hook_ctx.sanitized_headers = without(&hook_ctx.sanitized_headers, &runtime.header);
+        hook_ctx.sanitized_headers = without(&hook_ctx.sanitized_headers, &self.runtime.header);
 
-        let hooks = self.hooks().clone();
-        if runtime.audit_mode == crate::config::ApiKeyAuditMode::Required {
+        let hooks = self.engine.hooks().clone();
+        if self.runtime.audit_mode == crate::config::ApiKeyAuditMode::Required {
             return run_required_audit(
                 DETACHED_TASK_TIMEOUT,
                 hooks.on_api_key_request(&event, &hook_ctx),
@@ -194,17 +206,8 @@ pub(super) async fn run_required_audit(
     }
 }
 
-/// A refusal that identified no key.
-fn denied(reason: ApiKeyDenyReason) -> Verdict<'static> {
-    Verdict {
-        outcome: ApiKeyOutcome::Denied,
-        reason: Some(reason),
-        key: None,
-    }
-}
-
 /// The audit spelling of a verifier rejection.
-fn deny_reason(reason: ApiKeyRejection) -> ApiKeyDenyReason {
+pub(super) fn deny_reason(reason: ApiKeyRejection) -> ApiKeyDenyReason {
     match reason {
         ApiKeyRejection::Missing => ApiKeyDenyReason::Missing,
         ApiKeyRejection::Malformed => ApiKeyDenyReason::Malformed,

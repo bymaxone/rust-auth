@@ -155,3 +155,50 @@ pub(super) fn request_context() -> RequestContext {
         ]),
     )
 }
+
+/// One credential a guarded route must refuse: what to present, why, and the key it identifies.
+pub(super) struct BadCredential {
+    pub(super) header: Option<String>,
+    pub(super) rejection: super::ApiKeyRejection,
+    pub(super) identified: Option<String>,
+}
+
+/// A key the verifier cannot accept, with a different one for each of the six reasons (two
+/// spellings of "malformed"). The clock is advanced past the lapsing key's expiry, so call it
+/// once per fixture.
+pub(super) async fn bad_credentials(f: &Fixture) -> Result<Vec<BadCredential>, AuthError> {
+    use super::ApiKeyRejection as Why;
+    use bymax_auth_crypto::api_key;
+
+    let live = f.issue(&["admin"]).await?;
+    let revoked = f.issue(&["admin"]).await?;
+    f.engine.revoke_api_key(&revoked.record.id).await?;
+    let mut lapsing = IssueApiKeyInput::new("billing", vec!["admin".to_owned()]);
+    lapsing.expires_at = Some(f.clock_now() + Duration::seconds(30));
+    let lapsed = f.engine.issue_api_key(lapsing).await?;
+    f.clock.advance(Duration::seconds(30));
+
+    let case = |header: Option<String>, rejection, identified: Option<&str>| BadCredential {
+        header,
+        rejection,
+        identified: identified.map(str::to_owned),
+    };
+    let forged = |id: &str| Some(api_key::format("bak", id, &api_key::generate_secret()));
+    Ok(vec![
+        case(None, Why::Missing, None),
+        case(Some("junk".to_owned()), Why::Malformed, None),
+        case(Some(String::new()), Why::Malformed, None),
+        case(
+            forged("00000000-0000-4000-8000-0000000000aa"),
+            Why::Unknown,
+            None,
+        ),
+        case(
+            forged(&live.record.id),
+            Why::WrongSecret,
+            Some(&live.record.id),
+        ),
+        case(Some(revoked.key), Why::Revoked, Some(&revoked.record.id)),
+        case(Some(lapsed.key), Why::Expired, Some(&lapsed.record.id)),
+    ])
+}

@@ -2,17 +2,11 @@
 //! names its reason; a valid key is valid strictly before its expiry; only an accepted key is
 //! remembered as used.
 
-use bymax_auth_crypto::api_key;
 use time::Duration;
 
-use super::test_support::{TestResult, fixture};
+use super::test_support::{TestResult, bad_credentials, fixture};
 use super::{ApiKeyRejection, ApiKeyVerdict, IssueApiKeyInput};
 use crate::config::ApiKeyAuditMode;
-
-/// The key a request would present for `id` with a secret that is not the issued one.
-fn forged(prefix: &str, id: &str) -> String {
-    api_key::format(prefix, id, &api_key::generate_secret())
-}
 
 fn id_of(key: &str) -> String {
     key.split('_').nth(1).unwrap_or_default().to_owned()
@@ -47,54 +41,23 @@ async fn a_valid_key_is_accepted() -> TestResult {
 #[tokio::test]
 async fn every_refusal_reads_exactly_one_row_and_names_its_reason() -> TestResult {
     let f = fixture(ApiKeyAuditMode::BestEffort)?;
-    let live = f.issue(&["reports:read"]).await?;
-    let revoked = f.issue(&["reports:read"]).await?;
-    f.engine.revoke_api_key(&revoked.record.id).await?;
-    let expiring = f
-        .engine
-        .issue_api_key({
-            let mut input = IssueApiKeyInput::new("billing", vec!["admin".to_owned()]);
-            input.expires_at = Some(f.clock_now() + Duration::hours(1));
-            input
-        })
-        .await?;
-    f.clock.advance(Duration::hours(1));
+    let cases = bad_credentials(&f).await?;
 
-    let cases: Vec<(Option<String>, ApiKeyRejection, Option<String>)> = vec![
-        (None, ApiKeyRejection::Missing, None),
-        (
-            Some("not-a-key".to_owned()),
-            ApiKeyRejection::Malformed,
-            None,
-        ),
-        (Some(String::new()), ApiKeyRejection::Malformed, None),
-        (
-            Some(forged("bak", "00000000-0000-4000-8000-0000000000aa")),
-            ApiKeyRejection::Unknown,
-            None,
-        ),
-        (
-            Some(forged("bak", &live.record.id)),
-            ApiKeyRejection::WrongSecret,
-            Some(live.record.id.clone()),
-        ),
-        (
-            Some(revoked.key.clone()),
-            ApiKeyRejection::Revoked,
-            Some(revoked.record.id.clone()),
-        ),
-        (
-            Some(expiring.key.clone()),
-            ApiKeyRejection::Expired,
-            Some(expiring.record.id.clone()),
-        ),
-    ];
-
-    for (header, reason, identified) in cases {
+    for case in cases {
         let before = f.repo.reads();
-        let verdict = verify(&f, header.as_deref()).await?;
-        assert_eq!(rejection(verdict), Some((reason, identified)), "{header:?}");
-        assert_eq!(f.repo.reads(), before + 1, "{reason:?} must read one row");
+        let verdict = verify(&f, case.header.as_deref()).await?;
+        assert_eq!(
+            rejection(verdict),
+            Some((case.rejection, case.identified)),
+            "{:?}",
+            case.header
+        );
+        assert_eq!(
+            f.repo.reads(),
+            before + 1,
+            "{:?} must read one row",
+            case.rejection
+        );
     }
     Ok(())
 }

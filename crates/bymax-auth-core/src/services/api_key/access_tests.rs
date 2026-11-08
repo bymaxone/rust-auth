@@ -7,8 +7,8 @@ use std::time::Duration;
 use bymax_auth_types::AuthError;
 
 use super::ApiKeyRoute;
-use super::access::run_required_audit;
-use super::test_support::{Fixture, TestResult, fixture, request_context};
+use super::access::{deny_reason, run_required_audit};
+use super::test_support::{Fixture, TestResult, bad_credentials, fixture, request_context};
 use crate::config::ApiKeyAuditMode;
 use crate::traits::{ApiKeyDenyReason, ApiKeyOutcome, HookError, HookPlane};
 
@@ -99,58 +99,22 @@ async fn a_key_missing_one_declared_scope_is_refused_with_its_own_error() -> Tes
 #[tokio::test]
 async fn every_bad_credential_gets_one_answer_and_its_own_audit_reason() -> TestResult {
     let f = fixture(ApiKeyAuditMode::BestEffort)?;
-    let live = f.issue(&["admin"]).await?;
-    let revoked = f.issue(&["admin"]).await?;
-    f.engine.revoke_api_key(&revoked.record.id).await?;
-    let mut lapsing = super::IssueApiKeyInput::new("billing", vec!["admin".to_owned()]);
-    lapsing.expires_at = Some(f.clock_now() + time::Duration::seconds(30));
-    let lapsed = f.engine.issue_api_key(lapsing).await?;
-    f.clock.advance(time::Duration::seconds(30));
-    let wrong_secret = bymax_auth_crypto::api_key::format(
-        "bak",
-        &live.record.id,
-        &bymax_auth_crypto::api_key::generate_secret(),
-    );
-    let cases = [
-        (None, ApiKeyDenyReason::Missing, None),
-        (Some("junk".to_owned()), ApiKeyDenyReason::Malformed, None),
-        (
-            Some(bymax_auth_crypto::api_key::format(
-                "bak",
-                "00000000-0000-4000-8000-0000000000aa",
-                &bymax_auth_crypto::api_key::generate_secret(),
-            )),
-            ApiKeyDenyReason::Unknown,
-            None,
-        ),
-        (
-            Some(wrong_secret),
-            ApiKeyDenyReason::WrongSecret,
-            Some(live.record.id.clone()),
-        ),
-        (
-            Some(revoked.key.clone()),
-            ApiKeyDenyReason::Revoked,
-            Some(revoked.record.id.clone()),
-        ),
-        (
-            Some(lapsed.key.clone()),
-            ApiKeyDenyReason::Expired,
-            Some(lapsed.record.id.clone()),
-        ),
-    ];
+    let cases = bad_credentials(&f).await?;
 
-    for (index, (header, reason, identified)) in cases.iter().enumerate() {
-        let error = authorize(&f, header.as_deref(), &["admin"]).await.err();
+    for (index, case) in cases.iter().enumerate() {
+        let error = authorize(&f, case.header.as_deref(), &["admin"])
+            .await
+            .err();
         assert!(
             matches!(error, Some(AuthError::ApiKeyInvalid)),
-            "{reason:?}"
+            "{:?}",
+            case.rejection
         );
         let calls = f.hooks.wait_for(index + 1).await;
         let (event, _) = calls.get(index).ok_or("no audit event")?;
         assert_eq!(event.outcome, ApiKeyOutcome::Denied);
-        assert_eq!(event.reason, Some(*reason));
-        assert_eq!(&event.key_id, identified);
+        assert_eq!(event.reason, Some(deny_reason(case.rejection)));
+        assert_eq!(event.key_id, case.identified);
     }
     Ok(())
 }
