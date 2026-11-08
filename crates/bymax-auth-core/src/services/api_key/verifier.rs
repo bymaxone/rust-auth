@@ -1,6 +1,6 @@
 //! The verification of a presented API key.
 //!
-//! Every outcome takes the same steps: a value that does not parse is replaced by a well-formed
+//! Every refusal takes the same steps: a value that does not parse is replaced by a well-formed
 //! dummy key id and secret, the repository is read once, the digest is computed and two 32-byte
 //! buffers are compared in constant time (against a fixed dummy digest when there is no row).
 //! Only then is the verdict decided, so no refusal is faster or cheaper than another.

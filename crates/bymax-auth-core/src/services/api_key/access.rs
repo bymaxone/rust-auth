@@ -159,8 +159,7 @@ impl AuthEngine {
             ip: ctx.ip.clone(),
         };
         let mut hook_ctx = HookContext::from_request(HookPlane::ApiKey, ctx, None, None, None);
-        // The adapter strips credential headers already; the key's own header is dropped again
-        // here so a misconfigured sanitizer can never copy a key into an audit row.
+        // The key's own header is dropped so a key can never be copied into an audit row.
         hook_ctx.sanitized_headers = without(&hook_ctx.sanitized_headers, &runtime.header);
 
         let hooks = self.hooks().clone();

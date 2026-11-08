@@ -37,7 +37,7 @@ pub enum ApiKeyDenyReason {
     WrongSecret,
     /// The key was revoked.
     Revoked,
-    /// The key is past its expiry.
+    /// The key is at or past its expiry.
     Expired,
     /// A valid key that lacks a scope the route declares.
     ScopeInsufficient,
@@ -85,6 +85,6 @@ pub struct ApiKeyAccessEvent {
     pub route: String,
     /// The scopes the route declares; empty when it declares none.
     pub required_scopes: Vec<String>,
-    /// The client address as the host's trusted-proxy configuration resolves it.
+    /// The client address from the request context.
     pub ip: String,
 }

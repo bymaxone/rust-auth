@@ -18,7 +18,7 @@ pub enum ApiKeyAuditMode {
     /// A failing audit hook never changes an answer; the failure is only logged.
     #[default]
     BestEffort,
-    /// A failing audit hook DENIES the request it audits. For hosts whose audit row is a record
+    /// A failing audit hook refuses a request that would have been admitted. For hosts whose audit row is a record
     /// they must have.
     Required,
 }

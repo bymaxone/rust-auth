@@ -1068,7 +1068,7 @@ The **Default** column lists `AuthConfig::default()` (≡ `nest_compat_defaults(
 | `api_keys.header` | `String` | No | `x-api-key` | Lowercase header name the key is read from, never the query string; not a reserved header such as `authorization` or `cookie` (`ApiKeysTransport`) |
 | `api_keys.prefix` | `String` | No | `bak` | Key prefix, 2 to 16 lowercase letters and digits starting with a letter, no underscore (`ApiKeysTransport`) |
 | `api_keys.last_used_flush` | `Duration` | No | `60s` | Flush interval of the last-used timestamps, a whole number of seconds from 1 to 3600 (`ApiKeysFlushInterval`) |
-| `api_keys.audit_mode` | `ApiKeyAuditMode` | No | `BestEffort` | `Required`: a failing audit hook denies the request it audits; `BestEffort`: a failing hook never changes the answer |
+| `api_keys.audit_mode` | `ApiKeyAuditMode` | No | `BestEffort` | `Required`: a failing audit hook refuses a request that would have been admitted; `BestEffort`: a failing hook never changes the answer |
 | `password.scrypt.cost_factor` | `u32` | No | `131072` | Power of 2, min `16384` |
 | `password.scrypt.block_size` | `u32` | No | `8` | scrypt r |
 | `password.scrypt.parallelization` | `u32` | No | `1` | scrypt p |
@@ -3567,7 +3567,8 @@ pub trait AuthHooks: Send + Sync {
 
     /// Called once for every request guarded by a service API key, refusals included.
     /// Detached by default (a failure is logged); with `api_keys.audit_mode = Required` it is
-    /// awaited and a failure DENIES the request. The event never carries the presented key.
+    /// awaited and a failure refuses a request that would have been admitted. The event never
+    /// carries the presented key.
     async fn on_api_key_request(
         &self,
         event: &ApiKeyAccessEvent,

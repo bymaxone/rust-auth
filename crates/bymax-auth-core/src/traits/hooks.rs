@@ -476,8 +476,8 @@ pub trait AuthHooks: Send + Sync {
     /// trail of machine callers (who, what and how it ended).
     ///
     /// By default the call is detached and a failure is only logged, as for every other hook.
-    /// With `api_keys.audit_mode = Required` it is awaited and a failure DENIES the request, for
-    /// hosts whose audit row is a record they must have.
+    /// With `api_keys.audit_mode = Required` it is awaited and a failure refuses a request that
+    /// would have been admitted, for hosts whose audit row is a record they must have.
     async fn on_api_key_request(
         &self,
         event: &ApiKeyAccessEvent,
