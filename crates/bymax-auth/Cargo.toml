@@ -31,7 +31,7 @@ oauth-reqwest = ["oauth", "bymax-auth-core/oauth-reqwest"] # adds the bundled Re
 platform = ["bymax-auth-core/platform"]
 invitations = ["bymax-auth-core/invitations"]
 breach = ["bymax-auth-core/breach"]              # HIBP k-anonymity over the HttpClient seam
-api-keys = ["bymax-auth-core/api-keys"]          # scoped service API keys (repository port, verifier, issuing)
+api-keys = ["bymax-auth-core/api-keys", "bymax-auth-axum?/api-keys"] # scoped service API keys; with `axum`, also the layer, extractor and flush task
 
 # Infrastructure / adapters. Each pulls its crate in as an optional dependency AND forwards the
 # flow features already selected above, so an adapter can never be compiled without the engine
