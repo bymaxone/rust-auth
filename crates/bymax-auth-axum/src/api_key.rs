@@ -3,7 +3,7 @@
 //! [`require_api_key_scopes`] builds a per-route layer: it reads the configured header, asks the
 //! engine for the access decision with the scopes the route declares, and either answers with the
 //! library's error envelope or lets the request through carrying a [`CurrentApiKey`]. The decision
-//! itself lives in the core, so every transport answers in the same order and with the same codes.
+//! itself lives in the core.
 //!
 //! The key is read from the configured header only, never from the query string, and a header that
 //! appears twice is a malformed key rather than a choice between two.
@@ -45,12 +45,11 @@ pub struct ApiKeyScopesLayer {
 /// that holds EVERY scope in `scopes`.
 ///
 /// An empty `scopes` is not "no requirement": a guarded route that declares nothing is refused
-/// with `auth.forbidden` before any credential is read, so forgetting to declare a scope can never
+/// with `auth.forbidden` before any key is verified, so forgetting to declare a scope can never
 /// open a route.
 ///
-/// The client address is the one the adapter resolves for every other route; for a router that
-/// does not go through [`crate::auth_router`] that is the TCP peer, unless the client-address
-/// layer is installed.
+/// The client address recorded for the request is the one the adapter's client-address layer
+/// stored, or the TCP peer (`ConnectInfo`) when that layer did not run.
 ///
 /// # Errors
 ///
@@ -192,8 +191,8 @@ impl<S: Send + Sync> FromRequestParts<S> for CurrentApiKey {
 
 /// The background task that writes the coalesced last-used instants.
 ///
-/// The core only records an instant in memory; this task, owned by the adapter, flushes the batch
-/// every `api_keys.last_used_flush` and once more when it is stopped. A failed write stays queued
+/// The core runs no timer; this task, owned by the adapter, flushes the batch every
+/// `api_keys.last_used_flush` and once more when it is stopped. A failed write stays queued
 /// for the next round.
 pub struct ApiKeyFlushTask {
     stop: oneshot::Sender<()>,
