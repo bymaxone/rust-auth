@@ -161,9 +161,14 @@ pub trait UserRepository: Send + Sync {
     ) -> Result<Option<AuthUser>, RepositoryError>;
 
     /// Link an existing user to an OAuth identity.
+    ///
+    /// The write MUST be restricted to `tenant_id`, exactly as [`UserRepository::find_by_id`]
+    /// restricts its read: ids are unique only within a tenant on a host that numbers users per
+    /// tenant, and a write keyed on the id alone would land on another tenant's account.
     async fn link_oauth(
         &self,
         user_id: &str,
+        tenant_id: &str,
         provider: &str,
         provider_id: &str,
     ) -> Result<(), RepositoryError>;
@@ -303,6 +308,7 @@ mod tests {
         async fn link_oauth(
             &self,
             _user_id: &str,
+            _tenant_id: &str,
             _provider: &str,
             _provider_id: &str,
         ) -> Result<(), RepositoryError> {
@@ -388,7 +394,7 @@ mod tests {
             users.find_by_oauth_id("google", "1", "t").await,
             Ok(None)
         ));
-        assert!(users.link_oauth("x", "google", "1").await.is_ok());
+        assert!(users.link_oauth("x", "t1", "google", "1").await.is_ok());
         assert!(users.create_with_oauth(sample_oauth()).await.is_err());
         assert!(matches!(platform.find_by_id("p").await, Ok(None)));
         assert!(matches!(platform.find_by_email("e").await, Ok(None)));

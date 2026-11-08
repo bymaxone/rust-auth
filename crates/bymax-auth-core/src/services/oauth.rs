@@ -380,7 +380,7 @@ impl AuthEngine {
                     return Err(AuthError::OauthFailed);
                 };
                 self.user_repository()
-                    .link_oauth(&existing.id, provider_name, &profile.provider_id)
+                    .link_oauth(&existing.id, tenant_id, provider_name, &profile.provider_id)
                     .await
                     .map_err(map_repository_error)?;
                 // Re-fetch by primary key so the resolved user reflects the linked state; a
@@ -946,6 +946,9 @@ mod tests {
         assert!(matches!(&outcome, Ok(OAuthOutcome::Authenticated(_))));
         let Ok(OAuthOutcome::Authenticated(result)) = outcome else { return };
         assert_eq!(result.user.id, id);
+        // The write names the tenant the identity was resolved in, so a repository that numbers
+        // users per tenant cannot land it on another tenant's account.
+        assert_eq!(h.users.link_calls(), [(id, "t1".to_owned())]);
     }
 
     #[tokio::test]

@@ -2279,6 +2279,7 @@ mod tests {
         async fn link_oauth(
             &self,
             _user_id: &str,
+            _tenant_id: &str,
             _provider: &str,
             _provider_id: &str,
         ) -> Result<(), crate::RepositoryError> {
@@ -2357,7 +2358,7 @@ mod tests {
             repo.find_by_oauth_id("g", "1", "t").await,
             Ok(None)
         ));
-        assert!(repo.link_oauth("x", "g", "1").await.is_ok());
+        assert!(repo.link_oauth("x", "t1", "g", "1").await.is_ok());
         assert!(repo.create_with_oauth(oauth_data()).await.is_err());
     }
 
