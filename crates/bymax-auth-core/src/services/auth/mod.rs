@@ -14,6 +14,9 @@ mod email_verification;
 #[cfg(test)]
 mod hook_delivery_tests;
 mod invitation;
+mod lockout;
+#[cfg(test)]
+mod lockout_tests;
 mod login;
 mod password_reset;
 #[cfg(test)]
@@ -23,6 +26,7 @@ mod reset_request;
 mod session_ops;
 
 pub use invitation::AcceptInvitationInput;
+pub use lockout::LoginLockout;
 pub use password_reset::{
     ForgotPasswordInput, ResendResetOtpInput, ResetPasswordInput, VerifyResetOtpInput,
 };
