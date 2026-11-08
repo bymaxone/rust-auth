@@ -14,7 +14,7 @@
 mod brute_force;
 mod logout_pending;
 #[cfg(feature = "mfa")]
-mod mfa;
+pub(crate) mod mfa;
 #[cfg(feature = "oauth")]
 mod oauth;
 mod otp;

@@ -18,6 +18,8 @@ mod manage;
 mod setup;
 
 #[cfg(test)]
+mod contract_tests;
+#[cfg(test)]
 mod hook_tests;
 #[cfg(test)]
 mod plane_tests;

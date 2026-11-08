@@ -40,6 +40,13 @@ pub enum ConfigError {
     /// group is off.
     #[error("an API-key guard was built but api_keys.enabled is false")]
     ApiKeyGuardWithoutApiKeys,
+    /// A guard was built declaring a scope that is not in `api_keys.scopes`: no key could ever
+    /// hold it, so every request to the route would be refused.
+    #[error("the API-key guard declares scope [{index}], which is not in api_keys.scopes")]
+    ApiKeyGuardUndeclaredScope {
+        /// The position of the offending entry in the guard's list. Never the entry itself.
+        index: usize,
+    },
     /// `api_keys.pepper` is shorter than the 32-character minimum.
     #[error("api_keys.pepper must be at least 32 characters (got {len})")]
     ApiKeysPepperTooShort {

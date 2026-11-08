@@ -369,6 +369,23 @@ async fn a_guard_or_a_flush_task_over_an_engine_without_api_keys_is_refused_at_s
     Ok(())
 }
 
+#[tokio::test]
+async fn a_guard_declaring_a_scope_outside_the_vocabulary_is_refused_at_startup() -> TestResult {
+    let h = harness(|_| {})?;
+
+    // Every declared scope is in the vocabulary: accepted, whatever the order.
+    assert!(require_api_key_scopes(&h.state, &["reports:write", "reports:read"]).is_ok());
+    // One misspelled entry among valid ones is named by position, never by value.
+    let refused = require_api_key_scopes(&h.state, &["reports:read", "reports:raed"]);
+    assert!(matches!(
+        refused,
+        Err(ConfigError::ApiKeyGuardUndeclaredScope { index: 1 })
+    ));
+    // The empty list stays the documented fail-closed layer, not a startup error.
+    assert!(require_api_key_scopes(&h.state, &[]).is_ok());
+    Ok(())
+}
+
 #[tokio::test(start_paused = true)]
 async fn the_flush_task_writes_on_its_period_and_once_more_on_shutdown() -> TestResult {
     let h = harness(|cfg| cfg.api_keys.last_used_flush = Duration::from_secs(30))?;
