@@ -23,6 +23,7 @@ use async_trait::async_trait;
 use bymax_auth_types::SafeAuthUser;
 
 use crate::context::RequestContext;
+use crate::traits::api_key_event::ApiKeyAccessEvent;
 use crate::traits::email::SessionInfo;
 use crate::traits::oauth::OAuthProfile;
 
@@ -34,11 +35,14 @@ use crate::traits::oauth::OAuthProfile;
 /// connection by comparing those two values matches nothing on the platform plane and silently
 /// skips every administrator. Branch on this instead of on the shape of `tenant_id`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum HookPlane {
     /// A tenant-scoped dashboard user.
     Dashboard,
     /// A cross-tenant platform administrator, who has no tenant.
     Platform,
+    /// A machine caller authenticated by a service API key: no user and no tenant.
+    ApiKey,
 }
 
 impl HookPlane {
@@ -48,6 +52,7 @@ impl HookPlane {
         match self {
             Self::Dashboard => "dashboard",
             Self::Platform => "platform",
+            Self::ApiKey => "api_key",
         }
     }
 }
@@ -464,6 +469,21 @@ pub trait AuthHooks: Send + Sync {
         ctx: &HookContext,
     ) -> Result<(), HookError> {
         let _ = (user_id, evicted_session_hash, ctx);
+        Ok(())
+    }
+
+    /// Called once for every request guarded by a service API key, refusals included: the audit
+    /// trail of machine callers (who, what and how it ended).
+    ///
+    /// By default the call is detached and a failure is only logged, as for every other hook.
+    /// With `api_keys.audit_mode = Required` it is awaited and a failure DENIES the request, for
+    /// hosts whose audit row is a record they must have.
+    async fn on_api_key_request(
+        &self,
+        event: &ApiKeyAccessEvent,
+        ctx: &HookContext,
+    ) -> Result<(), HookError> {
+        let _ = (event, ctx);
         Ok(())
     }
 }

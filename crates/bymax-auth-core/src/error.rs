@@ -32,6 +32,10 @@ pub enum ConfigError {
     /// An `ApiKeyRepository` was supplied but `api_keys.enabled` is false, so it would be ignored.
     #[error("an ApiKeyRepository was supplied but api_keys.enabled is false")]
     ApiKeysRepositoryUnused,
+    /// `api_keys.audit_mode` is `Required` but the builder was given no hooks, so nothing could
+    /// write the audit row the mode demands.
+    #[error("api_keys.audit_mode is Required but no AuthHooks were supplied to write the audit")]
+    ApiKeysAuditRequiresHooks,
     /// `api_keys.pepper` is shorter than the 32-character minimum.
     #[error("api_keys.pepper must be at least 32 characters (got {len})")]
     ApiKeysPepperTooShort {

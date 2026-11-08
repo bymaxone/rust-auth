@@ -4,20 +4,34 @@
 
 use std::collections::HashMap;
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicUsize, Ordering};
 
 use async_trait::async_trait;
-use time::OffsetDateTime;
+use time::{Duration, OffsetDateTime};
 
 use crate::RepositoryError;
+use crate::services::api_key::ApiKeyClock;
 use crate::traits::{ApiKey, ApiKeyRepository, NewApiKey};
 
 /// An in-memory [`ApiKeyRepository`].
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct InMemoryApiKeyRepository {
     rows: Mutex<HashMap<String, ApiKey>>,
     reads: AtomicUsize,
     failing: AtomicBool,
+    /// Calls still allowed to succeed before every call fails; negative means no limit.
+    allowed: AtomicI64,
+}
+
+impl Default for InMemoryApiKeyRepository {
+    fn default() -> Self {
+        Self {
+            rows: Mutex::new(HashMap::new()),
+            reads: AtomicUsize::new(0),
+            failing: AtomicBool::new(false),
+            allowed: AtomicI64::new(-1),
+        }
+    }
 }
 
 impl InMemoryApiKeyRepository {
@@ -25,6 +39,11 @@ impl InMemoryApiKeyRepository {
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Let the next `calls` calls succeed, then fail every call like an outage.
+    pub fn fail_after(&self, calls: u32) {
+        self.allowed.store(i64::from(calls), Ordering::SeqCst);
     }
 
     /// Make every later call fail with [`RepositoryError::Backend`] (`true`) or work again
@@ -46,9 +65,16 @@ impl InMemoryApiKeyRepository {
     }
 
     fn check(&self) -> Result<(), RepositoryError> {
-        if self.failing.load(Ordering::SeqCst) {
+        let spent = self.allowed.load(Ordering::SeqCst) == 0;
+        if self.failing.load(Ordering::SeqCst) || spent {
             return Err(RepositoryError::Backend("api key store unavailable".into()));
         }
+        // A negative budget is "no limit"; a positive one counts a call down.
+        let _ = self
+            .allowed
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| {
+                (n > 0).then(|| n - 1)
+            });
         Ok(())
     }
 
@@ -141,5 +167,44 @@ impl ApiKeyRepository for InMemoryApiKeyRepository {
                 .then_with(|| a.id.cmp(&b.id))
         });
         Ok(keys)
+    }
+}
+
+/// An [`ApiKeyClock`] a test sets and advances by hand, so expiry, rotation and last-used tests
+/// never wait and never depend on the wall clock.
+#[derive(Debug)]
+pub struct ManualApiKeyClock {
+    now: Mutex<OffsetDateTime>,
+}
+
+impl ManualApiKeyClock {
+    /// A clock standing at `start`.
+    #[must_use]
+    pub fn new(start: OffsetDateTime) -> Self {
+        Self {
+            now: Mutex::new(start),
+        }
+    }
+
+    /// Move the clock to `at`, forwards or backwards.
+    pub fn set(&self, at: OffsetDateTime) {
+        *self
+            .now
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = at;
+    }
+
+    /// Move the clock forward by `by`.
+    pub fn advance(&self, by: Duration) {
+        self.set(self.now() + by);
+    }
+}
+
+impl ApiKeyClock for ManualApiKeyClock {
+    fn now(&self) -> OffsetDateTime {
+        *self
+            .now
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 }

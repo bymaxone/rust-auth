@@ -36,7 +36,7 @@ use crate::traits::{
 
 pub use crate::traits::{NoOpAuthHooks, NoOpEmailProvider};
 #[cfg(feature = "api-keys")]
-pub use api_key::InMemoryApiKeyRepository;
+pub use api_key::{InMemoryApiKeyRepository, ManualApiKeyClock};
 
 /// Acquire a mutex guard, recovering the inner value if the lock was poisoned (a test
 /// double never needs to escalate a poisoned lock to a panic).

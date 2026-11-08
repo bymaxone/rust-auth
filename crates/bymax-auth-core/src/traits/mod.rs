@@ -6,6 +6,9 @@
 
 #[cfg(feature = "api-keys")]
 pub mod api_key;
+pub mod api_key_event;
+#[cfg(test)]
+mod api_key_event_tests;
 pub mod breach;
 pub mod common_password;
 pub mod default_email;
@@ -21,6 +24,8 @@ pub mod user_status_cache;
 
 #[cfg(feature = "api-keys")]
 pub use api_key::{ApiKey, ApiKeyPrincipal, ApiKeyRepository, ApiKeySummary, NewApiKey};
+#[doc(inline)]
+pub use api_key_event::{ApiKeyAccessEvent, ApiKeyDenyReason, ApiKeyOutcome};
 #[cfg(feature = "breach")]
 #[doc(inline)]
 pub use breach::HibpBreachChecker;

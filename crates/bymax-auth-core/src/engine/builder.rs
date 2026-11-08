@@ -52,6 +52,8 @@ pub struct AuthEngineBuilder {
     mfa_store: Option<Arc<dyn MfaStore>>,
     #[cfg(feature = "api-keys")]
     api_key_repository: Option<Arc<dyn crate::traits::ApiKeyRepository>>,
+    #[cfg(feature = "api-keys")]
+    api_key_clock: Option<Arc<dyn crate::services::api_key::ApiKeyClock>>,
 }
 
 impl Default for AuthEngineBuilder {
@@ -89,6 +91,8 @@ impl AuthEngineBuilder {
             mfa_store: None,
             #[cfg(feature = "api-keys")]
             api_key_repository: None,
+            #[cfg(feature = "api-keys")]
+            api_key_clock: None,
         }
     }
 
@@ -336,6 +340,15 @@ impl AuthEngineBuilder {
         self
     }
 
+    /// Set the clock the API-key features read, so expiry and rotation can be driven without
+    /// waiting (defaults to the wall clock).
+    #[cfg(feature = "api-keys")]
+    #[must_use]
+    pub fn api_key_clock(mut self, clock: Arc<dyn crate::services::api_key::ApiKeyClock>) -> Self {
+        self.api_key_clock = Some(clock);
+        self
+    }
+
     /// Validate the configuration and assemble the engine.
     ///
     /// # Errors
@@ -371,6 +384,8 @@ impl AuthEngineBuilder {
             mfa_store,
             #[cfg(feature = "api-keys")]
             api_key_repository,
+            #[cfg(feature = "api-keys")]
+            api_key_clock,
         } = self;
 
         // Capture whether the consumer supplied custom hooks before the NoOp default is
@@ -396,14 +411,15 @@ impl AuthEngineBuilder {
         // Config-intrinsic validation, resolving `secure_cookies` from the environment.
         let secure_cookies = config.validate(environment)?;
 
-        // The repository is present exactly when the group is on: either mismatch would leave a
-        // deployment that believes keys authenticate while nothing can, or the reverse.
+        // The repository is present exactly when the group is on, and a mandatory audit has hooks
+        // to write it: see `ApiKeyRuntime::assemble`.
         #[cfg(feature = "api-keys")]
-        match (config.api_keys.enabled, api_key_repository.is_some()) {
-            (true, false) => return Err(ConfigError::ApiKeysRepositoryRequired),
-            (false, true) => return Err(ConfigError::ApiKeysRepositoryUnused),
-            _ => {}
-        }
+        let api_keys = crate::services::api_key::ApiKeyRuntime::assemble(
+            &config.api_keys,
+            api_key_repository,
+            api_key_clock,
+            hooks_supplied,
+        )?;
 
         // Collaborator-presence rules.
         let user_repository = user_repository.ok_or(ConfigError::MissingUserRepository)?;
@@ -615,7 +631,7 @@ impl AuthEngineBuilder {
             #[cfg(feature = "platform")]
             platform_auth,
             #[cfg(feature = "api-keys")]
-            api_key_repository,
+            api_keys,
         })
     }
 }
