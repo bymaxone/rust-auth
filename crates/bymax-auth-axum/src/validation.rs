@@ -428,8 +428,17 @@ mod tests {
         let rejection = PathParam::<String>::from_request_parts(&mut parts, &())
             .await
             .err();
-        let status = rejection.map(|rejection| rejection.into_response().status());
-        assert_eq!(status, Some(StatusCode::INTERNAL_SERVER_ERROR));
+        let response = rejection
+            .map(IntoResponse::into_response)
+            .unwrap_or_default();
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        // The status alone does not tell the adapter's fault from a malformed request that
+        // carries the same status: the envelope's code does.
+        let body = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap_or_default();
+        let envelope: serde_json::Value = serde_json::from_slice(&body).unwrap_or_default();
+        assert_eq!(envelope["error"]["code"], "auth.internal");
     }
 
     #[test]

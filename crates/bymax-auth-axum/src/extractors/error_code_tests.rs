@@ -101,9 +101,7 @@ async fn the_platform_guard_answers_platform_auth_required_for_a_valid_dashboard
 /// Drive a request through `SelfOrAdmin<Admin>` and return the `error.code` it answered with,
 /// or `None` when the request was admitted.
 async fn self_or_admin_code(s: &Scaffold, route: &str, uri: &str, token: &str) -> Option<String> {
-    async fn guarded(_guard: SelfOrAdmin<Admin>) -> http::StatusCode {
-        http::StatusCode::OK
-    }
+    async fn guarded(_guard: SelfOrAdmin<Admin>) {}
     let app: Router = Router::new()
         .route(route, get(guarded))
         .layer(CookieManagerLayer::new())

@@ -84,6 +84,20 @@ async fn last_used_never_moves_backwards() -> Result<(), RepositoryError> {
 }
 
 #[tokio::test]
+async fn last_used_advances_to_a_later_instant() -> Result<(), RepositoryError> {
+    let repo = InMemoryApiKeyRepository::new();
+    let now = OffsetDateTime::now_utc();
+    repo.create(new_key("a", "billing", now)).await?;
+    let late = now + Duration::minutes(5);
+
+    repo.touch_last_used(&[("a".to_owned(), now)]).await?;
+    repo.touch_last_used(&[("a".to_owned(), late)]).await?;
+
+    assert_eq!(repo.row("a").and_then(|k| k.last_used_at), Some(late));
+    Ok(())
+}
+
+#[tokio::test]
 async fn listing_by_label_returns_every_key_oldest_first() -> Result<(), RepositoryError> {
     let repo = InMemoryApiKeyRepository::new();
     let now = OffsetDateTime::now_utc();

@@ -136,3 +136,53 @@ async fn fail_next_epoch_bumps_fails_exactly_that_many_then_counts_up() {
         Ok(2)
     ));
 }
+
+#[tokio::test]
+async fn fail_next_otp_puts_fails_exactly_that_many_then_stores() {
+    let stores = InMemoryStores::new();
+    stores.fail_next_otp_puts(2);
+
+    let mut failed = Vec::new();
+    for _ in 0..4 {
+        let put = stores
+            .put(OtpPurpose::EmailVerification, "who", "123456", 60)
+            .await;
+        failed.push(put.is_err());
+    }
+
+    assert_eq!(failed, [true, true, false, false]);
+}
+
+#[tokio::test]
+async fn fail_next_resend_gates_fails_exactly_that_many_then_grants() {
+    let stores = InMemoryStores::new();
+    stores.fail_next_resend_gates(2);
+
+    let mut answers = Vec::new();
+    for who in ["a", "b", "c", "d"] {
+        answers.push(
+            stores
+                .try_begin_resend(OtpPurpose::EmailVerification, who, 60)
+                .await
+                .ok(),
+        );
+    }
+
+    assert_eq!(answers, [None, None, Some(true), Some(true)]);
+}
+
+#[tokio::test]
+async fn fail_next_resend_releases_fails_exactly_that_many_then_releases() {
+    let stores = InMemoryStores::new();
+    stores.fail_next_resend_releases(2);
+
+    let mut failed = Vec::new();
+    for _ in 0..4 {
+        let released = stores
+            .release_resend(OtpPurpose::EmailVerification, "who")
+            .await;
+        failed.push(released.is_err());
+    }
+
+    assert_eq!(failed, [true, true, false, false]);
+}

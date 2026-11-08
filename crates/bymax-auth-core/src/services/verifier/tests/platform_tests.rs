@@ -5,6 +5,8 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+#[cfg(feature = "mfa")]
+use bymax_auth_types::MfaContext;
 use bymax_auth_types::{AuthError, AuthPlatformUser, PlatformClaims, PlatformType};
 use time::OffsetDateTime;
 
@@ -85,6 +87,45 @@ async fn a_live_administrator_verifies_and_is_tagged_with_its_plane() {
     assert!(
         matches!(&verified, Ok(VerifiedAccessToken::Platform(c)) if c.sub == "a1"),
         "{verified:?}"
+    );
+}
+
+/// A platform-plane engine and an MFA-challenge token minted for `subject`, signed by it.
+#[cfg(feature = "mfa")]
+async fn mfa_challenge_for(subject: &str) -> Option<(AuthEngine, String)> {
+    let admins = Arc::new(InMemoryPlatformUserRepository::new());
+    let engine = engine(&admins)?;
+    let token = engine
+        .tokens()
+        .issue_mfa_temp_token(subject, MfaContext::Platform, None)
+        .await
+        .ok()?;
+    Some((engine, token))
+}
+
+#[cfg(feature = "mfa")]
+#[tokio::test]
+async fn a_signed_mfa_challenge_token_on_the_platform_plane_asks_for_platform_auth() {
+    // Another kind of token this deployment signed, not an unreadable one: the caller is told
+    // it presented the wrong context's token.
+    let Some((engine, token)) = mfa_challenge_for("a1").await else { return };
+    let refused = engine.verify_access(&token, &platform()).await;
+    assert!(
+        matches!(refused, Err(AuthError::PlatformAuthRequired)),
+        "{refused:?}"
+    );
+}
+
+#[cfg(feature = "mfa")]
+#[tokio::test]
+async fn a_signed_mfa_challenge_token_with_a_malformed_subject_is_just_invalid() {
+    // Shape is judged before kind, as for a dashboard token: a challenge whose subject is out
+    // of bounds is malformed on either plane, however well it is signed.
+    let Some((engine, token)) = mfa_challenge_for(&"a".repeat(257)).await else { return };
+    let refused = engine.verify_access(&token, &platform()).await;
+    assert!(
+        matches!(refused, Err(AuthError::TokenInvalid)),
+        "{refused:?}"
     );
 }
 
