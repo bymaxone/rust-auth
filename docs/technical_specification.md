@@ -1254,6 +1254,8 @@ Validation rules, in the order applied (parity with `resolveOptions`):
 | 21 | `controllers.oauth` ⇒ at least one OAuth provider registered | `OAuthToggleWithoutProvider` |
 | 22 | `UserRepository` supplied | `MissingUserRepository` |
 | 23 | session/OTP/brute-force stores supplied | `MissingStores` |
+| 24 | `api_keys.enabled` ⇒ the `api-keys` feature is compiled in, an `ApiKeyRepository` is supplied, and — when `audit_mode` is `Required` — hooks are supplied; a repository without `enabled` is refused too | `ApiKeysFeatureDisabled`, `ApiKeysRepositoryRequired`, `ApiKeysAuditRequiresHooks`, `ApiKeysRepositoryUnused` |
+| 25 | `api_keys.enabled` ⇒ the pepper is ≥ 32 characters, ≥ 3.5 bits/char and equals none of `jwt.secret`, a retired JWT secret, `identifier_key`, `mfa.encryption_key` or a retired MFA key; the scope vocabulary is non-empty, distinct and well-formed; `header` is a lowercase name the library does not read; `prefix` fits the key grammar; `last_used_flush` is a whole number of seconds from 1 to 3600 | `ApiKeysPepperTooShort`, `ApiKeysPepperLowEntropy`, `ApiKeysPepperReused`, `ApiKeysScopes`, `ApiKeysTransport`, `ApiKeysFlushInterval` |
 
 The entropy gate is a first-order filter (it detects extreme low-diversity secrets such as a single repeated character) and is documented as necessary-but-not-sufficient; the operational guidance is to generate the secret with 32 random bytes encoded as base64.
 
@@ -1616,6 +1618,42 @@ pub enum RepositoryError {
 ```
 
 "Not found" is intentionally absent: it is represented by `Ok(None)` on the read methods. This keeps the common, non-exceptional case out of the error channel and makes the contract unambiguous for implementers.
+### 6.6 `ApiKeyRepository` (feature `api-keys`)
+
+The host persists scoped service keys behind one more port, implemented like the user
+repositories. A stored row carries the HMAC digest of the key's secret and never the secret.
+
+```rust
+#[async_trait]
+pub trait ApiKeyRepository: Send + Sync {
+    async fn find_by_id(&self, id: &str) -> Result<Option<ApiKey>, RepositoryError>;
+    async fn create(&self, row: NewApiKey) -> Result<ApiKey, RepositoryError>;
+    async fn mark_revoked(&self, id: &str, at: OffsetDateTime) -> Result<bool, RepositoryError>;
+    async fn limit_expiry(&self, id: &str, at: OffsetDateTime) -> Result<bool, RepositoryError>;
+    async fn touch_last_used(&self, entries: &[(String, OffsetDateTime)]) -> Result<(), RepositoryError>;
+    async fn list_by_label(&self, label: &str) -> Result<Vec<ApiKey>, RepositoryError>;
+}
+```
+
+Contract an implementation must honour:
+
+- `find_by_id` returns revoked and expired rows too. Validity is decided by the library, so every
+  refusal takes the same steps (§7.13). A missing row is `Ok(None)`.
+- A row that cannot be decoded is a `RepositoryError::Backend`, never `Ok(None)` and never a row
+  that reads as lapsed: a decode failure is a `500 auth.internal`, not a silent refusal of a key.
+- `limit_expiry` is an **atomic minimum**: the stored expiry becomes the earlier of its current
+  value and `at` (`LEAST(expires_at, :at)`). Two rotations of one key read the same row, and a late
+  write from the one with the longer overlap must not push back the deadline the other set.
+- `touch_last_used` is **monotonic**: it never moves `last_used_at` backwards, because several
+  instances flush independently.
+- `mark_revoked` on an already revoked key is not an error.
+
+`ApiKey` holds `id` (a lowercase UUID, the public half of the key), `label` (not unique, so
+overlapping rotations are possible), `digest` (64 lowercase hex characters), `scopes`,
+`created_at`, `expires_at`, `revoked_at` and `last_used_at`. `ApiKeySummary` is the same without the
+digest, and is what the issuing calls return. `InMemoryApiKeyRepository` and `ManualApiKeyClock`
+are in `bymax_auth_core::testing`.
+
 ## 7. Core Engine & Services
 
 This section is the authoritative specification of the `rust-auth` core: the framework-agnostic engine and the services it composes. It is a full-parity port of the `@bymax-one/nest-auth` server services (`AuthService`, `TokenManagerService`, `PasswordService`, `SessionService`, `MfaService`, `OtpService`, `BruteForceService`, `PasswordResetService`, `PlatformAuthService`, `InvitationService`, `TokenDeliveryService`). NestJS dependency injection is replaced with explicit construction; the Express `Request`/`Response` coupling is removed from the core and pushed to the Axum adapter (see §8). All async methods return `Result<T, AuthError>` unless stated otherwise.
@@ -2498,8 +2536,68 @@ Traits/crates: `bymax-auth-types` (`AuthResult`, `PlatformAuthResult`, `SafeAuth
 | `PlatformAuthService` | `PlatformUserRepository`, `SessionStore`, `BruteForceStore` | jwt, crypto | `ROTATE_LUA` (platform), `invalidate_user_sessions` |
 | `InvitationService` | `UserRepository`, `EmailProvider`, `AuthHooks`, `SessionStore` | crypto | getdel |
 | `TokenDeliveryService` | — | types | — |
+| `ApiKeyRuntime` (feature `api-keys`) | `ApiKeyRepository`, `AuthHooks` | crypto (`api_key`) | — |
 
 All cross-store mutations follow the security-before-availability ordering established above (credential change before session invalidation; uniqueness/status/verification gates before KDF work; brute-force ordering invariant). Every `after_*`/`on_*` hook is fire-and-forget; only `before_register` (and OAuth's `on_oauth_login`) can block a flow.
+### 7.13 Service API keys (feature `api-keys`)
+
+Scoped keys for machine callers, held to the shared wire contract's `apiKeys` section. The feature is **off by default** in both the Cargo sense (`api-keys`) and the
+runtime sense (`api_keys.enabled`, §5.3). There are no HTTP routes that manage keys: who may mint,
+rotate or revoke one is the host's decision, made through `AuthEngine`.
+
+**Key grammar and digest.** A key is `{prefix}_{keyId}_{secret}`: a prefix of 2 to 16 lowercase
+letters and digits (default `bak`), a lowercase canonical UUID, and 43 unpadded base64url characters
+(32 random bytes). It is split on the first two separators only, because the secret may itself
+contain `_`. Only `hex(hmac_sha256(pepper, secret))` is stored, over the secret **as the string
+presented**: two base64url spellings of the same bytes are two different keys. Labels and scopes are
+never part of the digest. Parsing and hashing live in `bymax_auth_crypto::api_key` and are asserted
+against the contract's grammar numbers and known-answer vector.
+
+**Verification (`ApiKeyRuntime::verify`).** Every refusal takes the same steps: a value that does not
+parse is replaced by a fixed dummy key id and secret, the row is read once, the digest is computed,
+and two 32-byte buffers are compared in constant time (against a fixed dummy digest when there is no
+row). Only then is the verdict decided, in this order: not parsed (`Missing` when the header was
+absent, `Malformed` otherwise), no row (`Unknown`), digest mismatch (`WrongSecret`), `revoked_at`
+set (`Revoked`), `expires_at` at or before now (`Expired`). A key is valid strictly before its
+expiry, and a revoked key is invalid whatever instant it holds. A store failure is an error, not a
+verdict.
+
+**Issuing.** `issue_api_key`, `revoke_api_key` and `rotate_api_key` take an injectable `ApiKeyClock`.
+A label is 1 to 128 characters, not blank, with no control or invisible separator characters;
+scopes are non-empty, drawn from the configured vocabulary and distinct; an expiry must lie in the
+future. The plaintext key exists only in the returned `IssuedApiKey`, whose `Debug` redacts it.
+`revoke` and `rotate` of an unknown or non-UUID id are `auth.api_key_not_found`. A rotation keeps the
+label and scopes, mints the new key through `issue` (so it is held to the **current** scope
+vocabulary), and retires the old key at once or after an overlap of 0 to 2 592 000 seconds with
+`limit_expiry`, never extending an earlier expiry. A revoked or lapsed key cannot be rotated.
+
+**Last-used.** A verified request records its instant in memory (newest wins). The core runs no
+timer: the host calls `flush_api_key_last_used` every `api_keys.last_used_flush` and at shutdown (the
+axum adapter ships the task, §8.9). A failed write stays queued.
+
+**The access decision (`authorize_api_key`).** One function every transport calls, so the order of
+answers cannot differ between them: (1) a route that declares **no scopes** is refused with
+`auth.forbidden` before any key work, since a guarded route that declares nothing must never open;
+(2) the key is verified, and any bad credential is one `auth.api_key_invalid` whatever the reason;
+(3) the key must hold **every** declared scope (no wildcard, no hierarchy), else
+`auth.api_key_scope_insufficient`; (4) the audit. A store failure is `auth.internal`.
+
+**Audit.** `AuthHooks::on_api_key_request` receives a typed `ApiKeyAccessEvent` (`outcome`,
+`reason`, `key_id`, `label`, `method`, the route PATTERN, `required_scopes`, `ip`) for every guarded
+request, refusals included, with a `HookContext` on `HookPlane::ApiKey` (no user, no tenant). The
+event never carries the presented key, and the key header is removed from the context's sanitized
+headers. `api_keys.audit_mode = BestEffort` detaches the call; `Required` awaits it under the
+detached-task ceiling and turns an **admitted** request into `auth.internal` when it fails or times
+out (a request refused anyway keeps its own answer). `Required` without any supplied hooks fails the
+build with `ConfigError::ApiKeysAuditRequiresHooks`. The outcome and reason names are asserted
+against the contract's `apiKeys.auditEvent` in both directions.
+
+**Startup rules (§5.5).** Enabling the group needs the `api-keys` feature and an
+`AuthEngineBuilder::api_key_repository`, and a repository without the group enabled is refused too,
+so a half-configured deployment never starts. The pepper clears the signing secret's bar and equals
+no other key the deployment holds; the scope vocabulary, header, prefix and flush interval are
+validated as the §5.3 rows state.
+
 ## 8. HTTP Adapter — Axum
 
 The `bymax-auth-axum` crate is the **first** HTTP adapter built on top of the
@@ -3450,6 +3548,39 @@ nest-auth applies `@Throttle(AUTH_THROTTLE_CONFIGS.*)` per handler. See §16.
 Tracing follows the `tracing` ecosystem: the adapter emits spans/events but does
 not install a subscriber — the consuming application owns subscriber setup, so
 the adapter never dictates log formatting or transport.
+### 8.9 Service API-key guard (feature `api-keys`)
+
+```rust
+let guard = require_api_key_scopes(&state, &["reports:read"])?;     // Result<ApiKeyScopesLayer, ConfigError>
+let app = Router::new()
+    .route("/reports/{id}", get(report))                             // async fn report(CurrentApiKey(key): CurrentApiKey)
+    .route_layer(guard);
+let flush = spawn_api_key_flush(engine.clone())?;                    // later: flush.shutdown().await
+```
+
+`require_api_key_scopes` is a hand-written tower layer for `Router::route_layer`, so the route
+pattern is known (the audit names `/reports/{id}`, never the concrete URL). It reads the configured
+header only, asks the engine for the decision (§7.13) and either answers with the library's error
+envelope or passes the request on carrying a `CurrentApiKey` (id, label, scopes; never the digest).
+
+| Situation | Answer |
+| --- | --- |
+| No header, junk, unknown id, wrong secret, revoked, expired | `401 auth.api_key_invalid`, one body for all of them |
+| Header repeated, or value not visible ASCII | `401 auth.api_key_invalid` (a malformed key) |
+| Key in the query string | not read: `401 auth.api_key_invalid` |
+| Valid key missing a declared scope | `403 auth.api_key_scope_insufficient` |
+| Layer built with an empty scope list | `403 auth.forbidden`, before any key is read |
+| Key store failure, or a failed `Required` audit on an admitted request | `500 auth.internal` |
+| `CurrentApiKey` on a route without the layer | `500 auth.internal` (a wiring mistake, not a missing credential) |
+
+Every value of the key header is marked sensitive on the request, so a `Debug` print shows
+`Sensitive`. Building the layer, or the flush task, over an engine whose `api_keys` group is off is
+`ConfigError::ApiKeyGuardWithoutApiKeys`.
+
+`spawn_api_key_flush` is the adapter-owned task that calls `flush_api_key_last_used` every
+`api_keys.last_used_flush` and once more on `ApiKeyFlushTask::shutdown`, which reports whether the
+task ended normally. The host owns it and must call `shutdown` before the process exits.
+
 ## 9. Hooks System
 
 Hooks let a consumer inject custom logic at the inflection points of the auth flow without forking the engine. They are the Rust counterpart of nest-auth's `IAuthHooks`: a single object-safe trait whose methods all have default no-op implementations, so a consumer overrides only the events it cares about. The engine holds the implementation as `Arc<dyn AuthHooks>` and invokes each method through that handle — no per-hook registration.
@@ -6314,6 +6445,7 @@ always-on engine, nothing else.
 | `sessions`     | session-store paths in `bymax-auth-redis`/`-core`     | Session tracking + FIFO eviction                                |
 | `platform`     | platform service/guard paths                          | Platform-admin login/JWT/sessions                               |
 | `invitations`  | invitation service paths                              | Email invitations                                               |
+| `api-keys`     | `bymax-auth-core/api-keys` (+ `bymax-auth-axum/api-keys` when `axum` is on) | Scoped service API keys: repository port, verifier, issuing, audit hook, the axum layer, extractor and flush task (§7.13, §8.9) |
 | `oauth`        | `bymax-auth-core/oauth` (`OAuthProvider`/`HttpClient` traits) | OAuth 2.0 + PKCE orchestration; Google provider built-in — **no HTTP-client dependency** (transport injected, §11.1.1) |
 | `oauth-reqwest`| `oauth` + `reqwest` (`ReqwestHttpClient`)            | bundled `reqwest`-backed `HttpClient` default; **off by default** — omit it and supply your own `HttpClient` to add zero HTTP deps |
 | `client`       | `bymax-auth-client` (`reqwest`)                       | Native Rust HTTP auth client                                    |
@@ -7173,7 +7305,7 @@ non-goals explicitly keeps the surface unambiguous for the dev plans that follow
 | ---------------------------------------------- | ----------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------- |
 | **Session storage other than the Redis store trait** | The library tracks sessions/blacklist/refresh state in Redis only; there is no in-DB or in-memory production session backend. | Provide a Redis instance; the in-memory store is **test-only**. |
 | **Hosting an identity provider / SSO server**  | `rust-auth` is an auth library embedded in each service, not a standalone IdP, OAuth **server**, or SAML provider. It is an OAuth **client** (consumes Google et al.). | A dedicated IdP product if centralized SSO is required.         |
-| **API-key / machine-to-machine auth**          | A different model from user sessions; out of scope (as in nest-auth).                                       | Separate middleware/module in the host app.                     |
+| **An API-key management surface**              | The library mints, rotates, revokes and verifies scoped service keys (§7.13, §8.9) but ships no routes or UI to manage them; who may mint a key is the host's decision. | The host's admin tooling, calling `AuthEngine::{issue,revoke,rotate}_api_key`. |
 | **Authorization beyond role-hierarchy RBAC**   | The library does role-hierarchy checks (and the Next.js proxy does coarse edge RBAC for UX). It does **not** implement attribute-based access control, policy engines, or per-resource ACLs. | Host app's authorization layer.                                 |
 | **The `x-user-*` proxy headers as an authority** | Edge-propagated identity headers are a UI convenience only; every real access decision must hit the Rust backend. | Backend guards (`bymax-auth-axum` extractors).                  |
 
@@ -7408,6 +7540,16 @@ sign-off — never a silent edit.
     verify); high-entropy tokens are SHA-256-hashed; recovery codes are keyed-
     HMAC-SHA-256; signing keys are held in `Zeroizing` buffers and validated at
     startup. *Enforced in:* §17.1, §17.3 (item 5), §7.2.
+19. **A service key is never stored, logged or accepted from the query string.** Only the HMAC
+    digest of the secret is stored; `IssuedApiKey`'s `Debug` redacts the plaintext; the key header
+    is removed from the audit context and marked sensitive on the request; the key is read from
+    its configured header only, and a repeated header is a malformed key. *Enforced in:* §7.13,
+    §8.9, `bymax_auth_crypto::api_key` (known-answer vector) and the api-key tests.
+20. **A bad service credential has one answer, and an undeclared route opens for no one.** Absent,
+    malformed, unknown, wrong, revoked and expired keys all answer `auth.api_key_invalid` after the
+    same single row read and constant-time compare; a route that declares no scopes is refused with
+    `auth.forbidden` before any key work; a key must hold every declared scope. *Enforced in:*
+    §7.13 (`authorize_api_key`) and its tests.
 
 > **The contract CI and review must protect.** Any pull request that weakens one
 > of these invariants — even to satisfy a feature request or a consumer
