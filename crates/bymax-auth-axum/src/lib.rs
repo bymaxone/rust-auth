@@ -21,6 +21,8 @@
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 
+#[cfg(feature = "api-keys")]
+mod api_key;
 mod client_ip;
 mod delivery;
 mod dto;
@@ -43,6 +45,14 @@ mod ws;
 #[cfg(test)]
 mod test_support;
 
+#[cfg(all(test, feature = "api-keys"))]
+mod api_key_tests;
+
+#[cfg(feature = "api-keys")]
+pub use api_key::{
+    ApiKeyFlushTask, ApiKeyScopes, ApiKeyScopesLayer, CurrentApiKey, require_api_key_scopes,
+    spawn_api_key_flush,
+};
 pub use dto::{
     AcceptInvitationDto, ChangePasswordDto, CreateInvitationDto, ForgotPasswordDto, LoginDto,
     MfaChallengeDto, MfaDisableDto, MfaRegenerateRecoveryCodesDto, MfaSetupDto, MfaVerifyDto,
