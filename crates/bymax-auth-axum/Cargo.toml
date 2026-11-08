@@ -51,11 +51,11 @@ tracing = "0.1"
 # The rate-limit key maps only shrink when something calls `retain_recent` on them, so the
 # router spawns one timer per throttled route to do it. `rt` for the spawn, `time` for the
 # interval — no runtime is started here, only joined.
-tokio = { version = "1", default-features = false, features = ["rt", "time"] }
+tokio = { version = "1", default-features = false, features = ["rt", "time", "sync"] }
 
 [dev-dependencies]
 # A multi-threaded runtime + the assertion-friendly macros for the async E2E tests.
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "test-util"] }
 # Drives the built router with `ServiceExt::oneshot` (no socket needed) and reads bodies.
 tower = { version = "0.5", default-features = false, features = ["util"] }
 http-body-util = "0.1"
@@ -93,10 +93,13 @@ sessions = ["bymax-auth-core/sessions"]
 platform = ["bymax-auth-core/platform"]
 oauth = ["bymax-auth-core/oauth"]
 invitations = ["bymax-auth-core/invitations"]
+# Service API keys: the `require_api_key_scopes` layer, the `CurrentApiKey` extractor and the
+# adapter-owned last-used flush task.
+api-keys = ["bymax-auth-core/api-keys"]
 # The WebSocket upgrade-ticket surface (mint endpoint + the two redeem extractors).
 websocket = ["axum/ws"]
 # Convenience meta-feature: every optional group for a full backend.
-full = ["mfa", "sessions", "platform", "oauth", "invitations", "websocket"]
+full = ["mfa", "sessions", "platform", "oauth", "invitations", "websocket", "api-keys"]
 
 # docs.rs renders every route group; `--cfg docsrs` enables the feature-gated doc
 # annotations on the optional extractors and route factories.

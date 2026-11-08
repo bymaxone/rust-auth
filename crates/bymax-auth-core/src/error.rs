@@ -36,6 +36,10 @@ pub enum ConfigError {
     /// write the audit row the mode demands.
     #[error("api_keys.audit_mode is Required but no AuthHooks were supplied to write the audit")]
     ApiKeysAuditRequiresHooks,
+    /// A guard for service API keys was built over an engine whose `api_keys` group is off, so
+    /// every request it guarded would be refused with an internal error.
+    #[error("an API-key guard was built but api_keys.enabled is false")]
+    ApiKeyGuardWithoutApiKeys,
     /// `api_keys.pepper` is shorter than the 32-character minimum.
     #[error("api_keys.pepper must be at least 32 characters (got {len})")]
     ApiKeysPepperTooShort {
