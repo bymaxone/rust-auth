@@ -24,18 +24,19 @@ scrypt = ["bymax-auth-core/scrypt"]
 argon2 = ["bymax-auth-core/argon2"]
 
 # Optional engine flows.
-sessions = ["bymax-auth-core/sessions"]
-mfa = ["bymax-auth-core/mfa"]
-oauth = ["bymax-auth-core/oauth"]                # OAuth orchestration + traits; no HTTP client
+sessions = ["bymax-auth-core/sessions", "bymax-auth-axum?/sessions"]
+mfa = ["bymax-auth-core/mfa", "bymax-auth-axum?/mfa", "bymax-auth-redis?/mfa"]
+oauth = ["bymax-auth-core/oauth", "bymax-auth-axum?/oauth", "bymax-auth-redis?/oauth"] # OAuth orchestration + traits; no HTTP client
 oauth-reqwest = ["oauth", "bymax-auth-core/oauth-reqwest"] # adds the bundled ReqwestHttpClient
-platform = ["bymax-auth-core/platform"]
-invitations = ["bymax-auth-core/invitations"]
+platform = ["bymax-auth-core/platform", "bymax-auth-axum?/platform", "bymax-auth-redis?/platform"]
+invitations = ["bymax-auth-core/invitations", "bymax-auth-axum?/invitations"]
 breach = ["bymax-auth-core/breach"]              # HIBP k-anonymity over the HttpClient seam
 api-keys = ["bymax-auth-core/api-keys", "bymax-auth-axum?/api-keys"] # scoped service API keys; with `axum`, also the layer, extractor and flush task
 
-# Infrastructure / adapters. Each pulls its crate in as an optional dependency AND forwards the
-# flow features already selected above, so an adapter can never be compiled without the engine
-# capability it exposes.
+# Infrastructure / adapters. Each pulls its crate in as an optional dependency. The flow features
+# above forward to the adapters that gate the same flow as weak dependency features (`adapter?/flow`),
+# so enabling a flow never leaves an adapter selected without its half of it; the forwarding is
+# checked by `tests/adapter_feature_forwarding.rs`.
 redis = ["dep:bymax-auth-redis"]
 axum = ["dep:bymax-auth-axum"]
 client = ["dep:bymax-auth-client"]
