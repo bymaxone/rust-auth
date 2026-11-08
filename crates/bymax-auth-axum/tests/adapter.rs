@@ -2015,7 +2015,7 @@ async fn mfa_challenge_falls_back_to_the_oauth_temp_cookie_and_clears_it() {
         .send(&app)
         .await;
     use bymax_auth_core::traits::UserRepository;
-    let _ = h.users.link_oauth(&id, "google", "mock-123").await;
+    let _ = h.users.link_oauth(&id, "t1", "google", "mock-123").await;
 
     // Drive the real OAuth callback so the temp cookie is planted by the adapter itself.
     let initiate = Req::get("/auth/oauth/google?tenantId=t1").send(&app).await;
@@ -2568,7 +2568,7 @@ async fn oauth_callback_with_mfa_user_takes_the_mfa_redirect_branch() {
     enable_mfa_flag(&h, &id).await;
     // Link the OAuth identity so the callback finds this user (provider id from the mock).
     use bymax_auth_core::traits::UserRepository;
-    let _ = h.users.link_oauth(&id, "google", "mock-123").await;
+    let _ = h.users.link_oauth(&id, "t1", "google", "mock-123").await;
 
     let app = router(&h);
 
@@ -2815,7 +2815,7 @@ async fn oauth_callback_mfa_branch_without_redirect_returns_json() {
     let id = seed_user(&h, "mock@example.com", "glidingwalnut42", "USER").await;
     enable_mfa_flag(&h, &id).await;
     use bymax_auth_core::traits::UserRepository;
-    let _ = h.users.link_oauth(&id, "google", "mock-123").await;
+    let _ = h.users.link_oauth(&id, "t1", "google", "mock-123").await;
     let app = router(&h);
 
     let initiate = Req::get("/auth/oauth/google?tenantId=t1").send(&app).await;

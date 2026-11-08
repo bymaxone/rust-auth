@@ -1542,10 +1542,12 @@ pub trait UserRepository: Send + Sync {
         tenant_id: &str,
     ) -> Result<Option<AuthUser>, RepositoryError>;
 
-    /// Link an existing user to an OAuth identity.
+    /// Link an existing user to an OAuth identity. Restricted to `tenant_id`, as `find_by_id`
+    /// restricts its read.
     async fn link_oauth(
         &self,
         user_id: &str,
+        tenant_id: &str,
         provider: &str,
         provider_id: &str,
     ) -> Result<(), RepositoryError>;
@@ -4398,7 +4400,7 @@ performs:
      email_verified: true, oauth_provider, oauth_provider_id })`. Name falls back
      to the email local-part when the profile omits it.
    - **`Link`** — requires an existing user; `user_store.link_oauth(user_id,
-     provider, provider_id)`, then re-fetch by primary key. A `Link` with no
+     tenant_id, provider, provider_id)`, then re-fetch by primary key. A `Link` with no
      existing user → `OAuthFailed`.
    - **`Reject`** — `OAuthFailed`.
 8. **MFA branch** — if the resolved user has MFA enabled, OAuth has only proven

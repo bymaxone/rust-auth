@@ -79,6 +79,9 @@ pub struct InMemoryUserRepository {
     /// the one it asked for; that second lock only runs against a repository that answers from
     /// the wrong tenant, which this reproduces.
     ignore_tenant_on_id_lookup: AtomicBool,
+    /// Every `link_oauth` call as `(user id, tenant id)`, so a test can assert which tenant the
+    /// engine named for the write.
+    link_calls: Mutex<Vec<(String, String)>>,
     /// When set and raised, every read reports the account with MFA gone.
     ///
     /// A transition re-reads the account inside its lock, and the mutation abandons when that
@@ -117,6 +120,12 @@ impl InMemoryUserRepository {
     pub fn ignore_tenant_on_email(&self) {
         self.ignore_tenant_on_email_lookup
             .store(true, Ordering::SeqCst);
+    }
+
+    /// The `(user id, tenant id)` of every `link_oauth` call so far, oldest first.
+    #[must_use]
+    pub fn link_calls(&self) -> Vec<(String, String)> {
+        lock(&self.link_calls).clone()
     }
 
     /// Make `find_by_id` ignore its `tenant_id`, as a misconfigured consumer repository would.
@@ -377,10 +386,17 @@ impl UserRepository for InMemoryUserRepository {
     async fn link_oauth(
         &self,
         user_id: &str,
+        tenant_id: &str,
         provider: &str,
         provider_id: &str,
     ) -> Result<(), RepositoryError> {
-        if let Some(user) = lock(&self.users).get_mut(user_id) {
+        lock(&self.link_calls).push((user_id.to_owned(), tenant_id.to_owned()));
+        // Restricted to the named tenant, as the contract demands: a write for another tenant
+        // leaves the account untouched.
+        if let Some(user) = lock(&self.users)
+            .get_mut(user_id)
+            .filter(|user| user.tenant_id == tenant_id)
+        {
             user.oauth_provider = Some(provider.to_owned());
             user.oauth_provider_id = Some(provider_id.to_owned());
         }
@@ -1746,6 +1762,7 @@ mod tests {
     use std::sync::Arc;
 
     mod fault_injection;
+    mod link_oauth;
 
     fn create_data() -> CreateUserData {
         CreateUserData {
@@ -1862,8 +1879,16 @@ mod tests {
         );
 
         // OAuth link + lookup, then a fresh OAuth user (and its conflict path).
-        assert!(repo.link_oauth(&user.id, "google", "g-1").await.is_ok());
-        assert!(repo.link_oauth("missing", "google", "g-1").await.is_ok());
+        assert!(
+            repo.link_oauth(&user.id, "t1", "google", "g-1")
+                .await
+                .is_ok()
+        );
+        assert!(
+            repo.link_oauth("missing", "t1", "google", "g-1")
+                .await
+                .is_ok()
+        );
         assert!(matches!(
             repo.find_by_oauth_id("google", "g-1", "t1").await,
             Ok(Some(_))

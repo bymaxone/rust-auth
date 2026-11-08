@@ -2174,10 +2174,13 @@ impl crate::traits::UserRepository for TenantBlindUsers {
     async fn link_oauth(
         &self,
         user_id: &str,
+        tenant_id: &str,
         provider: &str,
         provider_id: &str,
     ) -> Result<(), crate::RepositoryError> {
-        self.inner.link_oauth(user_id, provider, provider_id).await
+        self.inner
+            .link_oauth(user_id, tenant_id, provider, provider_id)
+            .await
     }
 
     async fn create_with_oauth(

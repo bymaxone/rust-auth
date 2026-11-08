@@ -14,6 +14,8 @@ version bump.
 
 ### Changed
 
+- **BREAKING (host-implemented trait): `UserRepository::link_oauth` takes the tenant.** It was the one write keyed on the user id alone: on a host that numbers users per tenant, an OAuth `link` decision could land on another tenant's account, the same class as the writes made tenant-scoped earlier in this release. The signature is now `link_oauth(user_id, tenant_id, provider, provider_id)`, and an implementation MUST restrict the write to that tenant exactly as `find_by_id` restricts its read; the engine passes the tenant the identity was resolved in. **Apply:** add the `tenant_id: &str` parameter after the id and add the tenant to the `WHERE` clause of the update; a stale implementation fails to compile. The in-memory test double now restricts the write to the named tenant and records each call (`InMemoryUserRepository::link_calls`).
+
 - **BREAKING (public API): `HookPlane` is `#[non_exhaustive]` and gains `ApiKey`.** `ApiKey` is the plane of the hook context a machine caller's request builds (no user, no tenant). **Apply:** add a wildcard arm to every exhaustive `match` on `HookPlane` outside this workspace; the compiler lists them.
 
 - **BREAKING (public API): `AuthError` and `AuthErrorCode` are `#[non_exhaustive]`.** Each new error code was a source break for every host that matched either enum exhaustively. Marking them now means a future code is no longer a source break. **Apply:** add a wildcard arm (`_ =>`) to every `match` on `AuthError` or `AuthErrorCode` outside this workspace; the compiler lists them. Nothing on the wire changes.
