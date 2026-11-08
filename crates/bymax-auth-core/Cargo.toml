@@ -80,11 +80,14 @@ oauth = []
 oauth-reqwest = ["oauth", "dep:reqwest"]
 platform = []
 invitations = []
+# Scoped service API keys for machine callers. Off by default: without it the repository
+# port is not compiled, and `api_keys.enabled = true` is refused.
+api-keys = []
 # Exposes the in-memory trait doubles (`InMemoryUserRepository`, `InMemoryStores`, the
 # mock OAuth/HTTP clients) for downstream integration tests and this crate's own tests.
 testing = []
 # Convenience meta-feature: every optional flow capability for a full backend.
-full = ["sessions", "mfa", "oauth", "oauth-reqwest", "platform", "invitations", "breach"]
+full = ["sessions", "mfa", "oauth", "oauth-reqwest", "platform", "invitations", "breach", "api-keys"]
 
 # docs.rs renders every flow plus both hashers; `--cfg docsrs` enables the
 # feature-gated doc annotations. `testing` is excluded — the in-memory doubles are

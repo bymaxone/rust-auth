@@ -50,6 +50,8 @@ pub struct AuthEngineBuilder {
     oauth_state_store: Option<Arc<dyn crate::traits::OAuthStateStore>>,
     #[cfg(feature = "mfa")]
     mfa_store: Option<Arc<dyn MfaStore>>,
+    #[cfg(feature = "api-keys")]
+    api_key_repository: Option<Arc<dyn crate::traits::ApiKeyRepository>>,
 }
 
 impl Default for AuthEngineBuilder {
@@ -85,6 +87,8 @@ impl AuthEngineBuilder {
             oauth_state_store: None,
             #[cfg(feature = "mfa")]
             mfa_store: None,
+            #[cfg(feature = "api-keys")]
+            api_key_repository: None,
         }
     }
 
@@ -319,6 +323,19 @@ impl AuthEngineBuilder {
         self
     }
 
+    /// Set the service API-key repository. Required exactly when `api_keys.enabled` is set:
+    /// supplying one without enabling the group, or enabling it without one, is a
+    /// [`ConfigError`] at [`AuthEngineBuilder::build`].
+    #[cfg(feature = "api-keys")]
+    #[must_use]
+    pub fn api_key_repository(
+        mut self,
+        repository: Arc<dyn crate::traits::ApiKeyRepository>,
+    ) -> Self {
+        self.api_key_repository = Some(repository);
+        self
+    }
+
     /// Validate the configuration and assemble the engine.
     ///
     /// # Errors
@@ -352,6 +369,8 @@ impl AuthEngineBuilder {
             oauth_state_store,
             #[cfg(feature = "mfa")]
             mfa_store,
+            #[cfg(feature = "api-keys")]
+            api_key_repository,
         } = self;
 
         // Capture whether the consumer supplied custom hooks before the NoOp default is
@@ -376,6 +395,15 @@ impl AuthEngineBuilder {
 
         // Config-intrinsic validation, resolving `secure_cookies` from the environment.
         let secure_cookies = config.validate(environment)?;
+
+        // The repository is present exactly when the group is on: either mismatch would leave a
+        // deployment that believes keys authenticate while nothing can, or the reverse.
+        #[cfg(feature = "api-keys")]
+        match (config.api_keys.enabled, api_key_repository.is_some()) {
+            (true, false) => return Err(ConfigError::ApiKeysRepositoryRequired),
+            (false, true) => return Err(ConfigError::ApiKeysRepositoryUnused),
+            _ => {}
+        }
 
         // Collaborator-presence rules.
         let user_repository = user_repository.ok_or(ConfigError::MissingUserRepository)?;
@@ -586,6 +614,8 @@ impl AuthEngineBuilder {
             mfa,
             #[cfg(feature = "platform")]
             platform_auth,
+            #[cfg(feature = "api-keys")]
+            api_key_repository,
         })
     }
 }

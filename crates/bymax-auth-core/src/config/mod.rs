@@ -9,6 +9,9 @@
 //! ([`JwtConfig::secret`], [`MfaConfig::encryption_key`], [`GoogleOAuthConfig::client_secret`])
 //! are `secrecy::SecretString`, redacted in `Debug`/`Display` and zeroized on drop.
 
+mod api_keys;
+#[cfg(test)]
+mod api_keys_tests;
 #[cfg(test)]
 mod blocklist_tests;
 mod cookie_prefix;
@@ -24,6 +27,7 @@ use std::time::Duration;
 
 use secrecy::SecretString;
 
+pub use api_keys::{ApiKeyAuditMode, ApiKeysConfig};
 pub use resolvers::{
     CookieDomainResolver, MaxSessionsResolver, RequestParts, TenantIdResolver, TenantResolveError,
 };
@@ -700,4 +704,6 @@ pub struct AuthConfig {
     /// `tenant_id_resolver`: a flag with nothing to compare against would enforce nothing, so
     /// [`AuthConfig::validate`] rejects the pair at startup.
     pub enforce_tenant_binding: bool,
+    /// Scoped service API keys for machine callers; off unless `api_keys.enabled`.
+    pub api_keys: ApiKeysConfig,
 }

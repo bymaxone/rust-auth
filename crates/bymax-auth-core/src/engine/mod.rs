@@ -7,6 +7,8 @@
 //! authentication flow methods are defined in separate `impl AuthEngine` blocks alongside
 //! each flow's implementation.
 
+#[cfg(all(test, feature = "api-keys"))]
+mod api_key_wiring_tests;
 #[cfg(test)]
 mod blocklist_tests;
 mod builder;
@@ -65,6 +67,9 @@ pub struct AuthEngine {
     /// `config.platform.enabled`.
     #[cfg(feature = "platform")]
     platform_auth: Option<crate::services::platform::PlatformAuthService>,
+    /// The service API-key repository, present exactly when `api_keys.enabled`.
+    #[cfg(feature = "api-keys")]
+    api_key_repository: Option<Arc<dyn crate::traits::ApiKeyRepository>>,
 }
 
 impl AuthEngine {
@@ -184,6 +189,13 @@ impl AuthEngine {
     #[must_use]
     pub fn hooks(&self) -> &Arc<dyn AuthHooks> {
         &self.hooks
+    }
+
+    /// The service API-key repository: `Some` exactly when `api_keys.enabled` is set.
+    #[cfg(feature = "api-keys")]
+    #[must_use]
+    pub fn api_key_repository(&self) -> Option<&Arc<dyn crate::traits::ApiKeyRepository>> {
+        self.api_key_repository.as_ref()
     }
 
     /// The refresh-session store.

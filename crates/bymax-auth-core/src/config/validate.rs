@@ -19,10 +19,10 @@ use crate::traits::TOKEN_EPOCH_RETENTION_SECS;
 const HMAC_KEY_LABEL: &[u8] = b"bymax-auth:hmac-key:v1";
 
 /// The minimum Shannon entropy, in bits per character, accepted for the JWT secret.
-const MIN_SECRET_ENTROPY: f64 = 3.5;
+pub(super) const MIN_SECRET_ENTROPY: f64 = 3.5;
 
 /// The minimum JWT-secret length, in characters.
-const MIN_SECRET_LEN: usize = 32;
+pub(super) const MIN_SECRET_LEN: usize = 32;
 
 /// The fully-resolved configuration stored on the engine after a successful `build()`. It
 /// owns the validated [`AuthConfig`], the resolved `secure_cookies` bool, the deployment
@@ -461,6 +461,8 @@ impl AuthConfig {
         // or the browser drops every `Set-Cookie` for it without saying so.
         super::cookie_prefix::validate_cookie_prefixes(&self.cookies, secure_cookies)?;
 
+        super::api_keys::validate_api_keys(self)?;
+
         Ok(secure_cookies)
     }
 
@@ -728,7 +730,7 @@ fn validate_password(password: &PasswordConfig) -> Result<(), ConfigError> {
 }
 
 /// The Shannon entropy of `s` in bits per character.
-fn shannon_entropy(s: &str) -> f64 {
+pub(super) fn shannon_entropy(s: &str) -> f64 {
     let mut freq: HashMap<char, usize> = HashMap::new();
     let mut total = 0usize;
     for c in s.chars() {
