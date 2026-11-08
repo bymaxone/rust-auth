@@ -795,6 +795,7 @@ This is the one place where the Rust port deliberately extends nest-auth. nest-a
 
 ```rust
 #[derive(Clone)]
+#[non_exhaustive] // build from `PasswordConfig::default()` and set fields
 pub struct PasswordConfig {
     /// Algorithm used to hash NEW passwords. Verification accepts either.
     pub active_algorithm: PasswordAlgorithm,
@@ -802,6 +803,10 @@ pub struct PasswordConfig {
     /// algorithm — or is weaker than current params — triggers a transparent
     /// rehash. The engine calls `UserRepository::update_password` with the new hash.
     pub rehash_on_verify: bool,
+    /// Deployment-specific words the default password screen refuses, reduced the way a
+    /// candidate is (case, trailing digits and punctuation, leet). Ignored when the host
+    /// supplies its own screen.
+    pub blocklist: Vec<String>,
     pub scrypt: ScryptParams,
     pub argon2: Argon2Params,
 }
@@ -1057,6 +1062,7 @@ The **Default** column lists `AuthConfig::default()` (≡ `nest_compat_defaults(
 | `roles.platform_hierarchy` | `Option<HashMap<…>>` | Cond. | `None` | Required when `platform.enabled` |
 | `password.active_algorithm` | `PasswordAlgorithm` | No | `Scrypt` | New-hash algorithm; `Argon2id` requires the `argon2` feature (§5.1.9) |
 | `password.rehash_on_verify` | `bool` | No | `true` | Transparent upgrade on verify |
+| `password.blocklist` | `Vec<String>` | No | `[]` | Extra words the default screen refuses (the deployment's own names; ASVS v5 §6.2.11). Ignored when `AuthEngineBuilder::breach_checker` supplies a screen. **Rust-side addition, bounded at startup** (`ConfigError::PasswordBlocklistSize` / `PasswordBlocklistEntry`): a size cap, a per-entry length cap, and no entry reducing to nothing; nest-auth applies no bound |
 | `password.scrypt.cost_factor` | `u32` | No | `131072` | Power of 2, min `16384` |
 | `password.scrypt.block_size` | `u32` | No | `8` | scrypt r |
 | `password.scrypt.parallelization` | `u32` | No | `1` | scrypt p |

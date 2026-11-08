@@ -415,7 +415,9 @@ impl AuthEngineBuilder {
         // Build the password service (and its startup sentinel hash) from the validated
         // password config before it is moved into the resolved bundle.
         let breach_checker = breach_checker.unwrap_or_else(|| {
-            Arc::new(CommonPasswordChecker::new()) as Arc<dyn PasswordBreachChecker>
+            Arc::new(CommonPasswordChecker::with_extra_words(
+                &config.password.blocklist,
+            )) as Arc<dyn PasswordBreachChecker>
         });
         let passwords = Arc::new(PasswordService::new(&config.password, breach_checker)?);
 

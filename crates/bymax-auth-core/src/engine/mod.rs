@@ -7,6 +7,8 @@
 //! authentication flow methods are defined in separate `impl AuthEngine` blocks alongside
 //! each flow's implementation.
 
+#[cfg(test)]
+mod blocklist_tests;
 mod builder;
 
 use std::collections::HashMap;

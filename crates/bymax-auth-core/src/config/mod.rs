@@ -9,6 +9,8 @@
 //! ([`JwtConfig::secret`], [`MfaConfig::encryption_key`], [`GoogleOAuthConfig::client_secret`])
 //! are `secrecy::SecretString`, redacted in `Debug`/`Display` and zeroized on drop.
 
+#[cfg(test)]
+mod blocklist_tests;
 mod cookie_prefix;
 #[cfg(test)]
 mod cookie_prefix_tests;
@@ -111,9 +113,14 @@ impl Default for Argon2Params {
     }
 }
 
-/// Password-hashing configuration: which algorithm writes new hashes, whether to rehash on
-/// verify, the minimum length a new password must have, and the per-algorithm cost parameters.
+/// Password configuration: which algorithm writes new hashes, whether to rehash on verify, the
+/// minimum length a new password must have, the deployment's own words to refuse, and the
+/// per-algorithm cost parameters.
+///
+/// `#[non_exhaustive]`: build it from [`PasswordConfig::default`] and set the fields, so a field
+/// added later is not a source break for every deployment that spelled the struct out.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct PasswordConfig {
     /// Algorithm used to hash new passwords. Verification accepts either.
     pub active_algorithm: PasswordAlgorithm,
@@ -126,6 +133,18 @@ pub struct PasswordConfig {
     /// Never applied on login or on a rehash: refusing a password someone already has would
     /// lock them out of the account they need in order to change it.
     pub min_length: u32,
+    /// Extra words the default password screen refuses, on top of the ones it ships: the
+    /// deployment's own product, company and domain names, which are exactly the words its
+    /// users reach for and which no general corpus contains (ASVS v5 §6.2.11).
+    ///
+    /// Entries are reduced the way a candidate is (lowercased, trailing digits and
+    /// punctuation dropped, leet undone), so listing `Acme` also refuses `Acme2024!` and
+    /// `@cme123`. Ignored when a screen is supplied with `AuthEngineBuilder::breach_checker`:
+    /// that screen owns the decision.
+    ///
+    /// Bounded at startup (see `ConfigError::PasswordBlocklistSize` and
+    /// `ConfigError::PasswordBlocklistEntry`). Default: empty.
+    pub blocklist: Vec<String>,
     /// scrypt parameters.
     pub scrypt: ScryptParams,
     /// Argon2id parameters.
@@ -143,6 +162,7 @@ impl Default for PasswordConfig {
             // The DTOs keep a structural floor of 8; this is the policy layered on top,
             // and it matches nest-auth's `password.minLength`.
             min_length: 15,
+            blocklist: Vec::new(),
             scrypt: ScryptParams::default(),
             argon2: Argon2Params::default(),
         }

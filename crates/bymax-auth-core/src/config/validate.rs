@@ -626,8 +626,41 @@ fn validate_referential(hierarchy: &HashMap<String, Vec<String>>) -> Result<(), 
     Ok(())
 }
 
+/// The most entries `password.blocklist` accepts.
+const MAX_BLOCKLIST_ENTRIES: usize = 10_000;
+
+/// The most characters one `password.blocklist` entry may have.
+const MAX_BLOCKLIST_ENTRY_CHARS: usize = 128;
+
+/// Validate `password.blocklist`: bounded in size, each entry bounded and not reducing to
+/// nothing (such an entry names no word, so it can only be a mistake).
+fn validate_blocklist(blocklist: &[String]) -> Result<(), ConfigError> {
+    if blocklist.len() > MAX_BLOCKLIST_ENTRIES {
+        return Err(ConfigError::PasswordBlocklistSize {
+            got: blocklist.len(),
+        });
+    }
+    for (index, entry) in blocklist.iter().enumerate() {
+        if entry.chars().count() > MAX_BLOCKLIST_ENTRY_CHARS {
+            return Err(ConfigError::PasswordBlocklistEntry {
+                index,
+                reason: "is longer than 128 characters",
+            });
+        }
+        if crate::traits::common_password::reduce_to_base_word(entry).is_empty() {
+            return Err(ConfigError::PasswordBlocklistEntry {
+                index,
+                reason: "reduces to nothing",
+            });
+        }
+    }
+    Ok(())
+}
+
 /// Validate the password hasher parameters (rule 9-10) and the active-hasher availability.
 fn validate_password(password: &PasswordConfig) -> Result<(), ConfigError> {
+    validate_blocklist(&password.blocklist)?;
+
     #[cfg(feature = "scrypt")]
     if !password.scrypt.cost_factor.is_power_of_two() || password.scrypt.cost_factor < 16_384 {
         return Err(ConfigError::ScryptCostFactor {

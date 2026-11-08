@@ -172,6 +172,21 @@ pub enum ConfigError {
         /// The rejected iteration count.
         got: u32,
     },
+    /// An entry of `password.blocklist` is longer than the bound or reduces to nothing, so it
+    /// names no word.
+    #[error("password.blocklist entry {index} {reason}")]
+    PasswordBlocklistEntry {
+        /// The position of the rejected entry.
+        index: usize,
+        /// Why it was rejected.
+        reason: &'static str,
+    },
+    /// `password.blocklist` has more entries than the bound.
+    #[error("password.blocklist has {got} entries; the most accepted is 10000")]
+    PasswordBlocklistSize {
+        /// The number of entries given.
+        got: usize,
+    },
     /// `password.argon2.parallelism` is 0, which the hasher rejects at hash time.
     #[error("password.argon2.parallelism must be >= 1 (got {got})")]
     Argon2Parallelism {
