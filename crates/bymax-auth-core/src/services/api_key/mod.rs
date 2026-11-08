@@ -14,6 +14,8 @@ mod verifier;
 #[cfg(test)]
 mod access_tests;
 #[cfg(test)]
+mod contract_tests;
+#[cfg(test)]
 mod issuing_tests;
 #[cfg(test)]
 mod last_used_tests;

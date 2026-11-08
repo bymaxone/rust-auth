@@ -282,3 +282,25 @@ fn base64url_encodes_every_partial_group_length_as_the_alphabet_dictates() {
     assert_eq!(encode_base64url(b"fooba"), "Zm9vYmE");
     assert_eq!(encode_base64url(b"foobar"), "Zm9vYmFy");
 }
+
+#[test]
+fn the_digest_is_over_the_secret_string_not_the_bytes_it_decodes_to() {
+    // 43 base64url characters carry 258 bits for 256 bits of key: the last character's two low bits
+    // are ignored by a decoder, so `A` and `B` there are two spellings of the same 32 bytes. Both
+    // are valid secrets, and they must be two different keys.
+    let vector = &contract()["vector"];
+    let pepper = text(vector, "pepper");
+    let secret = text(vector, "secret");
+    let (stem, last) = secret.split_at(secret.len() - 1);
+    let respelled = format!("{stem}{}", if last == "A" { "B" } else { "A" });
+
+    assert_eq!(respelled.len(), secret.len());
+    assert_ne!(respelled, secret);
+    assert_ne!(digest(&respelled, &pepper), digest(&secret, &pepper));
+    let key_id = text(vector, "keyId");
+    let presented = format(DEFAULT_PREFIX, &key_id, &respelled);
+    assert!(
+        parse(&presented, DEFAULT_PREFIX).is_some(),
+        "the respelling is a valid key shape"
+    );
+}

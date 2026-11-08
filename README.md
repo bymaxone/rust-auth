@@ -96,6 +96,7 @@ pnpm add @bymax-one/rust-auth
 - ✅ **Platform Admin Auth** — A separate identity domain with its own claims, sessions, and role hierarchy — fully isolated from tenant users
 - ✅ **User Invitations** — Single-use tokenized invites with role + tenant assignment and re-validation on accept
 - ✅ **Role-Based Access Control** — Hierarchical roles enforced by the `RequireRole<R>` extractor
+- ✅ **Service API Keys** *(opt-in)* — Scoped keys for machine callers: only an HMAC digest is stored, one answer for every bad credential, a route that declares no scopes opens for no one, rotation with overlap, an audit event per request
 
 ### 🧩 Developer Experience
 
@@ -125,6 +126,7 @@ A thin facade over a set of focused internal crates. You enable only the capabil
 | `oauth-reqwest`  | Bundled `reqwest`-backed `HttpClient` (opt-in; omit to supply your own)    |
 | `platform`       | Platform-admin identity domain (login/MFA/sessions)                        |
 | `invitations`    | Tokenized user invitations                                                 |
+| `api-keys`       | Scoped service API keys (repository port, issuing, the `require_api_key_scopes` axum layer) |
 | `redis`          | Canonical Redis stores (`redis` + `deadpool-redis`) with atomic Lua        |
 | `axum`           | HTTP router, extractors, DTO validation, cookie delivery, per-route rate limiting, WebSocket tickets |
 | `breach`         | Opt-in breached-password check (`HibpBreachChecker`, HIBP k-anonymity)     |
@@ -396,6 +398,29 @@ async fn update_user(_: SelfOrAdmin<Admin>) -> &'static str {
 }
 ```
 
+#### Machine callers: scoped service API keys *(feature `api-keys`)*
+
+For a service that calls yours without a user session, enable `api_keys` (a strong `pepper`, a closed `scopes` vocabulary), implement `ApiKeyRepository` over your database, and guard routes with the layer. A key must hold **every** scope the route declares; a layer built with an empty list refuses everything.
+
+```rust
+use bymax_auth::axum::{CurrentApiKey, require_api_key_scopes, spawn_api_key_flush};
+
+// Mint a key once (the plaintext is returned only here) from your own admin tooling:
+//   let issued = engine.issue_api_key(IssueApiKeyInput::new("billing", vec!["reports:read".into()])).await?;
+
+async fn report(CurrentApiKey(key): CurrentApiKey) -> String {
+    format!("hello {}", key.label)
+}
+
+let guard = require_api_key_scopes(&state, &["reports:read"])?;
+let app = Router::new().route("/reports/{id}", get(report)).route_layer(guard);
+
+// Writes the coalesced last-used timestamps; call `shutdown().await` before the process exits.
+let flush = spawn_api_key_flush(engine.clone())?;
+```
+
+The key travels in the `x-api-key` header (configurable), never the query string. Every bad credential answers the same `401 auth.api_key_invalid`; a valid key missing a scope answers `403 auth.api_key_scope_insufficient`. Rotate with `rotate_api_key` (an overlap keeps the old key valid for a while), and receive one audit event per request through `AuthHooks::on_api_key_request`.
+
 ### 6. Frontend integration (React)
 
 Build an `AuthClient` once, hand it to `AuthProvider`; the hooks read the context it populates — exactly as in `@bymax-one/nest-auth`, so existing consumers change only the import specifier.
@@ -519,6 +544,7 @@ Everything is configured through `AuthConfig`. Two ready-made profiles bundle se
 | **password_reset** | `method` (`Token` \| `Otp`), `otp_length`, `token_ttl`                       | `Token`, 600 s             |
 | **platform**       | `enabled` (requires `roles.platform_hierarchy`)                              | `false`                    |
 | **invitations**    | `enabled`, `token_ttl`                                                       | `false`, 48 h              |
+| **api_keys**       | `enabled`, `pepper`, `scopes`, `header`, `prefix`, `last_used_flush`, `audit_mode` | `false`, —, —, `x-api-key`, `bak`, 60 s, best-effort |
 | **roles**          | `hierarchy` (required), `platform_hierarchy`                                 | —                          |
 | **oauth**          | `google`, `redirect_allowlist`, `*_redirect_url`                            | —                          |
 | **controllers**    | per-group route toggles                                                      | feature-driven             |
