@@ -11,9 +11,10 @@
 use std::time::Duration;
 
 use super::{
-    AuthConfig, BruteForceConfig, ControllerToggles, CookieConfig, EmailChangeConfig,
-    EmailVerificationConfig, InvitationConfig, JwtConfig, OAuthConfig, PasswordAlgorithm,
-    PasswordConfig, PasswordResetConfig, PlatformConfig, RolesConfig, SessionConfig, TokenDelivery,
+    ApiKeysConfig, AuthConfig, BruteForceConfig, ControllerToggles, CookieConfig,
+    EmailChangeConfig, EmailVerificationConfig, InvitationConfig, JwtConfig, OAuthConfig,
+    PasswordAlgorithm, PasswordConfig, PasswordResetConfig, PlatformConfig, RolesConfig,
+    SessionConfig, TokenDelivery,
 };
 
 impl AuthConfig {
@@ -50,6 +51,7 @@ impl AuthConfig {
             identifier_key: None,
             tenant_id_resolver: None,
             enforce_tenant_binding: false,
+            api_keys: ApiKeysConfig::default(),
         }
     }
 

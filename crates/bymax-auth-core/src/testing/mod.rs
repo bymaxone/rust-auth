@@ -35,6 +35,8 @@ use crate::traits::{
 };
 
 pub use crate::traits::{NoOpAuthHooks, NoOpEmailProvider};
+#[cfg(feature = "api-keys")]
+pub use api_key::InMemoryApiKeyRepository;
 
 /// Acquire a mutex guard, recovering the inner value if the lock was poisoned (a test
 /// double never needs to escalate a poisoned lock to a panic).
@@ -1721,6 +1723,10 @@ impl OAuthProvider for MockOAuthProvider {
     }
 }
 
+#[cfg(feature = "api-keys")]
+mod api_key;
+#[cfg(all(test, feature = "api-keys"))]
+mod api_key_tests;
 mod logout_pending;
 mod otp_cooldown;
 mod rate_limit;

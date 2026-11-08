@@ -4,6 +4,8 @@
 //! Redis-store abstraction, the OAuth providers, and the dependency-free
 //! [`HttpClient`] transport.
 
+#[cfg(feature = "api-keys")]
+pub mod api_key;
 pub mod breach;
 pub mod common_password;
 pub mod default_email;
@@ -17,6 +19,8 @@ pub mod repository;
 pub mod store;
 pub mod user_status_cache;
 
+#[cfg(feature = "api-keys")]
+pub use api_key::{ApiKey, ApiKeyPrincipal, ApiKeyRepository, ApiKeySummary, NewApiKey};
 #[cfg(feature = "breach")]
 #[doc(inline)]
 pub use breach::HibpBreachChecker;

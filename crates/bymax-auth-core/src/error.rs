@@ -22,6 +22,61 @@ pub enum ConfigError {
          binding is enforced"
     )]
     TenantBindingWithoutResolver,
+    /// `api_keys.enabled` is set but the `api-keys` feature is not compiled in, so nothing could
+    /// verify a key.
+    #[error("api_keys.enabled is true but the `api-keys` feature is not compiled in")]
+    ApiKeysFeatureDisabled,
+    /// `api_keys.enabled` is set but no `ApiKeyRepository` was supplied, so no key could be read.
+    #[error("api_keys.enabled is true but no ApiKeyRepository was supplied")]
+    ApiKeysRepositoryRequired,
+    /// An `ApiKeyRepository` was supplied but `api_keys.enabled` is false, so it would be ignored.
+    #[error("an ApiKeyRepository was supplied but api_keys.enabled is false")]
+    ApiKeysRepositoryUnused,
+    /// `api_keys.pepper` is shorter than the 32-character minimum.
+    #[error("api_keys.pepper must be at least 32 characters (got {len})")]
+    ApiKeysPepperTooShort {
+        /// The measured pepper length in characters.
+        len: usize,
+    },
+    /// `api_keys.pepper` Shannon entropy is below the 3.5 bits/char floor.
+    #[error("api_keys.pepper entropy {entropy:.2} bits/char is below the 3.5 minimum")]
+    ApiKeysPepperLowEntropy {
+        /// The measured Shannon entropy in bits per character.
+        entropy: f64,
+    },
+    /// `api_keys.pepper` equals another key the deployment holds.
+    #[error(
+        "api_keys.pepper must not equal {reused}: a key shared across purposes is one leak away \
+         from all of them"
+    )]
+    ApiKeysPepperReused {
+        /// Which other key it equals.
+        reused: &'static str,
+    },
+    /// `api_keys.scopes` is empty, or one entry is malformed or repeated.
+    #[error("api_keys.scopes{}: {reason}", scope_position(.index))]
+    ApiKeysScopes {
+        /// The position of the offending entry, or `None` when the list as a whole is at fault.
+        index: Option<usize>,
+        /// What is wrong. Never the entry itself.
+        reason: &'static str,
+    },
+    /// `api_keys.header` or `api_keys.prefix` cannot carry a key.
+    #[error("api_keys.{field} {reason}")]
+    ApiKeysTransport {
+        /// Which option: `header` or `prefix`.
+        field: &'static str,
+        /// What is wrong.
+        reason: &'static str,
+    },
+    /// `api_keys.last_used_flush` is not a whole number of seconds from 1 to 3600.
+    #[error(
+        "api_keys.last_used_flush must be a whole number of seconds from 1 to 3600 (got {millis} ms)"
+    )]
+    ApiKeysFlushInterval {
+        /// The configured interval in milliseconds.
+        millis: u128,
+    },
     /// `jwt.secret` is shorter than the 32-character minimum.
     #[error("jwt.secret must be at least 32 characters (got {len})")]
     JwtSecretTooShort {
@@ -350,4 +405,9 @@ pub enum RepositoryError {
     /// maps this to an internal error and logs the cause via `tracing`.
     #[error("repository backend error")]
     Backend(#[source] Box<dyn std::error::Error + Send + Sync>),
+}
+
+/// The position suffix of an `api_keys.scopes` message: `[2]` for an entry, nothing for the list.
+fn scope_position(index: &Option<usize>) -> String {
+    index.map_or_else(String::new, |i| format!("[{i}]"))
 }

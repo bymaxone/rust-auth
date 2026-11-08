@@ -30,6 +30,7 @@ use serde::{Deserialize, Serialize};
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts-export", derive(ts_rs::TS))]
 #[cfg_attr(feature = "ts-export", ts(export_to = "error-codes.ts"))]
+#[non_exhaustive]
 pub enum AuthErrorCode {
     // Credentials & account state
     /// Login email not found or password mismatch — deliberately indistinguishable.
@@ -407,6 +408,7 @@ pub struct AuthErrorEnvelope {
 /// The [`std::fmt::Display`] impl (`#[error(...)]`) is for logs/`tracing` only — it is
 /// never the client-facing message, which comes from [`AuthError::client_message`].
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum AuthError {
     // Credentials & account state
     /// Missing email or wrong password — deliberately indistinguishable.
@@ -697,6 +699,59 @@ impl AuthError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn every_code_is_named_in_an_exhaustive_match() {
+        // Compile-time anchor. `AuthErrorCode` is `#[non_exhaustive]`, which only binds other
+        // crates, so this match inside the defining crate stays exhaustive: adding a variant
+        // stops the build here until it is also added to `catalog()` in
+        // `tests/error_catalog.rs`, which the shared contract is compared against.
+        use AuthErrorCode::*;
+        let named = |code: AuthErrorCode| match code {
+            InvalidCredentials
+            | AccountLocked
+            | AccountInactive
+            | AccountSuspended
+            | AccountBanned
+            | PendingApproval
+            | TokenExpired
+            | TokenRevoked
+            | TokenInvalid
+            | RefreshTokenInvalid
+            | SessionNotFound
+            | TokenMissing
+            | EmailAlreadyExists
+            | EmailNotVerified
+            | EmailChangeTokenInvalid
+            | MfaRequired
+            | MfaInvalidCode
+            | MfaAlreadyEnabled
+            | MfaNotEnabled
+            | MfaSetupRequired
+            | MfaTempTokenInvalid
+            | MfaStateConflict
+            | PasswordCompromised
+            | PasswordResetTokenInvalid
+            | OtpInvalid
+            | OtpExpired
+            | OtpMaxAttempts
+            | InsufficientRole
+            | Forbidden
+            | UntrustedOrigin
+            | ReauthenticationRequired
+            | InvalidInvitationToken
+            | OauthFailed
+            | OauthEmailMismatch
+            | PlatformAuthRequired
+            | ApiKeyInvalid
+            | ApiKeyScopeInsufficient
+            | ApiKeyNotFound
+            | Validation
+            | TooManyRequests
+            | Internal => true,
+        };
+        assert!(named(AuthErrorCode::Internal));
+    }
 
     #[test]
     fn the_error_envelope_matches_the_shared_wire_contract() {

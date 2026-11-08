@@ -145,61 +145,6 @@ fn every_code_serializes_to_its_string_and_round_trips() {
 }
 
 #[test]
-fn the_table_lists_every_variant_of_the_enum() {
-    // Compile-time anchor. The match below is exhaustive over `AuthErrorCode`, so adding a
-    // variant to the enum stops the build here until someone comes back and adds it to
-    // `catalog()` as well. Without it the table is complete only by habit — and a code
-    // rust-auth can emit that nest-auth has never heard of is the same drift in a different
-    // column from the one that caused this file to be rewritten.
-    use AuthErrorCode::*;
-    for (code, _) in catalog() {
-        match code {
-            InvalidCredentials
-            | AccountLocked
-            | AccountInactive
-            | AccountSuspended
-            | AccountBanned
-            | PendingApproval
-            | TokenExpired
-            | TokenRevoked
-            | TokenInvalid
-            | RefreshTokenInvalid
-            | SessionNotFound
-            | TokenMissing
-            | EmailAlreadyExists
-            | EmailNotVerified
-            | EmailChangeTokenInvalid
-            | MfaRequired
-            | MfaInvalidCode
-            | MfaAlreadyEnabled
-            | MfaNotEnabled
-            | MfaSetupRequired
-            | MfaTempTokenInvalid
-            | MfaStateConflict
-            | PasswordCompromised
-            | PasswordResetTokenInvalid
-            | OtpInvalid
-            | OtpExpired
-            | OtpMaxAttempts
-            | InsufficientRole
-            | Forbidden
-            | UntrustedOrigin
-            | ReauthenticationRequired
-            | InvalidInvitationToken
-            | OauthFailed
-            | OauthEmailMismatch
-            | PlatformAuthRequired
-            | ApiKeyInvalid
-            | ApiKeyScopeInsufficient
-            | ApiKeyNotFound
-            | Validation
-            | TooManyRequests
-            | Internal => {}
-        }
-    }
-}
-
-#[test]
 fn internal_only_codes_remap_to_token_invalid_on_the_wire() {
     // The three token sentinels must never reach a client; they collapse to
     // `token_invalid`, denying an attacker an expired-vs-revoked-vs-missing oracle.
