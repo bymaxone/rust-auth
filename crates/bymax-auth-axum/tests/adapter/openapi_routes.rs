@@ -17,7 +17,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use bymax_auth_axum::openapi::{request_body_routes, request_schema};
+use bymax_auth_axum::openapi::{RequestBodyRoute, request_body_routes, request_schema};
 use serde_json::{Value, json};
 
 use super::*;
@@ -420,57 +420,77 @@ fn the_rows_are_the_handlers_that_extract_a_json_body() {
     assert!(BYTES_BODIES.iter().all(|(_, _, reason)| !reason.is_empty()));
 }
 
+/// The sessions the probe presents: a dashboard cookie value and a platform bearer token.
+struct Sessions {
+    dashboard: String,
+    platform: String,
+}
+
+/// Posts to `route` a body one character over the maximum of `broken`, with the session the
+/// route needs, and checks the refusal. Returns whether the error names the field by a name other
+/// than the schema's property.
+async fn probe_property(
+    app: &axum::Router,
+    sessions: &Sessions,
+    route: &RequestBodyRoute,
+    schema: &Value,
+    broken: &str,
+) -> bool {
+    let request = Req::post(&format!("{PREFIX}{}", route.path)).json(body_breaking(schema, broken));
+    let request = if PUBLIC_ROWS.contains(&route.path) {
+        request
+    } else if route.path.starts_with("/platform/mfa/") {
+        request.bearer(&sessions.platform)
+    } else {
+        request.cookie("access_token", &sessions.dashboard)
+    };
+    let res = request.send(app).await;
+    let label = format!("{route:?} with {broken} over its maximum");
+    assert_eq!(
+        res.status,
+        StatusCode::BAD_REQUEST,
+        "{label}: {:?}",
+        res.json()
+    );
+    assert_eq!(
+        res.json()["error"]["code"],
+        json!("auth.validation"),
+        "{label}"
+    );
+    let fields = res.json()["error"]["details"].to_string();
+    let reported = snake_case(broken);
+    assert!(
+        fields.contains(&format!("\"{reported}\"")),
+        "{label}: the error names {fields}"
+    );
+    // The length bound must be what refused it. A fixed-format code cannot say so: its pattern
+    // fixes the length, so the format refusal and the length refusal are one.
+    let fixed_format = schema["properties"][broken]["pattern"]
+        .as_str()
+        .is_some_and(|pattern| pattern.contains("\\d{6}"));
+    assert!(
+        fixed_format || fields.contains("length is greater than"),
+        "{label}: {fields}"
+    );
+    reported != broken
+}
+
 #[tokio::test]
 async fn every_body_route_refuses_a_body_that_breaks_its_own_schema() {
     let Some((h, app)) = every_group() else { return };
     seed_user(&h, "probe@e.com", "glidingwalnut42", "ADMIN").await;
     seed_admin(&h, "padmin@e.com", "SUPER_ADMIN").await;
-    let dashboard = login_access_cookie(&app, "probe@e.com", "glidingwalnut42").await;
-    let platform = platform_access(&platform_login(&app, "padmin@e.com").await);
-    assert!(!dashboard.is_empty() && !platform.is_empty());
+    let sessions = Sessions {
+        dashboard: login_access_cookie(&app, "probe@e.com", "glidingwalnut42").await,
+        platform: platform_access(&platform_login(&app, "padmin@e.com").await),
+    };
+    assert!(!sessions.dashboard.is_empty() && !sessions.platform.is_empty());
 
     let mut renamed = BTreeSet::new();
     for route in request_body_routes() {
         let Some(schema) = request_schema(route.schema) else { continue };
         for broken in bounded(&schema) {
-            let request =
-                Req::post(&format!("{PREFIX}{}", route.path)).json(body_breaking(&schema, &broken));
-            let request = if PUBLIC_ROWS.contains(&route.path) {
-                request
-            } else if route.path.starts_with("/platform/mfa/") {
-                request.bearer(&platform)
-            } else {
-                request.cookie("access_token", &dashboard)
-            };
-            let res = request.send(&app).await;
-            let label = format!("{route:?} with {broken} over its maximum");
-            assert_eq!(
-                res.status,
-                StatusCode::BAD_REQUEST,
-                "{label}: {:?}",
-                res.json()
-            );
-            assert_eq!(
-                res.json()["error"]["code"],
-                json!("auth.validation"),
-                "{label}"
-            );
-            let fields = res.json()["error"]["details"].to_string();
-            let reported = snake_case(&broken);
-            assert!(
-                fields.contains(&format!("\"{reported}\"")),
-                "{label}: the error names {fields}"
-            );
-            // The length bound must be what refused it. A fixed-format code cannot say so: its
-            // pattern fixes the length, so the format refusal and the length refusal are one.
-            let fixed_format = schema["properties"][&broken]["pattern"]
-                .as_str()
-                .is_some_and(|pattern| pattern.contains("\\d{6}"));
-            assert!(
-                fixed_format || fields.contains("length is greater than"),
-                "{label}: {fields}"
-            );
-            if reported != broken {
+            if probe_property(&app, &sessions, route, &schema, &broken).await {
                 renamed.insert(format!("{} {broken}", route.path));
             }
         }
