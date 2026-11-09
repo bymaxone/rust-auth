@@ -186,3 +186,23 @@ async fn fail_next_resend_releases_fails_exactly_that_many_then_releases() {
 
     assert_eq!(failed, [true, true, false, false]);
 }
+
+#[tokio::test]
+async fn fail_logout_pending_ops_skips_then_fails_exactly_count() {
+    let stores = InMemoryStores::new();
+    stores.fail_logout_pending_ops(2, 2);
+    let owner = LogoutOwner {
+        user_id: "u1".to_owned(),
+        tenant_id: None,
+    };
+
+    let mut failed = Vec::new();
+    for _ in 0..6 {
+        let put = stores
+            .put_logout_pending(SessionKind::Dashboard, "hash", &owner, 60)
+            .await;
+        failed.push(put.is_err());
+    }
+
+    assert_eq!(failed, [false, false, true, true, false, false]);
+}
