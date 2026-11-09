@@ -11,13 +11,12 @@ description = "Cryptographic primitives for bymax-auth: password hashing, consta
 [dependencies]
 # Mandatory crypto set — compiled into every build regardless of features.
 #
-# The whole RustCrypto stack here is pinned to one coherent generation (the
-# `digest 0.10` / `password-hash 0.5` line). `argon2` and `aes-gcm` have not yet
-# published a release on the newer `digest 0.11` line, so mixing generations would
-# pull a second major of `digest`/`crypto-common`/`password-hash` — which the
-# workspace `deny.toml` (`multiple-versions = "deny"`) rejects. Keeping every
-# RustCrypto crate on the same generation is what keeps the dependency graph free
-# of duplicate-major bloat.
+# The whole RustCrypto stack here stays on one coherent generation (the `digest 0.10` /
+# `password-hash 0.5` line). `sha1` (features `mfa` and `breach`) is on it too, so the
+# generation moves as a whole: moving any other crate alone would put a second major of
+# `digest`/`crypto-common` in the graph, which the workspace `deny.toml`
+# (`multiple-versions = "deny"`) rejects. `tests/known_answers.rs` holds the vectors that
+# must pass unchanged across the move.
 hmac = "0.12"
 sha2 = "0.10"
 subtle = "2.6"
