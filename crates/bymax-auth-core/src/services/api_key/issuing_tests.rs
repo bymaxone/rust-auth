@@ -364,6 +364,41 @@ async fn a_failing_store_is_an_internal_error_on_every_operation() -> TestResult
 }
 
 #[tokio::test]
+async fn an_id_that_is_not_a_key_id_never_reaches_the_store() -> TestResult {
+    // With the store down, the only way revoke and rotate answer "not found" is by refusing the
+    // id before the store is asked: a malformed id is the host repository's input otherwise.
+    let f = fixture(ApiKeyAuditMode::BestEffort)?;
+    f.repo.set_failing(true);
+
+    for id in [
+        "not-a-uuid",
+        "",
+        // Hex digits, but not 36 characters: the length alone must refuse it.
+        "abc",
+        // 36 characters, but uppercase and a stray letter: the shape alone must refuse it.
+        "ABCDEF00-0000-4000-8000-0000000000AA",
+        "0000000g-0000-4000-8000-0000000000aa",
+    ] {
+        let revoked = f.engine.revoke_api_key(id).await.err();
+        assert!(matches!(revoked, Some(AuthError::ApiKeyNotFound)), "{id:?}");
+        let rotated = f
+            .engine
+            .rotate_api_key(id, RotateApiKeyInput::new(0))
+            .await
+            .err();
+        assert!(matches!(rotated, Some(AuthError::ApiKeyNotFound)), "{id:?}");
+    }
+
+    // The control: a well-formed id does reach the store, which is down.
+    let well_formed = "00000000-0000-4000-8000-0000000000aa";
+    assert!(matches!(
+        f.engine.revoke_api_key(well_formed).await.err(),
+        Some(AuthError::Internal(_))
+    ));
+    Ok(())
+}
+
+#[tokio::test]
 async fn a_failure_while_retiring_the_old_key_is_reported() -> TestResult {
     let f = fixture(ApiKeyAuditMode::BestEffort)?;
     let old = f.issue(&["admin"]).await?;
