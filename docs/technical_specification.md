@@ -7074,6 +7074,19 @@ read`; jobs widen as noted. A protected GitHub **Environment** (manual approval)
 gates the publishing jobs so an accidental tag cannot publish unattended — same
 guard nest-auth uses on its `npm-publish` environment.
 
+> **Implementation status.** This section is the design. `.github/workflows/release.yml`
+> implements part of it, and `docs/RELEASE.md` is the authority on what that file runs.
+> Implemented: the tag ↔ version match (`scripts/check-release-versions.sh`), a
+> `cargo publish --workspace --dry-run` package check, crates.io and npm publication by
+> OIDC Trusted Publishing, `npm publish --provenance`, the WASM and ESM + CJS build with
+> an `attw` type-resolution check, and the GitHub Release with notes from `CHANGELOG.md`.
+> **Not implemented:** Job D (SBOM and artefact attestations), the attestation steps of
+> Jobs A and B, the `cargo-geiger` report, the in-workflow re-run of the `ci` gate, the
+> in-workflow mutation gate (the sweep is run by hand on the tagged SHA), the `ts-rs`
+> staleness check inside the release (it runs in `ci`), and `release-plz` (the workflow
+> uses `cargo publish --workspace`). The protected Environments it names,
+> `crates-io-publish` and `npm-publish`, still have to be created in the repository.
+
 **Pre-publish validation (shared first job):**
 
 - **Tag ↔ version match:** assert `${GITHUB_REF_NAME#v}` equals the facade
@@ -7265,7 +7278,8 @@ Mirroring nest-auth's required set (these gate Scorecard and are part of the
 
 For a public auth library the supply chain is part of the threat model, so the
 posture is explicit and verifiable end-to-end — every layer below is required,
-not optional:
+not optional. The controls marked **not implemented** are the design and are
+absent from `release.yml` today (see the status note in §21.5):
 
 | Control | Tool / mechanism | When | What it guarantees |
 | --- | --- | --- | --- |
@@ -7273,9 +7287,9 @@ not optional:
 | Policy / ban-list | **`cargo-deny`** | per-PR | bans (`openssl`/`ring`-on-wasm, duplicate semver-majors, git deps), license allow-list, advisory + source policy (§19.6) |
 | Dependency audit ledger | **`cargo-vet`** | per-PR | every crate + update is human-audited or trusted in the committed `supply-chain/` ledger — defence-in-depth past the ban-list |
 | Pinned graph | **`Cargo.lock` committed** | always | reproducible `--locked` builds; a stable surface for audit/vet/SBOM |
-| SBOM | **CycloneDX** (`cargo-cyclonedx` + npm CycloneDX) | each release | a machine-readable bill of materials for the crate graph, the npm package, and the WASM artefact; attached to the GitHub Release |
-| Transitive `unsafe` report | **cargo-geiger** (or equivalent) | each release | **non-blocking** visibility into `unsafe` across the dependency graph; the workspace's own crates are `#![forbid(unsafe_code)]` (sole exception: the `bymax-auth-wasm` bindgen glue), and any unsafe-heavy dependency is justified, replaced, or banned |
-| Build provenance | **GitHub Artifact Attestations** (`actions/attest-build-provenance`, Sigstore) | each release | signed, OIDC-bound provenance for the **crate tarball**, **npm tarball**, **`*_bg.wasm`**, and **SBOM**; verifiable with `gh attestation verify` |
+| SBOM (**not implemented**) | **CycloneDX** (`cargo-cyclonedx` + npm CycloneDX) | each release | a machine-readable bill of materials for the crate graph, the npm package, and the WASM artefact; attached to the GitHub Release |
+| Transitive `unsafe` report (**not implemented**) | **cargo-geiger** (or equivalent) | each release | **non-blocking** visibility into `unsafe` across the dependency graph; the workspace's own crates are `#![forbid(unsafe_code)]` (sole exception: the `bymax-auth-wasm` bindgen glue), and any unsafe-heavy dependency is justified, replaced, or banned |
+| Build provenance (**not implemented**) | **GitHub Artifact Attestations** (`actions/attest-build-provenance`, Sigstore) | each release | signed, OIDC-bound provenance for the **crate tarball**, **npm tarball**, **`*_bg.wasm`**, and **SBOM**; verifiable with `gh attestation verify` |
 | Registry trust | **crates.io Trusted Publishing (OIDC)** + **npm Trusted Publishing (OIDC / provenance)** | each release | short-lived, identity-bound publish credentials — **no long-lived `CARGO_REGISTRY_TOKEN` / `NPM_TOKEN`** (§21.5) |
 | Posture transparency | **OpenSSF Scorecard** | push-to-`main` + weekly | public score for pinned-deps, token-permissions, branch-protection, SAST, etc. (§21.3) |
 
