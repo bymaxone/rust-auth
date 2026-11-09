@@ -79,10 +79,10 @@ fn mounting(on: &[RouteGroup]) -> RouteGroups {
         auth: has(RouteGroup::Auth),
         mfa: has(RouteGroup::Mfa),
         password_reset: has(RouteGroup::PasswordReset),
-        sessions: false,
+        sessions: has(RouteGroup::Sessions),
         platform: has(RouteGroup::Platform),
         platform_mfa: has(RouteGroup::PlatformMfa),
-        oauth: false,
+        oauth: has(RouteGroup::OAuth),
         invitations: has(RouteGroup::Invitations),
         email_change: has(RouteGroup::EmailChange),
     }
@@ -136,6 +136,7 @@ fn nest_schemas(group: RouteGroup) -> Vec<&'static str> {
             "AcceptInvitationDto",
         ],
         RouteGroup::EmailChange => vec!["ChangeEmailDto", "ConfirmEmailChangeDto"],
+        RouteGroup::Sessions | RouteGroup::OAuth => Vec::new(),
     };
     names.sort_unstable();
     names
@@ -480,6 +481,30 @@ fn a_document_default_never_names_a_scheme_the_deployment_does_not_define() {
                     "{guard:?} {delivery:?} names {names:?}"
                 );
             }
+        }
+    }
+}
+
+#[test]
+fn a_group_is_mounted_exactly_when_its_own_toggle_is_on() {
+    let every = [
+        RouteGroup::Auth,
+        RouteGroup::PasswordReset,
+        RouteGroup::Mfa,
+        RouteGroup::Platform,
+        RouteGroup::PlatformMfa,
+        RouteGroup::Invitations,
+        RouteGroup::EmailChange,
+        RouteGroup::Sessions,
+        RouteGroup::OAuth,
+    ];
+    for group in every {
+        for other in every {
+            assert_eq!(
+                other.is_mounted(mounting(&[group])),
+                other == group,
+                "{other:?} with only {group:?} on"
+            );
         }
     }
 }

@@ -22,6 +22,12 @@ use serde_json::{Value, json};
 
 use crate::RouteGroups;
 
+mod operations;
+
+pub use operations::{
+    OperationDescription, OperationKind, OperationSecurity, describe_operation, operation_security,
+};
+
 /// The artefact as shipped: a JSON object with the `openapi` version it is written for and a
 /// `schemas` map from DTO name to schema.
 pub const REQUEST_SCHEMAS_JSON: &str = include_str!("../openapi/openapi-request-schemas.json");
@@ -63,8 +69,7 @@ pub fn request_schemas() -> BTreeMap<String, Value> {
 }
 
 /// A route group of the auth router: the unit a deployment switches on or off, and the unit a
-/// schema is contributed by. One variant per group that takes a request body; the sessions and
-/// OAuth groups of [`RouteGroups`] take none and have no variant.
+/// schema is contributed by. One variant per group of [`RouteGroups`] that mounts an operation.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[non_exhaustive]
 pub enum RouteGroup {
@@ -82,6 +87,10 @@ pub enum RouteGroup {
     Invitations,
     /// The address-change group.
     EmailChange,
+    /// The session-management group, which takes no request body.
+    Sessions,
+    /// The OAuth group, which takes no request body.
+    OAuth,
 }
 
 impl RouteGroup {
@@ -96,6 +105,8 @@ impl RouteGroup {
             Self::PlatformMfa => groups.platform_mfa,
             Self::Invitations => groups.invitations,
             Self::EmailChange => groups.email_change,
+            Self::Sessions => groups.sessions,
+            Self::OAuth => groups.oauth,
         }
     }
 }

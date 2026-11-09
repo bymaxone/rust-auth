@@ -51,6 +51,8 @@ mod test_support;
 mod api_key_tests;
 
 #[cfg(all(test, feature = "openapi"))]
+mod openapi_operations_tests;
+#[cfg(all(test, feature = "openapi"))]
 mod openapi_tests;
 
 #[cfg(feature = "api-keys")]

@@ -3435,6 +3435,21 @@ mode, since a platform token is always bearer. A scheme the deployment cannot sa
 delivery)` derives the document-level default for a host's own routes from the delivery mode; for the
 dashboard guard under `Both` it is a two-entry list, which OpenAPI reads as OR.
 
+Per operation, `operation_security()` lists the 38 operations of the auth router with the credential each
+requires, as one of ten kinds (`none`, `access`, `refreshRequired`, `accessAndRefreshRequired`,
+`accessWithOptionalRefresh`, `accessWithOptionalRefreshCookie`, `optionalAccessAndRefresh`,
+`platform`, `platformLogout`, `platformRefresh`). The kinds are `nest-auth`'s, held byte-identical in
+`conformance/openapi-operation-security.json` with a digest pin, and a test requires the table and the
+artefact to hold the same operations with the same kinds in both directions. `describe_operation(kind,
+delivery)` turns a kind into the operation's `security` list and, where a credential can arrive in a
+body, its request body: an access credential is the cookie scheme, the bearer scheme or both
+alternatives as the delivery mode allows; an entry naming several schemes needs all of them (AND);
+the empty entry says a caller sending nothing the list can name is still served, which is how a
+refresh token in the body is expressed because a requirement cannot name a body field; and a method
+that carries no body never declares one. A probe presents every operation, in each delivery mode,
+with nine combinations of credential and transport, including transports the deployment does not
+deliver by, and requires the router to admit or refuse each the way the kind says.
+
 A crate is built from its tarball, which holds only files under the crate's own directory, so the
 schemas are shipped as a copy in `crates/bymax-auth-axum/openapi/`. A test holds the copy
 byte-identical to the shared one, and CI builds the packaged crates with the feature on.
