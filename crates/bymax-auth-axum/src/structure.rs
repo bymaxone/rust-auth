@@ -2,12 +2,11 @@
 //! (layer: HTTP adapter).
 //!
 //! A body that parses as JSON but does not fit its DTO (a property missing, `null` or of the wrong
-//! type, or one the DTO does not have) used to answer one entry naming the container (`body`,
-//! `query`). A client keys its form errors by property, and the shared contract says each
-//! `details[].field` of an `auth.validation` answer is the wire property name, so every failing
-//! property is named here: the answer's `status`, `code`, top-level message and the set of
-//! distinct `field` values are what both libraries share. The messages are this crate's own and
-//! name only the property, never the value or the type the client sent.
+//! type, or one the DTO does not have) names every failing property by its wire name and never by
+//! a container (`body`, `query`): a client keys its form errors by property. The answer's
+//! `status`, `code`, top-level message and the set of distinct `field` values are what both
+//! libraries share. The messages are this crate's own and name only the property, never the value
+//! or the type the client sent.
 //!
 //! The properties come from the shared request schemas (`properties`, `required`), not from serde's
 //! text. When a request fails structurally, the failing properties are replaced by a harmless

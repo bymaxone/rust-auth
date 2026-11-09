@@ -117,9 +117,21 @@ fn the_declared_table_is_the_artefacts_schemas_and_each_dto_is_found_by_its_type
     let tabled: BTreeSet<&str> = DTOS.iter().map(|(name, ..)| *name).collect();
     assert_eq!(names.len(), DECLARED.len(), "a schema is declared twice");
     assert_eq!(names, tabled);
-    for (name, ..) in DTOS {
-        assert!(schema(name).is_some(), "{name} is not in the artefact");
-    }
+    // Both directions against the artefact itself, so a schema it gains that neither table names
+    // fails here and cannot bypass the naming of its failures.
+    let artefact: BTreeSet<String> = serde_json::from_str::<Value>(crate::request_schemas::JSON)
+        .ok()
+        .and_then(|root| root["schemas"].as_object().cloned())
+        .map(|schemas| schemas.keys().cloned().collect())
+        .unwrap_or_default();
+    assert!(!artefact.is_empty());
+    assert_eq!(
+        names
+            .iter()
+            .map(|name| (*name).to_owned())
+            .collect::<BTreeSet<_>>(),
+        artefact
+    );
     assert_eq!(
         declared_named(type_name::<LoginDto>()),
         Some(("LoginDto", true))
