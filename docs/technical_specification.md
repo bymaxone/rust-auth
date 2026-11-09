@@ -3409,8 +3409,14 @@ fragment merged into a 3.0 document validates as neither, and keyed by `nest-aut
 (`LoginDto`, ...), so a client generated from either backend sees the same names and bounds. The
 `openapi` feature of `bymax-auth-axum` (off by default, forwarded by the facade, no new dependency)
 exposes them as `serde_json` values through `bymax_auth_axum::openapi`:
-`request_schema_names()`, `request_schema(name)`, `request_schemas()`, `openapi_version()` and the
-raw `REQUEST_SCHEMAS_JSON`. The module builds no document and serves no route; a host places the
+`request_schema_names()`, `request_schema(name)`, `request_schemas()`,
+`request_schemas_for(groups)`, `request_body_routes()`, `openapi_version()` and the raw
+`REQUEST_SCHEMAS_JSON`. `request_schemas_for` returns only the schemas of the route groups a router
+mounts, as nest-auth does, since a component nothing references is noise in a served document;
+`request_body_routes` lists each route that takes a JSON body with the schema of that body. Rust has
+no reflection, so that table is data in the crate; a test reads the real router's mounted routes and
+the handlers' extractors from the route sources and requires the table to be exactly them, and
+posts to every row a body that breaks one bound of the row's own schema. The module builds no document and serves no route; a host places the
 schemas it wants under `components.schemas` of its own. Lengths are counts of characters, as JSON
 Schema defines `minLength` and `maxLength`, and the DTOs in 8.4.1 count the same way.
 
