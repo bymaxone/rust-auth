@@ -1,0 +1,532 @@
+{
+  "$comment": [
+    "DECLARED overlay — written by hand, never generated. Regenerating the schema artifact does not touch this file.",
+    "",
+    "It carries the contracts the generated half names in its own header and cannot express, because a class-validator decorator cannot express them: the exactly-one-of proof set on reset-password, the OAuth callback whose missing `code` is the handler's refusal rather than the pipe's, the password floor that is configuration rather than structure, and the anti-enumeration semantics that are a property of two responses being identical rather than of either one alone.",
+    "",
+    "Structures are OpenAPI 3.0 keywords, and only the three the evaluator understands — `required`, `oneOf`, `anyOf`. 3.0's Schema Object is an extended subset of JSON Schema Wright Draft 00 and also permits `allOf` and `not`; those are absent rather than unimplemented, and a structure using one is refused at load rather than skipped. An unevaluated keyword would publish a claim nothing checks, which is the same silence an unmapped decorator produces on the generated side.",
+    "",
+    "Every entry carries probes, and the suites run them. A request structure is evaluated against each probe body AND enforced for real — through the library's own validation pipe where the DTO is what refuses, over HTTP against a bootstrapped application where the service is. Prose and behaviour cannot drift, because the pair is what gets checked.",
+    "",
+    "Presence, for `required`, means the property is there and is not `null`. That is this server's rule rather than JSON Schema's, and it is measured: `@IsOptional()` registers a conditional whose predicate is `value !== null && value !== undefined`, so a body sending `null` and a body omitting the key are the same request here. The probes carrying an explicit `null` are what prove it. Type constraints are NOT declared here — they live in the generated half, and the two compose.",
+    "",
+    "The oneOf branches are `required`-only, and the minimal form is load-bearing — though not for the reason it first appears. Three rewrites look like tightenings and end in three different places, all measured across the eight subsets of the three proofs. SYMMETRIC exclusivity (every branch `not`s the others) is redundant, not inverting: a two-proof body then satisfies zero branches instead of two and oneOf refuses it either way — the verdict is identical to the minimal form on every input. What it does do is make oneOf and anyOf agree everywhere, so the keyword stops carrying visible weight; DROPPING the now-redundant-looking `not` clauses afterwards leaves an anyOf that ACCEPTS two proofs, which is the inversion, two steps out. ASYMMETRIC exclusivity — only the later branches excluding the earlier ones, i.e. what a half-finished edit looks like — inverts in ONE step: every multi-proof body satisfies exactly one branch and passes, on four of the eight subsets, while the server refuses all four. That is the likely accident. Both guards are in declared-structure.spec.ts and they compose: the anyOf end state is asserted so no route reaches it silently, and the census refuses `not` at load so neither exclusivity form can enter this file at all.",
+    "",
+    "Every probe body carries a literal tenantId, which makes this whole set implicitly a NO-RESOLVER deployment artifact: since 1.4.2 a deployment configuring a tenantIdResolver refuses a body-named tenant outright. That is safe rather than hidden — adding a resolver to a probe deployment fails every probe loudly with auth.validation naming tenantId, not silently — but it is worth naming, because it is an option-derived assumption living inside the artifact whose subject is option-derived truth.",
+    "",
+    "Known limit, stated rather than hidden: a structure is a NECESSARY condition on a request, never a sufficient one. A body satisfying the exactly-one-of still has to carry a proof the server can verify, and — see `narrowing` on ResetPasswordDto — which of the three proofs is even eligible depends on the deployment's `passwordReset.method`. That narrowing is option-derived and therefore cannot live in committed data at all; it is declared here with its probes so the runtime contributor has something to be checked against, not so a client can generate from it."
+  ],
+  "openapi": "3.0",
+  "requestStructures": {
+    "ResetPasswordDto": {
+      "description": "Carries exactly one proof of ownership: `token`, `otp`, or `verifiedToken`. Two or more is refused before the new password is even judged, and none is refused after it. Which of the three the deployment accepts is narrower still — see the narrowing below.",
+      "structure": {
+        "oneOf": [
+          {
+            "required": ["token"]
+          },
+          {
+            "required": ["otp"]
+          },
+          {
+            "required": ["verifiedToken"]
+          }
+        ]
+      },
+      "enforcement": {
+        "kind": "http",
+        "handler": "PasswordResetController.resetPassword",
+        "method": "post",
+        "path": "/password/reset-password",
+        "rejection": "auth.password_reset_token_invalid",
+        "deployment": {
+          "passwordReset": {
+            "method": "otp"
+          }
+        }
+      },
+      "probes": [
+        {
+          "note": "One proof. Reaches OTP verification and fails there, which is a DIFFERENT code from the structural refusal — this is the probe that keeps the set from being satisfied by a server that refuses everything.",
+          "body": {
+            "email": "probe@example.com",
+            "newPassword": "Str0ng-Probe-Passphrase",
+            "otp": "123456",
+            "tenantId": "probe-tenant"
+          },
+          "satisfies": true,
+          "expect": {
+            "code": "auth.otp_invalid"
+          }
+        },
+        {
+          "note": "`token: null` is absent, so this carries one proof, not two. Same outcome as the probe above; the null is the whole point.",
+          "body": {
+            "email": "probe@example.com",
+            "newPassword": "Str0ng-Probe-Passphrase",
+            "token": null,
+            "otp": "123456",
+            "tenantId": "probe-tenant"
+          },
+          "satisfies": true,
+          "expect": {
+            "code": "auth.otp_invalid"
+          }
+        },
+        {
+          "note": "One proof, of the shape the OTP deployment also accepts. Its failure code collides with the structural refusal — an unknown verifiedToken is refused with the same code — so it discriminates nothing on its own and is here for coverage of the third branch.",
+          "body": {
+            "email": "probe@example.com",
+            "newPassword": "Str0ng-Probe-Passphrase",
+            "verifiedToken": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+            "tenantId": "probe-tenant"
+          },
+          "satisfies": true,
+          "expect": {
+            "code": "auth.password_reset_token_invalid"
+          }
+        },
+        {
+          "note": "No proof at all.",
+          "body": {
+            "email": "probe@example.com",
+            "newPassword": "Str0ng-Probe-Passphrase",
+            "tenantId": "probe-tenant"
+          },
+          "satisfies": false,
+          "expect": {
+            "code": "auth.password_reset_token_invalid"
+          }
+        },
+        {
+          "note": "Two proofs. Refused before the password is judged, so a body that is both ambiguous and unacceptable answers for the ambiguity.",
+          "body": {
+            "email": "probe@example.com",
+            "newPassword": "Str0ng-Probe-Passphrase",
+            "otp": "123456",
+            "verifiedToken": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+            "tenantId": "probe-tenant"
+          },
+          "satisfies": false,
+          "expect": {
+            "code": "auth.password_reset_token_invalid"
+          }
+        },
+        {
+          "note": "All three.",
+          "body": {
+            "email": "probe@example.com",
+            "newPassword": "Str0ng-Probe-Passphrase",
+            "token": "probe-reset-token",
+            "otp": "123456",
+            "verifiedToken": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+            "tenantId": "probe-tenant"
+          },
+          "satisfies": false,
+          "expect": {
+            "code": "auth.password_reset_token_invalid"
+          }
+        }
+      ],
+      "narrowing": {
+        "description": "The structure above is mode-independent and necessary; it is not sufficient. passwordReset.method decides which proof is eligible, and an ineligible one is refused with the same auth.password_reset_token_invalid a structural violation gets. This is option-derived by construction and belongs to the runtime contributor rather than to any committed document. Each pair carries its ROLE as data — `demonstrates` means the two deployments must answer DIFFERENTLY, `documents` means they must answer IDENTICALLY in status and payload — payload equality, not caller-visible indistinguishability, which the deployments do not have — so a pair mislabelled by whoever wrote it fails at the moment the belief is written down rather than living on in prose. The role assertions look redundant with the e2e pair check and are not: the unit suite goes red on the LABEL, the e2e suite goes red on the BEHAVIOUR that contradicts it, so the two disagree with a mislabel from opposite directions. A label and a behaviour can only agree by being right — there is no consistent way to be wrong. Relabelling the only `demonstrates` pair fails twice for the same reason: the role assertion, and the one requiring a demonstrating pair to exist at all, because internally consistent and empty is a state a guard has to be able to name.",
+        "pairs": [
+          {
+            "role": "documents",
+            "note": "A token proof under both deployments: eligible-but-wrong under the token method, ineligible under the OTP one. The two answers must be IDENTICAL in status and payload — that is what this pair asserts, and it is ALL it asserts. It is deliberately NOT called a security property, because the configured method is discoverable and this artifact proves it: the `demonstrates` pair beside this one sends an OTP proof and gets `auth.otp_invalid` under one deployment and `auth.password_reset_token_invalid` under the other. One probe conceals the method, another reveals it, so concealment was never the contract. Timing does not hide it either — under the token method a token proof reaches `redis.getdel(pw_reset:…)`, while under the OTP method it throws at the method-mismatch branch with no I/O at all, and equalising that would need a latency assertion no single request can make without being flaky. What this pair is FOR is the payload contract: an ineligible proof must not acquire its own error code, which is a change someone would plausibly make for better diagnostics and which would widen the gap the demonstrates pair already opens.",
+            "body": {
+              "email": "probe@example.com",
+              "newPassword": "Str0ng-Probe-Passphrase",
+              "tenantId": "probe-tenant",
+              "token": "probe-reset-token"
+            },
+            "outcomes": [
+              {
+                "deployment": {
+                  "passwordReset": {
+                    "method": "token"
+                  }
+                },
+                "expect": {
+                  "code": "auth.password_reset_token_invalid"
+                }
+              },
+              {
+                "deployment": {
+                  "passwordReset": {
+                    "method": "otp"
+                  }
+                },
+                "expect": {
+                  "code": "auth.password_reset_token_invalid"
+                }
+              }
+            ]
+          },
+          {
+            "role": "demonstrates",
+            "note": "An OTP proof reaches OTP verification under the OTP method and is refused for the missing token under the token method. Byte-identical body, different code — this is the pair that shows the DEPLOYMENT decides and not the body.",
+            "body": {
+              "email": "probe@example.com",
+              "newPassword": "Str0ng-Probe-Passphrase",
+              "tenantId": "probe-tenant",
+              "otp": "123456"
+            },
+            "outcomes": [
+              {
+                "deployment": {
+                  "passwordReset": {
+                    "method": "token"
+                  }
+                },
+                "expect": {
+                  "code": "auth.password_reset_token_invalid"
+                }
+              },
+              {
+                "deployment": {
+                  "passwordReset": {
+                    "method": "otp"
+                  }
+                },
+                "expect": {
+                  "code": "auth.otp_invalid"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "codegenNote": "Root-level oneOf on a request body is where OpenAPI client generators are weakest — support is patchy across the ecosystem and several flatten or mis-model it. The oneOf stays anyway: a document that under-declares to please a generator is the defect this artifact exists to remove, and correctness at the contract layer outranks convenience at the tooling layer. The `description` above states the same rule in prose so the constraint survives a generator that drops the composition."
+    }
+  },
+  "operationSemantics": {
+    "OAuthController.callback#codelessCallback": {
+      "kind": "handlerRefusal",
+      "description": "A callback carrying neither `code` nor `error` is refused by the HANDLER as `auth.oauth_failed`, not by the pipe as `auth.validation`. `state` remains the only unconditional requirement of the query DTO; `code` is validated when it is present and `error` is not, so its absence is no longer a structural violation. The refusal moved because a codeless callback is a failed authorization rather than a malformed request — it is what rust-auth answers for the same request, and until 1.4.3 the two libraries disagreed on it while nest-auth's own handler already carried the rust-auth behaviour behind a branch the pipe made unreachable. This entry is what keeps the branch reachable: the probes below are refused by two different layers, and a DTO that took the requirement back would move a refusal from one to the other.",
+      "handler": "OAuthController.callback",
+      "dto": "OAuthCallbackQueryDto",
+      "method": "get",
+      "path": "/oauth/google/callback",
+      "placeholders": {
+        "OVERSIZED_CODE_2049": "Both suites expand this to a string exactly one character past `code`'s declared `maxLength`, read from the generated schema rather than restated here — so raising the bound moves the probe with it instead of leaving a value that is no longer oversized. Writing the characters into this file would bury the six probes they sit among."
+      },
+      "controllers": {
+        "auth": true,
+        "oauth": true
+      },
+      "deployment": {
+        "oauth": {
+          "google": {
+            "clientId": "probe-client-id",
+            "clientSecret": "probe-client-secret",
+            "callbackUrl": "http://localhost/oauth/google/callback"
+          }
+        }
+      },
+      "probes": [
+        {
+          "note": "Neither `code` nor `error` — the whole change. The pipe accepts it and the handler refuses it, which is the pair a single suite cannot see.",
+          "query": {
+            "state": "0123456789abcdef"
+          },
+          "acceptedByPipe": true,
+          "expect": {
+            "code": "auth.oauth_failed"
+          }
+        },
+        {
+          "note": "The error callback RFC 6749 §4.1.2.1 defines — the user declined consent. Answered with the same code as the callback above, which is the point: both are failed authorizations, and neither is a validation envelope.",
+          "query": {
+            "state": "0123456789abcdef",
+            "error": "access_denied"
+          },
+          "acceptedByPipe": true,
+          "expect": {
+            "code": "auth.oauth_failed"
+          }
+        },
+        {
+          "note": "An oversized `code` beside an `error`. Accepted by the pipe — with `error` present the conditional skips `code` entirely, bounds included — and the handler's `error` check runs BEFORE it reads `code`, which is what keeps an unbounded value from reaching the token exchange or the Redis key. Reordering those two checks would make this probe the only thing that notices.",
+          "query": {
+            "state": "0123456789abcdef",
+            "error": "access_denied",
+            "code": "OVERSIZED_CODE_2049"
+          },
+          "acceptedByPipe": true,
+          "expect": {
+            "code": "auth.oauth_failed"
+          }
+        },
+        {
+          "note": "An oversized `code` with no `error`: still the pipe's to refuse, and it names the field. The handler taking over the ABSENT case did not loosen the bound on the present one.",
+          "query": {
+            "state": "0123456789abcdef",
+            "code": "OVERSIZED_CODE_2049"
+          },
+          "acceptedByPipe": false,
+          "expect": {
+            "code": "auth.validation",
+            "field": "code"
+          }
+        },
+        {
+          "note": "An EMPTY `code` with no `error` — present, and therefore validated. This is the probe that separates absent from empty: absent reaches the handler and answers `auth.oauth_failed`, empty stops at the pipe and answers `auth.validation`. A DTO that swapped `@IsOptional()` for a blanket skip would answer both the same and this is where that shows.",
+          "query": {
+            "state": "0123456789abcdef",
+            "code": ""
+          },
+          "acceptedByPipe": false,
+          "expect": {
+            "code": "auth.validation",
+            "field": "code"
+          }
+        },
+        {
+          "note": "No `state`. Unconditional, refused by the pipe for the field it names, and unchanged by any of the above — the callback still has to prove which flow it belongs to.",
+          "query": {
+            "code": "probe-authorization-code"
+          },
+          "acceptedByPipe": false,
+          "expect": {
+            "code": "auth.validation",
+            "field": "state"
+          }
+        }
+      ]
+    },
+    "PasswordResetController.resetPassword#passwordFloor": {
+      "kind": "policyFloor",
+      "description": "The `minLength: 8` in the generated schema is STRUCTURAL — the lowest NIST SP 800-63B-4 §3.1.1.1 permits under any circumstance, and what a decorator can express, since decorators are evaluated when the class is defined and no configuration exists yet. The deployment's floor is `password.minLength`, default 15, enforced in PasswordService and answering the same `auth.validation` code with the same `{field, message}` details the pipe produces. A client generated from the schema alone will therefore build requests the server refuses, and the refusal names the field. The order of the checks on this route is part of the declaration: the proof is classified first without being spent (more than one proof, none, or one the configured method does not accept answers `auth.password_reset_token_invalid` whatever the password is), then the password is judged, then the proof is consumed. A caller with no usable proof therefore never reaches the password policy or its breach screen.",
+      "handler": "PasswordResetController.resetPassword",
+      "method": "post",
+      "path": "/password/reset-password",
+      "probes": [
+        {
+          "note": "Ten characters: past the structural floor, under the default policy floor. The pipe accepts it and the server refuses it, which is the whole claim in one body.",
+          "body": {
+            "email": "probe@example.com",
+            "newPassword": "Passw0rd12",
+            "otp": "123456",
+            "tenantId": "probe-tenant"
+          },
+          "dto": "ResetPasswordDto",
+          "acceptedByPipe": true,
+          "expect": {
+            "code": "auth.validation",
+            "field": "newPassword"
+          },
+          "deployment": {
+            "passwordReset": {
+              "method": "otp"
+            }
+          }
+        },
+        {
+          "note": "Seven characters: under BOTH floors, so the pipe refuses it first and the service is never reached. The pair is what shows the two floors are different checks rather than one described twice.",
+          "body": {
+            "email": "probe@example.com",
+            "newPassword": "Pass12!",
+            "otp": "123456",
+            "tenantId": "probe-tenant"
+          },
+          "dto": "ResetPasswordDto",
+          "acceptedByPipe": false,
+          "expect": {
+            "code": "auth.validation",
+            "field": "newPassword"
+          },
+          "deployment": {
+            "passwordReset": {
+              "method": "otp"
+            }
+          }
+        },
+        {
+          "note": "Ten characters and NO proof, under the otp method. The proof is classified before the password is judged, so the answer is the invalid token and not the length refusal: the answer does not depend on the password, and a caller holding no proof never reaches the breach screen.",
+          "body": {
+            "email": "probe@example.com",
+            "newPassword": "Passw0rd12",
+            "tenantId": "probe-tenant"
+          },
+          "dto": "ResetPasswordDto",
+          "acceptedByPipe": true,
+          "expect": {
+            "code": "auth.password_reset_token_invalid"
+          },
+          "deployment": {
+            "passwordReset": {
+              "method": "otp"
+            }
+          }
+        },
+        {
+          "note": "Ten characters and a TOKEN proof under the otp method, which does not accept it. A proof the method does not accept is classified out before the password is judged, so this answers the invalid token, identically to the missing proof above.",
+          "body": {
+            "email": "probe@example.com",
+            "newPassword": "Passw0rd12",
+            "tenantId": "probe-tenant",
+            "token": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          },
+          "dto": "ResetPasswordDto",
+          "acceptedByPipe": true,
+          "expect": {
+            "code": "auth.password_reset_token_invalid"
+          },
+          "deployment": {
+            "passwordReset": {
+              "method": "otp"
+            }
+          }
+        },
+        {
+          "note": "Ten characters and NO proof, under the token method: the same order under the other method.",
+          "body": {
+            "email": "probe@example.com",
+            "newPassword": "Passw0rd12",
+            "tenantId": "probe-tenant"
+          },
+          "dto": "ResetPasswordDto",
+          "acceptedByPipe": true,
+          "expect": {
+            "code": "auth.password_reset_token_invalid"
+          },
+          "deployment": {
+            "passwordReset": {
+              "method": "token"
+            }
+          }
+        },
+        {
+          "note": "Ten characters and an OTP proof under the token method, which does not accept it: classified out first, as under the otp method.",
+          "body": {
+            "email": "probe@example.com",
+            "newPassword": "Passw0rd12",
+            "otp": "123456",
+            "tenantId": "probe-tenant"
+          },
+          "dto": "ResetPasswordDto",
+          "acceptedByPipe": true,
+          "expect": {
+            "code": "auth.password_reset_token_invalid"
+          },
+          "deployment": {
+            "passwordReset": {
+              "method": "token"
+            }
+          }
+        },
+        {
+          "note": "Past both floors, so neither check refuses it and the request proceeds to the proof — which fails, for the proof.",
+          "body": {
+            "email": "probe@example.com",
+            "newPassword": "Str0ng-Probe-Passphrase",
+            "otp": "123456",
+            "tenantId": "probe-tenant"
+          },
+          "dto": "ResetPasswordDto",
+          "acceptedByPipe": true,
+          "expect": {
+            "code": "auth.otp_invalid"
+          },
+          "deployment": {
+            "passwordReset": {
+              "method": "otp"
+            }
+          }
+        }
+      ]
+    },
+    "PasswordResetController.forgotPassword": {
+      "kind": "indistinguishable",
+      "description": "Answers identically whether or not the address has an account. The response is not evidence about the account's existence, which is the point of the endpoint: a caller learns nothing they did not already know. A client must not branch on it.",
+      "handler": "PasswordResetController.forgotPassword",
+      "method": "post",
+      "path": "/password/forgot-password",
+      "registeredBody": {
+        "email": "registered@example.com",
+        "tenantId": "probe-tenant"
+      },
+      "unknownBody": {
+        "email": "never-registered@example.com",
+        "tenantId": "probe-tenant"
+      },
+      "expect": {
+        "status": 200
+      },
+      "deployment": {}
+    },
+    "PasswordResetController.resendOtp": {
+      "kind": "indistinguishable",
+      "description": "Answers identically whether or not the address has an account, for the same reason `forgot-password` does, and behind the same per-address cooldown — which is applied on the existing address only, and is invisible in the response precisely so it cannot be used to tell the two apart.",
+      "handler": "PasswordResetController.resendOtp",
+      "method": "post",
+      "path": "/password/resend-otp",
+      "registeredBody": {
+        "email": "registered@example.com",
+        "tenantId": "probe-tenant"
+      },
+      "unknownBody": {
+        "email": "never-registered@example.com",
+        "tenantId": "probe-tenant"
+      },
+      "expect": {
+        "status": 200
+      },
+      "deployment": {
+        "passwordReset": {
+          "method": "otp"
+        }
+      }
+    },
+    "AuthController.resendVerification": {
+      "kind": "indistinguishable",
+      "description": "Answers identically whether or not the address has an account awaiting verification. A client rendering \"check your inbox\" must render it either way.",
+      "handler": "AuthController.resendVerification",
+      "method": "post",
+      "path": "/resend-verification",
+      "registeredBody": {
+        "email": "registered@example.com",
+        "tenantId": "probe-tenant"
+      },
+      "unknownBody": {
+        "email": "never-registered@example.com",
+        "tenantId": "probe-tenant"
+      },
+      "expect": {
+        "status": 204
+      },
+      "deployment": {
+        "emailVerification": {
+          "required": true
+        }
+      }
+    },
+    "AuthController.verifyEmail": {
+      "kind": "indistinguishable",
+      "description": "A wrong code against a real account and any code against an address with no account answer the same `auth.otp_invalid`. The OTP catalogue collapses a wrong code, a missing record and an exhausted attempt ceiling onto that one code for this reason — telling them apart would hand back through the failure exactly what the identical success responses withhold. The submitted code is six NON-NUMERIC characters on purpose: it satisfies the DTO's `@Length(6, 6)` and can never equal a real one, because OtpService generates them with `String(randomInt(...)).padStart(6, '0')` — digits only. A plausible-looking `123456` would verify the seeded account roughly once in a million runs and answer 204, which is a flake that reads as a broken security property.",
+      "handler": "AuthController.verifyEmail",
+      "method": "post",
+      "path": "/verify-email",
+      "registeredBody": {
+        "email": "registered@example.com",
+        "otp": "ABCDEF",
+        "tenantId": "probe-tenant"
+      },
+      "unknownBody": {
+        "email": "never-registered@example.com",
+        "otp": "ABCDEF",
+        "tenantId": "probe-tenant"
+      },
+      "expect": {
+        "status": 401,
+        "code": "auth.otp_invalid"
+      },
+      "deployment": {
+        "emailVerification": {
+          "required": true
+        }
+      }
+    }
+  }
+}

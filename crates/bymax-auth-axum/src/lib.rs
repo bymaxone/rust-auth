@@ -55,6 +55,8 @@ mod openapi_descriptions_tests;
 #[cfg(all(test, feature = "openapi"))]
 mod openapi_operations_tests;
 #[cfg(all(test, feature = "openapi"))]
+mod openapi_structures_tests;
+#[cfg(all(test, feature = "openapi"))]
 mod openapi_tests;
 
 #[cfg(feature = "api-keys")]

@@ -38,6 +38,8 @@ mod code_formats;
 mod description_parity_tests;
 #[cfg(test)]
 mod openapi_parity_tests;
+#[cfg(test)]
+mod structure_parity_tests;
 mod text_rules;
 
 /// `POST /auth/register` body.
@@ -500,7 +502,12 @@ pub struct OAuthCallbackQuery {
     /// missing field: a user who simply changed their mind saw a validation envelope instead
     /// of the configured error redirect. The handler refuses a callback carrying neither this
     /// nor `error`.
-    #[garde(inner(length(chars, min = 1, max = 2048)))]
+    ///
+    /// Bounded only when there is no `error`: on an error callback the code is never read, and
+    /// the handler refuses the callback before it could reach the token exchange, so a value
+    /// past the bound is answered as the failed authorisation it is rather than as a malformed
+    /// query.
+    #[garde(if(cond = self.error.is_none(), inner(length(chars, min = 1, max = 2048))))]
     pub code: Option<String>,
     /// The provider's error code (RFC 6749 §4.1.2.1) — `access_denied` when the user clicks
     /// "Cancel" at the consent screen, plus `server_error`, `temporarily_unavailable` and the
