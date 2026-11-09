@@ -43,21 +43,21 @@ mod text_rules;
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RegisterDto {
     /// The email being registered.
-    #[garde(email, length(max = 255))]
+    #[garde(email, length(chars, max = 255))]
     #[serde(deserialize_with = "text_rules::normalized_email")]
     pub email: String,
     /// The plaintext password (8–128 chars).
-    #[garde(length(min = 8, max = 128))]
+    #[garde(length(chars, min = 8, max = 128))]
     pub password: String,
     /// The display name (2–128 chars).
-    #[garde(length(min = 2, max = 128))]
+    #[garde(length(chars, min = 2, max = 128))]
     pub name: String,
     /// The tenant scope. Optional: a deployment that configures a `TenantIdResolver`
     /// refuses this value, so a client there must omit it. With no resolver configured it is
     /// the only thing that can scope the request, and omitting it is refused rather than
     /// defaulted (`auth.validation`) — see `AuthEngine::resolve_tenant`.
     #[garde(
-        inner(length(min = 1, max = 128)),
+        inner(length(chars, min = 1, max = 128)),
         inner(custom(no_control_characters))
     )]
     pub tenant_id: Option<String>,
@@ -68,7 +68,7 @@ pub struct RegisterDto {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct LoginDto {
     /// The login email.
-    #[garde(email, length(max = 255))]
+    #[garde(email, length(chars, max = 255))]
     #[serde(deserialize_with = "text_rules::normalized_email")]
     pub email: String,
     /// The plaintext password (1–128 chars).
@@ -78,14 +78,14 @@ pub struct LoginDto {
     /// with a validation error rather than an authentication one, while telling an
     /// unauthenticated caller what the policy is before any derivation runs. Rejecting the
     /// empty string still keeps a caller from spending a KDF derivation for free.
-    #[garde(length(min = 1, max = 128))]
+    #[garde(length(chars, min = 1, max = 128))]
     pub password: String,
     /// The tenant scope. Optional: a deployment that configures a `TenantIdResolver`
     /// refuses this value, so a client there must omit it. With no resolver configured it is
     /// the only thing that can scope the request, and omitting it is refused rather than
     /// defaulted (`auth.validation`) — see `AuthEngine::resolve_tenant`.
     #[garde(
-        inner(length(min = 1, max = 128)),
+        inner(length(chars, min = 1, max = 128)),
         inner(custom(no_control_characters))
     )]
     pub tenant_id: Option<String>,
@@ -96,7 +96,7 @@ pub struct LoginDto {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ForgotPasswordDto {
     /// The account email (anti-enumeration; the same response regardless of existence).
-    #[garde(email, length(max = 255))]
+    #[garde(email, length(chars, max = 255))]
     #[serde(deserialize_with = "text_rules::normalized_email")]
     pub email: String,
     /// The tenant scope. Optional: a deployment that configures a `TenantIdResolver`
@@ -104,7 +104,7 @@ pub struct ForgotPasswordDto {
     /// the only thing that can scope the request, and omitting it is refused rather than
     /// defaulted (`auth.validation`) — see `AuthEngine::resolve_tenant`.
     #[garde(
-        inner(length(min = 1, max = 128)),
+        inner(length(chars, min = 1, max = 128)),
         inner(custom(no_control_characters))
     )]
     pub tenant_id: Option<String>,
@@ -124,10 +124,10 @@ pub struct ChangePasswordDto {
     /// spending a KDF derivation for free, while enforcing the deployment's real policy here
     /// would leak it as a pre-KDF signal — and this is a *current* password, which may predate
     /// whatever the policy says today.
-    #[garde(length(min = 1, max = 128))]
+    #[garde(length(chars, min = 1, max = 128))]
     pub current_password: String,
     /// The new password (8–128 chars).
-    #[garde(length(min = 8, max = 128))]
+    #[garde(length(chars, min = 8, max = 128))]
     pub new_password: String,
     /// The caller's refresh token, when it has one to send.
     ///
@@ -138,7 +138,7 @@ pub struct ChangePasswordDto {
     ///
     /// Bounded, like every other free-text field: the value is hashed before it is looked up,
     /// so an oversized one buys nothing but the bytes it costs to carry and log.
-    #[garde(inner(length(min = 1, max = 2048)))]
+    #[garde(inner(length(chars, min = 1, max = 2048)))]
     pub refresh_token: Option<String>,
 }
 
@@ -148,11 +148,11 @@ pub struct ChangePasswordDto {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ResetPasswordDto {
     /// The account email.
-    #[garde(email, length(max = 255))]
+    #[garde(email, length(chars, max = 255))]
     #[serde(deserialize_with = "text_rules::normalized_email")]
     pub email: String,
     /// The new password (8–128 chars).
-    #[garde(length(min = 8, max = 128))]
+    #[garde(length(chars, min = 8, max = 128))]
     pub new_password: String,
     /// `method = "token"`: the emailed reset token.
     ///
@@ -161,20 +161,20 @@ pub struct ResetPasswordDto {
     /// would describe the configuration to an unauthenticated caller. What garde does here is
     /// only the shape: the same bounds nest-auth's DTO carries, so an oversized or absurd value
     /// never reaches the lookup on either backend.
-    #[garde(inner(length(min = 1, max = 2048)))]
+    #[garde(inner(length(chars, min = 1, max = 2048)))]
     pub token: Option<String>,
     /// `method = "otp"`: the numeric OTP (4–8 digits).
-    #[garde(inner(length(min = 4, max = 8)))]
+    #[garde(inner(length(chars, min = 4, max = 8)))]
     pub otp: Option<String>,
     /// 2-step flow: the verified-token issued by `verify-otp` (64 hex chars).
-    #[garde(inner(length(min = 64, max = 64)))]
+    #[garde(inner(length(chars, min = 64, max = 64)))]
     pub verified_token: Option<String>,
     /// The tenant scope. Optional: a deployment that configures a `TenantIdResolver`
     /// refuses this value, so a client there must omit it. With no resolver configured it is
     /// the only thing that can scope the request, and omitting it is refused rather than
     /// defaulted (`auth.validation`) — see `AuthEngine::resolve_tenant`.
     #[garde(
-        inner(length(min = 1, max = 128)),
+        inner(length(chars, min = 1, max = 128)),
         inner(custom(no_control_characters))
     )]
     pub tenant_id: Option<String>,
@@ -185,18 +185,18 @@ pub struct ResetPasswordDto {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct VerifyOtpDto {
     /// The account email.
-    #[garde(email, length(max = 255))]
+    #[garde(email, length(chars, max = 255))]
     #[serde(deserialize_with = "text_rules::normalized_email")]
     pub email: String,
     /// The numeric OTP (4–8 digits).
-    #[garde(length(min = 4, max = 8))]
+    #[garde(length(chars, min = 4, max = 8))]
     pub otp: String,
     /// The tenant scope. Optional: a deployment that configures a `TenantIdResolver`
     /// refuses this value, so a client there must omit it. With no resolver configured it is
     /// the only thing that can scope the request, and omitting it is refused rather than
     /// defaulted (`auth.validation`) — see `AuthEngine::resolve_tenant`.
     #[garde(
-        inner(length(min = 1, max = 128)),
+        inner(length(chars, min = 1, max = 128)),
         inner(custom(no_control_characters))
     )]
     pub tenant_id: Option<String>,
@@ -207,7 +207,7 @@ pub struct VerifyOtpDto {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ResendOtpDto {
     /// The account email (anti-enumeration).
-    #[garde(email, length(max = 255))]
+    #[garde(email, length(chars, max = 255))]
     #[serde(deserialize_with = "text_rules::normalized_email")]
     pub email: String,
     /// The tenant scope. Optional: a deployment that configures a `TenantIdResolver`
@@ -215,7 +215,7 @@ pub struct ResendOtpDto {
     /// the only thing that can scope the request, and omitting it is refused rather than
     /// defaulted (`auth.validation`) — see `AuthEngine::resolve_tenant`.
     #[garde(
-        inner(length(min = 1, max = 128)),
+        inner(length(chars, min = 1, max = 128)),
         inner(custom(no_control_characters))
     )]
     pub tenant_id: Option<String>,
@@ -226,7 +226,7 @@ pub struct ResendOtpDto {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct VerifyEmailDto {
     /// The account email.
-    #[garde(email, length(max = 255))]
+    #[garde(email, length(chars, max = 255))]
     #[serde(deserialize_with = "text_rules::normalized_email")]
     pub email: String,
     /// The verification OTP — exactly 6 digits.
@@ -235,14 +235,14 @@ pub struct VerifyEmailDto {
     // password-reset OTP whose length is configurable. Accepting 4-8 here let a caller spend
     // the verify path — and one of the five attempts on the record — on a value that could
     // never have been issued.
-    #[garde(length(min = 6, max = 6))]
+    #[garde(length(chars, min = 6, max = 6))]
     pub otp: String,
     /// The tenant scope. Optional: a deployment that configures a `TenantIdResolver`
     /// refuses this value, so a client there must omit it. With no resolver configured it is
     /// the only thing that can scope the request, and omitting it is refused rather than
     /// defaulted (`auth.validation`) — see `AuthEngine::resolve_tenant`.
     #[garde(
-        inner(length(min = 1, max = 128)),
+        inner(length(chars, min = 1, max = 128)),
         inner(custom(no_control_characters))
     )]
     pub tenant_id: Option<String>,
@@ -253,7 +253,7 @@ pub struct VerifyEmailDto {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ResendVerificationDto {
     /// The account email (anti-enumeration).
-    #[garde(email, length(max = 255))]
+    #[garde(email, length(chars, max = 255))]
     #[serde(deserialize_with = "text_rules::normalized_email")]
     pub email: String,
     /// The tenant scope. Optional: a deployment that configures a `TenantIdResolver`
@@ -261,7 +261,7 @@ pub struct ResendVerificationDto {
     /// the only thing that can scope the request, and omitting it is refused rather than
     /// defaulted (`auth.validation`) — see `AuthEngine::resolve_tenant`.
     #[garde(
-        inner(length(min = 1, max = 128)),
+        inner(length(chars, min = 1, max = 128)),
         inner(custom(no_control_characters))
     )]
     pub tenant_id: Option<String>,
@@ -284,7 +284,7 @@ pub struct MfaSetupDto {
     ///
     /// `inner(...)` is required on an `Option`: without it the rule never runs against the
     /// contained value, so the bound was declared and enforced nothing.
-    #[garde(inner(length(min = 1, max = 128)))]
+    #[garde(inner(length(chars, min = 1, max = 128)))]
     pub password: Option<String>,
 }
 
@@ -293,7 +293,7 @@ pub struct MfaSetupDto {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct MfaVerifyDto {
     /// The 6-digit TOTP shown during enrolment.
-    #[garde(length(min = 6, max = 6), custom(code_formats::totp_code))]
+    #[garde(length(chars, min = 6, max = 6), custom(code_formats::totp_code))]
     pub code: String,
 }
 
@@ -310,11 +310,14 @@ pub struct MfaChallengeDto {
     /// the cap keeps an oversized payload away from JWT verification on this public endpoint.
     /// A request carrying neither channel is rejected by the handler as an invalid temp token,
     /// not as a field-validation failure.
-    #[garde(inner(length(min = 1, max = 512)))]
+    #[garde(inner(length(chars, min = 1, max = 512)))]
     pub mfa_temp_token: Option<String>,
     /// A 6-digit TOTP or a recovery code in `XXXX-XXXX-XXXX-XXXX-XXXX-XXXX` form. The 29-character
     /// ceiling is the longest recovery code and keeps an oversized value from being hashed.
-    #[garde(length(min = 1, max = 29), custom(code_formats::totp_or_recovery_code))]
+    #[garde(
+        length(chars, min = 1, max = 29),
+        custom(code_formats::totp_or_recovery_code)
+    )]
     pub code: String,
 }
 
@@ -323,7 +326,7 @@ pub struct MfaChallengeDto {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct MfaDisableDto {
     /// The 6-digit TOTP.
-    #[garde(length(min = 6, max = 6), custom(code_formats::totp_code))]
+    #[garde(length(chars, min = 6, max = 6), custom(code_formats::totp_code))]
     pub code: String,
 }
 
@@ -332,7 +335,7 @@ pub struct MfaDisableDto {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct MfaRegenerateRecoveryCodesDto {
     /// The 6-digit TOTP.
-    #[garde(length(min = 6, max = 6), custom(code_formats::totp_code))]
+    #[garde(length(chars, min = 6, max = 6), custom(code_formats::totp_code))]
     pub code: String,
 }
 
@@ -341,7 +344,7 @@ pub struct MfaRegenerateRecoveryCodesDto {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct PlatformLoginDto {
     /// The admin email.
-    #[garde(email, length(max = 255))]
+    #[garde(email, length(chars, max = 255))]
     #[serde(deserialize_with = "text_rules::normalized_email")]
     pub email: String,
     /// The plaintext password (1–128 chars).
@@ -351,7 +354,7 @@ pub struct PlatformLoginDto {
     /// with a validation error rather than an authentication one, while telling an
     /// unauthenticated caller what the policy is before any derivation runs. Rejecting the
     /// empty string still keeps a caller from spending a KDF derivation for free.
-    #[garde(length(min = 1, max = 128), custom(text_rules::not_blank))]
+    #[garde(length(chars, min = 1, max = 128), custom(text_rules::not_blank))]
     pub password: String,
 }
 
@@ -361,14 +364,14 @@ pub struct PlatformLoginDto {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CreateInvitationDto {
     /// The invitee email.
-    #[garde(email, length(max = 255))]
+    #[garde(email, length(chars, max = 255))]
     #[serde(deserialize_with = "text_rules::normalized_email")]
     pub email: String,
     /// The invited role (validated against the hierarchy by the engine).
-    #[garde(length(min = 1, max = 64))]
+    #[garde(length(chars, min = 1, max = 64))]
     pub role: String,
     /// Optional human-readable tenant name for the invitation email.
-    #[garde(inner(length(min = 1, max = 128)))]
+    #[garde(inner(length(chars, min = 1, max = 128)))]
     pub tenant_name: Option<String>,
 }
 
@@ -380,13 +383,13 @@ pub struct CreateInvitationDto {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ChangeEmailDto {
     /// The address to move to.
-    #[garde(email, length(max = 255))]
+    #[garde(email, length(chars, max = 255))]
     #[serde(deserialize_with = "text_rules::normalized_email")]
     pub new_email: String,
     /// The account's current password, re-proved because the address is the recovery
     /// credential. Bounded at 128 to match the hasher's input limit — an unbounded field is a
     /// cheap way to make someone else pay for a key derivation.
-    #[garde(length(min = 1, max = 128))]
+    #[garde(length(chars, min = 1, max = 128))]
     pub current_password: String,
 }
 
@@ -399,7 +402,7 @@ pub struct ChangeEmailDto {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ConfirmEmailChangeDto {
     /// The single-use token mailed to the new address — exactly 64 hex characters.
-    #[garde(length(min = 64, max = 64))]
+    #[garde(length(chars, min = 64, max = 64))]
     pub token: String,
 }
 
@@ -413,7 +416,7 @@ pub struct ConfirmEmailChangeDto {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RevokeInvitationDto {
     /// The invited address whose pending invitation is being withdrawn.
-    #[garde(email, length(max = 255))]
+    #[garde(email, length(chars, max = 255))]
     #[serde(deserialize_with = "text_rules::normalized_email")]
     pub email: String,
 }
@@ -423,13 +426,13 @@ pub struct RevokeInvitationDto {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct AcceptInvitationDto {
     /// The single-use invitation token — exactly 64 hex characters.
-    #[garde(length(min = 64, max = 64))]
+    #[garde(length(chars, min = 64, max = 64))]
     pub token: String,
     /// The new user's display name (2–100 chars).
-    #[garde(length(min = 2, max = 100))]
+    #[garde(length(chars, min = 2, max = 100))]
     pub name: String,
     /// The new user's password (8–128 chars).
-    #[garde(length(min = 8, max = 128))]
+    #[garde(length(chars, min = 8, max = 128))]
     pub password: String,
 }
 
@@ -448,7 +451,7 @@ pub struct RefreshDto {
     ///
     /// Bounded like every other free-text field: the value is hashed before it is looked up,
     /// so an oversized one buys nothing but the bytes it costs to carry and log.
-    #[garde(inner(length(min = 1, max = 2048)))]
+    #[garde(inner(length(chars, min = 1, max = 2048)))]
     pub refresh_token: Option<String>,
 }
 
@@ -472,7 +475,7 @@ pub struct OAuthInitiateQuery {
     /// here rather than dropping a body field. With no resolver its absence is refused rather
     /// than defaulted.
     #[garde(
-        inner(length(min = 1, max = 128)),
+        inner(length(chars, min = 1, max = 128)),
         inner(custom(no_control_characters))
     )]
     pub tenant_id: Option<String>,
@@ -495,43 +498,46 @@ pub struct OAuthCallbackQuery {
     /// missing field: a user who simply changed their mind saw a validation envelope instead
     /// of the configured error redirect. The handler refuses a callback carrying neither this
     /// nor `error`.
-    #[garde(inner(length(min = 1, max = 2048)))]
+    #[garde(inner(length(chars, min = 1, max = 2048)))]
     pub code: Option<String>,
     /// The provider's error code (RFC 6749 §4.1.2.1) — `access_denied` when the user clicks
     /// "Cancel" at the consent screen, plus `server_error`, `temporarily_unavailable` and the
     /// rest. Logged and never echoed to the caller: the response stays `auth.oauth_failed`, so
     /// the provider cannot choose what appears in a redirect URL the browser follows.
-    #[garde(inner(length(max = 128)))]
+    #[garde(inner(length(chars, max = 128)))]
     pub error: Option<String>,
-    /// Human-readable detail accompanying `error`. Accepted so the query validates; logged
-    /// with `error`, never echoed.
-    #[garde(inner(length(max = 512)))]
+    /// Human-readable detail accompanying `error`. Read under the provider's own name
+    /// (`error_description`, not the `camelCase` the rest of this query uses), which is why it
+    /// is renamed. Logged with `error`, never echoed.
+    #[serde(rename = "error_description")]
+    #[garde(inner(length(chars, max = 512)))]
     pub error_description: Option<String>,
-    /// URI of a provider page describing `error`. Accepted so the query validates; never
-    /// followed and never echoed.
-    #[garde(inner(length(max = 512)))]
+    /// URI of a provider page describing `error`, read under the provider's own name
+    /// (`error_uri`). Logged with `error`, never followed and never echoed.
+    #[serde(rename = "error_uri")]
+    #[garde(inner(length(chars, max = 512)))]
     pub error_uri: Option<String>,
     /// The CSRF `state` nonce (matched against the stored single-use record).
-    #[garde(length(min = 1, max = 128))]
+    #[garde(length(chars, min = 1, max = 128))]
     pub state: String,
     // The five below are accepted and unused, but still bounded — at the same ceilings
     // nest-auth's DTO carries. A field nothing reads is still a field an unauthenticated
     // caller fills, and the callback is a public route: unbounded, they are free bytes to
     // carry, parse and log.
     /// RFC 9207 issuer (accepted, unused).
-    #[garde(inner(length(max = 512)))]
+    #[garde(inner(length(chars, max = 512)))]
     pub iss: Option<String>,
     /// RFC 6749 scope echo (accepted, unused).
-    #[garde(inner(length(max = 2048)))]
+    #[garde(inner(length(chars, max = 2048)))]
     pub scope: Option<String>,
     /// Google `authuser` (accepted, unused).
-    #[garde(inner(length(max = 16)))]
+    #[garde(inner(length(chars, max = 16)))]
     pub authuser: Option<String>,
     /// Google `prompt` (accepted, unused).
-    #[garde(inner(length(max = 64)))]
+    #[garde(inner(length(chars, max = 64)))]
     pub prompt: Option<String>,
     /// Google `hd` hosted-domain hint (accepted, unused) — bounded at the DNS name limit.
-    #[garde(inner(length(max = 253)))]
+    #[garde(inner(length(chars, max = 253)))]
     pub hd: Option<String>,
 }
 

@@ -45,6 +45,9 @@ mod ws_ticket_body;
 #[path = "adapter/logout_failure.rs"]
 mod logout_failure;
 
+#[path = "adapter/oauth_provider_error_log.rs"]
+mod oauth_provider_error_log;
+
 #[path = "adapter/mfa_code_shape.rs"]
 mod mfa_code_shape;
 
