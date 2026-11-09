@@ -3147,7 +3147,7 @@ attributes reproduce the `@IsEmail`, `@MinLength`, `@MaxLength`, `@Length`
 constraints. Field rules are derived directly from the nest-auth DTOs.
 
 A validation error's `details[].field` names the property as the wire does (`currentPassword`, not
-`current_password`), the way `nest-auth` reports `error.property`: the adapter converts each segment of
+`current_password`): the adapter converts each segment of
 the `garde` path, and the OAuth callback's `error_description` and `error_uri`, which are their own wire
 names, are reported as they are.
 
