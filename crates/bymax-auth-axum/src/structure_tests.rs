@@ -224,7 +224,7 @@ fn what_serde_does_with_an_unknown_property_is_what_the_declared_table_says() {
 #[test]
 fn a_name_that_is_not_plausible_is_not_echoed() {
     let long = "a".repeat(200);
-    for name in [long.as_str(), "line\nbreak", "bell\u{7}"] {
+    for name in [long.as_str(), "line\nbreak", "bell\u{7}", ""] {
         let mut body = Map::new();
         body.insert(name.to_owned(), json!(1));
         body.insert("email".to_owned(), json!("a@e.com"));
