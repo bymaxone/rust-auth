@@ -355,7 +355,8 @@ fn check_lengths(
     }
 }
 
-/// A maximum is a count of characters, so `max` two-byte characters must fit.
+/// A bound is a count of characters, so `max` two-byte characters must fit, and one character
+/// fewer than a minimum of two or more must be refused however many bytes it takes.
 fn check_multibyte(
     (check, base): (Accepts, &Map<String, Value>),
     prop: &Prop,
@@ -375,6 +376,11 @@ fn check_multibyte(
             letters_work && accented_refused,
             (category, dto, &prop.name),
         );
+    }
+    for min in prop.min.iter().copied().filter(|min| *min >= 2) {
+        let short = check(&with(base, &prop.name, &filled('\u{e9}', min - 1)));
+        let category = "minLength: counted in bytes, not characters";
+        note_if(findings, short, (category, dto, &prop.name));
     }
 }
 
@@ -470,6 +476,24 @@ const KNOWN_DIVERGENCES: &[(&str, &[&str], &str)] = &[
          three-byte characters against a password maximum of 128. Not changed here: `length(chars)` \
          is a decision for this repository and nest-auth, since the contract does not say which unit \
          the bounds are in.",
+    ),
+    (
+        "minLength: counted in bytes, not characters",
+        &[
+            "AcceptInvitationDto.name",
+            "AcceptInvitationDto.password",
+            "ChangePasswordDto.newPassword",
+            "RegisterDto.name",
+            "RegisterDto.password",
+            "ResetPasswordDto.newPassword",
+            "ResetPasswordDto.otp",
+            "VerifyOtpDto.otp",
+        ],
+        "The same unit difference on the minimum side: one two-byte character is two bytes, so \
+         garde's `length(min = 2)` takes a one-character name that nest-auth's `minLength: 2` \
+         refuses, and seven two-byte characters (fourteen bytes) satisfy a structural password \
+         minimum of 8. The deployment's own password floor is enforced in the service, not \
+         here. Not changed here, for the same reason as the maximum.",
     ),
     (
         "maxLength: one above the maximum is accepted",
