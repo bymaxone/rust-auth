@@ -295,23 +295,16 @@ pub(crate) fn derive_security_schemes(
     if dashboard && delivers_cookie(delivery) {
         schemes.insert(
             ACCESS_COOKIE_SCHEME,
-            json!({
-                "type": "apiKey",
-                "in": "cookie",
-                "name": access_cookie_name,
-                "description": "Access token, delivered as an HttpOnly cookie."
-            }),
+            cookie_scheme(
+                access_cookie_name,
+                "Access token, delivered as an HttpOnly cookie.",
+            ),
         );
     }
     if dashboard && delivers_bearer(delivery) {
         schemes.insert(
             ACCESS_BEARER_SCHEME,
-            json!({
-                "type": "http",
-                "scheme": "bearer",
-                "bearerFormat": "JWT",
-                "description": "Access token, delivered in the Authorization header."
-            }),
+            bearer_scheme("Access token, delivered in the Authorization header."),
         );
     }
     // The groups that read the refresh cookie: logout and refresh, the two session handlers that
@@ -320,26 +313,31 @@ pub(crate) fn derive_security_schemes(
     if reads_refresh_cookie && delivers_cookie(delivery) {
         schemes.insert(
             REFRESH_COOKIE_SCHEME,
-            json!({
-                "type": "apiKey",
-                "in": "cookie",
-                "name": refresh_cookie_name,
-                "description": "Refresh token, delivered as an HttpOnly cookie scoped to the auth prefix."
-            }),
+            cookie_scheme(
+                refresh_cookie_name,
+                "Refresh token, delivered as an HttpOnly cookie scoped to the auth prefix.",
+            ),
         );
     }
     if groups.platform || groups.platform_mfa {
         schemes.insert(
             PLATFORM_BEARER_SCHEME,
-            json!({
-                "type": "http",
-                "scheme": "bearer",
-                "bearerFormat": "JWT",
-                "description": "Platform administrator access token, always delivered in the Authorization header regardless of the delivery mode."
-            }),
+            bearer_scheme(
+                "Platform administrator access token, always delivered in the Authorization header regardless of the delivery mode.",
+            ),
         );
     }
     schemes
+}
+
+/// An `apiKey` scheme for a credential carried in the cookie called `name`.
+fn cookie_scheme(name: &str, description: &str) -> Value {
+    json!({ "type": "apiKey", "in": "cookie", "name": name, "description": description })
+}
+
+/// An `http` bearer scheme for a JWT carried in the `Authorization` header.
+fn bearer_scheme(description: &str) -> Value {
+    json!({ "type": "http", "scheme": "bearer", "bearerFormat": "JWT", "description": description })
 }
 
 /// The security schemes this deployment can satisfy, for `components.securitySchemes`.
