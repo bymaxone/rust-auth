@@ -45,6 +45,9 @@ mod ws_ticket_body;
 #[path = "adapter/logout_failure.rs"]
 mod logout_failure;
 
+#[path = "adapter/validation_field_names.rs"]
+mod validation_field_names;
+
 #[cfg(feature = "openapi")]
 #[path = "adapter/openapi_routes.rs"]
 mod openapi_routes;

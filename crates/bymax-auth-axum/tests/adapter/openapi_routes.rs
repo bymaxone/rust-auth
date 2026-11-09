@@ -281,47 +281,6 @@ fn bounded(schema: &Value) -> Vec<String> {
         .collect()
 }
 
-/// A camelCase wire name as the Rust field it deserializes into.
-fn snake_case(name: &str) -> String {
-    name.chars()
-        .flat_map(|c| {
-            let lower = c.to_ascii_lowercase();
-            if c.is_ascii_uppercase() {
-                vec!['_', lower]
-            } else {
-                vec![lower]
-            }
-        })
-        .collect()
-}
-
-/// Properties whose validation error names the Rust field (`current_password`) where
-/// nest-auth names the wire field (`currentPassword`): `garde` reports the struct path, and
-/// class-validator reports the property. The contract pins `details` only as an object, so
-/// nothing says which is right; a client that keys its form errors by wire name finds
-/// nothing under it here. Listed so the difference is a decision and not a surprise; when the
-/// adapter reports wire names the probe's own assertion fails and this list goes.
-const RENAMED_IN_ERRORS: [&str; 18] = [
-    "/email/change currentPassword",
-    "/email/change newEmail",
-    "/invitations tenantName",
-    "/login tenantId",
-    "/mfa/challenge mfaTempToken",
-    "/password/change currentPassword",
-    "/password/change newPassword",
-    "/password/change refreshToken",
-    "/password/forgot-password tenantId",
-    "/password/resend-otp tenantId",
-    "/password/reset-password newPassword",
-    "/password/reset-password tenantId",
-    "/password/reset-password verifiedToken",
-    "/password/verify-otp tenantId",
-    "/platform/mfa/challenge mfaTempToken",
-    "/register tenantId",
-    "/resend-verification tenantId",
-    "/verify-email tenantId",
-];
-
 /// A router with every optional group on, and the harness behind it.
 fn every_group() -> Option<(common::Harness, axum::Router)> {
     let harness = build(EngineSpec {
@@ -427,15 +386,14 @@ struct Sessions {
 }
 
 /// Posts to `route` a body one character over the maximum of `broken`, with the session the
-/// route needs, and checks the refusal. Returns whether the error names the field by a name other
-/// than the schema's property.
+/// route needs, and checks the refusal: `400 auth.validation`, naming the field as the wire does.
 async fn probe_property(
     app: &axum::Router,
     sessions: &Sessions,
     route: &RequestBodyRoute,
     schema: &Value,
     broken: &str,
-) -> bool {
+) {
     let request = Req::post(&format!("{PREFIX}{}", route.path)).json(body_breaking(schema, broken));
     let request = if PUBLIC_ROWS.contains(&route.path) {
         request
@@ -458,9 +416,8 @@ async fn probe_property(
         "{label}"
     );
     let fields = res.json()["error"]["details"].to_string();
-    let reported = snake_case(broken);
     assert!(
-        fields.contains(&format!("\"{reported}\"")),
+        fields.contains(&format!("\"{broken}\"")),
         "{label}: the error names {fields}"
     );
     // The length bound must be what refused it. A fixed-format code cannot say so: its pattern
@@ -472,7 +429,6 @@ async fn probe_property(
         fixed_format || fields.contains("length is greater than"),
         "{label}: {fields}"
     );
-    reported != broken
 }
 
 #[tokio::test]
@@ -486,18 +442,10 @@ async fn every_body_route_refuses_a_body_that_breaks_its_own_schema() {
     };
     assert!(!sessions.dashboard.is_empty() && !sessions.platform.is_empty());
 
-    let mut renamed = BTreeSet::new();
     for route in request_body_routes() {
         let Some(schema) = request_schema(route.schema) else { continue };
         for broken in bounded(&schema) {
-            if probe_property(&app, &sessions, route, &schema, &broken).await {
-                renamed.insert(format!("{} {broken}", route.path));
-            }
+            probe_property(&app, &sessions, route, &schema, &broken).await;
         }
     }
-    let known: BTreeSet<String> = RENAMED_IN_ERRORS
-        .iter()
-        .map(|field| (*field).to_owned())
-        .collect();
-    assert_eq!(renamed, known, "observed on the left, listed on the right");
 }
