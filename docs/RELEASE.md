@@ -126,7 +126,8 @@ and `verify` fails the tag check.
 | Dependency budget | `cargo tree` count gate | per-PR | active (`ci`) |
 | Pinned graph | committed `Cargo.lock` | always | active |
 | Version coherence | `scripts/check-release-versions.sh` | per-PR + release | active (`ci`, `release`) |
-| Public API / SemVer | `cargo public-api` + `cargo-semver-checks` | per-PR | active (`ci`) |
+| Public API snapshot | `cargo public-api` | per-PR | active (`ci`) |
+| SemVer compatibility | `cargo-semver-checks` | per-PR | informational only (`continue-on-error` in `ci` until a first version gives it a baseline) |
 | Registry trust | crates.io + npm OIDC Trusted Publishing | each release | wired in `release.yml`; needs the setup above |
 | npm provenance | `npm publish --provenance` | each release | wired in `release.yml` |
 | Posture transparency | OpenSSF Scorecard | push-to-`main` + weekly | active (`scorecard`) |
