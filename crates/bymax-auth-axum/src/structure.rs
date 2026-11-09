@@ -107,15 +107,7 @@ fn scan(
     if denies_unknown {
         let known = |name: &str| properties.is_some_and(|map| map.contains_key(name));
         for name in body.keys().filter(|name| !known(name)) {
-            // A name is echoed only when it is a plausible property name. One that is long or
-            // carries a control character is reported once, under the container, so a client
-            // cannot make the answer as large as its request or fill it with control bytes.
-            let echoed = if echoable(name) {
-                name.as_str()
-            } else {
-                CONTAINER
-            };
-            found.insert(echoed.to_owned(), Failure::Unknown);
+            found.insert(name.clone(), Failure::Unknown);
         }
     }
 }
@@ -126,9 +118,22 @@ const CONTAINER: &str = "body";
 /// The longest unknown property name echoed back, in characters.
 const MAX_ECHOED_NAME: usize = 128;
 
-/// Whether an unknown property's name may appear in the answer.
-fn echoable(name: &str) -> bool {
-    name.chars().count() <= MAX_ECHOED_NAME && !name.chars().any(char::is_control)
+/// The field a failing property is reported under. A property the DTO has is reported by its
+/// name. An unknown one is echoed only when it is a plausible name; one that is long or carries a
+/// control character is reported under the container, so a client cannot make the answer as large
+/// as its request or fill it with control bytes.
+fn reported(name: &str, failure: &Failure) -> String {
+    let echoed = match failure {
+        Failure::Unknown => {
+            name.chars().count() <= MAX_ECHOED_NAME && !name.chars().any(char::is_control)
+        }
+        _ => true,
+    };
+    if echoed {
+        name.to_owned()
+    } else {
+        CONTAINER.to_owned()
+    }
 }
 
 /// `body` with every failing property replaced by a stand-in the DTO can read: an empty string
@@ -180,13 +185,17 @@ fn explain(
         return Vec::new();
     };
     let failing = failures(schema_name, denies_unknown, body);
-    let mut details: Vec<FieldError> = failing
-        .iter()
-        .map(|(name, failure)| FieldError {
-            field: name.clone(),
-            message: failure.message(name),
-        })
-        .collect();
+    let mut details: Vec<FieldError> = Vec::new();
+    for (name, failure) in &failing {
+        let field = reported(name, failure);
+        // Several names that are not echoed share the container's one entry.
+        if details.iter().all(|detail| detail.field != field) {
+            details.push(FieldError {
+                message: failure.message(&field),
+                field,
+            });
+        }
+    }
     details.extend(
         rest(repaired(body, &failing))
             .into_iter()

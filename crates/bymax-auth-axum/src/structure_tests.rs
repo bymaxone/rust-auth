@@ -319,3 +319,19 @@ fn nothing_is_named_for_a_schema_or_a_type_the_adapter_does_not_know() {
     }
     assert!(details_for::<HostDto>(&Map::new()).is_empty());
 }
+
+#[test]
+fn a_name_that_is_not_echoed_does_not_hide_the_other_failures() {
+    // The key is removed from the repaired body, whatever it is reported as, so the properties
+    // that fail by bound are still found: `email` fails the format rule beside the long key.
+    for name in ["a".repeat(200), "line\nbreak".to_owned()] {
+        let mut body = object(&json!({ "email": "not-an-email", "password": "p" }));
+        body.insert(name.clone(), json!(1));
+        let named = fields(details_for::<LoginDto>(&body));
+        assert_eq!(
+            named,
+            BTreeSet::from(["body".to_owned(), "email".to_owned()]),
+            "{name:?}"
+        );
+    }
+}
