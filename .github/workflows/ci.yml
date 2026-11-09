@@ -725,6 +725,7 @@ jobs:
       - supply-chain
       - invariants
       - versions
+      - package-openapi
       - public-api
       - fuzz-smoke
       - npm
