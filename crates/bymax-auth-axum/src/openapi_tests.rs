@@ -184,3 +184,302 @@ fn a_schema_is_served_unchanged_through_the_selection() {
     let served = request_schemas_for(mounting(&[RouteGroup::Auth]));
     assert_eq!(served.get("LoginDto"), request_schema("LoginDto").as_ref());
 }
+
+use bymax_auth_core::config::TokenDelivery;
+use serde_json::json;
+
+use crate::openapi::{
+    ACCESS_BEARER_SCHEME, ACCESS_COOKIE_SCHEME, GuardFamily, PLATFORM_BEARER_SCHEME,
+    REFRESH_COOKIE_SCHEME, derive_security_schemes, document_security,
+};
+
+const DELIVERIES: [TokenDelivery; 3] = [
+    TokenDelivery::Cookie,
+    TokenDelivery::Bearer,
+    TokenDelivery::Both,
+];
+
+/// No group mounted.
+fn nothing() -> RouteGroups {
+    RouteGroups {
+        auth: false,
+        mfa: false,
+        password_reset: false,
+        sessions: false,
+        platform: false,
+        platform_mfa: false,
+        oauth: false,
+        invitations: false,
+        email_change: false,
+    }
+}
+
+/// The scheme names defined for `groups` under `delivery`, sorted.
+fn defined(delivery: TokenDelivery, groups: RouteGroups) -> Vec<&'static str> {
+    derive_security_schemes(delivery, "ca", "cr", groups)
+        .into_keys()
+        .collect()
+}
+
+/// The names expected, sorted the way the map sorts them.
+fn sorted(mut names: Vec<&'static str>) -> Vec<&'static str> {
+    names.sort_unstable();
+    names
+}
+
+#[test]
+fn the_scheme_names_are_the_closed_vocabulary_nest_auth_uses() {
+    // AUTH_SECURITY_SCHEMES in nest-auth v1.4.22 (`src/server/openapi/auth-openapi-fragment.ts`).
+    // Renaming one is a break a generated client feels, so they are fixed identifiers.
+    assert_eq!(ACCESS_COOKIE_SCHEME, "bymaxAuthAccessCookie");
+    assert_eq!(ACCESS_BEARER_SCHEME, "bymaxAuthAccessBearer");
+    assert_eq!(REFRESH_COOKIE_SCHEME, "bymaxAuthRefreshCookie");
+    assert_eq!(PLATFORM_BEARER_SCHEME, "bymaxPlatformAccessBearer");
+}
+
+#[test]
+fn a_deployment_defines_only_the_schemes_it_can_satisfy() {
+    // (the groups mounted, the schemes under Cookie, under Bearer, under Both)
+    let cases: [(&str, RouteGroups, [Vec<&str>; 3]); 11] = [
+        ("nothing", nothing(), [vec![], vec![], vec![]]),
+        // OAuth's operations are public and name no credential: mounted alone it defines nothing.
+        (
+            "oauth only",
+            RouteGroups {
+                oauth: true,
+                ..nothing()
+            },
+            [vec![], vec![], vec![]],
+        ),
+        (
+            "auth",
+            RouteGroups {
+                auth: true,
+                ..nothing()
+            },
+            [
+                vec![ACCESS_COOKIE_SCHEME, REFRESH_COOKIE_SCHEME],
+                vec![ACCESS_BEARER_SCHEME],
+                vec![
+                    ACCESS_COOKIE_SCHEME,
+                    ACCESS_BEARER_SCHEME,
+                    REFRESH_COOKIE_SCHEME,
+                ],
+            ],
+        ),
+        (
+            "sessions only (reads the refresh cookie)",
+            RouteGroups {
+                sessions: true,
+                ..nothing()
+            },
+            [
+                vec![ACCESS_COOKIE_SCHEME, REFRESH_COOKIE_SCHEME],
+                vec![ACCESS_BEARER_SCHEME],
+                vec![
+                    ACCESS_COOKIE_SCHEME,
+                    ACCESS_BEARER_SCHEME,
+                    REFRESH_COOKIE_SCHEME,
+                ],
+            ],
+        ),
+        (
+            "password reset only (the change spares the caller's session)",
+            RouteGroups {
+                password_reset: true,
+                ..nothing()
+            },
+            [
+                vec![ACCESS_COOKIE_SCHEME, REFRESH_COOKIE_SCHEME],
+                vec![ACCESS_BEARER_SCHEME],
+                vec![
+                    ACCESS_COOKIE_SCHEME,
+                    ACCESS_BEARER_SCHEME,
+                    REFRESH_COOKIE_SCHEME,
+                ],
+            ],
+        ),
+        (
+            "mfa reads no refresh cookie",
+            RouteGroups {
+                mfa: true,
+                ..nothing()
+            },
+            [
+                vec![ACCESS_COOKIE_SCHEME],
+                vec![ACCESS_BEARER_SCHEME],
+                vec![ACCESS_COOKIE_SCHEME, ACCESS_BEARER_SCHEME],
+            ],
+        ),
+        (
+            "invitations reads no refresh cookie",
+            RouteGroups {
+                invitations: true,
+                ..nothing()
+            },
+            [
+                vec![ACCESS_COOKIE_SCHEME],
+                vec![ACCESS_BEARER_SCHEME],
+                vec![ACCESS_COOKIE_SCHEME, ACCESS_BEARER_SCHEME],
+            ],
+        ),
+        (
+            "email change reads no refresh cookie",
+            RouteGroups {
+                email_change: true,
+                ..nothing()
+            },
+            [
+                vec![ACCESS_COOKIE_SCHEME],
+                vec![ACCESS_BEARER_SCHEME],
+                vec![ACCESS_COOKIE_SCHEME, ACCESS_BEARER_SCHEME],
+            ],
+        ),
+        (
+            "platform: bearer in every mode",
+            RouteGroups {
+                platform: true,
+                ..nothing()
+            },
+            [
+                vec![PLATFORM_BEARER_SCHEME],
+                vec![PLATFORM_BEARER_SCHEME],
+                vec![PLATFORM_BEARER_SCHEME],
+            ],
+        ),
+        (
+            "platform MFA alone",
+            RouteGroups {
+                platform_mfa: true,
+                ..nothing()
+            },
+            [
+                vec![PLATFORM_BEARER_SCHEME],
+                vec![PLATFORM_BEARER_SCHEME],
+                vec![PLATFORM_BEARER_SCHEME],
+            ],
+        ),
+        (
+            "auth and platform together",
+            RouteGroups {
+                auth: true,
+                platform: true,
+                ..nothing()
+            },
+            [
+                vec![
+                    ACCESS_COOKIE_SCHEME,
+                    REFRESH_COOKIE_SCHEME,
+                    PLATFORM_BEARER_SCHEME,
+                ],
+                vec![ACCESS_BEARER_SCHEME, PLATFORM_BEARER_SCHEME],
+                vec![
+                    ACCESS_COOKIE_SCHEME,
+                    ACCESS_BEARER_SCHEME,
+                    REFRESH_COOKIE_SCHEME,
+                    PLATFORM_BEARER_SCHEME,
+                ],
+            ],
+        ),
+    ];
+    for (label, groups, expected) in cases {
+        for (delivery, names) in DELIVERIES.into_iter().zip(expected) {
+            assert_eq!(
+                defined(delivery, groups),
+                sorted(names),
+                "{label} under {delivery:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn each_scheme_is_the_object_a_document_builder_expects() {
+    let groups = RouteGroups {
+        auth: true,
+        platform: true,
+        ..nothing()
+    };
+    let schemes = derive_security_schemes(TokenDelivery::Both, "my_access", "my_refresh", groups);
+    // The cookie names are the deployment's: a document naming `access_token` on a deployment
+    // that renamed it describes a different server.
+    assert_eq!(schemes[ACCESS_COOKIE_SCHEME]["type"], json!("apiKey"));
+    assert_eq!(schemes[ACCESS_COOKIE_SCHEME]["in"], json!("cookie"));
+    assert_eq!(schemes[ACCESS_COOKIE_SCHEME]["name"], json!("my_access"));
+    assert_eq!(schemes[REFRESH_COOKIE_SCHEME]["type"], json!("apiKey"));
+    assert_eq!(schemes[REFRESH_COOKIE_SCHEME]["in"], json!("cookie"));
+    assert_eq!(schemes[REFRESH_COOKIE_SCHEME]["name"], json!("my_refresh"));
+    for bearer in [ACCESS_BEARER_SCHEME, PLATFORM_BEARER_SCHEME] {
+        assert_eq!(schemes[bearer]["type"], json!("http"), "{bearer}");
+        assert_eq!(schemes[bearer]["scheme"], json!("bearer"), "{bearer}");
+        assert_eq!(schemes[bearer]["bearerFormat"], json!("JWT"), "{bearer}");
+    }
+    assert!(
+        schemes
+            .values()
+            .all(|scheme| scheme["description"].is_string())
+    );
+}
+
+#[test]
+fn the_document_default_follows_the_delivery_mode() {
+    let requirement = |scheme: &str| json!({ scheme: [] });
+    assert_eq!(
+        document_security(GuardFamily::Dashboard, TokenDelivery::Cookie),
+        [requirement(ACCESS_COOKIE_SCHEME)]
+    );
+    assert_eq!(
+        document_security(GuardFamily::Dashboard, TokenDelivery::Bearer),
+        [requirement(ACCESS_BEARER_SCHEME)]
+    );
+    // Two entries, each naming one scheme: OpenAPI reads a list as OR, and one entry holding both
+    // would mean AND.
+    assert_eq!(
+        document_security(GuardFamily::Dashboard, TokenDelivery::Both),
+        [
+            requirement(ACCESS_COOKIE_SCHEME),
+            requirement(ACCESS_BEARER_SCHEME)
+        ]
+    );
+    for delivery in DELIVERIES {
+        assert_eq!(
+            document_security(GuardFamily::Platform, delivery),
+            [requirement(PLATFORM_BEARER_SCHEME)],
+            "{delivery:?}"
+        );
+    }
+}
+
+#[test]
+fn a_document_default_never_names_a_scheme_the_deployment_does_not_define() {
+    for delivery in DELIVERIES {
+        let everything = RouteGroups {
+            auth: true,
+            mfa: true,
+            password_reset: true,
+            sessions: true,
+            platform: true,
+            platform_mfa: true,
+            oauth: true,
+            invitations: true,
+            email_change: true,
+        };
+        let defined_here = defined(delivery, everything);
+        for guard in [GuardFamily::Dashboard, GuardFamily::Platform] {
+            let default = document_security(guard, delivery);
+            assert!(!default.is_empty(), "{guard:?} under {delivery:?}");
+            for requirement in default {
+                let names: Vec<&str> = requirement
+                    .as_object()
+                    .into_iter()
+                    .flat_map(|entry| entry.keys().map(String::as_str))
+                    .collect();
+                assert_eq!(names.len(), 1, "{requirement}");
+                assert!(
+                    defined_here.contains(&names[0]),
+                    "{guard:?} {delivery:?} names {names:?}"
+                );
+            }
+        }
+    }
+}

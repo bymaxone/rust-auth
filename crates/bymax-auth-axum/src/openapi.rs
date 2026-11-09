@@ -16,7 +16,9 @@
 use std::collections::BTreeMap;
 use std::sync::OnceLock;
 
-use serde_json::Value;
+use bymax_auth_core::AuthEngine;
+use bymax_auth_core::config::TokenDelivery;
+use serde_json::{Value, json};
 
 use crate::RouteGroups;
 
@@ -239,4 +241,146 @@ pub fn request_schemas_for(groups: RouteGroups) -> BTreeMap<String, Value> {
             request_schema(route.schema).map(|schema| (route.schema.to_owned(), schema))
         })
         .collect()
+}
+
+/// The name of the scheme for the access token delivered as a cookie.
+pub const ACCESS_COOKIE_SCHEME: &str = "bymaxAuthAccessCookie";
+/// The name of the scheme for the access token delivered in the `Authorization` header.
+pub const ACCESS_BEARER_SCHEME: &str = "bymaxAuthAccessBearer";
+/// The name of the scheme for the refresh token delivered as a cookie.
+pub const REFRESH_COOKIE_SCHEME: &str = "bymaxAuthRefreshCookie";
+/// The name of the scheme for the platform administrator's access token, which is always bearer.
+pub const PLATFORM_BEARER_SCHEME: &str = "bymaxPlatformAccessBearer";
+
+/// Which of this library's guards protects a host's own routes. The two families take different
+/// credentials, and only one of them varies with the delivery mode.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[non_exhaustive]
+pub enum GuardFamily {
+    /// The dashboard guard: the access token travels as the delivery mode says.
+    Dashboard,
+    /// The platform guard: the access token is a bearer token in every delivery mode.
+    Platform,
+}
+
+/// Whether the delivery mode puts credentials in cookies.
+fn delivers_cookie(delivery: TokenDelivery) -> bool {
+    matches!(delivery, TokenDelivery::Cookie | TokenDelivery::Both)
+}
+
+/// Whether the delivery mode puts credentials in the `Authorization` header and the body.
+fn delivers_bearer(delivery: TokenDelivery) -> bool {
+    matches!(delivery, TokenDelivery::Bearer | TokenDelivery::Both)
+}
+
+/// The schemes a deployment can satisfy, from the facts that decide them.
+///
+/// A scheme the deployment cannot satisfy is absent, not defined and unreferenced: a document
+/// that defines the bearer scheme on a cookie-only deployment tells a client generator to offer a
+/// credential the server will not read, and a requirement naming a scheme the document does not
+/// define is refused by a document builder.
+pub(crate) fn derive_security_schemes(
+    delivery: TokenDelivery,
+    access_cookie_name: &str,
+    refresh_cookie_name: &str,
+    groups: RouteGroups,
+) -> BTreeMap<&'static str, Value> {
+    let mut schemes = BTreeMap::new();
+    let dashboard = groups.auth
+        || groups.password_reset
+        || groups.mfa
+        || groups.sessions
+        || groups.invitations
+        || groups.email_change;
+    if dashboard && delivers_cookie(delivery) {
+        schemes.insert(
+            ACCESS_COOKIE_SCHEME,
+            cookie_scheme(
+                access_cookie_name,
+                "Access token, delivered as an HttpOnly cookie.",
+            ),
+        );
+    }
+    if dashboard && delivers_bearer(delivery) {
+        schemes.insert(
+            ACCESS_BEARER_SCHEME,
+            bearer_scheme("Access token, delivered in the Authorization header."),
+        );
+    }
+    // The groups that read the refresh cookie: logout and refresh, the two session handlers that
+    // identify the caller's own session by it, and the password change that spares that session.
+    let reads_refresh_cookie = groups.auth || groups.sessions || groups.password_reset;
+    if reads_refresh_cookie && delivers_cookie(delivery) {
+        schemes.insert(
+            REFRESH_COOKIE_SCHEME,
+            cookie_scheme(
+                refresh_cookie_name,
+                "Refresh token, delivered as an HttpOnly cookie scoped to the auth prefix.",
+            ),
+        );
+    }
+    if groups.platform || groups.platform_mfa {
+        schemes.insert(
+            PLATFORM_BEARER_SCHEME,
+            bearer_scheme(
+                "Platform administrator access token, always delivered in the Authorization header regardless of the delivery mode.",
+            ),
+        );
+    }
+    schemes
+}
+
+/// An `apiKey` scheme for a credential carried in the cookie called `name`.
+fn cookie_scheme(name: &str, description: &str) -> Value {
+    json!({ "type": "apiKey", "in": "cookie", "name": name, "description": description })
+}
+
+/// An `http` bearer scheme for a JWT carried in the `Authorization` header.
+fn bearer_scheme(description: &str) -> Value {
+    json!({ "type": "http", "scheme": "bearer", "bearerFormat": "JWT", "description": description })
+}
+
+/// The security schemes this deployment can satisfy, for `components.securitySchemes`.
+///
+/// Derived from the engine's resolved delivery mode and cookie names, and the route groups
+/// `groups` mounts (from [`crate::AuthRouter::groups`]), so the document names the cookies the
+/// adapter actually sets and defines only the credentials the server reads. The names are the
+/// constants of this module.
+#[must_use]
+pub fn security_schemes(engine: &AuthEngine, groups: RouteGroups) -> BTreeMap<&'static str, Value> {
+    let config = engine.config().config();
+    derive_security_schemes(
+        config.token_delivery,
+        &config.cookies.access_token_name,
+        &config.cookies.refresh_token_name,
+        groups,
+    )
+}
+
+/// The document-level `security` default for a host's own routes: which of this library's
+/// guards protects them, and how the deployment delivers tokens.
+///
+/// Derived rather than written as a literal, so a change of delivery mode cannot leave the
+/// default naming a scheme the document no longer declares. Under `Both` the result is a
+/// two-entry list, which OpenAPI reads as OR (either transport satisfies it); one entry holding
+/// both schemes would mean AND. Every entry names one scheme and carries no scopes, because
+/// scopes belong to OAuth2 schemes and every scheme here is `apiKey` or `http`.
+///
+/// It takes the guard and the delivery mode and not the mounted groups, so it names a scheme
+/// whether or not [`security_schemes`] defines it: a deployment that mounts no group using the
+/// guard's credential has no scheme of this library to name and should not set a default from it.
+#[must_use]
+pub fn document_security(guard: GuardFamily, delivery: TokenDelivery) -> Vec<Value> {
+    let requirement = |scheme: &str| json!({ scheme: [] });
+    match guard {
+        GuardFamily::Platform => vec![requirement(PLATFORM_BEARER_SCHEME)],
+        GuardFamily::Dashboard => [
+            (delivers_cookie(delivery), ACCESS_COOKIE_SCHEME),
+            (delivers_bearer(delivery), ACCESS_BEARER_SCHEME),
+        ]
+        .into_iter()
+        .filter(|(delivered, _)| *delivered)
+        .map(|(_, scheme)| requirement(scheme))
+        .collect(),
+    }
 }

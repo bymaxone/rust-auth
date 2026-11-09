@@ -3425,6 +3425,16 @@ posts to every row a body that breaks one bound of the row's own schema. The mod
 schemas it wants under `components.schemas` of its own. Lengths are counts of characters, as JSON
 Schema defines `minLength` and `maxLength`, and the DTOs in 8.4.1 count the same way.
 
+The same feature derives the security schemes. `security_schemes(&engine, groups)` returns the
+`components.securitySchemes` a deployment can satisfy, in a closed vocabulary of names
+(`bymaxAuthAccessCookie`, `bymaxAuthAccessBearer`, `bymaxAuthRefreshCookie`,
+`bymaxPlatformAccessBearer`): the cookie schemes carry the cookie names the adapter sets, the bearer
+schemes exist only where the delivery mode puts tokens in the body, the refresh cookie only where a
+group reads it, and the platform scheme wherever a platform group is mounted, in every delivery
+mode, since a platform token is always bearer. A scheme the deployment cannot satisfy is absent. `document_security(guard,
+delivery)` derives the document-level default for a host's own routes from the delivery mode; for the
+dashboard guard under `Both` it is a two-entry list, which OpenAPI reads as OR.
+
 A crate is built from its tarball, which holds only files under the crate's own directory, so the
 schemas are shipped as a copy in `crates/bymax-auth-axum/openapi/`. A test holds the copy
 byte-identical to the shared one, and CI builds the packaged crates with the feature on.
