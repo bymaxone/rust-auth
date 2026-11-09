@@ -19,7 +19,7 @@ This document is Layer 2 of the spec → roadmap → phase-tasks workflow. It de
 ## Progress
 
 - **Overall progress:** 🔄 12 / 13 phases implemented (92%); the **release workflow exists** (`.github/workflows/release.yml`), but it has no SBOM or attestation jobs and the first publish of each package is manual (see [`docs/RELEASE.md`](RELEASE.md)). Nothing is **published** to crates.io or npm yet.
-- **Active phase:** **P12** — its non-publishing scope (docs, the six examples, the extra CI quality/security gates, the dogfood smokes, and the Playwright browser E2E) is ✅ Done (2026-06-22); the `release` workflow, OIDC publishing and the tag↔version gate are implemented; SBOM/attestation publishing and the protected GitHub Environments are **not**.
+- **Active phase:** **P12** — its non-publishing scope (docs, the examples, the extra CI quality/security gates, the dogfood smokes, and the Playwright browser E2E) is ✅ Done (2026-06-22); the `release` workflow, OIDC publishing and the tag↔version gate are implemented; SBOM/attestation publishing and the protected GitHub Environments are **not**.
 - **Blocked:** —
 
 ## Phase dashboard
