@@ -3365,7 +3365,7 @@ DTO's own validation, so a request that fails one property by shape and another 
 What is shared with `nest-auth` is the status, the code, the top-level message and the set of distinct
 `details[].field` values for a given input; the message of each entry is this crate's own, naming the
 property and never the value or the type the client sent. An unknown property's name is echoed only
-when it is at most 128 characters with no control character, and is otherwise reported once under
+when it is non-empty, at most 128 characters and free of control characters, and is otherwise reported once under
 `body`. A request that cannot be explained that way (a root that is an array, a type that is not one
 of this crate's DTOs) answers one `body` or `query` detail with a fixed message. `garde` rule messages
 name the field and the rule, never the value. A route given `text/plain`, or no `Content-Type`, still

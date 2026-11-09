@@ -118,13 +118,15 @@ const CONTAINER: &str = "body";
 const MAX_ECHOED_NAME: usize = 128;
 
 /// The field a failing property is reported under. A property the DTO has is reported by its
-/// name. An unknown one is echoed only when it is a plausible name; one that is long or carries a
-/// control character is reported under the container, so a client cannot make the answer as large
+/// name. An unknown one is echoed only when it is a plausible name; one that is empty, long or
+/// carries a control character is reported under the container, so a client cannot make the answer as large
 /// as its request or fill it with control bytes.
 fn reported(name: &str, failure: &Failure) -> String {
     let echoed = match failure {
         Failure::Unknown => {
-            name.chars().count() <= MAX_ECHOED_NAME && !name.chars().any(char::is_control)
+            !name.is_empty()
+                && name.chars().count() <= MAX_ECHOED_NAME
+                && !name.chars().any(char::is_control)
         }
         _ => true,
     };

@@ -91,3 +91,11 @@ async fn a_query_that_does_not_fit_names_its_property() {
     let initiate = Req::get("/auth/oauth/google?unexpected=1").send(&app).await;
     assert_eq!(named(&initiate), set(&["unexpected"]));
 }
+
+#[tokio::test]
+async fn an_unknown_property_with_an_empty_name_is_reported_under_body() {
+    let Some(h) = build(EngineSpec::default()) else { return };
+    let app = router(&h);
+    let response = login_with(&app, r#"{"email":"a@e.com","password":"p","":1}"#).await;
+    assert_eq!(named(&response), set(&["body"]));
+}
