@@ -3,10 +3,8 @@
 //!
 //! The schemas are read from the file, never restated here, and every DTO is exercised through
 //! its real `serde` + `garde` path: a bound is checked by sending a value one either side of it,
-//! not by reading an attribute. A difference is not fixed here and not skipped: it is a finding,
-//! and `KNOWN_DIVERGENCES` is the list of findings someone has looked at. A new difference fails
-//! the test until it is listed, and a listed one that stops reproducing fails it until it is
-//! removed, so the list cannot go stale in either direction.
+//! not by reading an attribute. A difference is a finding and fails the test; the lengths are
+//! counted in characters, as JSON Schema defines `minLength` and `maxLength`.
 //!
 //! The artefact's identity is pinned below. As with the wire contract, the pin catches an
 //! unaccompanied byte change in this repository; it cannot see nest-auth move.
@@ -355,8 +353,10 @@ fn check_lengths(
     }
 }
 
-/// A bound is a count of characters, so `max` two-byte characters must fit, and one character
-/// fewer than a minimum of two or more must be refused however many bytes it takes.
+/// A bound is a count of characters, as JSON Schema defines `minLength` and `maxLength` (a count
+/// of Unicode characters, not of bytes or UTF-16 code units). So `max` characters must fit
+/// whether each takes two bytes or four, one character more must not, and one character fewer
+/// than a minimum of two or more must be refused however many bytes it takes.
 fn check_multibyte(
     (check, base): (Accepts, &Map<String, Value>),
     prop: &Prop,
@@ -366,21 +366,28 @@ fn check_multibyte(
     if prop.email || !letters_satisfy(prop.pattern.as_ref()) {
         return;
     }
+    let name = prop.name.as_str();
+    let taken = |text: String| check(&with(base, name, &text));
     for max in prop.max.iter().copied() {
-        let letters = filled('a', max.max(prop.min.unwrap_or(1)));
-        let letters_work = check(&with(base, &prop.name, &letters));
-        let accented_refused = !check(&with(base, &prop.name, &filled('\u{e9}', max)));
-        let category = "maxLength: counted in bytes, not characters";
+        let letters_work = taken(filled('a', max.max(prop.min.unwrap_or(1))));
+        let category = "maxLength: not counted in characters";
+        let refused_in_bounds = !taken(filled('\u{e9}', max)) || !taken(filled('\u{1f600}', max));
         note_if(
             findings,
-            letters_work && accented_refused,
-            (category, dto, &prop.name),
+            letters_work && refused_in_bounds,
+            (category, dto, name),
+        );
+        let category = "maxLength: one multibyte character over is accepted";
+        note_if(
+            findings,
+            taken(filled('\u{e9}', max + 1)),
+            (category, dto, name),
         );
     }
     for min in prop.min.iter().copied().filter(|min| *min >= 2) {
-        let short = check(&with(base, &prop.name, &filled('\u{e9}', min - 1)));
-        let category = "minLength: counted in bytes, not characters";
-        note_if(findings, short, (category, dto, &prop.name));
+        let category = "minLength: not counted in characters";
+        let short = taken(filled('\u{e9}', min - 1)) || taken(filled('\u{1f600}', min - 1));
+        note_if(findings, short, (category, dto, name));
     }
 }
 
@@ -421,104 +428,6 @@ fn check_dto(root: &Value, dto: &str, check: Accepts, findings: &mut Findings) {
         check_multibyte((check, &base), prop, dto, findings);
         check_pattern((check, &base), prop, dto, findings);
     }
-}
-
-/// The differences between the DTOs and the artefact that have been looked at: the category,
-/// the fields it concerns, and why it is not fixed here.
-const KNOWN_DIVERGENCES: &[(&str, &[&str], &str)] = &[
-    (
-        "maxLength: counted in bytes, not characters",
-        &[
-            "AcceptInvitationDto.name",
-            "AcceptInvitationDto.password",
-            "AcceptInvitationDto.token",
-            "ChangeEmailDto.currentPassword",
-            "ChangePasswordDto.currentPassword",
-            "ChangePasswordDto.newPassword",
-            "ChangePasswordDto.refreshToken",
-            "ConfirmEmailChangeDto.token",
-            "CreateInvitationDto.role",
-            "CreateInvitationDto.tenantName",
-            "ForgotPasswordDto.tenantId",
-            "LoginDto.password",
-            "LoginDto.tenantId",
-            "MfaChallengeDto.mfaTempToken",
-            "MfaSetupDto.password",
-            "OAuthCallbackQueryDto.authuser",
-            "OAuthCallbackQueryDto.code",
-            "OAuthCallbackQueryDto.error",
-            "OAuthCallbackQueryDto.hd",
-            "OAuthCallbackQueryDto.iss",
-            "OAuthCallbackQueryDto.prompt",
-            "OAuthCallbackQueryDto.scope",
-            "OAuthCallbackQueryDto.state",
-            "OAuthInitiateQueryDto.tenantId",
-            "PlatformLoginDto.password",
-            "RegisterDto.name",
-            "RegisterDto.password",
-            "RegisterDto.tenantId",
-            "ResendOtpDto.tenantId",
-            "ResendVerificationDto.tenantId",
-            "ResetPasswordDto.newPassword",
-            "ResetPasswordDto.otp",
-            "ResetPasswordDto.tenantId",
-            "ResetPasswordDto.token",
-            "ResetPasswordDto.verifiedToken",
-            "VerifyEmailDto.otp",
-            "VerifyEmailDto.tenantId",
-            "VerifyOtpDto.otp",
-            "VerifyOtpDto.tenantId",
-        ],
-        "garde's `length` on a String counts bytes (garde 0.23 `rules/length/simple.rs`), while \
-         nest-auth's class-validator `maxLength` counts characters: `maxLength('\u{e9}' x 128, 128)` \
-         is true there and `'\u{1f600}' x 2` fits a maximum of 2. A multibyte value near a maximum is \
-         accepted by one backend and refused by the other, for example a 100-character passphrase of \
-         three-byte characters against a password maximum of 128. Not changed here: `length(chars)` \
-         is a decision for this repository and nest-auth, since the contract does not say which unit \
-         the bounds are in.",
-    ),
-    (
-        "minLength: counted in bytes, not characters",
-        &[
-            "AcceptInvitationDto.name",
-            "AcceptInvitationDto.password",
-            "ChangePasswordDto.newPassword",
-            "RegisterDto.name",
-            "RegisterDto.password",
-            "ResetPasswordDto.newPassword",
-            "ResetPasswordDto.otp",
-            "VerifyOtpDto.otp",
-        ],
-        "The same unit difference on the minimum side: one two-byte character is two bytes, so \
-         garde's `length(min = 2)` takes a one-character name that nest-auth's `minLength: 2` \
-         refuses, and seven two-byte characters (fourteen bytes) satisfy a structural password \
-         minimum of 8. The deployment's own password floor is enforced in the service, not \
-         here. Not changed here, for the same reason as the maximum.",
-    ),
-    (
-        "maxLength: one above the maximum is accepted",
-        &[
-            "OAuthCallbackQueryDto.error_description",
-            "OAuthCallbackQueryDto.error_uri",
-        ],
-        "The DTO is `rename_all = \"camelCase\"`, so rust reads `errorDescription` and `errorUri`, \
-         while nest-auth's DTO and RFC 6749 section 4.1.2.1 name them `error_description` and \
-         `error_uri`. A provider's parameter is therefore dropped by serde (the DTO does not deny \
-         unknown fields) and its bound never applies; nothing reads either field. Not changed here: \
-         a rename on the two fields, or removing them, is a decision for this repository.",
-    ),
-];
-
-fn known() -> Findings {
-    KNOWN_DIVERGENCES
-        .iter()
-        .map(|(category, fields, _)| {
-            (
-                *category,
-                fields.iter().map(|field| (*field).to_owned()).collect(),
-            )
-        })
-        .collect()
 }
 
 #[test]
@@ -589,22 +498,15 @@ fn the_keywords_and_patterns_are_the_ones_this_test_understands() {
 }
 
 #[test]
-fn the_dtos_agree_with_the_artefact_or_the_difference_is_listed() {
+fn the_dtos_agree_with_the_artefact() {
     let root = artefact();
     let mut observed = Findings::new();
     for (dto, check) in DTOS {
         check_dto(&root, dto, check, &mut observed);
     }
-    assert_eq!(
-        observed,
-        known(),
-        "observed on the left, listed on the right"
-    );
-    assert!(
-        KNOWN_DIVERGENCES
-            .iter()
-            .all(|(_, _, reason)| !reason.is_empty())
-    );
+    // A difference is a finding, not a skipped case. One accepted on purpose belongs here, as an
+    // expectation with the reason it is left, never as a quiet exception inside a check.
+    assert!(observed.is_empty(), "{observed:#?}");
 }
 
 #[test]

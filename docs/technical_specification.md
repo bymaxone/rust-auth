@@ -3146,6 +3146,10 @@ unexpected field 400s rather than being silently stripped); `garde`
 attributes reproduce the `@IsEmail`, `@MinLength`, `@MaxLength`, `@Length`
 constraints. Field rules are derived directly from the nest-auth DTOs.
 
+String lengths are counted in characters, as nest-auth's validators and JSON Schema's
+`minLength` and `maxLength` count them. `garde`'s plain `length` counts the bytes of a
+`String`, so every length rule on a string is written `length(chars, ...)`.
+
 #### 8.4.1 Input DTO structs
 
 ```rust
@@ -3154,11 +3158,11 @@ constraints. Field rules are derived directly from the nest-auth DTOs.
 pub struct RegisterDto {
     #[garde(email)]
     pub email: String,
-    #[garde(length(min = 8, max = 128))]
+    #[garde(length(chars, min = 8, max = 128))]
     pub password: String,
-    #[garde(length(min = 2))]
+    #[garde(length(chars, min = 2))]
     pub name: String,
-    #[garde(length(min = 1))]
+    #[garde(length(chars, min = 1))]
     pub tenant_id: String,
 }
 
@@ -3167,9 +3171,9 @@ pub struct RegisterDto {
 pub struct LoginDto {
     #[garde(email)]
     pub email: String,
-    #[garde(length(max = 128))]
+    #[garde(length(chars, max = 128))]
     pub password: String,
-    #[garde(length(min = 1))]
+    #[garde(length(chars, min = 1))]
     pub tenant_id: String,
 }
 
@@ -3178,7 +3182,7 @@ pub struct LoginDto {
 pub struct ForgotPasswordDto {
     #[garde(email)]
     pub email: String,
-    #[garde(length(min = 1))]
+    #[garde(length(chars, min = 1))]
     pub tenant_id: String,
 }
 
@@ -3187,7 +3191,7 @@ pub struct ForgotPasswordDto {
 pub struct ResetPasswordDto {
     #[garde(email)]
     pub email: String,
-    #[garde(length(min = 8, max = 128))]
+    #[garde(length(chars, min = 8, max = 128))]
     pub new_password: String,
     /// method = "token": the emailed reset token.
     #[garde(skip)]
@@ -3198,7 +3202,7 @@ pub struct ResetPasswordDto {
     /// 2-step flow: the verified-token issued by `verify-otp`.
     #[garde(skip)]
     pub verified_token: Option<String>,
-    #[garde(length(min = 1))]
+    #[garde(length(chars, min = 1))]
     pub tenant_id: String,
 }
 
@@ -3207,9 +3211,9 @@ pub struct ResetPasswordDto {
 pub struct VerifyOtpDto {
     #[garde(email)]
     pub email: String,
-    #[garde(length(min = 4, max = 8))]
+    #[garde(length(chars, min = 4, max = 8))]
     pub otp: String,
-    #[garde(length(min = 1))]
+    #[garde(length(chars, min = 1))]
     pub tenant_id: String,
 }
 
@@ -3218,7 +3222,7 @@ pub struct VerifyOtpDto {
 pub struct ResendOtpDto {
     #[garde(email)]
     pub email: String,
-    #[garde(length(min = 1))]
+    #[garde(length(chars, min = 1))]
     pub tenant_id: String,
 }
 
@@ -3227,9 +3231,9 @@ pub struct ResendOtpDto {
 pub struct VerifyEmailDto {
     #[garde(email)]
     pub email: String,
-    #[garde(length(min = 4, max = 8))]
+    #[garde(length(chars, min = 4, max = 8))]
     pub otp: String,
-    #[garde(length(min = 1))]
+    #[garde(length(chars, min = 1))]
     pub tenant_id: String,
 }
 
@@ -3238,7 +3242,7 @@ pub struct VerifyEmailDto {
 pub struct ResendVerificationDto {
     #[garde(email)]
     pub email: String,
-    #[garde(length(min = 1))]
+    #[garde(length(chars, min = 1))]
     pub tenant_id: String,
 }
 
@@ -3246,19 +3250,19 @@ pub struct ResendVerificationDto {
 #[serde(deny_unknown_fields)]
 pub struct MfaVerifyDto {
     /// 6-digit TOTP shown by the authenticator during enrolment: exactly six ASCII digits (`^\d{6}$`).
-    #[garde(length(min = 6, max = 6), custom(totp_code))]
+    #[garde(length(chars, min = 6, max = 6), custom(totp_code))]
     pub code: String,
 }
 
 #[derive(Deserialize, Validate)]
 #[serde(deny_unknown_fields)]
 pub struct MfaChallengeDto {
-    #[garde(length(min = 1))]
+    #[garde(length(chars, min = 1))]
     pub mfa_temp_token: String,
     /// 6-digit TOTP (`^\d{6}$`) or a recovery code, six hyphen-separated groups of four hex digits
     /// (`XXXX-XXXX-XXXX-XXXX-XXXX-XXXX`, either case). Max 29 is the longest recovery code. A
     /// value of any other shape is a `400 auth.validation` and is never counted as a failed attempt.
-    #[garde(length(min = 1, max = 29), custom(totp_or_recovery_code))]
+    #[garde(length(chars, min = 1, max = 29), custom(totp_or_recovery_code))]
     pub code: String,
 }
 
@@ -3266,14 +3270,14 @@ pub struct MfaChallengeDto {
 #[serde(deny_unknown_fields)]
 pub struct MfaDisableDto {
     /// TOTP only — recovery codes are not accepted for disable, by design. Exactly six ASCII digits.
-    #[garde(length(min = 6, max = 6), custom(totp_code))]
+    #[garde(length(chars, min = 6, max = 6), custom(totp_code))]
     pub code: String,
 }
 
 #[derive(Deserialize, Validate)]
 #[serde(deny_unknown_fields)]
 pub struct MfaRegenerateRecoveryCodesDto {
-    #[garde(length(min = 6, max = 6))]
+    #[garde(length(chars, min = 6, max = 6))]
     pub code: String,
 }
 
@@ -3284,7 +3288,7 @@ pub struct PlatformLoginDto {
     pub email: String,
     /// Not blank (`/\S/` in JavaScript): a password of only whitespace is refused before any key
     /// derivation runs.
-    #[garde(length(min = 1, max = 128), custom(not_blank))]
+    #[garde(length(chars, min = 1, max = 128), custom(not_blank))]
     pub password: String,
 }
 
@@ -3301,7 +3305,7 @@ pub struct CreateInvitationDto {
     pub email: String,
     /// Validated against the configured role hierarchy by the engine; an unknown
     /// role is rejected. `tenant_id` is NOT a field — it is taken from the JWT.
-    #[garde(length(min = 1))]
+    #[garde(length(chars, min = 1))]
     pub role: String,
     #[garde(skip)]
     pub tenant_name: Option<String>,
@@ -3310,11 +3314,11 @@ pub struct CreateInvitationDto {
 #[derive(Deserialize, Validate)]
 #[serde(deny_unknown_fields)]
 pub struct AcceptInvitationDto {
-    #[garde(length(min = 1))]
+    #[garde(length(chars, min = 1))]
     pub token: String,
-    #[garde(length(min = 2))]
+    #[garde(length(chars, min = 2))]
     pub name: String,
-    #[garde(length(min = 8, max = 128))]
+    #[garde(length(chars, min = 8, max = 128))]
     pub password: String,
 }
 
@@ -4331,7 +4335,7 @@ pub struct OAuthInitiateQuery {
     /// Tenant the user will join on success. Stored in the Redis state and
     /// recovered on callback. NOT validated against the DB here — the
     /// `on_oauth_login` hook enforces tenant membership.
-    #[garde(length(min = 1, max = 128))]
+    #[garde(length(chars, min = 1, max = 128))]
     pub tenant_id: String,
 }
 ```
@@ -4367,9 +4371,9 @@ Query DTO (extra standard OIDC/Google fields are accepted but unused, so
 #[derive(Deserialize, Validate)]
 #[serde(deny_unknown_fields)]
 pub struct OAuthCallbackQuery {
-    #[garde(length(min = 1, max = 2048))]
+    #[garde(length(chars, min = 1, max = 2048))]
     pub code: String,
-    #[garde(length(min = 1, max = 128))]
+    #[garde(length(chars, min = 1, max = 128))]
     pub state: String,
     // Accepted-but-unused provider extras (RFC 9207 `iss`, RFC 6749 `scope`,
     // Google `authuser`/`prompt`/`hd`). Declared so validation does not reject

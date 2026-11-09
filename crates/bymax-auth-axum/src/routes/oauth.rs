@@ -39,6 +39,14 @@ fn found(url: &str) -> Response {
     }
 }
 
+/// A provider-supplied query value as it is written to the log: `<absent>` when the provider
+/// sent none, `<malformed>` when it carries a control character, and the value itself
+/// otherwise. The provider chooses these strings, and a newline or an escape sequence in one
+/// would forge a log record, so none of them is logged raw.
+fn logged(value: Option<&str>) -> String {
+    value.map_or_else(|| "<absent>".to_owned(), bymax_auth_core::log_safe)
+}
+
 /// The `?error=` value for a refusal: the wire code of `error` without its `auth.` namespace
 /// (`auth.oauth_email_mismatch` becomes `oauth_email_mismatch`), read from the same envelope a
 /// JSON response would carry, so a redirect can never name a code the API would not.
@@ -132,10 +140,16 @@ async fn callback(
     // on the query only so the error response can validate, never so a codeless exchange can
     // proceed.
     let Some(code) = query.code.as_deref().filter(|_| query.error.is_none()) else {
-        let provider_error = query.error.as_deref().unwrap_or("<absent>");
+        // Bound to locals first: a macro argument is not evaluated when no subscriber is
+        // listening, and the sanitising must not depend on one.
+        let provider_error = logged(query.error.as_deref());
+        let error_description = logged(query.error_description.as_deref());
+        let error_uri = logged(query.error_uri.as_deref());
         tracing::warn!(
             provider = %provider,
-            error = provider_error,
+            error = %provider_error,
+            error_description = %error_description,
+            error_uri = %error_uri,
             "oauth callback carried a provider error or no code"
         );
         return oauth_failure(&state, &bymax_auth_types::AuthError::OauthFailed);
