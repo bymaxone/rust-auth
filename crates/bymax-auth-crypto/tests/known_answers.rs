@@ -11,9 +11,9 @@
 //!   `conformance/wire-contract.json`, never copied into this file;
 //! * **independent producer** — scrypt PHC strings written by a program that shares no code with
 //!   this crate (Python's `hashlib.scrypt`);
-//! * **frozen snapshot** — one Argon2id PHC string written by this crate, because no independent
-//!   Argon2 producer was available. It pins that a record already stored stays verifiable; it
-//!   cannot show that the first write was right, which the RFC 9106 vector does.
+//! * **frozen snapshot** — one Argon2id PHC string written by this crate. It pins that a record
+//!   already stored stays verifiable; it cannot show that the first write was right, which the
+//!   RFC 9106 vector does.
 //!
 //! The public-API groups use only `bymax_auth_crypto` and must pass unchanged across any
 //! upgrade of the primitives beneath it. The two `primitive_*` groups call the underlying crates
