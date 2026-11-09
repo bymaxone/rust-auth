@@ -196,6 +196,29 @@ fn auth_error_exposes_code_status_and_message_for_every_variant() {
 }
 
 #[test]
+fn every_internal_only_error_reaches_the_wire_as_a_public_code() {
+    // The collapse is complete: the code an internal-only error is rendered under is itself
+    // public (collapsing twice moves nothing), and the envelope, the status and the message a
+    // caller receives all come from that code and never from the internal one.
+    let internal: Vec<AuthError> = all_errors()
+        .into_iter()
+        .filter(AuthError::is_internal_only)
+        .collect();
+    // The five internal-only codes: three token sentinels and two OTP ones.
+    assert_eq!(internal.len(), 5);
+    for err in internal {
+        let wire = err.code().to_wire();
+        assert!(!wire.is_internal_only(), "{:?}", err.code());
+        assert_eq!(wire.to_wire(), wire);
+        let envelope = err.to_envelope();
+        assert_eq!(envelope.error.code, wire);
+        assert_ne!(envelope.error.code, err.code());
+        assert_eq!(envelope.error.message, wire.client_message());
+        assert_eq!(err.http_status(), wire.http_status());
+    }
+}
+
+#[test]
 fn account_locked_details_carry_retry_after_in_camel_case() {
     // The lockout/throttle details must surface `retryAfterSeconds` (camelCase) so a
     // client can read the cooldown alongside the `Retry-After` header.

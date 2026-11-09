@@ -570,7 +570,14 @@ pub enum AuthError {
 }
 
 impl AuthError {
-    /// The stable [`AuthErrorCode`] for this error (before any wire remap).
+    /// The stable [`AuthErrorCode`] for this error, **before** any wire remap.
+    ///
+    /// Five codes are internal-only (the three token sentinels and the two OTP ones) and tell a
+    /// caller what the wire must not: an expired token from a revoked one, an absent OTP record
+    /// from a wrong code. A host that renders or serialises errors itself must therefore use
+    /// `error.code().to_wire()`, or [`AuthError::to_envelope`] / [`AuthError::http_status`] /
+    /// [`AuthError::client_message`], which resolve the wire code for it. Serialising
+    /// `error.code()` directly gives back the distinction the collapse removes.
     #[must_use]
     pub fn code(&self) -> AuthErrorCode {
         match self {
