@@ -11,7 +11,7 @@ use serde_json::Value;
 use super::tests::build;
 use super::{
     MFA_TRANSITION_LOCK_TOKEN_BYTES, MFA_TRANSITION_LOCK_TTL_SECONDS,
-    RECOVERY_CODE_CLAIM_TTL_SECONDS,
+    RECOVERY_CODE_CLAIM_TTL_SECONDS, verify_recovery_code,
 };
 use crate::services::{to_hex, user_subject};
 
@@ -109,4 +109,58 @@ fn the_lock_and_claim_keys_are_derived_as_the_contract_spells_them() -> Result<(
         );
     }
     Ok(())
+}
+
+/// Digests nest-auth's own `digestRecoveryCode` and `generateRecoveryCodes` produced under the
+/// contract's derived identifier key (`hmacKeyDerivation.vectors[0].derivedKeyHex`). They are
+/// the stored form of a recovery code, so a record written by the TypeScript side verifies here
+/// only if this side keys, encodes and compares the same way.
+const NEST_KEY_HEX: &str = "0dd66555bd2d89e0eb4ce050f1fef427bea6799bec27fb8e313f69ab965048c1";
+const NEST_CODE: &str = "ABCD-0123-4567-89AB-CDEF-0123";
+const NEST_CODE_DIGEST: &str = "0ad5f5013c492bb1c11863d01e120b066c20210b4a6604d6ddb6ca01a2e6cd51";
+const NEST_MINTED: [(&str, &str); 2] = [
+    (
+        "6322-8B85-4CA6-129F-26EA-70D8",
+        "c96df4f6481be59d7ebf93f3e13b94c4b8cc2779815529956fb4b7344bf3132e",
+    ),
+    (
+        "44D2-3F65-0227-BD53-1996-A90F",
+        "55a20853ae1d99202b62be9f4c8d13f7927daeaca499a5e2cad427e6de986ee1",
+    ),
+];
+
+fn digest_under_nest_key(code: &str) -> String {
+    to_hex(&bymax_auth_crypto::mac::hmac_sha256(
+        NEST_KEY_HEX.as_bytes(),
+        code.as_bytes(),
+    ))
+}
+
+#[test]
+fn the_contract_vector_key_is_the_one_nest_keyed_its_recovery_digests_with() {
+    let vector = &section("hmacKeyDerivation")["vectors"][0];
+    assert_eq!(vector["derivedKeyHex"].as_str(), Some(NEST_KEY_HEX));
+}
+
+#[test]
+fn a_recovery_digest_nest_wrote_is_the_one_this_side_computes() {
+    assert_eq!(digest_under_nest_key(NEST_CODE), NEST_CODE_DIGEST);
+    for (code, digest) in NEST_MINTED {
+        assert_eq!(digest_under_nest_key(code), digest);
+    }
+}
+
+#[test]
+fn a_record_nest_wrote_verifies_in_the_position_the_code_was_stored() {
+    let stored: Vec<String> = NEST_MINTED.iter().map(|(_, d)| (*d).to_owned()).collect();
+    for (index, (code, _)) in NEST_MINTED.iter().enumerate() {
+        assert_eq!(
+            verify_recovery_code(&stored, &[digest_under_nest_key(code)]),
+            Some(index)
+        );
+    }
+    assert_eq!(
+        verify_recovery_code(&stored, &[digest_under_nest_key(NEST_CODE)]),
+        None
+    );
 }
