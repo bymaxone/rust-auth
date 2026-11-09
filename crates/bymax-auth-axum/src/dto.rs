@@ -34,6 +34,8 @@ fn no_control_characters(value: &str, _: &()) -> garde::Result {
 }
 
 mod code_formats;
+#[cfg(test)]
+mod openapi_parity_tests;
 mod text_rules;
 
 /// `POST /auth/register` body.
