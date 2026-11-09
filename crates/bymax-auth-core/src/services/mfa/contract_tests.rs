@@ -129,11 +129,13 @@ const NEST_MINTED: [(&str, &str); 2] = [
     ),
 ];
 
-fn digest_under_nest_key(code: &str) -> String {
-    to_hex(&bymax_auth_crypto::mac::hmac_sha256(
-        NEST_KEY_HEX.as_bytes(),
-        code.as_bytes(),
-    ))
+/// The engine built by the harness holds the identifier key derived from the vector's secret,
+/// which is what a record nest-auth wrote was keyed with.
+fn production_candidates(code: &str) -> Result<Vec<String>, String> {
+    let h = build(true, false).ok_or("harness")?;
+    let mfa = h.engine.mfa().ok_or("mfa service")?;
+    assert_eq!(mfa.identifier_key.as_ref(), NEST_KEY_HEX.as_bytes());
+    Ok(mfa.recovery_code_candidates(code))
 }
 
 #[test]
@@ -143,24 +145,28 @@ fn the_contract_vector_key_is_the_one_nest_keyed_its_recovery_digests_with() {
 }
 
 #[test]
-fn a_recovery_digest_nest_wrote_is_the_one_this_side_computes() {
-    assert_eq!(digest_under_nest_key(NEST_CODE), NEST_CODE_DIGEST);
+fn the_engine_hashes_a_recovery_code_to_the_digest_nest_wrote() -> Result<(), String> {
+    let h = build(true, false).ok_or("harness")?;
+    let mfa = h.engine.mfa().ok_or("mfa service")?;
+    assert_eq!(mfa.hash_recovery_code(NEST_CODE), NEST_CODE_DIGEST);
     for (code, digest) in NEST_MINTED {
-        assert_eq!(digest_under_nest_key(code), digest);
+        assert_eq!(mfa.hash_recovery_code(code), digest);
     }
+    Ok(())
 }
 
 #[test]
-fn a_record_nest_wrote_verifies_in_the_position_the_code_was_stored() {
+fn a_record_nest_wrote_verifies_through_the_engines_own_candidates() -> Result<(), String> {
     let stored: Vec<String> = NEST_MINTED.iter().map(|(_, d)| (*d).to_owned()).collect();
     for (index, (code, _)) in NEST_MINTED.iter().enumerate() {
         assert_eq!(
-            verify_recovery_code(&stored, &[digest_under_nest_key(code)]),
+            verify_recovery_code(&stored, &production_candidates(code)?),
             Some(index)
         );
     }
     assert_eq!(
-        verify_recovery_code(&stored, &[digest_under_nest_key(NEST_CODE)]),
+        verify_recovery_code(&stored, &production_candidates(NEST_CODE)?),
         None
     );
+    Ok(())
 }
