@@ -16,14 +16,14 @@ exist on their registries, and the workspace and npm versions are still `0.0.0`.
 
 | Artefact | Registry | Notes |
 | --- | --- | --- |
-| `bymax-auth` (facade) + the internal `bymax-auth-*` crates | **crates.io** | eight crates; `cargo publish --workspace` orders them from the dependency graph |
+| `bymax-auth` (facade) + the internal `bymax-auth-*` crates | **crates.io** | `cargo publish --workspace` orders them from the dependency graph |
 | `@bymax-one/rust-auth` | **npm** | bundles the compiled WASM edge verifier |
 | `bymax-auth-wasm` | **neither** | `publish = false`; a build artefact compiled into the npm package |
 
 The workspace version (`[workspace.package]` in `Cargo.toml`), every publishable
 crate, every internal `=x.y.z` pin and `packages/rust-auth/package.json` carry one
 number. `scripts/check-release-versions.sh` proves it, and CI runs it on every
-push (job `release versions`), so a drifted pin is a red check long before a tag.
+pull request and push to `main` (job `release versions`), so a drifted pin is a red check long before a tag.
 
 ---
 
@@ -79,7 +79,7 @@ they are, that part of the specification describes intent, not behaviour.
    environment creates it unprotected on first use, and a pushed tag publishes
    with no approval step.
 2. **Publish the first version of every crate by hand.** crates.io can attach a
-   Trusted Publisher only to a crate that already exists, and none of the eight
+   Trusted Publisher only to a crate that already exists, and none of them
    does. Publish them in dependency order from a maintainer's machine, then
    configure `bymaxone/rust-auth` + workflow `release.yml` + environment
    `crates-io-publish` as the Trusted Publisher of each crate.
