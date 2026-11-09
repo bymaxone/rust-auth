@@ -7082,10 +7082,8 @@ guard nest-auth uses on its `npm-publish` environment.
 > an `attw` type-resolution check, and the GitHub Release with notes from `CHANGELOG.md`.
 > **Not implemented:** Job D (SBOM and artefact attestations), the attestation steps of
 > Jobs A and B, the `cargo-geiger` report, the in-workflow re-run of the `ci` gate, the
-> in-workflow mutation gate (the sweep is run by hand on the tagged SHA), the `ts-rs`
-> staleness check inside the release (it runs in `ci`), and `release-plz` (the workflow
-> uses `cargo publish --workspace`). The protected Environments it names,
-> `crates-io-publish` and `npm-publish`, still have to be created in the repository.
+> in-workflow mutation gate, the `ts-rs` staleness check inside the release, and
+> `release-plz` (the workflow uses `cargo publish --workspace`).
 
 **Pre-publish validation (shared first job):**
 
