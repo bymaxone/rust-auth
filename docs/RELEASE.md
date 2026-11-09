@@ -1,145 +1,122 @@
-# Release process (deferred)
+# Release process
 
-This document describes the **publish/release pipeline** for `rust-auth` and the
-**one-time setup** a maintainer must perform before the first tagged release can
-publish the 1.0 to crates.io and npm.
+This document describes what `.github/workflows/release.yml` does today, what it
+does **not** do, and what a maintainer must do by hand around it. It is written
+against that workflow file; where the two disagree, the workflow is the behaviour
+and this file is wrong.
 
-> **Status: the publish pipeline is intentionally not yet active.** The
-> documentation, the official `examples/`, the extra CI quality and security
-> gates, the dogfood smokes, and the browser end-to-end suite are all in place and
-> green. The **registry-publishing** half of the pipeline — OIDC Trusted
-> Publishing to crates.io and npm, the `release` workflow itself, the published
-> SBOM/attestations tied to a real publish, the protected GitHub Environment, and
-> any actual `cargo publish` / `npm publish` — is **deferred to a future release
-> phase**. Nothing in this repository performs a registry publish today. This file
-> is the blueprint for wiring it up when that phase begins.
-
-The design follows `docs/technical_specification.md` § 21.5 (release workflow),
-§ 21.7 (required repo files), and § 21.10 (the complete supply-chain provenance
-set). It is described here so the future implementation has an exact contract to
-build against, and so a reader understands why the publish step does not yet
-exist.
+Nothing has been published yet. Neither the crates nor `@bymax-one/rust-auth`
+exist on their registries, and the workspace and npm versions are still `0.0.0`.
 
 ---
 
 ## What ships, and where
 
-`rust-auth` is a **dual-registry** product:
+`rust-auth` is a **dual-registry** product with one version:
 
 | Artefact | Registry | Notes |
 | --- | --- | --- |
-| `bymax-auth` (facade) + the internal `bymax-auth-*` crates | **crates.io** | published in leaf-first DAG order, facade last |
+| `bymax-auth` (facade) + the internal `bymax-auth-*` crates | **crates.io** | eight crates; `cargo publish --workspace` orders them from the dependency graph |
 | `@bymax-one/rust-auth` | **npm** | bundles the compiled WASM edge verifier |
-| `bymax-auth-wasm` | **neither** | a `cdylib` build artefact, compiled **into** the npm package — never a crates.io crate |
+| `bymax-auth-wasm` | **neither** | `publish = false`; a build artefact compiled into the npm package |
 
-The crate version (facade `Cargo.toml`) and the npm version (`package.json`) move
-in **lockstep**; the tag drives both.
-
----
-
-## One-time maintainer setup (the deferred prerequisites)
-
-Before the first publish can run, a maintainer with org-admin rights must
-configure the following. **None of this is wired today — it is the work the
-deferred release phase unblocks.**
-
-1. **crates.io OIDC Trusted Publishing.** On crates.io, add this repository
-   (`bymaxone/rust-auth`) and the `release` workflow as a **Trusted Publisher**
-   for each published crate (`bymax-auth-types`, `bymax-auth-jwt`,
-   `bymax-auth-crypto`, `bymax-auth-redis`, `bymax-auth-client`, `bymax-auth-core`,
-   `bymax-auth-axum`, `bymax-auth`). This lets the workflow exchange its GitHub
-   OIDC token for a short-lived crates.io credential — **no `CARGO_REGISTRY_TOKEN`
-   secret is ever stored**.
-
-2. **npm OIDC Trusted Publishing.** On npm, configure the `@bymax-one/rust-auth`
-   package with this repository + the `release` workflow as a Trusted Publisher so
-   `npm publish --provenance` runs against a short-lived, identity-bound credential
-   — **no `NPM_TOKEN` secret**.
-
-3. **A protected GitHub Environment** (e.g. `release`) with **required reviewers**
-   (manual approval) and, ideally, a branch/tag restriction. The publishing jobs
-   reference this environment so an accidental tag cannot publish unattended.
-
-4. **Repository settings** confirmed: branch protection on `main`, the
-   `id-token: write` + `attestations: write` permissions available to the workflow,
-   and Artifact Attestations enabled for the org.
-
-5. **The tag ↔ version contract.** A release is cut by pushing a `v<MAJOR>.<MINOR>.<PATCH>`
-   tag whose version **exactly matches** the facade crate version and the npm
-   package version. The pre-publish job asserts this and aborts on mismatch.
+The workspace version (`[workspace.package]` in `Cargo.toml`), every publishable
+crate, every internal `=x.y.z` pin and `packages/rust-auth/package.json` carry one
+number. `scripts/check-release-versions.sh` proves it, and CI runs it on every
+push (job `release versions`), so a drifted pin is a red check long before a tag.
 
 ---
 
-## The `release` workflow (to be added)
+## What the `release` workflow does
 
-Tag-driven (`v*.*.*`) plus `workflow_dispatch`, with
-`concurrency: { group: release, cancel-in-progress: false }` (a release is
-destructive and one-at-a-time) and workflow-level `permissions: contents: read`.
-Each job widens only the scope it needs.
+Triggered by a `v*.*.*` tag push, or by `workflow_dispatch`. One run at a time
+(`concurrency: release`, no cancellation). Workflow-level permissions are
+`contents: read`; each job widens only what it needs.
 
-**Pre-publish validation (shared first job)**
+1. **`verify`** — runs `scripts/check-release-versions.sh "$GITHUB_REF_NAME"`
+   (tag = workspace version = every crate = every pin = npm version), then
+   `cargo publish --workspace --dry-run`, which packages every crate and rebuilds
+   it from its tarball.
+2. **`crates`** (needs `verify`) — environment `crates-io-publish`; exchanges the
+   job's OIDC token for a short-lived crates.io credential
+   (`rust-lang/crates-io-auth-action`) and runs `cargo publish --workspace --no-verify`.
+3. **`npm`** (needs `crates`) — environment `npm-publish`; builds the WASM and the
+   ESM + CJS bundles, runs `attw` (`check:exports`) and the Vitest suite with
+   coverage, then `npm publish --provenance --access public` (OIDC, no `NPM_TOKEN`).
+4. **`release`** (needs `crates` and `npm`) — creates the GitHub Release, using the
+   tag's `CHANGELOG.md` section as the body. The notes travel in an environment
+   variable, never through `${{ }}` interpolation.
 
-- **Tag ↔ version match** — `${GITHUB_REF_NAME#v}` must equal the facade
-  `Cargo.toml` version and the `package.json` version.
-- **Full verify** — rerun the `ci` gate (fmt / clippy / build / 100 % coverage /
-  doctests / supply-chain) on the tagged SHA.
-- **Mutation gate** — `cargo-mutants` over the logic crates must meet the agreed
-  near-100 % floor. It runs automatically post-merge on `main` via the shared
-  reusable (`bymaxone/.github` → `rust-ci.yml`), and on demand via `workflow_dispatch`;
-  run it locally with `cargo mutants --all-features` before tagging.
-- **Dogfood smokes** — the crate Axum smoke and the npm Next.js smoke
-  (`examples/smoke-crate`, `examples/smoke-npm`) must pass against the
-  to-be-published artefacts. A smoke failure blocks the tag.
+If `crates` succeeds and `npm` fails, the crates are already published and cannot
+be unpublished: both registries are append-only, so the fix is a new version.
 
-**Job A — crates.io publish (`id-token: write`, `contents: read`).** Ordered,
-leaf-first publish of `crates/*` **only** via crates.io OIDC Trusted Publishing
-(`release-plz` preferred, `cargo-release` as the alternative). Order:
+### What it does not do
 
-1. `bymax-auth-types`
-2. `bymax-auth-jwt`, `bymax-auth-crypto`
-3. `bymax-auth-redis`, `bymax-auth-client`
-4. `bymax-auth-core`
-5. `bymax-auth-axum`
-6. `bymax-auth` (facade) last
+State this plainly when deciding whether a tag is a release:
 
-`bymax-auth-wasm` is **not** in this order. Each `.crate` tarball receives a
-GitHub Artifact Attestation.
+- **No SBOM.** No CycloneDX document is generated or attached to the release.
+- **No artefact attestations.** Nothing runs `actions/attest-build-provenance`, so
+  `gh attestation verify` has nothing to verify. The only provenance is the one
+  `npm publish --provenance` attaches to the npm package; the crates carry none.
+- **No `cargo-geiger` report.**
+- **No re-run of the quality gates.** `release.yml` does not run the `ci` jobs,
+  the dogfood smokes or the mutation sweep. It trusts that the tagged commit was
+  green in `ci`; the tagger has to check that.
+- **No mutation gate.** The release floor is zero missed mutants, and it is
+  measured by hand (below), not enforced by the workflow.
 
-**Job B — npm publish (`id-token: write`, `contents: read`).**
-`wasm-pack build … --target bundler --release` → bundle into `wasm/`; run the
-`ts-rs` staleness gate; build + assert ESM + CJS + `.d.ts` per subpath;
-`npm publish --provenance` via npm OIDC. Attest the npm tarball.
-
-**Job C — GitHub Release (`contents: write`).** Extract the tag's `CHANGELOG.md`
-section and `gh release create`, passing the notes via an **environment variable
-(never `${{ }}` interpolation)** to close the shell-injection vector. Upload the
-SBOM + attestation bundle as release assets.
-
-**Job D — SBOM + attestation (`id-token: write`, `attestations: write`,
-`contents: read`).** Generate a CycloneDX SBOM for the crate graph, the npm
-package, and the WASM artefact; emit GitHub Artifact Attestations binding
-provenance to the crate tarball(s), the npm tarball, `*_bg.wasm`, and the SBOM
-itself (verifiable downstream with `gh attestation verify`); run a **non-blocking**
-`cargo-geiger` transitive-`unsafe` report.
-
-**Fail-fast.** A failure in type generation (`ts-rs`), the WASM build
-(`wasm-pack`), SBOM generation, the advisory audit (`cargo-audit`), or **any**
-artefact attestation aborts the release with **nothing published**.
-
-**WASM-only security-patch policy.** The compiled `.wasm` ships inside the npm
-artefact, so a security fix touching **only** the WASM edge-verification path —
-even with no change to any TS source — still **triggers an npm patch release** so
-consumers receive the rebuilt binary. `release-plz` bumps the affected crate and
-the npm package together; the tag ↔ version gate keeps them in lockstep.
+`docs/technical_specification.md` §21.5 and §21.10 describe the SBOM and
+attestation jobs as part of the release pipeline. They are not implemented; until
+they are, that part of the specification describes intent, not behaviour.
 
 ---
 
-## Supply-chain provenance (the complete set)
+## One-time maintainer setup (not yet done)
 
-Every layer below is required at release time. The per-PR layers
-(`cargo-deny` / `cargo-vet` / `cargo-audit` / dependency budget) are already wired
-in `ci`; the **release-time** layers (SBOM, attestations, OIDC publishing,
-`cargo-geiger`) are what the deferred `release` workflow adds.
+1. **Create the two GitHub Environments** the workflow names:
+   `crates-io-publish` and `npm-publish`, each with required reviewers. They do
+   not exist in the repository today. Until they do, a job that names an
+   environment creates it unprotected on first use, and a pushed tag publishes
+   with no approval step.
+2. **Publish the first version of every crate by hand.** crates.io can attach a
+   Trusted Publisher only to a crate that already exists, and none of the eight
+   does. Publish them in dependency order from a maintainer's machine, then
+   configure `bymaxone/rust-auth` + workflow `release.yml` + environment
+   `crates-io-publish` as the Trusted Publisher of each crate.
+3. **Publish the first version of `@bymax-one/rust-auth` by hand**, for the same
+   reason, then configure its npm Trusted Publisher the same way
+   (environment `npm-publish`).
+4. Confirm branch protection on `main`.
+
+After steps 2 and 3 the first publish has happened outside the workflow; the
+workflow's `crates` and `npm` jobs publish every later version.
+
+---
+
+## Cutting a release
+
+1. Land every change on `main` through pull requests; `ci` is green.
+2. Move the `Unreleased` items of `CHANGELOG.md` under a `## [X.Y.Z]` heading
+   (the release job finds its notes by that heading).
+3. Bump the workspace version, the internal `=x.y.z` pins and
+   `packages/rust-auth/package.json` together, in one pull request.
+   `scripts/check-release-versions.sh` must pass.
+4. Run the full mutation sweep (`mutation-sweep` workflow, dispatched on the merge
+   commit of step 3) and require every shard to have tested exactly what it was
+   assigned, with zero missed. The receipt must name the SHA that gets tagged.
+5. Tag that same commit and push the tag: `git tag vX.Y.Z <sha>`, then push
+   `vX.Y.Z` to `origin`.
+6. Approve the `crates-io-publish` and `npm-publish` environments when prompted.
+7. Check the result: the crates on crates.io, the package and its provenance on
+   npm, and the GitHub Release body.
+
+`workflow_dispatch` resumes an interrupted release only when it is run with the
+**tag** selected as the ref. Run on a branch, `GITHUB_REF_NAME` is the branch name
+and `verify` fails the tag check.
+
+---
+
+## Supply-chain controls
 
 | Control | Tool / mechanism | When | Status |
 | --- | --- | --- | --- |
@@ -148,29 +125,11 @@ in `ci`; the **release-time** layers (SBOM, attestations, OIDC publishing,
 | Dependency audit ledger | `cargo-vet` | per-PR | active (`ci`) |
 | Dependency budget | `cargo tree` count gate | per-PR | active (`ci`) |
 | Pinned graph | committed `Cargo.lock` | always | active |
-| SBOM | CycloneDX | each release | **deferred** (this doc) |
-| Transitive `unsafe` report | `cargo-geiger` | each release | **deferred** (this doc) |
-| Build provenance | GitHub Artifact Attestations (Sigstore) | each release | **deferred** (this doc) |
-| Registry trust | crates.io + npm OIDC Trusted Publishing | each release | **deferred** (this doc) |
+| Version coherence | `scripts/check-release-versions.sh` | per-PR + release | active (`ci`, `release`) |
+| Public API / SemVer | `cargo public-api` + `cargo-semver-checks` | per-PR | active (`ci`) |
+| Registry trust | crates.io + npm OIDC Trusted Publishing | each release | wired in `release.yml`; needs the setup above |
+| npm provenance | `npm publish --provenance` | each release | wired in `release.yml` |
 | Posture transparency | OpenSSF Scorecard | push-to-`main` + weekly | active (`scorecard`) |
-
-When the deferred half lands, a downstream consumer can answer two questions
-cryptographically: **what** is inside a release (SBOM) and **that** it was built by
-this repository's release workflow and not substituted (attestations + OIDC).
-
----
-
-## Cutting a release (once the pipeline is active)
-
-1. Land all changes on `main` through PRs; CI is green.
-2. Update `CHANGELOG.md` (move `Unreleased` items under the new version section).
-3. Bump the facade crate version and the npm `package.json` version together.
-4. Tag: `git tag v<X.Y.Z> && git push origin v<X.Y.Z>`.
-5. Approve the protected `release` environment when prompted.
-6. The workflow validates, publishes crates.io (leaf-first) and npm (with
-   provenance), emits the SBOM + attestations, and creates the GitHub Release.
-7. Verify with `gh attestation verify` against the published artefacts.
-
-Until this pipeline is implemented and the prerequisites above are configured,
-**no release is published** — the crates and the npm package remain unpublished by
-design.
+| SBOM | CycloneDX | each release | **absent** |
+| Artefact attestations | GitHub Artifact Attestations | each release | **absent** |
+| Transitive `unsafe` report | `cargo-geiger` | each release | **absent** |
