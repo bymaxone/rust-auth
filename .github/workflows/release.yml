@@ -192,10 +192,17 @@ jobs:
               # otherwise match any character — `1.1.0` would accept `1x1y0`.
               if (index($0, "[" ver "]") > 0) { found=1; next }
             }
+            found && /^\[[^]]+\]: / { exit }
             found { print }
           ' CHANGELOG.md)
           if [ -z "$NOTES" ]; then
             NOTES="See [CHANGELOG.md](./CHANGELOG.md) for details."
+          fi
+          # A release body is capped at 125000 characters, and `gh release create` fails
+          # past it. This job runs after both registries were published, so a refusal here
+          # would leave a published version with no release; point at the changelog instead.
+          if [ "${#NOTES}" -gt 120000 ]; then
+            NOTES="The notes for $VERSION are longer than a release body can hold. They are the [$VERSION] section of [CHANGELOG.md](https://github.com/${GITHUB_REPOSITORY}/blob/${GITHUB_REF_NAME}/CHANGELOG.md)."
           fi
           {
             echo 'notes<<EOF'

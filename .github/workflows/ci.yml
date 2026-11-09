@@ -400,12 +400,11 @@ jobs:
             echo "::endgroup::"
           done
       - name: SemVer compatibility check
-        # Non-blocking until the first publish: cargo-semver-checks diffs the current
-        # API against a baseline from crates.io, and nothing is published yet (the
-        # release pipeline is deferred — see docs/RELEASE.md), so there is no baseline
-        # to diff against. We still build the rustdoc and surface any findings as an
-        # informational log. Once the first version is published this becomes a hard
-        # gate: drop `continue-on-error` so a SemVer-breaking change fails the build.
+        # Informational: cargo-semver-checks diffs the current API against a baseline from
+        # crates.io, and no version of these crates is on crates.io until the first publish,
+        # so there is nothing to diff against. The rustdoc is still built and any finding is
+        # logged. Once a version is published, drop `continue-on-error` so a SemVer-breaking
+        # change fails the build.
         continue-on-error: true
         env:
           RUSTFLAGS: ""

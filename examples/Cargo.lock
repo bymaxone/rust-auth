@@ -359,7 +359,7 @@ checksum = "72f5acc6cb2ba439de613abc23857ec3d78374d8ed5ac84e9d11336e87da8649"
 
 [[package]]
 name = "bymax-auth-axum"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "axum",
  "bymax-auth-core",
@@ -381,7 +381,7 @@ dependencies = [
 
 [[package]]
 name = "bymax-auth-client"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "bymax-auth-types",
  "reqwest",
@@ -393,7 +393,7 @@ dependencies = [
 
 [[package]]
 name = "bymax-auth-core"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "async-trait",
  "base64",
@@ -413,7 +413,7 @@ dependencies = [
 
 [[package]]
 name = "bymax-auth-crypto"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "aes-gcm",
  "data-encoding",
@@ -431,7 +431,7 @@ dependencies = [
 
 [[package]]
 name = "bymax-auth-jwt"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "base64",
  "bymax-auth-crypto",
@@ -444,7 +444,7 @@ dependencies = [
 
 [[package]]
 name = "bymax-auth-redis"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "async-trait",
  "bymax-auth-core",
@@ -460,7 +460,7 @@ dependencies = [
 
 [[package]]
 name = "bymax-auth-types"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "serde",
  "serde_json",

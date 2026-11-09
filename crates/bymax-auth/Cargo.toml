@@ -68,8 +68,8 @@ rustdoc-args = ["--cfg", "docsrs"]
 workspace = true
 
 [dependencies]
-bymax-auth-core = { path = "../bymax-auth-core", version = "0.0.0" }
-bymax-auth-types = { path = "../bymax-auth-types", version = "0.0.0" }
-bymax-auth-redis = { path = "../bymax-auth-redis", version = "0.0.0", optional = true }
-bymax-auth-axum = { path = "../bymax-auth-axum", version = "0.0.0", optional = true }
-bymax-auth-client = { path = "../bymax-auth-client", version = "0.0.0", optional = true }
+bymax-auth-core = { path = "../bymax-auth-core", version = "0.1.0" }
+bymax-auth-types = { path = "../bymax-auth-types", version = "0.1.0" }
+bymax-auth-redis = { path = "../bymax-auth-redis", version = "0.1.0", optional = true }
+bymax-auth-axum = { path = "../bymax-auth-axum", version = "0.1.0", optional = true }
+bymax-auth-client = { path = "../bymax-auth-client", version = "0.1.0", optional = true }
