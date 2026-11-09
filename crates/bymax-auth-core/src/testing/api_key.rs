@@ -65,16 +65,21 @@ impl InMemoryApiKeyRepository {
     }
 
     fn check(&self) -> Result<(), RepositoryError> {
-        let spent = self.allowed.load(Ordering::SeqCst) == 0;
-        if self.failing.load(Ordering::SeqCst) || spent {
+        // Refusing a spent budget and counting a positive one down are ONE atomic update, so two
+        // callers cannot both take the last call. A negative budget is "no limit" and is left
+        // alone. A switched-off store refuses first, without spending the budget.
+        let refused = self.failing.load(Ordering::SeqCst)
+            || self
+                .allowed
+                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| match n.cmp(&0) {
+                    std::cmp::Ordering::Equal => None,
+                    std::cmp::Ordering::Greater => Some(n - 1),
+                    std::cmp::Ordering::Less => Some(n),
+                })
+                .is_err();
+        if refused {
             return Err(RepositoryError::Backend("api key store unavailable".into()));
         }
-        // A negative budget is "no limit"; a positive one counts a call down.
-        let _ = self
-            .allowed
-            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| {
-                (n > 0).then(|| n - 1)
-            });
         Ok(())
     }
 
