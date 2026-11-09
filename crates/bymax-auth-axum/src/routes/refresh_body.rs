@@ -59,16 +59,26 @@ pub(crate) fn parse_refresh_body(
     }
     match object.get("refreshToken") {
         None | Some(Value::Null) => Ok(None),
-        Some(Value::String(token)) if (1..=MAX_TOKEN_CHARS).contains(&token.chars().count()) => {
-            Ok(Some(token.clone()))
-        }
-        Some(_) => Err(BodyRejection::from(AuthError::Validation {
-            details: vec![FieldError {
-                field: "refreshToken".to_owned(),
-                message: TOKEN_MESSAGE.to_owned(),
-            }],
-        })),
+        Some(Value::String(token)) if within_bounds(token) => Ok(Some(token.clone())),
+        Some(_) => Err(out_of_bounds()),
     }
+}
+
+/// Whether `token` is a string of 1 to 2048 characters, the bound every channel holds a refresh
+/// token to.
+pub(crate) fn within_bounds(token: &str) -> bool {
+    (1..=MAX_TOKEN_CHARS).contains(&token.chars().count())
+}
+
+/// The refusal for a refresh token outside the bounds: `auth.validation` naming `refreshToken`,
+/// repeating no part of the value.
+pub(crate) fn out_of_bounds() -> BodyRejection {
+    BodyRejection::from(AuthError::Validation {
+        details: vec![FieldError {
+            field: "refreshToken".to_owned(),
+            message: TOKEN_MESSAGE.to_owned(),
+        }],
+    })
 }
 
 #[cfg(test)]

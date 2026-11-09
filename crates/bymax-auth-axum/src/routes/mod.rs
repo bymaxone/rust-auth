@@ -39,7 +39,9 @@ use tower_cookies::Cookies;
 
 use crate::client_ip::ResolvedClientIp;
 use crate::extractors::source_access_token;
+use crate::routes::refresh_body::{out_of_bounds, within_bounds};
 use crate::state::AuthState;
+use crate::transport::BodyRejection;
 
 /// The set of request headers that must never enter a `RequestContext`'s sanitized map.
 /// Lowercased to match the normalized header keys. This is the single source of truth for
@@ -174,6 +176,16 @@ fn sanitize_headers(parts: &Parts) -> BTreeMap<String, String> {
     map
 }
 
+/// What a refresh cookie longer than the bound is treated as.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum OversizeCookie {
+    /// Refused as `auth.validation` naming `refreshToken`, before anything is looked up.
+    Refuse,
+    /// Treated as absent. Logout uses this: a cookie planted by a sibling subdomain must not
+    /// stop the user from signing out.
+    Ignore,
+}
+
 /// Read the refresh token for a refresh/logout flow from the channel the delivery mode names:
 /// the refresh cookie in `cookie` mode, the body in `bearer` mode, and the cookie first and then
 /// the body in `both`. Never a query string. Returns an empty string when the channel carries
@@ -182,29 +194,48 @@ fn sanitize_headers(parts: &Parts) -> BTreeMap<String, String> {
 /// A mode reads exactly its own channel. A token on the other one is a token the deployment
 /// never issued there, and accepting it lets a script-supplied body value stand in for the
 /// cookie, or a stray cookie for the body.
+///
+/// An empty cookie is no token. A cookie longer than 2048 characters is handled as `oversize`
+/// says; exactly 2048 is a token. The body value is bounded where the body is parsed.
+///
+/// # Errors
+///
+/// `auth.validation` naming `refreshToken` for an oversize cookie under
+/// [`OversizeCookie::Refuse`].
 pub(crate) fn source_refresh_token(
     delivery: TokenDelivery,
     cookies: &Cookies,
     refresh_cookie_name: &str,
     body_value: Option<&str>,
-) -> String {
-    let from_cookie = || {
-        cookies
-            .get(refresh_cookie_name)
-            .map(|cookie| cookie.value().to_owned())
-            .filter(|value| !value.is_empty())
+    oversize: OversizeCookie,
+) -> Result<String, BodyRejection> {
+    let from_cookie = || -> Result<Option<String>, BodyRejection> {
+        let Some(cookie) = cookies.get(refresh_cookie_name) else {
+            return Ok(None);
+        };
+        let value = cookie.value();
+        if value.is_empty() {
+            return Ok(None);
+        }
+        if within_bounds(value) {
+            return Ok(Some(value.to_owned()));
+        }
+        match oversize {
+            OversizeCookie::Refuse => Err(out_of_bounds()),
+            OversizeCookie::Ignore => Ok(None),
+        }
     };
     let from_body = || {
         body_value
             .map(str::to_owned)
             .filter(|value| !value.is_empty())
     };
-    match delivery {
-        TokenDelivery::Cookie => from_cookie(),
+    let token = match delivery {
+        TokenDelivery::Cookie => from_cookie()?,
         TokenDelivery::Bearer => from_body(),
-        TokenDelivery::Both => from_cookie().or_else(from_body),
-    }
-    .unwrap_or_default()
+        TokenDelivery::Both => from_cookie()?.or_else(from_body),
+    };
+    Ok(token.unwrap_or_default())
 }
 
 /// A handler extractor that resolves an owned [`RequestContext`] from the request parts
@@ -328,7 +359,8 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use http::Request;
+    use axum::response::IntoResponse;
+    use http::{Request, StatusCode};
     use tower_cookies::{Cookie, Cookies};
 
     fn parts_with(headers: &[(&'static str, &str)]) -> Parts {
@@ -487,22 +519,42 @@ mod tests {
         jar.add(Cookie::new("refresh_token", "from-cookie"));
         let empty_jar = Cookies::default();
         let body = Some("from-body");
+        let read = |delivery, jar: &Cookies, body| {
+            source_refresh_token(delivery, jar, "refresh_token", body, OversizeCookie::Refuse)
+                .unwrap_or_default()
+        };
         // cookie mode: the cookie, and never the body.
-        let cookie =
-            |jar, body| source_refresh_token(TokenDelivery::Cookie, jar, "refresh_token", body);
-        assert_eq!(cookie(&jar, body), "from-cookie");
-        assert_eq!(cookie(&empty_jar, body), "");
+        assert_eq!(read(TokenDelivery::Cookie, &jar, body), "from-cookie");
+        assert_eq!(read(TokenDelivery::Cookie, &empty_jar, body), "");
         // bearer mode: the body, and never a stray cookie.
-        let bearer =
-            |jar, body| source_refresh_token(TokenDelivery::Bearer, jar, "refresh_token", body);
-        assert_eq!(bearer(&jar, body), "from-body");
-        assert_eq!(bearer(&jar, None), "");
+        assert_eq!(read(TokenDelivery::Bearer, &jar, body), "from-body");
+        assert_eq!(read(TokenDelivery::Bearer, &jar, None), "");
         // both: the cookie first, then the body, then nothing.
-        let both =
-            |jar, body| source_refresh_token(TokenDelivery::Both, jar, "refresh_token", body);
-        assert_eq!(both(&jar, body), "from-cookie");
-        assert_eq!(both(&empty_jar, body), "from-body");
-        assert_eq!(both(&empty_jar, None), "");
+        assert_eq!(read(TokenDelivery::Both, &jar, body), "from-cookie");
+        assert_eq!(read(TokenDelivery::Both, &empty_jar, body), "from-body");
+        assert_eq!(read(TokenDelivery::Both, &empty_jar, None), "");
+    }
+
+    #[test]
+    fn a_cookie_past_the_bound_is_refused_or_ignored_as_the_caller_says() {
+        let at_bound = Cookies::default();
+        at_bound.add(Cookie::new("refresh_token", "x".repeat(2048)));
+        let over = Cookies::default();
+        over.add(Cookie::new("refresh_token", "x".repeat(2049)));
+        let empty = Cookies::default();
+        empty.add(Cookie::new("refresh_token", ""));
+        let read = |jar: &Cookies, body, oversize| {
+            source_refresh_token(TokenDelivery::Both, jar, "refresh_token", body, oversize)
+                .map_err(|rejection| rejection.into_response().status())
+        };
+        let refuse = OversizeCookie::Refuse;
+        let ignore = OversizeCookie::Ignore;
+        assert_eq!(read(&at_bound, None, refuse), Ok("x".repeat(2048)));
+        assert_eq!(read(&over, None, refuse), Err(StatusCode::BAD_REQUEST));
+        assert_eq!(read(&over, Some("b"), refuse), Err(StatusCode::BAD_REQUEST));
+        assert_eq!(read(&over, None, ignore), Ok(String::new()));
+        assert_eq!(read(&over, Some("b"), ignore), Ok("b".to_owned()));
+        assert_eq!(read(&empty, Some("b"), refuse), Ok("b".to_owned()));
     }
 
     #[test]

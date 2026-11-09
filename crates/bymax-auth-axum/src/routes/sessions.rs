@@ -23,7 +23,7 @@ use tower_cookies::Cookies;
 use crate::extractors::{AuthUser, UserStatus};
 use crate::response::error_response;
 use crate::routes::refresh_body::{parse_refresh_body, reads_body};
-use crate::routes::source_refresh_token;
+use crate::routes::{OversizeCookie, source_refresh_token};
 use crate::shared_limit::Throttle;
 use crate::state::{AuthState, AxumAuthConfig};
 use crate::validation::{PathParam, RequestBytes};
@@ -59,12 +59,16 @@ async fn list(
     user: AuthUser,
     cookies: Cookies,
 ) -> Response {
-    let refresh = source_refresh_token(
+    let refresh = match source_refresh_token(
         state.config().delivery,
         &cookies,
         &state.config().cookies.refresh_name,
         None,
-    );
+        OversizeCookie::Refuse,
+    ) {
+        Ok(token) => token,
+        Err(rejection) => return rejection.into_response(),
+    };
     let raw = (!refresh.is_empty()).then_some(refresh.as_str());
     match state
         .engine()
@@ -98,12 +102,16 @@ async fn revoke_all(
         Ok(token) => token,
         Err(rejection) => return rejection.into_response(),
     };
-    let refresh = source_refresh_token(
+    let refresh = match source_refresh_token(
         delivery,
         &cookies,
         &state.config().cookies.refresh_name,
         body_token.as_deref(),
-    );
+        OversizeCookie::Refuse,
+    ) {
+        Ok(token) => token,
+        Err(rejection) => return rejection.into_response(),
+    };
     let raw = (!refresh.is_empty()).then_some(refresh.as_str());
     match state
         .engine()

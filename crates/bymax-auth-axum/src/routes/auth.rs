@@ -19,7 +19,9 @@ use crate::dto::{LoginDto, RegisterDto, ResendVerificationDto, VerifyEmailDto};
 use crate::extractors::AuthUser;
 use crate::response::{anti_enumerating_outcome, error_response};
 use crate::routes::refresh_body::{parse_refresh_body, reads_body};
-use crate::routes::{CookieDomains, PresentedAccessToken, RequestMeta, source_refresh_token};
+use crate::routes::{
+    CookieDomains, OversizeCookie, PresentedAccessToken, RequestMeta, source_refresh_token,
+};
 use crate::shared_limit::Throttle;
 use crate::state::{AuthState, AxumAuthConfig};
 use crate::validation::RequestBytes;
@@ -142,12 +144,17 @@ async fn logout(
         Ok(token) => token,
         Err(rejection) => return rejection.into_response(),
     };
+    // A cookie past the bound is no token here and not an error: a cookie planted by a sibling
+    // subdomain must not stop the user from signing out. The access token is still revoked.
+    // `Ignore` never refuses, so the default is not a swallowed failure.
     let refresh = source_refresh_token(
         delivery,
         &cookies,
         &state.config().cookies.refresh_name,
         body_token.as_deref(),
-    );
+        OversizeCookie::Ignore,
+    )
+    .unwrap_or_default();
     if let Err(error) = state.engine().logout(&access_token, &refresh).await {
         return error_response(&error);
     }
@@ -174,12 +181,16 @@ async fn refresh(
         Ok(token) => token,
         Err(rejection) => return rejection.into_response(),
     };
-    let refresh = source_refresh_token(
+    let refresh = match source_refresh_token(
         delivery,
         &cookies,
         &state.config().cookies.refresh_name,
         body_token.as_deref(),
-    );
+        OversizeCookie::Refuse,
+    ) {
+        Ok(token) => token,
+        Err(rejection) => return rejection.into_response(),
+    };
     let refreshed = match state
         .engine()
         .refresh(&refresh, &ctx.ip, &ctx.user_agent)

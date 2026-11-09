@@ -3397,6 +3397,14 @@ always bearer. A body the mode reads is held to one rule:
 Where the mode reads the cookie (dashboard `cookie` delivery) a value in the body is ignored, but a
 body that is not a JSON object or array is still refused. A refused logout or revoke-all revokes nothing.
 
+The refresh cookie is held to the same bound. An empty cookie is no token and a cookie of exactly 2048
+characters is a token. A longer one is refused as `400` `auth.validation` with a detail on
+`refreshToken`, before anything is looked up. Logout alone treats an oversize cookie as no token: it answers
+`204`, clears the auth cookies, still revokes a presented access token and touches no refresh
+session, because a cookie planted by a sibling subdomain must not stop the user from signing out.
+A body value past the bound on logout is still `400`. Under `both`, an oversize cookie on logout is
+treated as an absent one, so a valid body token still applies.
+
 `POST /auth/sessions/revoke-all` and `POST /auth/password/change` keep the caller's own session
 and end the rest, so they have to know which one it is. A presented token stands for a live
 session of the caller's own account, or, when it rotated away inside its grace window, for the one
