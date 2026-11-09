@@ -22,7 +22,7 @@ use http::{HeaderMap, Request, StatusCode};
 use http_body_util::BodyExt;
 use secrecy::SecretString;
 use time::OffsetDateTime;
-use tower::ServiceExt;
+use tower::{Layer, Service, ServiceExt};
 
 use crate::api_key::{
     ApiKeyScopesLayer, CurrentApiKey, require_api_key_scopes, spawn_api_key_flush,
@@ -383,6 +383,56 @@ async fn a_guard_declaring_a_scope_outside_the_vocabulary_is_refused_at_startup(
     ));
     // The empty list stays the documented fail-closed layer, not a startup error.
     assert!(require_api_key_scopes(&h.state, &[]).is_ok());
+    Ok(())
+}
+
+/// An inner service that is not ready on its first poll, so a wrapper that does not forward
+/// readiness is distinguishable from one that does.
+#[derive(Clone, Default)]
+struct ReadyOnSecondPoll {
+    polled: Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl Service<Request<Body>> for ReadyOnSecondPoll {
+    type Response = axum::response::Response;
+    type Error = std::convert::Infallible;
+    type Future = std::future::Ready<Result<Self::Response, Self::Error>>;
+
+    fn poll_ready(
+        &mut self,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Result<(), Self::Error>> {
+        if self.polled.swap(true, std::sync::atomic::Ordering::SeqCst) {
+            return std::task::Poll::Ready(Ok(()));
+        }
+        cx.waker().wake_by_ref();
+        std::task::Poll::Pending
+    }
+
+    fn call(&mut self, _request: Request<Body>) -> Self::Future {
+        std::future::ready(Ok(axum::response::Response::default()))
+    }
+}
+
+#[tokio::test]
+async fn the_guard_is_ready_only_when_the_service_it_wraps_is_ready() -> TestResult {
+    let h = harness(|_| {})?;
+    let inner = ReadyOnSecondPoll::default();
+    let mut guarded = require_api_key_scopes(&h.state, &["reports:read"])?.layer(inner.clone());
+    let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
+
+    // Tower's contract: a wrapper reports ready only once the service it wraps does, or a
+    // request is dispatched into a service that has no capacity for it.
+    assert!(guarded.poll_ready(&mut cx).is_pending());
+    assert!(guarded.poll_ready(&mut cx).is_ready());
+    // The inner service answers once called; the guard's own refusal path is covered above.
+    assert!(
+        inner
+            .clone()
+            .call(Request::new(Body::empty()))
+            .await
+            .is_ok()
+    );
     Ok(())
 }
 

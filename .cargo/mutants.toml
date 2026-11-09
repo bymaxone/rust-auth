@@ -155,6 +155,13 @@ cap_lints = true
 #     ordinarily distinct ticks, and a test cannot make them equal). A TTL that has already run
 #     out is killed by `an_entry_stops_answering_when_its_ttl_has_run_out`. The pattern is
 #     narrow to this one function and operator.
+# 15. `replace < with <= in LastUsed::record` — the slot is overwritten when it holds an instant
+#     strictly older than `at`; `<=` also overwrites when they are equal, which stores the
+#     instant it already holds.
+# 16. `replace < with <= in <impl ApiKeyRepository for InMemoryApiKeyRepository>::touch_last_used` —
+#     the same shape as 15: on equal instants the row is rewritten with the instant it holds. The
+#     `< with ==` mutant of that line is NOT equivalent (a later instant would never be stored) and
+#     is killed by `last_used_advances_to_a_later_instant`.
 exclude_re = [
     'replace \| with \^ in new_uuid_v4',
     'replace AuthEngine::builder -> AuthEngineBuilder with Default::default\(\)',
@@ -168,5 +175,7 @@ exclude_re = [
     'replace < with <= in MfaService::splice_recovery_code',
     'replace > with >= in InMemoryStores::read_fact',
     'replace \| with \^ in hotp',
+    'replace < with <= in LastUsed::record',
+    'replace < with <= in <impl ApiKeyRepository for InMemoryApiKeyRepository>::touch_last_used',
     'replace EmailProvider::(send_password_changed|send_email_changed_notification|send_new_session_alert) -> Result<\(\), EmailError> with Ok\(\(\)\)',
 ]

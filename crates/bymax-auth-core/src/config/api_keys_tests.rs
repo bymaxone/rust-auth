@@ -99,6 +99,16 @@ mod rules {
     }
 
     #[test]
+    fn a_pepper_exactly_on_the_entropy_floor_is_admitted() {
+        // 32 characters at exactly 3.5 bits per character: the floor is inclusive, and only a
+        // value sitting on it can tell `<` from `<=`.
+        const ON_THE_FLOOR: &str = "aabbccddeeffgghhiiiijjjjkkkkllll";
+        let mut cfg = enabled();
+        cfg.api_keys.pepper = secret(ON_THE_FLOOR);
+        assert!(verdict(&cfg).is_ok());
+    }
+
+    #[test]
     fn the_pepper_equals_no_other_key_the_deployment_holds() {
         let jwt = secret(PEPPER);
         let mut cfg = enabled();

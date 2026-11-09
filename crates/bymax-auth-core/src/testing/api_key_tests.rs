@@ -83,6 +83,41 @@ async fn last_used_never_moves_backwards() -> Result<(), RepositoryError> {
     Ok(())
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn the_last_allowed_call_is_spent_by_exactly_one_caller() {
+    // A budget of one, spent by many callers at once: refusing a spent budget and counting a
+    // positive one down are a single step, so no two callers can both take the last call.
+    for _ in 0..300 {
+        let repo = std::sync::Arc::new(InMemoryApiKeyRepository::new());
+        repo.fail_after(1);
+        let calls: Vec<_> = (0..16)
+            .map(|_| {
+                let repo = repo.clone();
+                tokio::spawn(async move { repo.list_by_label("billing").await.is_ok() })
+            })
+            .collect();
+        let mut admitted = 0;
+        for call in calls {
+            admitted += usize::from(call.await.unwrap_or(false));
+        }
+        assert_eq!(admitted, 1);
+    }
+}
+
+#[tokio::test]
+async fn last_used_advances_to_a_later_instant() -> Result<(), RepositoryError> {
+    let repo = InMemoryApiKeyRepository::new();
+    let now = OffsetDateTime::now_utc();
+    repo.create(new_key("a", "billing", now)).await?;
+    let late = now + Duration::minutes(5);
+
+    repo.touch_last_used(&[("a".to_owned(), now)]).await?;
+    repo.touch_last_used(&[("a".to_owned(), late)]).await?;
+
+    assert_eq!(repo.row("a").and_then(|k| k.last_used_at), Some(late));
+    Ok(())
+}
+
 #[tokio::test]
 async fn listing_by_label_returns_every_key_oldest_first() -> Result<(), RepositoryError> {
     let repo = InMemoryApiKeyRepository::new();
