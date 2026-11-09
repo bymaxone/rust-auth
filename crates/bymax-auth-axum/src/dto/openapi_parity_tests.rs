@@ -31,7 +31,7 @@ const ARTEFACT: &str = include_str!("../../../../conformance/openapi-request-sch
 const ARTEFACT_SHA256: &str = "2c2b7549f6aa6b2b76e55b38e9eece1e5fa66a562130d488a2a493d4d5ca1b7c";
 
 /// A DTO's verdict on a body: accepted when it deserializes and validates.
-type Accepts = fn(&Value) -> bool;
+pub(super) type Accepts = fn(&Value) -> bool;
 
 fn accepts<T: DeserializeOwned + Validate<Context = ()>>(body: &Value) -> bool {
     serde_json::from_value::<T>(body.clone()).is_ok_and(|dto| dto.validate().is_ok())
@@ -39,7 +39,7 @@ fn accepts<T: DeserializeOwned + Validate<Context = ()>>(body: &Value) -> bool {
 
 /// Every schema in the artefact and the DTO that answers it. The names differ for the two OAuth
 /// query types only.
-const DTOS: [(&str, Accepts); 22] = [
+pub(super) const DTOS: [(&str, Accepts); 22] = [
     ("AcceptInvitationDto", accepts::<AcceptInvitationDto>),
     ("ChangeEmailDto", accepts::<ChangeEmailDto>),
     ("ChangePasswordDto", accepts::<ChangePasswordDto>),
@@ -140,7 +140,7 @@ const PATTERN_SAMPLES: [(&str, &[(&str, bool)]); 4] = [
 ];
 
 /// A property of a request schema, with only the keywords the artefact uses.
-struct Prop {
+pub(super) struct Prop {
     name: String,
     required: bool,
     min: Option<usize>,
@@ -149,7 +149,7 @@ struct Prop {
     email: bool,
 }
 
-fn artefact() -> Value {
+pub(super) fn artefact() -> Value {
     serde_json::from_str(ARTEFACT).unwrap_or(Value::Null)
 }
 
@@ -160,7 +160,7 @@ fn schema_names(root: &Value) -> BTreeSet<String> {
         .unwrap_or_default()
 }
 
-fn props_of(root: &Value, schema: &str) -> Vec<Prop> {
+pub(super) fn props_of(root: &Value, schema: &str) -> Vec<Prop> {
     let body = &root["schemas"][schema];
     let required: BTreeSet<&str> = body["required"]
         .as_array()
@@ -215,7 +215,7 @@ fn with(base: &Map<String, Value>, prop: &str, value: &str) -> Value {
 const FILLS: [char; 3] = ['a', '1', 'A'];
 
 /// What one DTO's run found, keyed by category, each with the fields it concerns.
-type Findings = BTreeMap<&'static str, BTreeSet<String>>;
+pub(super) type Findings = BTreeMap<&'static str, BTreeSet<String>>;
 
 /// Records `detail` under `category` when `failed`. Every probe calls it, so a probe that passes
 /// costs a call and not a branch of its own.
@@ -280,7 +280,7 @@ fn letters_satisfy(pattern: Option<&String>) -> bool {
 }
 
 /// The base body for a DTO: its required properties, each with a valid value.
-fn base_body(
+pub(super) fn base_body(
     check: Accepts,
     props: &[Prop],
     dto: &str,

@@ -22,8 +22,10 @@ use serde_json::{Value, json};
 
 use crate::RouteGroups;
 
+mod descriptions;
 mod operations;
 
+pub use descriptions::{REQUEST_DESCRIPTIONS_JSON, request_description, request_descriptions};
 pub use operations::{
     OperationDescription, OperationKind, OperationSecurity, describe_operation, operation_security,
 };
