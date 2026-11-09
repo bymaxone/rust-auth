@@ -98,8 +98,11 @@ invitations = ["bymax-auth-core/invitations"]
 api-keys = ["bymax-auth-core/api-keys"]
 # The WebSocket upgrade-ticket surface (mint endpoint + the two redeem extractors).
 websocket = ["axum/ws"]
+# The OpenAPI 3.0 request-body schemas of the auth routes, as data: `openapi::request_schemas`.
+# Adds no dependency; the schemas are nest-auth's, held byte-identical in `openapi/`.
+openapi = []
 # Convenience meta-feature: every optional group for a full backend.
-full = ["mfa", "sessions", "platform", "oauth", "invitations", "websocket", "api-keys"]
+full = ["mfa", "sessions", "platform", "oauth", "invitations", "websocket", "api-keys", "openapi"]
 
 # docs.rs renders every route group; `--cfg docsrs` enables the feature-gated doc
 # annotations on the optional extractors and route factories.

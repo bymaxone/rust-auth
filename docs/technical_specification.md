@@ -3401,6 +3401,23 @@ that is neither is `404` `auth.session_not_found`, before anything changes. The 
 checks the current password first, then the session, then writes. When the session to keep cannot
 be resolved after the new password is written, every session ends and the epoch advances.
 
+#### 8.4.4 OpenAPI request schemas (feature `openapi`)
+
+The request-body schemas are `nest-auth`'s, generated there from its own validators and held
+byte-identical in `conformance/openapi-request-schemas.json`: OpenAPI 3.0 on purpose, since a 3.1
+fragment merged into a 3.0 document validates as neither, and keyed by `nest-auth`'s DTO names
+(`LoginDto`, ...), so a client generated from either backend sees the same names and bounds. The
+`openapi` feature of `bymax-auth-axum` (off by default, forwarded by the facade, no new dependency)
+exposes them as `serde_json` values through `bymax_auth_axum::openapi`:
+`request_schema_names()`, `request_schema(name)`, `request_schemas()`, `openapi_version()` and the
+raw `REQUEST_SCHEMAS_JSON`. The module builds no document and serves no route; a host places the
+schemas it wants under `components.schemas` of its own. Lengths are counts of characters, as JSON
+Schema defines `minLength` and `maxLength`, and the DTOs in 8.4.1 count the same way.
+
+A crate is built from its tarball, which holds only files under the crate's own directory, so the
+schemas are shipped as a copy in `crates/bymax-auth-axum/openapi/`. A test holds the copy
+byte-identical to the shared one, and CI builds the packaged crates with the feature on.
+
 ---
 
 ### 8.5 Token delivery in handlers

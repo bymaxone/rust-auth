@@ -356,6 +356,25 @@ jobs:
       - run: bash scripts/check-release-versions.sh
 
   # ─────────────────────────────────────────────────────────────────────────────
+  # The packaged crates build with the `openapi` feature on. A crate is built from its tarball,
+  # which holds only files under the crate's own directory, so a `include_str!` that reaches
+  # outside it compiles in the repository and fails for every consumer. `cargo package` verifies
+  # each tarball by building it, with default features unless told otherwise.
+  # ─────────────────────────────────────────────────────────────────────────────
+  package-openapi:
+    name: packaged crates (openapi feature)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions-rust-lang/setup-rust-toolchain@a188e68d0fd2bd36ad51dccb2b07ba6e75105f30 # v2.0.1
+        with:
+          rustflags: "-D warnings"
+      - run: cargo package --workspace --features bymax-auth-axum/openapi --locked
+
+  # ─────────────────────────────────────────────────────────────────────────────
   # Public API surface — `cargo public-api` snapshots the exported surface and
   # `cargo-semver-checks` gates SemVer compatibility, so a breaking change to the
   # published API cannot ship unnoticed. `cargo public-api` builds rustdoc JSON,

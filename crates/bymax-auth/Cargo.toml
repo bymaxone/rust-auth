@@ -32,6 +32,7 @@ platform = ["bymax-auth-core/platform", "bymax-auth-axum?/platform", "bymax-auth
 invitations = ["bymax-auth-core/invitations", "bymax-auth-axum?/invitations"]
 breach = ["bymax-auth-core/breach"]              # HIBP k-anonymity over the HttpClient seam
 api-keys = ["bymax-auth-core/api-keys", "bymax-auth-axum?/api-keys"] # scoped service API keys; with `axum`, also the layer, extractor and flush task
+openapi = ["bymax-auth-axum?/openapi"] # with `axum`, the OpenAPI request-body schemas of the auth routes
 
 # Infrastructure / adapters. Each pulls its crate in as an optional dependency. The flow features
 # above forward to the adapters that gate the same flow as weak dependency features (`adapter?/flow`),
@@ -53,6 +54,7 @@ full = [
     "invitations",
     "breach",
     "api-keys",
+    "openapi",
     "redis",
     "axum",
     "client",
