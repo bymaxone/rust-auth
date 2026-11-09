@@ -6815,6 +6815,16 @@ This turns "we accidentally pulled in a heavy transitive tree" into a red CI run
 rather than a discovery months later. **(Gate: a PR that grows the resolved graph
 past the cap cannot merge until the cap is consciously bumped.)**
 
+#### Moving the RustCrypto generation
+
+`bymax-auth-crypto` is on the `digest 0.10` / `password-hash 0.5` generation, and the generation
+moves as a whole, because `deny.toml` rejects a second major of `digest`. **Entry gate: a stable
+`sha1` release on `digest 0.11`.** The move waits for it: no `deny.toml` skip and no release
+candidate. When it runs, the `cargo vet` list is measured again, and the `getrandom` major change
+gets its own size and purity evidence for `bymax-auth-wasm`.
+`crates/bymax-auth-crypto/tests/known_answers.rs` is the oracle: its public-API vectors must pass
+unchanged across the move.
+
 ## 20. Testing Strategy & Quality Gates
 
 `rust-auth` mirrors the quality bar of `@bymax-one/nest-auth`: **100% coverage as
