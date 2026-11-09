@@ -45,6 +45,10 @@ mod ws_ticket_body;
 #[path = "adapter/logout_failure.rs"]
 mod logout_failure;
 
+#[cfg(feature = "openapi")]
+#[path = "adapter/openapi_routes.rs"]
+mod openapi_routes;
+
 #[path = "adapter/oauth_provider_error_log.rs"]
 mod oauth_provider_error_log;
 

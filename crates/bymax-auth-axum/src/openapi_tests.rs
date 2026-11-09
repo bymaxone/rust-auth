@@ -66,3 +66,121 @@ fn the_names_come_back_sorted_and_the_version_is_openapi_3_0() {
     assert_eq!(names, sorted);
     assert_eq!(openapi_version(), "3.0");
 }
+
+use std::collections::BTreeMap;
+
+use crate::RouteGroups;
+use crate::openapi::{RouteGroup, request_body_routes, request_schemas_for};
+
+/// `groups` with exactly the named groups on.
+fn mounting(on: &[RouteGroup]) -> RouteGroups {
+    let has = |group| on.contains(&group);
+    RouteGroups {
+        auth: has(RouteGroup::Auth),
+        mfa: has(RouteGroup::Mfa),
+        password_reset: has(RouteGroup::PasswordReset),
+        sessions: false,
+        platform: has(RouteGroup::Platform),
+        platform_mfa: has(RouteGroup::PlatformMfa),
+        oauth: false,
+        invitations: has(RouteGroup::Invitations),
+        email_change: has(RouteGroup::EmailChange),
+    }
+}
+
+const ALL_GROUPS: [RouteGroup; 7] = [
+    RouteGroup::Auth,
+    RouteGroup::PasswordReset,
+    RouteGroup::Mfa,
+    RouteGroup::Platform,
+    RouteGroup::PlatformMfa,
+    RouteGroup::Invitations,
+    RouteGroup::EmailChange,
+];
+
+/// The schemas nest-auth contributes per controller family (`REQUEST_SCHEMAS_BY_CONTROLLER` in
+/// `src/server/openapi/request-schema-mounts.ts`, v1.4.22), for the families rust mounts as
+/// groups. Sessions and OAuth take no body schema there.
+fn nest_schemas(group: RouteGroup) -> Vec<&'static str> {
+    let mut names = match group {
+        RouteGroup::Auth => vec![
+            "RegisterDto",
+            "LoginDto",
+            "VerifyEmailDto",
+            "ResendVerificationDto",
+        ],
+        RouteGroup::PasswordReset => vec![
+            "ForgotPasswordDto",
+            "ResetPasswordDto",
+            "ChangePasswordDto",
+            "VerifyOtpDto",
+            "ResendOtpDto",
+        ],
+        RouteGroup::Mfa => vec![
+            "MfaSetupDto",
+            "MfaVerifyDto",
+            "MfaChallengeDto",
+            "MfaDisableDto",
+            "MfaRegenerateRecoveryCodesDto",
+        ],
+        RouteGroup::Platform => vec!["PlatformLoginDto", "MfaChallengeDto"],
+        RouteGroup::PlatformMfa => vec![
+            "MfaSetupDto",
+            "MfaVerifyDto",
+            "MfaDisableDto",
+            "MfaRegenerateRecoveryCodesDto",
+        ],
+        RouteGroup::Invitations => vec![
+            "CreateInvitationDto",
+            "RevokeInvitationDto",
+            "AcceptInvitationDto",
+        ],
+        RouteGroup::EmailChange => vec!["ChangeEmailDto", "ConfirmEmailChangeDto"],
+    };
+    names.sort_unstable();
+    names
+}
+
+#[test]
+fn every_route_names_a_schema_the_artefact_has() {
+    for route in request_body_routes() {
+        assert!(request_schema(route.schema).is_some(), "{route:?}");
+        assert_eq!(route.method, "POST", "{route:?}");
+        assert!(route.path.starts_with('/'), "{route:?}");
+    }
+}
+
+#[test]
+fn a_group_contributes_the_schemas_nest_auth_contributes_for_it() {
+    for group in ALL_GROUPS {
+        let served: Vec<String> = request_schemas_for(mounting(&[group]))
+            .into_keys()
+            .collect();
+        assert_eq!(served, nest_schemas(group), "{group:?}");
+    }
+}
+
+#[test]
+fn a_group_left_off_contributes_nothing_and_the_groups_add_up() {
+    assert!(request_schemas_for(mounting(&[])).is_empty());
+    let all = request_schemas_for(mounting(&ALL_GROUPS));
+    let mut expected: BTreeMap<String, Value> = BTreeMap::new();
+    for group in ALL_GROUPS {
+        expected.extend(request_schemas_for(mounting(&[group])));
+    }
+    assert_eq!(all, expected);
+    // The artefact is complete: every schema is served by a group, except the two OAuth query
+    // schemas, which are query strings and not request bodies.
+    let mut unserved: Vec<String> = request_schemas()
+        .into_keys()
+        .filter(|name| !all.contains_key(name))
+        .collect();
+    unserved.sort_unstable();
+    assert_eq!(unserved, ["OAuthCallbackQueryDto", "OAuthInitiateQueryDto"]);
+}
+
+#[test]
+fn a_schema_is_served_unchanged_through_the_selection() {
+    let served = request_schemas_for(mounting(&[RouteGroup::Auth]));
+    assert_eq!(served.get("LoginDto"), request_schema("LoginDto").as_ref());
+}
