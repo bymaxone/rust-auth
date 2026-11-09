@@ -14,7 +14,7 @@ use http::StatusCode;
 use serde_json::json;
 use tower_cookies::Cookies;
 
-use super::{RequestMeta, source_refresh_token};
+use super::{OversizeCookie, RequestMeta, source_refresh_token};
 use crate::dto::{
     ChangePasswordDto, ForgotPasswordDto, ResendOtpDto, ResetPasswordDto, VerifyOtpDto,
 };
@@ -91,12 +91,16 @@ async fn change_password(
     // The caller's own session is kept, so its refresh token is sourced from whichever channel
     // carries it: the refresh cookie (cookie delivery) or the body (bearer delivery). A token that
     // is absent leaves the caller's session among those revoked.
-    let current_refresh = source_refresh_token(
+    let current_refresh = match source_refresh_token(
         state.config().delivery,
         &cookies,
         &state.config().cookies.refresh_name,
         dto.refresh_token.as_deref(),
-    );
+        OversizeCookie::Refuse,
+    ) {
+        Ok(token) => token,
+        Err(rejection) => return rejection.into_response(),
+    };
     match state
         .engine()
         .change_password(
