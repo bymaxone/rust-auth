@@ -1,6 +1,6 @@
 {
   "name": "@bymax-one/rust-auth",
-  "version": "0.0.0",
+  "version": "0.1.0",
   "type": "module",
   "description": "Frontend (React/Next.js) auth + edge JWT for the rust-auth backend — the byte-for-byte npm counterpart of @bymax-one/nest-auth.",
   "license": "MIT",

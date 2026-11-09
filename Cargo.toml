@@ -13,7 +13,7 @@ exclude = ["examples", "fuzz"]
 # internal pins in `[workspace.dependencies]` below are exact (`=`) — so a release
 # moves this line and those pins, and `scripts/check-release-versions.sh` refuses a
 # tag that disagrees with any of them.
-version = "0.0.0"
+version = "0.1.0"
 edition = "2024"
 rust-version = "1.90"
 license = "MIT"
@@ -25,13 +25,13 @@ authors = ["Bymax One"]
 # (`=0.0.0`) while the surface is pre-release; they move in lockstep. Real
 # third-party dependencies are added to this table as the crates gain content.
 [workspace.dependencies]
-bymax-auth-types = { path = "crates/bymax-auth-types", version = "=0.0.0" }
-bymax-auth-crypto = { path = "crates/bymax-auth-crypto", version = "=0.0.0" }
-bymax-auth-jwt = { path = "crates/bymax-auth-jwt", version = "=0.0.0" }
-bymax-auth-core = { path = "crates/bymax-auth-core", version = "=0.0.0" }
-bymax-auth-redis = { path = "crates/bymax-auth-redis", version = "=0.0.0" }
-bymax-auth-axum = { path = "crates/bymax-auth-axum", version = "=0.0.0" }
-bymax-auth-client = { path = "crates/bymax-auth-client", version = "=0.0.0" }
+bymax-auth-types = { path = "crates/bymax-auth-types", version = "=0.1.0" }
+bymax-auth-crypto = { path = "crates/bymax-auth-crypto", version = "=0.1.0" }
+bymax-auth-jwt = { path = "crates/bymax-auth-jwt", version = "=0.1.0" }
+bymax-auth-core = { path = "crates/bymax-auth-core", version = "=0.1.0" }
+bymax-auth-redis = { path = "crates/bymax-auth-redis", version = "=0.1.0" }
+bymax-auth-axum = { path = "crates/bymax-auth-axum", version = "=0.1.0" }
+bymax-auth-client = { path = "crates/bymax-auth-client", version = "=0.1.0" }
 
 # Shared lint posture, inherited by every crate via `[lints] workspace = true`.
 # The unsafe-code policy is intentionally NOT set here: it lives as a per-crate

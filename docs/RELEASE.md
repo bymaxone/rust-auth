@@ -6,7 +6,7 @@ against that workflow file; where the two disagree, the workflow is the behaviou
 and this file is wrong.
 
 Nothing has been published yet. Neither the crates nor `@bymax-one/rust-auth`
-exist on their registries, and the workspace and npm versions are still `0.0.0`.
+exist on their registries. The workspace and npm versions are `0.1.0`, the first release.
 
 ---
 

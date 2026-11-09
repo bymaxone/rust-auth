@@ -10,7 +10,7 @@ version bump.
 
 ## [Unreleased]
 
-> **Release rule.** The first breaking change below is on `main`, so the next release is the breaking batch: there is no interim release from `main`. A security fix needed before that batch ships from a release branch cut from the last tag.
+## [0.1.0] - 2026-11-09
 
 ### Changed
 
@@ -1293,4 +1293,5 @@ version bump.
   For the same reason the two are reported apart rather than summed: 1,269 caught
   by assertion is the number that carries the stronger guarantee.
 
-[Unreleased]: https://github.com/bymaxone/rust-auth/commits/main
+[Unreleased]: https://github.com/bymaxone/rust-auth/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/bymaxone/rust-auth/releases/tag/v0.1.0
