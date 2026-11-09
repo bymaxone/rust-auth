@@ -29,6 +29,8 @@ mod dto;
 mod encoding_policy;
 mod extractors;
 mod middleware;
+#[cfg(feature = "openapi")]
+pub mod openapi;
 mod rate_limit;
 mod response;
 mod router;
@@ -47,6 +49,9 @@ mod test_support;
 
 #[cfg(all(test, feature = "api-keys"))]
 mod api_key_tests;
+
+#[cfg(all(test, feature = "openapi"))]
+mod openapi_tests;
 
 #[cfg(feature = "api-keys")]
 pub use api_key::{
