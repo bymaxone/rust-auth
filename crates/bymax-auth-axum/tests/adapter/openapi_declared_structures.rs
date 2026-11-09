@@ -201,13 +201,7 @@ fn route(entry: &Value) -> String {
 /// Probes whose answer differs from the artefact's in one aspect: (entry, probe index, the
 /// aspect, why). Each must still differ, in that aspect only, so a fix that does not remove its
 /// entry fails the build, and a difference that is not listed fails it too.
-const KNOWN_DIVERGENCES: [(&str, usize, &str, &str); 1] = [(
-    "OAuthController.callback#codelessCallback",
-    5,
-    "field",
-    "a request that does not fit its DTO is refused naming its container (`query`, `body`), not \
-     the property: the property-naming of structural failures is a change of its own",
-)];
+const KNOWN_DIVERGENCES: [(&str, usize, &str, &str); 0] = [];
 
 /// Records, in `failures`, what is wrong with a probe's disagreements given what is tracked.
 fn judge(entry: &str, index: usize, found: &[String], failures: &mut Vec<String>) {

@@ -42,6 +42,43 @@ mod openapi_parity_tests;
 mod structure_parity_tests;
 mod text_rules;
 
+/// Declares which schema of the shared request schemas describes each DTO, and whether the DTO
+/// refuses properties it does not have. The key is the full type name: a type of a host that
+/// happens to share a short name is not one of these.
+macro_rules! declared {
+    ($($dto:ident => $schema:literal, $denies:literal;)*) => {
+        /// `(type name, schema name, refuses unknown properties)` for every DTO of this crate.
+        pub(crate) const DECLARED: &[(&str, &str, bool)] = &[
+            $((concat!(module_path!(), "::", stringify!($dto)), $schema, $denies),)*
+        ];
+    };
+}
+
+declared! {
+    AcceptInvitationDto => "AcceptInvitationDto", true;
+    ChangeEmailDto => "ChangeEmailDto", true;
+    ChangePasswordDto => "ChangePasswordDto", true;
+    ConfirmEmailChangeDto => "ConfirmEmailChangeDto", true;
+    CreateInvitationDto => "CreateInvitationDto", true;
+    ForgotPasswordDto => "ForgotPasswordDto", true;
+    LoginDto => "LoginDto", true;
+    MfaChallengeDto => "MfaChallengeDto", true;
+    MfaDisableDto => "MfaDisableDto", true;
+    MfaRegenerateRecoveryCodesDto => "MfaRegenerateRecoveryCodesDto", true;
+    MfaSetupDto => "MfaSetupDto", true;
+    MfaVerifyDto => "MfaVerifyDto", true;
+    OAuthCallbackQuery => "OAuthCallbackQueryDto", false;
+    OAuthInitiateQuery => "OAuthInitiateQueryDto", true;
+    PlatformLoginDto => "PlatformLoginDto", true;
+    RegisterDto => "RegisterDto", true;
+    ResendOtpDto => "ResendOtpDto", true;
+    ResendVerificationDto => "ResendVerificationDto", true;
+    ResetPasswordDto => "ResetPasswordDto", true;
+    RevokeInvitationDto => "RevokeInvitationDto", true;
+    VerifyEmailDto => "VerifyEmailDto", true;
+    VerifyOtpDto => "VerifyOtpDto", true;
+}
+
 /// `POST /auth/register` body.
 #[derive(Debug, Deserialize, Validate)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]

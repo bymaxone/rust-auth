@@ -80,18 +80,30 @@ async fn a_body_that_is_not_json_answers_malformed_request_and_echoes_nothing() 
 }
 
 #[tokio::test]
-async fn json_of_the_wrong_shape_answers_validation_with_a_fixed_message_and_echoes_nothing() {
+async fn json_of_the_wrong_shape_names_the_failing_property_and_echoes_no_value() {
     let Some(h) = build(EngineSpec::default()) else { return };
     let app = small_body_router(&h);
-    let bodies = [
-        // An unknown key the client chose.
-        format!(r#"{{"email":"a@e.com","password":"p","tenantId":"t1","{MARKER}":1}}"#),
-        // The right keys with a value of the wrong type.
-        format!(r#"{{"email":"{MARKER}","password":5,"tenantId":"t1"}}"#),
-        // A required key missing.
-        format!(r#"{{"email":"{MARKER}@e.com","tenantId":"t1"}}"#),
+    // (body, the properties it fails, what must not appear in the answer). The client's own key
+    // is the property name for an unknown key and may appear; a value never does. The second
+    // body fails `password` by type and `email` by format, and both are named.
+    let cases = [
+        (
+            format!(r#"{{"email":"a@e.com","password":"p","tenantId":"t1","{MARKER}":1}}"#),
+            vec![MARKER],
+            vec!["LoginDto", "expected one of", "unknown field"],
+        ),
+        (
+            format!(r#"{{"email":"{MARKER}","password":5,"tenantId":"t1"}}"#),
+            vec!["email", "password"],
+            vec![MARKER, "LoginDto", "invalid type"],
+        ),
+        (
+            format!(r#"{{"email":"{MARKER}@e.com","tenantId":"t1"}}"#),
+            vec!["password"],
+            vec![MARKER, "LoginDto", "missing field"],
+        ),
     ];
-    for body in bodies {
+    for (body, properties, secrets) in cases {
         let answer = login_request(body.into_bytes(), "application/json")
             .send(&app)
             .await;
@@ -104,17 +116,11 @@ async fn json_of_the_wrong_shape_answers_validation_with_a_fixed_message_and_ech
             .as_array()
             .cloned()
             .unwrap_or_default();
-        assert_eq!(details.len(), 1, "{text}");
-        assert_eq!(details[0]["field"], "body", "{text}");
-        for secret in [
-            MARKER,
-            "LoginDto",
-            "expected one of",
-            "expected struct",
-            "unknown field",
-            "invalid type",
-            "line 1",
-        ] {
+        let mut named: Vec<&str> = details.iter().filter_map(|d| d["field"].as_str()).collect();
+        named.sort_unstable();
+        named.dedup();
+        assert_eq!(named, properties, "{text}");
+        for secret in secrets.into_iter().chain(["expected struct", "line 1"]) {
             assert!(!text.contains(secret), "`{secret}` was echoed: {text}");
         }
     }
@@ -299,7 +305,7 @@ async fn the_refresh_body_never_echoes_what_it_could_not_read() {
 }
 
 #[tokio::test]
-async fn a_query_string_that_does_not_fit_never_echoes_its_keys_or_values() {
+async fn a_query_string_that_does_not_fit_names_the_property_and_echoes_no_value() {
     let Some(h) = build(EngineSpec {
         oauth: true,
         allow_oauth: true,
@@ -308,11 +314,14 @@ async fn a_query_string_that_does_not_fit_never_echoes_its_keys_or_values() {
         return;
     };
     let app = small_body_router(&h);
-    let answer = Req::get(&format!("/auth/oauth/google?tenantId=t1&{MARKER}=1"))
-        .send(&app)
-        .await;
+    let answer = Req::get(&format!(
+        "/auth/oauth/google?tenantId=t1&unexpected={MARKER}"
+    ))
+    .send(&app)
+    .await;
     assert_eq!(answer.status, StatusCode::BAD_REQUEST, "{}", text(&answer));
     assert_eq!(answer.json()["error"]["code"], "auth.validation");
+    assert_eq!(answer.json()["error"]["details"][0]["field"], "unexpected");
     assert!(!text(&answer).contains(MARKER), "{}", text(&answer));
 }
 
@@ -378,8 +387,14 @@ async fn an_mfa_setup_body_that_does_not_parse_never_echoes_what_it_held() {
         .await;
     assert_eq!(shaped.status, StatusCode::BAD_REQUEST, "{}", text(&shaped));
     assert_eq!(shaped.json()["error"]["message"], "Validation failed");
-    assert_eq!(shaped.json()["error"]["details"][0]["field"], "body");
-    assert!(!text(&shaped).contains(MARKER), "{}", text(&shaped));
+    // The unknown key is the property the answer names; the value is never echoed.
+    assert_eq!(shaped.json()["error"]["details"][0]["field"], MARKER);
+    assert!(!text(&shaped).contains("\"1\""), "{}", text(&shaped));
+    assert!(
+        !text(&shaped).contains("unknown field"),
+        "{}",
+        text(&shaped)
+    );
 }
 
 #[tokio::test]
