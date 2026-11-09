@@ -225,13 +225,29 @@ fn valid_value(property: &Value) -> String {
     }
 }
 
-/// A value one character over the property's maximum.
+/// An address of exactly `len` characters that is valid in every other respect: a local part of
+/// at most 64 and labels of at most 63, so only its length can be what refuses it.
+fn email_of_len(len: usize) -> String {
+    let local_len = if len <= 76 { len - 12 } else { 64 };
+    let mut domain_len = len - local_len - 1;
+    let mut labels: Vec<String> = Vec::new();
+    while domain_len > 63 + 1 + 3 {
+        labels.push("b".repeat(63));
+        domain_len -= 64;
+    }
+    labels.push("b".repeat(domain_len - 4));
+    labels.push("com".to_owned());
+    format!("{}@{}", "a".repeat(local_len), labels.join("."))
+}
+
+/// A value one character over the property's maximum, valid in every other respect where the
+/// keywords allow it.
 fn over_maximum(property: &Value) -> String {
     let max = property["maxLength"]
         .as_u64()
         .map_or(0, |n| usize::try_from(n).unwrap_or(0));
     if property["format"] == "email" {
-        format!("{}@example.com", "a".repeat(max))
+        email_of_len(max + 1)
     } else {
         "1".repeat(max + 1)
     }
@@ -444,6 +460,15 @@ async fn every_body_route_refuses_a_body_that_breaks_its_own_schema() {
             assert!(
                 fields.contains(&format!("\"{reported}\"")),
                 "{label}: the error names {fields}"
+            );
+            // The length bound must be what refused it. A fixed-format code cannot say so: its
+            // pattern fixes the length, so the format refusal and the length refusal are one.
+            let fixed_format = schema["properties"][&broken]["pattern"]
+                .as_str()
+                .is_some_and(|pattern| pattern.contains("\\d{6}"));
+            assert!(
+                fixed_format || fields.contains("length is greater than"),
+                "{label}: {fields}"
             );
             if reported != broken {
                 renamed.insert(format!("{} {broken}", route.path));

@@ -61,7 +61,8 @@ pub fn request_schemas() -> BTreeMap<String, Value> {
 }
 
 /// A route group of the auth router: the unit a deployment switches on or off, and the unit a
-/// schema is contributed by. One variant per field of [`RouteGroups`].
+/// schema is contributed by. One variant per group that takes a request body; the sessions and
+/// OAuth groups of [`RouteGroups`] take none and have no variant.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[non_exhaustive]
 pub enum RouteGroup {
