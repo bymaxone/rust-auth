@@ -3466,6 +3466,21 @@ and validation of the DTO the entry names, and compares the entries with the pro
 transforms in both directions. A transform that is the identity on the probe input escapes the
 probe, and one written without a `serde` attribute escapes the inventory.
 
+`declared_request_structures()` and `declared_operation_semantics()` serve the contracts of the auth routes
+that a generated schema cannot state, from `nest-auth`'s hand-written
+`conformance/openapi-declared-structures.json`, held byte-identical with a digest pin. A request
+structure is a constraint across the properties of a body (`required`, `oneOf`, `anyOf`; presence is
+present and not `null`), such as the exactly-one-of proof set of a password reset. An operation
+semantic is a refusal made by a handler and not by validation (a callback with neither `code` nor
+`error` is `auth.oauth_failed`), a policy floor that is configuration, the order of the reset-password
+checks (classify the proof, judge the password, spend the proof), or a pair of responses that must be
+identical for a registered and an unknown address. Every probe is run against the real router under the
+deployment it names, and a probe that says whether a body satisfies its structure is checked against both
+an evaluator of the keywords the artefact uses and the server. A structure using another keyword is refused. The
+artefact's keys are compared with the entries probed in both directions. A divergence this crate has not
+closed is listed with its reason, and the test requires it to still diverge, so a fix that leaves the
+entry fails the build.
+
 A crate is built from its tarball, which holds only files under the crate's own directory, so the
 schemas are shipped as a copy in `crates/bymax-auth-axum/openapi/`. A test holds the copy
 byte-identical to the shared one, and CI builds the packaged crates with the feature on.

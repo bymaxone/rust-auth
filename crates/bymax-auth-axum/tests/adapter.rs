@@ -56,6 +56,10 @@ mod validation_field_names;
 mod openapi_routes;
 
 #[cfg(feature = "openapi")]
+#[path = "adapter/openapi_declared_structures.rs"]
+mod openapi_declared_structures;
+
+#[cfg(feature = "openapi")]
 #[path = "adapter/openapi_operation_security.rs"]
 mod openapi_operation_security;
 

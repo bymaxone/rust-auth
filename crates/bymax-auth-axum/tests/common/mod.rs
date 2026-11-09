@@ -68,6 +68,8 @@ pub struct EngineSpec {
     pub invitations: bool,
     pub email_change: bool,
     pub sessions: bool,
+    /// Which proof a password reset accepts: the emailed OTP (the default here) or a link token.
+    pub reset_method: bymax_auth_core::config::ResetMethod,
     pub verification_required: bool,
     /// Resolve the request tenant from the `host` header and enforce that a token's tenant
     /// equals it.
@@ -99,6 +101,7 @@ impl Default for EngineSpec {
             invitations: false,
             email_change: false,
             sessions: false,
+            reset_method: bymax_auth_core::config::ResetMethod::Otp,
             verification_required: false,
             enforce_tenant_binding: false,
             allow_oauth: false,
@@ -334,7 +337,7 @@ pub fn build(spec: EngineSpec) -> Option<Harness> {
         config.tenant_id_resolver = Some(Arc::new(HostTenant));
         config.enforce_tenant_binding = true;
     }
-    config.password_reset.method = bymax_auth_core::config::ResetMethod::Otp;
+    config.password_reset.method = spec.reset_method;
     config.roles.hierarchy = HashMap::from([
         ("ADMIN".to_owned(), vec!["USER".to_owned()]),
         ("USER".to_owned(), Vec::new()),
