@@ -48,6 +48,9 @@ mod logout_failure;
 #[path = "adapter/refresh_cookie_bound.rs"]
 mod refresh_cookie_bound;
 
+#[path = "adapter/otp_failure_answers.rs"]
+mod otp_failure_answers;
+
 #[path = "adapter/validation_field_names.rs"]
 mod validation_field_names;
 
