@@ -3458,6 +3458,14 @@ that carries no body never declares one. A probe presents every operation, in ea
 with nine combinations of credential and transport, including transports the deployment does not
 deliver by, and requires the router to admit or refuse each the way the kind says.
 
+`request_descriptions()` and `request_description(dto, property)` serve what the server does to a
+request value that a schema cannot say. The text is `nest-auth`'s, held byte-identical in
+`conformance/openapi-request-descriptions.json` with a digest pin. Every entry carries a probe, an
+input and the value the server reads from it; a test runs each probe through the real `serde` path
+and validation of the DTO the entry names, and compares the entries with the properties this crate
+transforms in both directions. A transform that is the identity on the probe input escapes the
+probe, and one written without a `serde` attribute escapes the inventory.
+
 A crate is built from its tarball, which holds only files under the crate's own directory, so the
 schemas are shipped as a copy in `crates/bymax-auth-axum/openapi/`. A test holds the copy
 byte-identical to the shared one, and CI builds the packaged crates with the feature on.

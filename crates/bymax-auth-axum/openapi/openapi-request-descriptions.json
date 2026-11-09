@@ -1,0 +1,123 @@
+{
+  "$comment": [
+    "DECLARED overlay — written by hand, never generated. Regenerating the schema artifact does not touch this file.",
+    "",
+    "It carries what a decorator cannot express and a generator therefore must not invent. Today that is normalisation: @Transform runs an opaque lambda, so any \"derived\" description would really be a hand-maintained lookup wearing a generated costume.",
+    "",
+    "Every entry carries its own probe, and the conformance suite runs it through plainToInstance and asserts the output. The probe IS the sentence’s operational meaning: the prose cannot drift from the behaviour, because the pair is what gets checked. A probe that fails to exercise the effect its sentence claims is visible to a reviewer, since input and expected sit beside the sentence they verify.",
+    "",
+    "The opposite direction — a transform ADDED with no entry here — is caught by a canary sweep in the same suite: one rich input through every string property of all 22 DTOs, flagging any property that changes without a declared entry.",
+    "",
+    "Known limit, stated rather than hidden: a future transform that is the identity on that canary would escape both checks. The rejected alternative was reading class-transformer cjs/storage internals, which has no type declarations and is an unpublished path that can move between minors."
+  ],
+  "descriptions": {
+    "ChangeEmailDto": {
+      "newEmail": {
+        "description": "Trimmed and lowercased before validation and before the service sees it, so the stored identity matches the case-insensitive lookup and every e-mail-keyed control (brute-force counter, OTP records, reset tokens). Send any casing; the server canonicalises it.",
+        "probe": {
+          "input": "  MiXeD@Example.COM  ",
+          "expected": "mixed@example.com"
+        }
+      }
+    },
+    "CreateInvitationDto": {
+      "email": {
+        "description": "Trimmed and lowercased before validation and before the service sees it, so the stored identity matches the case-insensitive lookup and every e-mail-keyed control (brute-force counter, OTP records, reset tokens). Send any casing; the server canonicalises it.",
+        "probe": {
+          "input": "  MiXeD@Example.COM  ",
+          "expected": "mixed@example.com"
+        }
+      }
+    },
+    "ForgotPasswordDto": {
+      "email": {
+        "description": "Trimmed and lowercased before validation and before the service sees it, so the stored identity matches the case-insensitive lookup and every e-mail-keyed control (brute-force counter, OTP records, reset tokens). Send any casing; the server canonicalises it.",
+        "probe": {
+          "input": "  MiXeD@Example.COM  ",
+          "expected": "mixed@example.com"
+        }
+      }
+    },
+    "LoginDto": {
+      "email": {
+        "description": "Trimmed and lowercased before validation and before the service sees it, so the stored identity matches the case-insensitive lookup and every e-mail-keyed control (brute-force counter, OTP records, reset tokens). Send any casing; the server canonicalises it.",
+        "probe": {
+          "input": "  MiXeD@Example.COM  ",
+          "expected": "mixed@example.com"
+        }
+      }
+    },
+    "PlatformLoginDto": {
+      "email": {
+        "description": "Trimmed and lowercased before validation and before the service sees it, so the stored identity matches the case-insensitive lookup and every e-mail-keyed control (brute-force counter, OTP records, reset tokens). Send any casing; the server canonicalises it.",
+        "probe": {
+          "input": "  MiXeD@Example.COM  ",
+          "expected": "mixed@example.com"
+        }
+      }
+    },
+    "RegisterDto": {
+      "email": {
+        "description": "Trimmed and lowercased before validation and before the service sees it, so the stored identity matches the case-insensitive lookup and every e-mail-keyed control (brute-force counter, OTP records, reset tokens). Send any casing; the server canonicalises it.",
+        "probe": {
+          "input": "  MiXeD@Example.COM  ",
+          "expected": "mixed@example.com"
+        }
+      }
+    },
+    "ResendOtpDto": {
+      "email": {
+        "description": "Trimmed and lowercased before validation and before the service sees it, so the stored identity matches the case-insensitive lookup and every e-mail-keyed control (brute-force counter, OTP records, reset tokens). Send any casing; the server canonicalises it.",
+        "probe": {
+          "input": "  MiXeD@Example.COM  ",
+          "expected": "mixed@example.com"
+        }
+      }
+    },
+    "ResendVerificationDto": {
+      "email": {
+        "description": "Trimmed and lowercased before validation and before the service sees it, so the stored identity matches the case-insensitive lookup and every e-mail-keyed control (brute-force counter, OTP records, reset tokens). Send any casing; the server canonicalises it.",
+        "probe": {
+          "input": "  MiXeD@Example.COM  ",
+          "expected": "mixed@example.com"
+        }
+      }
+    },
+    "ResetPasswordDto": {
+      "email": {
+        "description": "Trimmed and lowercased before validation and before the service sees it, so the stored identity matches the case-insensitive lookup and every e-mail-keyed control (brute-force counter, OTP records, reset tokens). Send any casing; the server canonicalises it.",
+        "probe": {
+          "input": "  MiXeD@Example.COM  ",
+          "expected": "mixed@example.com"
+        }
+      }
+    },
+    "RevokeInvitationDto": {
+      "email": {
+        "description": "Trimmed and lowercased before validation and before the service sees it, so the stored identity matches the case-insensitive lookup and every e-mail-keyed control (brute-force counter, OTP records, reset tokens). Send any casing; the server canonicalises it.",
+        "probe": {
+          "input": "  MiXeD@Example.COM  ",
+          "expected": "mixed@example.com"
+        }
+      }
+    },
+    "VerifyEmailDto": {
+      "email": {
+        "description": "Trimmed and lowercased before validation and before the service sees it, so the stored identity matches the case-insensitive lookup and every e-mail-keyed control (brute-force counter, OTP records, reset tokens). Send any casing; the server canonicalises it.",
+        "probe": {
+          "input": "  MiXeD@Example.COM  ",
+          "expected": "mixed@example.com"
+        }
+      }
+    },
+    "VerifyOtpDto": {
+      "email": {
+        "description": "Trimmed and lowercased before validation and before the service sees it, so the stored identity matches the case-insensitive lookup and every e-mail-keyed control (brute-force counter, OTP records, reset tokens). Send any casing; the server canonicalises it.",
+        "probe": {
+          "input": "  MiXeD@Example.COM  ",
+          "expected": "mixed@example.com"
+        }
+      }
+    }
+  }
+}

@@ -35,6 +35,8 @@ fn no_control_characters(value: &str, _: &()) -> garde::Result {
 
 mod code_formats;
 #[cfg(test)]
+mod description_parity_tests;
+#[cfg(test)]
 mod openapi_parity_tests;
 mod text_rules;
 
