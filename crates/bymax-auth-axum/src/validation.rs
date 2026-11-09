@@ -241,8 +241,50 @@ fn deserialize_query<T: DeserializeOwned>(query: &str) -> Result<T, AuthRejectio
     })
 }
 
+/// Fields whose wire name is the provider's own snake_case name, not the `camelCase` the rest of
+/// the DTOs use: they are the OAuth callback's (RFC 6749 section 4.1.2.1), renamed explicitly on
+/// the DTO. Their error names are already wire names and stay as they are.
+const SNAKE_CASE_WIRE_FIELDS: [&str; 2] = ["error_description", "error_uri"];
+
+/// `snake_case` as `camelCase`: an underscore is dropped and the letter after it is capitalised.
+/// A leading underscore is dropped without capitalising, so the result never starts upper-case.
+fn camel_case(name: &str) -> String {
+    let mut out = String::with_capacity(name.len());
+    let mut capitalise_next = false;
+    for c in name.chars() {
+        if c == '_' {
+            capitalise_next = !out.is_empty();
+        } else if capitalise_next {
+            out.extend(c.to_uppercase());
+            capitalise_next = false;
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+/// One segment of a `garde` path (`name` or `name[3]`) as the wire names it.
+fn wire_segment(segment: &str) -> String {
+    let (name, index) = segment.split_at(segment.find('[').unwrap_or(segment.len()));
+    if SNAKE_CASE_WIRE_FIELDS.contains(&name) {
+        return segment.to_owned();
+    }
+    format!("{}{index}", camel_case(name))
+}
+
+/// A `garde` path, which names Rust fields, as the wire names it: the property a client sent
+/// (`currentPassword`), which is what `nest-auth` reports and what a client keys its form
+/// errors by. Every segment of a nested path is converted.
+fn wire_path(path: &str) -> String {
+    path.split('.')
+        .map(wire_segment)
+        .collect::<Vec<_>>()
+        .join(".")
+}
+
 /// Run a DTO's `garde` validation, collecting every `(path, message)` into the typed
-/// `Validation` details on failure.
+/// `Validation` details on failure, with each path as the wire names it.
 fn run_garde<T: Validate<Context = ()>>(value: &T) -> Result<(), AuthRejection> {
     match value.validate() {
         Ok(()) => Ok(()),
@@ -250,7 +292,7 @@ fn run_garde<T: Validate<Context = ()>>(value: &T) -> Result<(), AuthRejection> 
             let details = report
                 .iter()
                 .map(|(path, error)| FieldError {
-                    field: path.to_string(),
+                    field: wire_path(&path.to_string()),
                     message: error.to_string(),
                 })
                 .collect();
@@ -481,5 +523,26 @@ mod tests {
         ));
         let Ok(good) = deserialize_query::<OAuthInitiateQuery>("tenantId=t1") else { return };
         assert!(run_garde(&good).is_ok());
+    }
+
+    #[test]
+    fn a_rust_field_path_is_reported_as_the_wire_name() {
+        // Single words are unchanged; snake_case becomes camelCase; a nested path converts every
+        // segment and keeps an index; a leading underscore never capitalises the first letter.
+        assert_eq!(wire_path("email"), "email");
+        assert_eq!(wire_path("current_password"), "currentPassword");
+        assert_eq!(wire_path("tenant_id"), "tenantId");
+        assert_eq!(wire_path("order_items[3].item_id"), "orderItems[3].itemId");
+        assert_eq!(wire_path("_internal_flag"), "internalFlag");
+        assert_eq!(wire_path("a__b"), "aB");
+    }
+
+    #[test]
+    fn the_providers_own_names_are_reported_as_they_are() {
+        // `error_description` and `error_uri` ARE their wire names (the DTO renames them
+        // explicitly), so converting them would name a field nothing sends.
+        assert_eq!(wire_path("error_description"), "error_description");
+        assert_eq!(wire_path("error_uri"), "error_uri");
+        assert_eq!(wire_path("error"), "error");
     }
 }
