@@ -32,11 +32,15 @@ mod middleware;
 #[cfg(feature = "openapi")]
 pub mod openapi;
 mod rate_limit;
+mod request_schemas;
 mod response;
 mod router;
 mod routes;
 mod shared_limit;
 mod state;
+mod structure;
+#[cfg(test)]
+mod structure_tests;
 mod transport;
 mod trusted_origin;
 mod validation;

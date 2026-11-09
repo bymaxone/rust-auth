@@ -3356,11 +3356,19 @@ A request the HTTP layer cannot read answers the shared contract's `transportErr
 | A body over `max_body_bytes` (declared by `Content-Length` or found while reading) | `413` | `Request entity too large` |
 | A charset other than UTF-8, or a `Content-Encoding` other than `identity` | `415` | `Unsupported media type` |
 
-A body that is JSON but does not fit the route (an unknown key, a value of the wrong type, a
-missing key) answers the ordinary validation envelope (§8.6) with one `body` detail and the fixed
-message `Request body does not match the expected shape.`; a query string that does not fit
-answers a `query` detail with a fixed message in the same way. `garde` rule messages name the
-field and the rule, never the value. A route given `text/plain`, or no `Content-Type`, still
+A request that is readable but does not fit the route (a property missing or `null`, a value of the
+wrong type, or a property the DTO does not have) answers the ordinary validation envelope (§8.6)
+with one detail for each failing property, named by its wire name and never by a container. The
+properties come from the shared request schemas (`required`, `properties`), not from serde's text.
+The failing properties are replaced by a stand-in and the rest of the request still goes through the
+DTO's own validation, so a request that fails one property by shape and another by bound names both.
+What is shared with `nest-auth` is the status, the code, the top-level message and the set of distinct
+`details[].field` values for a given input; the message of each entry is this crate's own, naming the
+property and never the value or the type the client sent. An unknown property's name is echoed only
+when it is at most 128 characters with no control character, and is otherwise reported once under
+`body`. A request that cannot be explained that way (a root that is an array, a type that is not one
+of this crate's DTOs) answers one `body` or `query` detail with a fixed message. `garde` rule messages
+name the field and the rule, never the value. A route given `text/plain`, or no `Content-Type`, still
 answers `400` `Validation failed` with a `content-type` detail (the contract's
 `contentTypeMismatch`).
 

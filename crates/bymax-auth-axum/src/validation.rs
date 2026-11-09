@@ -18,8 +18,10 @@ use garde::Validate;
 use http::StatusCode;
 use http::request::Parts;
 use serde::de::DeserializeOwned;
+use serde_json::{Map, Value};
 
 use crate::response::AuthRejection;
+use crate::structure::details_for;
 use crate::transport::{BodyRejection, Transport};
 
 /// What a body that is JSON but does not fit the route answers, in place of serde's text (which
@@ -207,10 +209,14 @@ where
 /// no body at all), or that does not parse, answers the transport envelope's "Malformed
 /// request": nest-auth's body parser accepts only an object or an array at the root and refuses
 /// the rest the same way. A body that parses but does not fit `T` (an unknown key, a value of
-/// the wrong type, a missing key) answers `auth.validation` with a fixed message under the
-/// synthetic `body` field. serde's own text is never used: it names the offending value, key
-/// and type, which are the client's.
-pub(crate) fn deserialize_json<T: DeserializeOwned>(bytes: &[u8]) -> Result<T, BodyRejection> {
+/// the wrong type, a missing key) answers `auth.validation` with one entry for each failing
+/// property, named by its wire name (see [`crate::structure`]); where no property can be named it
+/// answers one fixed message under `body`. serde's own text is never used: it names the offending
+/// value, key and type, which are the client's.
+pub(crate) fn deserialize_json<T>(bytes: &[u8]) -> Result<T, BodyRejection>
+where
+    T: DeserializeOwned + Validate<Context = ()>,
+{
     let first = bytes
         .iter()
         .find(|byte| !matches!(byte, b' ' | b'\t' | b'\n' | b'\r'));
@@ -219,25 +225,55 @@ pub(crate) fn deserialize_json<T: DeserializeOwned>(bytes: &[u8]) -> Result<T, B
     }
     serde_json::from_slice::<T>(bytes).map_err(|error| match error.classify() {
         serde_json::error::Category::Data => BodyRejection::from(AuthError::Validation {
-            details: vec![FieldError {
-                field: "body".to_owned(),
-                message: BODY_SHAPE_MESSAGE.to_owned(),
-            }],
+            details: shape_details::<T>(bytes, "body", BODY_SHAPE_MESSAGE),
         }),
         _ => Transport::Malformed(StatusCode::BAD_REQUEST).into(),
     })
 }
 
-/// Deserialize a query string into `T`, mapping any failure to `auth.validation` with a fixed
-/// message (serde's text names the offending key and value).
-fn deserialize_query<T: DeserializeOwned>(query: &str) -> Result<T, AuthRejection> {
+/// The details for a request that does not fit `T`: every failing property by its wire name, or
+/// the one fixed entry naming `container` when no property can be named (a root that is not an
+/// object, a type that is not one of this crate's DTOs).
+fn shape_details<T>(bytes: &[u8], container: &str, message: &str) -> Vec<FieldError>
+where
+    T: DeserializeOwned + Validate<Context = ()>,
+{
+    let named = serde_json::from_slice::<Value>(bytes)
+        .ok()
+        .and_then(|root| root.as_object().map(details_for::<T>))
+        .unwrap_or_default();
+    if named.is_empty() {
+        vec![FieldError {
+            field: container.to_owned(),
+            message: message.to_owned(),
+        }]
+    } else {
+        named
+    }
+}
+
+/// Deserialize a query string into `T`, mapping any failure to `auth.validation`: every failing
+/// property by its wire name, or a fixed message (serde's text names the offending key and value).
+fn deserialize_query<T>(query: &str) -> Result<T, AuthRejection>
+where
+    T: DeserializeOwned + Validate<Context = ()>,
+{
     serde_urlencoded::from_str::<T>(query).map_err(|_| {
-        AuthRejection(AuthError::Validation {
-            details: vec![FieldError {
+        let pairs = serde_urlencoded::from_str::<Vec<(String, String)>>(query).unwrap_or_default();
+        let body: Map<String, Value> = pairs
+            .into_iter()
+            .map(|(name, value)| (name, Value::String(value)))
+            .collect();
+        let named = details_for::<T>(&body);
+        let details = if named.is_empty() {
+            vec![FieldError {
                 field: "query".to_owned(),
                 message: QUERY_SHAPE_MESSAGE.to_owned(),
-            }],
-        })
+            }]
+        } else {
+            named
+        };
+        AuthRejection(AuthError::Validation { details })
     })
 }
 
@@ -283,21 +319,25 @@ fn wire_path(path: &str) -> String {
         .join(".")
 }
 
+/// The details of a `garde` report: every `(path, message)`, with each path as the wire names it.
+pub(crate) fn garde_details(report: &garde::Report) -> Vec<FieldError> {
+    report
+        .iter()
+        .map(|(path, error)| FieldError {
+            field: wire_path(&path.to_string()),
+            message: error.to_string(),
+        })
+        .collect()
+}
+
 /// Run a DTO's `garde` validation, collecting every `(path, message)` into the typed
 /// `Validation` details on failure, with each path as the wire names it.
 fn run_garde<T: Validate<Context = ()>>(value: &T) -> Result<(), AuthRejection> {
     match value.validate() {
         Ok(()) => Ok(()),
-        Err(report) => {
-            let details = report
-                .iter()
-                .map(|(path, error)| FieldError {
-                    field: wire_path(&path.to_string()),
-                    message: error.to_string(),
-                })
-                .collect();
-            Err(AuthRejection(AuthError::Validation { details }))
-        }
+        Err(report) => Err(AuthRejection(AuthError::Validation {
+            details: garde_details(&report),
+        })),
     }
 }
 
@@ -484,12 +524,35 @@ mod tests {
     }
 
     #[test]
+    fn a_request_no_property_can_be_named_for_answers_one_fixed_entry_under_its_container() {
+        // A root that is an array has no properties, so the body is the only thing to name.
+        let array = deserialize_json::<LoginDto>(b"[]")
+            .err()
+            .map(|e| e.into_response().status());
+        assert_eq!(array, Some(StatusCode::BAD_REQUEST));
+        // A query serde refuses for no property of its own (a key given twice) names the query.
+        let err = deserialize_query::<OAuthInitiateQuery>("tenantId=a&tenantId=b").err();
+        assert!(matches!(
+            err,
+            Some(AuthRejection(AuthError::Validation { details }))
+                if details.len() == 1 && details[0].field == "query"
+        ));
+        assert_eq!(
+            shape_details::<LoginDto>(b"[]", "body", BODY_SHAPE_MESSAGE)
+                .iter()
+                .map(|d| (d.field.as_str(), d.message.as_str()))
+                .collect::<Vec<_>>(),
+            [("body", BODY_SHAPE_MESSAGE)]
+        );
+    }
+
+    #[test]
     fn deserialize_query_maps_errors_and_parses_valid() {
-        // An unknown field fails (`deny_unknown_fields`); a valid query parses.
+        // An unknown field fails (`deny_unknown_fields`) and is named; a valid query parses.
         let err = deserialize_query::<OAuthInitiateQuery>("nope=1").err();
         assert!(matches!(
             err,
-            Some(AuthRejection(AuthError::Validation { details })) if details[0].field == "query"
+            Some(AuthRejection(AuthError::Validation { details })) if details[0].field == "nope"
         ));
         let ok = deserialize_query::<OAuthInitiateQuery>("tenantId=t1");
         assert!(matches!(ok, Ok(q) if q.tenant_id.as_deref() == Some("t1")));

@@ -815,6 +815,17 @@ mod tests {
         assert!(svc.assert_long_enough(&accented, "password").is_ok());
     }
 
+    #[test]
+    fn the_floor_counts_an_astral_character_once() {
+        // One astral character is one code point, four bytes and two UTF-16 units. The floor
+        // counts code points, so fifteen of them reach it and fourteen do not; counting bytes
+        // would admit four, and counting UTF-16 units would admit eight.
+        let Some(svc) = service() else { return };
+        let astral = |count: usize| "\u{1F600}".repeat(count);
+        assert!(svc.assert_long_enough(&astral(15), "password").is_ok());
+        assert!(svc.assert_long_enough(&astral(14), "password").is_err());
+    }
+
     #[tokio::test]
     async fn a_password_refused_locally_never_reaches_the_breach_corpus() {
         // Ordering is the point: the length is decided locally and for free, and the corpus may

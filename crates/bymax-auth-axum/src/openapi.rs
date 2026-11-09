@@ -36,7 +36,7 @@ pub use structures::{
 
 /// The artefact as shipped: a JSON object with the `openapi` version it is written for and a
 /// `schemas` map from DTO name to schema.
-pub const REQUEST_SCHEMAS_JSON: &str = include_str!("../openapi/openapi-request-schemas.json");
+pub const REQUEST_SCHEMAS_JSON: &str = crate::request_schemas::JSON;
 
 /// The artefact, parsed once.
 fn document() -> &'static Value {

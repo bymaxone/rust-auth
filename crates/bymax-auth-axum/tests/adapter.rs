@@ -51,6 +51,9 @@ mod refresh_cookie_bound;
 #[path = "adapter/otp_failure_answers.rs"]
 mod otp_failure_answers;
 
+#[path = "adapter/structural_failure_names.rs"]
+mod structural_failure_names;
+
 #[path = "adapter/validation_field_names.rs"]
 mod validation_field_names;
 
