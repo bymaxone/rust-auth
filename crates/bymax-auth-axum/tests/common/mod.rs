@@ -73,6 +73,9 @@ pub struct EngineSpec {
     /// equals it.
     pub enforce_tenant_binding: bool,
     pub allow_oauth: bool,
+    /// Names for the access and refresh cookies, when the test needs a deployment that renamed
+    /// them. `None` keeps the engine's defaults.
+    pub cookie_names: Option<(&'static str, &'static str)>,
     /// Origins the deployment trusts for cross-site, cookie-authenticated writes. Setting any
     /// switches `SameSite` to `None`, since the two are only valid together.
     pub trusted_origins: &'static [&'static str],
@@ -99,6 +102,7 @@ impl Default for EngineSpec {
             verification_required: false,
             enforce_tenant_binding: false,
             allow_oauth: false,
+            cookie_names: None,
             trusted_origins: &[],
             cookie_domains: &[],
             environment: Environment::Test,
@@ -321,6 +325,10 @@ pub fn build(spec: EngineSpec) -> Option<Harness> {
     let mut config = AuthConfig::default();
     config.jwt.secret = SecretString::from(JWT_SECRET.to_owned());
     config.token_delivery = spec.delivery;
+    if let Some((access, refresh)) = spec.cookie_names {
+        config.cookies.access_token_name = access.to_owned();
+        config.cookies.refresh_token_name = refresh.to_owned();
+    }
     config.email_verification.required = spec.verification_required;
     if spec.enforce_tenant_binding {
         config.tenant_id_resolver = Some(Arc::new(HostTenant));

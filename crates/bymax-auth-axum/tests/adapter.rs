@@ -52,6 +52,10 @@ mod validation_field_names;
 #[path = "adapter/openapi_routes.rs"]
 mod openapi_routes;
 
+#[cfg(feature = "openapi")]
+#[path = "adapter/openapi_security.rs"]
+mod openapi_security;
+
 #[path = "adapter/oauth_provider_error_log.rs"]
 mod oauth_provider_error_log;
 
