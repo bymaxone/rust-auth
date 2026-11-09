@@ -215,12 +215,50 @@ fn spends_session(op: &OperationSecurity) -> bool {
     ) || op.path == "/platform/sessions"
 }
 
-/// Whether a 401 body is the handler's own answer to a credential it was given (a wrong password,
-/// a session it cannot name) and not the guard refusing to accept the request at all.
-fn refused_by_handler(body: &serde_json::Value) -> bool {
-    body["error"]["code"]
-        .as_str()
-        .is_some_and(|code| code == "auth.invalid_credentials" || code.contains("session"))
+/// What the router does with a request, as far as credentials go.
+#[derive(Debug, Eq, PartialEq)]
+enum Answer {
+    /// The guard refuses to accept the request: a 401 before any handler runs.
+    GuardRefuses,
+    /// The guard accepts the caller and the handler cannot name the session it must act on.
+    NoSession,
+    /// Anything else, including a handler's own refusal of a wrong password or a missing target.
+    Serves,
+}
+
+/// The answer a kind promises for a request carrying `p`. A kind that needs both credentials is
+/// refused by the guard without the access token and by the handler without the refresh token.
+fn promised(kind: OperationKind, p: Presented, delivery: DeliveryMode) -> Answer {
+    if kind == OperationKind::AccessAndRefreshRequired && access_read(p, delivery) {
+        return if refresh_read(p, delivery) {
+            Answer::Serves
+        } else {
+            Answer::NoSession
+        };
+    }
+    if admits(kind, p, delivery) {
+        Answer::Serves
+    } else {
+        Answer::GuardRefuses
+    }
+}
+
+/// The answer a response shows. A session the handler cannot name answers 404 `session_not_found`
+/// on the operation that acts on the caller's own session; on an operation that names its target
+/// in the path, that same answer is only the target being absent.
+fn observed(op: &OperationSecurity, got: &Captured) -> Answer {
+    let code = got.json()["error"]["code"].as_str().map(str::to_owned);
+    let code = code.as_deref();
+    if code == Some("auth.session_not_found") && !op.path.contains('{') {
+        return Answer::NoSession;
+    }
+    if got.status == StatusCode::UNAUTHORIZED
+        && code != Some("auth.invalid_credentials")
+        && !code.is_some_and(|c| c.contains("session"))
+    {
+        return Answer::GuardRefuses;
+    }
+    Answer::Serves
 }
 
 /// Presents every combination to one operation and returns the disagreements.
@@ -240,15 +278,12 @@ async fn probe_operation(
             &shared
         };
         let got = request(op, p, session).send(app).await;
-        let expected = admits(op.kind, p, delivery);
-        let guard_refused =
-            got.status == StatusCode::UNAUTHORIZED && !refused_by_handler(&got.json());
-        if guard_refused == expected {
+        let expected = promised(op.kind, p, delivery);
+        if observed(op, &got) != expected {
             disagreements.push(format!(
-                "{} {} under {delivery:?} presenting {label}: expected {}, got {} {}",
+                "{} {} under {delivery:?} presenting {label}: expected {expected:?}, got {} {}",
                 op.method,
                 op.path,
-                if expected { "admitted" } else { "401" },
                 got.status,
                 got.json()
             ));
