@@ -5218,6 +5218,11 @@ pub enum AuthErrorCode {
     #[serde(rename = "auth.api_key_invalid")] ApiKeyInvalid,
     #[serde(rename = "auth.api_key_scope_insufficient")] ApiKeyScopeInsufficient,
     #[serde(rename = "auth.api_key_not_found")] ApiKeyNotFound,
+    // Workspaces (see §15.3): one variant per row of the Workspaces table.
+    #[serde(rename = "auth.workspace_required")] WorkspaceRequired,
+    #[serde(rename = "auth.workspace_not_found")] WorkspaceNotFound,
+    // … InsufficientWorkspaceRole, LastOwner, AlreadyMember, InvitationEmailMismatch,
+    //   RegistrationClosed, WorkspaceLimitReached, WorkspacePendingDeletion …
     // Adapter-originated — the two codes with no nest-auth `auth.*` equivalent (see §15.3):
     #[serde(rename = "auth.validation")] Validation,
     #[serde(rename = "auth.too_many_requests")] TooManyRequests,
@@ -5375,6 +5380,20 @@ The statuses below are **wire** statuses — what a caller actually receives. An
 | `auth.api_key_invalid` | 401 | The presented key is absent, malformed, unknown, wrong, revoked or expired. One answer for all of them, so the response is no oracle for which one it was. | Invalid API key |
 | `auth.api_key_scope_insufficient` | 403 | The key is valid but does not hold every scope the route declares. | API key lacks the required scope |
 | `auth.api_key_not_found` | 404 | The named API key does not exist. | API key not found |
+
+#### Workspaces
+
+| Code | HTTP | When raised | Client message |
+| --- | --- | --- | --- |
+| `auth.workspace_required` | 400 | The request names no target workspace. | A workspace is required |
+| `auth.workspace_not_found` | 404 | The workspace does not exist, is not active, or the caller is not an active member. The three cases are indistinguishable on purpose, so the answer reveals nothing about which workspaces exist. | Workspace not found |
+| `auth.insufficient_workspace_role` | 403 | The caller is an active member whose workspace role does not satisfy the operation. | Insufficient workspace role |
+| `auth.last_owner` | 409 | The change would leave the workspace with no active owner. | A workspace needs at least one owner |
+| `auth.already_member` | 409 | An invitation or add names someone who already belongs to the workspace. | Already a member of this workspace |
+| `auth.invitation_email_mismatch` | 403 | The invitation was sent to a different email address than the one accepting it. | This invitation was sent to a different email address |
+| `auth.registration_closed` | 403 | Registration is closed to anyone without a valid invitation. | Registration is closed |
+| `auth.workspace_limit_reached` | 403 | The account already owns the most workspaces the configuration allows; workspaces pending deletion count toward the limit. | Workspace limit reached. Workspaces pending deletion count toward the limit. |
+| `auth.workspace_pending_deletion` | 409 | The workspace is scheduled for deletion. Answered to an owner only; every other caller gets `auth.workspace_not_found`. | Workspace is scheduled for deletion |
 
 #### Validation (adapter-originated)
 

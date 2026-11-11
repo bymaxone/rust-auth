@@ -67,6 +67,18 @@ fn catalog() -> Vec<(AuthErrorCode, &'static str)> {
         (ApiKeyNotFound, "auth.api_key_not_found"),
         (Validation, "auth.validation"),
         (TooManyRequests, "auth.too_many_requests"),
+        (WorkspaceRequired, "auth.workspace_required"),
+        (WorkspaceNotFound, "auth.workspace_not_found"),
+        (
+            InsufficientWorkspaceRole,
+            "auth.insufficient_workspace_role",
+        ),
+        (LastOwner, "auth.last_owner"),
+        (AlreadyMember, "auth.already_member"),
+        (InvitationEmailMismatch, "auth.invitation_email_mismatch"),
+        (RegistrationClosed, "auth.registration_closed"),
+        (WorkspaceLimitReached, "auth.workspace_limit_reached"),
+        (WorkspacePendingDeletion, "auth.workspace_pending_deletion"),
         (Internal, "auth.internal"),
     ]
 }
@@ -123,6 +135,15 @@ fn all_errors() -> Vec<AuthError> {
         AuthError::TooManyRequests {
             retry_after_seconds: None,
         },
+        AuthError::WorkspaceRequired,
+        AuthError::WorkspaceNotFound,
+        AuthError::InsufficientWorkspaceRole,
+        AuthError::LastOwner,
+        AuthError::AlreadyMember,
+        AuthError::InvitationEmailMismatch,
+        AuthError::RegistrationClosed,
+        AuthError::WorkspaceLimitReached,
+        AuthError::WorkspacePendingDeletion,
         AuthError::Internal(Box::<dyn std::error::Error + Send + Sync>::from("boom")),
     ]
 }
@@ -132,7 +153,7 @@ fn every_code_serializes_to_its_string_and_round_trips() {
     // Table-driven wire-string check: each code's `auth.*` string must match the catalog
     // exactly. The catalog covers every code; the status each one answers is asserted
     // against the shared contract in `every_code_answers_the_wire_status_the_contract_pins`.
-    assert_eq!(catalog().len(), 41);
+    assert_eq!(catalog().len(), 50);
     for (code, wire) in catalog() {
         let json = serde_json::to_string(&code).unwrap_or_default();
         assert_eq!(json, format!("\"{wire}\""), "wrong string for {code:?}");
@@ -401,60 +422,12 @@ fn contract_statuses() -> BTreeMap<String, u16> {
     statuses
 }
 
-/// Codes the shared contract names that this repository has not built yet, with the slice that
-/// builds each.
-///
-/// The set comparisons below leave these out of both sides, and
-/// [`every_pending_code_is_still_missing_and_still_in_the_contract`] requires each one to be
-/// absent from the catalog and present in the contract. A slice that builds a code therefore has
-/// to delete its entry here, and a code the contract adds that is not listed fails the build.
-const PENDING_CODES: &[&str] = &[
-    "auth.workspace_required",
-    "auth.workspace_not_found",
-    "auth.insufficient_workspace_role",
-    "auth.last_owner",
-    "auth.already_member",
-    "auth.invitation_email_mismatch",
-    "auth.registration_closed",
-    "auth.workspace_limit_reached",
-    "auth.workspace_pending_deletion",
-];
-
-/// The contract's code list without the codes still pending.
-fn built_contract_codes() -> Vec<String> {
-    contract_codes("codes")
-        .into_iter()
-        .filter(|code| !PENDING_CODES.contains(&code.as_str()))
-        .collect()
-}
-
-#[test]
-fn every_pending_code_is_still_missing_and_still_in_the_contract() {
-    // A pending entry that the catalog already carries is a finished slice that forgot to remove
-    // it; one the contract no longer names is a row describing nothing. Either hides drift.
-    let in_contract = contract_codes("codes");
-    let built: Vec<String> = catalog()
-        .iter()
-        .map(|(_, wire)| (*wire).to_owned())
-        .collect();
-    for code in PENDING_CODES {
-        assert!(
-            in_contract.iter().any(|c| c == code),
-            "{code} is pending but the contract does not name it"
-        );
-        assert!(
-            !built.iter().any(|c| c == code),
-            "{code} is built; remove it from PENDING_CODES"
-        );
-    }
-}
-
 #[test]
 fn the_catalog_names_exactly_the_codes_the_shared_contract_does() {
     // One vocabulary across both implementations: a code present on one side only is a client
     // branch that never fires against the other, and a code neither side emits is a branch that
     // never fires at all — which is what five of them were before this check existed.
-    let mut expected = built_contract_codes();
+    let mut expected = contract_codes("codes");
     let mut actual: Vec<String> = catalog()
         .iter()
         .filter_map(|(code, _)| serde_json::to_value(code).ok())
@@ -514,11 +487,8 @@ fn the_contract_pins_a_status_for_exactly_the_codes_it_names() {
     // gate covers, which is exactly how the thirteen diverged; the second is a row describing a
     // code that no longer exists. Compared against the contract's own code list and against the
     // enum's, so no one of the three can move without the other two.
-    let pinned: Vec<String> = contract_statuses()
-        .into_keys()
-        .filter(|code| !PENDING_CODES.contains(&code.as_str()))
-        .collect();
-    let mut codes = built_contract_codes();
+    let pinned: Vec<String> = contract_statuses().into_keys().collect();
+    let mut codes = contract_codes("codes");
     codes.sort();
     assert_eq!(
         pinned, codes,
