@@ -1,29 +1,38 @@
 # Phase 13 — Workspace parity with `nest-auth`: plan
 
-> **Status**: ⛔ Blocked (entry gate below) · **Progress**: 0 / 9 slices · **Last updated**: 2026-11-09
-> **Source roadmap**: [`docs/development_plan.md`](../development_plan.md) (this phase is not in its dashboard until the work is authorised)
+> **Status**: 🔄 In progress · **Progress**: 0 / 12 slices · **Last updated**: 2026-11-11
+> **Source roadmap**: [`docs/development_plan.md`](../development_plan.md) (this phase is not in its dashboard)
 > **Source spec**: [`docs/technical_specification.md`](../technical_specification.md)
 
-This is a plan. It contains no code and authorises none. It exists so that, when the entry gate opens, the work starts from a measured list and not from memory.
+This is the plan for the workspace feature set as the published contract states it. It contains no code; each slice is its own reviewed pull request.
 
 ---
 
 ## Entry gate
 
-Implementation starts only when `@bymax-one/nest-auth` has published the release that carries its workspace feature set, and the project owner has authorised the work. Until then, `nest-auth` still adds to the shared contract, so code written now would chase a moving target. Every list below is therefore **re-derived from the published contract files at that point**; the lists here are what the contract reviews found in the files named in each slice, and they will have grown.
+Met: `@bymax-one/nest-auth` has published the release that carries its workspace feature set, and the project owner has authorised the work. The files below are the ones this phase takes, in one pass, from that release (`conformance/` at the release tag, read through the contents API and base64-decoded, never the raw media type, which rewrites JSON escapes):
 
-Nothing in this phase is copied into the repository before the gate: the files under `conformance/` stay at the version the repository holds, and the tests that assert against them keep passing.
+| File | sha256 |
+|---|---|
+| `wire-contract.json` (contract version 3) | `33f571f3e86ebcf14ee1dcdce4a6a50a6e430d9be968e883453a4d32d94f3a78` |
+| `openapi-operation-security.json` | `41aa87e8ff48c9f417ce2839cdcf86da2cc5f025d3d18aba987437489e004d3a` |
+| `openapi-request-schemas.json` | `90b2fd7ae9da0634881c193e0dd36ee31ff7b17aa5af83827b3da50b1b34741c` |
+| `openapi-request-descriptions.json` | `81b6e5aaced9e463dbd61b928dca1b59dbe1b669d4402b3fc9b27e237f476c07` |
+| `openapi-declared-structures.json` | `78218849b5d1aea392e54fc0b8722e76444d86db9600cb3d77848f0aa3296fd5` |
+
+Nothing is copied before slice 13.0 lands. Until then the files under `conformance/` stay at the version the repository holds, and the tests that assert against them keep passing.
 
 ---
 
 ## Context
 
-The shared files are the authority. `conformance/wire-contract.json` is held byte-identical with `nest-auth`, with the sha256 pinned in this repository, and so are the OpenAPI artefacts (`openapi-request-schemas.json`, `openapi-operation-security.json`, `openapi-request-descriptions.json`, `openapi-declared-structures.json`). Workspaces add, to those files:
+The shared files are the authority. `conformance/wire-contract.json` is held byte-identical with `nest-auth`, with the sha256 pinned in this repository, and so are the four OpenAPI artefacts. Workspaces add, to those files:
 
-- sections of the wire contract: `workspaceMembershipCache` and `workspaceInvitations` (with key vectors), `passwordResetOrder`, `refreshTokenInput`; and additions to `errorCatalog`, `errorEnvelope`, `identifierPreimages`, `rateLimits`, `redisKeyPrefixes`, `requestEncoding` and `requestFieldBounds` (`pageLimit`, `workspaceName`, `memberUserId`, `pathParameters`);
-- operations in the operation-security table, DTOs in the request schemas, and descriptions of two more email-normalising DTOs.
+- sections of the wire contract: `workspaceMembershipCache`, `workspaceInvitations` (with key vectors), `workspaceScopedName` (with vectors), `workspaceRealtime` (the access decision on every surface, the live job check, `access.denied` and its vectors), `passwordResetOrder`, `refreshTokenInput`;
+- changes to `errorCatalog` (nine codes), `errorEnvelope`, `identifierPreimages`, `userSubjectDerivedKeys`, `rateLimits` (nineteen limits), `redisKeyPrefixes` (nine prefixes), `requestEncoding` (eleven strict routes and three when-body routes), `requestFieldBounds` (`pageLimit`, `workspaceName`, `memberUserId`, `pathParameters`) and `recordEncodings` (the OAuth state record gains an optional `workspaceInvitation`);
+- operations in the operation-security table (38 become 57), DTOs in the request schemas (22 become 35, and the OAuth initiate query gains `workspaceInvitation`), and descriptions of two more email-normalising DTOs.
 
-Because every one of those lists is compared with this repository's own tables in **both directions**, copying the files makes the comparing tests fail until the matching code exists. That is the purpose of the tests, and it decides the shape of this plan: slice 0 makes the failure visible and tracked instead of blocking, and each later slice removes entries from the tracked list.
+Because every one of those lists is compared with this repository's own tables in **both directions**, copying the files makes the comparing tests fail until the matching code exists. That is the purpose of the tests, and it decides the shape of this plan: slice 13.0 makes the failure visible and tracked instead of blocking, and each later slice removes entries from the tracked list.
 
 ---
 
@@ -54,13 +63,16 @@ Because every one of those lists is compared with this repository's own tables i
 |---|---|---|---|
 | 13.0 | Copy the contract; track what is not built | 📋 ToDo | entry gate |
 | 13.1 | Error codes, statuses and wire envelope | 📋 ToDo | 13.0 |
-| 13.2 | Keys, preimages, rate limits, encoding and bounds (data only) | 📋 ToDo | 13.0 |
+| 13.2 | Keys, preimages, rate limits, encoding, bounds, scoped names (data only) | 📋 ToDo | 13.0 |
 | 13.3 | Domain model and repository traits | 📋 ToDo | 13.1 |
 | 13.4 | Membership cache store and its scripts | 📋 ToDo | 13.2, 13.3 |
-| 13.5 | Workspace services, guard and routes | 📋 ToDo | 13.1, 13.3, 13.4 |
-| 13.6 | Invitations: store, scripts and routes | 📋 ToDo | 13.2, 13.3, 13.5 |
-| 13.7 | Whatever the release adds after the lifecycle and invitations | 📋 ToDo | the published contract |
-| 13.8 | OpenAPI surface, client, npm types and documentation | 📋 ToDo | 13.5, 13.6 |
+| 13.5a | Workspace reads: list, access, members, switch, and the guard | 📋 ToDo | 13.1, 13.3, 13.4 |
+| 13.5b | Workspace mutations: create, rename, deletion lifecycle, role, remove, leave, transfer | 📋 ToDo | 13.5a |
+| 13.6 | Invitations core: invite, resend, revoke, list, preview | 📋 ToDo | 13.2, 13.3, 13.5a |
+| 13.7 | Acceptance family and bootstrap invitations | 📋 ToDo | 13.5b, 13.6 |
+| 13.8 | OAuth invitation, invitation-only registration, the OAuth MFA branch | 📋 ToDo | 13.7 |
+| 13.9 | Realtime surfaces: verifier, sockets, job check, `access.denied` and its limiter | 📋 ToDo | 13.5a |
+| 13.10 | OpenAPI surface, client, npm types and documentation | 📋 ToDo | 13.5b, 13.7, 13.8, 13.9 |
 
 ---
 
@@ -91,7 +103,7 @@ Because every one of those lists is compared with this repository's own tables i
 
 **Contract surface:** `errorCatalog` (codes, statuses, `internalOnly`), `errorEnvelope`.
 
-**Work.** Add the workspace codes to `AuthErrorCode` and `AuthError` with the statuses the contract pins, fixed client messages, and the TypeScript export. The enums are `#[non_exhaustive]`, so this is not a source break. A code the contract marks internal-only goes through `to_wire` like the existing sentinels. The structural-failure naming already follows the envelope rule (the set of distinct fields is normative; message text and entry count are not).
+**Work.** Add the nine workspace codes to `AuthErrorCode` and `AuthError` with the statuses the contract pins, fixed client messages, and the TypeScript export. The enums are `#[non_exhaustive]`, so this is not a source break. A code the contract marks internal-only goes through `to_wire` like the existing sentinels. The structural-failure naming already follows the envelope rule (the set of distinct fields is normative; message text and entry count are not).
 
 **Probes reused:** `every_code_answers_the_wire_status_the_contract_pins`, `the_catalog_names_exactly_the_codes_the_shared_contract_does`, the wire-status assertion of every code.
 
@@ -108,7 +120,8 @@ Because every one of those lists is compared with this repository's own tables i
 - the workspace and membership subjects and the invitation-email and inviter-rate subjects, each HMAC-ed with the identifier key of `hmacKeyDerivation`, and the key builders for every prefix;
 - the named rate limits in the same `requests/windowSeconds` form, with defaults;
 - the strict and when-body route lists, including the first `PATCH` route;
-- the bound tables: workspace name (counted on the value as submitted, stored trimmed, blank after trim refused), member user id, page limit and cursor, path parameters.
+- the bound tables: workspace name (counted on the value as submitted, stored trimmed, blank after trim refused), member user id, page limit and cursor, path parameters;
+- the `workspaceScopedName` builder and its vectors (length-prefixed in UTF-8 bytes, refusals for controls and unpaired surrogates), and the optional `workspaceInvitation` field of the OAuth state record.
 
 **Probes and vectors reused:** the contract's vectors are read from the file, never restated: the membership vectors and the invitation key and inviter-rate vectors. They were recomputed independently with a second implementation during the contract reviews and all reproduced, including the multibyte and the delimiter-in-identifier cases. The test asserts **set equality** with each vector section, so a vector added later fails until it is derived.
 
@@ -159,29 +172,42 @@ Because every one of those lists is compared with this repository's own tables i
 
 ---
 
-## Slice 13.5 — workspace services, guard and routes
+## Slice 13.5a — workspace reads and the guard
 
-**Contract surface:** the workspace operations of the operation-security table, the request schemas and descriptions of their DTOs, `requestEncoding`, `requestFieldBounds`, `rateLimits`, `errorCatalog`.
+**Contract surface:** the read operations of the operation-security table (list, access, members, switch), their DTOs (`WorkspacePageQueryDto`, `MemberRouteParamsDto`), `workspaceRealtime.rules.accessDecision` and `workspaceIdField`, `requestEncoding`, `requestFieldBounds`, `rateLimits`, `errorCatalog`.
 
-**Work.** The lifecycle services (create, rename, schedule deletion, restore, list, access, members, switch, change role, remove, leave, transfer ownership), the workspace guard and permission check, the workspace hooks, and the routes in a new `RouteGroup`.
+**Work.** The workspace guard and permission check, the access decision, the read services and their routes behind a new flag of `RouteGroups`.
 
 **Behaviour the contract fixes and the slice must probe:**
 
-- **Path parameters.** A parameter over 128 code points, blank, or carrying a control character answers `400 auth.validation` naming the parameter, **ahead of authorization**. The workspace guard runs first, so when both `workspaceId` and another parameter are bad only `workspaceId` is reported. A well-formed parameter that names nothing, or a workspace the caller may not see, answers the identical `404 auth.workspace_not_found`, with the same repository reads in each case. "Blank" uses the JavaScript whitespace set, as `not_blank` does. A literal route such as `workspaces/invitations/preview` coexists with `workspaces/{workspaceId}/…` because static segments win; a workspace whose id is `invitations` is unreachable under that prefix, which the documentation states.
-- **Workspace name.** Length and control characters are checked on the value as submitted; the stored value is trimmed; blank after trimming is refused as `auth.validation` naming `name`.
-- **List routes.** `limit` and `cursor` as above; the tenant and the workspace of a list always come from the credential and the route.
-- **Authorization.** Every operation is `access`; the role ceiling and the last-owner rules are enforced in the service through the repository's atomic operations.
+- **The access decision, in one fixed order.** Not an active member of an active workspace, and any non-owner of a workspace pending deletion, answer the IDENTICAL `404 auth.workspace_not_found`, decided from the rows already read. The owner of a workspace pending deletion answers `409 auth.workspace_pending_deletion` unless the surface admits pending workspaces, in which case only that owner is admitted. Then the role is judged through the hierarchy (`403 auth.insufficient_workspace_role`). A surface never tells a non-owner more than the route does.
+- **Path parameters.** A parameter over 128 code points, blank, or carrying a control character answers `400 auth.validation` naming the parameter, **ahead of authorization**; the workspace guard runs first, so when both `workspaceId` and another parameter are bad only `workspaceId` is reported. A well-formed id that names nothing answers the identical 404. "Blank" uses the JavaScript whitespace set, as `not_blank` does. A literal route such as `workspaces/invitations/preview` coexists with `workspaces/{workspaceId}/…` because static segments win; a workspace whose id is `invitations` is unreachable under that prefix, which the documentation states.
+- **Membership status.** Every path that reads a membership decides its status explicitly, and only an ACTIVE membership of an ACTIVE workspace grants anything; the cache fills and reads back only an active membership.
+- **List routes.** `limit` and `cursor` as in 13.2; the tenant and the workspace of a list always come from the credential and the route.
 - **Structural failures.** The new DTOs are added to `dto::DECLARED` with their schema names, so a missing or wrong-typed property names the property.
 
-**Probes reused:** the operation matrix (each operation × each delivery mode × nine credential and transport combinations, with an oracle written from what each kind means) extends to the new operations without a new oracle; the structural-failure table extends to the new DTOs by construction (an empty body names exactly the required set).
-
-**Set equality that moves here:** the operation table, the DTO table, the descriptions inventory (two more email-normalising DTOs), the encoding lists, the rate limits.
+**Probes reused:** the operation matrix (each operation × each delivery mode × nine credential and transport combinations, with an oracle written from what each kind means) extends to the new operations without a new oracle; the structural-failure table extends to the new DTOs by construction.
 
 ---
 
-## Slice 13.6 — invitations
+## Slice 13.5b — workspace mutations
 
-**Contract surface:** `workspaceInvitations` (`record`, `keys`, `fullKeyVectors`, `inviterRateVectors`, `rules`), the invitation operations and DTOs, `rateLimits`.
+**Contract surface:** the mutating operations (create, rename, schedule deletion, restore, change role, remove, leave, transfer ownership), their DTOs, `workspaceName`, `memberUserId`, `rules.membershipStatus`, `rules.bootstrapCreate` (the create path shared with bootstrap), the workspace hooks.
+
+**Work.** The lifecycle services, the routes, and the hooks, including the workspace-create cap (`workspaces.maxWorkspacesPerUser`, counted as the workspaces the account owns with the owner role), the host's `beforeWorkspaceCreate`, and the self-serve switch `allowCreate`.
+
+**Behaviour the contract fixes and the slice must probe:**
+
+- **Workspace name.** The bound (1 to 120 code points) and the control-character rule apply to the value as submitted; the stored value is trimmed; blank after trimming is refused as `auth.validation` naming `name`.
+- **Ownership.** The last owner cannot leave, be removed or be demoted, as one atomic repository operation. The receiver of an ownership hand-over must be ACTIVE (`400 auth.validation` naming `userId`), checked before the giver's password is looked at and again by the repository's write.
+- **Role changes and removals** act only on an ACTIVE member; a suspended one answers `404 auth.workspace_not_found`. Both are conditional on the role the actor read.
+- **Refusals** use the catalog codes: `auth.last_owner`, `auth.workspace_limit_reached`, `auth.insufficient_workspace_role`, and a `403 auth.forbidden` with a detail for a host-hook refusal.
+
+---
+
+## Slice 13.6 — invitations core
+
+**Contract surface:** `workspaceInvitations` (`record`, `keys`, `fullKeyVectors`, `inviterRateVectors`, `rules`), the invite, resend, revoke, list and preview operations and their DTOs, `rateLimits`.
 
 **Work.** The invitation store (record, index, pending set, inviter counter), the services and the routes.
 
@@ -189,28 +215,65 @@ Because every one of those lists is compared with this repository's own tables i
 
 | Script | Rule |
 |---|---|
-| Invite | in **one step**: list and prune the pending set (a member whose record is gone is dropped), refuse when the pending cap (`workspaces.maxPendingInvitationsPerWorkspace`) is reached, set the index by compare-and-set against the key the writer read, write the record, add it to the set, and set the TTLs. The index is claimed before the record is written, so a crash leaves an index naming nothing, which reads as no invitation. A lost compare-and-set is `429 auth.too_many_requests` |
-| Replace (resend, or a second invitation of the same address) | mints a new token, takes the role of the new request, retires the old record, in one step; the cooldown (60 s) and the resend limit (5) apply to both |
+| Publish (invite, resend, or a second invitation of the same address) | ONE atomic step, with no separate claim: it takes the record key the writer read from the index (none for a first invitation) and writes only while the index still holds it, then writes the record, points the index at it, adds the record key to the set, deletes the record it replaces and that record's place in the set, and sets the TTLs. A writer that read a stale index writes nothing and answers `429 auth.too_many_requests` |
+| Pending cap | in the same step: a first invitation at the cap writes nothing; replacing a LIVE record skips the cap because the set does not grow; an index naming a GONE record counts as a first invitation, with `resendCount` 0 and no cooldown, because the dead entry is dropped before the cap is counted |
 | Revoke | removes the record, the index entry and the set member in one step; an address with no live invitation, or one the actor may not act on, answers 204 and changes nothing |
-| Inviter counter | `INCR` with `EXPIRE` on the first increment only, so the hour runs from the first invitation; 20 per inviter per hour |
+| Inviter counter | `INCR` with `EXPIRE` on the first increment only, one atomic step; 20 per inviter per hour |
 
-**Behaviour to probe:** the role ceiling (the owner invites to any role; every other role invites only to a role strictly below its own); an active member is refused with `409 auth.already_member`; invite, resend and revoke answer 204 with no body whether or not the address has an account, and the email provider is told `accountExists`; the preview needs no credential, takes a token of exactly 64 characters, and answers one `400 auth.invalid_invitation_token` for a token that never existed, expired, was withdrawn or consumed, or whose workspace is not active or whose inviter is gone, with the same repository reads in each case; a delivery failure is re-thrown without the failing text, which may quote the token.
+**Behaviour to probe:** the role ceiling (the owner invites to any role; every other role invites only to a role strictly below its own); an address that has a membership in ANY status is refused with `409 auth.already_member`; invite, resend and revoke answer 204 with no body whether or not the address has an account, and the email provider is told `accountExists`; the 60 s cooldown and the limit of 5 resends apply to a second invitation as to a resend; the preview needs no credential, takes a token of exactly 64 characters, and answers a union on `kind` (`member` carries `inviterName`, `bootstrap` has none), with one `400 auth.invalid_invitation_token` for every failure cause and the same repository reads in each; a delivery failure is re-thrown without the failing text, which may quote the token.
 
-**Probes reused:** the indistinguishability harness of the declared-structures test (registered against unknown address: identical status and payload) extends to the invitation answers; the preview uses the same comparison across its failure causes.
-
----
-
-## Slice 13.7 — what the release adds after this
-
-The accept route, the OAuth invitation path and invite-only registration (the codes `registration_closed` and `invitation_email_mismatch` are in the catalog) are planned only after the contract that carries them is published. This slice is a placeholder: its contract surface, probes and gates are written when its files exist, in the same format as the slices above.
+**Probes reused:** the indistinguishability harness of the declared-structures test (registered against unknown address: identical status and payload) extends to the invitation answers.
 
 ---
 
-## Slice 13.8 — OpenAPI surface, client, npm types and documentation
+## Slice 13.7 — acceptance family and bootstrap invitations
+
+**Contract surface:** `rules.accept`, `acceptOrder`, `acceptSignup`, `bootstrap`, `bootstrapCreate`, `acceptLimits`, `afterAcceptedHook`, the accept and accept-signup operations and DTOs, the hook event.
+
+**Work.** Accept (a signed-in caller), accept-signup (no credential), host-issued bootstrap invitations (a service call with no route, and a second call that withdraws one by workspace id), and the hooks.
+
+**Behaviour the contract fixes and the slice must probe:**
+
+- **Accept order, without spending the token:** the token names a record of a known role in the caller's tenant (else `400 auth.invalid_invitation_token`); the caller's address equals the record's, compared in lowercase (else `403 auth.invitation_email_mismatch`); that address is verified (else `403 auth.email_not_verified`); the workspace is active and the inviter exists; then the membership is written and the record spent. The answer is `200 {workspaceId, role}` where `role` is the role the caller ACTUALLY holds afterwards.
+- **Spend semantics.** Spending deletes the token's own record key always, and the index and the set entry only while they still name that key; a revoke or a resend that lands between the write and the spend cannot undo the acceptance. A failure before the write leaves the invitation usable; a failure after it retries into `already_member`, which counts as success. The hook event carries `lostConsumeRace: true` only when the spend found the index no longer naming the record.
+- **Accept-signup:** the record, the inviter and workspace checks, an existing account for the address (`409 auth.email_already_exists`), then the password policy and breach screen, then the account is created with a verified address, the membership is written, the record is spent, and the session is issued as a sign-in does. A refused password spends nothing.
+- **Bootstrap:** accepting creates the workspace and the owner membership in one repository call, applying the owner cap and the create hook (never `allowCreate`), then spends the record; a retry that finds the workspace created with this caller as its active owner is success.
+- **The after-accepted hook** runs only when an acceptance CREATED the account, is detached, and a failing hook is logged without its message.
+- **Limits:** 10 per minute per IP for accept, 5 for accept-signup.
+
+---
+
+## Slice 13.8 — OAuth invitation and invitation-only registration
+
+**Contract surface:** `rules.oauthAccept`, `oauthAcceptMfa`, `registration`, `recordEncodings.oauthState`, the OAuth initiate query with `workspaceInvitation`.
+
+**Work.** `GET oauth/{provider}?workspaceInvitation=<token>` (the token is exactly 64 characters, `Referrer-Policy: no-referrer` on the start response, `400 auth.invalid_invitation_token` when workspaces are not enabled); the optional `workspaceInvitation` field of the state record, the SHA-256 of the token and never the token; the callback checks, before the host's `onOAuthLogin` hook runs; the MFA branch; and the `registration` option.
+
+**Behaviour to probe:** an account with a second factor receives the MFA challenge exactly as any OAuth sign-in does, and the invitation is neither completed nor spent; `registration: 'invitation-only'` makes `POST register` answer `403 auth.registration_closed` before anything else is read, and the OAuth `create` action answers it unless the flow carries an invitation that passed the callback checks; sign-in, linking and every accept route are unaffected; startup refuses the mode when workspaces and invitations are both off, naming both. A state record carrying `workspaceInvitation` as anything but 64 lowercase hex characters is refused as corrupt.
+
+---
+
+## Slice 13.9 — realtime surfaces
+
+**Contract surface:** `workspaceRealtime` in full (`accessDecision`, `workspaceIdField`, `verifierWorkspace`, `socketMessage`, `jobAuthorization`, `accessDeniedEvents`, `accessDeniedVectors`), `redisKeyPrefixes` (`wad`, `wads`), `userSubjectDerivedKeys`, the `workspaces.accessDeniedEvents` options.
 
 **Work.**
 
-- `request_schemas`, `operation_security`, `describe_operation` and the descriptions and structures accessors serve the new files.
+- **The verifier.** An optional `workspace {workspaceId, roles, allowPending}` on the access verifier that, on the dashboard plane, returns the caller's membership beside the verified payload, resolved through the same versioned access cache as the routes and judged by the access decision after the identity checks. On the platform plane, or with workspaces disabled, the option is a programmer error and not an auth failure.
+- **Sockets.** A message is admitted to the workspace it names, from its body only (never the URL, a header, the handshake or the ticket), judged again on every message, with the membership kept with the message and not on the connection. A message that is not an object answers `400 auth.validation` naming `workspaceId`; a handler declaring no roles is refused `403 auth.forbidden` before anything is looked up.
+- **The live job check.** A queued job carries `{tenantId, workspaceId, actorUserId}`; before any side effect the check reads the account, the workspace and the membership from the repositories on the primary (never from the access or status cache), the account first, then the access decision. It does not emit `access.denied`.
+- **`access.denied` and its limiter.** The event, its `surface` and `reason` mapping, and the per-account budget: a fixed-window counter `wad:{digest}` and a suppressed counter `wads:{digest}` (24 h), each incremented by one atomic script that sets the expiry on the creating increment, with the suppressed count read and deleted in one atomic step (`GETDEL`). The options `max` and `window_seconds` (defaults 10 and 60, bounds 1 to 10000 and 1 to 3600) with the startup errors the contract pins; when the counter store fails nothing is emitted, one warning per window per process says so, and the access decision is unchanged.
+
+**Vectors:** the `accessDeniedVectors` and the `fullKeyVectors` are read from the pinned contract in the test and reproduced byte for byte, never typed into Rust.
+
+---
+
+## Slice 13.10 — OpenAPI surface, client, npm types and documentation
+
+**Work.**
+
+- `request_schemas`, `operation_security`, `describe_operation` and the descriptions and structures accessors serve the new files; the request-body schemas for the refresh and logout bodies carry the artefact's bounds; the declared-DTO table covers all 35 schemas.
+- `workspaceScopedName` is exposed to hosts: a public helper that builds the length-prefixed name for rooms, keys and prefixes, with the contract's refusals (a C0 control or DEL, an unpaired surrogate, an empty tenant or workspace), and a test that reproduces the contract's vectors from the pinned file.
 - The Rust client crate and the npm package types gain the workspace methods and types; the `ts-rs` export is regenerated.
 - The specification (§ 6, § 8, § 12), the CHANGELOG (the breaking behaviour entries for every change to an existing route) and the migration notes (a shared Redis keyspace gains prefixes; a deployment running both libraries needs both on the same contract) are written.
 
@@ -227,9 +290,8 @@ The accept route, the OAuth invitation path and invite-only registration (the co
 
 ## Risks and open questions
 
-1. **The contract is still growing.** Any list above can gain entries before the gate; slice 13.0 absorbs that, because it copies whatever is published.
-2. **Multi-key scripts and Redis Cluster.** The fill and invite scripts touch several keys, so whether they support Redis Cluster is decided in their slice and stated in the specification.
-3. **Trait shapes are outside the contract files.** Slice 13.3 takes them from the published ports and must reconcile any difference with a contract change request.
-4. **`type_name` keys the declared-DTO table.** A format change in the compiler would fail safe (the old container entry), and a test requires every DTO to be found; a new DTO must be added to the table in the slice that adds it.
-5. **Character counting.** Lengths on text a user submits count code points everywhere; store-key and storage bounds may count bytes by design. New bounds follow the same rule and get an astral boundary test.
-6. **Dependency budget.** No new crate is expected. If one is needed (a cursor encoding, for instance), it needs a vet entry, and the dependency-budget job is re-measured.
+1. **Multi-key scripts and Redis Cluster.** The fill and invite scripts touch several keys, so whether they support Redis Cluster is decided in their slice and stated in the specification.
+2. **Trait shapes are outside the contract files.** Slice 13.3 takes them from the published ports and must reconcile any difference with a contract change request.
+3. **`type_name` keys the declared-DTO table.** A format change in the compiler would fail safe (the old container entry), and a test requires every DTO to be found; a new DTO must be added to the table in the slice that adds it.
+4. **Character counting.** Lengths on text a user submits count code points everywhere; store-key and storage bounds may count bytes by design. New bounds follow the same rule and get an astral boundary test.
+5. **Dependency budget.** No new crate is expected. If one is needed (a cursor encoding, for instance), it needs a vet entry, and the dependency-budget job is re-measured.
