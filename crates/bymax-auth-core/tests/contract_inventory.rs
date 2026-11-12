@@ -252,3 +252,36 @@ fn every_record_encoding_is_read_or_pending() {
         ),
     );
 }
+
+#[test]
+fn every_membership_cache_statement_is_read_or_pending() {
+    let root = contract();
+    inventory(
+        "workspaceMembershipCache",
+        &root["workspaceMembershipCache"],
+        (
+            &[
+                "workspaceSubject",
+                "membershipSubject",
+                "keys",
+                "hmacKey",
+                "absentVersion",
+                "entryValue",
+                "ttl",
+                "versionRetentionSeconds",
+                "versionRetentionWhy",
+                "bump",
+                "vectors",
+                "entryRead",
+                "blankParts",
+                "fullKeyVectors",
+                "scenarios",
+                "entryRefreshesCounters",
+            ],
+            // `entryRule` is prose whose cases are steps of `scenarios` (an inactive workspace is
+            // not cached, a seeded suspended entry reads as a miss) and of the resolver's tests.
+            &["entryRule"],
+            &[("workspaceWideEvents", "13.5b")],
+        ),
+    );
+}

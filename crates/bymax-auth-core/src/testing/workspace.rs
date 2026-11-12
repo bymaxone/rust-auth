@@ -68,8 +68,8 @@ pub(super) fn membership_key(member: MembershipRef<'_>) -> MembershipKey {
 /// Width of the zero-padded instant in a sort key.
 const INSTANT_DIGITS: usize = 22;
 
-/// Added to an instant in nanoseconds so every representable instant sorts as a non-negative
-/// number of `INSTANT_DIGITS` digits.
+/// Added to an instant in nanoseconds so every instant in `time`'s default range (years -9999 to
+/// 9999) sorts as a non-negative number of `INSTANT_DIGITS` digits.
 const INSTANT_BIAS: i128 = 1_000_000_000_000_000_000_000;
 
 /// The sort key of a row: its creation instant to the nanosecond, zero-padded, then its id.

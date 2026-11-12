@@ -31,12 +31,12 @@ fn shared(file: &str) -> Value {
     serde_json::from_str(&raw).unwrap_or(Value::Null)
 }
 
-fn contract() -> Value {
+pub(super) fn contract() -> Value {
     shared("wire-contract.json")
 }
 
 /// The identifier-HMAC key the vectors use: the hex text of `hmacKeyDerivation`'s derived key.
-fn hmac_key() -> [u8; 64] {
+pub(super) fn hmac_key() -> [u8; 64] {
     let root = contract();
     let hex = root["hmacKeyDerivation"]["vectors"][0]["derivedKeyHex"]
         .as_str()
@@ -48,7 +48,7 @@ fn hmac_key() -> [u8; 64] {
 }
 
 /// The prefix the contract names for a key family.
-fn prefix(name: &str) -> String {
+pub(super) fn prefix(name: &str) -> String {
     contract()["redisKeyPrefixes"][name]
         .as_str()
         .unwrap_or_default()
@@ -56,7 +56,7 @@ fn prefix(name: &str) -> String {
 }
 
 /// The vectors of a section as objects, and a failure when there are none.
-fn vectors(section: &Value) -> Vec<Map<String, Value>> {
+pub(super) fn vectors(section: &Value) -> Vec<Map<String, Value>> {
     let list: Vec<Map<String, Value>> = section
         .as_array()
         .into_iter()
@@ -68,7 +68,7 @@ fn vectors(section: &Value) -> Vec<Map<String, Value>> {
 }
 
 /// Removes `field` from `vector` and returns it as text.
-fn take(vector: &mut Map<String, Value>, field: &str) -> String {
+pub(super) fn take(vector: &mut Map<String, Value>, field: &str) -> String {
     let value = vector.remove(field);
     assert!(value.is_some(), "the vector has no field {field}");
     value

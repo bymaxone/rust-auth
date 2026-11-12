@@ -237,6 +237,7 @@ Rust has no DI container, and `rust-auth` deliberately does not emulate one. Ins
 | `SessionStore` | session half of `AuthRedisService` | refresh-session storage |
 | `OtpStore` | OTP/verification half of Redis | OTP records with attempt counters |
 | `BruteForceStore` | brute-force half of Redis | attempt counters with fixed TTL |
+| `MembershipCacheStore` | the `wsv`/`wmv`/`wm` keys and scripts of `WorkspaceAccessService` | versioned workspace-membership cache shared with nest-auth (§12.5.6) |
 | `OAuthProvider` | `OAuthProviderPlugin` | per-provider OAuth (Google built-in) |
 
 Conceptually (illustrative — see §7.0.1 for the authoritative engine shape):
@@ -2554,6 +2555,7 @@ Traits/crates: `bymax-auth-types` (`AuthResult`, `PlatformAuthResult`, `SafeAuth
 | `InvitationService` | `UserRepository`, `EmailProvider`, `AuthHooks`, `SessionStore` | crypto | getdel |
 | `TokenDeliveryService` | — | types | — |
 | `ApiKeyRuntime` (feature `api-keys`) | `ApiKeyRepository`, `AuthHooks` | crypto (`api_key`) | — |
+| `services::membership_cache` (`resolve_membership`, `bump_workspace`, `bump_membership`) | `MembershipCacheStore`, `WorkspaceRepository`, `MembershipRepository` | crypto (mac) | `membership_cache_fill`, `membership_cache_bump` |
 
 All cross-store mutations follow the security-before-availability ordering established above (credential change before session invalidation; uniqueness/status/verification gates before KDF work; brute-force ordering invariant). Every `after_*`/`on_*` hook is fire-and-forget; only `before_register` (and OAuth's `on_oauth_login`) can block a flow.
 ### 7.13 Service API keys (feature `api-keys`)
@@ -4755,7 +4757,7 @@ pub trait BruteForceStore: Send + Sync {
 }
 ```
 
-Auxiliary single-purpose keyspaces (MFA pending setup, MFA temp token, MFA anti-replay, OAuth state, password-reset token/verified, invitations, user-status cache, and — under the `websocket` feature — the single-use WebSocket upgrade ticket) are served by small store traits in the same crate (`MfaStore`, `OAuthStateStore`, `PasswordResetStore`, `InvitationStore`, `UserStatusCache`, `WsTicketStore`) following the identical pattern; their keys are catalogued in §12.4. `SessionKind` is `{ Dashboard, Platform }` and selects the prefix pair (`rt`/`prt`, `rp`/`prp`, `sess`/`psess`, `sd`/`psd`).
+Auxiliary single-purpose keyspaces (MFA pending setup, MFA temp token, MFA anti-replay, OAuth state, password-reset token/verified, invitations, user-status cache, workspace-membership cache, and — under the `websocket` feature — the single-use WebSocket upgrade ticket) are served by small store traits in the same crate (`MfaStore`, `OAuthStateStore`, `PasswordResetStore`, `InvitationStore`, `UserStatusCache`, `MembershipCacheStore`, `WsTicketStore`) following the identical pattern; their keys are catalogued in §12.4. `SessionKind` is `{ Dashboard, Platform }` and selects the prefix pair (`rt`/`prt`, `rp`/`prp`, `sess`/`psess`, `sd`/`psd`).
 
 ### 12.4 Complete Redis key catalog
 
@@ -4870,12 +4872,22 @@ Makes "compare code, bump attempts, consume on success, lock on max" a single at
   4. On match → `DEL KEYS[1]`; **return `"OK"`**.
 - **Rust mapping:** an enum over the four string results. Preserving residual TTL on the attempt bump is mandatory so an attacker cannot extend the OTP lifetime by guessing.
 
+#### 12.5.6 `membership_cache_fill` and `membership_cache_bump` — the workspace-membership cache
+
+The cache is three keys per membership (`wsv`, `wmv`, `wm`, §12.4), shared with nest-auth and pinned by `workspaceMembershipCache` in the shared contract. **The order is the requirement:** a reader reads `wsv`, then `wmv`, then the entry named by those two values, then, on a miss, the repositories, and refills the entry under the versions it read **first**. The read needs no script: `MembershipCacheStore::read` issues three single-key `GET`s in that order, an absent counter reads `0`, and a read never creates a counter. An entry is read by parsing; one that is not valid JSON, whose `role` is not a string or whose `status` is not `active` is a miss. Only an active membership of an active workspace is cached, a TTL of `0` (`workspaces.membershipCacheTtlSeconds`) disables the cache, and the cache is advisory: a store failure answers from the repositories and writes nothing (`services::membership_cache::resolve_membership`).
+
+- **`membership_cache_fill`** — **KEYS** `[1]` `wsv:{hmac(workspaceSubject)}`, `[2]` `wmv:{hmac(membershipSubject)}`, `[3]` `wm:{hmac(membershipSubject)}:{w}:{m}`; **ARGV** `[1]` the entry `{"role":"<role>","status":"active"}`, `[2]` the entry TTL (s, at least 1), `[3]` the counters' retention (2 592 000 s, the token-epoch retention), `[4]` and `[5]` the versions read. **Contract:** read each counter (absent ⇒ `'0'`); if either differs from the version read, **return `'moved'`** and write nothing. Otherwise `EXPIRE` each counter that `EXISTS` to the retention (an absent counter stays absent), `SET KEYS[3] ARGV[1] EX ARGV[2]`, and **return `'written'`**. A counter that expired between the read and the fill reads `'0'` and no longer matches, so a counter value is never reused while an entry bearing it can live.
+- **`membership_cache_bump`** — **KEYS** `[1]` the counter; **ARGV** `[1]` the retention. **Contract:** `INCR KEYS[1]`, then `EXPIRE KEYS[1] ARGV[1]` on **every** bump; return the new value. A writer changes the repository first and bumps after, and a failed bump is an error: a change is never reported as invalidated when it was not.
+- **Rust mapping:** `FillOutcome::{ Written, Moved }`; a bump returns the new `u64`. Every key the scripts touch is declared in `KEYS`, and the entry key is built by the caller from the versions it read.
+- **Operational requirement (documented, not tested):** a counter evicted under memory pressure restarts at `0` and can make an entry written under an earlier `0:0` readable again for up to its TTL — the exposure the token-epoch counters have. Run the store with a no-eviction policy (`maxmemory-policy noeviction`) for the auth keyspace.
+
 > **Why Lua, in one line:** every one of these transitions has a read→decide→write shape where a second concurrent caller slipping between the read and the write would breach a security invariant (double session, cross-user revoke, lockout evasion, attempt-ceiling evasion). Redis runs each script to completion atomically, which is the cheapest correct primitive available and exactly what nest-auth relies on.
 
 ### 12.6 Performance and operational notes
 
 - All operations are O(1) except `list_sessions` (`SMEMBERS` + `MGET`), which is O(N) in the number of a single account's sessions (typically < 10, hard-bounded by FIFO eviction).
 - Namespacing isolates the auth keyspace from the host application's own Redis keys.
+- The auth keyspace needs a no-eviction policy: an evicted version counter (`ep`, `pep`, `wsv`, `wmv`) restarts at `0`, which can revive what a bump had invalidated (§12.5.6).
 - Scripts are loaded with `SCRIPT LOAD` lazily on first use; the `NOSCRIPT` fallback keeps the system correct across Redis restarts and failovers without a warm-up step.
 - The same keyspace and TTLs are honored by the `nest-auth` implementation, enabling a side-by-side migration where both backends share one Redis.
 ## 13. JWT & Token Strategy

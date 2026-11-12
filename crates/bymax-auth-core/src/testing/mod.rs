@@ -37,6 +37,7 @@ use crate::traits::{
 pub use crate::traits::{NoOpAuthHooks, NoOpEmailProvider};
 #[cfg(feature = "api-keys")]
 pub use api_key::{InMemoryApiKeyRepository, ManualApiKeyClock};
+pub use membership_cache::InMemoryMembershipCache;
 pub use workspace::InMemoryWorkspaces;
 
 /// Acquire a mutex guard, recovering the inner value if the lock was poisoned (a test
@@ -1745,6 +1746,10 @@ mod api_key;
 #[cfg(all(test, feature = "api-keys"))]
 mod api_key_tests;
 mod logout_pending;
+mod membership_cache;
+pub mod membership_cache_scenarios;
+#[cfg(test)]
+mod membership_cache_tests;
 mod otp_cooldown;
 mod rate_limit;
 mod user_status;

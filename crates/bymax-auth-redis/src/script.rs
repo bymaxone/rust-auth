@@ -68,6 +68,16 @@ pub static BRUTE_FORCE_INCR: LazyLock<LuaScript> =
 pub static CLAIM_INVITATION_INDEX: LazyLock<LuaScript> =
     LazyLock::new(|| LuaScript::new(include_str!("lua/claim_invitation_index.lua")));
 
+/// `membership_cache_fill` — write a cached workspace membership only while both version counters
+/// hold the versions read, extending every counter that exists to the retention (section 12.5.6).
+pub static MEMBERSHIP_CACHE_FILL: LazyLock<LuaScript> =
+    LazyLock::new(|| LuaScript::new(include_str!("lua/membership_cache_fill.lua")));
+
+/// `membership_cache_bump` — `INCR` then `EXPIRE` to the retention of one workspace or membership
+/// version counter (section 12.5.6).
+pub static MEMBERSHIP_CACHE_BUMP: LazyLock<LuaScript> =
+    LazyLock::new(|| LuaScript::new(include_str!("lua/membership_cache_bump.lua")));
+
 /// `otp_verify` — attempt-bounded verify + consume (section 12.5.4).
 pub static OTP_VERIFY: LazyLock<LuaScript> =
     LazyLock::new(|| LuaScript::new(include_str!("lua/otp_verify.lua")));

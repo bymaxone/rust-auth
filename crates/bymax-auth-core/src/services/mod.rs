@@ -14,6 +14,8 @@
 //!   verify with timing normalization, and the resend cooldown).
 //! - [`session`] — the [`session::SessionService`] (concurrent-session tracking, FIFO
 //!   eviction, device/IP metadata, ownership-checked revoke, and atomic detail rotation).
+//! - [`membership_cache`] — resolving a workspace membership through the versioned cache shared
+//!   with nest-auth, and the bumps that invalidate it.
 //! - [`auth`] — the local authentication flows (register, login, logout, me, refresh,
 //!   email verification, password reset, invitations, and password-less issuance).
 //! - `platform` (feature `platform`) — the [`platform::PlatformAuthService`]: the operator
@@ -33,6 +35,9 @@ pub use verifier::{AuthPlane, VerifiedAccessToken, VerifyAccessOptions};
 pub mod api_key;
 pub mod auth;
 pub mod brute_force;
+pub mod membership_cache;
+#[cfg(test)]
+mod membership_cache_tests;
 #[cfg(feature = "mfa")]
 pub mod mfa;
 #[cfg(feature = "oauth")]

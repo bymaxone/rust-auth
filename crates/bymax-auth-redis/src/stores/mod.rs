@@ -5,7 +5,8 @@
 //! fixed-window brute-force counter ([`brute_force`]), the shared per-route request counter
 //! ([`rate_limit`]), the single-use WebSocket ticket
 //! ([`ws_ticket`]), the small single-use opaque-token keyspaces for password reset and
-//! invitations ([`single_use`]), and — under the `oauth` feature — the single-use OAuth
+//! invitations ([`single_use`]), the workspace-membership cache shared with nest-auth
+//! ([`membership_cache`]), and — under the `oauth` feature — the single-use OAuth
 //! `state` + PKCE keyspace ([`oauth`]). The atomic, race-sensitive transitions run as Lua scripts
 //! (section 12.5); the rest are single commands. Every fallible Redis interaction is funneled
 //! through a private `Result<_, RedisStoreError>` helper, and the trait method projects that
@@ -13,6 +14,7 @@
 
 mod brute_force;
 mod logout_pending;
+mod membership_cache;
 #[cfg(feature = "mfa")]
 pub(crate) mod mfa;
 #[cfg(feature = "oauth")]
