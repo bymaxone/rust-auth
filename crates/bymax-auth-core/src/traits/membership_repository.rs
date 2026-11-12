@@ -446,6 +446,124 @@ mod tests {
         }
     }
 
+    fn audit() -> WorkspaceAuditEvent {
+        WorkspaceAuditEvent {
+            tenant_id: "t".into(),
+            workspace_id: "w".into(),
+            actor_user_id: None,
+            at: "x".into(),
+            kind: crate::workspace::audit::AuditKind::WorkspaceCreated,
+        }
+    }
+
+    #[tokio::test]
+    async fn a_repository_that_models_no_read_answers_with_its_own_error() {
+        let repo = Bare;
+        let m = MembershipRef {
+            tenant_id: "t",
+            workspace_id: "w",
+            user_id: "u",
+        };
+        let workspace = m.workspace();
+        let owned = OwnedBy {
+            tenant_id: "t",
+            user_id: "u",
+            owner_role: "owner",
+        };
+        assert!(repo.find(m).await.is_err());
+        let user = ListForUser {
+            tenant_id: "t",
+            user_id: "u",
+            cursor: None,
+            limit: 1,
+        };
+        assert!(repo.list_for_user(user).await.is_err());
+        let list = ListForWorkspace {
+            workspace,
+            cursor: None,
+            limit: 1,
+        };
+        assert!(repo.list_for_workspace(list).await.is_err());
+        assert!(repo.count_owned(owned).await.is_err());
+        let sole = ListSoleOwned {
+            owner: owned,
+            cursor: None,
+            limit: 1,
+        };
+        assert!(repo.list_sole_owned(sole).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn a_repository_that_models_no_write_answers_with_its_own_error() {
+        let repo = Bare;
+        let m = MembershipRef {
+            tenant_id: "t",
+            workspace_id: "w",
+            user_id: "u",
+        };
+        let event = audit();
+        let create = CreateMembership {
+            member: m,
+            role: "r",
+            invited_by_user_id: None,
+            audit: &event,
+        };
+        assert!(repo.create(create).await.is_err());
+        let actor = ActingMember {
+            user_id: "a",
+            expected_role: "r",
+        };
+        let change = ChangeRole {
+            member: m,
+            role: "r",
+            expected_role: "r",
+            actor,
+            owner_role: "o",
+            audit: &event,
+        };
+        assert!(repo.change_role(change).await.is_err());
+        let remove = RemoveMembership {
+            member: m,
+            expected_role: None,
+            actor: None,
+            owner_role: "o",
+            audit: &event,
+        };
+        assert!(repo.remove(remove).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn a_repository_that_models_no_account_removal_or_transfer_answers_with_its_own_error() {
+        let repo = Bare;
+        let m = MembershipRef {
+            tenant_id: "t",
+            workspace_id: "w",
+            user_id: "u",
+        };
+        let event = audit();
+        let all = RemoveAllForUser {
+            tenant_id: "t",
+            user_id: "u",
+            owner_role: "o",
+            audit: AccountRemovalAudit {
+                tenant_id: "t",
+                actor_user_id: None,
+                user_id: "u",
+                at: "x",
+            },
+        };
+        assert!(repo.remove_all_for_user(all).await.is_err());
+        let transfer = TransferOwnership {
+            workspace: m.workspace(),
+            from_user_id: "a",
+            to_user_id: "b",
+            owner_role: "o",
+            demote_from_to: None,
+            audit: &event,
+        };
+        assert!(repo.transfer_ownership(transfer).await.is_err());
+    }
+
     #[tokio::test]
     async fn the_optional_last_active_workspace_records_nothing_by_default() {
         let repo: &dyn MembershipRepository = &Bare;

@@ -95,6 +95,31 @@ async fn a_role_change_holds_both_roles_and_never_orphans_a_workspace() {
     assert_eq!(last, Some(MemberChangeOutcome::LastOwner));
 }
 
+#[tokio::test]
+async fn a_sole_owner_keeping_the_owner_role_is_no_demotion_and_each_write_moves_the_clock() {
+    let repo = InMemoryWorkspaces::new();
+    assert!(create(&repo, "w1", "u1", 0).await);
+    add(&repo, "w1", "u2", "member").await;
+    let call = |user, expected, role| RoleCall {
+        workspace: "w1",
+        user,
+        expected,
+        role,
+        actor: ("u1", OWNER),
+    };
+    let kept = change(&repo, call("u1", OWNER, OWNER)).await;
+    assert_eq!(kept, Some(MemberChangeOutcome::Done));
+    let first = repo.membership(who("w1", "u2")).map(|m| m.updated_at);
+    let moved = change(&repo, call("u2", "member", "admin")).await;
+    assert_eq!(moved, Some(MemberChangeOutcome::Done));
+    let second = repo.membership(who("w1", "u2")).map(|m| m.updated_at);
+    assert!(second > first);
+    let again = change(&repo, call("u2", "admin", "member")).await;
+    assert_eq!(again, Some(MemberChangeOutcome::Done));
+    let third = repo.membership(who("w1", "u2")).map(|m| m.updated_at);
+    assert!(third > second);
+}
+
 async fn remove(
     repo: &InMemoryWorkspaces,
     user: &str,
