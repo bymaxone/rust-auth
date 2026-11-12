@@ -192,6 +192,44 @@ pub struct RateLimitConfig {
     /// caller could otherwise mint them without bound. A reconnecting client needs one per
     /// socket; 20 covers a flapping connection without covering a loop.
     pub ws_ticket: Option<RateLimit>,
+    /// `GET /auth/workspaces` — 30 / 60s.
+    pub workspace_list: Option<RateLimit>,
+    /// `GET /auth/workspaces/{workspaceId}/access` — 60 / 60s.
+    pub workspace_access: Option<RateLimit>,
+    /// `POST /auth/workspaces/{workspaceId}/switch` — 20 / 60s.
+    pub workspace_switch: Option<RateLimit>,
+    /// `GET /auth/workspaces/{workspaceId}/members` — 30 / 60s.
+    pub workspace_members: Option<RateLimit>,
+    /// `POST /auth/workspaces` — 10 / 3600s.
+    pub workspace_create: Option<RateLimit>,
+    /// `PATCH /auth/workspaces/{workspaceId}` — 20 / 60s.
+    pub workspace_rename: Option<RateLimit>,
+    /// `POST /auth/workspaces/{workspaceId}/schedule-deletion` — 5 / 300s.
+    pub workspace_schedule_deletion: Option<RateLimit>,
+    /// `POST /auth/workspaces/{workspaceId}/restore` — 5 / 300s.
+    pub workspace_restore: Option<RateLimit>,
+    /// `PATCH /auth/workspaces/{workspaceId}/members/{userId}` — 20 / 60s.
+    pub workspace_change_role: Option<RateLimit>,
+    /// `DELETE /auth/workspaces/{workspaceId}/members/{userId}` — 20 / 60s.
+    pub workspace_remove_member: Option<RateLimit>,
+    /// `POST /auth/workspaces/{workspaceId}/leave` — 10 / 60s.
+    pub workspace_leave: Option<RateLimit>,
+    /// `POST /auth/workspaces/{workspaceId}/transfer-ownership` — 3 / 300s.
+    pub workspace_transfer_ownership: Option<RateLimit>,
+    /// `POST /auth/workspaces/{workspaceId}/invitations` — 30 / 3600s.
+    pub workspace_invite: Option<RateLimit>,
+    /// `GET /auth/workspaces/{workspaceId}/invitations` — 30 / 60s.
+    pub workspace_invitations: Option<RateLimit>,
+    /// `POST /auth/workspaces/{workspaceId}/invitations/resend` — 10 / 300s.
+    pub workspace_invitation_resend: Option<RateLimit>,
+    /// `POST /auth/workspaces/{workspaceId}/invitations/revoke` — 20 / 60s.
+    pub workspace_invitation_revoke: Option<RateLimit>,
+    /// `POST /auth/workspaces/invitations/preview` — 20 / 60s.
+    pub workspace_invitation_preview: Option<RateLimit>,
+    /// `POST /auth/workspaces/invitations/accept` — 10 / 60s.
+    pub workspace_invitation_accept: Option<RateLimit>,
+    /// `POST /auth/workspaces/invitations/accept-signup` — 5 / 60s.
+    pub workspace_invitation_accept_signup: Option<RateLimit>,
 }
 
 impl Default for RateLimitConfig {
@@ -224,6 +262,25 @@ impl Default for RateLimitConfig {
             change_password: Some(RateLimit::new(5, 60)),
             logout: Some(RateLimit::new(20, 60)),
             ws_ticket: Some(RateLimit::new(20, 60)),
+            workspace_list: Some(RateLimit::new(30, 60)),
+            workspace_access: Some(RateLimit::new(60, 60)),
+            workspace_switch: Some(RateLimit::new(20, 60)),
+            workspace_members: Some(RateLimit::new(30, 60)),
+            workspace_create: Some(RateLimit::new(10, 3600)),
+            workspace_rename: Some(RateLimit::new(20, 60)),
+            workspace_schedule_deletion: Some(RateLimit::new(5, 300)),
+            workspace_restore: Some(RateLimit::new(5, 300)),
+            workspace_change_role: Some(RateLimit::new(20, 60)),
+            workspace_remove_member: Some(RateLimit::new(20, 60)),
+            workspace_leave: Some(RateLimit::new(10, 60)),
+            workspace_transfer_ownership: Some(RateLimit::new(3, 300)),
+            workspace_invite: Some(RateLimit::new(30, 3600)),
+            workspace_invitations: Some(RateLimit::new(30, 60)),
+            workspace_invitation_resend: Some(RateLimit::new(10, 300)),
+            workspace_invitation_revoke: Some(RateLimit::new(20, 60)),
+            workspace_invitation_preview: Some(RateLimit::new(20, 60)),
+            workspace_invitation_accept: Some(RateLimit::new(10, 60)),
+            workspace_invitation_accept_signup: Some(RateLimit::new(5, 60)),
         }
     }
 }
@@ -243,8 +300,8 @@ const KEY_GC_INTERVAL_SECS: u64 = 60;
 /// socket address, so an unauthenticated `POST /auth/login` from a routine IPv6 /64 offers
 /// 2^64 distinct keys — and because the per-route limit is *per key*, every new address is both
 /// a fresh burst budget and a permanent map entry. The throttle was the mechanism that grew the
-/// map rather than a bound on it, and with the default config enabling 27 routes there were 27
-/// such maps, all process-lifetime. That is monotonic RSS growth with no ceiling, reachable
+/// map rather than a bound on it, and with the default config there is one
+/// such map per throttled route, all process-lifetime. That is monotonic RSS growth with no ceiling, reachable
 /// without a credential.
 ///
 /// The consumer could not compensate: [`build_governor_config`] and
@@ -338,7 +395,7 @@ mod tests {
     /// Every default limit this crate carries, under the name the contract gives it.
     fn defaults_by_contract_name(
         defaults: &RateLimitConfig,
-    ) -> [(&'static str, Option<RateLimit>); 27] {
+    ) -> [(&'static str, Option<RateLimit>); 46] {
         [
             ("login", defaults.login),
             ("register", defaults.register),
@@ -367,51 +424,47 @@ mod tests {
             ("changePassword", defaults.change_password),
             ("logout", defaults.logout),
             ("wsTicket", defaults.ws_ticket),
+            ("workspaceList", defaults.workspace_list),
+            ("workspaceAccess", defaults.workspace_access),
+            ("workspaceSwitch", defaults.workspace_switch),
+            ("workspaceMembers", defaults.workspace_members),
+            ("workspaceCreate", defaults.workspace_create),
+            ("workspaceRename", defaults.workspace_rename),
+            (
+                "workspaceScheduleDeletion",
+                defaults.workspace_schedule_deletion,
+            ),
+            ("workspaceRestore", defaults.workspace_restore),
+            ("workspaceChangeRole", defaults.workspace_change_role),
+            ("workspaceRemoveMember", defaults.workspace_remove_member),
+            ("workspaceLeave", defaults.workspace_leave),
+            (
+                "workspaceTransferOwnership",
+                defaults.workspace_transfer_ownership,
+            ),
+            ("workspaceInvite", defaults.workspace_invite),
+            ("workspaceInvitations", defaults.workspace_invitations),
+            (
+                "workspaceInvitationResend",
+                defaults.workspace_invitation_resend,
+            ),
+            (
+                "workspaceInvitationRevoke",
+                defaults.workspace_invitation_revoke,
+            ),
+            (
+                "workspaceInvitationPreview",
+                defaults.workspace_invitation_preview,
+            ),
+            (
+                "workspaceInvitationAccept",
+                defaults.workspace_invitation_accept,
+            ),
+            (
+                "workspaceInvitationAcceptSignup",
+                defaults.workspace_invitation_accept_signup,
+            ),
         ]
-    }
-
-    /// Limits the contract names that this crate has no default for yet, with the slice that adds
-    /// each. The contract comparison leaves them out, and
-    /// [`the_pending_limits_are_still_unbuilt`] requires each to be absent from the defaults and
-    /// present in the contract, so the slice that builds a limit has to delete its entry, and a
-    /// limit the contract adds that is not listed fails the build.
-    const PENDING_LIMITS: [&str; 19] = [
-        "workspaceAccess",
-        "workspaceChangeRole",
-        "workspaceCreate",
-        "workspaceInvitationAccept",
-        "workspaceInvitationAcceptSignup",
-        "workspaceInvitationPreview",
-        "workspaceInvitationResend",
-        "workspaceInvitationRevoke",
-        "workspaceInvitations",
-        "workspaceInvite",
-        "workspaceLeave",
-        "workspaceList",
-        "workspaceMembers",
-        "workspaceRemoveMember",
-        "workspaceRename",
-        "workspaceRestore",
-        "workspaceScheduleDeletion",
-        "workspaceSwitch",
-        "workspaceTransferOwnership",
-    ];
-
-    #[test]
-    fn the_pending_limits_are_still_unbuilt() {
-        let contract = contract_limits();
-        let defaults = RateLimitConfig::default();
-        let built = defaults_by_contract_name(&defaults);
-        for name in PENDING_LIMITS {
-            assert!(
-                contract.get(name).is_some(),
-                "{name} is pending but the contract does not name it"
-            );
-            assert!(
-                built.iter().all(|(built_name, _)| *built_name != name),
-                "{name} has a default; remove it from PENDING_LIMITS"
-            );
-        }
     }
 
     #[test]
@@ -435,12 +488,7 @@ mod tests {
         // is a route whose limit nobody agreed on.
         let named = contract
             .as_object()
-            .map(|table| {
-                table
-                    .keys()
-                    .filter(|key| !key.starts_with('$') && !PENDING_LIMITS.contains(&key.as_str()))
-                    .count()
-            })
+            .map(|table| table.keys().filter(|key| !key.starts_with('$')).count())
             .unwrap_or_default();
         assert_eq!(named, pairs.len());
     }

@@ -41,6 +41,7 @@ pub mod providers;
 pub mod services;
 mod status_gate;
 pub mod traits;
+pub mod workspace;
 
 #[cfg(any(test, feature = "testing"))]
 pub mod testing;

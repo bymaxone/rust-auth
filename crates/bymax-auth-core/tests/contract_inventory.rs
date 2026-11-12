@@ -151,6 +151,9 @@ fn every_section_of_the_contract_is_read_or_pending() {
                 "userStatusCache",
                 "userSubjectDerivedKeys",
                 "userSubjectPreimages",
+                "workspaceInvitations",
+                "workspaceMembershipCache",
+                "workspaceScopedName",
             ],
             // `version` is covered by the byte pin of the whole file.
             &["version"],
@@ -164,10 +167,7 @@ fn every_section_of_the_contract_is_read_or_pending() {
                     "unassigned: behaviour exists, no test reads the section",
                 ),
                 ("workspaceAccountRemoval", "13.3 and 13.5b"),
-                ("workspaceInvitations", "13.2 and 13.6"),
-                ("workspaceMembershipCache", "13.2 and 13.4"),
                 ("workspaceRealtime", "13.9"),
-                ("workspaceScopedName", "13.2"),
             ],
         ),
     );
@@ -180,12 +180,16 @@ fn every_identifier_preimage_is_read_or_pending() {
         "identifierPreimages",
         &root["identifierPreimages"],
         (
-            &["dashboard", "platform", "otpRecord", "inviteeIndex"],
-            &[],
             &[
-                ("workspaceInvitationEmail", "13.2"),
-                ("workspaceInviterRate", "13.2"),
+                "dashboard",
+                "platform",
+                "otpRecord",
+                "inviteeIndex",
+                "workspaceInvitationEmail",
+                "workspaceInviterRate",
             ],
+            &[],
+            &[],
         ),
     );
 }
@@ -209,18 +213,16 @@ fn every_request_field_bound_is_read_or_pending() {
                 "verificationOtp",
                 "totpCode",
                 "role",
+                "memberUserId",
+                "workspaceName",
+                "pageLimit",
+                "pathParameters",
             ],
             &[],
-            &[
-                (
-                    "opaqueToken",
-                    "unassigned: the 2048 bound is written in dto.rs and not read from here",
-                ),
-                ("memberUserId", "13.2"),
-                ("workspaceName", "13.2"),
-                ("pageLimit", "13.2"),
-                ("pathParameters", "13.2"),
-            ],
+            &[(
+                "opaqueToken",
+                "unassigned: the 2048 bound is written in dto.rs and not read from here",
+            )],
         ),
     );
 }
@@ -248,23 +250,5 @@ fn every_record_encoding_is_read_or_pending() {
                 "unassigned: no test reads the record by name",
             )],
         ),
-    );
-    // The OAuth state record gains an optional field this repository does not carry yet.
-    let state = &root["recordEncodings"]["oauthState"];
-    assert!(
-        state["optionalFields"]
-            .as_array()
-            .is_some_and(|fields| fields.iter().any(|field| field == "workspaceInvitation")),
-        "the contract no longer names the optional workspaceInvitation field of oauthState"
-    );
-    let payload = std::fs::read_to_string(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/src/services/oauth.rs"
-    ))
-    .unwrap_or_default();
-    assert!(!payload.is_empty(), "the OAuth service source did not load");
-    assert!(
-        !payload.contains("workspace_invitation"),
-        "the OAuth state payload carries the field already; remove this pending check (slice 13.2)"
     );
 }
