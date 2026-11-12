@@ -237,7 +237,7 @@ Rust has no DI container, and `rust-auth` deliberately does not emulate one. Ins
 | `SessionStore` | session half of `AuthRedisService` | refresh-session storage |
 | `OtpStore` | OTP/verification half of Redis | OTP records with attempt counters |
 | `BruteForceStore` | brute-force half of Redis | attempt counters with fixed TTL |
-| `MembershipCacheStore` | the `wsv`/`wmv`/`wm` keys and scripts of `WorkspaceAccessService` | versioned workspace-membership cache shared with nest-auth (§12.5.6) |
+| `MembershipCacheStore` | the `wsv`/`wmv`/`wm` keys and the `membership_cache_fill` / `membership_cache_bump` scripts | versioned workspace-membership cache shared with nest-auth (§12.5.6) |
 | `OAuthProvider` | `OAuthProviderPlugin` | per-provider OAuth (Google built-in) |
 
 Conceptually (illustrative — see §7.0.1 for the authoritative engine shape):
@@ -4878,7 +4878,7 @@ The cache is three keys per membership (`wsv`, `wmv`, `wm`, §12.4), shared with
 
 - **`membership_cache_fill`** — **KEYS** `[1]` `wsv:{hmac(workspaceSubject)}`, `[2]` `wmv:{hmac(membershipSubject)}`, `[3]` `wm:{hmac(membershipSubject)}:{w}:{m}`; **ARGV** `[1]` the entry `{"role":"<role>","status":"active"}`, `[2]` the entry TTL (s, at least 1), `[3]` the counters' retention (2 592 000 s, the token-epoch retention), `[4]` and `[5]` the versions read. **Contract:** read each counter (absent ⇒ `'0'`); if either differs from the version read, **return `'moved'`** and write nothing. Otherwise `EXPIRE` each counter that `EXISTS` to the retention (an absent counter stays absent), `SET KEYS[3] ARGV[1] EX ARGV[2]`, and **return `'written'`**. A counter that expired between the read and the fill reads `'0'` and no longer matches, so a counter value is never reused while an entry bearing it can live.
 - **`membership_cache_bump`** — **KEYS** `[1]` the counter; **ARGV** `[1]` the retention. **Contract:** `INCR KEYS[1]`, then `EXPIRE KEYS[1] ARGV[1]` on **every** bump; return the new value. A writer changes the repository first and bumps after, and a failed bump is an error: a change is never reported as invalidated when it was not.
-- **Rust mapping:** `FillOutcome::{ Written, Moved }`; a bump returns the new `u64`. Every key the scripts touch is declared in `KEYS`, and the entry key is built by the caller from the versions it read.
+- **Rust mapping:** `FillOutcome::{ Written, Moved }`; a bump returns the new `u64`. Every key the scripts touch is declared in `KEYS`, and the entry key is derived from the versions the reader saw.
 - **Operational requirement (documented, not tested):** a counter evicted under memory pressure restarts at `0` and can make an entry written under an earlier `0:0` readable again for up to its TTL — the exposure the token-epoch counters have. Run the store with a no-eviction policy (`maxmemory-policy noeviction`) for the auth keyspace.
 
 > **Why Lua, in one line:** every one of these transitions has a read→decide→write shape where a second concurrent caller slipping between the read and the write would breach a security invariant (double session, cross-user revoke, lockout evasion, attempt-ceiling evasion). Redis runs each script to completion atomically, which is the cheapest correct primitive available and exactly what nest-auth relies on.
