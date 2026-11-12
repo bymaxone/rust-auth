@@ -78,6 +78,17 @@ async fn try_start() -> Option<TestRedis> {
 }
 
 impl TestRedis {
+    /// A probe that must connect: a container that started and refuses a connection fails the
+    /// case instead of passing it.
+    async fn connected(&self, namespace: &str) -> Option<RedisProbe> {
+        let probe = self.probe(namespace).await;
+        assert!(
+            probe.is_some(),
+            "the started container refused a connection"
+        );
+        probe
+    }
+
     /// A store and its raw keyspace under `namespace`.
     async fn probe(&self, namespace: &str) -> Option<RedisProbe> {
         let _ = self.container.id();
@@ -247,7 +258,7 @@ async fn the_contract_scenarios_pass_against_a_real_redis() {
 #[tokio::test]
 async fn the_keys_and_the_entry_are_the_ones_the_contract_pins() {
     let Some(redis) = try_start().await else { return };
-    let (Some(probe), Some(ids)) = (redis.probe("auth").await, ids()) else { return };
+    let (Some(probe), Some(ids)) = (redis.connected("auth").await, ids()) else { return };
     // A read of a fresh keyspace reads 0:0 and creates nothing.
     let read = probe.read(&ids).await;
     assert!(matches!(&read, Ok(read) if read.versions == MembershipVersions::default()));
@@ -257,11 +268,9 @@ async fn the_keys_and_the_entry_are_the_ones_the_contract_pins() {
         .fill(&ids, MembershipVersions::default(), "editor", ttl(60))
         .await;
     assert!(matches!(filled, Ok(FillOutcome::Written)));
-    let vector = &section()["fullKeyVectors"][0];
-    let entry_key = vector["membershipCacheKey"]
-        .as_str()
-        .unwrap_or_default()
-        .replace("{namespace}", "auth");
+    let entry_key = probe
+        .keys
+        .key(Prefix::Wm, &ids.entry(MembershipVersions::default()));
     assert_eq!(probe.keys().await, std::slice::from_ref(&entry_key));
     assert_eq!(probe.get(&entry_key).await, Some(entry_value("editor")));
     let left = probe.ttl(&entry_key).await;
@@ -272,20 +281,78 @@ async fn the_keys_and_the_entry_are_the_ones_the_contract_pins() {
         probe.bump_membership(&ids.membership).await,
         Ok(1)
     ));
-    for name in ["workspaceVersionKey", "membershipVersionKey"] {
-        let key = vector[name]
-            .as_str()
-            .unwrap_or_default()
-            .replace("{namespace}", "auth");
-        assert_eq!(probe.get(&key).await.as_deref(), Some("1"), "{name}");
-        assert!(is_retention(probe.ttl(&key).await), "{name}");
+    for counter in [VersionCounter::Workspace, VersionCounter::Membership] {
+        let key = probe.counter_key(counter, ids.counter(counter));
+        assert_eq!(probe.get(&key).await.as_deref(), Some("1"), "{counter:?}");
+        assert!(is_retention(probe.ttl(&key).await), "{counter:?}");
+    }
+}
+
+/// Reads the version a vector names, as a number.
+fn version_of(vector: &Value, name: &str) -> u64 {
+    vector[name]
+        .as_str()
+        .unwrap_or_default()
+        .parse()
+        .unwrap_or(u64::MAX)
+}
+
+#[tokio::test]
+async fn every_full_key_vector_names_the_keys_the_store_writes() {
+    let Some(redis) = try_start().await else { return };
+    let vectors = section()["fullKeyVectors"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    assert!(!vectors.is_empty());
+    for (index, vector) in vectors.iter().enumerate() {
+        let Some(probe) = redis.connected(&format!("vec{index}")).await else { return };
+        let member = MembershipRef {
+            tenant_id: vector["tenantId"].as_str().unwrap_or_default(),
+            workspace_id: vector["workspaceId"].as_str().unwrap_or_default(),
+            user_id: vector["userId"].as_str().unwrap_or_default(),
+        };
+        let Ok(ids) = MembershipCacheIds::derive(&identifier_key(), member) else { return };
+        let versions = MembershipVersions {
+            workspace: version_of(vector, "workspaceVersion"),
+            membership: version_of(vector, "membershipVersion"),
+        };
+        let expected = |name: &str| {
+            let key = vector[name].as_str().unwrap_or_default();
+            key.replace("{namespace}", &format!("vec{index}"))
+        };
+        for (counter, name, version) in [
+            (
+                VersionCounter::Workspace,
+                "workspaceVersionKey",
+                versions.workspace,
+            ),
+            (
+                VersionCounter::Membership,
+                "membershipVersionKey",
+                versions.membership,
+            ),
+        ] {
+            let key = probe.counter_key(counter, ids.counter(counter));
+            assert_eq!(key, expected(name), "{index} {name}");
+            assert!(version == 0 || probe.set(&key, &version.to_string(), 60).await);
+        }
+        let filled = probe.fill(&ids, versions, "editor", ttl(60)).await;
+        assert!(matches!(filled, Ok(FillOutcome::Written)), "{index}");
+        let entry = probe.keys.key(Prefix::Wm, &ids.entry(versions));
+        assert_eq!(entry, expected("membershipCacheKey"), "{index}");
+        assert_eq!(
+            probe.get(&entry).await,
+            Some(entry_value("editor")),
+            "{index}"
+        );
     }
 }
 
 #[tokio::test]
 async fn every_bump_restores_the_retention() {
     let Some(redis) = try_start().await else { return };
-    let (Some(probe), Some(ids)) = (redis.probe("auth").await, ids()) else { return };
+    let (Some(probe), Some(ids)) = (redis.connected("auth").await, ids()) else { return };
     let key = probe.counter_key(VersionCounter::Membership, &ids.membership);
     assert!(probe.set(&key, "7", 30).await);
     assert!(matches!(
@@ -303,7 +370,7 @@ async fn every_bump_restores_the_retention() {
 #[tokio::test]
 async fn a_fill_extends_existing_counters_and_never_creates_one() {
     let Some(redis) = try_start().await else { return };
-    let (Some(probe), Some(ids)) = (redis.probe("auth").await, ids()) else { return };
+    let (Some(probe), Some(ids)) = (redis.connected("auth").await, ids()) else { return };
     let workspace_key = probe.counter_key(VersionCounter::Workspace, &ids.workspace);
     let membership_key = probe.counter_key(VersionCounter::Membership, &ids.membership);
     assert!(probe.set(&workspace_key, "3", 30).await);
@@ -324,7 +391,7 @@ async fn a_fill_extends_existing_counters_and_never_creates_one() {
 #[tokio::test]
 async fn a_fill_that_finds_a_counter_moved_writes_and_refreshes_nothing() {
     let Some(redis) = try_start().await else { return };
-    let (Some(probe), Some(ids)) = (redis.probe("auth").await, ids()) else { return };
+    let (Some(probe), Some(ids)) = (redis.connected("auth").await, ids()) else { return };
     let membership_key = probe.counter_key(VersionCounter::Membership, &ids.membership);
     assert!(probe.set(&membership_key, "2", 30).await);
     let stale = MembershipVersions {
@@ -340,7 +407,7 @@ async fn a_fill_that_finds_a_counter_moved_writes_and_refreshes_nothing() {
 #[tokio::test]
 async fn a_counter_that_expired_after_the_read_no_longer_matches() {
     let Some(redis) = try_start().await else { return };
-    let (Some(probe), Some(ids)) = (redis.probe("auth").await, ids()) else { return };
+    let (Some(probe), Some(ids)) = (redis.connected("auth").await, ids()) else { return };
     let workspace_key = probe.counter_key(VersionCounter::Workspace, &ids.workspace);
     assert!(probe.set(&workspace_key, "1", 30).await);
     let read = probe.read(&ids).await.map(|read| read.versions);
@@ -360,7 +427,7 @@ async fn a_counter_that_expired_after_the_read_no_longer_matches() {
 #[tokio::test]
 async fn an_entry_another_writer_spelled_differently_is_read_by_parsing() {
     let Some(redis) = try_start().await else { return };
-    let (Some(probe), Some(ids)) = (redis.probe("auth").await, ids()) else { return };
+    let (Some(probe), Some(ids)) = (redis.connected("auth").await, ids()) else { return };
     let entry = ids.entry(MembershipVersions::default());
     probe
         .seed_entry(&entry, "{\"status\":\"active\", \"role\":\"viewer\"}")
@@ -377,7 +444,7 @@ async fn an_entry_another_writer_spelled_differently_is_read_by_parsing() {
 #[tokio::test]
 async fn a_counter_that_is_not_a_number_fails_the_read() {
     let Some(redis) = try_start().await else { return };
-    let (Some(probe), Some(ids)) = (redis.probe("auth").await, ids()) else { return };
+    let (Some(probe), Some(ids)) = (redis.connected("auth").await, ids()) else { return };
     assert!(
         probe
             .set(
