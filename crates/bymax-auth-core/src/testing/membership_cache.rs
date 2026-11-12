@@ -1,8 +1,10 @@
 //! The in-memory [`MembershipCacheStore`] (layer: test double).
 //!
-//! Counters and entries expire on the wall clock like the Redis keys they stand in for, and every
-//! operation runs under one lock, so a fill's compare, write and retention refresh are one step as
-//! the Redis script makes them. A switch makes every call fail, for the advisory paths, and the
+//! Counters and entries expire like the Redis keys they stand in for, on the wall clock or on a
+//! clock a test freezes and advances by hand, so a lifetime is checked at its exact boundary: a
+//! key is readable strictly before the instant it expires, as Redis reads it. Every operation runs
+//! under one lock, so a fill's compare, write and retention refresh are one step as
+//! the Redis script makes them. Two switches make every call, or every fill, fail, for the advisory paths, and the
 //! probe methods of [`MembershipCacheProbe`] reach the keyspace directly for the contract
 //! scenarios.
 
@@ -31,14 +33,32 @@ struct State {
     counters: HashMap<(VersionCounter, String), Slot<u64>>,
     entries: HashMap<String, Slot<String>>,
     operations: Vec<&'static str>,
+    /// The instant a frozen clock stands at; `None` follows the wall clock.
+    frozen: Option<Instant>,
 }
 
 impl State {
+    /// The current instant.
+    fn now(&self) -> Instant {
+        self.frozen.unwrap_or_else(Instant::now)
+    }
+
+    /// The instant something written now with lifetime `ttl` stops being readable.
+    fn expiry(&self, ttl: Duration) -> Instant {
+        self.now() + ttl
+    }
+
+    /// The instant a counter bumped or refreshed now stops being readable.
+    fn retention(&self) -> Instant {
+        self.expiry(Duration::from_secs(VERSION_RETENTION_SECONDS))
+    }
+
     /// The live value of a counter, dropping it when its retention has run out.
     fn counter(&mut self, counter: VersionCounter, id: &str) -> Option<u64> {
         let key = (counter, id.to_owned());
+        let now = self.now();
         match self.counters.get(&key) {
-            Some((value, expires)) if *expires > Instant::now() => Some(*value),
+            Some((value, expires)) if *expires > now => Some(*value),
             Some(_) => {
                 self.counters.remove(&key);
                 None
@@ -49,8 +69,9 @@ impl State {
 
     /// The live entry `id`, dropping it when its lifetime has run out.
     fn entry(&mut self, id: &str) -> Option<String> {
+        let now = self.now();
         match self.entries.get(id) {
-            Some((value, expires)) if *expires > Instant::now() => Some(value.clone()),
+            Some((value, expires)) if *expires > now => Some(value.clone()),
             Some(_) => {
                 self.entries.remove(id);
                 None
@@ -62,24 +83,26 @@ impl State {
     /// `INCR` then `EXPIRE` to the retention.
     fn bump(&mut self, counter: VersionCounter, id: &str) -> u64 {
         let next = self.counter(counter, id).unwrap_or(0).saturating_add(1);
+        let expires = self.retention();
         self.counters
-            .insert((counter, id.to_owned()), (next, retention()));
+            .insert((counter, id.to_owned()), (next, expires));
         next
     }
 
     /// Extends a counter that exists to the retention; an absent one stays absent.
     fn refresh(&mut self, counter: VersionCounter, id: &str) {
+        let expires = self.retention();
         if self.counter(counter, id).is_some()
             && let Some(slot) = self.counters.get_mut(&(counter, id.to_owned()))
         {
-            slot.1 = retention();
+            slot.1 = expires;
         }
     }
-}
 
-/// The instant a counter bumped or refreshed now stops being readable.
-fn retention() -> Instant {
-    Instant::now() + Duration::from_secs(VERSION_RETENTION_SECONDS)
+    /// How long a slot expiring at `expires` has left.
+    fn left(&self, expires: Instant) -> Duration {
+        expires.saturating_duration_since(self.now())
+    }
 }
 
 /// The in-memory membership cache.
@@ -87,6 +110,7 @@ fn retention() -> Instant {
 pub struct InMemoryMembershipCache {
     state: Mutex<State>,
     unavailable: AtomicBool,
+    fills_failing: AtomicBool,
 }
 
 impl InMemoryMembershipCache {
@@ -101,6 +125,12 @@ impl InMemoryMembershipCache {
         self.unavailable.store(down, Ordering::SeqCst);
     }
 
+    /// Makes every fill fail while `failing` is set, the reads and bumps still answering: a store
+    /// that went away between a resolution's read and its refill.
+    pub fn set_fills_failing(&self, failing: bool) {
+        self.fills_failing.store(failing, Ordering::SeqCst);
+    }
+
     /// The store calls made so far, oldest first: `read`, `fill`, `bump_workspace` and
     /// `bump_membership`, a failed one included.
     #[must_use]
@@ -108,11 +138,25 @@ impl InMemoryMembershipCache {
         lock(&self.state).operations.clone()
     }
 
+    /// Stops the clock at the current instant; until then it follows the wall clock.
+    pub fn freeze_clock(&self) {
+        let mut state = lock(&self.state);
+        state.frozen = Some(state.now());
+    }
+
+    /// Moves the clock forward by `by`, freezing it first if it follows the wall clock.
+    pub fn advance_clock(&self, by: Duration) {
+        let mut state = lock(&self.state);
+        state.frozen = Some(state.now() + by);
+    }
+
     /// Plants a counter at `value` that expires in `ttl`, for a test of what a fill refreshes.
     pub fn seed_counter(&self, counter: VersionCounter, id: &str, value: u64, ttl: Duration) {
-        lock(&self.state)
+        let mut state = lock(&self.state);
+        let expires = state.expiry(ttl);
+        state
             .counters
-            .insert((counter, id.to_owned()), (value, Instant::now() + ttl));
+            .insert((counter, id.to_owned()), (value, expires));
     }
 
     /// How long a counter has left, or `None` when it does not exist.
@@ -121,7 +165,7 @@ impl InMemoryMembershipCache {
         let mut state = lock(&self.state);
         state.counter(counter, id)?;
         let (_, expires) = state.counters.get(&(counter, id.to_owned()))?;
-        Some(expires.saturating_duration_since(Instant::now()))
+        Some(state.left(*expires))
     }
 
     /// How long entry `id` has left, or `None` when it does not exist.
@@ -130,7 +174,7 @@ impl InMemoryMembershipCache {
         let mut state = lock(&self.state);
         state.entry(id)?;
         let (_, expires) = state.entries.get(id)?;
-        Some(expires.saturating_duration_since(Instant::now()))
+        Some(state.left(*expires))
     }
 
     /// Records `operation` and fails it while the cache is unavailable.
@@ -171,6 +215,9 @@ impl MembershipCacheStore for InMemoryMembershipCache {
         ttl: NonZeroU64,
     ) -> Result<FillOutcome, AuthError> {
         let mut state = self.begin("fill")?;
+        if self.fills_failing.load(Ordering::SeqCst) {
+            return Err(AuthError::Internal("membership cache fill refused".into()));
+        }
         let workspace = state
             .counter(VersionCounter::Workspace, &ids.workspace)
             .unwrap_or(0);
@@ -182,7 +229,7 @@ impl MembershipCacheStore for InMemoryMembershipCache {
         }
         state.refresh(VersionCounter::Workspace, &ids.workspace);
         state.refresh(VersionCounter::Membership, &ids.membership);
-        let expires = Instant::now() + Duration::from_secs(ttl.get());
+        let expires = state.expiry(Duration::from_secs(ttl.get()));
         state
             .entries
             .insert(ids.entry(versions), (entry_value(role), expires));
@@ -203,8 +250,9 @@ impl MembershipCacheStore for InMemoryMembershipCache {
 #[async_trait]
 impl MembershipCacheProbe for InMemoryMembershipCache {
     async fn seed_entry(&self, entry_id: &str, raw: &str) {
-        let expires = Instant::now() + Duration::from_secs(VERSION_RETENTION_SECONDS);
-        lock(&self.state)
+        let mut state = lock(&self.state);
+        let expires = state.retention();
+        state
             .entries
             .insert(entry_id.to_owned(), (raw.to_owned(), expires));
     }

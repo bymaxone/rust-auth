@@ -2,7 +2,6 @@
 //! a disabled cache, a store that fails, blank key parts, members who are not active, and the
 //! host's repositories as the source of the rows.
 
-use std::num::NonZeroU64;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -16,14 +15,12 @@ use super::membership_cache::{
 };
 use crate::RepositoryError;
 use crate::testing::{InMemoryMembershipCache, InMemoryWorkspaces};
-use crate::traits::{FillOutcome, MembershipCacheRead, MembershipCacheStore};
+use crate::traits::MembershipCacheStore;
 use crate::workspace::domain::{
     Membership, MembershipRef, MembershipStatus, Workspace, WorkspaceRef, WorkspaceStatus,
 };
 use crate::workspace::keys::BlankPart;
-use crate::workspace::membership_cache::{
-    MembershipCacheIds, MembershipCacheTtl, MembershipVersions,
-};
+use crate::workspace::membership_cache::{MembershipCacheIds, MembershipCacheTtl};
 
 const KEY: [u8; 64] = [3; 64];
 const MEMBER: MembershipRef<'static> = MembershipRef {
@@ -161,40 +158,24 @@ async fn an_unreachable_store_answers_from_the_repositories_and_writes_nothing()
     assert!(read.is_some_and(|read| read.entry.is_none()));
 }
 
-/// A store whose reads succeed and whose fills fail.
-struct FailingFill(InMemoryMembershipCache);
-
-#[async_trait]
-impl MembershipCacheStore for FailingFill {
-    async fn read(&self, ids: &MembershipCacheIds) -> Result<MembershipCacheRead, AuthError> {
-        self.0.read(ids).await
-    }
-    async fn fill(
-        &self,
-        _: &MembershipCacheIds,
-        _: MembershipVersions,
-        _: &str,
-        _: NonZeroU64,
-    ) -> Result<FillOutcome, AuthError> {
-        Err(AuthError::Internal("fill failed".into()))
-    }
-    async fn bump_workspace(&self, id: &str) -> Result<u64, AuthError> {
-        self.0.bump_workspace(id).await
-    }
-    async fn bump_membership(&self, id: &str) -> Result<u64, AuthError> {
-        self.0.bump_membership(id).await
-    }
-}
-
 #[tokio::test]
 async fn a_failed_fill_still_answers() {
-    let store = FailingFill(InMemoryMembershipCache::new());
+    let store = InMemoryMembershipCache::new();
+    store.set_fills_failing(true);
     let rows = Rows::active();
     let answer =
         resolve_membership(&cache(&store, MembershipCacheTtl::default()), &rows, MEMBER).await;
     assert_eq!(answer.ok(), Some(member_from(ResolutionSource::Repository)));
-    assert!(matches!(store.bump_workspace("w").await, Ok(1)));
-    assert!(matches!(store.bump_membership("m").await, Ok(1)));
+    assert_eq!(store.operations(), ["read", "fill"]);
+    // Nothing was cached, so the next resolution reads the repositories again.
+    store.set_fills_failing(false);
+    let cache = cache(&store, MembershipCacheTtl::default());
+    let again = resolve_membership(&cache, &rows, MEMBER);
+    assert_eq!(
+        again.await.ok(),
+        Some(member_from(ResolutionSource::Repository))
+    );
+    assert_eq!(rows.reads(), 2);
 }
 
 #[tokio::test]
@@ -337,4 +318,36 @@ async fn the_host_repositories_are_read_together_through_the_adapter() {
     .await;
     assert!(matches!(answer, Ok(Resolution::NotMember(read))
         if read.workspace.is_some() && read.membership.is_none()));
+}
+
+#[tokio::test]
+async fn a_store_failure_the_cache_absorbs_is_reported_as_a_warning_with_its_cause() {
+    let (events, guard) = crate::log_capture::capture_events();
+    let unreachable = InMemoryMembershipCache::new();
+    unreachable.set_unavailable(true);
+    let rows = Rows::active();
+    let down = cache(&unreachable, MembershipCacheTtl::default());
+    assert!(resolve_membership(&down, &rows, MEMBER).await.is_ok());
+    let failing = InMemoryMembershipCache::new();
+    failing.set_fills_failing(true);
+    let refusing = cache(&failing, MembershipCacheTtl::default());
+    assert!(resolve_membership(&refusing, &rows, MEMBER).await.is_ok());
+    drop(guard);
+    let warn = tracing::Level::WARN;
+    assert!(events.contains_at(
+        warn,
+        "membership cache unavailable; reading the repositories"
+    ));
+    assert!(events.contains_at(
+        warn,
+        "membership cache unavailable; the answer was not cached"
+    ));
+    // The cause is on the line; no identifier is.
+    assert!(events.contains_at(warn, "membership cache fill refused"));
+    let lines = events.iter();
+    assert_eq!(lines.len(), 2, "{lines:?}");
+    let named = |line: &crate::log_capture::CapturedEvent| {
+        line.rendered.contains("u1") || line.rendered.contains("t1")
+    };
+    assert!(!lines.iter().any(named));
 }

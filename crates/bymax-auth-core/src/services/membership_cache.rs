@@ -203,10 +203,8 @@ async fn from_rows<R: MembershipRows + ?Sized>(
 
 /// Logs a store failure the cache absorbs. No identifier is logged.
 fn unavailable(error: &AuthError, outcome: &'static str) {
-    tracing::warn!(
-        error = %error_chain(error),
-        "workspace membership cache unavailable; {outcome}"
-    );
+    let cause = error_chain(error);
+    tracing::warn!(error = %cause, "workspace membership cache unavailable; {outcome}");
 }
 
 /// Drops the cached access of EVERY member of `workspace`, for an event that changes the whole

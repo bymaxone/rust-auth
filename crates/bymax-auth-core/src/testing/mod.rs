@@ -1749,6 +1749,8 @@ mod logout_pending;
 mod membership_cache;
 pub mod membership_cache_scenarios;
 #[cfg(test)]
+mod membership_cache_scenarios_tests;
+#[cfg(test)]
 mod membership_cache_tests;
 mod otp_cooldown;
 mod rate_limit;

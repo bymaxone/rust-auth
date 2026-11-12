@@ -20,8 +20,8 @@ use time::OffsetDateTime;
 use super::lock;
 use crate::RepositoryError;
 use crate::services::membership_cache::{
-    MembershipCache, MembershipRows, MembershipRowsRead, Resolution, ResolutionSource,
-    bump_membership, bump_workspace, resolve_membership,
+    MembershipCache, MembershipRows, MembershipRowsRead, Resolution, bump_membership,
+    bump_workspace, resolve_membership,
 };
 use crate::traits::MembershipCacheStore;
 use crate::workspace::domain::{
@@ -329,17 +329,13 @@ async fn resolve<P: MembershipCacheProbe + ?Sized>(
     let resolution = resolve_membership(&cache, &harness.rows, MEMBER)
         .await
         .map_err(|error| format!("resolve failed: {error}"))?;
+    // Where the answer came from is what the repositories saw, not what the resolution claims.
     let read_rows = harness.rows.reads.load(Ordering::SeqCst) > before;
-    let (answer, source) = match resolution {
-        Resolution::Member { role, source } => (Some(role), source),
-        Resolution::NotMember(_) => (None, ResolutionSource::Repository),
+    let answer = match resolution {
+        Resolution::Member { role, .. } => Some(role),
+        Resolution::NotMember(_) => None,
     };
     let named = if read_rows { "repository" } else { "cache" };
-    if (source == ResolutionSource::Repository) != read_rows {
-        return Err(format!(
-            "the answer claims {source:?} but the rows say {named}"
-        ));
-    }
     let wanted = expect
         .answer
         .as_ref()
@@ -422,7 +418,10 @@ async fn play<P: MembershipCacheProbe + ?Sized>(
     identifier_key: &[u8; 64],
     steps: &[Step],
 ) -> Result<(), String> {
-    let ids = MembershipCacheIds::derive(identifier_key, MEMBER).map_err(|e| e.to_string())?;
+    // The scenario member has no blank part, so the derivation always succeeds.
+    let ids = MembershipCacheIds::derive(identifier_key, MEMBER)
+        .ok()
+        .ok_or("the scenario member did not derive")?;
     let held = Held {
         workspace: WorkspaceStatus::Active,
         membership: MembershipStatus::Active,

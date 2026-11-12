@@ -240,3 +240,44 @@ async fn the_probe_plants_reads_and_drops_what_the_scenarios_need() {
     );
     assert_eq!(cache.entry_ttl("absent"), None);
 }
+
+#[tokio::test]
+async fn a_counter_is_readable_strictly_before_its_expiry() {
+    let cache = InMemoryMembershipCache::new();
+    cache.freeze_clock();
+    let id = ids().membership;
+    cache.seed_counter(VersionCounter::Membership, &id, 4, Duration::from_secs(10));
+    cache.advance_clock(Duration::from_secs(10) - Duration::from_nanos(1));
+    assert_eq!(
+        cache.counter(VersionCounter::Membership, &id).await,
+        Some(4)
+    );
+    assert_eq!(
+        cache.counter_ttl(VersionCounter::Membership, &id),
+        Some(Duration::from_nanos(1))
+    );
+    // At the expiry instant the counter is gone, and it is dropped rather than kept.
+    cache.advance_clock(Duration::from_nanos(1));
+    assert_eq!(cache.counter(VersionCounter::Membership, &id).await, None);
+    let read = cache.read(&ids()).await;
+    assert!(matches!(read, Ok(read) if read.versions == MembershipVersions::default()));
+    assert!(matches!(cache.bump_membership(&id).await, Ok(1)));
+}
+
+#[tokio::test]
+async fn an_entry_is_readable_strictly_before_its_lifetime_ends() {
+    let cache = InMemoryMembershipCache::new();
+    cache.freeze_clock();
+    let versions = MembershipVersions::default();
+    let filled = cache.fill(&ids(), versions, "editor", ttl(1)).await;
+    assert!(matches!(filled, Ok(FillOutcome::Written)));
+    let entry = ids().entry(versions);
+    cache.advance_clock(Duration::from_secs(1) - Duration::from_nanos(1));
+    assert_eq!(cache.entry(&entry).await, Some(entry_value("editor")));
+    assert_eq!(cache.entry_ttl(&entry), Some(Duration::from_nanos(1)));
+    cache.advance_clock(Duration::from_nanos(1));
+    let read = cache.read(&ids()).await;
+    assert!(matches!(read, Ok(read) if read.entry.is_none()));
+    assert_eq!(cache.entry(&entry).await, None);
+    assert_eq!(cache.entry_ttl(&entry), None);
+}
