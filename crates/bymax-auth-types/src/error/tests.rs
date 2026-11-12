@@ -52,6 +52,15 @@ fn every_code_is_named_in_an_exhaustive_match() {
         | ApiKeyNotFound
         | Validation
         | TooManyRequests
+        | WorkspaceRequired
+        | WorkspaceNotFound
+        | InsufficientWorkspaceRole
+        | LastOwner
+        | AlreadyMember
+        | InvitationEmailMismatch
+        | RegistrationClosed
+        | WorkspaceLimitReached
+        | WorkspacePendingDeletion
         | Internal => true,
     };
     assert!(named(AuthErrorCode::Internal));

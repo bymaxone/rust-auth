@@ -6,7 +6,7 @@
  * HTTP status via [`AuthErrorCode::http_status`]. Both the string and the status are
  * pinned by `errorCatalog` in `conformance/wire-contract.json`, not by this file.
  */
-export type AuthErrorCode = "auth.invalid_credentials" | "auth.account_locked" | "auth.account_inactive" | "auth.account_suspended" | "auth.account_banned" | "auth.pending_approval" | "auth.token_expired" | "auth.token_revoked" | "auth.token_invalid" | "auth.refresh_token_invalid" | "auth.session_not_found" | "auth.token_missing" | "auth.email_already_exists" | "auth.email_not_verified" | "auth.email_change_token_invalid" | "auth.mfa_required" | "auth.mfa_invalid_code" | "auth.mfa_already_enabled" | "auth.mfa_not_enabled" | "auth.mfa_setup_required" | "auth.mfa_temp_token_invalid" | "auth.mfa_state_conflict" | "auth.password_compromised" | "auth.password_reset_token_invalid" | "auth.otp_invalid" | "auth.otp_expired" | "auth.otp_max_attempts" | "auth.insufficient_role" | "auth.forbidden" | "auth.untrusted_origin" | "auth.reauthentication_required" | "auth.invalid_invitation_token" | "auth.oauth_failed" | "auth.oauth_email_mismatch" | "auth.platform_auth_required" | "auth.api_key_invalid" | "auth.api_key_scope_insufficient" | "auth.api_key_not_found" | "auth.validation" | "auth.too_many_requests" | "auth.internal";
+export type AuthErrorCode = "auth.invalid_credentials" | "auth.account_locked" | "auth.account_inactive" | "auth.account_suspended" | "auth.account_banned" | "auth.pending_approval" | "auth.token_expired" | "auth.token_revoked" | "auth.token_invalid" | "auth.refresh_token_invalid" | "auth.session_not_found" | "auth.token_missing" | "auth.email_already_exists" | "auth.email_not_verified" | "auth.email_change_token_invalid" | "auth.mfa_required" | "auth.mfa_invalid_code" | "auth.mfa_already_enabled" | "auth.mfa_not_enabled" | "auth.mfa_setup_required" | "auth.mfa_temp_token_invalid" | "auth.mfa_state_conflict" | "auth.password_compromised" | "auth.password_reset_token_invalid" | "auth.otp_invalid" | "auth.otp_expired" | "auth.otp_max_attempts" | "auth.insufficient_role" | "auth.forbidden" | "auth.untrusted_origin" | "auth.reauthentication_required" | "auth.invalid_invitation_token" | "auth.oauth_failed" | "auth.oauth_email_mismatch" | "auth.platform_auth_required" | "auth.api_key_invalid" | "auth.api_key_scope_insufficient" | "auth.api_key_not_found" | "auth.validation" | "auth.too_many_requests" | "auth.workspace_required" | "auth.workspace_not_found" | "auth.insufficient_workspace_role" | "auth.last_owner" | "auth.already_member" | "auth.invitation_email_mismatch" | "auth.registration_closed" | "auth.workspace_limit_reached" | "auth.workspace_pending_deletion" | "auth.internal";
 export const AUTH_ERROR_CODES = {
   INVALID_CREDENTIALS: "auth.invalid_credentials",
   ACCOUNT_LOCKED: "auth.account_locked",
@@ -48,5 +48,14 @@ export const AUTH_ERROR_CODES = {
   API_KEY_NOT_FOUND: "auth.api_key_not_found",
   VALIDATION: "auth.validation",
   TOO_MANY_REQUESTS: "auth.too_many_requests",
+  WORKSPACE_REQUIRED: "auth.workspace_required",
+  WORKSPACE_NOT_FOUND: "auth.workspace_not_found",
+  INSUFFICIENT_WORKSPACE_ROLE: "auth.insufficient_workspace_role",
+  LAST_OWNER: "auth.last_owner",
+  ALREADY_MEMBER: "auth.already_member",
+  INVITATION_EMAIL_MISMATCH: "auth.invitation_email_mismatch",
+  REGISTRATION_CLOSED: "auth.registration_closed",
+  WORKSPACE_LIMIT_REACHED: "auth.workspace_limit_reached",
+  WORKSPACE_PENDING_DELETION: "auth.workspace_pending_deletion",
   INTERNAL: "auth.internal",
 } as const;

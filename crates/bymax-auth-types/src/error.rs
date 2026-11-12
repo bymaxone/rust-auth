@@ -200,6 +200,35 @@ pub enum AuthErrorCode {
     #[serde(rename = "auth.too_many_requests")]
     TooManyRequests,
 
+    // Workspaces
+    /// The request named no target workspace.
+    #[serde(rename = "auth.workspace_required")]
+    WorkspaceRequired,
+    /// The workspace does not exist, is not active, or the caller is not an active member; the cases are indistinguishable on purpose.
+    #[serde(rename = "auth.workspace_not_found")]
+    WorkspaceNotFound,
+    /// The caller is an active member whose workspace role does not satisfy the operation.
+    #[serde(rename = "auth.insufficient_workspace_role")]
+    InsufficientWorkspaceRole,
+    /// The change would leave the workspace with no active owner.
+    #[serde(rename = "auth.last_owner")]
+    LastOwner,
+    /// An invitation or add named someone who already belongs to the workspace.
+    #[serde(rename = "auth.already_member")]
+    AlreadyMember,
+    /// The invitation was sent to a different email address than the one accepting it.
+    #[serde(rename = "auth.invitation_email_mismatch")]
+    InvitationEmailMismatch,
+    /// Registration is closed to anyone without a valid invitation.
+    #[serde(rename = "auth.registration_closed")]
+    RegistrationClosed,
+    /// The account already owns the most workspaces the configuration allows; workspaces pending deletion count.
+    #[serde(rename = "auth.workspace_limit_reached")]
+    WorkspaceLimitReached,
+    /// The workspace is scheduled for deletion; answered to an owner only.
+    #[serde(rename = "auth.workspace_pending_deletion")]
+    WorkspacePendingDeletion,
+
     // Internal
     /// Unexpected internal failure (store down, serialization error, repository error).
     /// The underlying cause is logged, never serialized — only this generic code and a
@@ -247,11 +276,18 @@ impl AuthErrorCode {
             | Self::Forbidden
             | Self::UntrustedOrigin
             | Self::ReauthenticationRequired
+            | Self::InsufficientWorkspaceRole
+            | Self::InvitationEmailMismatch
+            | Self::RegistrationClosed
+            | Self::WorkspaceLimitReached
             | Self::ApiKeyScopeInsufficient => 403,
-            Self::SessionNotFound | Self::ApiKeyNotFound => 404,
+            Self::SessionNotFound | Self::ApiKeyNotFound | Self::WorkspaceNotFound => 404,
             Self::EmailAlreadyExists
             | Self::MfaAlreadyEnabled
             | Self::MfaStateConflict
+            | Self::LastOwner
+            | Self::AlreadyMember
+            | Self::WorkspacePendingDeletion
             | Self::OauthEmailMismatch => 409,
             Self::MfaNotEnabled
             | Self::MfaSetupRequired
@@ -259,6 +295,7 @@ impl AuthErrorCode {
             | Self::PasswordResetTokenInvalid
             | Self::InvalidInvitationToken
             | Self::EmailChangeTokenInvalid
+            | Self::WorkspaceRequired
             | Self::Validation => 400,
             Self::AccountLocked | Self::OtpMaxAttempts | Self::TooManyRequests => 429,
             Self::Internal => 500,
@@ -315,6 +352,19 @@ impl AuthErrorCode {
             Self::ApiKeyNotFound => "API key not found",
             Self::Validation => "Validation failed",
             Self::TooManyRequests => "Too many requests. Please slow down and try again shortly.",
+            Self::WorkspaceRequired => "A workspace is required",
+            Self::WorkspaceNotFound => "Workspace not found",
+            Self::InsufficientWorkspaceRole => "Insufficient workspace role",
+            Self::LastOwner => "A workspace needs at least one owner",
+            Self::AlreadyMember => "Already a member of this workspace",
+            Self::InvitationEmailMismatch => {
+                "This invitation was sent to a different email address"
+            }
+            Self::RegistrationClosed => "Registration is closed",
+            Self::WorkspaceLimitReached => {
+                "Workspace limit reached. Workspaces pending deletion count toward the limit."
+            }
+            Self::WorkspacePendingDeletion => "Workspace is scheduled for deletion",
             Self::Internal => "Internal server error",
         }
     }
@@ -563,6 +613,35 @@ pub enum AuthError {
         retry_after_seconds: Option<u64>,
     },
 
+    // Workspaces
+    /// The request named no target workspace.
+    #[error("workspace required")]
+    WorkspaceRequired,
+    /// The workspace does not exist, is not active, or the caller is not an active member; the cases are indistinguishable on purpose.
+    #[error("workspace not found")]
+    WorkspaceNotFound,
+    /// The caller is an active member whose workspace role does not satisfy the operation.
+    #[error("insufficient workspace role")]
+    InsufficientWorkspaceRole,
+    /// The change would leave the workspace with no active owner.
+    #[error("last owner")]
+    LastOwner,
+    /// An invitation or add named someone who already belongs to the workspace.
+    #[error("already a member")]
+    AlreadyMember,
+    /// The invitation was sent to a different email address than the one accepting it.
+    #[error("invitation email mismatch")]
+    InvitationEmailMismatch,
+    /// Registration is closed to anyone without a valid invitation.
+    #[error("registration closed")]
+    RegistrationClosed,
+    /// The account already owns the most workspaces the configuration allows; workspaces pending deletion count.
+    #[error("workspace limit reached")]
+    WorkspaceLimitReached,
+    /// The workspace is scheduled for deletion; answered to an owner only.
+    #[error("workspace pending deletion")]
+    WorkspacePendingDeletion,
+
     // Internal
     /// Unexpected internal failure; the cause is logged, never serialized.
     #[error("internal error")]
@@ -621,6 +700,15 @@ impl AuthError {
             Self::ApiKeyNotFound => AuthErrorCode::ApiKeyNotFound,
             Self::Validation { .. } => AuthErrorCode::Validation,
             Self::TooManyRequests { .. } => AuthErrorCode::TooManyRequests,
+            Self::WorkspaceRequired => AuthErrorCode::WorkspaceRequired,
+            Self::WorkspaceNotFound => AuthErrorCode::WorkspaceNotFound,
+            Self::InsufficientWorkspaceRole => AuthErrorCode::InsufficientWorkspaceRole,
+            Self::LastOwner => AuthErrorCode::LastOwner,
+            Self::AlreadyMember => AuthErrorCode::AlreadyMember,
+            Self::InvitationEmailMismatch => AuthErrorCode::InvitationEmailMismatch,
+            Self::RegistrationClosed => AuthErrorCode::RegistrationClosed,
+            Self::WorkspaceLimitReached => AuthErrorCode::WorkspaceLimitReached,
+            Self::WorkspacePendingDeletion => AuthErrorCode::WorkspacePendingDeletion,
             Self::Internal(_) => AuthErrorCode::Internal,
         }
     }
