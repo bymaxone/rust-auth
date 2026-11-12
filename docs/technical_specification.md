@@ -230,6 +230,8 @@ Rust has no DI container, and `rust-auth` deliberately does not emulate one. Ins
 |---|---|---|
 | `UserRepository` | `IUserRepository` (`BYMAX_AUTH_USER_REPOSITORY`) | tenant/dashboard user persistence |
 | `PlatformUserRepository` | `IPlatformUserRepository` | platform-admin persistence |
+| `WorkspaceRepository` | `IWorkspaceRepository` | workspace records, rename and lifecycle, each write with its audit event |
+| `MembershipRepository` | `IMembershipRepository` | memberships, owner-protecting writes, account removal |
 | `EmailProvider` | `IEmailProvider` (NoOp fallback) | transactional emails |
 | `AuthHooks` | `IAuthHooks` (NoOp fallback) | lifecycle extension points |
 | `SessionStore` | session half of `AuthRedisService` | refresh-session storage |
