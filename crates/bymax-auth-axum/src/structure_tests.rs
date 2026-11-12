@@ -11,8 +11,8 @@ use crate::dto::{
     AcceptInvitationDto, ChangeEmailDto, ChangePasswordDto, ConfirmEmailChangeDto,
     CreateInvitationDto, DECLARED, ForgotPasswordDto, LoginDto, MfaChallengeDto, MfaDisableDto,
     MfaRegenerateRecoveryCodesDto, MfaSetupDto, MfaVerifyDto, OAuthCallbackQuery,
-    OAuthInitiateQuery, PlatformLoginDto, RegisterDto, ResendOtpDto, ResendVerificationDto,
-    ResetPasswordDto, RevokeInvitationDto, VerifyEmailDto, VerifyOtpDto,
+    OAuthInitiateQuery, PlatformLoginDto, RefreshDto, RegisterDto, ResendOtpDto,
+    ResendVerificationDto, ResetPasswordDto, RevokeInvitationDto, VerifyEmailDto, VerifyOtpDto,
 };
 use crate::request_schemas::schema;
 use crate::structure::{declared_named, details_for};
@@ -49,7 +49,7 @@ macro_rules! dto {
 }
 
 /// Every DTO, by the name of its schema.
-const DTOS: [(&str, Details, Refuses); 22] = [
+const DTOS: [(&str, Details, Refuses); 23] = [
     dto!(AcceptInvitationDto, "AcceptInvitationDto"),
     dto!(ChangeEmailDto, "ChangeEmailDto"),
     dto!(ChangePasswordDto, "ChangePasswordDto"),
@@ -68,6 +68,7 @@ const DTOS: [(&str, Details, Refuses); 22] = [
     dto!(OAuthCallbackQuery, "OAuthCallbackQueryDto"),
     dto!(OAuthInitiateQuery, "OAuthInitiateQueryDto"),
     dto!(PlatformLoginDto, "PlatformLoginDto"),
+    dto!(RefreshDto, "RefreshTokenBodyDto"),
     dto!(RegisterDto, "RegisterDto"),
     dto!(ResendOtpDto, "ResendOtpDto"),
     dto!(ResendVerificationDto, "ResendVerificationDto"),
@@ -215,15 +216,19 @@ fn an_unknown_property_is_named_where_the_dto_refuses_it_and_only_there() {
 fn what_serde_does_with_an_unknown_property_is_what_the_declared_table_says() {
     // The flag is what names a property the DTO refuses; this reads the refusal off serde itself,
     // so a DTO that gains or loses `deny_unknown_fields` fails here and not in front of a client.
-    let mut refusing = 0;
+    let mut ignoring = BTreeSet::new();
     for (name, _, refused) in DTOS {
         assert_eq!(refused(name), declared_to_refuse(name), "{name}");
-        refusing += usize::from(refused(name));
+        if !refused(name) {
+            ignoring.insert(name);
+        }
     }
+    // The OAuth callback, because a provider appends parameters nobody enumerates, and the
+    // refresh body, because nest-auth's routes read only `refreshToken` from it.
     assert_eq!(
-        refusing,
-        DTOS.len() - 1,
-        "only the OAuth callback ignores unknown properties"
+        ignoring,
+        BTreeSet::from(["OAuthCallbackQueryDto", "RefreshTokenBodyDto"]),
+        "only the OAuth callback and the refresh body ignore unknown properties"
     );
 }
 

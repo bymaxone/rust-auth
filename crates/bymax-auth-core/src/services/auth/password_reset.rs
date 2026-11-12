@@ -775,6 +775,7 @@ mod tests {
     use std::time::Duration;
     use time::OffsetDateTime;
 
+    mod order_contract;
     mod request_failure_tests;
 
     fn token_harness() -> Option<Harness> {

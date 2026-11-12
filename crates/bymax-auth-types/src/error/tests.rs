@@ -9,7 +9,9 @@ fn every_code_is_named_in_an_exhaustive_match() {
     // Compile-time anchor. `AuthErrorCode` is `#[non_exhaustive]`, which only binds other
     // crates, so this match inside the defining crate stays exhaustive: adding a variant
     // stops the build here until it is also added to `catalog()` in
-    // `tests/error_catalog.rs`, which the shared contract is compared against.
+    // `tests/error_catalog.rs`, which the shared contract is compared against. The match must
+    // stay exhaustive: a closed enum of ~50 codes is one decision whose length is the enum's, so a
+    // wildcard arm would trade the compile-time guarantee for a line count.
     use AuthErrorCode::*;
     let named = |code: AuthErrorCode| match code {
         InvalidCredentials

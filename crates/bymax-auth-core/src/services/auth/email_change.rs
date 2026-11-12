@@ -258,6 +258,8 @@ mod tests {
     use crate::testing::InMemoryUserRepository;
     use crate::traits::{PasswordResetStore, UserRepository};
 
+    mod record_contract;
+
     /// A harness with the address-change flow tunable, and email verification off so seeding
     /// stays about the address rather than about the onboarding gate.
     fn setup() -> Option<Harness> {

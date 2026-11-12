@@ -70,6 +70,7 @@ declared! {
     OAuthCallbackQuery => "OAuthCallbackQueryDto", false;
     OAuthInitiateQuery => "OAuthInitiateQueryDto", true;
     PlatformLoginDto => "PlatformLoginDto", true;
+    RefreshDto => "RefreshTokenBodyDto", false;
     RegisterDto => "RegisterDto", true;
     ResendOtpDto => "ResendOtpDto", true;
     ResendVerificationDto => "ResendVerificationDto", true;
@@ -481,9 +482,10 @@ pub struct AcceptInvitationDto {
 /// logout, and `POST /auth/sessions/revoke-all` — in bearer/both mode. In cookie mode the token
 /// is read from the cookie and this body is optional/empty.
 ///
-/// It deliberately does **not** deny unknown fields, unlike every other request body: nest-auth
-/// has no DTO on these routes and reads only `refreshToken`, so a client that sends more keys
-/// must reach the same outcome on both backends. The routes read the body through
+/// It deliberately does **not** deny unknown fields, unlike every other request body: nest-auth's
+/// `RefreshTokenBodyDto`, the schema this one answers, is never validated against on these
+/// routes, which read only `refreshToken`, so a client that sends more keys must reach the same
+/// outcome on both backends. The routes read the body through
 /// `parse_refresh_body`, which applies the bounds below and ignores every other key.
 #[derive(Debug, Default, Deserialize, Validate)]
 #[serde(rename_all = "camelCase")]
@@ -590,6 +592,8 @@ pub struct OAuthCallbackQuery {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    mod opaque_token;
 
     /// Read `requestFieldBounds.{name}` from the shared cross-implementation wire contract.
     ///
