@@ -24,6 +24,8 @@
 mod contract_tests;
 mod error;
 mod keys;
+#[cfg(test)]
+mod membership_cache_script_tests;
 mod pool;
 mod script;
 mod stores;

@@ -596,6 +596,54 @@ async fn a_cursor_of_another_member_does_not_skip_that_members_earlier_rows() {
 }
 
 #[tokio::test]
+async fn a_cursor_of_another_workspace_or_tenant_does_not_skip_that_listings_earlier_rows() {
+    let repo = InMemoryWorkspaces::new();
+    assert!(create(&repo, "w1", "u1", 0).await);
+    seed_workspace(&repo, "w2", WorkspaceStatus::Active, 100);
+    for user in ["a", "b"] {
+        seed_member(&repo, "w2", user, "member", true);
+    }
+    let late = Membership {
+        tenant_id: "t2".into(),
+        workspace_id: "w2".into(),
+        user_id: "x".into(),
+        role: "member".into(),
+        status: MembershipStatus::Active,
+        invited_by_user_id: None,
+        created_at: instant(1),
+        updated_at: instant(1),
+    };
+    repo.seed_membership(late);
+    let page = |workspace, cursor| ListForWorkspace {
+        workspace,
+        cursor,
+        limit: 1,
+    };
+    let cursor = repo.list_for_workspace(page(ws("w2"), None)).await.ok();
+    let cursor = cursor.and_then(|p| p.next_cursor);
+    assert!(cursor.is_some());
+    let other_workspace = repo
+        .list_for_workspace(page(ws("w1"), cursor.as_deref()))
+        .await
+        .ok();
+    assert_eq!(
+        other_workspace,
+        repo.list_for_workspace(page(ws("w1"), None)).await.ok()
+    );
+    let t2 = WorkspaceRef {
+        tenant_id: "t2",
+        workspace_id: "w2",
+    };
+    let t2_first = repo.list_for_workspace(page(t2, None)).await.ok();
+    let other_tenant = repo
+        .list_for_workspace(page(t2, cursor.as_deref()))
+        .await
+        .ok();
+    assert_eq!(other_tenant, t2_first);
+    assert_eq!(t2_first.map(|p| p.items.len()), Some(1));
+}
+
+#[tokio::test]
 async fn members_created_within_one_second_list_in_creation_order() {
     let repo = InMemoryWorkspaces::new();
     seed_workspace(&repo, "w1", WorkspaceStatus::Active, 1);

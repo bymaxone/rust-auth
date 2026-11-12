@@ -7,7 +7,8 @@
 ///
 /// A counter must outlive every cache entry written under it: one that expires while an entry
 /// keyed by its old value is alive would restart at `0` and make that stale entry current again.
-pub const VERSION_RETENTION_SECONDS: u64 = 2_592_000;
+/// It is the token-epoch retention, so every counter in the keyspace keeps one retention rule.
+pub const VERSION_RETENTION_SECONDS: u64 = crate::traits::TOKEN_EPOCH_RETENTION_SECS;
 
 /// The default lifetime of a cached membership entry, in seconds.
 pub const MEMBERSHIP_CACHE_TTL_DEFAULT_SECONDS: u64 = 60;

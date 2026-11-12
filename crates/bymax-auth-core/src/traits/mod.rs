@@ -16,6 +16,7 @@ pub mod email;
 pub mod hooks;
 pub mod http;
 mod logout_owner;
+pub mod membership_cache;
 pub mod membership_repository;
 pub mod oauth;
 pub mod rate_limit;
@@ -49,6 +50,8 @@ pub use hooks::{
 };
 #[doc(inline)]
 pub use http::{HttpClient, HttpError, HttpMethod, HttpRequest, HttpResponse};
+#[doc(inline)]
+pub use membership_cache::{FillOutcome, MembershipCacheRead, MembershipCacheStore};
 #[doc(inline)]
 pub use membership_repository::MembershipRepository;
 #[doc(inline)]
