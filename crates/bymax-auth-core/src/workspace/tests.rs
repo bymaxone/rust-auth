@@ -385,7 +385,18 @@ fn the_bounds_are_the_contracts() {
         IDENTIFIER_MAX_CHARS as u64
     );
     assert_eq!(read(&bounds["memberUserId"], "min"), 1);
-    for field in ["workspaceId", "userId"] {
+    let checked = ["workspaceId", "userId"];
+    let named: std::collections::BTreeSet<&str> = bounds["pathParameters"]
+        .as_object()
+        .map(|map| {
+            map.keys()
+                .filter(|key| !key.starts_with('$'))
+                .map(String::as_str)
+                .collect()
+        })
+        .unwrap_or_default();
+    assert_eq!(named, checked.into_iter().collect());
+    for field in checked {
         assert_eq!(
             read(&bounds["pathParameters"][field], "max"),
             IDENTIFIER_MAX_CHARS as u64
