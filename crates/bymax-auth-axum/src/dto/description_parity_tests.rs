@@ -17,6 +17,8 @@ use std::collections::BTreeSet;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
 
+use crate::pending::PENDING_SCHEMAS;
+
 use super::openapi_parity_tests::{DTOS, Findings, artefact, base_body, props_of};
 use super::{
     ChangeEmailDto, CreateInvitationDto, ForgotPasswordDto, LoginDto, PlatformLoginDto,
@@ -97,7 +99,11 @@ fn every_entry_of_the_artefact_has_a_property_here_and_the_reverse() {
         .map(|(dto, wire, ..)| ((*dto).to_owned(), (*wire).to_owned()))
         .collect();
     assert_eq!(rows.len(), DESCRIBED.len(), "a row is listed twice");
-    assert_eq!(rows, described_pairs());
+    let built: BTreeSet<(String, String)> = described_pairs()
+        .into_iter()
+        .filter(|(dto, _)| !PENDING_SCHEMAS.contains(&dto.as_str()))
+        .collect();
+    assert_eq!(rows, built);
 }
 
 /// Each `(DTO, Rust field)` the source marks with the normaliser, found by reading `dto.rs`: the

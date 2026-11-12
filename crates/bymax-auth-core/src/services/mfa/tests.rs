@@ -3060,6 +3060,11 @@ fn the_mfa_subject_preimages_match_the_shared_contract() {
         !derived.is_empty(),
         "`userSubjectDerivedKeys` is not a populated object — the contract did not load"
     );
+    //
+    // The two keys of `access.denied` are the only ones the contract derives that this crate does
+    // not yet. Each is listed, and required to be absent from `implemented`, so the slice that
+    // derives it has to delete its entry here.
+    const PENDING: [&str; 2] = ["accessDeniedSuppressed", "accessDeniedWindow"];
     let mut in_contract: Vec<&str> = derived
         .keys()
         // `$comment` carries the section's rationale, not a key shape. The `$` prefix is the
@@ -3067,8 +3072,15 @@ fn the_mfa_subject_preimages_match_the_shared_contract() {
         // name.
         .filter(|name| !name.starts_with('$'))
         .map(String::as_str)
+        .filter(|name| !PENDING.contains(name))
         .collect();
     in_contract.sort_unstable();
+    for name in PENDING {
+        assert!(
+            derived.contains_key(name),
+            "{name} is pending but the contract does not derive it"
+        );
+    }
     let mut implemented = [
         "mfaSetupRecord",
         "recentAuthMarker",

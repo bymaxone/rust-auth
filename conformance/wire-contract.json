@@ -11,9 +11,18 @@
     "sessions, lockouts, and reset links that silently miss each other in production.",
     "",
     "Changing a value here is a breaking change to the shared keyspace. Do it in both repos in",
-    "the same change, and only with a migration story for data already written in the old form."
+    "the same change, and only with a migration story for data already written in the old form.",
+    "",
+    "`version` names the contract a RELEASE of nest-auth ships. It moves once per release that",
+    "changes the contract, never once per change: an edit to a version no release has shipped yet",
+    "stays inside that version, and rust-auth reads it the same way.",
+    "",
+    "Every string in this file, key or value, must be well-formed Unicode, because a parser that builds",
+    "well-formed strings (serde_json is one) rejects a lone surrogate escape and loses the whole file.",
+    "A case that needs an ill-formed string states it as UTF-16 code units beside its `case`, for",
+    "example `unpairedSurrogateCodeUnits: [55296]`, and each library's test builds the string itself."
   ],
-  "version": 1,
+  "version": 4,
   "hmacKeyDerivation": {
     "$comment": [
       "The identifier-hashing key both sides derive from the identifier secret, and one",
@@ -96,7 +105,16 @@
     "otpResendCooldown": "resend",
     "invitationIndex": "invidx",
     "userStatus": "us",
-    "userEmailVerified": "uev"
+    "userEmailVerified": "uev",
+    "workspaceVersion": "wsv",
+    "membershipVersion": "wmv",
+    "membershipCache": "wm",
+    "workspaceInvitation": "winv",
+    "workspaceInvitationIndex": "winvidx",
+    "workspaceInvitationSet": "winvset",
+    "workspaceInvitationInviterRate": "winvrl",
+    "accessDeniedWindow": "wad",
+    "accessDeniedSuppressed": "wads"
   },
   "userStatusCache": {
     "$comment": [
@@ -174,6 +192,418 @@
         "digestHex": "169d23f4def0019c0fcbebb0630aca4635b89f592909ef51a364f8ac330c232a"
       }
     ]
+  },
+  "workspaceMembershipCache": {
+    "$comment": [
+      "The workspace-membership cache both libraries read and write on one Redis. A deployment that",
+      "runs both behind one store shares it, so the subjects, the keys, the value and the ORDER of the",
+      "version reads are part of the contract: a version bump issued by one side that names a",
+      "different key than the other reads raises nothing and serves a removed member's role until",
+      "the entry expires.",
+      "",
+      "Access to a workspace needs an ACTIVE membership of an ACTIVE workspace. Any other state reads",
+      "as 'not a member', so a caller cannot tell a workspace it may not enter from one that does",
+      "not exist (`auth.workspace_not_found`).",
+      "",
+      "Two subjects, both length-prefixed in UTF-8 BYTES for the reason `userSubjectPreimages` gives:",
+      "a bare `:` between free-form identifiers is not injective, and a UTF-16 length would derive",
+      "different keys from a UTF-8 one for the first accented identifier. Identifiers are used as",
+      "given: there is NO Unicode normalisation, so a composed and a decomposed spelling of the same",
+      "text are different identifiers with different digests. The user id is last and unprefixed",
+      "because nothing follows it. Every key HMACs its subject with the identifier key of",
+      "`hmacKeyDerivation`, so no identifier is written into the keyspace in the clear. No other",
+      "preimage under that key starts with `wsp:` or `wms:`, so these subjects cannot collide with",
+      "the account subjects.",
+      "",
+      "Three keys. `wsv` and `wmv` are version counters; `wm` holds the cached answer under BOTH",
+      "versions. THE ORDER IS THE REQUIREMENT: a reader reads `wsv`, then `wmv`, then the entry named",
+      "by those two values, then, on a miss, the repositories, and writes the entry under the versions",
+      "it read FIRST. A change that lands after the version reads moves a counter, so the refill sits",
+      "under a key nobody reads and is never served. Reading all three in one atomic step is an",
+      "optimisation, not a requirement: an implementation may issue the reads as separate",
+      "single-key commands, or pipeline them, provided the order holds. A multi-key read across the",
+      "three keys is not required and is not portable to a store that shards by key.",
+      "",
+      "What the order guarantees: a read that BEGINS after a bump has returned never serves an entry",
+      "written before that bump, because the bump is committed before it returns and the reader reads",
+      "the counters first. A read that overlaps a bump may be answered from the state before it, as a",
+      "request that finished a moment earlier would be; separate reads do not make a read that",
+      "straddles a bump fresh, and the contract does not ask them to.",
+      "",
+      "A counter value is never reused while an entry bearing it can live. A counter that expires",
+      "restarts at 1 on its next bump, and an entry still alive under 1 would be current again. A",
+      "retention longer than the entry lifetime is not enough on its own, since an entry can be written",
+      "in the last moment of a counter's retention, or after the counter expired between the version",
+      "read and the write. So a fill writes only if both counters still hold the versions it read (an",
+      "absent counter counts as 0), and in the same step it extends every counter that exists to the",
+      "retention. A counter that does not exist is left absent: it reads as 0, and a read never creates",
+      "a counter. A fill that finds a counter moved writes nothing, which also skips an entry nobody",
+      "could read.",
+      "",
+      "A writer changes the repository FIRST and bumps the counter after, and a failed bump is an",
+      "error: a change is never reported as invalidated when it was not. A bump is INCR followed by",
+      "EXPIRE, on every bump, so a counter always carries its retention; nest-auth issues both in one",
+      "atomic step.",
+      "",
+      "nest-auth runs the read and the bump as Lua scripts, so it supports a standalone Redis and",
+      "Sentinel only, like every other multi-key script in this library (its Redis Cluster position is",
+      "documented in the technical specification).",
+      "",
+      "The cache is advisory. When Redis is unreachable a reader answers from the repositories and",
+      "writes nothing. The repository reads the cache is filled from must come from the primary or",
+      "be read-your-writes: a lagging replica would cache a removed member as present under the new",
+      "version.",
+      "",
+      "A counter evicted under memory pressure restarts at 0, which can make an entry written under",
+      "an earlier 0:0 readable again for up to its TTL. This is the same exposure the token-epoch",
+      "counters have; run the store with a no-eviction policy for the auth keyspace."
+    ],
+    "workspaceSubject": "wsp:{utf8ByteLength(tenantId)}:{tenantId}:{utf8ByteLength(workspaceId)}:{workspaceId}",
+    "membershipSubject": "wms:{utf8ByteLength(tenantId)}:{tenantId}:{utf8ByteLength(workspaceId)}:{workspaceId}:{userId}",
+    "keys": {
+      "workspaceVersion": "{namespace}:wsv:{hmac_sha256(hmacKey, workspaceSubject)}",
+      "membershipVersion": "{namespace}:wmv:{hmac_sha256(hmacKey, membershipSubject)}",
+      "membershipCache": "{namespace}:wm:{hmac_sha256(hmacKey, membershipSubject)}:{workspaceVersion}:{membershipVersion}"
+    },
+    "hmacKey": "the identifier-HMAC key of hmacKeyDerivation, and the vectors below use its pinned derivedKeyHex",
+    "absentVersion": "a counter that does not exist reads as the text '0'",
+    "entryValue": "{\"role\":\"<role>\",\"status\":\"active\"}",
+    "entryRule": "only an active membership of an active workspace is cached; a missing, suspended or inactive answer is never cached, and an entry whose status is not 'active' is read as a miss",
+    "ttl": {
+      "option": "workspaces.membershipCacheTtlSeconds",
+      "default": 60,
+      "max": 3600,
+      "zero": "disables the cache: every request reads the repositories",
+      "appliesTo": "the cache entry only"
+    },
+    "versionRetentionSeconds": 2592000,
+    "versionRetentionWhy": "a counter must outlive every entry written under it, or it restarts at 0 and revives a stale entry; the value is TOKEN_EPOCH_RETENTION_SECONDS",
+    "bump": "INCR the counter, then EXPIRE it to versionRetentionSeconds, atomically and on every bump",
+    "workspaceWideEvents": "deleting, scheduling the deletion of, restoring or suspending a workspace bumps the workspace version; a change to one membership bumps that membership's version only",
+    "vectors": [
+      {
+        "tenantId": "tenant-1",
+        "workspaceId": "ws-1",
+        "userId": "user-1",
+        "workspaceSubject": "wsp:8:tenant-1:4:ws-1",
+        "workspaceDigestHex": "89a04c5f97b071aa56b591f7e37dceb01b52ee8c2a71271cb267b33d24cfde2e",
+        "membershipSubject": "wms:8:tenant-1:4:ws-1:user-1",
+        "membershipDigestHex": "2f327d73d12a8bec883620d297049993dd76ae8bb67bab530df39b1320f86a85"
+      },
+      {
+        "tenantId": "a:b",
+        "workspaceId": "c",
+        "userId": "d",
+        "workspaceSubject": "wsp:3:a:b:1:c",
+        "workspaceDigestHex": "011f691bbd27fe0938ba31ea7252013a00d652015bdbe09013f8f4894b1d1d32",
+        "membershipSubject": "wms:3:a:b:1:c:d",
+        "membershipDigestHex": "f6021fd1a75bce2006ea3ef15ca0e9b76f8b0f8933cb9c730256468b578cdf26"
+      },
+      {
+        "tenantId": "a",
+        "workspaceId": "b:c",
+        "userId": "d",
+        "workspaceSubject": "wsp:1:a:3:b:c",
+        "workspaceDigestHex": "85266538b8a0a5662a11c7438a1d992b811272b887538a4b144910b74130ad26",
+        "membershipSubject": "wms:1:a:3:b:c:d",
+        "membershipDigestHex": "a35441f9cf129077c814a12954483e02f8d4cfee47b0c0a84a2b228a4db6ef40"
+      },
+      {
+        "tenantId": "a\u00e7a\u00ed",
+        "workspaceId": "w\u00e9",
+        "userId": "u%1+x",
+        "workspaceSubject": "wsp:6:a\u00e7a\u00ed:3:w\u00e9",
+        "workspaceDigestHex": "1dd6af63723cd64b9cca358d7e438f67921fae276609f0923914dacd40d2cb0c",
+        "membershipSubject": "wms:6:a\u00e7a\u00ed:3:w\u00e9:u%1+x",
+        "membershipDigestHex": "4d4f6b2caf02eb381c25aab5c6185082cd268d2288b120bd7cb0e84d6142e3b1"
+      },
+      {
+        "tenantId": "tenant-0123456789",
+        "workspaceId": "w",
+        "userId": "u1",
+        "workspaceSubject": "wsp:17:tenant-0123456789:1:w",
+        "workspaceDigestHex": "d921c40b2dbe3d10d0529acacad36800961248db44fbd2dea99b89c13bf74d75",
+        "membershipSubject": "wms:17:tenant-0123456789:1:w:u1",
+        "membershipDigestHex": "b5ffc56960709367e10dd6d2cc931b19b353303fed00fba2c2b0e862131394f3"
+      },
+      {
+        "tenantId": "t",
+        "workspaceId": "w",
+        "userId": "5:abc",
+        "workspaceSubject": "wsp:1:t:1:w",
+        "workspaceDigestHex": "fe1d6ead2ef2e1d6822cfe90364e97b12e489cc5fb5dd9bbbb376ec1785b1996",
+        "membershipSubject": "wms:1:t:1:w:5:abc",
+        "membershipDigestHex": "c1326dac0ff0324988853c2ce9de87927b439195e47e64bed4e9c80f3adff412"
+      },
+      {
+        "tenantId": "t\ud83d\ude00",
+        "workspaceId": "w\u20ac",
+        "userId": "u",
+        "workspaceSubject": "wsp:5:t\ud83d\ude00:4:w\u20ac",
+        "workspaceDigestHex": "92c37cd2418d6a954e701b4cb5f5524aeb03a7517c905e5a3a5686fdd1c33fe6",
+        "membershipSubject": "wms:5:t\ud83d\ude00:4:w\u20ac:u",
+        "membershipDigestHex": "3bd729a64d16712003ba0cbdc0253cff58e598ca061893ba32f4b2f3fed58b59"
+      },
+      {
+        "tenantId": "caf\u00e9",
+        "workspaceId": "w",
+        "userId": "u",
+        "workspaceSubject": "wsp:5:caf\u00e9:1:w",
+        "workspaceDigestHex": "da3880dd8e7c22061b5b9eb9821775ccca62f33c9288a397c36977207c03484a",
+        "membershipSubject": "wms:5:caf\u00e9:1:w:u",
+        "membershipDigestHex": "8cc1a61b3c4b99100338e9f91e9e23c54dda168076ffc66fecad45406977080e"
+      },
+      {
+        "tenantId": "cafe\u0301",
+        "workspaceId": "w",
+        "userId": "u",
+        "workspaceSubject": "wsp:6:cafe\u0301:1:w",
+        "workspaceDigestHex": "45c9131d1a4c3db2a5815f3e839ec8d1da008b3cf257204a2a8a9ba8b7c66ece",
+        "membershipSubject": "wms:6:cafe\u0301:1:w:u",
+        "membershipDigestHex": "280ba602d50e97a6c3b088b2d0aeb526abb75fc82ff40b2ac6b0f27114203504"
+      }
+    ],
+    "entryRead": "the entry is a JSON object that is read by PARSING, never compared as text; a value that is not valid JSON, whose role is not a string, or whose status is not 'active' is a miss",
+    "blankParts": "a tenantId, workspaceId or userId that is not a string, is empty, or is only whitespace is refused before any key is derived; no key is ever built from a blank part",
+    "fullKeyVectors": [
+      {
+        "tenantId": "tenant-1",
+        "workspaceId": "ws-1",
+        "userId": "user-1",
+        "workspaceVersion": "0",
+        "membershipVersion": "0",
+        "workspaceVersionKey": "{namespace}:wsv:89a04c5f97b071aa56b591f7e37dceb01b52ee8c2a71271cb267b33d24cfde2e",
+        "membershipVersionKey": "{namespace}:wmv:2f327d73d12a8bec883620d297049993dd76ae8bb67bab530df39b1320f86a85",
+        "membershipCacheKey": "{namespace}:wm:2f327d73d12a8bec883620d297049993dd76ae8bb67bab530df39b1320f86a85:0:0"
+      },
+      {
+        "tenantId": "tenant-1",
+        "workspaceId": "ws-1",
+        "userId": "user-1",
+        "workspaceVersion": "3",
+        "membershipVersion": "12",
+        "workspaceVersionKey": "{namespace}:wsv:89a04c5f97b071aa56b591f7e37dceb01b52ee8c2a71271cb267b33d24cfde2e",
+        "membershipVersionKey": "{namespace}:wmv:2f327d73d12a8bec883620d297049993dd76ae8bb67bab530df39b1320f86a85",
+        "membershipCacheKey": "{namespace}:wm:2f327d73d12a8bec883620d297049993dd76ae8bb67bab530df39b1320f86a85:3:12"
+      },
+      {
+        "tenantId": "a:b",
+        "workspaceId": "c",
+        "userId": "d",
+        "workspaceVersion": "0",
+        "membershipVersion": "0",
+        "workspaceVersionKey": "{namespace}:wsv:011f691bbd27fe0938ba31ea7252013a00d652015bdbe09013f8f4894b1d1d32",
+        "membershipVersionKey": "{namespace}:wmv:f6021fd1a75bce2006ea3ef15ca0e9b76f8b0f8933cb9c730256468b578cdf26",
+        "membershipCacheKey": "{namespace}:wm:f6021fd1a75bce2006ea3ef15ca0e9b76f8b0f8933cb9c730256468b578cdf26:0:0"
+      },
+      {
+        "tenantId": "a:b",
+        "workspaceId": "c",
+        "userId": "d",
+        "workspaceVersion": "3",
+        "membershipVersion": "12",
+        "workspaceVersionKey": "{namespace}:wsv:011f691bbd27fe0938ba31ea7252013a00d652015bdbe09013f8f4894b1d1d32",
+        "membershipVersionKey": "{namespace}:wmv:f6021fd1a75bce2006ea3ef15ca0e9b76f8b0f8933cb9c730256468b578cdf26",
+        "membershipCacheKey": "{namespace}:wm:f6021fd1a75bce2006ea3ef15ca0e9b76f8b0f8933cb9c730256468b578cdf26:3:12"
+      }
+    ],
+    "scenarios": {
+      "$comment": [
+        "Run by both implementations against a store and two repositories. `repository` is the state the repositories hold at that step; `expect.answer` is the role returned or null; `expect.source` is where the answer came from; `expect.cachedUnder` is the versions of the entry that exists afterwards for this member, or null when there is no entry under the CURRENT versions; `expect.absentUnder` lists versions under which no entry may exist afterwards. Versions start at 0:0. `concurrentBump` names a counter bumped after the reader has read the versions and the repositories and before the fill; `dropCounter` removes a counter, standing for its expiry, and the counter then reads as 0. `counterLoss` runs on a fresh store."
+      ],
+      "steps": [
+        {
+          "do": "resolve",
+          "repository": {
+            "workspace": "active",
+            "membership": "active",
+            "role": "editor"
+          },
+          "expect": {
+            "answer": "editor",
+            "source": "repository",
+            "cachedUnder": "0:0"
+          }
+        },
+        {
+          "do": "resolve",
+          "repository": {
+            "workspace": "active",
+            "membership": "active",
+            "role": "owner"
+          },
+          "expect": {
+            "answer": "editor",
+            "source": "cache",
+            "cachedUnder": "0:0"
+          }
+        },
+        {
+          "do": "bumpMembership",
+          "repository": {
+            "workspace": "active",
+            "membership": "active",
+            "role": "owner"
+          },
+          "expect": {
+            "versions": "0:1"
+          }
+        },
+        {
+          "do": "resolve",
+          "repository": {
+            "workspace": "active",
+            "membership": "active",
+            "role": "owner"
+          },
+          "expect": {
+            "answer": "owner",
+            "source": "repository",
+            "cachedUnder": "0:1"
+          }
+        },
+        {
+          "do": "bumpWorkspace",
+          "repository": {
+            "workspace": "pending_deletion",
+            "membership": "active",
+            "role": "owner"
+          },
+          "expect": {
+            "versions": "1:1"
+          }
+        },
+        {
+          "do": "resolve",
+          "repository": {
+            "workspace": "pending_deletion",
+            "membership": "active",
+            "role": "owner"
+          },
+          "expect": {
+            "answer": null,
+            "source": "repository",
+            "cachedUnder": null
+          }
+        },
+        {
+          "do": "resolve",
+          "repository": {
+            "workspace": "suspended",
+            "membership": "active",
+            "role": "owner"
+          },
+          "expect": {
+            "answer": null,
+            "source": "repository",
+            "cachedUnder": null
+          }
+        },
+        {
+          "do": "seedEntry",
+          "entry": "{\"role\":\"owner\",\"status\":\"suspended\"}",
+          "under": "1:1",
+          "repository": {
+            "workspace": "active",
+            "membership": "active",
+            "role": "editor"
+          },
+          "expect": {
+            "answer": "editor",
+            "source": "repository",
+            "cachedUnder": "1:1"
+          }
+        }
+      ],
+      "counterLoss": {
+        "$comment": [
+          "Starts from a store with no entries. A fill that finds a counter moved writes nothing, and a counter that is lost reads as 0 and is recreated at 1 by the next bump, so no entry written before the loss can be read after it, on a store where no entry is alive under a value the counter will restart at; an entry that is, is the documented eviction exposure."
+        ],
+        "steps": [
+          {
+            "do": "bumpMembership",
+            "repository": {
+              "workspace": "active",
+              "membership": "active",
+              "role": "owner"
+            },
+            "expect": {
+              "versions": "0:1"
+            }
+          },
+          {
+            "do": "resolve",
+            "concurrentBump": "membership",
+            "repository": {
+              "workspace": "active",
+              "membership": "active",
+              "role": "owner"
+            },
+            "expect": {
+              "answer": "owner",
+              "source": "repository",
+              "cachedUnder": null,
+              "absentUnder": [
+                "0:1",
+                "0:2"
+              ],
+              "versions": "0:2"
+            }
+          },
+          {
+            "do": "dropCounter",
+            "counter": "membership",
+            "repository": {
+              "workspace": "active",
+              "membership": "active",
+              "role": "owner"
+            },
+            "expect": {
+              "versions": "0:0"
+            }
+          },
+          {
+            "do": "resolve",
+            "repository": {
+              "workspace": "active",
+              "membership": "active",
+              "role": "editor"
+            },
+            "expect": {
+              "answer": "editor",
+              "source": "repository",
+              "cachedUnder": "0:0",
+              "countersAbsent": true
+            }
+          },
+          {
+            "do": "bumpMembership",
+            "repository": {
+              "workspace": "active",
+              "membership": "active",
+              "role": "viewer"
+            },
+            "expect": {
+              "versions": "0:1"
+            }
+          },
+          {
+            "do": "resolve",
+            "repository": {
+              "workspace": "active",
+              "membership": "active",
+              "role": "viewer"
+            },
+            "expect": {
+              "answer": "viewer",
+              "source": "repository",
+              "cachedUnder": "0:1"
+            }
+          }
+        ]
+      }
+    },
+    "entryRefreshesCounters": "a fill writes the entry only if both counters still hold the versions it read (absent counts as 0), and in the same step extends every existing counter to the retention"
   },
   "graceRecoveryWrite": {
     "$comment": [
@@ -317,6 +747,8 @@
     "tokenEpoch": "{ep|pep}:{hmac_sha256(hmacKey, userSubject)}",
     "userStatus": "us:{hmac_sha256(hmacKey, userSubject)}",
     "userEmailVerified": "uev:{hmac_sha256(hmacKey, userSubject)}",
+    "accessDeniedWindow": "wad:{hmac_sha256(hmacKey, userSubject)}",
+    "accessDeniedSuppressed": "wads:{hmac_sha256(hmacKey, userSubject)}",
     "$comment": [
       "The keys that derive from `userSubjectPreimages`. A contract detects drift only in what it",
       "lists, so every key that names an ACCOUNT rather than a token belongs here.",
@@ -410,12 +842,19 @@
       "",
       "The invitee index takes the canonicalized address alone — the tenant is already a literal",
       "segment of that key. It is an HMAC and not a bare digest for the reason all of these are:",
-      "an address carries too little entropy for a plain SHA-256 to hide it."
+      "an address carries too little entropy for a plain SHA-256 to hide it.",
+      "",
+      "The two workspace-invitation preimages use the same length prefix, in UTF-8 bytes, for the",
+      "reason `userSubjectPreimages` gives, and leave the last component unprefixed because nothing",
+      "follows it. The pending set of a workspace is keyed on the workspace subject of",
+      "`workspaceMembershipCache`. None of the three starts with a prefix any other preimage uses."
     ],
     "dashboard": "hmac_sha256(hmacKey, 'dashboard:{tenantId}:{email}')",
     "platform": "hmac_sha256(hmacKey, 'platform:{email}')",
     "otpRecord": "hmac_sha256(hmacKey, '{tenantId}:{email}')",
-    "inviteeIndex": "hmac_sha256(hmacKey, '{email}')"
+    "inviteeIndex": "hmac_sha256(hmacKey, '{email}')",
+    "workspaceInvitationEmail": "wie:{utf8ByteLength(tenantId)}:{tenantId}:{utf8ByteLength(workspaceId)}:{workspaceId}:{email}",
+    "workspaceInviterRate": "wir:{utf8ByteLength(tenantId)}:{tenantId}:{userId}"
   },
   "requestFieldBounds": {
     "$comment": [
@@ -429,7 +868,12 @@
       "PROVING one (login, or the current-password re-proof) floors at 1, because the credential",
       "may predate whatever the policy says today and a policy floor on a login door refuses a",
       "legitimate holder with a validation error while telling an unauthenticated caller what the",
-      "policy is, before any key derivation runs."
+      "policy is, before any key derivation runs.",
+      "",
+      "Every length bound on text a USER SUBMITS, on a request field or on the service-side check behind",
+      "it, counts Unicode CODE POINTS and not UTF-16 units, as validator.js isLength does by subtracting",
+      "surrogate pairs: an emoji is one. A string of 120 emoji meets a bound of 120. Store-key and",
+      "storage bounds are not user text and may count bytes by design."
     ],
     "email": {
       "max": 255
@@ -477,7 +921,56 @@
     "opaqueToken": {
       "min": 1,
       "max": 2048
+    },
+    "memberUserId": {
+      "min": 1,
+      "max": 128,
+      "$comment": "The user id of a workspace member, in a path segment or a body field, with no control character."
+    },
+    "workspaceName": {
+      "min": 1,
+      "max": 120,
+      "$comment": "The display name of a workspace. The bound and the control-character rule apply to the value as submitted, before any trimming: a name over 120 characters as submitted, or carrying a control character anywhere, is refused with 400 auth.validation naming the field name. The name is then stored trimmed, and one that is blank after trimming is refused the same way."
+    },
+    "pageLimit": {
+      "min": 1,
+      "max": 100,
+      "default": 50,
+      "$comment": "The `limit` query parameter of a paginated list, a whole number written in decimal digits without a leading zero (`5`, not `05`). A value outside 1 to 100, or not written that way, is refused with 400 auth.validation naming the field limit, a present but empty `limit=` included; it is never clamped. The cursor is opaque, 1 to 512 characters (an empty `cursor=` is refused) with no control character, and says only where the next page starts: the tenant and the workspace of a list always come from the credential and the route."
+    },
+    "pathParameters": {
+      "$comment": "A path parameter that is over its bound, blank, or carries a control character is refused with 400 auth.validation naming the parameter, ahead of authorization. The workspace guard runs first, so when both `workspaceId` and another parameter are bad only `workspaceId` is reported. A well-formed parameter that names nothing, or a workspace the caller may not see, is the identical 404 auth.workspace_not_found. `Blank` means only JS `\\s` whitespace; the control-character rule is a separate pattern. A workspace id is always a library-generated UUID, so it can never be `invitations`, and the static `workspaces/invitations/...` routes cannot shadow a workspace.",
+      "workspaceId": {
+        "min": 1,
+        "max": 128
+      },
+      "userId": {
+        "min": 1,
+        "max": 128
+      }
     }
+  },
+  "passwordResetOrder": {
+    "$comment": [
+      "The order of the checks on the reset-password route, which decides the answer for a request",
+      "that fails more than one of them. It is the same in both libraries, so a client sees one",
+      "behaviour whichever one serves it."
+    ],
+    "steps": [
+      "1. classify the proof without spending it: more than one proof, none, or one the configured passwordReset.method does not accept answers auth.password_reset_token_invalid, whatever the new password is",
+      "2. judge the new password (the policy floor, then the breach screen): auth.validation for a password under the floor, auth.password_compromised for a known one",
+      "3. spend the proof: auth.password_reset_token_invalid for a token proof that is not valid; auth.otp_invalid for EVERY OTP failure (a wrong code, an absent record, an expired one and an exhausted attempt ceiling are indistinguishable)"
+    ],
+    "reason": "A request with no usable proof never reaches the password policy, so an unproven caller cannot drive the breach screen (an outbound query when a host wires one), and a refused password never consumes a single-use proof."
+  },
+  "refreshTokenInput": {
+    "$comment": [
+      "Where a refresh token may arrive and what each place accepts. The bound is the",
+      "`opaqueToken` bound in `requestFieldBounds`; no token either library mints is longer.",
+      "A value refused here is refused before any store lookup."
+    ],
+    "body": "a string of 1 to 2048 characters; a missing field or a JSON null is no token; anything else present (not a string, empty, longer) is refused with 400 auth.validation naming the field refreshToken",
+    "cookie": "a value over 2048 characters is refused with 400 auth.validation naming the field refreshToken, except on logout, which reads it as no token (204, the auth cookies cleared, no refresh session touched, and a presented access token is still blacklisted); an empty cookie is no token; under tokenDelivery both, a cookie over 2048 on logout is read as absent, so a valid refreshToken in the body is the token that applies and its session is revoked"
   },
   "sessionIndexMembers": {
     "$comment": [
@@ -650,6 +1143,19 @@
         "passwordFingerprint"
       ],
       "passwordFingerprint": "sha256 of the account's password hash at the moment the token was minted, or the empty string when the account had none. Several reset tokens can be alive at once, and completing one used to leave the rest valid — the wrong end state exactly when it matters, since a victim resetting BECAUSE an attacker read a link from their mailbox had not closed the link the attacker read. The binding makes the first completed reset invalidate all of them, with no per-user index to keep in step. An ABSENT field is read as 'no binding' and accepted, so a rolling deploy does not break the resets already in flight."
+    },
+    "oauthState": {
+      "key": "os:{sha256(state)}",
+      "fields": [
+        "provider",
+        "tenantId",
+        "codeVerifier"
+      ],
+      "optionalFields": [
+        "workspaceInvitation"
+      ],
+      "workspaceInvitation": "The lowercase hex SHA-256 of the workspace invitation token the flow was started with, written only when it was; the raw token is never stored. A record carrying it as anything but 64 lowercase hex characters is refused as corrupt, and one without it is an ordinary sign-in.",
+      "$comment": "The record of an OAuth flow between its start and its callback, read and deleted in one step by the callback. Both libraries read the same record."
     }
   },
   "credentialFormats": {
@@ -739,7 +1245,26 @@
     "revokeSession": "10/60",
     "revokeAllSessions": "5/60",
     "oauthInitiate": "10/60",
-    "oauthCallback": "10/60"
+    "oauthCallback": "10/60",
+    "workspaceList": "30/60",
+    "workspaceAccess": "60/60",
+    "workspaceSwitch": "20/60",
+    "workspaceMembers": "30/60",
+    "workspaceCreate": "10/3600",
+    "workspaceRename": "20/60",
+    "workspaceScheduleDeletion": "5/300",
+    "workspaceRestore": "5/300",
+    "workspaceChangeRole": "20/60",
+    "workspaceRemoveMember": "20/60",
+    "workspaceLeave": "10/60",
+    "workspaceTransferOwnership": "3/300",
+    "workspaceInvite": "30/3600",
+    "workspaceInvitations": "30/60",
+    "workspaceInvitationResend": "10/300",
+    "workspaceInvitationRevoke": "20/60",
+    "workspaceInvitationPreview": "20/60",
+    "workspaceInvitationAccept": "10/60",
+    "workspaceInvitationAcceptSignup": "5/60"
   },
   "accessTokenClaims": {
     "$comment": [
@@ -889,6 +1414,15 @@
       "auth.api_key_not_found",
       "auth.validation",
       "auth.too_many_requests",
+      "auth.workspace_required",
+      "auth.workspace_not_found",
+      "auth.insufficient_workspace_role",
+      "auth.last_owner",
+      "auth.already_member",
+      "auth.invitation_email_mismatch",
+      "auth.registration_closed",
+      "auth.workspace_limit_reached",
+      "auth.workspace_pending_deletion",
       "auth.internal"
     ],
     "internalOnly": [
@@ -967,11 +1501,20 @@
       "auth.api_key_invalid": 401,
       "auth.api_key_scope_insufficient": 403,
       "auth.api_key_not_found": 404,
+      "auth.workspace_required": 400,
+      "auth.workspace_not_found": 404,
+      "auth.insufficient_workspace_role": 403,
+      "auth.last_owner": 409,
+      "auth.already_member": 409,
+      "auth.invitation_email_mismatch": 403,
+      "auth.registration_closed": 403,
+      "auth.workspace_limit_reached": 403,
+      "auth.workspace_pending_deletion": 409,
       "auth.internal": 500
     }
   },
   "errorEnvelope": {
-    "$comment": "The body shape every auth error serializes to. `details` is present and null when the thrower supplied none.",
+    "$comment": "The body shape every auth error serializes to. `details` is present and null when the thrower supplied none. For `auth.validation`, each `details[].field` is the WIRE property name, the key the client sent in the request JSON or query (`currentPassword`, never a language-level field name), and a nested field is its dotted path with an array index as a segment (`billing.name`, `items.1.name`), never bracketed. What is normative for an `auth.validation` answer is the status, the code, the top-level message and the SET of distinct `details[].field` values for a given input; the per-entry message text and the number of entries per field are not, and a library words its own, provided no message repeats the client's value or type. An unknown request property is named by the client, so its name is repeated in the answer only when it is at most 128 code points and holds no control character; an unknown property over 128 code points, holding a control character, or empty is reported once under the field `body`, however many there are, while every other failure is still reported by its own name. The answer therefore never grows with the length of a client-chosen key and never carries a control byte.",
     "shape": {
       "error": {
         "code": "string",
@@ -1121,9 +1664,20 @@
       "POST platform/mfa/recovery-codes",
       "POST invitations",
       "POST invitations/revoke",
-      "POST invitations/accept"
+      "POST invitations/accept",
+      "POST workspaces",
+      "PATCH workspaces/:workspaceId",
+      "POST workspaces/:workspaceId/schedule-deletion",
+      "PATCH workspaces/:workspaceId/members/:userId",
+      "POST workspaces/:workspaceId/transfer-ownership",
+      "POST workspaces/:workspaceId/invitations",
+      "POST workspaces/:workspaceId/invitations/resend",
+      "POST workspaces/:workspaceId/invitations/revoke",
+      "POST workspaces/invitations/preview",
+      "POST workspaces/invitations/accept",
+      "POST workspaces/invitations/accept-signup"
     ],
-    "whenBody": ["POST mfa/setup", "POST platform/mfa/setup"],
+    "whenBody": ["POST mfa/setup", "POST platform/mfa/setup", "POST workspaces/:workspaceId/switch", "POST workspaces/:workspaceId/restore", "POST workspaces/:workspaceId/leave"],
     "unchecked": [
       "POST logout",
       "POST refresh",
@@ -1131,6 +1685,372 @@
       "POST platform/logout",
       "POST platform/refresh",
       "POST sessions/revoke-all"
+    ]
+  },
+  "workspaceInvitations": {
+    "$comment": [
+      "Workspace invitations, shared by both libraries on one Redis. An invitation is a record keyed by",
+      "the SHA-256 of a token only the invitee's mailbox holds; the token is 32 CSPRNG bytes, 64",
+      "lowercase hex characters, and is never stored. Whoever the workspace permission `manageMembers` admits can list",
+      "every pending invitation, the inviter's id included.",
+      "",
+      "Three structures and one counter. `winv:{sha256(token)}` holds the record. `winvidx:` names the",
+      "ONE live invitation of an address in a workspace by the record key it points at. `winvset:` holds the",
+      "record keys of a workspace's pending invitations, for listing and for the pending cap; a member whose",
+      "record is gone is dropped when the set is read. `winvrl:` counts the invitations one member issues,",
+      "one hour from the first.",
+      "",
+      "A record is published in ONE atomic step, never in several. The step takes the record key the writer",
+      "read from the index (none for a first invitation) and writes only while the index still holds it; it",
+      "then writes the record, points the index at it, adds the record key to the set, and deletes the record",
+      "it replaces and that record's place in the set. When the workspace is at the pending cap, a first",
+      "invitation writes nothing, in the same step. A writer that read a stale index writes nothing, so no",
+      "state exists in which an index names a record that is not yet written, and two overlapping",
+      "invitations for one address leave exactly one record. An index whose record is already gone (the",
+      "record expired, or was deleted) is replaced like any other.",
+      "",
+      "Every record, index and set expires `workspaces.invitationTtlSeconds` after it is written",
+      "(default 604800, at most 2592000)."
+    ],
+    "record": {
+      "key": "winv:{sha256(token)}",
+      "fields": [
+        "kind",
+        "email",
+        "role",
+        "tenantId",
+        "workspaceId",
+        "createdAt",
+        "resendCount"
+      ],
+      "kinds": {
+        "member": {
+          "adds": [
+            "inviterUserId"
+          ],
+          "forbids": [
+            "workspaceName"
+          ],
+          "$comment": "Issued by a workspace member for a workspace that exists. `role` is a role of the workspace hierarchy."
+        },
+        "bootstrap": {
+          "adds": [
+            "workspaceName"
+          ],
+          "forbids": [
+            "inviterUserId"
+          ],
+          "$comment": "Issued by the platform for the invitee to OWN a workspace that does not exist until they accept. `role` is the owner role, `workspaceId` is the id the workspace will be created with, and `workspaceName` is held in the form the create route stores it: already trimmed, 1 to 120 code points, no control character, `blank` meaning only JS `\\s` whitespace. There is no inviter."
+        }
+      },
+      "kind": "`member` or `bootstrap`, required. A record with no kind, another kind, or any other combination of the fields above is not a record: it is read as absent and answered as `auth.invalid_invitation_token`.",
+      "email": "the invited address, trimmed and lowercased",
+      "createdAt": "iso8601-string; when the CURRENT token was issued, reset by a resend",
+      "resendCount": "JSON number; 0 on the first invitation, one more on each resend or second invitation of the address",
+      "$comment": "A value under the key that is not an object with every field of the right type reads as no record. The ordinary invite route cannot set `kind`, `workspaceName` or `workspaceId`: its body accepts only `email` and `role`, and any other property is refused."
+    },
+    "keys": {
+      "index": "winvidx:{hmacSha256(hmacKey, workspaceInvitationEmail preimage)}, value: the record key `winv:{hash}`",
+      "set": "winvset:{hmacSha256(hmacKey, workspace subject)}, members: record keys `winv:{hash}`",
+      "inviterRate": "winvrl:{hmacSha256(hmacKey, workspaceInviterRate preimage)}, value: a counter whose TTL is set on the first increment only"
+    },
+    "fullKeyVectors": [
+      {
+        "tenantId": "tenant-1",
+        "workspaceId": "ws-1",
+        "email": "invitee@example.com",
+        "token": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        "indexSubject": "wie:8:tenant-1:4:ws-1:invitee@example.com",
+        "indexKey": "{namespace}:winvidx:7414c8278dd3a2657f4ceb26a59dee3a533f58f6c0ec19a8e29c480bcb7d12ce",
+        "setSubject": "wsp:8:tenant-1:4:ws-1",
+        "setKey": "{namespace}:winvset:89a04c5f97b071aa56b591f7e37dceb01b52ee8c2a71271cb267b33d24cfde2e",
+        "recordKey": "{namespace}:winv:a8ae6e6ee929abea3afcfc5258c8ccd6f85273e0d4626d26c7279f3250f77c8e"
+      },
+      {
+        "tenantId": "acme:prod",
+        "workspaceId": "w1",
+        "email": "a@example.com",
+        "token": "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210",
+        "indexSubject": "wie:9:acme:prod:2:w1:a@example.com",
+        "indexKey": "{namespace}:winvidx:a43059a7446a2ce20cbcf938fea7aad77db5f87c999abd1f54bec4c2c87f2321",
+        "setSubject": "wsp:9:acme:prod:2:w1",
+        "setKey": "{namespace}:winvset:274c11e1218f7f0e1e5a1864357a8fec12f0e780c36d14dccc796a254cc3386a",
+        "recordKey": "{namespace}:winv:7b9d07f2404b102b3c62fede026097c5ab81668f18414abd8ea560cecb008006"
+      },
+      {
+        "tenantId": "acme",
+        "workspaceId": "prod:w1",
+        "email": "a@example.com",
+        "token": "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210",
+        "indexSubject": "wie:4:acme:7:prod:w1:a@example.com",
+        "indexKey": "{namespace}:winvidx:6e5d8188a87db061ced47af873b68b6e997cbff10c003579e45bc5fa67c3a965",
+        "setSubject": "wsp:4:acme:7:prod:w1",
+        "setKey": "{namespace}:winvset:e4b41f85a2e19f6b3f24963d925924f89feb344a7210ae2636707817753b40cd",
+        "recordKey": "{namespace}:winv:7b9d07f2404b102b3c62fede026097c5ab81668f18414abd8ea560cecb008006"
+      },
+      {
+        "tenantId": "ten\u00e9",
+        "workspaceId": "w\u00e9",
+        "email": "\u00e9@example.com",
+        "token": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        "indexSubject": "wie:5:ten\u00e9:3:w\u00e9:\u00e9@example.com",
+        "indexKey": "{namespace}:winvidx:a6309b1909c3436b9c2774ad570c90949798de37bca2d1bf684b3ef3996d6e9d",
+        "setSubject": "wsp:5:ten\u00e9:3:w\u00e9",
+        "setKey": "{namespace}:winvset:0e67c0148f86d72570840b5db8fb688f0fac3f3106b1baf126f6a19cd87afab4",
+        "recordKey": "{namespace}:winv:a8ae6e6ee929abea3afcfc5258c8ccd6f85273e0d4626d26c7279f3250f77c8e"
+      }
+    ],
+    "inviterRateVectors": [
+      {
+        "tenantId": "tenant-1",
+        "userId": "user-1",
+        "subject": "wir:8:tenant-1:user-1",
+        "key": "{namespace}:winvrl:d7aafebe8e7b88f2d5499f5784d212a7583092f1a53cb065b61242e46e3dab45"
+      },
+      {
+        "tenantId": "tenant-\u00e9",
+        "userId": "user:1",
+        "subject": "wir:9:tenant-\u00e9:user:1",
+        "key": "{namespace}:winvrl:86f6bc8ce5d6419fbf092f2c55bddf99d101d5ba66d761e79b882d53c12ac570"
+      }
+    ],
+    "rules": {
+      "oneLiveInvitationPerAddress": "Inviting an address that already has a live invitation is a resend: it mints a new token, takes the role of the new request, and retires the old record.",
+      "roleCeiling": "The owner role may invite to any role. Every other role invites only to a role strictly below its own, and acts on (resends, revokes, replaces) only an invitation to such a role. This is stricter than `at or below`; the owner may grant the owner role. A role outside the hierarchy is refused with 400 auth.validation naming `role`.",
+      "outrankedInvitation": "A resend or a revoke of an address with no live invitation, or one the actor may not act on, answers 204 and changes nothing. A second invitation the actor may not replace is refused with 403 auth.insufficient_workspace_role.",
+      "alreadyMember": "An address whose account has a membership of the workspace, in ANY status, is refused with 409 auth.already_member: a suspended member is still a member, and an invitation cannot reinstate one. Accepting, a caller whose existing membership is not active is answered 400 auth.invalid_invitation_token and the record is not spent.",
+      "resendCooldownSeconds": 60,
+      "maxResends": 5,
+      "invitationsPerInviterPerHour": 20,
+      "limitsAnswer": "The cooldown, the resend limit, the hourly limit, the pending cap (`workspaces.maxPendingInvitationsPerWorkspace`, default 100, checked in the same step that adds the record to the set, so two writers cannot both take the last place) and a lost compare-and-set on the index are all refused with 429 auth.too_many_requests. The cooldown and the resend limit apply to a second invitation of the same address as to a resend.",
+      "answers": "POST invite, resend and revoke answer 204 with no body, whether or not the address has an account. The email provider is told `accountExists`.",
+      "preview": "POST workspaces/invitations/preview takes `{token}` of exactly 64 characters, needs no credential, and answers `{kind, workspaceName, inviterName, role, maskedEmail, accountExists}` for a member invitation and `{kind, workspaceName, role, maskedEmail, accountExists}` for a bootstrap one, where the answer is a union on `kind`, the same as the record's: `member` carries `inviterName` (a string), and `bootstrap` has NO `inviterName` field because it has no inviter. A bootstrap token previews while its workspace does not exist, and is invalid once that workspace exists and is not active. A token that never existed, expired, was withdrawn or consumed, or whose workspace is not active or whose inviter is gone, is answered with the SAME 400 auth.invalid_invitation_token, and the library performs the same repository reads in each case.",
+      "tokenInEmail": "A delivery failure is re-thrown without the failing text, which may quote the token.",
+      "capOnReplacement": "Replacing a LIVE record skips the pending cap: the set does not grow. An index naming a record that is already gone counts as a first invitation for the cap, with `resendCount` 0 and no cooldown, because the dead entry is dropped before the cap is counted. Example: at a cap of 1 with one live invitation to a@x, inviting a@x again succeeds, and a first invitation to b@x answers 429.",
+      "accept": "POST workspaces/invitations/accept takes `{token}` of exactly 64 characters and a signed-in caller, and answers 200 `{workspaceId, role}` where `role` is the role the caller ACTUALLY holds in the workspace afterwards: the invited role, or the role of a caller who was already a member, whose membership the invitation never changes. Decided in this order, without spending the token: the token names a record, of a known role, in the caller's tenant (else 400 auth.invalid_invitation_token); the caller's address equals the record's, compared in lowercase (else 403 auth.invitation_email_mismatch); that address is verified (else 403 auth.email_not_verified); the workspace is active and the inviter still exists, is not blocked, is in the tenant, and is an ACTIVE member whose role outranks the invited role (else 400 auth.invalid_invitation_token, whatever the reason). A bootstrap record skips the inviter and member checks and needs its workspace absent or active. Then the membership is written, and only then the record is spent.",
+      "acceptOrder": "The acceptance takes effect when the membership is written. Spending the record afterwards deletes the token's own record key always, and the index and the set entry only while they still name that key; a revoke or a resend that lands between the write and the spend therefore cannot undo the acceptance, and the answer is still 200. A failure before the write leaves the invitation usable; a failure after it retries into `already_member`, which counts as success. The hook event for the acceptance carries `lostConsumeRace: true` only when the spend found the index no longer naming the record.",
+      "acceptSignup": "POST workspaces/invitations/accept-signup takes `{token, name, password}` (token exactly 64 characters, name 2 to 100, password 8 to 128 code points) and needs no credential. Order: the record, then the inviter and workspace checks as above, then an existing account for the address (409 auth.email_already_exists, the pointer to sign in and accept as above), then the password policy and breach screen, then the account is created with a verified address and no role of its own, the membership is written, the record is spent, and the session is issued as a sign-in does. A password that is refused spends nothing. When creating the account fails and an account for the address now exists, the answer is 409 auth.email_already_exists, never a server error. When the account is created and the membership write fails, the record is NOT spent and the retry answers 409 auth.email_already_exists: the holder signs in and accepts as above. Answers 201 with the sign-in body of the configured delivery mode, plus `workspaceId` and `role`.",
+      "bootstrap": "A bootstrap invitation is issued by the host through a service call, with no route: the platform plane's authorization is the host's. The call returns the workspace id the invitation reserves; each call is its own invitation for its own workspace. Accepting creates the workspace and the owner membership in one repository call, then spends the record. A retry that finds the workspace already created, with this caller as its active owner, is success and spends the record. A bootstrap invitation is withdrawn by the host through a second service call keyed by that workspace id; no workspace route can reach it, because its workspace does not exist.",
+      "acceptLimits": "accept is limited to 10 per minute per IP and accept-signup to 5 per minute per IP; the token is 256 bits, so no per-account limit adds anything.",
+      "membershipStatus": "Every path that reads a membership decides its status explicitly, and only an ACTIVE membership of an ACTIVE workspace grants anything. Access, and the cache that serves it, fill and read back only an active membership. Changing a member's role and removing a member act only on an ACTIVE member; a suspended one answers 404 auth.workspace_not_found. The receiver of an ownership hand-over must be ACTIVE (400 auth.validation naming `userId`), checked before the giver's password is looked at and again by the repository's write. Leaving, and the role the acting member holds, are reached only through the workspace guard, which resolves an ACTIVE membership, so a suspended member reaches neither. Inviting an address that has a membership in any status is 409 auth.already_member, and accepting with a non-active membership is 400 auth.invalid_invitation_token: an invitation never reinstates a member.",
+      "bootstrapCreate": "Accepting a bootstrap invitation applies to the workspace it creates what the create route applies to a workspace an account creates for itself, except the self-serve switch: first the owner cap (`workspaces.maxWorkspacesPerUser`, counted as the workspaces the account owns with the owner role), then the host's `beforeWorkspaceCreate`, then the workspace is created. The platform has already decided that this account may own a workspace, so `allowCreate` is never consulted; the acceptance may land days after the invitation, so the cap and the hook are. A refusal by the cap answers `auth.workspace_limit_reached`, a refusal by the hook `403 auth.forbidden` with `details: [{field: 'name', message: <the hook's reason, or 'Workspace creation was refused'>}]`, and neither spends the record. The retry of an acceptance whose workspace already exists with the caller as its active owner applies neither.",
+      "oauthAccept": "GET oauth/{provider}?workspaceInvitation=<token> starts an OAuth flow that accepts the invitation; the token is exactly 64 characters (else 400 auth.validation) and the start answers 400 auth.invalid_invitation_token when workspaces are not enabled. The start response carries `Referrer-Policy: no-referrer` and the state record gains `workspaceInvitation`, the SHA-256 of the token: the raw token is never stored, and the flow stays bound to the browser that started it by the state cookie. On the callback, before the host's `onOAuthLogin` hook runs, the record is read by that hash and must be a record of a known role in the flow's tenant (else 400 auth.invalid_invitation_token); the provider's address must equal the record's, compared in lowercase (else 403 auth.invitation_email_mismatch); the provider must report that address verified (else 403 auth.email_not_verified); and the workspace and inviter must still stand, as for accept. Then the hook decides create, link or reject as for any OAuth sign-in, and the account it resolves must be the invited address, in the invitation's tenant, and verified. An account with a second factor is sent to the MFA challenge and the invitation is neither completed nor spent: its holder completes the challenge and accepts as a signed-in account. Otherwise the record is read again and the inviter's standing and the workspace are judged again immediately before the write, because the host's hook and the account write ran since the vetting: a record revoked, replaced by a resend or expired in that time, an inviter who no longer stands and a workspace that is no longer active all answer 400 auth.invalid_invitation_token with nothing written or spent; then the membership is written, the record is spent and the sign-in is delivered as for any OAuth sign-in. A bootstrap invitation applies the owner cap and `beforeWorkspaceCreate` as in `bootstrapCreate`. No refusal spends the record, and a refusal after the hook created the account leaves that account created, as for accept-signup. A refusal is delivered as every other callback failure is and never carries the token. #298 section 6 says the library links an existing account \"when oauth.linkByVerifiedEmail is enabled\": there is no such option, the host's `onOAuthLogin` hook decides whether to link.",
+      "oauthAcceptMfa": "An account with a second factor that signs in through an OAuth invitation receives the MFA challenge exactly as any OAuth sign-in does, and the invitation is neither completed nor spent: OAuth proves the mailbox and the provider account, not the second factor, and a membership is a privilege. Its holder completes the challenge and then accepts with POST workspaces/invitations/accept as a signed-in account, which spends the record as for any signed-in acceptance. A reader that completed the invitation before the challenge would grant a membership to a session that never passed the second factor.",
+      "registration": "`registration: 'invitation-only'` closes the self sign-up paths. POST register answers 403 auth.registration_closed before anything else is read or run, and the OAuth `create` action answers it unless the flow carries an invitation that passed the checks in `oauthAccept`. Signing in an existing account, linking an identity and every accept route are unaffected. Startup refuses the mode when `workspaces.enabled` and `invitations.enabled` are both false, naming both, since no account could ever be created.",
+      "afterAcceptedHook": "The host's after-acceptance hook runs when an acceptance CREATED the account: on accept-signup, on an OAuth acceptance whose flow created the account, and on the tenant invitation's accept. It does not run on the signed-in accept, nor on an OAuth acceptance that signed in an account that already existed. It is detached: neither a rejection nor a synchronous throw changes the answer, because the account, the membership, the spend and the session are already done. A failing hook is logged without its message."
+    }
+  },
+  "workspaceScopedName": {
+    "$comment": [
+      "Names scoped to a workspace: the keys, rooms and prefixes a host builds for storage, cache,",
+      "sockets and queues. Shared by both libraries because the same name must come out of either.",
+      "",
+      "name = concatenation, for the tenant, the workspace and then every part in order, of",
+      "`<byte length>:<text>`, where the length is the number of UTF-8 bytes of the text in canonical",
+      "decimal (no leading zero, `0` for the empty text). A length-prefixed piece is self-delimiting,",
+      "so no text can move a boundary: two different argument lists never produce one name.",
+      "",
+      "Refused (TypeError in nest-auth, an error in the sibling): a piece holding a C0 control",
+      "(U+0000 to U+001F) or DEL (U+007F), because several storage backends reject or mangle them;",
+      "an unpaired surrogate, which has no UTF-8 form so two different strings would write the same",
+      "bytes; an empty tenant or workspace. An empty part is allowed and is a piece of its own.",
+      "",
+      "A vector with `unpairedSurrogateCodeUnits` is one more final part, built from those UTF-16 code",
+      "units, because the JSON text itself must stay well-formed."
+    ],
+    "vectors": [
+        {
+              "case": "tenant, workspace and one part",
+              "args": [
+                    "t1",
+                    "w1",
+                    "room"
+              ],
+              "name": "2:t12:w14:room"
+        },
+        {
+              "case": "no part",
+              "args": [
+                    "t1",
+                    "w1"
+              ],
+              "name": "2:t12:w1"
+        },
+        {
+              "case": "an empty part is a piece of its own",
+              "args": [
+                    "t1",
+                    "w1",
+                    ""
+              ],
+              "name": "2:t12:w10:"
+        },
+        {
+              "case": "a colon and digits inside a part",
+              "args": [
+                    "t1",
+                    "w1",
+                    "2:ab"
+              ],
+              "name": "2:t12:w14:2:ab"
+        },
+        {
+              "case": "the same text split differently is a different name, first split",
+              "args": [
+                    "t1",
+                    "w1",
+                    "a",
+                    "1:b"
+              ],
+              "name": "2:t12:w11:a3:1:b"
+        },
+        {
+              "case": "the same text split differently is a different name, second split",
+              "args": [
+                    "t1",
+                    "w1",
+                    "a:1",
+                    "b"
+              ],
+              "name": "2:t12:w13:a:11:b"
+        },
+        {
+              "case": "a slash is encoded, not interpreted",
+              "args": [
+                    "t1",
+                    "w1",
+                    "files/a.png"
+              ],
+              "name": "2:t12:w111:files/a.png"
+        },
+        {
+              "case": "the length counts UTF-8 bytes: e-acute is 2, an emoji is 4",
+              "args": [
+                    "t1",
+                    "w1",
+                    "\u00e9",
+                    "\ud83d\ude00"
+              ],
+              "name": "2:t12:w12:\u00e94:\ud83d\ude00"
+        },
+        {
+              "case": "a tenant that looks like a length prefix",
+              "args": [
+                    "1:a",
+                    "w1"
+              ],
+              "name": "3:1:a2:w1"
+        },
+        {
+              "case": "NUL in a part",
+              "args": [
+                    "t1",
+                    "w1",
+                    "a\u0000b"
+              ],
+              "refused": "control character"
+        },
+        {
+              "case": "a tab in a part",
+              "args": [
+                    "t1",
+                    "w1",
+                    "a\tb"
+              ],
+              "refused": "control character"
+        },
+        {
+              "case": "DEL in a part",
+              "args": [
+                    "t1",
+                    "w1",
+                    "a\u007fb"
+              ],
+              "refused": "control character"
+        },
+        {
+              "case": "a newline in the tenant",
+              "args": [
+                    "t\n1",
+                    "w1"
+              ],
+              "refused": "control character"
+        },
+        {
+              "case": "an empty tenant",
+              "args": [
+                    "",
+                    "w1"
+              ],
+              "refused": "empty tenant"
+        },
+        {
+              "case": "an empty workspace",
+              "args": [
+                    "t1",
+                    ""
+              ],
+              "refused": "empty workspace"
+        },
+        {
+              "case": "an unpaired surrogate in a part",
+              "args": [
+                    "t1",
+                    "w1"
+              ],
+              "unpairedSurrogateCodeUnits": [
+                    55296
+              ],
+              "refused": "unpaired surrogate"
+        }
+  ]
+  },
+  "workspaceRealtime": {
+    "$comment": ["Authorization of a workspace on the surfaces that have no route guard in front of them: streams, sockets and queued jobs. Shared by both libraries because a member removed or a workspace hidden on one must be refused and hidden on the other."],
+    "rules": {
+      "accessDecision": "Every surface that admits a caller to a workspace (the route guard, the stream's access verifier, a socket message) judges the resolved access in one fixed order and answers the same codes: not an active member of an active workspace, and any non-owner of a workspace pending deletion, answer the IDENTICAL 404 auth.workspace_not_found, decided from the rows already read; the OWNER of a workspace pending deletion answers 409 auth.workspace_pending_deletion unless the surface admits pending workspaces (a route's explicit decorator, a stream's allowPending), in which case only that owner is admitted; then the role is judged through the hierarchy (403 auth.insufficient_workspace_role). A surface never tells a non-owner more than the route does.",
+      "workspaceIdField": "A workspace id taken from a path parameter, a message body or a job context is 1 to 128 code points, not blank, with no control character; anything else answers 400 auth.validation naming `workspaceId` (`tenantId` and `actorUserId` for a job context), ahead of any lookup. A well-formed id that names nothing answers the identical 404 of accessDecision.",
+      "verifierWorkspace": "The access verifier takes an optional `workspace: {workspaceId, roles, allowPending}` and, on the dashboard plane, returns the caller's membership `{tenantId, workspaceId, userId, role}` beside the verified payload, resolved through the same versioned access cache as the routes (so a removal is refused within the cache's own bound) and judged by accessDecision after the identity checks. On the platform plane, or with workspaces disabled, the option is a programmer error, not an auth failure.",
+      "socketMessage": "A socket message is admitted to the workspace it names after the connection's identity was verified: the workspace comes from the message body (`workspaceId`, or the host's resolver given the body and nothing else), never from the URL, a header, the handshake or the ticket, which carries an identity only. Every message is judged again, so a member removed between two messages is refused on the second. The membership an admitted message earned is kept with that message and handed to its own handler, never held on the connection, because messages overlap on one connection and a single slot would let a handler act in the workspace another message was admitted to. A message that is not an object cannot carry a workspace and answers 400 auth.validation naming `workspaceId`. A handler that declares no roles is refused 403 auth.forbidden before anything is looked up, and a connection with no verified dashboard identity 401 auth.token_invalid.",
+      "jobAuthorization": "A queued job carries `{tenantId, workspaceId, actorUserId}` and nothing about the role. Before any side effect the worker asks whether the actor may act NOW: the account (`auth.token_invalid` when it is gone, the blocked status's own code, `auth.email_not_verified` when verification is required), the workspace and the membership are all read from the repositories on the primary, never from the access cache or the status cache, the account first, then accessDecision. It costs three repository reads per call. A workspaceId read from a job payload is never trusted without it. The check does not emit access.denied.",
+      "accessDeniedEvents": "A refusal of a workspace access decision on a route, on a stream verification and on a socket message is reported to the host's workspace-event hook as `access.denied`, never for the queued-job check, and never for a request refused before the decision (a malformed workspace id, a missing identity). The event carries `{type, tenantId, workspaceId, actorUserId, userId, surface, code, reason, suppressedCount, at}`: `surface` is `http`, `verifier` or `ws`; `code` is the public code the caller was answered with (`auth.workspace_not_found`, `auth.workspace_pending_deletion` or `auth.insufficient_workspace_role`), and `reason` is what the host alone is told, taken from the access decision and not from the code: `not_member` when the caller is not an active member (it covers a workspace that does not exist, which the resolution does not tell apart from one the caller does not belong to, and an inactive one), `pending_deletion` whenever the workspace is pending deletion and the caller is an active member of it, the owner (who is answered `auth.workspace_pending_deletion`) and a non-owner (who is answered `auth.workspace_not_found`, identical to a stranger) alike, and `insufficient_role` for a member below the role (`auth.insufficient_workspace_role`); so `code` and `reason` differ exactly where the disclosure rule hides the state from the caller, and a caller who is not a member of a pending workspace is `not_member`; the caller never receives the event, so `reason` discloses nothing to it; there is no role set. `actorUserId` and `userId` are always equal on these surfaces (the verified account); `at` is an ISO-8601 UTC instant as a string, `Date.prototype.toISOString`. Only a dashboard account is reported: the subject is the dashboard arm, so a platform administrator, which has no tenant, is not. The workspace id is the one the caller named, reported only after it validated. Emission is detached and never changes or delays the answer. It is bounded per account, the tenant and the user together: the subject is `dashboard:<utf8 byte length of tenantId>:<tenantId>:<userId>`, its HMAC-SHA256 under the identifier key is `<digest>`, and the window counter is the key `wad:<digest>`, incremented on every denial with its expiry set to `windowSeconds` by the increment that creates it, the increment and the expiry being ONE atomic step (a script, never two commands: a crash between them would leave a counter that never expires and an account that never emits again) (a fixed window). At most `max` events are emitted per window; a denial beyond it is not emitted but increments the key `wads:<digest>`, whose expiry is 86400 seconds, set by the increment that creates it in the same atomic step; the count is lost if no further event is emitted for the account within those 86400 seconds. The next event that is emitted reads and deletes `wads:<digest>` in one atomic step and carries the value as `suppressedCount` (0 when absent). The two keys are two slots: only the order matters, and a lost increment can only under-count. The options are `workspaces.accessDeniedEvents: {max, windowSeconds}`, positive integers, defaults `max` 10 and `windowSeconds` 60, `max` at most 10000 and `windowSeconds` at most 3600 so the suppressed count always outlives a window; startup validation raises an error whose first sentence is `workspaces.accessDeniedEvents.max must be an integer from 1 to 10000.` or `workspaces.accessDeniedEvents.windowSeconds must be an integer from 1 to 3600.`, and `workspaces.accessDeniedEvents must be an object.` for a value that is not an object. `accessDeniedVectors` pins the two keys for two accounts, including one whose tenant id holds the delimiter. When the counter store fails nothing is emitted, never an unbounded stream, one warning per window per process says so, and the access decision is unchanged. An allowed request never touches either key. One budget covers all three surfaces of an account.",
+      "workspaceScopedName": "Rooms, cache keys and storage prefixes a host builds for a workspace use the `workspaceScopedName` encoding declared in its own section, so two workspaces cannot collide on a delimiter."
+    },
+    "accessDeniedVectors": [
+      {
+        "tenantId": "tenant-1",
+        "userId": "user-1",
+        "userSubject": "dashboard:8:tenant-1:user-1",
+        "digestHex": "40a3b06eff7ff26d20d5ff7b9f238ddf5858d7f42505bd646acf5ecd3ed9c50b",
+        "windowKey": "wad:40a3b06eff7ff26d20d5ff7b9f238ddf5858d7f42505bd646acf5ecd3ed9c50b",
+        "suppressedKey": "wads:40a3b06eff7ff26d20d5ff7b9f238ddf5858d7f42505bd646acf5ecd3ed9c50b"
+      },
+      {
+        "tenantId": "a:b",
+        "userId": "c",
+        "userSubject": "dashboard:3:a:b:c",
+        "digestHex": "ee454d898fc64c5c6021212945ac239004538d927c35f7b32f544aa0b68eb962",
+        "windowKey": "wad:ee454d898fc64c5c6021212945ac239004538d927c35f7b32f544aa0b68eb962",
+        "suppressedKey": "wads:ee454d898fc64c5c6021212945ac239004538d927c35f7b32f544aa0b68eb962"
+      }
+    ]
+  },
+  "workspaceAccountRemoval": {
+    "$comment": ["Removing every membership of an account that the host is about to delete or anonymise. Shared by both libraries because a workspace left without an owner, or a membership left behind, is the same defect whichever library the deployment runs."],
+    "rules": {
+      "scope": "The removal covers every membership of the account in the tenant, in every membership status (active or suspended) and in every workspace status, not only the active memberships of active workspaces that the workspace picker lists. Only the repository can enumerate them all, so it is one port call (`removeAllForUser`) that the host makes before deleting or anonymising the user; the library never deletes a user and wires nothing automatically.",
+      "blocking": "The removal is refused, with nothing written, no audit row and no cache change, while the account is the only ACTIVE holder of the owner role of a workspace whose status is `active` or `suspended`. The refusal is 409 auth.last_owner with `details.workspaces` naming each blocking workspace as `{id, name, status}` (at most 100), or as `{id}` alone when the repository found it during the write (see atomicity). The host transfers ownership or schedules the workspace's deletion first.",
+      "pendingDeletion": "A workspace whose status is `pending_deletion` never blocks, and neither does a `deleted` one. No one can finalize a pending deletion before its grace period ends, so an owner who scheduled a deletion would otherwise be unable to delete their own account for the whole period. The account's membership there is removed with the others, so the workspace has no owner and can no longer be restored (restoring is owner-only); it is deleted when its grace period ends, which needs no member.",
+      "atomicity": "The last-owner decision and every removal are one transaction in the repository, which re-decides the blocking rule inside it: a workspace that became solely owned by the account after the library's own read refuses the whole call with `last_owner` and the ids of those workspaces, and nothing is removed. The library reads the sole-owned workspaces first only to name them to the caller.",
+      "audit": "One `member.removed` event is persisted per removed membership in the same transaction, `{type, tenantId, workspaceId, actorUserId, userId, at}`, where `actorUserId` is the account itself, an administrator, or null for a job, and `at` is one ISO-8601 UTC instant for the whole call. The same events are reported to the host's workspace-event hook after the commit, detached and best-effort.",
+      "cache": "After the commit the cached access of every removed membership is dropped by bumping that membership's version, so access ends at the next request, the same bound as a single removal. Every bump is attempted even when one fails. If any fails the call fails with the full removed list and the failed list: the removal is already committed, so repeating the call finds nothing to remove, and the host drops the failed ones through the access service's `invalidateMembership` or waits out `membershipCacheTtlSeconds`."
+    },
+    "blockingVectors": [
+      { "workspaceStatus": "active", "accountIsSoleOwner": true, "blocks": true },
+      { "workspaceStatus": "suspended", "accountIsSoleOwner": true, "blocks": true },
+      { "workspaceStatus": "pending_deletion", "accountIsSoleOwner": true, "blocks": false },
+      { "workspaceStatus": "deleted", "accountIsSoleOwner": true, "blocks": false },
+      { "workspaceStatus": "active", "accountIsSoleOwner": false, "blocks": false }
     ]
   }
 }

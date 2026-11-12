@@ -11,6 +11,7 @@ use crate::openapi::{
     ACCESS_BEARER_SCHEME, ACCESS_COOKIE_SCHEME, OperationKind, PLATFORM_BEARER_SCHEME,
     REFRESH_COOKIE_SCHEME, describe_operation, operation_security,
 };
+use crate::pending::PENDING_OPERATIONS;
 
 /// The shared copy, as it sits in the repository.
 const CONFORMANCE_COPY: &str = include_str!("../../../conformance/openapi-operation-security.json");
@@ -18,7 +19,7 @@ const CONFORMANCE_COPY: &str = include_str!("../../../conformance/openapi-operat
 const CRATE_COPY: &str = include_str!("../openapi/openapi-operation-security.json");
 /// The digest of the artefact this table was written against. A new release of the artefact
 /// fails the table until the table and this digest are moved together.
-const ARTEFACT_SHA256: &str = "09d8c0d6ec145fdba369bb50360357d70f577076d5b80010787d3aecbdb8b75e";
+const ARTEFACT_SHA256: &str = "41aa87e8ff48c9f417ce2839cdcf86da2cc5f025d3d18aba987437489e004d3a";
 
 fn artefact() -> Value {
     serde_json::from_str(CONFORMANCE_COPY).unwrap_or(Value::Null)
@@ -73,8 +74,30 @@ fn the_table_and_the_artefact_hold_the_same_operations_with_the_same_kinds() {
         })
         .collect();
     assert_eq!(operation_security().len(), table.len(), "a duplicated row");
-    assert_eq!(table, expected);
     assert!(!expected.is_empty());
+    let built: BTreeMap<String, String> = expected
+        .iter()
+        .filter(|(key, _)| !PENDING_OPERATIONS.contains(&key.as_str()))
+        .map(|(key, kind)| (key.clone(), kind.clone()))
+        .collect();
+    assert_eq!(table, built);
+}
+
+#[test]
+fn every_pending_operation_is_in_the_artefact_and_has_no_row() {
+    let shared = artefact();
+    for key in PENDING_OPERATIONS {
+        assert!(
+            shared["operations"].get(key).is_some(),
+            "{key} is pending but the artefact does not carry it"
+        );
+        assert!(
+            operation_security()
+                .iter()
+                .all(|row| artefact_key(row.method, row.path) != key),
+            "{key} has a row; remove it from PENDING_OPERATIONS"
+        );
+    }
 }
 
 #[test]

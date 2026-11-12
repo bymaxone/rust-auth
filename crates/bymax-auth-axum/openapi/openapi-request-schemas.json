@@ -50,6 +50,38 @@
       },
       "required": ["name", "password", "token"]
     },
+    "AcceptWorkspaceInvitationDto": {
+      "type": "object",
+      "properties": {
+        "token": {
+          "type": "string",
+          "minLength": 64,
+          "maxLength": 64
+        }
+      },
+      "required": ["token"]
+    },
+    "AcceptWorkspaceInvitationSignupDto": {
+      "type": "object",
+      "properties": {
+        "token": {
+          "type": "string",
+          "minLength": 64,
+          "maxLength": 64
+        },
+        "name": {
+          "type": "string",
+          "minLength": 2,
+          "maxLength": 100
+        },
+        "password": {
+          "type": "string",
+          "minLength": 8,
+          "maxLength": 128
+        }
+      },
+      "required": ["name", "password", "token"]
+    },
     "ChangeEmailDto": {
       "type": "object",
       "properties": {
@@ -66,6 +98,18 @@
         }
       },
       "required": ["currentPassword", "newEmail"]
+    },
+    "ChangeMemberRoleDto": {
+      "type": "object",
+      "properties": {
+        "role": {
+          "type": "string",
+          "pattern": "^[^\\u0000-\\u001F\\u007F-\\u009F]+$",
+          "maxLength": 64,
+          "minLength": 1
+        }
+      },
+      "required": ["role"]
     },
     "ChangePasswordDto": {
       "type": "object",
@@ -121,6 +165,18 @@
       },
       "required": ["email", "role"]
     },
+    "CreateWorkspaceDto": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string",
+          "pattern": "^[^\\u0000-\\u001F\\u007F-\\u009F]+$",
+          "maxLength": 120,
+          "minLength": 1
+        }
+      },
+      "required": ["name"]
+    },
     "ForgotPasswordDto": {
       "type": "object",
       "properties": {
@@ -137,6 +193,24 @@
         }
       },
       "required": ["email"]
+    },
+    "InviteToWorkspaceDto": {
+      "type": "object",
+      "properties": {
+        "email": {
+          "type": "string",
+          "maxLength": 255,
+          "minLength": 1,
+          "format": "email"
+        },
+        "role": {
+          "type": "string",
+          "pattern": "^[^\\u0000-\\u001F\\u007F-\\u009F]+$",
+          "maxLength": 64,
+          "minLength": 1
+        }
+      },
+      "required": ["email", "role"]
     },
     "LoginDto": {
       "type": "object",
@@ -159,6 +233,24 @@
         }
       },
       "required": ["email", "password"]
+    },
+    "MemberRouteParamsDto": {
+      "type": "object",
+      "properties": {
+        "workspaceId": {
+          "type": "string",
+          "pattern": "^[^\\u0000-\\u001F\\u007F-\\u009F]+$",
+          "maxLength": 128,
+          "minLength": 1
+        },
+        "userId": {
+          "type": "string",
+          "pattern": "^[^\\u0000-\\u001F\\u007F-\\u009F]+$",
+          "maxLength": 128,
+          "minLength": 1
+        }
+      },
+      "required": ["userId", "workspaceId"]
     },
     "MfaChallengeDto": {
       "type": "object",
@@ -279,6 +371,11 @@
           "pattern": "^[^\\u0000-\\u001F\\u007F-\\u009F]+$",
           "maxLength": 128,
           "minLength": 1
+        },
+        "workspaceInvitation": {
+          "type": "string",
+          "minLength": 64,
+          "maxLength": 64
         }
       }
     },
@@ -299,6 +396,27 @@
         }
       },
       "required": ["email", "password"]
+    },
+    "PreviewWorkspaceInvitationDto": {
+      "type": "object",
+      "properties": {
+        "token": {
+          "type": "string",
+          "minLength": 64,
+          "maxLength": 64
+        }
+      },
+      "required": ["token"]
+    },
+    "RefreshTokenBodyDto": {
+      "type": "object",
+      "properties": {
+        "refreshToken": {
+          "type": "string",
+          "maxLength": 2048,
+          "minLength": 1
+        }
+      }
     },
     "RegisterDto": {
       "type": "object",
@@ -326,6 +444,18 @@
         }
       },
       "required": ["email", "name", "password"]
+    },
+    "RenameWorkspaceDto": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string",
+          "pattern": "^[^\\u0000-\\u001F\\u007F-\\u009F]+$",
+          "maxLength": 120,
+          "minLength": 1
+        }
+      },
+      "required": ["name"]
     },
     "ResendOtpDto": {
       "type": "object",
@@ -410,6 +540,39 @@
       },
       "required": ["email"]
     },
+    "ScheduleWorkspaceDeletionDto": {
+      "type": "object",
+      "properties": {
+        "password": {
+          "type": "string",
+          "maxLength": 128,
+          "minLength": 1
+        }
+      }
+    },
+    "TransferOwnershipDto": {
+      "type": "object",
+      "properties": {
+        "userId": {
+          "type": "string",
+          "pattern": "^[^\\u0000-\\u001F\\u007F-\\u009F]+$",
+          "maxLength": 128,
+          "minLength": 1
+        },
+        "demoteSelfTo": {
+          "type": "string",
+          "pattern": "^[^\\u0000-\\u001F\\u007F-\\u009F]+$",
+          "maxLength": 64,
+          "minLength": 1
+        },
+        "password": {
+          "type": "string",
+          "maxLength": 128,
+          "minLength": 1
+        }
+      },
+      "required": ["userId"]
+    },
     "VerifyEmailDto": {
       "type": "object",
       "properties": {
@@ -453,6 +616,33 @@
         }
       },
       "required": ["email", "otp"]
+    },
+    "WorkspaceInvitationEmailDto": {
+      "type": "object",
+      "properties": {
+        "email": {
+          "type": "string",
+          "maxLength": 255,
+          "minLength": 1,
+          "format": "email"
+        }
+      },
+      "required": ["email"]
+    },
+    "WorkspacePageQueryDto": {
+      "type": "object",
+      "properties": {
+        "cursor": {
+          "type": "string",
+          "pattern": "^[^\\u0000-\\u001F\\u007F-\\u009F]+$",
+          "maxLength": 512,
+          "minLength": 1
+        },
+        "limit": {
+          "type": "string",
+          "pattern": "^(?:[1-9][0-9]?|100)$"
+        }
+      }
     }
   }
 }

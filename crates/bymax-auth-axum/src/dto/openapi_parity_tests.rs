@@ -16,6 +16,8 @@ use garde::Validate;
 use serde::de::DeserializeOwned;
 use serde_json::{Map, Value};
 
+use crate::pending::{PENDING_PROPERTIES, PENDING_SCHEMAS};
+
 use super::{
     AcceptInvitationDto, ChangeEmailDto, ChangePasswordDto, ConfirmEmailChangeDto,
     CreateInvitationDto, ForgotPasswordDto, LoginDto, MfaChallengeDto, MfaDisableDto,
@@ -28,7 +30,7 @@ const ARTEFACT: &str = include_str!("../../../../conformance/openapi-request-sch
 
 /// The SHA-256 of the artefact, lower-case hex. Source: nest-auth `v1.4.22`, commit
 /// `b3e64f1c6dd1a2cf0f4ad874b6fe6470e3325ea1`, path `conformance/openapi-request-schemas.json`.
-const ARTEFACT_SHA256: &str = "2c2b7549f6aa6b2b76e55b38e9eece1e5fa66a562130d488a2a493d4d5ca1b7c";
+const ARTEFACT_SHA256: &str = "90b2fd7ae9da0634881c193e0dd36ee31ff7b17aa5af83827b3da50b1b34741c";
 
 /// A DTO's verdict on a body: accepted when it deserializes and validates.
 pub(super) type Accepts = fn(&Value) -> bool;
@@ -444,7 +446,10 @@ fn the_artefact_carries_the_bytes_this_repository_declared() {
 
 #[test]
 fn every_schema_has_a_dto_and_the_rust_only_ones_are_named() {
-    let in_artefact = schema_names(&artefact());
+    let in_artefact: BTreeSet<String> = schema_names(&artefact())
+        .into_iter()
+        .filter(|name| !PENDING_SCHEMAS.contains(&name.as_str()))
+        .collect();
     let mapped: BTreeSet<String> = DTOS.iter().map(|(name, _)| (*name).to_owned()).collect();
     assert_eq!(mapped, in_artefact);
     assert!(
@@ -461,10 +466,14 @@ fn the_keywords_and_patterns_are_the_ones_this_test_understands() {
     let mut types = BTreeSet::new();
     let mut formats = BTreeSet::new();
     let mut patterns = BTreeSet::new();
+    // A schema still pending is read when its slice builds the DTO, which is also when this
+    // test learns any keyword or pattern it introduces.
     for schema in root["schemas"]
         .as_object()
         .into_iter()
-        .flat_map(Map::values)
+        .flat_map(Map::iter)
+        .filter(|(name, _)| !PENDING_SCHEMAS.contains(&name.as_str()))
+        .map(|(_, schema)| schema)
     {
         schema_keys.extend(schema.as_object().into_iter().flat_map(Map::keys).cloned());
         types.insert(schema["type"].as_str().unwrap_or_default().to_owned());
@@ -504,6 +513,17 @@ fn the_dtos_agree_with_the_artefact() {
     for (dto, check) in DTOS {
         check_dto(&root, dto, check, &mut observed);
     }
+    // A property still pending is a known difference: it must still be observed, so the slice
+    // that builds it has to delete its entry, and nothing else is accepted.
+    for (schema, property) in PENDING_PROPERTIES {
+        let entry = format!("{schema}.{property}");
+        let mut seen = false;
+        for found in observed.values_mut() {
+            seen |= found.remove(&entry);
+        }
+        assert!(seen, "{entry} is built; remove it from PENDING_PROPERTIES");
+    }
+    observed.retain(|_, found| !found.is_empty());
     // A difference is a finding, not a skipped case. One accepted on purpose belongs here, as an
     // expectation with the reason it is left, never as a quiet exception inside a check.
     assert!(observed.is_empty(), "{observed:#?}");
