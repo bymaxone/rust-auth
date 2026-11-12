@@ -70,15 +70,37 @@ pub(super) fn sort_key(created_at: OffsetDateTime, id: &str) -> String {
     format!("{:020}:{id}", created_at.unix_timestamp())
 }
 
-/// Whether `cursor` has the shape this double issues; any other value restarts from the first page.
-pub(super) fn well_formed(cursor: &str) -> bool {
-    cursor.as_bytes().get(20) == Some(&b':') && cursor.bytes().take(20).all(|b| b.is_ascii_digit())
+/// Whether `key` has the shape of a sort key this double issues.
+pub(super) fn well_formed(key: &str) -> bool {
+    key.as_bytes().get(20) == Some(&b':') && key.bytes().take(20).all(|b| b.is_ascii_digit())
 }
 
-/// One page of `rows` (sort key, row) in key order, after `cursor`.
-pub(super) fn paginate<T>(mut rows: Vec<(String, T)>, cursor: Option<&str>, limit: u32) -> Page<T> {
+/// Names one listing: its kind and each of its parts, length-prefixed so no part moves the
+/// boundary of another. A cursor carries it, so a cursor issued for another query is not followed.
+pub(super) fn query_scope(kind: &str, parts: &[&str]) -> String {
+    parts.iter().fold(kind.to_owned(), |scope, part| {
+        format!("{scope}:{}:{part}", part.len())
+    })
+}
+
+/// The prefix every cursor of `scope` carries.
+fn cursor_prefix(scope: &str) -> String {
+    format!("{}:{scope}:", scope.len())
+}
+
+/// One page of `rows` (sort key, row) in key order, after `cursor`. A cursor that this listing did
+/// not issue, or that is malformed, restarts from the first page.
+pub(super) fn paginate<T>(
+    mut rows: Vec<(String, T)>,
+    scope: &str,
+    cursor: Option<&str>,
+    limit: u32,
+) -> Page<T> {
     rows.sort_by(|a, b| a.0.cmp(&b.0));
-    let after = cursor.filter(|c| well_formed(c));
+    let prefix = cursor_prefix(scope);
+    let after = cursor
+        .and_then(|c| c.strip_prefix(prefix.as_str()))
+        .filter(|key| well_formed(key));
     let size = usize::try_from(limit.max(1)).unwrap_or(usize::MAX);
     let mut rest: Vec<(String, T)> = rows
         .into_iter()
@@ -87,7 +109,7 @@ pub(super) fn paginate<T>(mut rows: Vec<(String, T)>, cursor: Option<&str>, limi
     let more = rest.len() > size;
     rest.truncate(size);
     let next_cursor = if more {
-        rest.last().map(|(key, _)| key.clone())
+        rest.last().map(|(key, _)| format!("{prefix}{key}"))
     } else {
         None
     };

@@ -5,7 +5,9 @@
 
 use async_trait::async_trait;
 
-use super::workspace::{InMemoryWorkspaces, State, lock, membership_key, paginate, sort_key};
+use super::workspace::{
+    InMemoryWorkspaces, State, lock, membership_key, paginate, query_scope, sort_key,
+};
 use crate::RepositoryError;
 use crate::traits::MembershipRepository;
 use crate::traits::membership_repository::{
@@ -100,7 +102,8 @@ impl MembershipRepository for InMemoryWorkspaces {
                 })
             })
             .collect();
-        Ok(paginate(rows, params.cursor, params.limit))
+        let scope = query_scope("user", &[params.tenant_id, params.user_id]);
+        Ok(paginate(rows, &scope, params.cursor, params.limit))
     }
 
     async fn list_for_workspace(
@@ -117,7 +120,9 @@ impl MembershipRepository for InMemoryWorkspaces {
             })
             .map(|m| (sort_key(m.created_at, &m.user_id), m.clone()))
             .collect();
-        Ok(paginate(rows, params.cursor, params.limit))
+        let workspace = params.workspace;
+        let scope = query_scope("workspace", &[workspace.tenant_id, workspace.workspace_id]);
+        Ok(paginate(rows, &scope, params.cursor, params.limit))
     }
 
     async fn create(
@@ -284,7 +289,9 @@ impl MembershipRepository for InMemoryWorkspaces {
             .into_iter()
             .map(|w| (sort_key(w.created_at, &w.id), w.clone()))
             .collect();
-        Ok(paginate(rows, params.cursor, params.limit))
+        let owner = params.owner;
+        let scope = query_scope("sole", &[owner.tenant_id, owner.user_id, owner.owner_role]);
+        Ok(paginate(rows, &scope, params.cursor, params.limit))
     }
 
     async fn last_active_workspace_id(

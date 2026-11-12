@@ -544,7 +544,7 @@ async fn the_last_active_workspace_is_remembered_per_tenant_and_member() {
 }
 
 #[test]
-fn only_a_cursor_in_the_shape_this_double_issues_is_followed() {
+fn only_a_sort_key_in_the_shape_this_double_issues_is_followed() {
     let issued = super::workspace::sort_key(instant(7), "w1");
     assert!(super::workspace::well_formed(&issued));
     assert!(super::workspace::well_formed("00000000000000000007:"));
@@ -553,4 +553,43 @@ fn only_a_cursor_in_the_shape_this_double_issues_is_followed() {
     assert!(!super::workspace::well_formed("0000000000000000000x:w1"));
     assert!(!super::workspace::well_formed("00000000000000000007x"));
     assert!(!super::workspace::well_formed("000000000000000000070:w1"));
+}
+
+fn user<'a>(cursor: Option<&'a str>, user_id: &'a str) -> ListForUser<'a> {
+    ListForUser {
+        tenant_id: T,
+        user_id,
+        cursor,
+        limit: 1,
+    }
+}
+
+fn members_of(cursor: Option<&str>) -> ListForWorkspace<'_> {
+    ListForWorkspace {
+        workspace: ws("w1"),
+        cursor,
+        limit: 1,
+    }
+}
+
+#[tokio::test]
+async fn a_cursor_issued_for_another_query_restarts_from_the_first_page() {
+    let repo = InMemoryWorkspaces::new();
+    assert!(create(&repo, "w1", "u1", 0).await);
+    assert!(create(&repo, "w2", "u1", 0).await);
+    add(&repo, "w1", "u2", "member").await;
+    add(&repo, "w1", "u3", "member").await;
+    let mine = repo.list_for_user(user(None, "u1")).await.ok();
+    let cursor = mine.and_then(|p| p.next_cursor);
+    assert!(cursor.is_some());
+    let fresh = repo.list_for_workspace(members_of(None)).await.ok();
+    let foreign = repo
+        .list_for_workspace(members_of(cursor.as_deref()))
+        .await
+        .ok();
+    assert_eq!(foreign, fresh);
+    let other = repo.list_for_user(user(cursor.as_deref(), "u2")).await.ok();
+    assert_eq!(other, repo.list_for_user(user(None, "u2")).await.ok());
+    let followed = repo.list_for_user(user(cursor.as_deref(), "u1")).await.ok();
+    assert_ne!(followed, repo.list_for_user(user(None, "u1")).await.ok());
 }

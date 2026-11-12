@@ -55,6 +55,7 @@ pub use membership_repository::MembershipRepository;
 pub use oauth::{OAuthProfile, OAuthProvider, OAuthProviderError, OAuthProviders, OAuthTokens};
 #[doc(inline)]
 pub use rate_limit::RateLimitStore;
+#[doc(inline)]
 pub use repository::{PlatformUserRepository, UserRepository};
 #[cfg(feature = "mfa")]
 #[doc(inline)]
@@ -71,4 +72,5 @@ pub use store::{
 };
 #[doc(inline)]
 pub use user_status_cache::UserStatusCacheStore;
+#[doc(inline)]
 pub use workspace_repository::WorkspaceRepository;
