@@ -77,9 +77,10 @@ pub use dto::{
     ResendOtpDto, ResendVerificationDto, ResetPasswordDto, RevokeInvitationDto, VerifyEmailDto,
     VerifyOtpDto,
 };
+pub use dto::{MemberRouteParamsDto, WorkspacePageQueryDto};
 pub use extractors::{
-    AdminRole, AuthUser, CurrentUser, MfaSatisfied, OptionalAuthUser, RequireRole, Role,
-    SelfOrAdmin, UserStatus, VerifiedUser,
+    AdminRole, AnyWorkspaceMember, AuthUser, CurrentUser, MfaSatisfied, OptionalAuthUser,
+    RequireRole, RequireWorkspace, Role, SelfOrAdmin, UserStatus, VerifiedUser, WorkspacePolicy,
 };
 pub use rate_limit::{RateLimit, RateLimitConfig};
 pub use response::{AuthRejection, error_response};

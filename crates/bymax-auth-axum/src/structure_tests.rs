@@ -9,10 +9,11 @@ use serde_json::{Map, Value, json};
 
 use crate::dto::{
     AcceptInvitationDto, ChangeEmailDto, ChangePasswordDto, ConfirmEmailChangeDto,
-    CreateInvitationDto, DECLARED, ForgotPasswordDto, LoginDto, MfaChallengeDto, MfaDisableDto,
-    MfaRegenerateRecoveryCodesDto, MfaSetupDto, MfaVerifyDto, OAuthCallbackQuery,
-    OAuthInitiateQuery, PlatformLoginDto, RefreshDto, RegisterDto, ResendOtpDto,
-    ResendVerificationDto, ResetPasswordDto, RevokeInvitationDto, VerifyEmailDto, VerifyOtpDto,
+    CreateInvitationDto, DECLARED, ForgotPasswordDto, LoginDto, MemberRouteParamsDto,
+    MfaChallengeDto, MfaDisableDto, MfaRegenerateRecoveryCodesDto, MfaSetupDto, MfaVerifyDto,
+    OAuthCallbackQuery, OAuthInitiateQuery, PlatformLoginDto, RefreshDto, RegisterDto,
+    ResendOtpDto, ResendVerificationDto, ResetPasswordDto, RevokeInvitationDto, VerifyEmailDto,
+    VerifyOtpDto, WorkspacePageQueryDto,
 };
 use crate::request_schemas::schema;
 use crate::structure::{declared_named, details_for};
@@ -49,7 +50,7 @@ macro_rules! dto {
 }
 
 /// Every DTO, by the name of its schema.
-const DTOS: [(&str, Details, Refuses); 23] = [
+const DTOS: [(&str, Details, Refuses); 25] = [
     dto!(AcceptInvitationDto, "AcceptInvitationDto"),
     dto!(ChangeEmailDto, "ChangeEmailDto"),
     dto!(ChangePasswordDto, "ChangePasswordDto"),
@@ -57,6 +58,7 @@ const DTOS: [(&str, Details, Refuses); 23] = [
     dto!(CreateInvitationDto, "CreateInvitationDto"),
     dto!(ForgotPasswordDto, "ForgotPasswordDto"),
     dto!(LoginDto, "LoginDto"),
+    dto!(MemberRouteParamsDto, "MemberRouteParamsDto"),
     dto!(MfaChallengeDto, "MfaChallengeDto"),
     dto!(MfaDisableDto, "MfaDisableDto"),
     dto!(
@@ -76,6 +78,7 @@ const DTOS: [(&str, Details, Refuses); 23] = [
     dto!(RevokeInvitationDto, "RevokeInvitationDto"),
     dto!(VerifyEmailDto, "VerifyEmailDto"),
     dto!(VerifyOtpDto, "VerifyOtpDto"),
+    dto!(WorkspacePageQueryDto, "WorkspacePageQueryDto"),
 ];
 
 fn properties(name: &str) -> BTreeSet<String> {
@@ -152,6 +155,11 @@ fn the_declared_table_is_the_artefacts_schemas_and_each_dto_is_found_by_its_type
         pub struct LoginDto;
     }
     assert_eq!(declared_named(type_name::<host::LoginDto>()), None);
+    // A DTO declared in a submodule is found by the full name its type carries.
+    assert_eq!(
+        declared_named(type_name::<WorkspacePageQueryDto>()),
+        Some(("WorkspacePageQueryDto", true))
+    );
 }
 
 #[test]

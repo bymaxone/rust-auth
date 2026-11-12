@@ -156,11 +156,12 @@ fn every_section_of_the_contract_is_read_or_pending() {
                 "workspaceAccountRemoval",
                 "workspaceInvitations",
                 "workspaceMembershipCache",
+                "workspaceRealtime",
                 "workspaceScopedName",
             ],
             // `version` is covered by the byte pin of the whole file.
             &["version"],
-            &[("workspaceRealtime", "13.9")],
+            &[],
         ),
     );
 }
@@ -270,6 +271,32 @@ fn every_membership_cache_statement_is_read_or_pending() {
             // not cached, a seeded suspended entry reads as a miss) and of the resolver's tests.
             &["entryRule"],
             &[("workspaceWideEvents", "13.5b")],
+        ),
+    );
+}
+
+#[test]
+fn every_workspace_realtime_statement_is_read_or_pending() {
+    let root = contract();
+    let section = &root["workspaceRealtime"];
+    inventory(
+        "workspaceRealtime",
+        section,
+        (&["rules"], &[], &[("accessDeniedVectors", "13.9")]),
+    );
+    inventory(
+        "workspaceRealtime.rules",
+        &section["rules"],
+        (
+            &["accessDecision", "workspaceIdField"],
+            // The rule points at the `workspaceScopedName` section, which is read in full.
+            &["workspaceScopedName"],
+            &[
+                ("verifierWorkspace", "13.9"),
+                ("socketMessage", "13.9"),
+                ("jobAuthorization", "13.9"),
+                ("accessDeniedEvents", "13.9"),
+            ],
         ),
     );
 }

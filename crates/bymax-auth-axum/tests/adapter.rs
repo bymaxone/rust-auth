@@ -115,6 +115,9 @@ mod status_gates;
 #[path = "adapter/tenant_binding.rs"]
 mod tenant_binding;
 
+#[path = "adapter/workspace_reads.rs"]
+mod workspace_reads;
+
 use common::{
     Captured, EngineSpec, Req, TENANT, build, build_oauth_with_failing_state_store,
     build_oauth_with_redirects, current_totp, enable_mfa_flag, router, router_with, seed_admin,
@@ -3739,6 +3742,25 @@ const ALL_LIMIT_SETTERS: &[LimitSetter] = &[
     |c, v| c.change_password = v,
     |c, v| c.logout = v,
     |c, v| c.ws_ticket = v,
+    |c, v| c.workspace_list = v,
+    |c, v| c.workspace_access = v,
+    |c, v| c.workspace_switch = v,
+    |c, v| c.workspace_members = v,
+    |c, v| c.workspace_create = v,
+    |c, v| c.workspace_rename = v,
+    |c, v| c.workspace_schedule_deletion = v,
+    |c, v| c.workspace_restore = v,
+    |c, v| c.workspace_change_role = v,
+    |c, v| c.workspace_remove_member = v,
+    |c, v| c.workspace_leave = v,
+    |c, v| c.workspace_transfer_ownership = v,
+    |c, v| c.workspace_invite = v,
+    |c, v| c.workspace_invitations = v,
+    |c, v| c.workspace_invitation_resend = v,
+    |c, v| c.workspace_invitation_revoke = v,
+    |c, v| c.workspace_invitation_preview = v,
+    |c, v| c.workspace_invitation_accept = v,
+    |c, v| c.workspace_invitation_accept_signup = v,
 ];
 
 /// Hit `request` twice against `app` and report whether the second call was throttled.

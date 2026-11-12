@@ -20,10 +20,11 @@ use crate::pending::{PENDING_PROPERTIES, PENDING_SCHEMAS};
 
 use super::{
     AcceptInvitationDto, ChangeEmailDto, ChangePasswordDto, ConfirmEmailChangeDto,
-    CreateInvitationDto, ForgotPasswordDto, LoginDto, MfaChallengeDto, MfaDisableDto,
-    MfaRegenerateRecoveryCodesDto, MfaSetupDto, MfaVerifyDto, OAuthCallbackQuery,
+    CreateInvitationDto, ForgotPasswordDto, LoginDto, MemberRouteParamsDto, MfaChallengeDto,
+    MfaDisableDto, MfaRegenerateRecoveryCodesDto, MfaSetupDto, MfaVerifyDto, OAuthCallbackQuery,
     OAuthInitiateQuery, PlatformLoginDto, RefreshDto, RegisterDto, ResendOtpDto,
     ResendVerificationDto, ResetPasswordDto, RevokeInvitationDto, VerifyEmailDto, VerifyOtpDto,
+    WorkspacePageQueryDto,
 };
 
 const ARTEFACT: &str = include_str!("../../../../conformance/openapi-request-schemas.json");
@@ -41,7 +42,7 @@ fn accepts<T: DeserializeOwned + Validate<Context = ()>>(body: &Value) -> bool {
 
 /// Every schema in the artefact and the DTO that answers it. The names differ for the two OAuth
 /// query types and for `RefreshDto`, which answers `RefreshTokenBodyDto`.
-pub(super) const DTOS: [(&str, Accepts); 23] = [
+pub(super) const DTOS: [(&str, Accepts); 25] = [
     ("AcceptInvitationDto", accepts::<AcceptInvitationDto>),
     ("ChangeEmailDto", accepts::<ChangeEmailDto>),
     ("ChangePasswordDto", accepts::<ChangePasswordDto>),
@@ -49,6 +50,7 @@ pub(super) const DTOS: [(&str, Accepts); 23] = [
     ("CreateInvitationDto", accepts::<CreateInvitationDto>),
     ("ForgotPasswordDto", accepts::<ForgotPasswordDto>),
     ("LoginDto", accepts::<LoginDto>),
+    ("MemberRouteParamsDto", accepts::<MemberRouteParamsDto>),
     ("MfaChallengeDto", accepts::<MfaChallengeDto>),
     ("MfaDisableDto", accepts::<MfaDisableDto>),
     (
@@ -68,12 +70,13 @@ pub(super) const DTOS: [(&str, Accepts); 23] = [
     ("RevokeInvitationDto", accepts::<RevokeInvitationDto>),
     ("VerifyEmailDto", accepts::<VerifyEmailDto>),
     ("VerifyOtpDto", accepts::<VerifyOtpDto>),
+    ("WorkspacePageQueryDto", accepts::<WorkspacePageQueryDto>),
 ];
 
 /// Samples for each `pattern` in the artefact, with the verdict of an ECMA-262 engine
 /// (`new RegExp(pattern).test(sample)` under node) recorded beside each. The set of patterns here
 /// is compared with the artefact in both directions, so a new pattern fails until it has samples.
-const PATTERN_SAMPLES: [(&str, &[(&str, bool)]); 4] = [
+const PATTERN_SAMPLES: [(&str, &[(&str, bool)]); 5] = [
     (
         r"^[^\u0000-\u001F\u007F-\u009F]+$",
         &[
@@ -138,6 +141,32 @@ const PATTERN_SAMPLES: [(&str, &[(&str, bool)]); 4] = [
             ("ABCD-0123-4567-89AB-CDEF-0123\n", false),
             ("12345a", false),
             ("\u{661}\u{662}\u{663}\u{664}\u{665}\u{666}", false),
+        ],
+    ),
+    (
+        r"^(?:[1-9][0-9]?|100)$",
+        &[
+            ("1", true),
+            ("9", true),
+            ("10", true),
+            ("50", true),
+            ("99", true),
+            ("100", true),
+            ("0", false),
+            ("00", false),
+            ("05", false),
+            ("007", false),
+            ("101", false),
+            ("1000", false),
+            ("+5", false),
+            ("-5", false),
+            (" 5", false),
+            ("5 ", false),
+            ("5.0", false),
+            ("1e2", false),
+            ("", false),
+            ("\u{661}", false),
+            ("50\n", false),
         ],
     ),
 ];

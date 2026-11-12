@@ -108,7 +108,7 @@ use OperationKind as K;
 use RouteGroup as G;
 
 /// Every operation the auth router mounts and the credential each requires.
-static OPERATION_SECURITY: [OperationSecurity; 38] = [
+static OPERATION_SECURITY: [OperationSecurity; 42] = [
     op!(G::Auth, "POST", "/register", K::None),
     op!(G::Auth, "POST", "/login", K::None),
     op!(G::Auth, "POST", "/logout", K::OptionalAccessAndRefresh),
@@ -182,6 +182,25 @@ static OPERATION_SECURITY: [OperationSecurity; 38] = [
     op!(G::EmailChange, "POST", "/email/change/confirm", K::None),
     op!(G::OAuth, "GET", "/oauth/{provider}", K::None),
     op!(G::OAuth, "GET", "/oauth/{provider}/callback", K::None),
+    op!(G::Workspaces, "GET", "/workspaces", K::Access),
+    op!(
+        G::Workspaces,
+        "GET",
+        "/workspaces/{workspaceId}/access",
+        K::Access
+    ),
+    op!(
+        G::Workspaces,
+        "GET",
+        "/workspaces/{workspaceId}/members",
+        K::Access
+    ),
+    op!(
+        G::Workspaces,
+        "POST",
+        "/workspaces/{workspaceId}/switch",
+        K::Access
+    ),
 ];
 
 /// The operations of the auth router and the credential each requires.

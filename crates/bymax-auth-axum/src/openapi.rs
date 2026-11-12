@@ -97,6 +97,8 @@ pub enum RouteGroup {
     Sessions,
     /// The OAuth group, which takes no request body.
     OAuth,
+    /// The workspace group, whose read routes take no request body.
+    Workspaces,
 }
 
 impl RouteGroup {
@@ -113,6 +115,7 @@ impl RouteGroup {
             Self::EmailChange => groups.email_change,
             Self::Sessions => groups.sessions,
             Self::OAuth => groups.oauth,
+            Self::Workspaces => groups.workspaces,
         }
     }
 }
@@ -308,7 +311,8 @@ pub(crate) fn derive_security_schemes(
         || groups.mfa
         || groups.sessions
         || groups.invitations
-        || groups.email_change;
+        || groups.email_change
+        || groups.workspaces;
     if dashboard && delivers_cookie(delivery) {
         schemes.insert(
             ACCESS_COOKIE_SCHEME,

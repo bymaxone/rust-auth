@@ -135,6 +135,10 @@ pub struct RouteGroups {
     pub invitations: bool,
     /// The address-change group.
     pub email_change: bool,
+    /// The workspace group: the read routes behind `controllers.workspaces`. Not behind a Cargo
+    /// feature, like `email_change`: the workspace layer is part of the engine and is switched on
+    /// at runtime.
+    pub workspaces: bool,
 }
 
 impl RouteGroups {
@@ -152,6 +156,7 @@ impl RouteGroups {
             oauth: toggles.oauth,
             invitations: toggles.invitations,
             email_change: toggles.email_change,
+            workspaces: toggles.workspaces,
         }
     }
 }

@@ -85,6 +85,7 @@ fn mounting(on: &[RouteGroup]) -> RouteGroups {
         oauth: has(RouteGroup::OAuth),
         invitations: has(RouteGroup::Invitations),
         email_change: has(RouteGroup::EmailChange),
+        workspaces: has(RouteGroup::Workspaces),
     }
 }
 
@@ -136,7 +137,7 @@ fn nest_schemas(group: RouteGroup) -> Vec<&'static str> {
             "AcceptInvitationDto",
         ],
         RouteGroup::EmailChange => vec!["ChangeEmailDto", "ConfirmEmailChangeDto"],
-        RouteGroup::Sessions | RouteGroup::OAuth => Vec::new(),
+        RouteGroup::Sessions | RouteGroup::OAuth | RouteGroup::Workspaces => Vec::new(),
     };
     names.sort_unstable();
     names
@@ -170,19 +171,22 @@ fn a_group_left_off_contributes_nothing_and_the_groups_add_up() {
         expected.extend(request_schemas_for(mounting(&[group])));
     }
     assert_eq!(all, expected);
-    // The artefact is complete: every schema is served by a group, except the two OAuth query
-    // schemas, which are query strings and not request bodies; the refresh body, which nest-auth
-    // declares for its bound and mounts on no controller family, because its routes read the raw
-    // body; and the schemas still pending.
+    // The artefact is complete: every schema is served by a group, except the query and path
+    // schemas (the two OAuth queries, the workspace page query and the member route parameters),
+    // which are not request bodies; the refresh body, which nest-auth declares for its bound and
+    // mounts on no controller family, because its routes read the raw body; and the schemas still
+    // pending.
     let mut unserved: Vec<String> = request_schemas()
         .into_keys()
         .filter(|name| !all.contains_key(name))
         .collect();
     unserved.sort_unstable();
     let mut expected: Vec<&str> = [
+        "MemberRouteParamsDto",
         "OAuthCallbackQueryDto",
         "OAuthInitiateQueryDto",
         "RefreshTokenBodyDto",
+        "WorkspacePageQueryDto",
     ]
     .into_iter()
     .chain(crate::pending::PENDING_SCHEMAS)
@@ -223,6 +227,7 @@ fn nothing() -> RouteGroups {
         oauth: false,
         invitations: false,
         email_change: false,
+        workspaces: false,
     }
 }
 
@@ -252,7 +257,7 @@ fn the_scheme_names_are_the_closed_vocabulary_nest_auth_uses() {
 #[test]
 fn a_deployment_defines_only_the_schemes_it_can_satisfy() {
     // (the groups mounted, the schemes under Cookie, under Bearer, under Both)
-    let cases: [(&str, RouteGroups, [Vec<&str>; 3]); 11] = [
+    let cases: [(&str, RouteGroups, [Vec<&str>; 3]); 12] = [
         ("nothing", nothing(), [vec![], vec![], vec![]]),
         // OAuth's operations are public and name no credential: mounted alone it defines nothing.
         (
@@ -327,6 +332,18 @@ fn a_deployment_defines_only_the_schemes_it_can_satisfy() {
             "invitations reads no refresh cookie",
             RouteGroups {
                 invitations: true,
+                ..nothing()
+            },
+            [
+                vec![ACCESS_COOKIE_SCHEME],
+                vec![ACCESS_BEARER_SCHEME],
+                vec![ACCESS_COOKIE_SCHEME, ACCESS_BEARER_SCHEME],
+            ],
+        ),
+        (
+            "workspaces reads no refresh cookie",
+            RouteGroups {
+                workspaces: true,
                 ..nothing()
             },
             [
@@ -475,6 +492,7 @@ fn a_document_default_never_names_a_scheme_the_deployment_does_not_define() {
             oauth: true,
             invitations: true,
             email_change: true,
+            workspaces: true,
         };
         let defined_here = defined(delivery, everything);
         for guard in [GuardFamily::Dashboard, GuardFamily::Platform] {
@@ -508,6 +526,7 @@ fn a_group_is_mounted_exactly_when_its_own_toggle_is_on() {
         RouteGroup::EmailChange,
         RouteGroup::Sessions,
         RouteGroup::OAuth,
+        RouteGroup::Workspaces,
     ];
     for group in every {
         for other in every {

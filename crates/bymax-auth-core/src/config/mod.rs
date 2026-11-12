@@ -20,6 +20,9 @@ mod cookie_prefix_tests;
 mod profiles;
 pub mod resolvers;
 mod validate;
+mod workspaces;
+#[cfg(test)]
+mod workspaces_tests;
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -32,6 +35,8 @@ pub use resolvers::{
     CookieDomainResolver, MaxSessionsResolver, RequestParts, TenantIdResolver, TenantResolveError,
 };
 pub use validate::ResolvedConfig;
+pub(crate) use workspaces::ResolvedWorkspaces;
+pub use workspaces::{WorkspacePermissionsConfig, WorkspaceRolesConfig, WorkspacesConfig};
 
 /// The JWT signing algorithm. A single-variant enum so an asymmetric algorithm is
 /// *unrepresentable* — algorithm confusion is impossible by construction.
@@ -613,6 +618,8 @@ pub struct ControllerToggles {
     pub invitations: bool,
     /// Mount the address-change routes, default false. Opt-in.
     pub email_change: bool,
+    /// Mount the workspace routes (opt-in; requires `workspaces.enabled`), default false.
+    pub workspaces: bool,
 }
 
 impl Default for ControllerToggles {
@@ -626,6 +633,7 @@ impl Default for ControllerToggles {
             platform: false,
             oauth: false,
             invitations: false,
+            workspaces: false,
         }
     }
 }
@@ -706,4 +714,6 @@ pub struct AuthConfig {
     pub enforce_tenant_binding: bool,
     /// Scoped service API keys for machine callers; off unless `api_keys.enabled`.
     pub api_keys: ApiKeysConfig,
+    /// The workspace layer; off unless `workspaces.enabled`.
+    pub workspaces: WorkspacesConfig,
 }
