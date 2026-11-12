@@ -22,8 +22,8 @@ use super::{
     AcceptInvitationDto, ChangeEmailDto, ChangePasswordDto, ConfirmEmailChangeDto,
     CreateInvitationDto, ForgotPasswordDto, LoginDto, MfaChallengeDto, MfaDisableDto,
     MfaRegenerateRecoveryCodesDto, MfaSetupDto, MfaVerifyDto, OAuthCallbackQuery,
-    OAuthInitiateQuery, PlatformLoginDto, RegisterDto, ResendOtpDto, ResendVerificationDto,
-    ResetPasswordDto, RevokeInvitationDto, VerifyEmailDto, VerifyOtpDto,
+    OAuthInitiateQuery, PlatformLoginDto, RefreshDto, RegisterDto, ResendOtpDto,
+    ResendVerificationDto, ResetPasswordDto, RevokeInvitationDto, VerifyEmailDto, VerifyOtpDto,
 };
 
 const ARTEFACT: &str = include_str!("../../../../conformance/openapi-request-schemas.json");
@@ -40,8 +40,8 @@ fn accepts<T: DeserializeOwned + Validate<Context = ()>>(body: &Value) -> bool {
 }
 
 /// Every schema in the artefact and the DTO that answers it. The names differ for the two OAuth
-/// query types only.
-pub(super) const DTOS: [(&str, Accepts); 22] = [
+/// query types and for `RefreshDto`, which answers `RefreshTokenBodyDto`.
+pub(super) const DTOS: [(&str, Accepts); 23] = [
     ("AcceptInvitationDto", accepts::<AcceptInvitationDto>),
     ("ChangeEmailDto", accepts::<ChangeEmailDto>),
     ("ChangePasswordDto", accepts::<ChangePasswordDto>),
@@ -60,6 +60,7 @@ pub(super) const DTOS: [(&str, Accepts); 22] = [
     ("OAuthCallbackQueryDto", accepts::<OAuthCallbackQuery>),
     ("OAuthInitiateQueryDto", accepts::<OAuthInitiateQuery>),
     ("PlatformLoginDto", accepts::<PlatformLoginDto>),
+    ("RefreshTokenBodyDto", accepts::<RefreshDto>),
     ("RegisterDto", accepts::<RegisterDto>),
     ("ResendOtpDto", accepts::<ResendOtpDto>),
     ("ResendVerificationDto", accepts::<ResendVerificationDto>),
@@ -454,7 +455,7 @@ fn every_schema_has_a_dto_and_the_rust_only_ones_are_named() {
     assert_eq!(mapped, in_artefact);
     assert!(
         !in_artefact.contains("RefreshDto"),
-        "RefreshDto is a Rust-only body"
+        "RefreshDto answers RefreshTokenBodyDto, under the artefact's name"
     );
 }
 

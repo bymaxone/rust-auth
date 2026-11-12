@@ -491,6 +491,7 @@ pub(crate) mod test_support {
     pub(crate) struct CapturingEmails {
         verification: std::sync::Mutex<Option<String>>,
         password_reset: std::sync::Mutex<Option<String>>,
+        email_change: std::sync::Mutex<Option<String>>,
     }
 
     impl CapturingEmails {
@@ -508,6 +509,12 @@ pub(crate) mod test_support {
         /// [`Self::verification_code`] for why it consumes.
         pub(crate) fn password_reset_code(&self) -> Option<String> {
             self.password_reset.lock().ok().and_then(|mut c| c.take())
+        }
+
+        /// Take the last address-change token sent, leaving the mailbox empty. See
+        /// [`Self::verification_code`] for why it consumes.
+        pub(crate) fn email_change_token(&self) -> Option<String> {
+            self.email_change.lock().ok().and_then(|mut c| c.take())
         }
     }
 
@@ -550,9 +557,12 @@ pub(crate) mod test_support {
             &self,
             _tenant_id: &str,
             _new_email: &str,
-            _token: &str,
+            token: &str,
             _locale: Option<&str>,
         ) -> Result<(), crate::traits::EmailError> {
+            if let Ok(mut slot) = self.email_change.lock() {
+                *slot = Some(token.to_owned());
+            }
             Ok(())
         }
         async fn send_mfa_enabled(

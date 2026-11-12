@@ -171,16 +171,22 @@ fn a_group_left_off_contributes_nothing_and_the_groups_add_up() {
     }
     assert_eq!(all, expected);
     // The artefact is complete: every schema is served by a group, except the two OAuth query
-    // schemas, which are query strings and not request bodies, and the schemas still pending.
+    // schemas, which are query strings and not request bodies; the refresh body, which nest-auth
+    // declares for its bound and mounts on no controller family, because its routes read the raw
+    // body; and the schemas still pending.
     let mut unserved: Vec<String> = request_schemas()
         .into_keys()
         .filter(|name| !all.contains_key(name))
         .collect();
     unserved.sort_unstable();
-    let mut expected: Vec<&str> = ["OAuthCallbackQueryDto", "OAuthInitiateQueryDto"]
-        .into_iter()
-        .chain(crate::pending::PENDING_SCHEMAS)
-        .collect();
+    let mut expected: Vec<&str> = [
+        "OAuthCallbackQueryDto",
+        "OAuthInitiateQueryDto",
+        "RefreshTokenBodyDto",
+    ]
+    .into_iter()
+    .chain(crate::pending::PENDING_SCHEMAS)
+    .collect();
     expected.sort_unstable();
     assert_eq!(unserved, expected);
 }

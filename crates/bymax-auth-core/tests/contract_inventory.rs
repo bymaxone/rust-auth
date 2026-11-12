@@ -138,10 +138,12 @@ fn every_section_of_the_contract_is_read_or_pending() {
                 "identifierPreimages",
                 "mfaTransitionLock",
                 "passwordHashFormat",
+                "passwordResetOrder",
                 "rateLimits",
                 "recordEncodings",
                 "recoveryCodeClaim",
                 "redisKeyPrefixes",
+                "refreshTokenInput",
                 "requestEncoding",
                 "requestFieldBounds",
                 "responseBodies",
@@ -158,17 +160,7 @@ fn every_section_of_the_contract_is_read_or_pending() {
             ],
             // `version` is covered by the byte pin of the whole file.
             &["version"],
-            &[
-                (
-                    "passwordResetOrder",
-                    "unassigned: behaviour exists, no test reads the section",
-                ),
-                (
-                    "refreshTokenInput",
-                    "unassigned: behaviour exists, no test reads the section",
-                ),
-                ("workspaceRealtime", "13.9"),
-            ],
+            &[("workspaceRealtime", "13.9")],
         ),
     );
 }
@@ -215,14 +207,12 @@ fn every_request_field_bound_is_read_or_pending() {
                 "role",
                 "memberUserId",
                 "workspaceName",
+                "opaqueToken",
                 "pageLimit",
                 "pathParameters",
             ],
             &[],
-            &[(
-                "opaqueToken",
-                "unassigned: the 2048 bound is written in dto.rs and not read from here",
-            )],
+            &[],
         ),
     );
 }
@@ -243,12 +233,10 @@ fn every_record_encoding_is_read_or_pending() {
                 "logoutPending",
                 "passwordResetContext",
                 "oauthState",
+                "emailChangeContext",
             ],
             &[],
-            &[(
-                "emailChangeContext",
-                "unassigned: no test reads the record by name",
-            )],
+            &[],
         ),
     );
 }

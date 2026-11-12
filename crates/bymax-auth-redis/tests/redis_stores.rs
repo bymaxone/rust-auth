@@ -11,6 +11,8 @@
 //! and passes.
 
 mod common;
+#[path = "redis_stores/email_change_record.rs"]
+mod email_change_record;
 #[path = "redis_stores/grace_successor.rs"]
 mod grace_successor;
 #[path = "redis_stores/logout_pending.rs"]

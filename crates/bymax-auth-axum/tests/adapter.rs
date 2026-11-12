@@ -48,6 +48,9 @@ mod logout_failure;
 #[path = "adapter/refresh_cookie_bound.rs"]
 mod refresh_cookie_bound;
 
+#[path = "adapter/refresh_token_input.rs"]
+mod refresh_token_input;
+
 #[path = "adapter/otp_failure_answers.rs"]
 mod otp_failure_answers;
 
