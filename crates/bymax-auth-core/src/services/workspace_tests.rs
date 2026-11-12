@@ -128,8 +128,16 @@ async fn a_surface_declaring_no_role_and_a_blank_credential_are_refused_before_a
     let nothing = AcceptedRoles::Roles(Vec::new());
     let forbidden = authorize(&f, ("t1", "u1", "\u{0}"), &nothing, false).await;
     assert!(matches!(forbidden, Err(AuthError::Forbidden)));
-    for (tenant, user) in [(" ", "u1"), ("t1", "\u{feff}"), ("", "u1")] {
-        let refused = authorize(&f, (tenant, user, "w-active"), &ANY, false).await;
+    // Each blank operand alone is enough, and it is refused before the workspace id is judged: a
+    // malformed id beside it is not what the answer names.
+    for (tenant, user, workspace) in [
+        (" ", "u1", "w-active"),
+        ("t1", "\u{feff}", "w-active"),
+        ("", "u1", "w-active"),
+        (" ", "u1", "\u{0}"),
+        ("t1", " ", "\u{0}"),
+    ] {
+        let refused = authorize(&f, (tenant, user, workspace), &ANY, false).await;
         assert!(
             matches!(refused, Err(AuthError::TokenInvalid)),
             "{tenant:?} {user:?}"
@@ -340,4 +348,20 @@ fn a_half_configured_layer_fails_at_startup() {
     // Off, with nothing supplied, the layer is simply absent.
     let off = assemble(base_config(), |builder| builder);
     assert!(matches!(off, Ok(engine) if !engine.workspaces_enabled()));
+}
+
+#[test]
+fn the_members_permission_is_the_configured_one_and_any_member_by_default() {
+    let Some(default) = build(config()) else { return };
+    assert_eq!(
+        default.engine.workspace_view_members_roles(),
+        Some(&AcceptedRoles::AnyMember)
+    );
+    let mut cfg = config();
+    cfg.workspaces.permissions.view_members = AcceptedRoles::roles(["admin"]);
+    let Some(configured) = build(cfg) else { return };
+    assert_eq!(
+        configured.engine.workspace_view_members_roles(),
+        Some(&AcceptedRoles::roles(["admin"]))
+    );
 }

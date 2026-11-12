@@ -19,6 +19,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use bymax_auth_core::services::workspace::{MyWorkspaces, PageQuery, WorkspaceAccessView};
 use bymax_auth_core::workspace::domain::{Membership, Page, Workspace};
+use bymax_auth_types::AuthError;
 use http::StatusCode;
 use serde_json::{Value, json};
 use time::{OffsetDateTime, UtcOffset};
@@ -70,14 +71,13 @@ async fn list(
     ValidatedQuery(query): ValidatedQuery<WorkspacePageQueryDto>,
 ) -> Response {
     let claims = status.0;
-    match state
+    let listed = state
         .engine()
         .list_my_workspaces(&claims.tenant_id, &claims.sub, page_of(&query))
-        .await
-    {
-        Ok(page) => (StatusCode::OK, Json(my_workspaces_body(&page))).into_response(),
-        Err(error) => error_response(&error),
-    }
+        .await;
+    answer(listed, |page| {
+        (StatusCode::OK, Json(my_workspaces_body(&page))).into_response()
+    })
 }
 
 /// `GET /auth/workspaces/{workspaceId}/access` (200): the workspace and the caller's role in it.
@@ -85,10 +85,10 @@ async fn access(
     State(state): State<AuthState>,
     RequireWorkspace(member, _): RequireWorkspace<AnyWorkspaceMember>,
 ) -> Response {
-    match state.engine().workspace_access(&member).await {
-        Ok(view) => (StatusCode::OK, Json(access_body(&view))).into_response(),
-        Err(error) => error_response(&error),
-    }
+    let view = state.engine().workspace_access(&member).await;
+    answer(view, |view| {
+        (StatusCode::OK, Json(access_body(&view))).into_response()
+    })
 }
 
 /// `GET /auth/workspaces/{workspaceId}/members` (200): one page of the workspace's members in
@@ -100,14 +100,13 @@ async fn members(
     RequireWorkspace(member, _): RequireWorkspace<ViewMembers>,
     ValidatedQuery(query): ValidatedQuery<WorkspacePageQueryDto>,
 ) -> Response {
-    match state
+    let listed = state
         .engine()
         .list_workspace_members(&member, page_of(&query))
-        .await
-    {
-        Ok(page) => (StatusCode::OK, Json(members_body(&page))).into_response(),
-        Err(error) => error_response(&error),
-    }
+        .await;
+    answer(listed, |page| {
+        (StatusCode::OK, Json(members_body(&page))).into_response()
+    })
 }
 
 /// `POST /auth/workspaces/{workspaceId}/switch` (204): records the workspace as the caller's last
@@ -117,10 +116,14 @@ async fn switch(
     State(state): State<AuthState>,
     RequireWorkspace(member, _): RequireWorkspace<AnyWorkspaceMember>,
 ) -> Response {
-    match state.engine().switch_workspace(&member).await {
-        Ok(()) => StatusCode::NO_CONTENT.into_response(),
-        Err(error) => error_response(&error),
-    }
+    let switched = state.engine().switch_workspace(&member).await;
+    answer(switched, |()| StatusCode::NO_CONTENT.into_response())
+}
+
+/// The response for an engine result: `ok` builds the success, and every error renders its own
+/// envelope the same way on every route of the group.
+fn answer<T>(result: Result<T, AuthError>, ok: impl FnOnce(T) -> Response) -> Response {
+    result.map_or_else(|error| error_response(&error), ok)
 }
 
 /// An instant as `Date.prototype.toISOString` writes it: UTC, milliseconds, `Z`, and a six-digit

@@ -182,6 +182,25 @@ async fn the_access_route_answers_the_workspace_and_the_callers_role() {
     assert_eq!(banned.json()["error"]["code"], "auth.account_banned");
 }
 
+#[tokio::test]
+async fn the_access_route_answers_404_when_the_workspace_left_active_after_the_guard_admitted() {
+    let Some((h, app, user, access)) = signed_in().await else { return };
+    h.workspaces.seed_workspace("w1", WorkspaceStatus::Active);
+    h.workspaces
+        .seed_member("w1", &user, "admin", MembershipStatus::Active);
+    let first = get(&app, "/auth/workspaces/w1/access", &access).await;
+    assert_eq!(first.status, StatusCode::OK);
+    // A suspension the writer has not bumped: the guard still admits from the cached entry, and
+    // the handler's own read of the workspace is what refuses.
+    h.workspaces
+        .seed_workspace("w1", WorkspaceStatus::Suspended);
+    let refused = get(&app, "/auth/workspaces/w1/access", &access).await;
+    assert_eq!(refused.status, StatusCode::NOT_FOUND);
+    assert_eq!(refused.json()["error"]["code"], "auth.workspace_not_found");
+    let operations = h.workspaces.cache.operations();
+    assert_eq!(operations, ["read", "fill", "read"], "{operations:?}");
+}
+
 /// The caller in w1, w2 and w3 (w2 suspended for it), and another account in w1.
 fn seed_lists(h: &common::Harness, user: &str) {
     let w = &h.workspaces;

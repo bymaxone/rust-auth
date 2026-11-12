@@ -7,6 +7,7 @@ use std::sync::Arc;
 
 use axum::Router;
 use axum::body::Body;
+use axum::extract::FromRequestParts;
 use axum::extract::Path;
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
@@ -29,7 +30,7 @@ use serde_json::Value;
 use time::OffsetDateTime;
 use tower::ServiceExt;
 
-use super::workspace::{AnyWorkspaceMember, RequireWorkspace, WorkspacePolicy};
+use super::workspace::{AnyWorkspaceMember, RequireWorkspace, ViewMembers, WorkspacePolicy};
 use crate::dto::MemberRouteParamsDto;
 use crate::response::error_response;
 use crate::state::AuthState;
@@ -76,10 +77,9 @@ async fn member_route(
     }
 }
 
-/// The router the tests drive, its state, and the repository the rows are seeded into.
-async fn app() -> Option<(Router, Arc<InMemoryWorkspaces>, String)> {
-    let users = Arc::new(InMemoryUserRepository::new());
-    let repo = Arc::new(InMemoryWorkspaces::new());
+/// A workspace-enabled configuration, bearer delivery, with `view_members` as the members
+/// permission: owner over admin over member.
+fn config(view_members: AcceptedRoles) -> AuthConfig {
     let mut config = AuthConfig::default();
     config.jwt.secret = SecretString::from(SECRET.to_owned());
     config.token_delivery = TokenDelivery::Bearer;
@@ -94,8 +94,16 @@ async fn app() -> Option<(Router, Arc<InMemoryWorkspaces>, String)> {
         ("member".to_owned(), Vec::new()),
     ]);
     config.workspaces.roles.owner_role = "owner".to_owned();
+    config.workspaces.permissions.view_members = view_members;
+    config
+}
+
+/// The router the tests drive, the state behind it, and the caller's access token.
+async fn app_with(view_members: AcceptedRoles) -> Option<(Router, AuthState, String)> {
+    let users = Arc::new(InMemoryUserRepository::new());
+    let repo = Arc::new(InMemoryWorkspaces::new());
     let engine = AuthEngine::builder()
-        .config(config)
+        .config(config(view_members))
         .environment(Environment::Test)
         .user_repository(users.clone())
         .redis_stores(Arc::new(InMemoryStores::new()))
@@ -122,8 +130,9 @@ async fn app() -> Option<(Router, Arc<InMemoryWorkspaces>, String)> {
         .route("/w/{workspaceId}/m/{userId}", get(member_route))
         .route("/plain", get(role::<AnyWorkspaceMember>))
         .route("/other/{id}", get(role::<AnyWorkspaceMember>))
-        .with_state(state);
-    Some((router, repo, token))
+        .route("/members/{workspaceId}", get(role::<ViewMembers>))
+        .with_state(state.clone());
+    Some((router, state, token))
 }
 
 /// The caller is an active member of `w-member`, an active admin of `w-admin` and the owner of
@@ -154,6 +163,11 @@ fn seed_rows(repo: &InMemoryWorkspaces, user: &str) {
             updated_at: at,
         });
     }
+}
+
+/// The router of [`app_with`] under the default members permission, every active member.
+async fn app() -> Option<(Router, AuthState, String)> {
+    app_with(AcceptedRoles::AnyMember).await
 }
 
 /// Sends `GET path` with the caller's token: the status, the error code and the body text.
@@ -241,5 +255,45 @@ async fn a_route_that_cannot_name_a_workspace_is_refused_as_requiring_one() {
     // A capture that is not UTF-8 once decoded is a malformed request, not a lookup.
     let (status, body, _) = get_as(&app, "/admins/%FF", &token).await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
-    assert_ne!(body["error"]["code"], "auth.workspace_not_found");
+    assert_eq!(body["error"]["message"], "Malformed request");
+    assert_ne!(body["error"]["code"], "auth.workspace_required");
+}
+
+#[tokio::test]
+async fn a_capture_the_router_never_recorded_is_a_route_requiring_a_workspace() {
+    // Parts that no router matched carry no captures at all, which axum reports as its own fault
+    // (a 500, not a client error), unlike a capture that is not UTF-8 (a 400).
+    let Some((_, state, token)) = app().await else { return };
+    let (mut parts, ()) = Request::builder()
+        .uri("/w/w-member")
+        .header(http::header::AUTHORIZATION, format!("Bearer {token}"))
+        .body(())
+        .unwrap_or_default()
+        .into_parts();
+    let refused =
+        RequireWorkspace::<AnyWorkspaceMember>::from_request_parts(&mut parts, &state).await;
+    let response = refused.map(|_| ()).map_err(IntoResponse::into_response);
+    let Err(response) = response else { return };
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let bytes = response
+        .into_body()
+        .collect()
+        .await
+        .map(|c| c.to_bytes())
+        .unwrap_or_default();
+    let body: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+    assert_eq!(body["error"]["code"], "auth.workspace_required");
+}
+
+#[tokio::test]
+async fn the_members_permission_is_the_configured_roles_and_every_member_by_default() {
+    let Some((app, _, token)) = app().await else { return };
+    let (status, _, text) = get_as(&app, "/members/w-member", &token).await;
+    assert_eq!((status, text.as_str()), (StatusCode::OK, "member"));
+    let Some((app, _, token)) = app_with(AcceptedRoles::roles(["admin"])).await else { return };
+    let (status, _, text) = get_as(&app, "/members/w-admin", &token).await;
+    assert_eq!((status, text.as_str()), (StatusCode::OK, "admin"));
+    let (status, body, _) = get_as(&app, "/members/w-member", &token).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert_eq!(body["error"]["code"], "auth.insufficient_workspace_role");
 }
