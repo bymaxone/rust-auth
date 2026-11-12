@@ -8,7 +8,10 @@
 //! present in the artefact and absent from the crate: the slice that builds one has to delete its
 //! entry, and a gap that is not listed fails the build.
 
-/// Request schemas the artefact carries that have no DTO here yet.
+/// Request schemas the artefact carries that no `dto::DECLARED` row maps to yet.
+///
+/// `RefreshTokenBodyDto` already has a Rust counterpart, `RefreshDto`, with the same property and
+/// bound; what is pending is mapping it to the schema. Every other entry has no DTO at all.
 pub(crate) const PENDING_SCHEMAS: [&str; 13] = [
     "AcceptWorkspaceInvitationDto",
     "AcceptWorkspaceInvitationSignupDto",
