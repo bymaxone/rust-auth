@@ -16,11 +16,13 @@ pub mod email;
 pub mod hooks;
 pub mod http;
 mod logout_owner;
+pub mod membership_repository;
 pub mod oauth;
 pub mod rate_limit;
 pub mod repository;
 pub mod store;
 pub mod user_status_cache;
+pub mod workspace_repository;
 
 #[cfg(feature = "api-keys")]
 pub use api_key::{ApiKey, ApiKeyPrincipal, ApiKeyRepository, ApiKeySummary, NewApiKey};
@@ -48,6 +50,8 @@ pub use hooks::{
 #[doc(inline)]
 pub use http::{HttpClient, HttpError, HttpMethod, HttpRequest, HttpResponse};
 #[doc(inline)]
+pub use membership_repository::MembershipRepository;
+#[doc(inline)]
 pub use oauth::{OAuthProfile, OAuthProvider, OAuthProviderError, OAuthProviders, OAuthTokens};
 #[doc(inline)]
 pub use rate_limit::RateLimitStore;
@@ -68,3 +72,5 @@ pub use store::{
 };
 #[doc(inline)]
 pub use user_status_cache::UserStatusCacheStore;
+#[doc(inline)]
+pub use workspace_repository::WorkspaceRepository;

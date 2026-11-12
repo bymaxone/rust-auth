@@ -37,6 +37,7 @@ use crate::traits::{
 pub use crate::traits::{NoOpAuthHooks, NoOpEmailProvider};
 #[cfg(feature = "api-keys")]
 pub use api_key::{InMemoryApiKeyRepository, ManualApiKeyClock};
+pub use workspace::InMemoryWorkspaces;
 
 /// Acquire a mutex guard, recovering the inner value if the lock was poisoned (a test
 /// double never needs to escalate a poisoned lock to a panic).
@@ -1747,6 +1748,12 @@ mod logout_pending;
 mod otp_cooldown;
 mod rate_limit;
 mod user_status;
+mod workspace;
+#[cfg(test)]
+mod workspace_member_tests;
+mod workspace_members;
+#[cfg(test)]
+mod workspace_tests;
 
 #[cfg(test)]
 mod tests {

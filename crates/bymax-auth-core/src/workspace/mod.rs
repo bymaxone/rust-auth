@@ -5,10 +5,15 @@
 //! the subjects and Redis key identifiers (`keys`), the host-facing scoped name
 //! (`scoped_name`), the request bounds (`bounds`) and the lifetimes and limits (`limits`).
 
+pub mod audit;
 pub mod bounds;
+pub mod domain;
 pub mod keys;
 pub mod limits;
+pub mod roles;
 pub mod scoped_name;
 
+#[cfg(test)]
+mod domain_tests;
 #[cfg(test)]
 mod tests;

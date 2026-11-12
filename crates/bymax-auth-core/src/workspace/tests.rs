@@ -371,20 +371,10 @@ fn the_limits_are_the_contracts() {
 }
 
 #[test]
-fn the_bounds_are_the_contracts() {
+fn the_path_parameter_bounds_are_the_contracts_and_name_the_same_parameters() {
     let root = contract();
     let bounds = &root["requestFieldBounds"];
     let read = |entry: &Value, key: &str| entry[key].as_u64().unwrap_or(u64::MAX);
-    assert_eq!(read(&bounds["workspaceName"], "min"), 1);
-    assert_eq!(
-        read(&bounds["workspaceName"], "max"),
-        super::bounds::WORKSPACE_NAME_MAX_CHARS as u64
-    );
-    assert_eq!(
-        read(&bounds["memberUserId"], "max"),
-        IDENTIFIER_MAX_CHARS as u64
-    );
-    assert_eq!(read(&bounds["memberUserId"], "min"), 1);
     let checked = ["workspaceId", "userId"];
     let named: std::collections::BTreeSet<&str> = bounds["pathParameters"]
         .as_object()
@@ -403,6 +393,23 @@ fn the_bounds_are_the_contracts() {
         );
         assert_eq!(read(&bounds["pathParameters"][field], "min"), 1);
     }
+}
+
+#[test]
+fn the_bounds_are_the_contracts() {
+    let root = contract();
+    let bounds = &root["requestFieldBounds"];
+    let read = |entry: &Value, key: &str| entry[key].as_u64().unwrap_or(u64::MAX);
+    assert_eq!(read(&bounds["workspaceName"], "min"), 1);
+    assert_eq!(
+        read(&bounds["workspaceName"], "max"),
+        super::bounds::WORKSPACE_NAME_MAX_CHARS as u64
+    );
+    assert_eq!(
+        read(&bounds["memberUserId"], "max"),
+        IDENTIFIER_MAX_CHARS as u64
+    );
+    assert_eq!(read(&bounds["memberUserId"], "min"), 1);
     assert_eq!(read(&bounds["pageLimit"], "min"), 1);
     assert_eq!(read(&bounds["pageLimit"], "max"), u64::from(PAGE_LIMIT_MAX));
     assert_eq!(
