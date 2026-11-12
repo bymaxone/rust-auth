@@ -129,12 +129,46 @@ async fn an_unchecked_route_does_not_refuse_a_declared_encoding() {
     }
 }
 
+/// `whenBody` routes the contract lists that this router does not serve yet. Until a slice
+/// serves one, a request without a body is still refused by the encoding layer like any other
+/// unlisted route, which [`a_pending_when_body_route_is_still_refused_without_a_body`] requires:
+/// the slice that serves it has to delete its entry here, and a route the contract adds that is
+/// not listed fails [`a_when_body_route_refuses_only_a_request_that_carries_a_body`].
+const PENDING_WHEN_BODY: [&str; 3] = [
+    "POST workspaces/:workspaceId/leave",
+    "POST workspaces/:workspaceId/restore",
+    "POST workspaces/:workspaceId/switch",
+];
+
+#[tokio::test]
+async fn a_pending_when_body_route_is_still_refused_without_a_body() {
+    let Some((app, credentials)) = every_surface().await else {
+        return;
+    };
+    let in_contract = routes("whenBody");
+    for route in PENDING_WHEN_BODY {
+        assert!(
+            in_contract.contains(route),
+            "{route} is pending but the contract does not list it"
+        );
+        let empty = gzip_request(route, b"", &credentials).send(&app).await;
+        assert_eq!(
+            empty.status,
+            StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            "{route} is served; remove it from PENDING_WHEN_BODY"
+        );
+    }
+}
+
 #[tokio::test]
 async fn a_when_body_route_refuses_only_a_request_that_carries_a_body() {
     let Some((app, credentials)) = every_surface().await else {
         return;
     };
-    let when_body = routes("whenBody");
+    let when_body: Vec<String> = routes("whenBody")
+        .into_iter()
+        .filter(|route| !PENDING_WHEN_BODY.contains(&route.as_str()))
+        .collect();
     assert!(
         !when_body.is_empty(),
         "the contract lists no whenBody routes"

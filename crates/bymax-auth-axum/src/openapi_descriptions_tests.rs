@@ -12,7 +12,7 @@ const CONFORMANCE_COPY: &str =
     include_str!("../../../conformance/openapi-request-descriptions.json");
 /// The digest of the artefact the parity tests were written against. A new release of the
 /// artefact fails them until they and this digest move together.
-const ARTEFACT_SHA256: &str = "9a60efcf236b3e2e75e0890833b191b651415aa8e7647713d3533bbb87e93d01";
+const ARTEFACT_SHA256: &str = "81b6e5aaced9e463dbd61b928dca1b59dbe1b669d4402b3fc9b27e237f476c07";
 
 fn shared() -> Value {
     serde_json::from_str::<Value>(CONFORMANCE_COPY)

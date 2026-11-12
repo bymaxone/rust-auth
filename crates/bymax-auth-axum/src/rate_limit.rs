@@ -335,11 +335,11 @@ mod tests {
             .unwrap_or(serde_json::Value::Null)
     }
 
-    #[test]
-    fn every_default_limit_matches_the_shared_wire_contract() {
-        let contract = contract_limits();
-        let defaults = RateLimitConfig::default();
-        let pairs: [(&str, Option<RateLimit>); 27] = [
+    /// Every default limit this crate carries, under the name the contract gives it.
+    fn defaults_by_contract_name(
+        defaults: &RateLimitConfig,
+    ) -> [(&'static str, Option<RateLimit>); 27] {
+        [
             ("login", defaults.login),
             ("register", defaults.register),
             ("refresh", defaults.refresh),
@@ -367,7 +367,58 @@ mod tests {
             ("changePassword", defaults.change_password),
             ("logout", defaults.logout),
             ("wsTicket", defaults.ws_ticket),
-        ];
+        ]
+    }
+
+    /// Limits the contract names that this crate has no default for yet, with the slice that adds
+    /// each. The contract comparison leaves them out, and
+    /// [`the_pending_limits_are_still_unbuilt`] requires each to be absent from the defaults and
+    /// present in the contract, so the slice that builds a limit has to delete its entry, and a
+    /// limit the contract adds that is not listed fails the build.
+    const PENDING_LIMITS: [&str; 19] = [
+        "workspaceAccess",
+        "workspaceChangeRole",
+        "workspaceCreate",
+        "workspaceInvitationAccept",
+        "workspaceInvitationAcceptSignup",
+        "workspaceInvitationPreview",
+        "workspaceInvitationResend",
+        "workspaceInvitationRevoke",
+        "workspaceInvitations",
+        "workspaceInvite",
+        "workspaceLeave",
+        "workspaceList",
+        "workspaceMembers",
+        "workspaceRemoveMember",
+        "workspaceRename",
+        "workspaceRestore",
+        "workspaceScheduleDeletion",
+        "workspaceSwitch",
+        "workspaceTransferOwnership",
+    ];
+
+    #[test]
+    fn the_pending_limits_are_still_unbuilt() {
+        let contract = contract_limits();
+        let defaults = RateLimitConfig::default();
+        let built = defaults_by_contract_name(&defaults);
+        for name in PENDING_LIMITS {
+            assert!(
+                contract.get(name).is_some(),
+                "{name} is pending but the contract does not name it"
+            );
+            assert!(
+                built.iter().all(|(built_name, _)| *built_name != name),
+                "{name} has a default; remove it from PENDING_LIMITS"
+            );
+        }
+    }
+
+    #[test]
+    fn every_default_limit_matches_the_shared_wire_contract() {
+        let contract = contract_limits();
+        let defaults = RateLimitConfig::default();
+        let pairs = defaults_by_contract_name(&defaults);
 
         for (name, limit) in pairs {
             assert!(limit.is_some(), "{name} has no default limit");
@@ -384,7 +435,12 @@ mod tests {
         // is a route whose limit nobody agreed on.
         let named = contract
             .as_object()
-            .map(|table| table.keys().filter(|key| !key.starts_with('$')).count())
+            .map(|table| {
+                table
+                    .keys()
+                    .filter(|key| !key.starts_with('$') && !PENDING_LIMITS.contains(&key.as_str()))
+                    .count()
+            })
             .unwrap_or_default();
         assert_eq!(named, pairs.len());
     }

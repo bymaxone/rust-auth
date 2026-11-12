@@ -117,10 +117,40 @@ mod tests {
         list.iter().map(|item| (*item).to_owned()).collect()
     }
 
+    /// Routes the contract lists under `whenBody` that this crate does not serve yet, with the
+    /// slice that serves each. The comparison below leaves them out of the contract's side, and
+    /// [`the_pending_when_body_routes_are_still_unbuilt`] requires each to be missing from
+    /// [`WHEN_BODY`] and present in the contract, so the slice that builds a route has to delete
+    /// its entry, and a route the contract adds that is not listed fails the build.
+    const PENDING_WHEN_BODY: [&str; 3] = [
+        "POST workspaces/:workspaceId/leave",
+        "POST workspaces/:workspaceId/restore",
+        "POST workspaces/:workspaceId/switch",
+    ];
+
+    #[test]
+    fn the_pending_when_body_routes_are_still_unbuilt() {
+        let in_contract = contract_list("whenBody");
+        for route in PENDING_WHEN_BODY {
+            assert!(
+                in_contract.contains(route),
+                "{route} is pending but the contract does not list it"
+            );
+            assert!(
+                !WHEN_BODY.contains(&route),
+                "{route} is built; remove it from PENDING_WHEN_BODY"
+            );
+        }
+    }
+
     #[test]
     fn the_exempt_lists_are_exactly_the_contracts() {
         assert_eq!(owned(&UNCHECKED), contract_list("unchecked"));
-        assert_eq!(owned(&WHEN_BODY), contract_list("whenBody"));
+        let built: BTreeSet<String> = contract_list("whenBody")
+            .into_iter()
+            .filter(|route| !PENDING_WHEN_BODY.contains(&route.as_str()))
+            .collect();
+        assert_eq!(owned(&WHEN_BODY), built);
         let methods: BTreeSet<String> = METHODS_NEVER_CHECKED
             .iter()
             .map(ToString::to_string)

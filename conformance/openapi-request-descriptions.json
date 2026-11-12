@@ -38,6 +38,15 @@
         }
       }
     },
+    "InviteToWorkspaceDto": {
+      "email": {
+        "description": "Trimmed and lowercased before validation and before the service sees it, so the stored identity matches the case-insensitive lookup and every e-mail-keyed control (brute-force counter, OTP records, reset tokens). Send any casing; the server canonicalises it.",
+        "probe": {
+          "input": "  MiXeD@Example.COM  ",
+          "expected": "mixed@example.com"
+        }
+      }
+    },
     "LoginDto": {
       "email": {
         "description": "Trimmed and lowercased before validation and before the service sees it, so the stored identity matches the case-insensitive lookup and every e-mail-keyed control (brute-force counter, OTP records, reset tokens). Send any casing; the server canonicalises it.",
@@ -111,6 +120,15 @@
       }
     },
     "VerifyOtpDto": {
+      "email": {
+        "description": "Trimmed and lowercased before validation and before the service sees it, so the stored identity matches the case-insensitive lookup and every e-mail-keyed control (brute-force counter, OTP records, reset tokens). Send any casing; the server canonicalises it.",
+        "probe": {
+          "input": "  MiXeD@Example.COM  ",
+          "expected": "mixed@example.com"
+        }
+      }
+    },
+    "WorkspaceInvitationEmailDto": {
       "email": {
         "description": "Trimmed and lowercased before validation and before the service sees it, so the stored identity matches the case-insensitive lookup and every e-mail-keyed control (brute-force counter, OTP records, reset tokens). Send any casing; the server canonicalises it.",
         "probe": {

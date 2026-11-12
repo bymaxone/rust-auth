@@ -122,7 +122,13 @@ fn the_declared_table_is_the_artefacts_schemas_and_each_dto_is_found_by_its_type
     let artefact: BTreeSet<String> = serde_json::from_str::<Value>(crate::request_schemas::JSON)
         .ok()
         .and_then(|root| root["schemas"].as_object().cloned())
-        .map(|schemas| schemas.keys().cloned().collect())
+        .map(|schemas| {
+            schemas
+                .keys()
+                .filter(|name| !crate::pending::PENDING_SCHEMAS.contains(&name.as_str()))
+                .cloned()
+                .collect()
+        })
         .unwrap_or_default();
     assert!(!artefact.is_empty());
     assert_eq!(
