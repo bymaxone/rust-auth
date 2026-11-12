@@ -16,6 +16,7 @@ use crate::workspace::audit::AuditKind;
 use crate::workspace::domain::{
     ActingMember, Membership, MembershipRef, MembershipStatus, WorkspaceRef, WorkspaceStatus,
 };
+use time::Duration;
 
 struct RoleCall<'a> {
     workspace: &'a str,
@@ -545,14 +546,84 @@ async fn the_last_active_workspace_is_remembered_per_tenant_and_member() {
 
 #[test]
 fn only_a_sort_key_in_the_shape_this_double_issues_is_followed() {
+    let wf = super::workspace::well_formed;
     let issued = super::workspace::sort_key(instant(7), "w1");
-    assert!(super::workspace::well_formed(&issued));
-    assert!(super::workspace::well_formed("00000000000000000007:"));
-    assert!(!super::workspace::well_formed(""));
-    assert!(!super::workspace::well_formed("0000000000000000000"));
-    assert!(!super::workspace::well_formed("0000000000000000000x:w1"));
-    assert!(!super::workspace::well_formed("00000000000000000007x"));
-    assert!(!super::workspace::well_formed("000000000000000000070:w1"));
+    assert!(wf(&issued));
+    assert!(wf(&format!("{}:", "0".repeat(22))));
+    assert!(!wf(""));
+    assert!(!wf(&"0".repeat(21)));
+    assert!(!wf(&format!("{}x:w1", "0".repeat(21))));
+    assert!(!wf(&format!("{}x", "0".repeat(22))));
+    assert!(!wf(&format!("{}:w1", "0".repeat(23))));
+}
+
+fn sole_of<'a>(cursor: Option<&'a str>, user_id: &'a str) -> ListSoleOwned<'a> {
+    ListSoleOwned {
+        owner: OwnedBy {
+            tenant_id: T,
+            user_id,
+            owner_role: OWNER,
+        },
+        cursor,
+        limit: 1,
+    }
+}
+
+#[tokio::test]
+async fn a_cursor_of_another_member_does_not_skip_that_members_earlier_rows() {
+    let repo = InMemoryWorkspaces::new();
+    assert!(create(&repo, "w1", "u2", 0).await);
+    for id in ["w5", "w6"] {
+        seed_workspace(&repo, id, WorkspaceStatus::Active, 100);
+        seed_member(&repo, id, "u1", OWNER, true);
+    }
+    let mine = repo.list_for_user(user(None, "u1")).await.ok();
+    let cursor = mine.and_then(|p| p.next_cursor);
+    assert!(cursor.is_some());
+    let theirs = repo.list_for_user(user(cursor.as_deref(), "u2")).await.ok();
+    let ids: Vec<String> = theirs.map_or_else(Vec::new, |p| {
+        p.items.into_iter().map(|i| i.workspace.id).collect()
+    });
+    assert_eq!(ids, ["w1"]);
+    let own = repo.list_sole_owned(sole_of(None, "u1")).await.ok();
+    let cursor = own.and_then(|p| p.next_cursor);
+    assert!(cursor.is_some());
+    let other = repo
+        .list_sole_owned(sole_of(cursor.as_deref(), "u2"))
+        .await
+        .ok();
+    assert_eq!(other, repo.list_sole_owned(sole_of(None, "u2")).await.ok());
+}
+
+#[tokio::test]
+async fn members_created_within_one_second_list_in_creation_order() {
+    let repo = InMemoryWorkspaces::new();
+    seed_workspace(&repo, "w1", WorkspaceStatus::Active, 1);
+    for (user, millis) in [("z", 100), ("a", 900)] {
+        let at = instant(1) + Duration::milliseconds(millis);
+        repo.seed_membership(Membership {
+            tenant_id: T.into(),
+            workspace_id: "w1".into(),
+            user_id: user.into(),
+            role: "member".into(),
+            status: MembershipStatus::Active,
+            invited_by_user_id: None,
+            created_at: at,
+            updated_at: at,
+        });
+    }
+    assert_eq!(member_ids(&repo, ws("w1")).await, ["z", "a"]);
+}
+
+#[test]
+fn sort_keys_order_by_the_full_instant_before_the_id() {
+    let at = |millis: i64| instant(1) + Duration::milliseconds(millis);
+    let late_a = super::workspace::sort_key(at(900), "a");
+    let early_z = super::workspace::sort_key(at(100), "z");
+    assert!(early_z < late_a);
+    let before_epoch = super::workspace::sort_key(instant(-5), "a");
+    assert!(before_epoch < super::workspace::sort_key(instant(0), "a"));
+    assert!(super::workspace::well_formed(&before_epoch));
 }
 
 fn user<'a>(cursor: Option<&'a str>, user_id: &'a str) -> ListForUser<'a> {

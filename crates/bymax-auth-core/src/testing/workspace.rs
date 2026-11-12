@@ -65,14 +65,23 @@ pub(super) fn membership_key(member: MembershipRef<'_>) -> MembershipKey {
     )
 }
 
-/// The sort key of a row: its creation second, zero-padded, then its id.
+/// Width of the zero-padded instant in a sort key.
+const INSTANT_DIGITS: usize = 22;
+
+/// Added to an instant in nanoseconds so every representable instant sorts as a non-negative
+/// number of `INSTANT_DIGITS` digits.
+const INSTANT_BIAS: i128 = 1_000_000_000_000_000_000_000;
+
+/// The sort key of a row: its creation instant to the nanosecond, zero-padded, then its id.
 pub(super) fn sort_key(created_at: OffsetDateTime, id: &str) -> String {
-    format!("{:020}:{id}", created_at.unix_timestamp())
+    let nanos = created_at.unix_timestamp_nanos() + INSTANT_BIAS;
+    format!("{nanos:0width$}:{id}", width = INSTANT_DIGITS)
 }
 
 /// Whether `key` has the shape of a sort key this double issues.
 pub(super) fn well_formed(key: &str) -> bool {
-    key.as_bytes().get(20) == Some(&b':') && key.bytes().take(20).all(|b| b.is_ascii_digit())
+    key.as_bytes().get(INSTANT_DIGITS) == Some(&b':')
+        && key.bytes().take(INSTANT_DIGITS).all(|b| b.is_ascii_digit())
 }
 
 /// Names one listing: its kind and each of its parts, length-prefixed so no part moves the
