@@ -122,6 +122,29 @@ pub enum Prefix {
     Tu,
     /// Single-use OAuth `state` + PKCE record (`os`).
     Os,
+    /// Version counter of one workspace (`wsv`), suffixed by `hmac_sha256(hmacKey,
+    /// workspaceSubject)`. Bumped when the whole workspace changes state, so every cached
+    /// membership of it stops being read. A counter that does not exist reads as `0`.
+    Wsv,
+    /// Version counter of one membership (`wmv`), suffixed by `hmac_sha256(hmacKey,
+    /// membershipSubject)`. Bumped when that membership changes.
+    Wmv,
+    /// Cached membership entry (`wm`), suffixed
+    /// `{hmac_sha256(hmacKey, membershipSubject)}:{workspaceVersion}:{membershipVersion}`: the
+    /// two versions read before the repository are part of the name, so an entry written after a
+    /// concurrent change lands under a key nobody reads.
+    Wm,
+    /// Pending workspace invitation record (`winv`), suffixed by `sha256(token)`.
+    Winv,
+    /// Invitee index of a workspace invitation (`winvidx`), suffixed by
+    /// `hmac_sha256(hmacKey, workspaceInvitationEmail preimage)` and holding the record key.
+    Winvidx,
+    /// Set of the live invitation record keys of one workspace (`winvset`), suffixed by
+    /// `hmac_sha256(hmacKey, workspaceSubject)`.
+    Winvset,
+    /// Per-inviter hourly invitation counter (`winvrl`), suffixed by `hmac_sha256(hmacKey,
+    /// workspaceInviterRate preimage)`. Its lifetime is set on the first increment only.
+    Winvrl,
 }
 
 impl Prefix {
@@ -164,6 +187,13 @@ impl Prefix {
             Self::Mfalock => "mfalock",
             Self::Tu => "tu",
             Self::Os => "os",
+            Self::Wsv => "wsv",
+            Self::Wmv => "wmv",
+            Self::Wm => "wm",
+            Self::Winv => "winv",
+            Self::Winvidx => "winvidx",
+            Self::Winvset => "winvset",
+            Self::Winvrl => "winvrl",
         }
     }
 }
@@ -240,7 +270,7 @@ mod tests {
     }
 
     /// Every name `redisKeyPrefixes` carries and the prefix this crate writes for it.
-    fn modelled_prefixes() -> [(&'static str, Prefix); 35] {
+    fn modelled_prefixes() -> [(&'static str, Prefix); 42] {
         [
             ("dashboardRefreshSession", Prefix::Rt),
             ("dashboardGracePointer", Prefix::Rp),
@@ -277,6 +307,13 @@ mod tests {
             ("emailChangeToken", Prefix::Ec),
             ("userStatus", Prefix::Us),
             ("userEmailVerified", Prefix::Uev),
+            ("workspaceVersion", Prefix::Wsv),
+            ("membershipVersion", Prefix::Wmv),
+            ("membershipCache", Prefix::Wm),
+            ("workspaceInvitation", Prefix::Winv),
+            ("workspaceInvitationIndex", Prefix::Winvidx),
+            ("workspaceInvitationSet", Prefix::Winvset),
+            ("workspaceInvitationInviterRate", Prefix::Winvrl),
         ]
     }
 
@@ -320,17 +357,7 @@ mod tests {
     /// [`the_pending_prefixes_are_still_unmodelled`] requires each to be absent from
     /// [`modelled_prefixes`] and present in the contract, so the slice that models a prefix has
     /// to delete its entry, and a prefix the contract adds that is not listed fails the build.
-    const PENDING_PREFIXES: [&str; 9] = [
-        "accessDeniedSuppressed",
-        "accessDeniedWindow",
-        "membershipCache",
-        "membershipVersion",
-        "workspaceInvitation",
-        "workspaceInvitationIndex",
-        "workspaceInvitationInviterRate",
-        "workspaceInvitationSet",
-        "workspaceVersion",
-    ];
+    const PENDING_PREFIXES: [&str; 2] = ["accessDeniedSuppressed", "accessDeniedWindow"];
 
     #[test]
     fn the_pending_prefixes_are_still_unmodelled() {

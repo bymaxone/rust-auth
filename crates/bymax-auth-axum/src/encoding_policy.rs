@@ -29,8 +29,32 @@ const UNCHECKED: [&str; 6] = [
     "POST sessions/revoke-all",
 ];
 
-/// Routes that accept an empty body, so only a request that carries one is refused.
-const WHEN_BODY: [&str; 2] = ["POST mfa/setup", "POST platform/mfa/setup"];
+/// Routes that accept an empty body, so only a request that carries one is refused. A segment
+/// written `:name` stands for any one non-empty path segment.
+const WHEN_BODY: [&str; 5] = [
+    "POST mfa/setup",
+    "POST platform/mfa/setup",
+    "POST workspaces/:workspaceId/leave",
+    "POST workspaces/:workspaceId/restore",
+    "POST workspaces/:workspaceId/switch",
+];
+
+/// Whether `route` (`METHOD path`) is one of `list`, where a `:name` segment of a listed route
+/// matches any one non-empty segment of `route`.
+fn listed(list: &[&str], route: &str) -> bool {
+    list.iter().any(|template| {
+        let mut wanted = template.split('/');
+        let mut given = route.split('/');
+        loop {
+            match (wanted.next(), given.next()) {
+                (None, None) => return true,
+                (Some(want), Some(got)) if want == got => {}
+                (Some(want), Some(got)) if want.starts_with(':') && !got.is_empty() => {}
+                _ => return false,
+            }
+        }
+    })
+}
 
 /// The route prefix the policy strips before it compares a path.
 #[derive(Clone)]
@@ -57,10 +81,10 @@ impl EncodingPolicy {
             .unwrap_or(path)
             .trim_start_matches('/');
         let route = format!("{} {relative}", request.method());
-        if UNCHECKED.contains(&route.as_str()) {
+        if listed(&UNCHECKED, &route) {
             return false;
         }
-        if WHEN_BODY.contains(&route.as_str()) && !carries_a_body(request.headers()) {
+        if listed(&WHEN_BODY, &route) && !carries_a_body(request.headers()) {
             return false;
         }
         !crate::validation::encoding_is_identity(request.headers())
@@ -117,45 +141,38 @@ mod tests {
         list.iter().map(|item| (*item).to_owned()).collect()
     }
 
-    /// Routes the contract lists under `whenBody` that this crate does not serve yet, with the
-    /// slice that serves each. The comparison below leaves them out of the contract's side, and
-    /// [`the_pending_when_body_routes_are_still_unbuilt`] requires each to be missing from
-    /// [`WHEN_BODY`] and present in the contract, so the slice that builds a route has to delete
-    /// its entry, and a route the contract adds that is not listed fails the build.
-    const PENDING_WHEN_BODY: [&str; 3] = [
-        "POST workspaces/:workspaceId/leave",
-        "POST workspaces/:workspaceId/restore",
-        "POST workspaces/:workspaceId/switch",
-    ];
-
-    #[test]
-    fn the_pending_when_body_routes_are_still_unbuilt() {
-        let in_contract = contract_list("whenBody");
-        for route in PENDING_WHEN_BODY {
-            assert!(
-                in_contract.contains(route),
-                "{route} is pending but the contract does not list it"
-            );
-            assert!(
-                !WHEN_BODY.contains(&route),
-                "{route} is built; remove it from PENDING_WHEN_BODY"
-            );
-        }
-    }
-
     #[test]
     fn the_exempt_lists_are_exactly_the_contracts() {
         assert_eq!(owned(&UNCHECKED), contract_list("unchecked"));
-        let built: BTreeSet<String> = contract_list("whenBody")
-            .into_iter()
-            .filter(|route| !PENDING_WHEN_BODY.contains(&route.as_str()))
-            .collect();
-        assert_eq!(owned(&WHEN_BODY), built);
+        assert_eq!(owned(&WHEN_BODY), contract_list("whenBody"));
         let methods: BTreeSet<String> = METHODS_NEVER_CHECKED
             .iter()
             .map(ToString::to_string)
             .collect();
         assert_eq!(methods, contract_list("methodsNeverChecked"));
+    }
+
+    #[test]
+    fn a_parameter_segment_matches_one_non_empty_segment() {
+        let list = ["POST workspaces/:workspaceId/leave", "POST mfa/setup"];
+        for matching in [
+            "POST workspaces/:workspaceId/leave",
+            "POST workspaces/0f8fad5b-d9cb-469f-a165-70867728950e/leave",
+            "POST mfa/setup",
+        ] {
+            assert!(listed(&list, matching), "{matching}");
+        }
+        for other in [
+            "POST workspaces//leave",
+            "POST workspaces/w/leave/extra",
+            "POST workspaces/w",
+            "POST workspaces/w/restore",
+            "PATCH workspaces/w/leave",
+            "POST mfa/setup/extra",
+            "POST mfa",
+        ] {
+            assert!(!listed(&list, other), "{other}");
+        }
     }
 
     #[test]

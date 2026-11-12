@@ -74,6 +74,35 @@ struct OAuthStatePayload {
     tenant_id: String,
     /// The PKCE `code_verifier` (RFC 7636), forwarded on exchange and never logged.
     code_verifier: String,
+    /// The lowercase hex SHA-256 of the workspace invitation token the flow was started with,
+    /// present only when it was. The raw token is never stored. A record that carries the field
+    /// as anything but 64 lowercase hex characters does not parse, so it is refused like any
+    /// other corrupt record, and one without it is an ordinary sign-in.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "invitation_hash"
+    )]
+    workspace_invitation: Option<String>,
+}
+
+/// Reads `workspaceInvitation` of the state record: exactly 64 lowercase hex characters, or an
+/// error. `null`, a number and every other shape are errors too, because a record that carries
+/// the field must carry it correctly.
+fn invitation_hash<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let hash = String::deserialize(deserializer)?;
+    let well_formed =
+        hash.len() == 64 && hash.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'));
+    if well_formed {
+        Ok(Some(hash))
+    } else {
+        Err(serde::de::Error::custom(
+            "workspaceInvitation must be 64 lowercase hex characters",
+        ))
+    }
 }
 
 /// What [`AuthEngine::oauth_initiate`] hands back: the provider authorization URL to redirect
@@ -154,6 +183,7 @@ impl AuthEngine {
             provider: provider_impl.name().to_owned(),
             tenant_id,
             code_verifier,
+            workspace_invitation: None,
         })
         .map_err(oauth_state_serialize_failed)?;
 
@@ -1232,6 +1262,65 @@ mod tests {
         assert!(counting.put_state("hash", "payload", 600).await.is_ok());
         assert!(matches!(counting.take_state("hash").await, Ok(None)));
         assert_eq!(counting.take_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn callback_reads_the_optional_workspace_invitation_only_when_well_formed() {
+        // The state record may carry the hash of a workspace invitation token. The provider is
+        // contacted only when the record parses, so contact tells a readable record from a
+        // corrupt one, which both answer `OauthFailed` otherwise.
+        let valid = "0123456789abcdef".repeat(4);
+        let cases: [(serde_json::Value, bool); 9] = [
+            (serde_json::json!(valid), true),
+            (serde_json::json!("0123456789ABCDEF".repeat(4)), false),
+            (serde_json::json!("0123456789abcdef".repeat(4) + "0"), false),
+            (serde_json::json!(&valid[..63]), false),
+            (serde_json::json!("g".repeat(64)), false),
+            (serde_json::json!(""), false),
+            (serde_json::Value::Null, false),
+            (serde_json::json!(5), false),
+            (serde_json::json!([valid]), false),
+        ];
+        let state = "ab".repeat(32);
+        for (value, readable) in cases {
+            let hooks: Arc<dyn AuthHooks> = Arc::new(DecisionHook(OAuthLoginResult::Link));
+            let http = Arc::new(RoutingHttpClient::new());
+            let Some(h) = harness(hooks, http, false) else { return };
+            let record = serde_json::json!({
+                "provider": "google",
+                "tenantId": "t1",
+                "codeVerifier": "verifier",
+                "workspaceInvitation": value,
+            })
+            .to_string();
+            let stored = h
+                .stores
+                .put_state(&state_key(&state), &record, OAUTH_STATE_TTL_SECS)
+                .await;
+            assert!(stored.is_ok());
+            let _ = h
+                .engine
+                .oauth_callback("google", "code", &state, Some(&state), &ctx())
+                .await;
+            assert_eq!(
+                !lock(&h.http.requests).is_empty(),
+                readable,
+                "workspaceInvitation {value}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_state_record_without_an_invitation_serializes_without_the_field() {
+        // Both libraries read the record, and an ordinary sign-in must stay exactly what it was.
+        let record = OAuthStatePayload {
+            provider: "google".to_owned(),
+            tenant_id: "t1".to_owned(),
+            code_verifier: "v".to_owned(),
+            workspace_invitation: None,
+        };
+        let text = serde_json::to_string(&record).unwrap_or_default();
+        assert!(!text.contains("workspaceInvitation"), "{text}");
     }
 
     #[tokio::test]
