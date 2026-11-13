@@ -57,6 +57,17 @@ fn not_an_active_member() -> AuthError {
     invalid("userId", "userId must be an active member".to_owned())
 }
 
+/// The answer to a hand-over's write: a receiver who stopped being an active member is the same
+/// `userId` refusal the check before the password gives, and a giver who is no longer an active
+/// owner is the identical 404.
+pub(crate) fn transfer_outcome(outcome: TransferOutcome) -> Result<(), AuthError> {
+    match outcome {
+        TransferOutcome::Done => Ok(()),
+        TransferOutcome::NotFound => Err(AuthError::WorkspaceNotFound),
+        TransferOutcome::TargetNotMember => Err(not_an_active_member()),
+    }
+}
+
 impl WorkspaceRuntime {
     /// Whether a member holding `actor` may act on `other`: the owner role on any role, every
     /// other role only on a role it includes and does not itself hold.
@@ -315,16 +326,8 @@ impl AuthEngine {
             demote_from_to: hand_over.demote_self_to,
             audit: &event,
         };
-        match runtime
-            .memberships
-            .transfer_ownership(params)
-            .await
-            .map_err(internal)?
-        {
-            TransferOutcome::Done => {}
-            TransferOutcome::NotFound => return Err(AuthError::WorkspaceNotFound),
-            TransferOutcome::TargetNotMember => return Err(not_an_active_member()),
-        }
+        let outcome = runtime.memberships.transfer_ownership(params).await;
+        transfer_outcome(outcome.map_err(internal)?)?;
         let receiver = MembershipRef {
             user_id: hand_over.to_user_id,
             ..member.key()

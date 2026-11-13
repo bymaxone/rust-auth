@@ -127,11 +127,16 @@ async fn send(
 
 /// An account with the test password; returns its id.
 async fn seed_user(users: &InMemoryUserRepository) -> String {
+    seed_account(users, "w@e.com").await
+}
+
+/// An account at `email` with the test password; returns its id.
+async fn seed_account(users: &InMemoryUserRepository, email: &str) -> String {
     let params = bymax_auth_crypto::password::PasswordParams::default();
     let hash = bymax_auth_crypto::password::hash(PASSWORD.as_bytes(), &params).unwrap_or_default();
     let created = users
         .create(CreateUserData {
-            email: "w@e.com".to_owned(),
+            email: email.to_owned(),
             name: "Member".to_owned(),
             password_hash: Some(hash),
             role: Some("USER".to_owned()),
@@ -204,4 +209,57 @@ async fn the_workspace_guard_resolves_through_the_cache_in_real_redis() {
     assert_eq!(body["error"]["code"], "auth.workspace_not_found");
     let (status, body, _) = send(&app, (Method::GET, "/auth/workspaces"), None, &access).await;
     assert_eq!((status, &body["items"]), (StatusCode::OK, &json!([])));
+}
+
+/// Signs `email` in and returns its access cookie.
+async fn sign_in(app: &Router, email: &str) -> String {
+    let credentials = json!({ "email": email, "password": PASSWORD, "tenantId": TENANT });
+    let (_, _, access) = send(app, (Method::POST, "/auth/login"), Some(credentials), "").await;
+    access
+}
+
+#[tokio::test]
+async fn a_removal_through_the_route_ends_the_members_cached_access_in_real_redis() {
+    let Some((_container, url)) = try_start().await else { return };
+    let built = build(&url);
+    assert!(
+        built.is_some(),
+        "setup must succeed once the container runs"
+    );
+    let Some(b) = built else { return };
+    let router = AuthRouter::from_engine(
+        b.engine.clone(),
+        AxumAuthConfig::new(ClientIpSource::PeerAddr),
+    );
+    let Ok(app) = router.map(AuthRouter::into_router) else { return };
+    let owner = seed_user(&b.users).await;
+    let member = seed_account(&b.users, "m@e.com").await;
+    seed_seat(&b.repo, &owner, MembershipStatus::Active);
+    let at = OffsetDateTime::UNIX_EPOCH;
+    b.repo.seed_membership(Membership {
+        tenant_id: TENANT.to_owned(),
+        workspace_id: "w1".to_owned(),
+        user_id: member.clone(),
+        role: "owner".to_owned(),
+        status: MembershipStatus::Active,
+        invited_by_user_id: None,
+        created_at: at,
+        updated_at: at,
+    });
+    let owner_access = sign_in(&app, "w@e.com").await;
+    let member_access = sign_in(&app, "m@e.com").await;
+    let read = (Method::GET, "/auth/workspaces/w1/access");
+    // The member's access is now cached in Redis.
+    let (status, _, _) = send(&app, read.clone(), None, &member_access).await;
+    assert_eq!(status, StatusCode::OK);
+    let path = format!("/auth/workspaces/w1/members/{member}");
+    let (status, body, _) = send(&app, (Method::DELETE, &path), None, &owner_access).await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+    // The bump the removal made after its write takes the cached entry out at once.
+    let (status, body, _) = send(&app, read, None, &member_access).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(body["error"]["code"], "auth.workspace_not_found");
+    let events = b.repo.audit_events();
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].kind.type_name(), "member.removed");
 }

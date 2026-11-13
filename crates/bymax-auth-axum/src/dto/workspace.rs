@@ -8,9 +8,7 @@
 //! name is blank once trimmed and whether a receiver is an active member are the service's
 //! decisions, under the same field names.
 
-use bymax_auth_core::workspace::bounds::{
-    IDENTIFIER_MAX_CHARS, WORKSPACE_NAME_MAX_CHARS, check_cursor, parse_page_limit,
-};
+use bymax_auth_core::workspace::bounds::{IDENTIFIER_MAX_CHARS, check_cursor, parse_page_limit};
 use garde::Validate;
 use serde::Deserialize;
 
@@ -75,22 +73,13 @@ pub struct MemberRouteParamsDto {
     pub user_id: String,
 }
 
-/// `garde` rule: a workspace name as submitted, 1 to 120 characters with no control character.
-/// The service trims it and refuses one that is blank after trimming, under the same field.
-fn name_rule(value: &str, context: &()) -> garde::Result {
-    let count = value.chars().count();
-    if !(1..=WORKSPACE_NAME_MAX_CHARS).contains(&count) {
-        return Err(garde::Error::new("must be 1 to 120 characters"));
-    }
-    no_control_characters(value, context)
-}
-
 /// `POST /auth/workspaces` body: the name of the workspace to create.
 #[derive(Debug, Deserialize, Validate)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CreateWorkspaceDto {
-    /// The display name, 1 to 120 characters as submitted, with no control character.
-    #[garde(custom(name_rule))]
+    /// The display name, 1 to 120 characters as submitted, with no control character. The
+    /// service trims it and refuses one that is blank after trimming, under the same field.
+    #[garde(length(chars, min = 1, max = 120), custom(no_control_characters))]
     pub name: String,
 }
 
@@ -99,8 +88,9 @@ pub struct CreateWorkspaceDto {
 #[derive(Debug, Deserialize, Validate)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RenameWorkspaceDto {
-    /// The display name, 1 to 120 characters as submitted, with no control character.
-    #[garde(custom(name_rule))]
+    /// The display name, 1 to 120 characters as submitted, with no control character. The
+    /// service trims it and refuses one that is blank after trimming, under the same field.
+    #[garde(length(chars, min = 1, max = 120), custom(no_control_characters))]
     pub name: String,
 }
 
@@ -131,7 +121,7 @@ pub struct ChangeMemberRoleDto {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct TransferOwnershipDto {
     /// The member who becomes an owner, 1 to 128 characters with no control character.
-    #[garde(custom(identifier_rule))]
+    #[garde(length(chars, min = 1, max = 128), custom(no_control_characters))]
     pub user_id: String,
     /// The role the giver keeps, 1 to 64 characters with no control character; absent keeps both
     /// as owners.

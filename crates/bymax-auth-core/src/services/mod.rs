@@ -61,8 +61,12 @@ mod verifier;
 pub mod workspace;
 pub mod workspace_lifecycle;
 #[cfg(test)]
+mod workspace_lifecycle_tests;
+#[cfg(test)]
 mod workspace_list_tests;
 pub mod workspace_members;
+#[cfg(test)]
+mod workspace_members_tests;
 #[cfg(test)]
 mod workspace_test_support;
 #[cfg(test)]

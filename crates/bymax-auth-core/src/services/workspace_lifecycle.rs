@@ -80,11 +80,27 @@ pub enum FinalizeOutcome {
 
 /// The `403 auth.forbidden` a host refusal answers, naming `name` with `reason`.
 fn refused_by_host(reason: Option<String>) -> AuthError {
-    AuthError::ForbiddenWithDetails {
-        details: vec![FieldError {
-            field: "name".to_owned(),
-            message: reason.unwrap_or_else(|| WORKSPACE_CREATE_REFUSED.to_owned()),
-        }],
+    AuthError::ForbiddenWithDetails(vec![FieldError {
+        field: "name".to_owned(),
+        message: reason.unwrap_or_else(|| WORKSPACE_CREATE_REFUSED.to_owned()),
+    }])
+}
+
+/// The workspace a create wrote, or `auth.workspace_limit_reached` when the repository enforced
+/// the owner cap itself.
+pub(crate) fn created_workspace(outcome: CreateWorkspaceOutcome) -> Result<Workspace, AuthError> {
+    match outcome {
+        CreateWorkspaceOutcome::Created(workspace) => Ok(workspace),
+        CreateWorkspaceOutcome::LimitReached => Err(AuthError::WorkspaceLimitReached),
+    }
+}
+
+/// The answer to a rename's write.
+pub(crate) fn rename_outcome(outcome: RenameOutcome) -> Result<(), AuthError> {
+    match outcome {
+        RenameOutcome::Done => Ok(()),
+        RenameOutcome::NotFound => Err(AuthError::WorkspaceNotFound),
+        RenameOutcome::ActorChanged => Err(AuthError::InsufficientWorkspaceRole),
     }
 }
 
@@ -248,10 +264,7 @@ impl AuthEngine {
             audit: &event,
         };
         let created = runtime.workspaces.create_with_owner(params).await;
-        match created.map_err(internal)? {
-            CreateWorkspaceOutcome::Created(workspace) => Ok((workspace, event)),
-            CreateWorkspaceOutcome::LimitReached => Err(AuthError::WorkspaceLimitReached),
-        }
+        Ok((created_workspace(created.map_err(internal)?)?, event))
     }
 
     /// The host's `before_workspace_create` decision about `name` for `owner`.
@@ -294,11 +307,7 @@ impl AuthEngine {
             actor: acting(member),
             audit: &event,
         };
-        match runtime.workspaces.rename(params).await.map_err(internal)? {
-            RenameOutcome::Done => {}
-            RenameOutcome::NotFound => return Err(AuthError::WorkspaceNotFound),
-            RenameOutcome::ActorChanged => return Err(AuthError::InsufficientWorkspaceRole),
-        }
+        rename_outcome(runtime.workspaces.rename(params).await.map_err(internal)?)?;
         self.notify_workspace_event(event, member_hook_context(ctx, member));
         runtime.active_workspace(workspace).await
     }
@@ -451,7 +460,7 @@ impl AuthEngine {
 
     /// What a finalize whose compare-and-set lost answers: the workspace as it reads now, and one
     /// that is still due is left for the next run.
-    async fn finalize_lost(
+    pub(crate) async fn finalize_lost(
         &self,
         runtime: &WorkspaceRuntime,
         workspace: WorkspaceRef<'_>,
