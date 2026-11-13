@@ -1074,7 +1074,7 @@ The **Default** column lists `AuthConfig::default()` (≡ `nest_compat_defaults(
 | `api_keys.audit_mode` | `ApiKeyAuditMode` | No | `BestEffort` | `Required`: a failing audit hook refuses a request that would have been admitted; `BestEffort`: a failing hook never changes the answer |
 | `workspaces.enabled` | `bool` | No | `false` | The workspace layer (§8.2.9). Needs a `WorkspaceRepository`, a `MembershipRepository` (`AuthEngineBuilder::workspace_repositories`) and a `MembershipCacheStore` (`membership_cache_store`; `RedisStores` implements it) whatever the cache lifetime; any of them without the other half is a startup error (`ConfigError::MissingWorkspaceRepositories`, `MissingMembershipCacheStore`, `WorkspaceCollaboratorsUnused`). Not behind a Cargo feature. Nothing below is checked while it is `false` |
 | `workspaces.roles.hierarchy` | `BTreeMap<String, Vec<String>>` | Cond. | — | Every workspace role and the roles it includes, one level and explicit; the owner role lists every other role and no other role lists it (`ConfigError::WorkspaceRoles`) |
-| `workspaces.roles.owner_role` | `String` | Cond. | — | The role that owns a workspace, a key of the hierarchy. Only a member holding exactly this role is told a workspace is pending deletion |
+| `workspaces.roles.owner_role` | `String` | Cond. | — | The role that owns a workspace, a key of the hierarchy, 1 to 32 code points with no control character (`WorkspaceOwnerRole`; the role is part of a `list_sole_owned` cursor, whose bound is 4096 characters). Only a member holding exactly this role is told a workspace is pending deletion |
 | `workspaces.permissions.view_members` | `AcceptedRoles` | No | `AnyMember` | Who may list a workspace's members; a named role outside the hierarchy is refused (`WorkspacePermissionUnknownRole`). An empty list declares nothing and the route then answers `403 auth.forbidden` to everyone |
 | `workspaces.membership_cache_ttl_seconds` | `u64` | No | `60` | Lifetime of a cached membership, 0 to 3600 (`WorkspaceMembershipCacheTtl`); `0` disables the cache and every request reads the repositories |
 | `password.scrypt.cost_factor` | `u32` | No | `131072` | Power of 2, min `16384` |
@@ -1277,7 +1277,7 @@ Validation rules, in the order applied (parity with `resolveOptions`):
 | 23 | session/OTP/brute-force stores supplied | `MissingStores` |
 | 24 | `api_keys.enabled` ⇒ the `api-keys` feature is compiled in, an `ApiKeyRepository` is supplied, and — when `audit_mode` is `Required` — hooks are supplied; a repository without `enabled` is refused too | `ApiKeysFeatureDisabled`, `ApiKeysRepositoryRequired`, `ApiKeysAuditRequiresHooks`, `ApiKeysRepositoryUnused` |
 | 25 | `api_keys.enabled` ⇒ the pepper is ≥ 32 characters, ≥ 3.5 bits/char and equals none of `jwt.secret`, a retired JWT secret, `identifier_key`, `mfa.encryption_key` or a retired MFA key; the scope vocabulary is non-empty, distinct and well-formed; `header` is a lowercase name the library does not read; `prefix` fits the key grammar; `last_used_flush` is a whole number of seconds from 1 to 3600 | `ApiKeysPepperTooShort`, `ApiKeysPepperLowEntropy`, `ApiKeysPepperReused`, `ApiKeysScopes`, `ApiKeysTransport`, `ApiKeysFlushInterval` |
-| 26 | `controllers.workspaces` ⇒ `workspaces.enabled`; `workspaces.enabled` ⇒ both repositories and the membership cache store are supplied, the hierarchy and owner role are valid, `view_members` names only roles of it and the cache lifetime is at most 3600; any collaborator without `enabled` is refused too | `WorkspacesControllerWithoutWorkspaces`, `MissingWorkspaceRepositories`, `MissingMembershipCacheStore`, `WorkspaceCollaboratorsUnused`, `WorkspaceRoles`, `WorkspacePermissionUnknownRole`, `WorkspaceMembershipCacheTtl` |
+| 26 | `controllers.workspaces` ⇒ `workspaces.enabled`; `workspaces.enabled` ⇒ both repositories and the membership cache store are supplied, the owner role is 1 to 32 code points with no control character (checked first, so a malformed name is reported as that and not as an unknown owner; no other role is constrained), the hierarchy and owner role are valid, `view_members` names only roles of it and the cache lifetime is at most 3600; any collaborator without `enabled` is refused too | `WorkspacesControllerWithoutWorkspaces`, `MissingWorkspaceRepositories`, `MissingMembershipCacheStore`, `WorkspaceCollaboratorsUnused`, `WorkspaceOwnerRole`, `WorkspaceRoles`, `WorkspacePermissionUnknownRole`, `WorkspaceMembershipCacheTtl` |
 
 The entropy gate is a first-order filter (it detects extreme low-diversity secrets such as a single repeated character) and is documented as necessary-but-not-sufficient; the operational guidance is to generate the secret with 32 random bytes encoded as base64.
 
@@ -2924,10 +2924,11 @@ deletion. The tenant is the caller's own and is never repeated.
 
 **Lists.** `limit` is read as a string and must match `^(?:[1-9][0-9]?|100)$` (`05`, `+5`, `0`,
 `101` and an empty `limit=` are `400 auth.validation` naming `limit`, never clamped; default 50);
-`cursor` is 1 to 512 characters with no control character (`400` naming `cursor`) and is opaque.
+`cursor` is 1 to 4096 characters with no control character (`400` naming `cursor`) and is opaque.
 The query carries nothing else: a `tenantId`, `userId` or `workspaceId` in it is refused as a
 property that should not exist, so the tenant and the workspace of a list always come from the
-credential and the route (`requestFieldBounds.pageLimit`).
+credential and the route (`requestFieldBounds.pageLimit`). A cursor a repository issues must stay within
+that 4096-character bound, because the edge refuses a longer one.
 
 **Path parameters.** A `workspaceId` that is over 128 code points, blank (JavaScript's `\s` set,
 so U+FEFF is blank and U+200B is not) or carries a C0, DEL or C1 control character is `400

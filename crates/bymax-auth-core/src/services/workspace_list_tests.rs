@@ -14,6 +14,7 @@ use crate::services::auth::test_support::base_config;
 use crate::services::workspace::{MyWorkspaces, PageQuery, WorkspaceAccessRequest};
 use crate::testing::{InMemoryStores, InMemoryUserRepository};
 use crate::workspace::access::{AcceptedRoles, WorkspaceMember};
+use crate::workspace::bounds::CURSOR_MAX_CHARS;
 use crate::workspace::domain::{MembershipStatus, WorkspaceStatus};
 
 /// The pinned shared contract.
@@ -189,9 +190,9 @@ async fn the_cursor_bounds_are_the_contracts_and_a_cursor_names_no_scope() {
     let rule = root["requestFieldBounds"]["pageLimit"]["$comment"]
         .as_str()
         .unwrap_or_default();
-    assert!(rule.contains("1 to 512 characters"));
+    assert!(rule.contains(&format!("1 to {CURSOR_MAX_CHARS} characters")));
     assert!(rule.contains("always come from the credential and the route"));
-    let long = "c".repeat(513);
+    let long = "c".repeat(CURSOR_MAX_CHARS + 1);
     for cursor in ["", "a\u{0}", "a\u{85}", long.as_str()] {
         let got = f
             .engine

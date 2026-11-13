@@ -8,6 +8,7 @@ use std::collections::BTreeMap;
 
 use crate::error::ConfigError;
 use crate::workspace::access::AcceptedRoles;
+use crate::workspace::bounds::is_valid_owner_role;
 use crate::workspace::limits::MEMBERSHIP_CACHE_TTL_DEFAULT_SECONDS;
 use crate::workspace::membership_cache::MembershipCacheTtl;
 use crate::workspace::roles::RoleHierarchy;
@@ -94,12 +95,21 @@ impl WorkspacesConfig {
     ///
     /// # Errors
     ///
+    /// [`ConfigError::WorkspaceOwnerRole`] for an owner role outside the name rule,
     /// [`ConfigError::WorkspaceRoles`] for a hierarchy the rules refuse,
     /// [`ConfigError::WorkspacePermissionUnknownRole`] for a permission naming a role outside it,
     /// and [`ConfigError::WorkspaceMembershipCacheTtl`] for a lifetime over the maximum.
     pub(crate) fn resolve(&self) -> Result<Option<ResolvedWorkspaces>, ConfigError> {
         if !self.enabled {
             return Ok(None);
+        }
+        // The shape rule runs before the hierarchy rules so a malformed owner role is reported as
+        // that, not as an unknown owner (an empty name matches no key). It binds the owner role
+        // alone: other roles keep whatever shape the host gives them.
+        if !is_valid_owner_role(&self.roles.owner_role) {
+            return Err(ConfigError::WorkspaceOwnerRole {
+                value: self.roles.owner_role.clone(),
+            });
         }
         let hierarchy = RoleHierarchy::new(self.roles.hierarchy.clone(), &self.roles.owner_role)
             .map_err(ConfigError::WorkspaceRoles)?;

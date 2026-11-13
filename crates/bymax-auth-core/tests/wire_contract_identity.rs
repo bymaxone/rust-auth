@@ -36,7 +36,7 @@ use bymax_auth_crypto::mac::sha256;
 /// does. Both repositories are meant to carry identical contract bytes and the same digest; a
 /// copy that differs from nest-auth's is a divergence to close, not a state to keep.
 const WIRE_CONTRACT_SHA256: &str =
-    "1e4c38e1741c21e639e4099cd33ece9b04518cf69699fb39fd9d5b9d37352edd";
+    "1567980b057a9da2d5c1329a2bb1719298b2e0b4f43187df593b6c48269d5bac";
 
 /// The contract, as it sits in the working tree.
 ///
