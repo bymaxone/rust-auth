@@ -31,7 +31,7 @@ const ARTEFACT: &str = include_str!("../../../../conformance/openapi-request-sch
 
 /// The SHA-256 of the artefact, lower-case hex. Source: nest-auth `v1.4.22`, commit
 /// `b3e64f1c6dd1a2cf0f4ad874b6fe6470e3325ea1`, path `conformance/openapi-request-schemas.json`.
-const ARTEFACT_SHA256: &str = "90b2fd7ae9da0634881c193e0dd36ee31ff7b17aa5af83827b3da50b1b34741c";
+const ARTEFACT_SHA256: &str = "1c2f19b482db131991a0f054a1b511710ee90d4b40463e0094da1820ef5f41bc";
 
 /// A DTO's verdict on a body: accepted when it deserializes and validates.
 pub(super) type Accepts = fn(&Value) -> bool;

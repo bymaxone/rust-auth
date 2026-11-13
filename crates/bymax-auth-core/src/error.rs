@@ -25,6 +25,18 @@ pub enum ConfigError {
     /// `workspaces.roles` breaks a rule of the role hierarchy.
     #[error(transparent)]
     WorkspaceRoles(crate::workspace::roles::RoleHierarchyError),
+    /// `workspaces.roles.owner_role` is empty, longer than 32 code points or carries a control
+    /// character. The role is part of the key of a `list_sole_owned` cursor, and its length is what
+    /// keeps that cursor under the cursor bound. The value is shown escaped, so a control character
+    /// cannot forge a log line.
+    #[error(
+        "workspaces.roles.ownerRole must be 1 to 32 characters with no control character, got \
+         {value:?}"
+    )]
+    WorkspaceOwnerRole {
+        /// The refused owner role, as configured.
+        value: String,
+    },
     /// A `workspaces.permissions` entry names a role that is not a role of the hierarchy, so no
     /// member could ever hold it.
     #[error("workspaces.permissions.{action} names '{role}', which is not a workspace role")]

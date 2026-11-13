@@ -22,7 +22,7 @@
     "A case that needs an ill-formed string states it as UTF-16 code units beside its `case`, for",
     "example `unpairedSurrogateCodeUnits: [55296]`, and each library's test builds the string itself."
   ],
-  "version": 4,
+  "version": 5,
   "hmacKeyDerivation": {
     "$comment": [
       "The identifier-hashing key both sides derive from the identifier secret, and one",
@@ -936,7 +936,8 @@
       "min": 1,
       "max": 100,
       "default": 50,
-      "$comment": "The `limit` query parameter of a paginated list, a whole number written in decimal digits without a leading zero (`5`, not `05`). A value outside 1 to 100, or not written that way, is refused with 400 auth.validation naming the field limit, a present but empty `limit=` included; it is never clamped. The cursor is opaque, 1 to 512 characters (an empty `cursor=` is refused) with no control character, and says only where the next page starts: the tenant and the workspace of a list always come from the credential and the route."
+      "cursor": { "min": 1, "max": 4096 },
+      "$comment": "The `limit` query parameter of a paginated list, a whole number written in decimal digits without a leading zero (`5`, not `05`). A value outside 1 to 100, or not written that way, is refused with 400 auth.validation naming the field limit, a present but empty `limit=` included; it is never clamped. The cursor is opaque, 1 to 4096 characters (an empty `cursor=` is refused) with no control character, and says only where the next page starts: the tenant and the workspace of a list always come from the credential and the route. 4096 is sized for the longest cursor a repository can issue from ids, tenants and key parts of 128 code points (a code point is counted once, an emoji included) and an owner role the `workspaceOwnerRole` rule admits, which is 2306 characters in the format nest-auth's adapters use; the format of a cursor is private to each repository and is not part of this contract."
     },
     "pathParameters": {
       "$comment": "A path parameter that is over its bound, blank, or carries a control character is refused with 400 auth.validation naming the parameter, ahead of authorization. The workspace guard runs first, so when both `workspaceId` and another parameter are bad only `workspaceId` is reported. A well-formed parameter that names nothing, or a workspace the caller may not see, is the identical 404 auth.workspace_not_found. `Blank` means only JS `\\s` whitespace; the control-character rule is a separate pattern. A workspace id is always a library-generated UUID, so it can never be `invitations`, and the static `workspaces/invitations/...` routes cannot shadow a workspace.",
@@ -2051,6 +2052,67 @@
       { "workspaceStatus": "pending_deletion", "accountIsSoleOwner": true, "blocks": false },
       { "workspaceStatus": "deleted", "accountIsSoleOwner": true, "blocks": false },
       { "workspaceStatus": "active", "accountIsSoleOwner": false, "blocks": false }
+    ]
+  },
+  "workspaceOwnerRole": {
+    "$comment": "The name of the OWNER role of `workspaces.roles` (`ownerRole`), and no other role of the hierarchy: other role names keep whatever shape a host gives them. The owner role is refused at startup, naming the option and the value, unless it is 1 to `maxLength` code points of well-formed text with no control character (the C0 and C1 ranges and DEL): the rule an id follows, and no charset. A code point is counted once, an emoji included. The role is part of the key of a `listSoleOwned` cursor, and its length is what keeps that cursor under the cursor bound of `requestFieldBounds.pageLimit`: with the longest role of the costliest characters the longest cursor of nest-auth's format is 2306 characters. Each `refuses` entry is the string `value`, with the code units of `unpairedSurrogateCodeUnits` appended when it has them, so no ill-formed string appears in this file.",
+    "maxLength": 32,
+    "accepts": [
+      "owner",
+      "admin",
+      "member",
+      "billing_admin",
+      "org:admin",
+      "team lead",
+      "proprietário",
+      "dono_é",
+      "😀",
+      "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀"
+    ],
+    "refuses": [
+      {
+        "case": "empty",
+        "value": ""
+      },
+      {
+        "case": "33 code points",
+        "value": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      },
+      {
+        "case": "33 emoji",
+        "value": "😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀"
+      },
+      {
+        "case": "a NUL",
+        "value": "\u0000"
+      },
+      {
+        "case": "a newline",
+        "value": "a\nb"
+      },
+      {
+        "case": "a DEL",
+        "value": "ab"
+      },
+      {
+        "case": "a C1 control",
+        "value": "ab"
+      },
+      {
+        "case": "an unpaired high surrogate",
+        "value": "",
+        "unpairedSurrogateCodeUnits": [
+          55296
+        ]
+      },
+      {
+        "case": "an unpaired low surrogate after a letter",
+        "value": "a",
+        "unpairedSurrogateCodeUnits": [
+          56320
+        ]
+      }
     ]
   }
 }

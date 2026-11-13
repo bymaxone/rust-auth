@@ -192,7 +192,7 @@ impl<'a> PageQuery<'a> {
             check_cursor(cursor).map_err(|refused| {
                 invalid(
                     refused.field,
-                    "cursor must be 1 to 512 characters with no control characters".to_owned(),
+                    "cursor must be 1 to 4096 characters with no control characters".to_owned(),
                 )
             })?;
         }

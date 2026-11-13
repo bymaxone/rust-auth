@@ -21,8 +21,14 @@ pub const PAGE_LIMIT_DEFAULT: u8 = 50;
 /// The largest page size.
 pub const PAGE_LIMIT_MAX: u8 = 100;
 
-/// The longest pagination cursor, in characters.
-pub const CURSOR_MAX_CHARS: usize = 512;
+/// The longest pagination cursor, in characters: `requestFieldBounds.pageLimit.cursor.max`.
+///
+/// A cursor a repository issues must stay within it, because [`check_cursor`] refuses a longer one
+/// at the HTTP edge with `400` naming `cursor`, so the client could never request the next page.
+pub const CURSOR_MAX_CHARS: usize = 4096;
+
+/// The longest owner role name, in code points: `workspaceOwnerRole.maxLength`.
+pub const OWNER_ROLE_MAX_CHARS: usize = 32;
 
 /// A request value outside its bound.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
@@ -57,7 +63,7 @@ pub fn is_blank(value: &str) -> bool {
 }
 
 /// Whether `c` is a C0 control, DEL or a C1 control.
-fn is_control(c: char) -> bool {
+pub(crate) fn is_control(c: char) -> bool {
     matches!(c, '\u{0}'..='\u{1f}' | '\u{7f}'..='\u{9f}')
 }
 
@@ -120,7 +126,7 @@ pub fn parse_page_limit(raw: Option<&str>) -> Result<u8, OutOfBounds> {
     }
 }
 
-/// The opaque `cursor` query parameter: 1 to 512 characters, no control character.
+/// The opaque `cursor` query parameter: 1 to [`CURSOR_MAX_CHARS`] characters, no control character.
 ///
 /// # Errors
 ///
@@ -131,4 +137,13 @@ pub fn check_cursor(value: &str) -> Result<(), OutOfBounds> {
         return Err(OutOfBounds { field: "cursor" });
     }
     Ok(())
+}
+
+/// Whether `role` is a name the owner role may have: 1 to [`OWNER_ROLE_MAX_CHARS`] code points and
+/// no control character (C0, C1 or DEL), the rule an id follows and no charset.
+///
+/// A `&str` is well-formed text by construction, so ill-formed UTF-16 never reaches this check.
+#[must_use]
+pub fn is_valid_owner_role(role: &str) -> bool {
+    (1..=OWNER_ROLE_MAX_CHARS).contains(&role.chars().count()) && !role.chars().any(is_control)
 }
