@@ -1074,7 +1074,7 @@ The **Default** column lists `AuthConfig::default()` (≡ `nest_compat_defaults(
 | `api_keys.audit_mode` | `ApiKeyAuditMode` | No | `BestEffort` | `Required`: a failing audit hook refuses a request that would have been admitted; `BestEffort`: a failing hook never changes the answer |
 | `workspaces.enabled` | `bool` | No | `false` | The workspace layer (§8.2.9). Needs a `WorkspaceRepository`, a `MembershipRepository` (`AuthEngineBuilder::workspace_repositories`) and a `MembershipCacheStore` (`membership_cache_store`; `RedisStores` implements it) whatever the cache lifetime; any of them without the other half is a startup error (`ConfigError::MissingWorkspaceRepositories`, `MissingMembershipCacheStore`, `WorkspaceCollaboratorsUnused`). Not behind a Cargo feature. Nothing below is checked while it is `false` |
 | `workspaces.roles.hierarchy` | `BTreeMap<String, Vec<String>>` | Cond. | — | Every workspace role and the roles it includes, one level and explicit; the owner role lists every other role and no other role lists it (`ConfigError::WorkspaceRoles`) |
-| `workspaces.roles.owner_role` | `String` | Cond. | — | The role that owns a workspace, a key of the hierarchy, 1 to 32 code points with no control character (`WorkspaceOwnerRole`; the role is part of a `list_sole_owned` cursor, whose bound is 4096 characters). Only a member holding exactly this role is told a workspace is pending deletion |
+| `workspaces.roles.owner_role` | `String` | Cond. | — | The role that owns a workspace, a key of the hierarchy, 1 to 32 code points with no control character (`WorkspaceOwnerRole`; the role is part of a `list_sole_owned` cursor). Only a member holding exactly this role is told a workspace is pending deletion |
 | `workspaces.permissions.view_members` | `AcceptedRoles` | No | `AnyMember` | Who may list a workspace's members; a named role outside the hierarchy is refused (`WorkspacePermissionUnknownRole`). An empty list declares nothing and the route then answers `403 auth.forbidden` to everyone |
 | `workspaces.membership_cache_ttl_seconds` | `u64` | No | `60` | Lifetime of a cached membership, 0 to 3600 (`WorkspaceMembershipCacheTtl`); `0` disables the cache and every request reads the repositories |
 | `password.scrypt.cost_factor` | `u32` | No | `131072` | Power of 2, min `16384` |
@@ -2928,7 +2928,7 @@ deletion. The tenant is the caller's own and is never repeated.
 The query carries nothing else: a `tenantId`, `userId` or `workspaceId` in it is refused as a
 property that should not exist, so the tenant and the workspace of a list always come from the
 credential and the route (`requestFieldBounds.pageLimit`). A cursor a repository issues must stay within
-that 4096-character bound, because the edge refuses a longer one.
+that bound, because the edge refuses a longer one.
 
 **Path parameters.** A `workspaceId` that is over 128 code points, blank (JavaScript's `\s` set,
 so U+FEFF is blank and U+200B is not) or carries a C0, DEL or C1 control character is `400
