@@ -416,6 +416,11 @@ fn the_bounds_are_the_contracts() {
         read(&bounds["pageLimit"], "default"),
         u64::from(PAGE_LIMIT_DEFAULT)
     );
+    assert_eq!(read(&bounds["pageLimit"]["cursor"], "min"), 1);
+    assert_eq!(
+        read(&bounds["pageLimit"]["cursor"], "max"),
+        CURSOR_MAX_CHARS as u64
+    );
     // The cursor bound and the `limit` pattern are written in the request schemas.
     let page =
         &shared("openapi-request-schemas.json")["schemas"]["WorkspacePageQueryDto"]["properties"];
@@ -474,12 +479,15 @@ fn a_page_limit_is_a_plain_whole_number_from_one_to_a_hundred() {
 }
 
 #[test]
-fn a_cursor_is_one_to_512_characters_without_controls() {
+fn a_cursor_is_one_to_the_contracts_maximum_characters_without_controls() {
     assert!(check_cursor("a").is_ok());
+    // The maximum is counted in characters: 4096 two-byte and 4096 four-byte ones both fit.
     assert!(check_cursor(&"\u{e9}".repeat(CURSOR_MAX_CHARS)).is_ok());
+    assert!(check_cursor(&"\u{1f600}".repeat(CURSOR_MAX_CHARS)).is_ok());
     for refused in [
         String::new(),
         "x".repeat(CURSOR_MAX_CHARS + 1),
+        "\u{1f600}".repeat(CURSOR_MAX_CHARS + 1),
         "a\u{0}b".to_owned(),
         "a\u{7f}".to_owned(),
         "\u{85}".to_owned(),

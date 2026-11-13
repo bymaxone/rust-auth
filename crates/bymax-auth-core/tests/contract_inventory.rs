@@ -156,6 +156,7 @@ fn every_section_of_the_contract_is_read_or_pending() {
                 "workspaceAccountRemoval",
                 "workspaceInvitations",
                 "workspaceMembershipCache",
+                "workspaceOwnerRole",
                 "workspaceRealtime",
                 "workspaceScopedName",
             ],
@@ -215,6 +216,16 @@ fn every_request_field_bound_is_read_or_pending() {
             &[],
             &[],
         ),
+    );
+}
+
+#[test]
+fn every_page_limit_bound_is_read_or_pending() {
+    let root = contract();
+    inventory(
+        "requestFieldBounds.pageLimit",
+        &root["requestFieldBounds"]["pageLimit"],
+        (&["min", "max", "default", "cursor"], &[], &[]),
     );
 }
 

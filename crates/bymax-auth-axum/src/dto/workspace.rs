@@ -14,10 +14,10 @@ use serde::Deserialize;
 
 use super::no_control_characters;
 
-/// `garde` rule: the `cursor` bound, 1 to 512 characters with no control character.
+/// `garde` rule: the `cursor` bound, 1 to 4096 characters with no control character.
 fn cursor_rule(value: &str, _: &()) -> garde::Result {
     check_cursor(value)
-        .map_err(|_| garde::Error::new("must be 1 to 512 characters with no control characters"))
+        .map_err(|_| garde::Error::new("must be 1 to 4096 characters with no control characters"))
 }
 
 /// `garde` rule: `limit` is a whole number from 1 to 100 written without a leading zero.

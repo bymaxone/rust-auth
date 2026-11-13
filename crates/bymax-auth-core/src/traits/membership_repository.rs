@@ -257,6 +257,11 @@ pub trait MembershipRepository: Send + Sync {
     /// and then workspace id, ascending. The cursor is opaque to the library and valid only for the
     /// same tenant and member; a malformed cursor, or one issued for another query, restarts from
     /// the first page and never widens the scope.
+    ///
+    /// A cursor this method issues as `next_cursor` must be 1 to
+    /// [`CURSOR_MAX_CHARS`](crate::workspace::bounds::CURSOR_MAX_CHARS) characters with no control
+    /// character: the HTTP edge refuses a longer one with `400` naming `cursor`, so the client
+    /// could not ask for the next page.
     async fn list_for_user(
         &self,
         params: ListForUser<'_>,
@@ -268,6 +273,11 @@ pub trait MembershipRepository: Send + Sync {
     /// Ordered by membership creation instant and then user id, ascending. The cursor is opaque to
     /// the library and valid only for the same workspace; a malformed cursor, or one issued for
     /// another query, restarts from the first page and never widens the scope.
+    ///
+    /// A cursor this method issues as `next_cursor` must be 1 to
+    /// [`CURSOR_MAX_CHARS`](crate::workspace::bounds::CURSOR_MAX_CHARS) characters with no control
+    /// character: the HTTP edge refuses a longer one with `400` naming `cursor`, so the client
+    /// could not ask for the next page.
     async fn list_for_workspace(
         &self,
         params: ListForWorkspace<'_>,
@@ -349,6 +359,11 @@ pub trait MembershipRepository: Send + Sync {
     /// ascending. The cursor is opaque to the library and valid only for the same tenant and
     /// member; a malformed cursor, or one issued for another query, restarts from the first page and
     /// never widens the scope.
+    ///
+    /// A cursor this method issues as `next_cursor` must be 1 to
+    /// [`CURSOR_MAX_CHARS`](crate::workspace::bounds::CURSOR_MAX_CHARS) characters with no control
+    /// character: the HTTP edge refuses a longer one with `400` naming `cursor`, so the client
+    /// could not ask for the next page.
     async fn list_sole_owned(
         &self,
         params: ListSoleOwned<'_>,

@@ -23,4 +23,6 @@ mod domain_tests;
 #[cfg(test)]
 mod membership_cache_tests;
 #[cfg(test)]
+mod owner_role_tests;
+#[cfg(test)]
 mod tests;
