@@ -117,6 +117,12 @@ fn all_errors() -> Vec<AuthError> {
         AuthError::OtpMaxAttempts,
         AuthError::InsufficientRole,
         AuthError::Forbidden,
+        AuthError::ForbiddenWithDetails {
+            details: vec![FieldError {
+                field: "name".to_owned(),
+                message: "no seats".to_owned(),
+            }],
+        },
         AuthError::UntrustedOrigin,
         AuthError::ReauthenticationRequired,
         AuthError::InvalidInvitationToken,
@@ -271,6 +277,26 @@ fn validation_details_serialize_the_field_errors() {
     assert_eq!(
         details,
         serde_json::json!([{ "field": "password", "message": "too short" }])
+    );
+}
+
+#[test]
+fn a_host_refusal_is_forbidden_with_its_reason_under_details() {
+    // A host decision that refuses with a reason answers the same code and status as any other
+    // refusal, and carries the reason the way a validation failure names its field.
+    let err = AuthError::ForbiddenWithDetails {
+        details: vec![FieldError {
+            field: "name".to_owned(),
+            message: "no seats".to_owned(),
+        }],
+    };
+    assert_eq!(err.code(), AuthErrorCode::Forbidden);
+    assert_eq!(err.http_status(), AuthError::Forbidden.http_status());
+    let json = serde_json::to_value(err.to_envelope()).unwrap_or_default();
+    assert_eq!(json["error"]["code"], "auth.forbidden");
+    assert_eq!(
+        json["error"]["details"],
+        serde_json::json!([{ "field": "name", "message": "no seats" }])
     );
 }
 

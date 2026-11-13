@@ -2,7 +2,32 @@
 //!
 //! The library fills an event in completely before the write and the repository stores it as
 //! given, in the same transaction as the change. Its tenant and workspace are the key of the call
-//! that carries it.
+//! that carries it, and its instant is written as `Date.prototype.toISOString` writes one, the
+//! form `@bymax-one/nest-auth` stores, so a deployment running both reads one audit trail.
+
+use time::{OffsetDateTime, UtcOffset};
+
+/// An instant as `Date.prototype.toISOString` writes it: UTC, milliseconds, `Z`, and a six-digit
+/// signed year outside 0 to 9999.
+#[must_use]
+pub fn iso_instant(at: OffsetDateTime) -> String {
+    let utc = at.checked_to_offset(UtcOffset::UTC).unwrap_or(at);
+    let year = utc.year();
+    let year = if (0..=9999).contains(&year) {
+        format!("{year:04}")
+    } else {
+        format!("{year:+07}")
+    };
+    format!(
+        "{year}-{:02}-{:02}T{:02}:{:02}:{:02}.{:03}Z",
+        u8::from(utc.month()),
+        utc.day(),
+        utc.hour(),
+        utc.minute(),
+        utc.second(),
+        utc.millisecond()
+    )
+}
 
 /// One audit event: who did what to which workspace, and when.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -117,5 +142,29 @@ impl AuditKind {
             Self::WorkspaceSwitched { .. } => "workspace.switched",
             Self::OwnershipTransferred { .. } => "ownership.transferred",
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::iso_instant;
+    use time::{Date, Month, OffsetDateTime, PrimitiveDateTime, Time, UtcOffset};
+
+    fn at(year: i32, offset_hours: i8) -> OffsetDateTime {
+        let date = Date::from_calendar_date(year, Month::March, 4).unwrap_or(Date::MIN);
+        let time = Time::from_hms_milli(5, 6, 7, 89).unwrap_or(Time::MIDNIGHT);
+        let offset = UtcOffset::from_hms(offset_hours, 0, 0).unwrap_or(UtcOffset::UTC);
+        PrimitiveDateTime::new(date, time).assume_offset(offset)
+    }
+
+    #[test]
+    fn an_instant_is_written_the_way_to_iso_string_writes_it() {
+        assert_eq!(iso_instant(at(2026, 0)), "2026-03-04T05:06:07.089Z");
+        // Another offset is converted to UTC first.
+        assert_eq!(iso_instant(at(2026, 2)), "2026-03-04T03:06:07.089Z");
+        // The year keeps four digits down to 0 and takes a sign and six digits outside 0 to 9999.
+        assert_eq!(iso_instant(at(7, 0)), "0007-03-04T05:06:07.089Z");
+        assert_eq!(iso_instant(at(9999, 0)), "9999-03-04T05:06:07.089Z");
+        assert_eq!(iso_instant(at(-1, 0)), "-000001-03-04T05:06:07.089Z");
     }
 }

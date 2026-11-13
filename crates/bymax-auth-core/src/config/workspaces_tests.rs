@@ -41,7 +41,7 @@ fn an_enabled_group_resolves_to_its_hierarchy_lifetime_and_permission() {
     let Ok(Some(resolved)) = resolved else { return };
     assert_eq!(resolved.hierarchy.owner_role(), "owner");
     assert_eq!(resolved.ttl.seconds(), 60);
-    assert_eq!(resolved.view_members, AcceptedRoles::AnyMember);
+    assert_eq!(resolved.permissions.view_members, AcceptedRoles::AnyMember);
 }
 
 #[test]

@@ -27,3 +27,12 @@ pub const INVITATIONS_PER_INVITER_PER_WINDOW: u32 = 20;
 
 /// The window of [`INVITATIONS_PER_INVITER_PER_WINDOW`], in seconds.
 pub const INVITER_WINDOW_SECONDS: u64 = 3_600;
+
+/// The largest `workspaces.max_workspaces_per_user` a deployment may set; `0` is no limit.
+pub const MAX_WORKSPACES_PER_USER_LIMIT: u32 = 1_000_000;
+
+/// The default number of days a workspace whose deletion was scheduled can still be restored.
+pub const DELETION_GRACE_DAYS_DEFAULT: u32 = 14;
+
+/// The longest configurable deletion grace period, in days; `0` deletes at once.
+pub const DELETION_GRACE_DAYS_MAX: u32 = 365;

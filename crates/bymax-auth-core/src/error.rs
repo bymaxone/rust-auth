@@ -34,6 +34,14 @@ pub enum ConfigError {
         /// The unknown role.
         role: String,
     },
+    /// A numeric `workspaces` option is over its bound.
+    #[error("workspaces.{option} must be at most {max}")]
+    WorkspaceOptionOutOfRange {
+        /// The option, as the shared contract names it.
+        option: &'static str,
+        /// The largest value accepted.
+        max: u32,
+    },
     /// `workspaces.membership_cache_ttl_seconds` is over the maximum.
     #[error(transparent)]
     WorkspaceMembershipCacheTtl(crate::workspace::membership_cache::MembershipCacheTtlTooLong),

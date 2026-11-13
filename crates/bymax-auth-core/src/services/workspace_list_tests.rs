@@ -10,7 +10,7 @@ use super::workspace_test_support::{Fixture, Seat, active, build, config, member
 use std::sync::Arc;
 
 use crate::engine::AuthEngine;
-use crate::services::auth::test_support::base_config;
+use crate::services::auth::test_support::{base_config, ctx};
 use crate::services::workspace::{MyWorkspaces, PageQuery, WorkspaceAccessRequest};
 use crate::testing::{InMemoryStores, InMemoryUserRepository};
 use crate::workspace::access::{AcceptedRoles, WorkspaceMember};
@@ -280,7 +280,7 @@ async fn a_switch_is_recorded_for_the_caller_and_listed_as_its_last_active_works
     let Some(f) = seeded() else { return };
     let switched = f
         .engine
-        .switch_workspace(&admitted("w3", "u1", "member"))
+        .switch_workspace(&admitted("w3", "u1", "member"), &ctx())
         .await;
     assert!(switched.is_ok());
     let mine = f
@@ -325,5 +325,5 @@ async fn every_workspace_call_on_an_engine_without_the_layer_is_internal() {
         .list_workspace_members(&member, PageQuery::default())
         .await;
     assert!(internal(members.map(drop)));
-    assert!(internal(engine.switch_workspace(&member).await));
+    assert!(internal(engine.switch_workspace(&member, &ctx()).await));
 }

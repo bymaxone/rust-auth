@@ -8,12 +8,13 @@ use bymax_auth_types::FieldError;
 use serde_json::{Map, Value, json};
 
 use crate::dto::{
-    AcceptInvitationDto, ChangeEmailDto, ChangePasswordDto, ConfirmEmailChangeDto,
-    CreateInvitationDto, DECLARED, ForgotPasswordDto, LoginDto, MemberRouteParamsDto,
-    MfaChallengeDto, MfaDisableDto, MfaRegenerateRecoveryCodesDto, MfaSetupDto, MfaVerifyDto,
-    OAuthCallbackQuery, OAuthInitiateQuery, PlatformLoginDto, RefreshDto, RegisterDto,
-    ResendOtpDto, ResendVerificationDto, ResetPasswordDto, RevokeInvitationDto, VerifyEmailDto,
-    VerifyOtpDto, WorkspacePageQueryDto,
+    AcceptInvitationDto, ChangeEmailDto, ChangeMemberRoleDto, ChangePasswordDto,
+    ConfirmEmailChangeDto, CreateInvitationDto, CreateWorkspaceDto, DECLARED, ForgotPasswordDto,
+    LoginDto, MemberRouteParamsDto, MfaChallengeDto, MfaDisableDto, MfaRegenerateRecoveryCodesDto,
+    MfaSetupDto, MfaVerifyDto, OAuthCallbackQuery, OAuthInitiateQuery, PlatformLoginDto,
+    RefreshDto, RegisterDto, RenameWorkspaceDto, ResendOtpDto, ResendVerificationDto,
+    ResetPasswordDto, RevokeInvitationDto, ScheduleWorkspaceDeletionDto, TransferOwnershipDto,
+    VerifyEmailDto, VerifyOtpDto, WorkspacePageQueryDto,
 };
 use crate::request_schemas::schema;
 use crate::structure::{declared_named, details_for};
@@ -50,12 +51,14 @@ macro_rules! dto {
 }
 
 /// Every DTO, by the name of its schema.
-const DTOS: [(&str, Details, Refuses); 25] = [
+const DTOS: [(&str, Details, Refuses); 30] = [
     dto!(AcceptInvitationDto, "AcceptInvitationDto"),
     dto!(ChangeEmailDto, "ChangeEmailDto"),
+    dto!(ChangeMemberRoleDto, "ChangeMemberRoleDto"),
     dto!(ChangePasswordDto, "ChangePasswordDto"),
     dto!(ConfirmEmailChangeDto, "ConfirmEmailChangeDto"),
     dto!(CreateInvitationDto, "CreateInvitationDto"),
+    dto!(CreateWorkspaceDto, "CreateWorkspaceDto"),
     dto!(ForgotPasswordDto, "ForgotPasswordDto"),
     dto!(LoginDto, "LoginDto"),
     dto!(MemberRouteParamsDto, "MemberRouteParamsDto"),
@@ -72,10 +75,13 @@ const DTOS: [(&str, Details, Refuses); 25] = [
     dto!(PlatformLoginDto, "PlatformLoginDto"),
     dto!(RefreshDto, "RefreshTokenBodyDto"),
     dto!(RegisterDto, "RegisterDto"),
+    dto!(RenameWorkspaceDto, "RenameWorkspaceDto"),
     dto!(ResendOtpDto, "ResendOtpDto"),
     dto!(ResendVerificationDto, "ResendVerificationDto"),
     dto!(ResetPasswordDto, "ResetPasswordDto"),
     dto!(RevokeInvitationDto, "RevokeInvitationDto"),
+    dto!(ScheduleWorkspaceDeletionDto, "ScheduleWorkspaceDeletionDto"),
+    dto!(TransferOwnershipDto, "TransferOwnershipDto"),
     dto!(VerifyEmailDto, "VerifyEmailDto"),
     dto!(VerifyOtpDto, "VerifyOtpDto"),
     dto!(WorkspacePageQueryDto, "WorkspacePageQueryDto"),

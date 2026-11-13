@@ -45,8 +45,9 @@ pub use email::{
 };
 #[doc(inline)]
 pub use hooks::{
-    AuthHooks, BeforeRegisterResult, HookContext, HookError, HookPlane, LoginFailure,
-    LoginFailureReason, NoOpAuthHooks, OAuthLoginResult, RegisterAttempt, RegisterOverrides,
+    AuthHooks, BeforeRegisterResult, BeforeWorkspaceCreateResult, HookContext, HookError,
+    HookPlane, LoginFailure, LoginFailureReason, NoOpAuthHooks, OAuthLoginResult, RegisterAttempt,
+    RegisterOverrides,
 };
 #[doc(inline)]
 pub use http::{HttpClient, HttpError, HttpMethod, HttpRequest, HttpResponse};

@@ -36,7 +36,9 @@ pub use resolvers::{
 };
 pub use validate::ResolvedConfig;
 pub(crate) use workspaces::ResolvedWorkspaces;
-pub use workspaces::{WorkspacePermissionsConfig, WorkspaceRolesConfig, WorkspacesConfig};
+pub use workspaces::{
+    WorkspacePermission, WorkspacePermissionsConfig, WorkspaceRolesConfig, WorkspacesConfig,
+};
 
 /// The JWT signing algorithm. A single-variant enum so an asymmetric algorithm is
 /// *unrepresentable* — algorithm confusion is impossible by construction.

@@ -43,7 +43,10 @@ mod structure_parity_tests;
 mod text_rules;
 mod workspace;
 
-pub use workspace::{MemberRouteParamsDto, WorkspacePageQueryDto};
+pub use workspace::{
+    ChangeMemberRoleDto, CreateWorkspaceDto, MemberRouteParamsDto, RenameWorkspaceDto,
+    ScheduleWorkspaceDeletionDto, TransferOwnershipDto, WorkspacePageQueryDto,
+};
 
 /// Declares which schema of the shared request schemas describes each DTO, and whether the DTO
 /// refuses properties it does not have. The key is the full type name: a type of a host that
@@ -65,9 +68,11 @@ macro_rules! declared {
 declared! {
     AcceptInvitationDto => "AcceptInvitationDto", true;
     ChangeEmailDto => "ChangeEmailDto", true;
+    ChangeMemberRoleDto in workspace => "ChangeMemberRoleDto", true;
     ChangePasswordDto => "ChangePasswordDto", true;
     ConfirmEmailChangeDto => "ConfirmEmailChangeDto", true;
     CreateInvitationDto => "CreateInvitationDto", true;
+    CreateWorkspaceDto in workspace => "CreateWorkspaceDto", true;
     ForgotPasswordDto => "ForgotPasswordDto", true;
     LoginDto => "LoginDto", true;
     MemberRouteParamsDto in workspace => "MemberRouteParamsDto", true;
@@ -81,10 +86,13 @@ declared! {
     PlatformLoginDto => "PlatformLoginDto", true;
     RefreshDto => "RefreshTokenBodyDto", false;
     RegisterDto => "RegisterDto", true;
+    RenameWorkspaceDto in workspace => "RenameWorkspaceDto", true;
     ResendOtpDto => "ResendOtpDto", true;
     ResendVerificationDto => "ResendVerificationDto", true;
     ResetPasswordDto => "ResetPasswordDto", true;
     RevokeInvitationDto => "RevokeInvitationDto", true;
+    ScheduleWorkspaceDeletionDto in workspace => "ScheduleWorkspaceDeletionDto", true;
+    TransferOwnershipDto in workspace => "TransferOwnershipDto", true;
     VerifyEmailDto => "VerifyEmailDto", true;
     VerifyOtpDto => "VerifyOtpDto", true;
     WorkspacePageQueryDto in workspace => "WorkspacePageQueryDto", true;

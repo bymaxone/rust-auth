@@ -563,6 +563,14 @@ pub enum AuthError {
     /// Generic access-denied fallback.
     #[error("forbidden")]
     Forbidden,
+    /// Access denied by a host decision that gives its reason: `auth.forbidden`, with the reason
+    /// rendered under `error.details` the way a validation failure names its field. The reason is
+    /// shown to the caller, so the host keeps it free of anything sensitive.
+    #[error("forbidden by a host decision")]
+    ForbiddenWithDetails {
+        /// The field the refusal is about and the reason, rendered under `error.details`.
+        details: Vec<FieldError>,
+    },
     /// A state-changing request carrying the session cookie came from an untrusted origin.
     #[error("untrusted origin")]
     UntrustedOrigin,
@@ -688,7 +696,7 @@ impl AuthError {
             Self::OtpExpired => AuthErrorCode::OtpExpired,
             Self::OtpMaxAttempts => AuthErrorCode::OtpMaxAttempts,
             Self::InsufficientRole => AuthErrorCode::InsufficientRole,
-            Self::Forbidden => AuthErrorCode::Forbidden,
+            Self::Forbidden | Self::ForbiddenWithDetails { .. } => AuthErrorCode::Forbidden,
             Self::UntrustedOrigin => AuthErrorCode::UntrustedOrigin,
             Self::ReauthenticationRequired => AuthErrorCode::ReauthenticationRequired,
             Self::InvalidInvitationToken => AuthErrorCode::InvalidInvitationToken,
@@ -760,7 +768,9 @@ impl AuthError {
             // so `to_value` never fails for this type. `.ok()` (not `unwrap`/`expect`,
             // which the workspace lints forbid) yields `None` on the unreachable error,
             // degrading to a detail-less envelope rather than panicking.
-            Self::Validation { details } => serde_json::to_value(details).ok(),
+            Self::Validation { details } | Self::ForbiddenWithDetails { details } => {
+                serde_json::to_value(details).ok()
+            }
             _ => None,
         }
     }

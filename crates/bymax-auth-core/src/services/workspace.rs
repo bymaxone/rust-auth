@@ -11,17 +11,20 @@ use std::sync::Arc;
 use bymax_auth_types::{AuthError, FieldError};
 use zeroize::Zeroizing;
 
-use crate::config::{ResolvedWorkspaces, WorkspacesConfig};
+use crate::config::{ResolvedWorkspaces, WorkspacePermission, WorkspacesConfig};
+use crate::context::RequestContext;
 use crate::engine::AuthEngine;
 use crate::error::{ConfigError, RepositoryError};
 use crate::services::membership_cache::{
     MembershipCache, Repositories, Resolution, ResolveError, resolve_membership,
 };
+use crate::services::workspace_writes::{audit_event, member_hook_context, now_iso};
 use crate::traits::membership_repository::{ListForUser, ListForWorkspace};
 use crate::traits::{MembershipCacheStore, MembershipRepository, WorkspaceRepository};
 use crate::workspace::access::{
     AcceptedRoles, ResolvedAccess, SurfaceRules, WorkspaceMember, classify, decide,
 };
+use crate::workspace::audit::AuditKind;
 use crate::workspace::bounds::{
     IDENTIFIER_MAX_CHARS, check_cursor, check_identifier, is_blank, parse_page_limit,
 };
@@ -49,11 +52,11 @@ impl WorkspaceCollaborators {
 
 /// The workspace layer as the engine holds it: present exactly when `workspaces.enabled`.
 pub(crate) struct WorkspaceRuntime {
-    workspaces: Arc<dyn WorkspaceRepository>,
-    memberships: Arc<dyn MembershipRepository>,
-    cache_store: Arc<dyn MembershipCacheStore>,
-    resolved: ResolvedWorkspaces,
-    identifier_key: Zeroizing<[u8; 64]>,
+    pub(crate) workspaces: Arc<dyn WorkspaceRepository>,
+    pub(crate) memberships: Arc<dyn MembershipRepository>,
+    pub(crate) cache_store: Arc<dyn MembershipCacheStore>,
+    pub(crate) resolved: ResolvedWorkspaces,
+    pub(crate) identifier_key: Zeroizing<[u8; 64]>,
 }
 
 impl WorkspaceRuntime {
@@ -132,12 +135,12 @@ fn resolve_error(error: ResolveError) -> AuthError {
 }
 
 /// A repository failure as the opaque internal error, the cause kept for the log.
-fn internal(error: RepositoryError) -> AuthError {
+pub(crate) fn internal(error: RepositoryError) -> AuthError {
     AuthError::Internal(Box::new(error))
 }
 
 /// `auth.validation` naming `field`, with the rule it breaks.
-fn invalid(field: &str, message: String) -> AuthError {
+pub(crate) fn invalid(field: &str, message: String) -> AuthError {
     AuthError::Validation {
         details: vec![FieldError {
             field: field.to_owned(),
@@ -227,7 +230,7 @@ fn grants(item: &MembershipWithWorkspace) -> bool {
 
 impl AuthEngine {
     /// The workspace layer, or the internal error a call reaching it while it is off is.
-    fn workspace_runtime(&self) -> Result<&WorkspaceRuntime, AuthError> {
+    pub(crate) fn workspace_runtime(&self) -> Result<&WorkspaceRuntime, AuthError> {
         self.workspaces().ok_or_else(|| {
             AuthError::Internal(Box::new(std::io::Error::other(
                 "the workspace layer is not enabled",
@@ -239,8 +242,18 @@ impl AuthEngine {
     /// `None` when the workspace layer is off.
     #[must_use]
     pub fn workspace_view_members_roles(&self) -> Option<&AcceptedRoles> {
+        self.workspace_permission_roles(WorkspacePermission::ViewMembers)
+    }
+
+    /// The roles `workspaces.permissions` accepts for `permission`, the owner role alone where the
+    /// configuration names none, or `None` when the workspace layer is off.
+    #[must_use]
+    pub fn workspace_permission_roles(
+        &self,
+        permission: WorkspacePermission,
+    ) -> Option<&AcceptedRoles> {
         self.workspaces()
-            .map(|runtime| &runtime.resolved.view_members)
+            .map(|runtime| runtime.resolved.permissions.roles(permission))
     }
 
     /// Decides whether the caller may act in the workspace a request names: the guard of every
@@ -388,19 +401,32 @@ impl AuthEngine {
             .map_err(internal)
     }
 
-    /// Records the workspace `member` was admitted to as the one they last switched to. Nothing
-    /// about the session changes: the token carries no workspace.
+    /// Records the workspace `member` was admitted to as the one they last switched to, when the
+    /// repository records it ([`MembershipRepository::set_last_active_workspace_id`] is optional
+    /// and its default records nothing), then reports `workspace.switched` to the host's
+    /// workspace-event hook. Nothing about the session changes: the token carries no workspace.
+    /// The event rides on no repository write, so it reaches the hook only.
     ///
     /// # Errors
     ///
     /// `auth.internal` for a repository failure or a disabled workspace layer.
-    pub async fn switch_workspace(&self, member: &WorkspaceMember) -> Result<(), AuthError> {
+    pub async fn switch_workspace(
+        &self,
+        member: &WorkspaceMember,
+        ctx: &RequestContext,
+    ) -> Result<(), AuthError> {
         let runtime = self.workspace_runtime()?;
         runtime
             .memberships
             .set_last_active_workspace_id(&member.tenant_id, &member.user_id, &member.workspace_id)
             .await
-            .map_err(internal)
+            .map_err(internal)?;
+        let kind = AuditKind::WorkspaceSwitched {
+            user_id: member.user_id.clone(),
+        };
+        let event = audit_event(member.workspace(), Some(&member.user_id), &now_iso(), kind);
+        self.notify_workspace_event(event, member_hook_context(ctx, member));
+        Ok(())
     }
 }
 
