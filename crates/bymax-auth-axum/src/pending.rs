@@ -10,29 +10,24 @@
 
 /// Request schemas the artefact carries that no `dto::DECLARED` row maps to yet. None of them has
 /// a DTO at all.
-pub(crate) const PENDING_SCHEMAS: [&str; 12] = [
+pub(crate) const PENDING_SCHEMAS: [&str; 10] = [
     "AcceptWorkspaceInvitationDto",
     "AcceptWorkspaceInvitationSignupDto",
     "ChangeMemberRoleDto",
     "CreateWorkspaceDto",
     "InviteToWorkspaceDto",
-    "MemberRouteParamsDto",
     "PreviewWorkspaceInvitationDto",
     "RenameWorkspaceDto",
     "ScheduleWorkspaceDeletionDto",
     "TransferOwnershipDto",
     "WorkspaceInvitationEmailDto",
-    "WorkspacePageQueryDto",
 ];
 
 /// Operations the artefact carries that have no row in the operation table yet, as the
 /// artefact's `METHOD /path` keys.
-pub(crate) const PENDING_OPERATIONS: [&str; 19] = [
+pub(crate) const PENDING_OPERATIONS: [&str; 15] = [
     "DELETE /workspaces/:workspaceId/members/:userId",
-    "GET /workspaces",
-    "GET /workspaces/:workspaceId/access",
     "GET /workspaces/:workspaceId/invitations",
-    "GET /workspaces/:workspaceId/members",
     "PATCH /workspaces/:workspaceId",
     "PATCH /workspaces/:workspaceId/members/:userId",
     "POST /workspaces",
@@ -42,7 +37,6 @@ pub(crate) const PENDING_OPERATIONS: [&str; 19] = [
     "POST /workspaces/:workspaceId/leave",
     "POST /workspaces/:workspaceId/restore",
     "POST /workspaces/:workspaceId/schedule-deletion",
-    "POST /workspaces/:workspaceId/switch",
     "POST /workspaces/:workspaceId/transfer-ownership",
     "POST /workspaces/invitations/accept",
     "POST /workspaces/invitations/accept-signup",

@@ -14,6 +14,9 @@ mod optional;
 mod role;
 mod self_or_admin;
 mod status;
+pub(crate) mod workspace;
+#[cfg(test)]
+mod workspace_tests;
 
 #[cfg(all(test, feature = "platform"))]
 mod error_code_tests;
@@ -28,6 +31,7 @@ pub use optional::OptionalAuthUser;
 pub use role::{RequireRole, Role};
 pub use self_or_admin::{AdminRole, SelfOrAdmin};
 pub use status::{UserStatus, VerifiedUser};
+pub use workspace::{AnyWorkspaceMember, RequireWorkspace, WorkspacePolicy};
 
 #[cfg(feature = "platform")]
 pub use platform::{PlatformRole, PlatformUser, RequirePlatformRole};

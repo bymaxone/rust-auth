@@ -1072,6 +1072,11 @@ The **Default** column lists `AuthConfig::default()` (≡ `nest_compat_defaults(
 | `api_keys.prefix` | `String` | No | `bak` | Key prefix, 2 to 16 lowercase letters and digits starting with a letter, no underscore (`ApiKeysTransport`) |
 | `api_keys.last_used_flush` | `Duration` | No | `60s` | Flush interval of the last-used timestamps, a whole number of seconds from 1 to 3600 (`ApiKeysFlushInterval`) |
 | `api_keys.audit_mode` | `ApiKeyAuditMode` | No | `BestEffort` | `Required`: a failing audit hook refuses a request that would have been admitted; `BestEffort`: a failing hook never changes the answer |
+| `workspaces.enabled` | `bool` | No | `false` | The workspace layer (§8.2.9). Needs a `WorkspaceRepository`, a `MembershipRepository` (`AuthEngineBuilder::workspace_repositories`) and a `MembershipCacheStore` (`membership_cache_store`; `RedisStores` implements it) whatever the cache lifetime; any of them without the other half is a startup error (`ConfigError::MissingWorkspaceRepositories`, `MissingMembershipCacheStore`, `WorkspaceCollaboratorsUnused`). Not behind a Cargo feature. Nothing below is checked while it is `false` |
+| `workspaces.roles.hierarchy` | `BTreeMap<String, Vec<String>>` | Cond. | — | Every workspace role and the roles it includes, one level and explicit; the owner role lists every other role and no other role lists it (`ConfigError::WorkspaceRoles`) |
+| `workspaces.roles.owner_role` | `String` | Cond. | — | The role that owns a workspace, a key of the hierarchy. Only a member holding exactly this role is told a workspace is pending deletion |
+| `workspaces.permissions.view_members` | `AcceptedRoles` | No | `AnyMember` | Who may list a workspace's members; a named role outside the hierarchy is refused (`WorkspacePermissionUnknownRole`). An empty list declares nothing and the route then answers `403 auth.forbidden` to everyone |
+| `workspaces.membership_cache_ttl_seconds` | `u64` | No | `60` | Lifetime of a cached membership, 0 to 3600 (`WorkspaceMembershipCacheTtl`); `0` disables the cache and every request reads the repositories |
 | `password.scrypt.cost_factor` | `u32` | No | `131072` | Power of 2, min `16384` |
 | `password.scrypt.block_size` | `u32` | No | `8` | scrypt r |
 | `password.scrypt.parallelization` | `u32` | No | `1` | scrypt p |
@@ -1272,6 +1277,7 @@ Validation rules, in the order applied (parity with `resolveOptions`):
 | 23 | session/OTP/brute-force stores supplied | `MissingStores` |
 | 24 | `api_keys.enabled` ⇒ the `api-keys` feature is compiled in, an `ApiKeyRepository` is supplied, and — when `audit_mode` is `Required` — hooks are supplied; a repository without `enabled` is refused too | `ApiKeysFeatureDisabled`, `ApiKeysRepositoryRequired`, `ApiKeysAuditRequiresHooks`, `ApiKeysRepositoryUnused` |
 | 25 | `api_keys.enabled` ⇒ the pepper is ≥ 32 characters, ≥ 3.5 bits/char and equals none of `jwt.secret`, a retired JWT secret, `identifier_key`, `mfa.encryption_key` or a retired MFA key; the scope vocabulary is non-empty, distinct and well-formed; `header` is a lowercase name the library does not read; `prefix` fits the key grammar; `last_used_flush` is a whole number of seconds from 1 to 3600 | `ApiKeysPepperTooShort`, `ApiKeysPepperLowEntropy`, `ApiKeysPepperReused`, `ApiKeysScopes`, `ApiKeysTransport`, `ApiKeysFlushInterval` |
+| 26 | `controllers.workspaces` ⇒ `workspaces.enabled`; `workspaces.enabled` ⇒ both repositories and the membership cache store are supplied, the hierarchy and owner role are valid, `view_members` names only roles of it and the cache lifetime is at most 3600; any collaborator without `enabled` is refused too | `WorkspacesControllerWithoutWorkspaces`, `MissingWorkspaceRepositories`, `MissingMembershipCacheStore`, `WorkspaceCollaboratorsUnused`, `WorkspaceRoles`, `WorkspacePermissionUnknownRole`, `WorkspaceMembershipCacheTtl` |
 
 The entropy gate is a first-order filter (it detects extreme low-diversity secrets such as a single repeated character) and is documented as necessary-but-not-sufficient; the operational guidance is to generate the secret with 32 random bytes encoded as base64.
 
@@ -1286,7 +1292,7 @@ nest-auth expresses opt-in/opt-out at one layer (the dynamic module's `controlle
 
 1. **Cargo feature flags (compile-time, on the facade crate `bymax-auth`).** Each *optional* route group is gated behind a feature so a consumer can exclude its code entirely. The flow features are `mfa`, `sessions`, `platform`, `oauth`, `invitations`, plus the transport features `axum`/`client` and the hasher features `scrypt` (the default, enabled by `default`) / `argon2` (Argon2id, opt-in). There is no `wasm` facade feature — the edge binding is the separate `bymax-auth-wasm` crate (§4). The non-hasher mandatory crypto set is always compiled (§17.1). **The `auth` and `password-reset` flows are not features** — they are always compiled into `bymax-auth-core` and can only be opted **out** at runtime (layer 2); there is no `core` feature. A disabled *optional* feature means the corresponding controller code, DTOs, and the relevant `OAuthProvider` plumbing are not compiled into the binary at all — the strongest form of opt-out, with zero runtime cost and a smaller attack surface. `bymax-auth-core` always compiles the always-on engine logic (`auth` + `password-reset`); the facade's features select which optional flows, adapters and route modules are pulled in.
 
-2. **Builder toggles (`ControllerToggles`, runtime).** Within the set of compiled-in groups, `ControllerToggles` decides which are actually active for this engine instance. Defaults match nest-auth precisely: `auth` and `password_reset` are `true` (opt-out); `mfa`, `oauth` are `false` (opt-in); `sessions`, `platform`, `invitations` default `false` but are auto-promoted to `true` during `build()` when their feature config is enabled (`sessions.enabled`, `platform.enabled`, `invitations.enabled`) — the same "default true when X.enabled" behavior nest-auth documents. The cross-validation lives in `build()`: enabling a toggle without its prerequisite config is a `ConfigError` (rules 13 and 21 above).
+2. **Builder toggles (`ControllerToggles`, runtime).** Within the set of compiled-in groups, `ControllerToggles` decides which are actually active for this engine instance. Defaults match nest-auth precisely: `auth` and `password_reset` are `true` (opt-out); `mfa`, `oauth`, `email_change` and `workspaces` are `false` (opt-in, and `workspaces` requires `workspaces.enabled`); `sessions`, `platform`, `invitations` default `false` but are auto-promoted to `true` during `build()` when their feature config is enabled (`sessions.enabled`, `platform.enabled`, `invitations.enabled`) — the same "default true when X.enabled" behavior nest-auth documents. The cross-validation lives in `build()`: enabling a toggle without its prerequisite config is a `ConfigError` (rules 13 and 21 above).
 
 3. **Axum router mounting (`bymax-auth-axum`).** The adapter does **not** accept an independent set of group flags — its `RouteGroups` is **derived from the engine's resolved `ControllerToggles`** (with `platform_mfa = platform && mfa`), so routing can never disagree with what the engine actually wired. `AuthRouter::from_engine(&engine)` reads those resolved toggles and mounts exactly the matching route groups under `route_prefix`. A toggle that is `false` (or whose feature is absent) contributes no routes. This is the Rust equivalent of NestJS registering — or not registering — a controller class.
 
@@ -1302,6 +1308,7 @@ The route groups and the toggle/feature that gates each:
 | OAuth | `/oauth/{provider}` `/oauth/{provider}/callback` | `oauth` (opt-in) | `oauth` |
 | Invitations | `/invitations` `/invitations/accept` `/invitations/revoke` | `invitations` (auto when `invitations.enabled`) | `invitations` |
 | Email change | `/email/change` `/email/change/confirm` | `email_change` (opt-in) | — (always compiled) |
+| Workspaces | `/workspaces` (GET) `/workspaces/{workspaceId}/access` (GET) `/workspaces/{workspaceId}/members` (GET) `/workspaces/{workspaceId}/switch` (POST) | `workspaces` (opt-in; requires `workspaces.enabled`) | — (always compiled) |
 
 For consumers using the framework-agnostic core directly (no Axum), the toggles still gate which engine methods are wired and which background tasks run; routing is simply the consumer's responsibility. The edge JWT verifier (`bymax-auth-wasm`) is independent of all toggles — it only ever verifies HS256 access tokens locally and mounts no routes.
 
@@ -2556,6 +2563,7 @@ Traits/crates: `bymax-auth-types` (`AuthResult`, `PlatformAuthResult`, `SafeAuth
 | `TokenDeliveryService` | — | types | — |
 | `ApiKeyRuntime` (feature `api-keys`) | `ApiKeyRepository`, `AuthHooks` | crypto (`api_key`) | — |
 | `services::membership_cache` (`resolve_membership`, `bump_workspace`, `bump_membership`) | `MembershipCacheStore`, `WorkspaceRepository`, `MembershipRepository` | crypto (mac) | `membership_cache_fill`, `membership_cache_bump` |
+| `services::workspace` (`AuthEngine::authorize_workspace`, `list_my_workspaces`, `workspace_access`, `list_workspace_members`, `switch_workspace`) | `WorkspaceRepository`, `MembershipRepository`, `MembershipCacheStore` | crypto (mac) | `membership_cache_fill` (through `resolve_membership`) |
 
 All cross-store mutations follow the security-before-availability ordering established above (credential change before session invalidation; uniqueness/status/verification gates before KDF work; brute-force ordering invariant). Every `after_*`/`on_*` hook is fire-and-forget; only `before_register` (and OAuth's `on_oauth_login`) can block a flow.
 ### 7.13 Service API keys (feature `api-keys`)
@@ -2886,6 +2894,65 @@ their ordering reproduces the NestJS guard pipeline.
 > for which addresses have invitations, which is exactly what hashing the address in the
 > `invidx:` index avoids disclosing.
 
+#### 8.2.9 WorkspaceController — group `workspaces` (`controllers.workspaces`)
+
+| Method | Path | Handler | Extractors / guards | Success | Query DTO | Rate limit |
+| ------ | ---- | ------- | ------------------- | ------- | --------- | ---------- |
+| GET    | `/auth/workspaces` | `list` | `UserStatus`, `ValidatedQuery<WorkspacePageQueryDto>` | 200 | `WorkspacePageQueryDto` | `workspace_list` (30/60) |
+| GET    | `/auth/workspaces/{workspaceId}/access` | `access` | `RequireWorkspace<AnyWorkspaceMember>` | 200 | — | `workspace_access` (60/60) |
+| GET    | `/auth/workspaces/{workspaceId}/members` | `members` | `RequireWorkspace<ViewMembers>`, `ValidatedQuery<WorkspacePageQueryDto>` | 200 | `WorkspacePageQueryDto` | `workspace_members` (30/60) |
+| POST   | `/auth/workspaces/{workspaceId}/switch` | `switch` | `RequireWorkspace<AnyWorkspaceMember>` | 204 | — (a body is never read; `requestEncoding.whenBody`) | `workspace_switch` (20/60) |
+
+Every route needs a verified dashboard access token and an account in good standing (the status
+gate runs before the workspace is read). The answers:
+
+- `GET /workspaces` — `{ items: [{ workspace, role }], nextCursor, lastActiveWorkspaceId }`: one page of
+  the caller's ACTIVE memberships of ACTIVE workspaces, ordered by membership creation and then
+  workspace id. The repository promises that filter and the service decides it again. The tenant
+  and the member come from the token.
+- `GET /workspaces/{workspaceId}/access` — `{ workspace, role }`. The workspace is read again after the
+  guard and answered only while it is still active (`404` otherwise).
+- `GET /workspaces/{workspaceId}/members` — `{ items: [{ userId, role, status, invitedByUserId, createdAt }], nextCursor }`:
+  the members in every membership status, for a caller whose role
+  `workspaces.permissions.view_members` accepts.
+- `POST /workspaces/{workspaceId}/switch` — records the workspace as the caller's last active one
+  (`MembershipRepository::set_last_active_workspace_id`); the session does not change.
+
+A workspace answer is `{ id, name, status, createdAt, deletionScheduledAt }`, with instants written
+as `Date.prototype.toISOString` writes them (UTC, milliseconds, `Z`) and `null` for no scheduled
+deletion. The tenant is the caller's own and is never repeated.
+
+**Lists.** `limit` is read as a string and must match `^(?:[1-9][0-9]?|100)$` (`05`, `+5`, `0`,
+`101` and an empty `limit=` are `400 auth.validation` naming `limit`, never clamped; default 50);
+`cursor` is 1 to 512 characters with no control character (`400` naming `cursor`) and is opaque.
+The query carries nothing else: a `tenantId`, `userId` or `workspaceId` in it is refused as a
+property that should not exist, so the tenant and the workspace of a list always come from the
+credential and the route (`requestFieldBounds.pageLimit`).
+
+**Path parameters.** A `workspaceId` that is over 128 code points, blank (JavaScript's `\s` set,
+so U+FEFF is blank and U+200B is not) or carries a C0, DEL or C1 control character is `400
+auth.validation` naming `workspaceId`, ahead of any lookup; the guard runs before the handler
+reads any other path parameter, so when `workspaceId` and another parameter are both malformed
+only `workspaceId` is reported. A well-formed id that names nothing is the identical `404`.
+
+**The access decision** (`workspaceRealtime.rules.accessDecision`), in one fixed order, decided
+from the workspace and membership rows already read: a caller who is not an active member of an
+active workspace (a missing workspace, a suspended or deleted one, a missing or suspended
+membership) and any non-owner of a workspace pending deletion get the IDENTICAL `404
+auth.workspace_not_found` (same status, same body bytes); the member holding exactly the owner
+role of a workspace pending deletion gets `409 auth.workspace_pending_deletion`, unless the route's
+policy admits pending workspaces (`WorkspacePolicy::ALLOW_PENDING`), in which case that owner alone
+is admitted; then the role is judged through `workspaces.roles.hierarchy` (`403
+auth.insufficient_workspace_role`). None of these routes admits a pending workspace. The
+membership is resolved through the versioned cache of §12.5.6, which fills and reads back only an
+active membership of an active workspace.
+
+**Literal segments.** A literal route under the same prefix, such as
+`workspaces/invitations/preview`, coexists with `workspaces/{workspaceId}/...` because a static
+segment wins over a capture. A workspace whose id is `invitations` is therefore unreachable under this
+prefix. The shared contract makes a workspace id a library-generated UUID
+(`requestFieldBounds.pathParameters`), so only a workspace a host gave that id itself is affected.
+
 ---
 
 ### 8.3 Extractors — Axum 0.8 `FromRequestParts`
@@ -2945,6 +3012,7 @@ where
 | `@Public()`                      | **absence** of `AuthUser` in the handler| public = the handler simply does not request an auth extractor            |
 | `@SkipMfa()`                     | **absence** of `MfaSatisfied`           | skip-MFA = the handler requests `AuthUser` but not `MfaSatisfied`          |
 | `WsJwtGuard`                     | `WsAuthUser` (ws upgrade extractor)     | validate dashboard JWT for the WebSocket upgrade (see §8.7)                |
+| `WorkspaceGuard` + `@WorkspaceRoles` / `@WorkspacePermission` / `@AllowPendingWorkspace` | `RequireWorkspace<P: WorkspacePolicy>` | the access decision in the workspace the route's `{workspaceId}` names (§8.3.8) |
 
 The two "absence" rows are the key insight: in NestJS, `@Public` and `@SkipMfa`
 are *opt-outs* read by always-applied global guards. In Axum there are no global
@@ -3123,6 +3191,28 @@ extensions to avoid repeated signature verification within a single request).
 > extractors are stacked, the first extractor to run inserts the verified claims
 > into `parts.extensions`; subsequent extractors read from there. This keeps the
 > composition ergonomic without paying for redundant HMAC verifications.
+
+#### 8.3.8 `RequireWorkspace<P>`
+
+The `WorkspaceGuard`. `P` is a marker type implementing `WorkspacePolicy`: `fn accepted(&AuthEngine)
+-> AcceptedRoles` (the roles the route accepts, read per request, `AnyMember` or a list judged
+through the workspace hierarchy) and `const ALLOW_PENDING: bool` (default `false`). The library
+ships `AnyWorkspaceMember`. In order it verifies the dashboard access token and the account's
+standing (as `UserStatus` does), reads the workspace from the route's `{workspaceId}` capture and
+nowhere else (`400 auth.workspace_required` for a route without one; the transport envelope for a
+capture that is not UTF-8), refuses a policy that declares no role (`403 auth.forbidden`, before any
+repository is read), applies the path-parameter rule (`400 auth.validation` naming `workspaceId`), and
+asks `AuthEngine::authorize_workspace` for the access decision of §8.2.9. It carries the admitted
+`WorkspaceMember { tenant_id, workspace_id, user_id, role }`; a handler takes the workspace it acts in
+from there and never from the request.
+
+```rust
+pub trait WorkspacePolicy: Send + Sync + 'static {
+    const ALLOW_PENDING: bool = false;
+    fn accepted(engine: &AuthEngine) -> AcceptedRoles;
+}
+pub struct RequireWorkspace<P: WorkspacePolicy>(pub WorkspaceMember, pub PhantomData<P>);
+```
 
 ---
 

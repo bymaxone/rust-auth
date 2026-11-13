@@ -70,6 +70,8 @@ pub struct AuthEngine {
     /// The service API-key runtime, present exactly when `api_keys.enabled`.
     #[cfg(feature = "api-keys")]
     api_keys: Option<crate::services::api_key::ApiKeyRuntime>,
+    /// The workspace layer, present exactly when `workspaces.enabled`.
+    workspaces: Option<crate::services::workspace::WorkspaceRuntime>,
 }
 
 impl AuthEngine {
@@ -202,6 +204,17 @@ impl AuthEngine {
     #[cfg(feature = "api-keys")]
     pub(crate) fn api_keys(&self) -> Option<&crate::services::api_key::ApiKeyRuntime> {
         self.api_keys.as_ref()
+    }
+
+    /// The workspace layer, when it is enabled.
+    pub(crate) fn workspaces(&self) -> Option<&crate::services::workspace::WorkspaceRuntime> {
+        self.workspaces.as_ref()
+    }
+
+    /// Whether the workspace layer is enabled.
+    #[must_use]
+    pub fn workspaces_enabled(&self) -> bool {
+        self.workspaces.is_some()
     }
 
     /// The refresh-session store.

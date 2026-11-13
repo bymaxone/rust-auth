@@ -14,7 +14,7 @@ use super::{
     ApiKeysConfig, AuthConfig, BruteForceConfig, ControllerToggles, CookieConfig,
     EmailChangeConfig, EmailVerificationConfig, InvitationConfig, JwtConfig, OAuthConfig,
     PasswordAlgorithm, PasswordConfig, PasswordResetConfig, PlatformConfig, RolesConfig,
-    SessionConfig, TokenDelivery,
+    SessionConfig, TokenDelivery, WorkspacesConfig,
 };
 
 impl AuthConfig {
@@ -52,6 +52,7 @@ impl AuthConfig {
             tenant_id_resolver: None,
             enforce_tenant_binding: false,
             api_keys: ApiKeysConfig::default(),
+            workspaces: WorkspacesConfig::default(),
         }
     }
 

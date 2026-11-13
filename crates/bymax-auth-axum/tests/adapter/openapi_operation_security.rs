@@ -1,6 +1,6 @@
 //! The credential each operation declares, against what the router does with it.
 //!
-//! `operation_security()` says which credential each of the 38 operations requires. This presents
+//! `operation_security()` says which credential each operation requires. This presents
 //! every operation, in each delivery mode, with each combination of credential and transport a
 //! client could send, and requires the router to refuse or admit it the way the kind says: a
 //! request that carries no credential the kind requires is refused with 401, and one that carries
@@ -165,7 +165,8 @@ fn admits(kind: OperationKind, p: Presented, delivery: DeliveryMode) -> bool {
 fn concrete(path: &str) -> String {
     let filled = path
         .replace("{id}", "no-such-session")
-        .replace("{provider}", "google");
+        .replace("{provider}", "google")
+        .replace("{workspaceId}", "no-such-workspace");
     format!("/auth{filled}")
 }
 
@@ -309,6 +310,7 @@ async fn every_operation_admits_and_refuses_what_its_kind_says_in_every_delivery
             invitations: true,
             email_change: true,
             sessions: true,
+            workspaces: true,
             cookie_names: Some((ACCESS_NAME, REFRESH_NAME)),
             ..EngineSpec::default()
         }) else {

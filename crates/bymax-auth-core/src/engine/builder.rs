@@ -54,6 +54,7 @@ pub struct AuthEngineBuilder {
     api_key_repository: Option<Arc<dyn crate::traits::ApiKeyRepository>>,
     #[cfg(feature = "api-keys")]
     api_key_clock: Option<Arc<dyn crate::services::api_key::ApiKeyClock>>,
+    workspaces: crate::services::workspace::WorkspaceCollaborators,
 }
 
 impl Default for AuthEngineBuilder {
@@ -93,6 +94,7 @@ impl AuthEngineBuilder {
             api_key_repository: None,
             #[cfg(feature = "api-keys")]
             api_key_clock: None,
+            workspaces: crate::services::workspace::WorkspaceCollaborators::default(),
         }
     }
 
@@ -349,6 +351,31 @@ impl AuthEngineBuilder {
         self
     }
 
+    /// Set the workspace and membership repositories. Required exactly when `workspaces.enabled`
+    /// is set: supplying them without enabling the layer, or enabling it without them, is a
+    /// [`ConfigError`] at [`AuthEngineBuilder::build`].
+    #[must_use]
+    pub fn workspace_repositories(
+        mut self,
+        workspaces: Arc<dyn crate::traits::WorkspaceRepository>,
+        memberships: Arc<dyn crate::traits::MembershipRepository>,
+    ) -> Self {
+        self.workspaces.workspaces = Some(workspaces);
+        self.workspaces.memberships = Some(memberships);
+        self
+    }
+
+    /// Set the store of the versioned membership cache (`RedisStores` implements it). Required
+    /// exactly when `workspaces.enabled` is set, whatever the cache lifetime.
+    #[must_use]
+    pub fn membership_cache_store(
+        mut self,
+        store: Arc<dyn crate::traits::MembershipCacheStore>,
+    ) -> Self {
+        self.workspaces.cache_store = Some(store);
+        self
+    }
+
     /// Validate the configuration and assemble the engine.
     ///
     /// # Errors
@@ -386,6 +413,7 @@ impl AuthEngineBuilder {
             api_key_repository,
             #[cfg(feature = "api-keys")]
             api_key_clock,
+            workspaces,
         } = self;
 
         // Capture whether the consumer supplied custom hooks before the NoOp default is
@@ -486,6 +514,12 @@ impl AuthEngineBuilder {
         #[cfg(feature = "mfa")]
         let sessions_enabled = session_config.enabled;
         let config = Arc::new(ResolvedConfig::new(config, environment, secure_cookies));
+        let workspaces = crate::services::workspace::WorkspaceRuntime::assemble(
+            &config.config().workspaces,
+            config.config().controllers.workspaces,
+            workspaces,
+            config.hmac_key(),
+        )?;
 
         let previous_keys = config
             .config()
@@ -632,6 +666,7 @@ impl AuthEngineBuilder {
             platform_auth,
             #[cfg(feature = "api-keys")]
             api_keys,
+            workspaces,
         })
     }
 }

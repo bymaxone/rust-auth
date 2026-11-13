@@ -97,6 +97,8 @@ pub enum RouteGroup {
     Sessions,
     /// The OAuth group, which takes no request body.
     OAuth,
+    /// The workspace group, whose read routes take no request body.
+    Workspaces,
 }
 
 impl RouteGroup {
@@ -113,6 +115,7 @@ impl RouteGroup {
             Self::EmailChange => groups.email_change,
             Self::Sessions => groups.sessions,
             Self::OAuth => groups.oauth,
+            Self::Workspaces => groups.workspaces,
         }
     }
 }
@@ -290,6 +293,17 @@ fn delivers_bearer(delivery: TokenDelivery) -> bool {
     matches!(delivery, TokenDelivery::Bearer | TokenDelivery::Both)
 }
 
+/// Whether any enabled route group reads the dashboard credentials.
+pub(crate) fn serves_dashboard_routes(groups: RouteGroups) -> bool {
+    groups.auth
+        || groups.password_reset
+        || groups.mfa
+        || groups.sessions
+        || groups.invitations
+        || groups.email_change
+        || groups.workspaces
+}
+
 /// The schemes a deployment can satisfy, from the facts that decide them.
 ///
 /// A scheme the deployment cannot satisfy is absent, not defined and unreferenced: a document
@@ -303,12 +317,7 @@ pub(crate) fn derive_security_schemes(
     groups: RouteGroups,
 ) -> BTreeMap<&'static str, Value> {
     let mut schemes = BTreeMap::new();
-    let dashboard = groups.auth
-        || groups.password_reset
-        || groups.mfa
-        || groups.sessions
-        || groups.invitations
-        || groups.email_change;
+    let dashboard = serves_dashboard_routes(groups);
     if dashboard && delivers_cookie(delivery) {
         schemes.insert(
             ACCESS_COOKIE_SCHEME,

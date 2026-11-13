@@ -22,6 +22,40 @@ pub enum ConfigError {
          binding is enforced"
     )]
     TenantBindingWithoutResolver,
+    /// `workspaces.roles` breaks a rule of the role hierarchy.
+    #[error(transparent)]
+    WorkspaceRoles(crate::workspace::roles::RoleHierarchyError),
+    /// A `workspaces.permissions` entry names a role that is not a role of the hierarchy, so no
+    /// member could ever hold it.
+    #[error("workspaces.permissions.{action} names '{role}', which is not a workspace role")]
+    WorkspacePermissionUnknownRole {
+        /// The permission, as the option names it.
+        action: &'static str,
+        /// The unknown role.
+        role: String,
+    },
+    /// `workspaces.membership_cache_ttl_seconds` is over the maximum.
+    #[error(transparent)]
+    WorkspaceMembershipCacheTtl(crate::workspace::membership_cache::MembershipCacheTtlTooLong),
+    /// `controllers.workspaces` is on but `workspaces.enabled` is not, so the routes would have
+    /// nothing to decide with.
+    #[error("controllers.workspaces is true but workspaces.enabled is false")]
+    WorkspacesControllerWithoutWorkspaces,
+    /// `workspaces.enabled` is set but the workspace or the membership repository is missing.
+    #[error(
+        "workspaces.enabled is true but a WorkspaceRepository and a MembershipRepository were not \
+         both supplied"
+    )]
+    MissingWorkspaceRepositories,
+    /// `workspaces.enabled` is set but no `MembershipCacheStore` was supplied. It is required
+    /// whatever the cache lifetime, so turning the cache on is a configuration change and never a
+    /// wiring one.
+    #[error("workspaces.enabled is true but no MembershipCacheStore was supplied")]
+    MissingMembershipCacheStore,
+    /// A workspace repository or a membership cache store was supplied but `workspaces.enabled`
+    /// is false, so it would be ignored.
+    #[error("a workspace collaborator was supplied but workspaces.enabled is false")]
+    WorkspaceCollaboratorsUnused,
     /// `api_keys.enabled` is set but the `api-keys` feature is not compiled in, so nothing could
     /// verify a key.
     #[error("api_keys.enabled is true but the `api-keys` feature is not compiled in")]

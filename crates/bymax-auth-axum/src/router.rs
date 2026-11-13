@@ -155,6 +155,9 @@ fn mount_optional_groups(
     if groups.email_change {
         router = router.merge(crate::routes::email_change::routes(config, ip_source));
     }
+    if groups.workspaces {
+        router = router.merge(crate::routes::workspaces::routes(config, ip_source));
+    }
 
     router
 }

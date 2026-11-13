@@ -23,7 +23,7 @@ use serde_json::{Value, json};
 use super::*;
 
 /// The route files, by the name they are listed under.
-const ROUTE_SOURCES: [(&str, &str); 9] = [
+const ROUTE_SOURCES: [(&str, &str); 10] = [
     ("auth", include_str!("../../src/routes/auth.rs")),
     (
         "email_change",
@@ -45,6 +45,7 @@ const ROUTE_SOURCES: [(&str, &str); 9] = [
         include_str!("../../src/routes/platform_mfa.rs"),
     ),
     ("sessions", include_str!("../../src/routes/sessions.rs")),
+    ("workspaces", include_str!("../../src/routes/workspaces.rs")),
 ];
 
 /// The prefix the harness router mounts everything under.
@@ -92,7 +93,7 @@ const BYTES_BODIES: [(&str, Option<&str>, &str); 7] = [
 ];
 
 /// Mounted routes that read no body, so no schema describes them.
-const NO_BODY_ROUTES: [(&str, &str); 8] = [
+const NO_BODY_ROUTES: [(&str, &str); 12] = [
     ("GET", "/me"),
     ("POST", "/ws-ticket"),
     ("GET", "/sessions"),
@@ -101,6 +102,11 @@ const NO_BODY_ROUTES: [(&str, &str); 8] = [
     ("GET", "/oauth/{provider}/callback"),
     ("GET", "/platform/me"),
     ("DELETE", "/platform/sessions"),
+    ("GET", "/workspaces"),
+    ("GET", "/workspaces/{workspaceId}/access"),
+    ("GET", "/workspaces/{workspaceId}/members"),
+    // A body is accepted and never read: the route records a switch, nothing more.
+    ("POST", "/workspaces/{workspaceId}/switch"),
 ];
 
 /// Rows reachable without a session. Every other row is probed with a session, a platform one
@@ -291,6 +297,7 @@ fn every_group() -> Option<(common::Harness, axum::Router)> {
         invitations: true,
         email_change: true,
         sessions: true,
+        workspaces: true,
         ..EngineSpec::default()
     })?;
     let mut config =

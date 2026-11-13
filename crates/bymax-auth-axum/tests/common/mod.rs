@@ -7,6 +7,9 @@
 //! module, so the crate's no-suppression lint posture holds without a `dead_code` allow.
 
 mod user_status_cache;
+mod workspaces;
+
+pub use workspaces::WorkspaceDoubles;
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -89,6 +92,8 @@ pub struct EngineSpec {
     pub environment: Environment,
     /// Hooks the engine fires; `None` leaves the engine's defaults.
     pub hooks: Option<Arc<dyn AuthHooks>>,
+    /// Switches the workspace layer and its routes on, over the harness's workspace doubles.
+    pub workspaces: bool,
 }
 
 impl Default for EngineSpec {
@@ -110,6 +115,7 @@ impl Default for EngineSpec {
             cookie_domains: &[],
             environment: Environment::Test,
             hooks: None,
+            workspaces: false,
         }
     }
 }
@@ -301,6 +307,8 @@ pub struct Harness {
     pub domain_resolver: Option<Arc<RecordingDomains>>,
     /// The codes the engine actually mailed, for flows whose store holds only a fingerprint.
     pub emails: Arc<CapturingEmails>,
+    /// The workspace repositories and cache, wired only when `EngineSpec::workspaces` is set.
+    pub workspaces: WorkspaceDoubles,
 }
 
 /// A resolver that names the tenant after the request's `host` header.
@@ -382,6 +390,9 @@ pub fn build(spec: EngineSpec) -> Option<Harness> {
         });
         config.controllers.mfa = true;
     }
+    if spec.workspaces {
+        WorkspaceDoubles::enable(&mut config);
+    }
     if spec.platform {
         config.platform.enabled = true;
         config.roles.platform_hierarchy = Some(HashMap::from([
@@ -410,6 +421,10 @@ pub fn build(spec: EngineSpec) -> Option<Harness> {
     if let Some(hooks) = spec.hooks {
         builder = builder.hooks(hooks);
     }
+    let workspaces = WorkspaceDoubles::default();
+    if spec.workspaces {
+        builder = workspaces.wire(builder);
+    }
 
     let engine = Arc::new(builder.build().ok()?);
     Some(Harness {
@@ -419,6 +434,7 @@ pub fn build(spec: EngineSpec) -> Option<Harness> {
         stores,
         domain_resolver,
         emails,
+        workspaces,
     })
 }
 
@@ -456,6 +472,7 @@ pub fn build_oauth_with_redirects() -> Option<Harness> {
         stores,
         domain_resolver: None,
         emails: Arc::new(CapturingEmails::default()),
+        workspaces: WorkspaceDoubles::default(),
     })
 }
 
@@ -494,6 +511,7 @@ pub fn build_oauth_with_failing_state_store() -> Option<Harness> {
         stores: inert,
         domain_resolver: None,
         emails: Arc::new(CapturingEmails::default()),
+        workspaces: WorkspaceDoubles::default(),
     })
 }
 
@@ -1163,6 +1181,7 @@ fn build_failing_over(failing: FailingStores, invitations: bool) -> Option<Harne
         stores: inert,
         domain_resolver: None,
         emails: Arc::new(CapturingEmails::default()),
+        workspaces: WorkspaceDoubles::default(),
     })
 }
 
@@ -1199,6 +1218,7 @@ pub fn build_failing_blacklist() -> Option<Harness> {
         stores: inert,
         domain_resolver: None,
         emails: Arc::new(CapturingEmails::default()),
+        workspaces: WorkspaceDoubles::default(),
     })
 }
 

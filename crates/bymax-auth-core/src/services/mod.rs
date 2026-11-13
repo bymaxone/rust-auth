@@ -16,6 +16,8 @@
 //!   eviction, device/IP metadata, ownership-checked revoke, and atomic detail rotation).
 //! - [`membership_cache`] — resolving a workspace membership through the versioned cache shared
 //!   with nest-auth, and the bumps that invalidate it.
+//! - [`workspace`] — the workspace guard's decision and the read services behind the workspace
+//!   routes.
 //! - [`auth`] — the local authentication flows (register, login, logout, me, refresh,
 //!   email verification, password reset, invitations, and password-less issuance).
 //! - `platform` (feature `platform`) — the [`platform::PlatformAuthService`]: the operator
@@ -51,6 +53,13 @@ pub mod session;
 mod tenant_binding;
 pub mod token_manager;
 mod verifier;
+pub mod workspace;
+#[cfg(test)]
+mod workspace_list_tests;
+#[cfg(test)]
+mod workspace_test_support;
+#[cfg(test)]
+mod workspace_tests;
 
 use bymax_auth_types::{AuthError, MfaContext};
 use time::OffsetDateTime;

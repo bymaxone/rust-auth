@@ -24,6 +24,7 @@ pub(crate) mod platform;
 pub(crate) mod platform_mfa;
 #[cfg(feature = "sessions")]
 pub(crate) mod sessions;
+pub(crate) mod workspaces;
 
 use std::collections::BTreeMap;
 use std::convert::Infallible;

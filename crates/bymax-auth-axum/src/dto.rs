@@ -41,15 +41,23 @@ mod openapi_parity_tests;
 #[cfg(test)]
 mod structure_parity_tests;
 mod text_rules;
+mod workspace;
+
+pub use workspace::{MemberRouteParamsDto, WorkspacePageQueryDto};
 
 /// Declares which schema of the shared request schemas describes each DTO, and whether the DTO
 /// refuses properties it does not have. The key is the full type name: a type of a host that
-/// happens to share a short name is not one of these.
+/// happens to share a short name is not one of these. A DTO defined in a submodule names it, as
+/// `WorkspacePageQueryDto in workspace`, because the full type name carries the submodule.
 macro_rules! declared {
-    ($($dto:ident => $schema:literal, $denies:literal;)*) => {
+    ($($dto:ident $(in $module:ident)? => $schema:literal, $denies:literal;)*) => {
         /// `(type name, schema name, refuses unknown properties)` for every DTO of this crate.
         pub(crate) const DECLARED: &[(&str, &str, bool)] = &[
-            $((concat!(module_path!(), "::", stringify!($dto)), $schema, $denies),)*
+            $((
+                concat!(module_path!(), "::", $(stringify!($module), "::",)? stringify!($dto)),
+                $schema,
+                $denies,
+            ),)*
         ];
     };
 }
@@ -62,6 +70,7 @@ declared! {
     CreateInvitationDto => "CreateInvitationDto", true;
     ForgotPasswordDto => "ForgotPasswordDto", true;
     LoginDto => "LoginDto", true;
+    MemberRouteParamsDto in workspace => "MemberRouteParamsDto", true;
     MfaChallengeDto => "MfaChallengeDto", true;
     MfaDisableDto => "MfaDisableDto", true;
     MfaRegenerateRecoveryCodesDto => "MfaRegenerateRecoveryCodesDto", true;
@@ -78,6 +87,7 @@ declared! {
     RevokeInvitationDto => "RevokeInvitationDto", true;
     VerifyEmailDto => "VerifyEmailDto", true;
     VerifyOtpDto => "VerifyOtpDto", true;
+    WorkspacePageQueryDto in workspace => "WorkspacePageQueryDto", true;
 }
 
 /// `POST /auth/register` body.
