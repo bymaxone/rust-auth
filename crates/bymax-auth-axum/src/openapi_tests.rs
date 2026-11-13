@@ -70,7 +70,9 @@ fn the_names_come_back_sorted_and_the_version_is_openapi_3_0() {
 use std::collections::BTreeMap;
 
 use crate::RouteGroups;
-use crate::openapi::{RouteGroup, request_body_routes, request_schemas_for};
+use crate::openapi::{
+    RouteGroup, request_body_routes, request_schemas_for, serves_dashboard_routes,
+};
 
 /// `groups` with exactly the named groups on.
 fn mounting(on: &[RouteGroup]) -> RouteGroups {
@@ -214,6 +216,58 @@ const DELIVERIES: [TokenDelivery; 3] = [
     TokenDelivery::Bearer,
     TokenDelivery::Both,
 ];
+
+#[test]
+fn only_the_groups_that_read_dashboard_credentials_make_a_deployment_a_dashboard_one() {
+    let alone = |groups: RouteGroups| serves_dashboard_routes(groups);
+    assert!(!alone(nothing()));
+    let dashboard = [
+        RouteGroups {
+            auth: true,
+            ..nothing()
+        },
+        RouteGroups {
+            mfa: true,
+            ..nothing()
+        },
+        RouteGroups {
+            password_reset: true,
+            ..nothing()
+        },
+        RouteGroups {
+            sessions: true,
+            ..nothing()
+        },
+        RouteGroups {
+            invitations: true,
+            ..nothing()
+        },
+        RouteGroups {
+            email_change: true,
+            ..nothing()
+        },
+        RouteGroups {
+            workspaces: true,
+            ..nothing()
+        },
+    ];
+    assert!(dashboard.into_iter().all(alone));
+    let other = [
+        RouteGroups {
+            platform: true,
+            ..nothing()
+        },
+        RouteGroups {
+            platform_mfa: true,
+            ..nothing()
+        },
+        RouteGroups {
+            oauth: true,
+            ..nothing()
+        },
+    ];
+    assert!(!other.into_iter().any(alone));
+}
 
 /// No group mounted.
 fn nothing() -> RouteGroups {
