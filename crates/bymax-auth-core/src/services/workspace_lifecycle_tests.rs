@@ -459,6 +459,53 @@ async fn a_passwordless_account_proves_a_recent_sign_in_instead() {
 }
 
 #[tokio::test]
+async fn a_locked_account_is_refused_before_the_password_is_checked_and_nothing_is_written() {
+    let Some((f, member)) = owned(14).await else { return };
+    for _ in 0..5 {
+        let wrong = f
+            .engine
+            .schedule_workspace_deletion(&member, Some("not-the-password"), &ctx())
+            .await;
+        assert!(matches!(wrong, Err(AuthError::InvalidCredentials)));
+    }
+    // The right password no longer helps: the ceiling is checked first.
+    let locked = f
+        .engine
+        .schedule_workspace_deletion(&member, Some(PASSWORD), &ctx())
+        .await;
+    assert!(
+        matches!(
+            locked,
+            Err(AuthError::AccountLocked {
+                retry_after_seconds: Some(secs)
+            }) if secs > 0
+        ),
+        "{locked:?}"
+    );
+    assert_eq!(
+        stored(&f).await.map(|w| w.status),
+        Some(WorkspaceStatus::Active)
+    );
+    assert!(f.repo.audit_events().is_empty());
+    assert!(f.cache.operations().is_empty());
+}
+
+#[tokio::test]
+async fn a_rename_of_a_workspace_no_longer_active_is_answered_as_not_found() {
+    let Some(f) = fixture() else { return };
+    f.repo
+        .seed_workspace(workspace("t1", "w1", WorkspaceStatus::PendingDeletion, 1));
+    f.repo
+        .seed_membership(membership(&active("t1", "w1", "u1", "owner"), 1));
+    let member = acting_member("t1", "w1", "u1", "owner");
+    let renamed = f.engine.rename_workspace(&member, "New", &ctx()).await;
+    assert!(
+        matches!(renamed, Err(AuthError::WorkspaceNotFound)),
+        "{renamed:?}"
+    );
+}
+
+#[tokio::test]
 async fn a_failed_bump_is_an_error_and_the_committed_change_stays() {
     let Some((f, member)) = owned(14).await else { return };
     f.cache.set_unavailable(true);
