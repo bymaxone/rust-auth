@@ -3088,6 +3088,8 @@ fn the_mfa_subject_preimages_match_the_shared_contract() {
         "challengeFailureCounter",
         "disableFailureCounter",
         "reauthFailureCounter",
+        "changePasswordFailureCounter",
+        "emailChangeFailureCounter",
         "sessionIndex",
         "tokenEpoch",
         "userStatus",

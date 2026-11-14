@@ -467,7 +467,7 @@ impl MfaService {
     }
 
     /// The hashed brute-force identifier for the pre-auth challenge counter
-    /// (`hmac_sha256("challenge:{plane}:{user_id}")`, hex), isolated from the `disable:`
+    /// (`hmac_sha256("challenge:{user_subject}")`, hex), isolated from the `disable:`
     /// namespace and from the other identity plane — otherwise a colliding id lets either
     /// party exhaust the other's lockout budget.
     fn challenge_bf_id(&self, ctx: MfaContext, tenant_id: Option<&str>, user_id: &str) -> String {
@@ -478,7 +478,7 @@ impl MfaService {
     }
 
     /// The hashed brute-force identifier for the authenticated management counter
-    /// (`hmac_sha256("disable:{user_id}")`, hex), shared by `disable` and `regenerate` and
+    /// (`hmac_sha256("disable:{user_subject}")`, hex), shared by `disable` and `regenerate` and
     /// isolated from the `challenge:` namespace.
     fn disable_bf_id(&self, ctx: MfaContext, tenant_id: Option<&str>, user_id: &str) -> String {
         to_hex(&hmac_sha256(
@@ -492,7 +492,7 @@ impl MfaService {
     /// Namespaced by flow and by plane for the same two reasons `disable_bf_id` is. Sharing one
     /// counter with `login` would let an authenticated caller lock the owner out of their own
     /// sign-in; sharing it across planes would let a dashboard user and a platform admin holding
-    /// the same id exhaust each other's budget.
+    /// the same id exhaust each other's budget. The preimage is `reauth:{user_subject}`.
     fn reauth_bf_id(&self, ctx: MfaContext, tenant_id: Option<&str>, user_id: &str) -> String {
         to_hex(&hmac_sha256(
             self.identifier_key.as_ref(),

@@ -22,7 +22,7 @@
     "A case that needs an ill-formed string states it as UTF-16 code units beside its `case`, for",
     "example `unpairedSurrogateCodeUnits: [55296]`, and each library's test builds the string itself."
   ],
-  "version": 5,
+  "version": 6,
   "hmacKeyDerivation": {
     "$comment": [
       "The identifier-hashing key both sides derive from the identifier secret, and one",
@@ -736,6 +736,69 @@
       "into a code the account can see but can never use."
     ]
   },
+  "reproofCounterVectors": {
+    "$comment": [
+      "The failure counters of the two flows that ask for the CURRENT PASSWORD again,",
+      "`change-password` and `email-change`, pinned with known answers because a template alone",
+      "(`userSubjectDerivedKeys`) is text on both sides and proves nothing about the bytes. The key",
+      "is `lf:` followed by the lowercase hex of HMAC-SHA256 whose KEY is the TEXT of",
+      "`hmacKeyDerivation.vectors[0].derivedKeyHex` (the hex string itself, not its decoded bytes)",
+      "and whose message is `reauth:{flow}:{userSubject}`, with the UTF-8 bytes of that string.",
+      "",
+      "Both libraries must count a failed re-proof under the TENANT-SCOPED subject. A bare user id",
+      "is not an account identifier: two tenants may each have a user `1`, and a counter keyed on",
+      "the id alone lets failures against one lock the other out of its own flow with no credential.",
+      "Each vector gives the subject too, so a reader can see which step diverges.",
+      "",
+      "The cases include an accented tenant (its length prefix counts UTF-8 BYTES, 6 for `açaí`), a",
+      "tenant that contains `:`, and the pair (`acme:prod`, `u1`) against (`acme`, `prod:u1`) that a",
+      "bare delimiter would make one subject. Both flows are dashboard-only: the platform plane has",
+      "no password re-proof flow."
+    ],
+    "hmacKeySource": "hmacKeyDerivation.vectors[0].derivedKeyHex, as text",
+    "vectors": [
+      {
+        "flow": "change-password",
+        "tenantId": "acme",
+        "userId": "u1",
+        "userSubject": "dashboard:4:acme:u1",
+        "identifierHex": "a75b677bc54f3102d8fd915bf35439b13e9e352d7e6174b8521f5a619911e761",
+        "key": "lf:a75b677bc54f3102d8fd915bf35439b13e9e352d7e6174b8521f5a619911e761"
+      },
+      {
+        "flow": "email-change",
+        "tenantId": "acme",
+        "userId": "u1",
+        "userSubject": "dashboard:4:acme:u1",
+        "identifierHex": "046c0be2f6817ed4172048987b17ff77a5bbd46f208831a325cefc7e41db1884",
+        "key": "lf:046c0be2f6817ed4172048987b17ff77a5bbd46f208831a325cefc7e41db1884"
+      },
+      {
+        "flow": "change-password",
+        "tenantId": "açaí",
+        "userId": "u1",
+        "userSubject": "dashboard:6:açaí:u1",
+        "identifierHex": "71dd971cfb64dfcbcf8ddbea8017b2c7864a46fdf47a1806aad9fced7929e222",
+        "key": "lf:71dd971cfb64dfcbcf8ddbea8017b2c7864a46fdf47a1806aad9fced7929e222"
+      },
+      {
+        "flow": "email-change",
+        "tenantId": "acme:prod",
+        "userId": "u1",
+        "userSubject": "dashboard:9:acme:prod:u1",
+        "identifierHex": "aa76b0715b0b144b82e5e1cb6a0ec340180783d1514a45ef1ebae257e447a2a4",
+        "key": "lf:aa76b0715b0b144b82e5e1cb6a0ec340180783d1514a45ef1ebae257e447a2a4"
+      },
+      {
+        "flow": "email-change",
+        "tenantId": "acme",
+        "userId": "prod:u1",
+        "userSubject": "dashboard:4:acme:prod:u1",
+        "identifierHex": "4229519e2fd4246eec9b4e6d7438c8564d2dccd3d8996a7a823388346da9523b",
+        "key": "lf:4229519e2fd4246eec9b4e6d7438c8564d2dccd3d8996a7a823388346da9523b"
+      }
+    ] 
+  },
   "userSubjectDerivedKeys": {
     "mfaSetupRecord": "mfa_setup:{hmac_sha256(hmacKey, userSubject)}",
     "recentAuthMarker": "ra:{hmac_sha256(hmacKey, userSubject)}",
@@ -743,6 +806,8 @@
     "challengeFailureCounter": "lf:{hmac_sha256(hmacKey, 'challenge:{userSubject}')}",
     "disableFailureCounter": "lf:{hmac_sha256(hmacKey, 'disable:{userSubject}')}",
     "reauthFailureCounter": "lf:{hmac_sha256(hmacKey, 'reauth:{userSubject}')}",
+    "changePasswordFailureCounter": "lf:{hmac_sha256(hmacKey, 'reauth:change-password:{userSubject}')}",
+    "emailChangeFailureCounter": "lf:{hmac_sha256(hmacKey, 'reauth:email-change:{userSubject}')}",
     "sessionIndex": "{sess|psess}:{hmac_sha256(hmacKey, userSubject)}",
     "tokenEpoch": "{ep|pep}:{hmac_sha256(hmacKey, userSubject)}",
     "userStatus": "us:{hmac_sha256(hmacKey, userSubject)}",
