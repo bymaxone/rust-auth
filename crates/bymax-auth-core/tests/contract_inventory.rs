@@ -144,6 +144,7 @@ fn every_section_of_the_contract_is_read_or_pending() {
                 "recoveryCodeClaim",
                 "redisKeyPrefixes",
                 "refreshTokenInput",
+                "reproofCounterVectors",
                 "requestEncoding",
                 "requestFieldBounds",
                 "responseBodies",

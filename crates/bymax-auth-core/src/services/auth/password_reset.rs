@@ -461,7 +461,7 @@ impl AuthEngine {
 
         // Counted like a login: this door asks for the account password, so it carries the
         // password's lockout. Checked BEFORE the KDF, so a locked account is not an amplifier.
-        let bf_id = self.reproof_identifier("change-password", user_id);
+        let bf_id = self.reproof_identifier("change-password", tenant_id, user_id);
         if self.brute_force().is_locked(&bf_id).await? {
             let retry = self.brute_force().remaining_lockout_secs(&bf_id).await?;
             tracing::warn!(user_id = %user_id, "password change: account locked");

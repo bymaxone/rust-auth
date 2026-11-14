@@ -83,7 +83,7 @@ impl AuthEngine {
         // password's lockout. Winning the guess here moves the address the account recovers
         // through, which is persistence rather than a single theft. Checked BEFORE the KDF, so
         // a locked account is not an amplifier either.
-        let bf_id = self.reproof_identifier("email-change", user_id);
+        let bf_id = self.reproof_identifier("email-change", tenant_id, user_id);
         if self.brute_force().is_locked(&bf_id).await? {
             let retry = self.brute_force().remaining_lockout_secs(&bf_id).await?;
             tracing::warn!(%user_id, "email change: account locked");
