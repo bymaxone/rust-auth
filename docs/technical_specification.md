@@ -1747,7 +1747,7 @@ pub struct HookContext {
 }
 ```
 
-**Hook discipline (invariant, identical to nest-auth):** only `before_register`, `before_login`, `on_oauth_login` (covered in §11) and `before_workspace_create` (§8.2.9) may block a flow. Every `after_*` / `on_*` hook is **fire-and-forget under one model** (shared verbatim with §9.4): the engine moves owned data (a `SafeAuthUser` clone + `HookContext`) into a **detached `tokio::spawn` task wrapped in a 5 s `tokio::time::timeout` ceiling**. A slow or hanging hook therefore can never stall the auth response; a hook that errors, times out, or panics is isolated by the task boundary (the runtime catches the panic — it never unwinds into the caller) and logged via `tracing::error!`, and it never rolls back a completed DB/Redis mutation. The 5 s ceiling is the single knob bounding hook latency impact.
+**Hook discipline (invariant):** only `before_register`, `before_login`, `on_oauth_login` (covered in §11) and `before_workspace_create` (§8.2.9) may block a flow. Every `after_*` / `on_*` hook is **fire-and-forget under one model** (shared verbatim with §9.4): the engine moves owned data (a `SafeAuthUser` clone + `HookContext`) into a **detached `tokio::spawn` task wrapped in a 5 s `tokio::time::timeout` ceiling**. A slow or hanging hook therefore can never stall the auth response; a hook that errors, times out, or panics is isolated by the task boundary (the runtime catches the panic — it never unwinds into the caller) and logged via `tracing::error!`, and it never rolls back a completed DB/Redis mutation. The 5 s ceiling is the single knob bounding hook latency impact.
 
 #### 7.0.4 `SafeAuthUser` projection
 
@@ -2988,7 +2988,7 @@ and the DTO run first, so a caller the guard refuses learns nothing about the bo
   `lf:{hmac('reauth:{userSubject}')}`, `401 auth.invalid_credentials` / `429
   auth.account_locked`; a recent sign-in for an account with none, `403
   auth.reauthentication_required`), then moves the workspace to `pending_deletion` with
-  `deletion_scheduled_at = now + workspaces.deletion_grace_days` (default 14, at most 365), or to
+  `deletion_scheduled_at = now + workspaces.deletion_grace_days`, or to
   `deleted` at once when the grace period is `0`. A write lost to a concurrent change answers
   `409 auth.workspace_pending_deletion` when the deletion is already scheduled and the identical
   404 otherwise.
@@ -2997,9 +2997,9 @@ and the DTO run first, so a caller the guard refuses learns nothing about the bo
   its owner.
 - `PATCH /workspaces/{workspaceId}/members/{userId}` (`change_member_role`) — `role` must be a role
   of the hierarchy (`400` naming `role`); the role ceiling: the owner role acts on any role, every
-  other role only strictly below itself, on the role granted and on the role the target holds
-  (`403 auth.insufficient_workspace_role`); the target must be an ACTIVE member (a suspended one is
-  the identical 404); a target already holding the role is not written and its counter is still
+  other role only strictly below itself, on the role granted (`403
+  auth.insufficient_workspace_role`); the target must be an ACTIVE member (a suspended one is the
+  identical 404); the same ceiling on the role the target holds; a target already holding the role is not written and its counter is still
   bumped. `200` with the membership `{ userId, role, status, invitedByUserId, createdAt }`.
 - `DELETE /workspaces/{workspaceId}/members/{userId}` (`remove_workspace_member`) — the same ceiling
   and ACTIVE rule; `204`.
@@ -3022,9 +3022,8 @@ is the guard's and not the DTO's.
 the write's own transaction (`MemberChangeOutcome::LastOwner`, `409 auth.last_owner`). A role
 change and a removal carry the role the guard resolved for the actor and the role read for the
 target; a write whose actor no longer holds its role answers `403
-auth.insufficient_workspace_role`, and one whose target changed answers the identical 404. A
-status write, a rename and the two member writes refuse with the catalog codes of
-`workspace_writes`, and every refusal writes nothing, the audit row included.
+auth.insufficient_workspace_role`, and one whose target changed answers the identical 404. Every
+refusal writes nothing, the audit row included.
 
 **Audit, cache and events.** Every successful write persists its `WorkspaceAuditEvent` in the
 repository's transaction, filled in by the library: the tenant and workspace of the call, the
@@ -3039,7 +3038,7 @@ type only. `workspace.switched` reaches the hook only.
 
 `AuthEngine::finalize_workspace_deletion` is the host job's call: it deletes a workspace pending
 deletion whose grace period has ended, conditional on the status and the instant it read, and
-answers `FinalizeOutcome::{Deleted, NotFound, NotPending, NotDue}`.
+answers with a `FinalizeOutcome`.
 
 **Literal segments.** A literal route under the same prefix, such as
 `workspaces/invitations/preview`, coexists with `workspaces/{workspaceId}/...` because a static
