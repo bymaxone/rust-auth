@@ -4,7 +4,7 @@
 //!
 //! # Blocking vs. fire-and-forget
 //!
-//! Only four hooks can change an outcome: [`AuthHooks::before_register`] (returns a
+//! Only these hooks can change an outcome: [`AuthHooks::before_register`] (returns a
 //! [`BeforeRegisterResult`] that may reject or override field defaults),
 //! [`AuthHooks::before_login`] (blocks by returning `Err`),
 //! [`AuthHooks::on_oauth_login`] (returns an [`OAuthLoginResult`] selecting create / link
@@ -258,9 +258,7 @@ pub enum HookError {
 ///
 /// # Errors
 ///
-/// The blocking/decision hooks ([`AuthHooks::before_register`],
-/// [`AuthHooks::before_login`], [`AuthHooks::on_oauth_login`]) propagate [`HookError`] to
-/// abort the operation. The fire-and-forget hooks also return `Result` for ergonomics,
+/// The blocking/decision hooks propagate [`HookError`] to abort the operation. The fire-and-forget hooks also return `Result` for ergonomics,
 /// but the engine logs and drops any error — it never reaches the client.
 #[async_trait]
 pub trait AuthHooks: Send + Sync {

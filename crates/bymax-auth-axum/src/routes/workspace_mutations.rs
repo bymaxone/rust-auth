@@ -6,8 +6,8 @@
 //! has no workspace to guard yet; every other route is behind the workspace guard with the
 //! permission its action needs, so the workspace a request acts in is the path segment and the
 //! caller's role is the one the guard resolved. The guard runs before a body is read, so a caller
-//! the guard refuses learns nothing about the body's shape, and the re-proof of the two
-//! destructive routes runs only after the guard and the checks the request alone decides. The
+//! the guard refuses learns nothing about the body's shape, and the re-proof of a
+//! destructive route runs only after the guard and the checks the request alone decides. The
 //! order of each operation's checks, the audit event, the cache bump and the host notification
 //! are the engine's.
 

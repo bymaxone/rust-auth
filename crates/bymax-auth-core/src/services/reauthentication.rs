@@ -1,13 +1,10 @@
-//! Re-proving the account at the keyboard before a change a session alone must not authorise:
-//! enrolling a second factor, scheduling a workspace's deletion, handing its ownership over
-//! (layer: service).
+//! Re-proving the account at the keyboard before a change a session alone must not authorise (layer: service).
 //!
 //! An account with a password proves it again, counted by the `reauthFailureCounter` of
 //! `userSubjectDerivedKeys` (`lf:{hmac_sha256(hmacKey, 'reauth:{userSubject}')}`), so a stolen
 //! access token cannot guess the password here without limit. An account with no password (one
-//! provisioned through OAuth) proves a recent real sign-in instead, by the `recentAuthMarker` the
-//! token manager plants on issuance and never on rotation. Every door that asks for a re-proof
-//! goes through here, so there is one derivation of each key to be right.
+//! provisioned through OAuth) proves a recent real sign-in instead, by the `recentAuthMarker`. Every door that asks for a
+//! re-proof goes through here, so there is one derivation of each key to be right.
 
 use bymax_auth_crypto::mac::hmac_sha256;
 use bymax_auth_types::{AuthError, MfaContext};

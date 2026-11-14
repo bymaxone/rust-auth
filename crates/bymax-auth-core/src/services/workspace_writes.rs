@@ -8,7 +8,7 @@
 //! it was not.
 //!
 //! What a bump covers is `workspaceMembershipCache.workspaceWideEvents`: scheduling the deletion
-//! of, restoring, deleting or suspending a workspace bumps the workspace counter, and a change to
+//! of, restoring or deleting a workspace bumps the workspace counter, and a change to
 //! one membership bumps that membership's counter only.
 
 use std::fmt;
@@ -95,7 +95,7 @@ pub(crate) fn member_change(outcome: MemberChangeOutcome) -> Result<(), AuthErro
 
 /// The refusal a status write answered with, or `None` for `Done`. A lost compare-and-set is
 /// answered from what the workspace is now: `409 auth.workspace_pending_deletion` when its deletion
-/// is scheduled (only the owner reaches the write), the identical 404 otherwise.
+/// is scheduled, the identical 404 otherwise.
 pub(crate) fn status_refusal(
     outcome: UpdateStatusOutcome,
     current: Option<WorkspaceStatus>,

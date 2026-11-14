@@ -12,7 +12,7 @@
 //! (`workspaceInvitations.rules.bootstrapCreate`): first the owner cap
 //! (`workspaces.max_workspaces_per_user`, counted as the workspaces the account owns with the owner
 //! role), then the host's `before_workspace_create`, then the write, which receives the cap so the
-//! repository can enforce it exactly. Only the route consults the self-serve switch
+//! repository can enforce it exactly. Only `AuthEngine::create_workspace` consults the self-serve switch
 //! `workspaces.allow_create` before that path.
 
 use bymax_auth_types::{AuthError, FieldError, SafeAuthUser};
