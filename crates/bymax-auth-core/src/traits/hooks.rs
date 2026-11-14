@@ -4,11 +4,13 @@
 //!
 //! # Blocking vs. fire-and-forget
 //!
-//! Only three hooks can change an outcome: [`AuthHooks::before_register`] (returns a
+//! Only these hooks can change an outcome: [`AuthHooks::before_register`] (returns a
 //! [`BeforeRegisterResult`] that may reject or override field defaults),
-//! [`AuthHooks::before_login`] (blocks by returning `Err`), and
+//! [`AuthHooks::before_login`] (blocks by returning `Err`),
 //! [`AuthHooks::on_oauth_login`] (returns an [`OAuthLoginResult`] selecting create / link
-//! / reject). Every other hook is **fire-and-forget** under the engine's invocation
+//! / reject), and [`AuthHooks::before_workspace_create`] (returns a
+//! [`BeforeWorkspaceCreateResult`] that may refuse a workspace with a reason the caller is shown).
+//! Every other hook is **fire-and-forget** under the engine's invocation
 //! contract: it is run detached and time-bounded, with any error, timeout, or panic
 //! swallowed and logged via `tracing`, so a slow or failing notification can never stall —
 //! or roll back — the user-facing operation. (The flows that invoke hooks honor this
@@ -26,6 +28,7 @@ use crate::context::RequestContext;
 use crate::traits::api_key_event::ApiKeyAccessEvent;
 use crate::traits::email::SessionInfo;
 use crate::traits::oauth::OAuthProfile;
+use crate::workspace::audit::WorkspaceAuditEvent;
 
 /// The identity plane a hook event belongs to.
 ///
@@ -225,6 +228,19 @@ pub enum OAuthLoginResult {
     },
 }
 
+/// The outcome of [`AuthHooks::before_workspace_create`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum BeforeWorkspaceCreateResult {
+    /// Create the workspace.
+    Allow,
+    /// Do not create it. `reason` is shown to the caller under `error.details` naming `name`, so
+    /// it must not leak sensitive detail; without one the caller is shown a fixed message.
+    Reject {
+        /// An optional client-safe reason.
+        reason: Option<String>,
+    },
+}
+
 /// A hook failure.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
@@ -242,9 +258,7 @@ pub enum HookError {
 ///
 /// # Errors
 ///
-/// The blocking/decision hooks ([`AuthHooks::before_register`],
-/// [`AuthHooks::before_login`], [`AuthHooks::on_oauth_login`]) propagate [`HookError`] to
-/// abort the operation. The fire-and-forget hooks also return `Result` for ergonomics,
+/// The blocking/decision hooks propagate [`HookError`] to abort the operation. The fire-and-forget hooks also return `Result` for ergonomics,
 /// but the engine logs and drops any error — it never reaches the client.
 #[async_trait]
 pub trait AuthHooks: Send + Sync {
@@ -291,7 +305,42 @@ pub trait AuthHooks: Send + Sync {
         })
     }
 
+    /// Called BEFORE a workspace is created, and able to refuse it (a plan, a quota, an
+    /// approval), with the account creating it and the name it will have, trimmed.
+    ///
+    /// Runs after the self-serve switch and the per-account owner cap have passed, and before
+    /// anything is written; a bootstrap acceptance runs it too. `Reject { reason }` answers
+    /// `403 auth.forbidden` with `reason` under `error.details` naming `name`.
+    /// [`HookError::Rejected`] refuses the same way with the fixed message, and
+    /// [`HookError::Internal`] is answered as an internal failure; either way nothing is written.
+    async fn before_workspace_create(
+        &self,
+        user: &SafeAuthUser,
+        name: &str,
+        ctx: &HookContext,
+    ) -> Result<BeforeWorkspaceCreateResult, HookError> {
+        let _ = (user, name, ctx);
+        Ok(BeforeWorkspaceCreateResult::Allow)
+    }
+
     // ---- Fire-and-forget notifications (errors logged, never propagated) ----
+
+    /// Called after a workspace or membership change has committed, with the event the
+    /// repository persisted with it, and for `workspace.switched`, which rides on no repository
+    /// write and reaches this hook only.
+    ///
+    /// Informational and best-effort: it runs detached, never delays or fails the operation, and
+    /// can be lost if the process stops between the commit and the call, which is why the
+    /// persisted audit row is the record. A failure is logged with the event's type only, since
+    /// the event can carry an address.
+    async fn on_workspace_event(
+        &self,
+        event: &WorkspaceAuditEvent,
+        ctx: &HookContext,
+    ) -> Result<(), HookError> {
+        let _ = (event, ctx);
+        Ok(())
+    }
 
     /// Called after a new user is persisted.
     async fn after_register(
@@ -599,6 +648,26 @@ mod tests {
         assert!(hooks.after_invitation_accepted(&user, &c).await.is_ok());
         assert!(hooks.on_new_session(&user, &session(), &c).await.is_ok());
         assert!(hooks.on_session_evicted("u1", "hash", &c).await.is_ok());
+        let event = WorkspaceAuditEvent {
+            tenant_id: "t1".into(),
+            workspace_id: "w1".into(),
+            actor_user_id: Some("u1".into()),
+            at: "1970-01-01T00:00:00.000Z".into(),
+            kind: crate::workspace::audit::AuditKind::WorkspaceCreated,
+        };
+        assert!(hooks.on_workspace_event(&event, &c).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn the_default_workspace_create_decision_allows() {
+        let hooks: Arc<dyn AuthHooks> = Arc::new(NoOpAuthHooks);
+        assert_eq!(
+            hooks
+                .before_workspace_create(&safe_user(), "Acme", &ctx())
+                .await
+                .ok(),
+            Some(BeforeWorkspaceCreateResult::Allow)
+        );
     }
 
     #[test]

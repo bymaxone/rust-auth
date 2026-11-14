@@ -272,6 +272,7 @@ fn every_membership_cache_statement_is_read_or_pending() {
                 "versionRetentionSeconds",
                 "versionRetentionWhy",
                 "bump",
+                "workspaceWideEvents",
                 "vectors",
                 "entryRead",
                 "blankParts",
@@ -282,7 +283,7 @@ fn every_membership_cache_statement_is_read_or_pending() {
             // `entryRule` is prose whose cases are steps of `scenarios` (an inactive workspace is
             // not cached, a seeded suspended entry reads as a miss) and of the resolver's tests.
             &["entryRule"],
-            &[("workspaceWideEvents", "13.5b")],
+            &[],
         ),
     );
 }

@@ -97,7 +97,7 @@ pub enum RouteGroup {
     Sessions,
     /// The OAuth group, which takes no request body.
     OAuth,
-    /// The workspace group, whose read routes take no request body.
+    /// The workspace group.
     Workspaces,
 }
 
@@ -134,13 +134,17 @@ pub struct RequestBodyRoute {
     pub schema: &'static str,
 }
 
-/// One row of [`REQUEST_BODY_ROUTES`]. A macro and not a function: a `const fn` that only builds a
-/// `static` runs at compile time, so coverage would count its body as never executed.
+/// One row of [`REQUEST_BODY_ROUTES`], `POST` unless a method is named first. A macro and not a
+/// function: a `const fn` that only builds a `static` runs at compile time, so coverage would
+/// count its body as never executed.
 macro_rules! row {
     ($group:expr, $path:expr, $schema:expr $(,)?) => {
+        row!($group, "POST" => $path, $schema)
+    };
+    ($group:expr, $method:literal => $path:expr, $schema:expr $(,)?) => {
         RequestBodyRoute {
             group: $group,
-            method: "POST",
+            method: $method,
             path: $path,
             schema: $schema,
         }
@@ -151,7 +155,7 @@ macro_rules! row {
 ///
 /// A route that reads no body, or a body no schema describes (the refresh token, which is read
 /// from the cookie or the body and has no shared schema), is not here.
-static REQUEST_BODY_ROUTES: [RequestBodyRoute; 25] = [
+static REQUEST_BODY_ROUTES: [RequestBodyRoute; 30] = [
     row!(RouteGroup::Auth, "/register", "RegisterDto"),
     row!(RouteGroup::Auth, "/login", "LoginDto"),
     row!(RouteGroup::Auth, "/verify-email", "VerifyEmailDto"),
@@ -240,6 +244,27 @@ static REQUEST_BODY_ROUTES: [RequestBodyRoute; 25] = [
         RouteGroup::EmailChange,
         "/email/change/confirm",
         "ConfirmEmailChangeDto",
+    ),
+    row!(RouteGroup::Workspaces, "/workspaces", "CreateWorkspaceDto"),
+    row!(
+        RouteGroup::Workspaces,
+        "PATCH" => "/workspaces/{workspaceId}",
+        "RenameWorkspaceDto",
+    ),
+    row!(
+        RouteGroup::Workspaces,
+        "/workspaces/{workspaceId}/schedule-deletion",
+        "ScheduleWorkspaceDeletionDto",
+    ),
+    row!(
+        RouteGroup::Workspaces,
+        "PATCH" => "/workspaces/{workspaceId}/members/{userId}",
+        "ChangeMemberRoleDto",
+    ),
+    row!(
+        RouteGroup::Workspaces,
+        "/workspaces/{workspaceId}/transfer-ownership",
+        "TransferOwnershipDto",
     ),
 ];
 

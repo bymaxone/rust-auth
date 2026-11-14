@@ -40,6 +40,7 @@ use serde::{Deserialize, Serialize};
 use zeroize::Zeroizing;
 
 use crate::services::brute_force::BruteForceService;
+use crate::services::reauthentication::{ProvingAccount, Reproof};
 use crate::services::session::SessionService;
 use crate::services::token_manager::TokenManagerService;
 use crate::services::{internal_error, now_unix, to_hex, user_subject};
@@ -322,17 +323,19 @@ impl MfaService {
         }
     }
 
-    /// Require the caller to re-prove the account password before a factor is changed.
-    ///
-    /// An account provisioned purely through OAuth has no local password, so there is nothing
-    /// to re-authenticate against and refusing it would make MFA unreachable for those users
-    /// — their credential belongs to the provider, which this engine cannot re-verify inline.
+    /// Require the caller to re-prove the account before a factor is changed: the password when
+    /// the account has one, a recent real sign-in when it has none (an account provisioned purely
+    /// through OAuth, whose credential belongs to the provider). The rules and the keys are
+    /// [`crate::services::reauthentication`]'s, shared with every other door that asks for a
+    /// re-proof.
     ///
     /// # Errors
     ///
     /// [`AuthError::InvalidCredentials`] when the account has a password and the submitted one
     /// is absent or wrong. Deliberately the same error a failed login returns: an attacker
     /// holding a stolen token learns nothing from it beyond what they already knew.
+    /// [`AuthError::AccountLocked`] at the lockout ceiling and
+    /// [`AuthError::ReauthenticationRequired`] for a passwordless account with no recent sign-in.
     async fn assert_reauthenticated(
         &self,
         ctx: MfaContext,
@@ -341,59 +344,22 @@ impl MfaService {
         password_hash: Option<&str>,
         password: Option<&str>,
     ) -> Result<(), AuthError> {
-        let Some(hash) = password_hash else {
-            // No local password to re-prove — the account was provisioned through OAuth and its
-            // credential belongs to the provider, which this engine cannot verify inline. So the
-            // proof is temporal instead of cryptographic: the caller must have completed a REAL
-            // authentication within the last few minutes.
-            //
-            // This arm used to return `Ok(())`, and it was the single worst thing in the
-            // library. An access token lifted by XSS or from a shared machine was enough to
-            // enrol a factor the ATTACKER holds; the enable then invalidates every session and
-            // bumps the epoch, so the owner — who still signs in with the provider perfectly
-            // well — is stopped at a challenge they cannot pass, with the recovery codes having
-            // been displayed once, to the attacker. And there was no way back: `disable` and
-            // `regenerate_recovery_codes` both demand a live TOTP code, and the reset flow
-            // refuses an account with no password. A fifteen-minute token theft became
-            // permanent, unrecoverable loss of the account.
-            //
-            // The marker is planted by `TokenManagerService::issue_tokens` and NOT by
-            // `reissue_tokens`, which is what makes it proof of anything: an attacker holding a
-            // stolen session can rotate it indefinitely and never make the mark fresh again.
-            // Through `user_subject_hash`, not a copy of its body written here. The preimage has
-            // to agree byte-for-byte with nest-auth's `recentAuthKey`, and the WRITER of this
-            // marker derived it differently until recently — `hmac_sha256("{plane}:{userId}")`,
-            // with no tenant — so the mark was planted where nothing read it and every
-            // password-less account was refused enrolment. One call, one derivation, is what
-            // stops the two halves drifting apart again.
-            let marker =
-                crate::services::user_subject_hash(&self.identifier_key, ctx, tenant_id, user_id);
-            if !self.session_store.has_recent_auth(&marker).await? {
-                tracing::warn!(%user_id, "mfa setup: no recent authentication");
-                return Err(AuthError::ReauthenticationRequired);
-            }
-            return Ok(());
+        let account = ProvingAccount {
+            plane: ctx,
+            tenant_id,
+            user_id,
+            password_hash,
         };
-        // Counted like a login, and for the same reason. `login` refuses an account after N
-        // wrong passwords; this door asks for the SAME secret and used to refuse nothing, so a
-        // caller holding a stolen access token but not the password could guess it here without
-        // limit. The only control left was the per-IP rate limit — which in this crate is
-        // in-process and per-instance, so a distributed caller sidesteps it entirely — and
-        // winning the guess buys the whole account: enrol a factor, change the password, move
-        // the address. The check runs BEFORE the KDF, so a locked account is not an amplifier.
-        let bf_id = self.reauth_bf_id(ctx, tenant_id, user_id);
-        self.assert_not_locked("reauthenticate", user_id, &bf_id)
-            .await?;
+        self.reproof().assert(account, password).await
+    }
 
-        // A missing password still pays the KDF, so "no password sent" and "wrong password"
-        // take the same time — otherwise the response separates them for free.
-        let outcome = self.passwords.verify(password.unwrap_or(""), hash).await?;
-        if outcome.matched {
-            self.brute_force.reset(&bf_id).await?;
-            Ok(())
-        } else {
-            self.brute_force.record_failure(&bf_id).await?;
-            Err(AuthError::InvalidCredentials)
+    /// The collaborators of a re-proof, from this service's own.
+    fn reproof(&self) -> Reproof<'_> {
+        Reproof {
+            brute_force: &self.brute_force,
+            passwords: &self.passwords,
+            session_store: self.session_store.as_ref(),
+            identifier_key: &self.identifier_key,
         }
     }
 
@@ -493,11 +459,9 @@ impl MfaService {
     /// counter with `login` would let an authenticated caller lock the owner out of their own
     /// sign-in; sharing it across planes would let a dashboard user and a platform admin holding
     /// the same id exhaust each other's budget. The preimage is `reauth:{user_subject}`.
+    #[cfg(test)]
     fn reauth_bf_id(&self, ctx: MfaContext, tenant_id: Option<&str>, user_id: &str) -> String {
-        to_hex(&hmac_sha256(
-            self.identifier_key.as_ref(),
-            format!("reauth:{}", user_subject(ctx, tenant_id, user_id)).as_bytes(),
-        ))
+        self.reproof().failure_identifier(ctx, tenant_id, user_id)
     }
 
     /// The keyed HMAC-SHA-256 digest (hex) of a recovery code — the only form ever persisted.

@@ -118,6 +118,9 @@ mod tenant_binding;
 #[path = "adapter/workspace_reads.rs"]
 mod workspace_reads;
 
+#[path = "adapter/workspace_writes.rs"]
+mod workspace_writes;
+
 use common::{
     Captured, EngineSpec, Req, TENANT, build, build_oauth_with_failing_state_store,
     build_oauth_with_redirects, current_totp, enable_mfa_flag, router, router_with, seed_admin,

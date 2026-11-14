@@ -289,7 +289,9 @@ impl AuthEngineBuilder {
 A consumer therefore either calls the three individual setters (e.g. when the
 stores live in different backends) or the `redis_stores` convenience, which
 registers the same handle behind all three store traits in one step (the form
-used in §5.4).
+used in §5.4). `redis_stores` does not wire the membership cache store: it is
+required with `workspaces.enabled` and refused without it, so a deployment with
+workspaces passes the same handle to `membership_cache_store` as well.
 
 `build()` performs the same cross-validation `resolveOptions()` does in `nest-auth`, returning a typed `ConfigError` instead of throwing:
 
@@ -1077,6 +1079,10 @@ The **Default** column lists `AuthConfig::default()` (≡ `nest_compat_defaults(
 | `workspaces.roles.owner_role` | `String` | Cond. | — | The role that owns a workspace, a key of the hierarchy, 1 to 32 code points with no control character (`WorkspaceOwnerRole`; the role is part of a `list_sole_owned` cursor). Only a member holding exactly this role is told a workspace is pending deletion |
 | `workspaces.permissions.view_members` | `AcceptedRoles` | No | `AnyMember` | Who may list a workspace's members; a named role outside the hierarchy is refused (`WorkspacePermissionUnknownRole`). An empty list declares nothing and the route then answers `403 auth.forbidden` to everyone |
 | `workspaces.membership_cache_ttl_seconds` | `u64` | No | `60` | Lifetime of a cached membership, 0 to 3600 (`WorkspaceMembershipCacheTtl`); `0` disables the cache and every request reads the repositories |
+| `workspaces.permissions.manage_workspace` / `delete_workspace` / `manage_members` | `Option<Vec<String>>` | No | owner role | Who may rename; who may schedule and undo a deletion; who may change a member's role and remove a member. A named role outside the hierarchy is refused (`WorkspacePermissionUnknownRole`) |
+| `workspaces.allow_create` | `bool` | No | `true` | The self-serve switch of `POST /workspaces`; `false` answers `403 auth.forbidden`. Never consulted for a bootstrap acceptance |
+| `workspaces.max_workspaces_per_user` | `u32` | No | `0` | Most workspaces one account may own (owner role, not deleted, pending deletion included); `0` is no limit; at most 1 000 000 (`WorkspaceOptionOutOfRange`) |
+| `workspaces.deletion_grace_days` | `u32` | No | `14` | Days a scheduled deletion can be restored; `0` deletes at once; at most 365 (`WorkspaceOptionOutOfRange`) |
 | `password.scrypt.cost_factor` | `u32` | No | `131072` | Power of 2, min `16384` |
 | `password.scrypt.block_size` | `u32` | No | `8` | scrypt r |
 | `password.scrypt.parallelization` | `u32` | No | `1` | scrypt p |
@@ -1277,7 +1283,7 @@ Validation rules, in the order applied (parity with `resolveOptions`):
 | 23 | session/OTP/brute-force stores supplied | `MissingStores` |
 | 24 | `api_keys.enabled` ⇒ the `api-keys` feature is compiled in, an `ApiKeyRepository` is supplied, and — when `audit_mode` is `Required` — hooks are supplied; a repository without `enabled` is refused too | `ApiKeysFeatureDisabled`, `ApiKeysRepositoryRequired`, `ApiKeysAuditRequiresHooks`, `ApiKeysRepositoryUnused` |
 | 25 | `api_keys.enabled` ⇒ the pepper is ≥ 32 characters, ≥ 3.5 bits/char and equals none of `jwt.secret`, a retired JWT secret, `identifier_key`, `mfa.encryption_key` or a retired MFA key; the scope vocabulary is non-empty, distinct and well-formed; `header` is a lowercase name the library does not read; `prefix` fits the key grammar; `last_used_flush` is a whole number of seconds from 1 to 3600 | `ApiKeysPepperTooShort`, `ApiKeysPepperLowEntropy`, `ApiKeysPepperReused`, `ApiKeysScopes`, `ApiKeysTransport`, `ApiKeysFlushInterval` |
-| 26 | `controllers.workspaces` ⇒ `workspaces.enabled`; `workspaces.enabled` ⇒ both repositories and the membership cache store are supplied, the owner role is 1 to 32 code points with no control character (checked first, so a malformed name is reported as that and not as an unknown owner; no other role is constrained), the hierarchy and owner role are valid, `view_members` names only roles of it and the cache lifetime is at most 3600; any collaborator without `enabled` is refused too | `WorkspacesControllerWithoutWorkspaces`, `MissingWorkspaceRepositories`, `MissingMembershipCacheStore`, `WorkspaceCollaboratorsUnused`, `WorkspaceOwnerRole`, `WorkspaceRoles`, `WorkspacePermissionUnknownRole`, `WorkspaceMembershipCacheTtl` |
+| 26 | `controllers.workspaces` ⇒ `workspaces.enabled`; `workspaces.enabled` ⇒ both repositories and the membership cache store are supplied, the owner role is 1 to 32 code points with no control character (checked first, so a malformed name is reported as that and not as an unknown owner; no other role is constrained), the hierarchy and owner role are valid, every permission names only roles of it, the cache lifetime is at most 3600, the owner cap at most 1 000 000 and the deletion grace period at most 365 days; any collaborator without `enabled` is refused too | `WorkspacesControllerWithoutWorkspaces`, `MissingWorkspaceRepositories`, `MissingMembershipCacheStore`, `WorkspaceCollaboratorsUnused`, `WorkspaceOwnerRole`, `WorkspaceRoles`, `WorkspacePermissionUnknownRole`, `WorkspaceMembershipCacheTtl`, `WorkspaceOptionOutOfRange` |
 
 The entropy gate is a first-order filter (it detects extreme low-diversity secrets such as a single repeated character) and is documented as necessary-but-not-sufficient; the operational guidance is to generate the secret with 32 random bytes encoded as base64.
 
@@ -1308,7 +1314,7 @@ The route groups and the toggle/feature that gates each:
 | OAuth | `/oauth/{provider}` `/oauth/{provider}/callback` | `oauth` (opt-in) | `oauth` |
 | Invitations | `/invitations` `/invitations/accept` `/invitations/revoke` | `invitations` (auto when `invitations.enabled`) | `invitations` |
 | Email change | `/email/change` `/email/change/confirm` | `email_change` (opt-in) | — (always compiled) |
-| Workspaces | `/workspaces` (GET) `/workspaces/{workspaceId}/access` (GET) `/workspaces/{workspaceId}/members` (GET) `/workspaces/{workspaceId}/switch` (POST) | `workspaces` (opt-in; requires `workspaces.enabled`) | — (always compiled) |
+| Workspaces | `/workspaces` (GET, POST) `/workspaces/{workspaceId}` (PATCH) `/workspaces/{workspaceId}/access` (GET) `/workspaces/{workspaceId}/members` (GET) `/workspaces/{workspaceId}/switch` `/restore` `/leave` `/schedule-deletion` `/transfer-ownership` (POST) `/workspaces/{workspaceId}/members/{userId}` (PATCH, DELETE) | `workspaces` (opt-in; requires `workspaces.enabled`) | — (always compiled) |
 
 For consumers using the framework-agnostic core directly (no Axum), the toggles still gate which engine methods are wired and which background tasks run; routing is simply the consumer's responsibility. The edge JWT verifier (`bymax-auth-wasm`) is independent of all toggles — it only ever verifies HS256 access tokens locally and mounts no routes.
 
@@ -1741,7 +1747,7 @@ pub struct HookContext {
 }
 ```
 
-**Hook discipline (invariant, identical to nest-auth):** only `before_register`, `before_login` and `on_oauth_login` (covered in §11) may block a flow. Every `after_*` / `on_*` hook is **fire-and-forget under one model** (shared verbatim with §9.4): the engine moves owned data (a `SafeAuthUser` clone + `HookContext`) into a **detached `tokio::spawn` task wrapped in a 5 s `tokio::time::timeout` ceiling**. A slow or hanging hook therefore can never stall the auth response; a hook that errors, times out, or panics is isolated by the task boundary (the runtime catches the panic — it never unwinds into the caller) and logged via `tracing::error!`, and it never rolls back a completed DB/Redis mutation. The 5 s ceiling is the single knob bounding hook latency impact.
+**Hook discipline (invariant):** only `before_register`, `before_login`, `on_oauth_login` (covered in §11) and `before_workspace_create` (§8.2.9) may block a flow. Every `after_*` / `on_*` hook is **fire-and-forget under one model** (shared verbatim with §9.4): the engine moves owned data (a `SafeAuthUser` clone + `HookContext`) into a **detached `tokio::spawn` task wrapped in a 5 s `tokio::time::timeout` ceiling**. A slow or hanging hook therefore can never stall the auth response; a hook that errors, times out, or panics is isolated by the task boundary (the runtime catches the panic — it never unwinds into the caller) and logged via `tracing::error!`, and it never rolls back a completed DB/Redis mutation. The 5 s ceiling is the single knob bounding hook latency impact.
 
 #### 7.0.4 `SafeAuthUser` projection
 
@@ -2563,7 +2569,9 @@ Traits/crates: `bymax-auth-types` (`AuthResult`, `PlatformAuthResult`, `SafeAuth
 | `TokenDeliveryService` | — | types | — |
 | `ApiKeyRuntime` (feature `api-keys`) | `ApiKeyRepository`, `AuthHooks` | crypto (`api_key`) | — |
 | `services::membership_cache` (`resolve_membership`, `bump_workspace`, `bump_membership`) | `MembershipCacheStore`, `WorkspaceRepository`, `MembershipRepository` | crypto (mac) | `membership_cache_fill`, `membership_cache_bump` |
-| `services::workspace` (`AuthEngine::authorize_workspace`, `list_my_workspaces`, `workspace_access`, `list_workspace_members`, `switch_workspace`) | `WorkspaceRepository`, `MembershipRepository`, `MembershipCacheStore` | crypto (mac) | `membership_cache_fill` (through `resolve_membership`) |
+| `services::workspace` (`AuthEngine::authorize_workspace`, `list_my_workspaces`, `workspace_access`, `list_workspace_members`, `switch_workspace`) | `WorkspaceRepository`, `MembershipRepository`, `MembershipCacheStore`, `AuthHooks` | crypto (mac) | `membership_cache_fill` (through `resolve_membership`) |
+| `services::workspace_lifecycle` (`AuthEngine::create_workspace`, `create_owned_workspace`, `rename_workspace`, `schedule_workspace_deletion`, `restore_workspace`, `finalize_workspace_deletion`) | `WorkspaceRepository`, `MembershipRepository`, `MembershipCacheStore`, `UserRepository`, `BruteForceStore`, `SessionStore`, `AuthHooks` | crypto (mac, password) | `membership_cache_bump` |
+| `services::workspace_members` (`AuthEngine::change_member_role`, `remove_workspace_member`, `leave_workspace`, `transfer_workspace_ownership`) | `MembershipRepository`, `MembershipCacheStore`, `UserRepository`, `BruteForceStore`, `SessionStore`, `AuthHooks` | crypto (mac, password) | `membership_cache_bump` |
 
 All cross-store mutations follow the security-before-availability ordering established above (credential change before session invalidation; uniqueness/status/verification gates before KDF work; brute-force ordering invariant). Every `after_*`/`on_*` hook is fire-and-forget; only `before_register` (and OAuth's `on_oauth_login`) can block a flow.
 ### 7.13 Service API keys (feature `api-keys`)
@@ -2907,6 +2915,14 @@ their ordering reproduces the NestJS guard pipeline.
 | GET    | `/auth/workspaces/{workspaceId}/access` | `access` | `RequireWorkspace<AnyWorkspaceMember>` | 200 | — | `workspace_access` (60/60) |
 | GET    | `/auth/workspaces/{workspaceId}/members` | `members` | `RequireWorkspace<ViewMembers>`, `ValidatedQuery<WorkspacePageQueryDto>` | 200 | `WorkspacePageQueryDto` | `workspace_members` (30/60) |
 | POST   | `/auth/workspaces/{workspaceId}/switch` | `switch` | `RequireWorkspace<AnyWorkspaceMember>` | 204 | — (a body is never read; `requestEncoding.whenBody`) | `workspace_switch` (20/60) |
+| POST   | `/auth/workspaces` | `create` | `UserStatus`, `ValidatedJson<CreateWorkspaceDto>` | 201 | `CreateWorkspaceDto` (body) | `workspace_create` (10/3600) |
+| PATCH  | `/auth/workspaces/{workspaceId}` | `rename` | `RequireWorkspace<ManageWorkspace>`, `ValidatedJson<RenameWorkspaceDto>` | 200 | `RenameWorkspaceDto` (body) | `workspace_rename` (20/60) |
+| POST   | `/auth/workspaces/{workspaceId}/schedule-deletion` | `schedule_deletion` | `RequireWorkspace<DeleteWorkspace>`, `ValidatedJson<ScheduleWorkspaceDeletionDto>` | 204 | `ScheduleWorkspaceDeletionDto` (body) | `workspace_schedule_deletion` (5/300) |
+| POST   | `/auth/workspaces/{workspaceId}/restore` | `restore` | `RequireWorkspace<RestoreWorkspace>` (admits the owner of a pending workspace) | 204 | — (`requestEncoding.whenBody`) | `workspace_restore` (5/300) |
+| PATCH  | `/auth/workspaces/{workspaceId}/members/{userId}` | `change_role` | `RequireMemberRoute<ManageMembers>`, `ValidatedJson<ChangeMemberRoleDto>` | 200 | `ChangeMemberRoleDto` (body) | `workspace_change_role` (20/60) |
+| DELETE | `/auth/workspaces/{workspaceId}/members/{userId}` | `remove_member` | `RequireMemberRoute<ManageMembers>` | 204 | — | `workspace_remove_member` (20/60) |
+| POST   | `/auth/workspaces/{workspaceId}/leave` | `leave` | `RequireWorkspace<AnyWorkspaceMember>` | 204 | — (`requestEncoding.whenBody`) | `workspace_leave` (10/60) |
+| POST   | `/auth/workspaces/{workspaceId}/transfer-ownership` | `transfer_ownership` | `RequireWorkspace<AnyWorkspaceMember>`, `ValidatedJson<TransferOwnershipDto>` | 204 | `TransferOwnershipDto` (body) | `workspace_transfer_ownership` (3/300) |
 
 Every route needs a verified dashboard access token and an account in good standing (the status
 gate runs before the workspace is read). The answers:
@@ -2921,7 +2937,9 @@ gate runs before the workspace is read). The answers:
   the members in every membership status, for a caller whose role
   `workspaces.permissions.view_members` accepts.
 - `POST /workspaces/{workspaceId}/switch` — records the workspace as the caller's last active one
-  (`MembershipRepository::set_last_active_workspace_id`); the session does not change.
+  when the repository records it (`MembershipRepository::set_last_active_workspace_id` is optional,
+  and its default records nothing), then reports `workspace.switched` to
+  `AuthHooks::on_workspace_event`; the session does not change.
 
 A workspace answer is `{ id, name, status, createdAt, deletionScheduledAt }`, with instants written
 as `Date.prototype.toISOString` writes them (UTC, milliseconds, `Z`) and `null` for no scheduled
@@ -2952,6 +2970,80 @@ is admitted; then the role is judged through `workspaces.roles.hierarchy` (`403
 auth.insufficient_workspace_role`). None of these routes admits a pending workspace. The
 membership is resolved through the versioned cache of §12.5.6, which fills and reads back only an
 active membership of an active workspace.
+
+**Writes.** Each write is one `AuthEngine` call that fixes the order of its checks; the guard
+and the DTO run first, so a caller the guard refuses learns nothing about the body.
+
+- `POST /workspaces` (`create_workspace`) — the account behind the credential (`401
+  auth.token_invalid` when gone), the name, the self-serve switch `workspaces.allow_create` (`403
+  auth.forbidden` with no detail), then the path shared with a bootstrap acceptance
+  (`create_owned_workspace`, `workspaceInvitations.rules.bootstrapCreate`): the owner cap
+  `workspaces.max_workspaces_per_user`, counted with `MembershipRepository::count_owned` as the
+  workspaces the account owns with the owner role and that are not deleted, so one pending
+  deletion counts (`403 auth.workspace_limit_reached`); then `AuthHooks::before_workspace_create`
+  (a refusal is `403 auth.forbidden` with `details: [{ field: "name", message }]`, the hook's
+  reason or `Workspace creation was refused`); then `WorkspaceRepository::create_with_owner`,
+  which receives the cap so a host can enforce it exactly and answer `LimitReached`. The id is a
+  fresh UUID. Answers `201` with the workspace. The shared path never consults the switch and
+  reports nothing to the event hook; the route reports `workspace.created`.
+- `PATCH /workspaces/{workspaceId}` (`rename_workspace`) — `200` with the workspace as it now
+  reads. A rename bumps no counter: no cached membership holds the name.
+- `POST /workspaces/{workspaceId}/schedule-deletion` (`schedule_workspace_deletion`) — re-proves the
+  caller (the password when the account has one, counted by the `reauthFailureCounter`
+  `lf:{hmac('reauth:{userSubject}')}`, `401 auth.invalid_credentials` / `429
+  auth.account_locked`; a recent sign-in for an account with none, `403
+  auth.reauthentication_required`), then moves the workspace to `pending_deletion` with
+  `deletion_scheduled_at = now + workspaces.deletion_grace_days`, or to
+  `deleted` at once when the grace period is `0`. A write lost to a concurrent change answers
+  `409 auth.workspace_pending_deletion` when the deletion is already scheduled and the identical
+  404 otherwise.
+- `POST /workspaces/{workspaceId}/restore` (`restore_workspace`) — only for a workspace pending
+  deletion whose grace period has not ended (the identical 404 otherwise); the route alone admits
+  its owner.
+- `PATCH /workspaces/{workspaceId}/members/{userId}` (`change_member_role`) — `role` must be a role
+  of the hierarchy (`400` naming `role`); the role ceiling: the owner role acts on any role, every
+  other role only strictly below itself, on the role granted (`403
+  auth.insufficient_workspace_role`); the target must be an ACTIVE member (a suspended one is the
+  identical 404); the same ceiling on the role the target holds; a target already holding the role is not written and its counter is still
+  bumped. `200` with the membership `{ userId, role, status, invitedByUserId, createdAt }`.
+- `DELETE /workspaces/{workspaceId}/members/{userId}` (`remove_workspace_member`) — the same ceiling
+  and ACTIVE rule; `204`.
+- `POST /workspaces/{workspaceId}/leave` (`leave_workspace`) — any member; `204`.
+- `POST /workspaces/{workspaceId}/transfer-ownership` (`transfer_workspace_ownership`) — from
+  cheapest to costliest: only an owner (`403 auth.insufficient_workspace_role`), not to oneself
+  (`400` naming `userId`), `demoteSelfTo` a role other than the owner role (`400` naming
+  `demoteSelfTo`), the receiver an ACTIVE member of this workspace (`400` naming `userId`), all
+  BEFORE the password is looked at; then the re-proof; then one
+  `MembershipRepository::transfer_ownership` that decides the giver and the receiver again (a giver
+  no longer an active owner is the identical 404, a receiver no longer active the same `400`).
+
+**The member routes' `userId`.** `RequireMemberRoute` applies the path-parameter rule to `userId`
+after `workspaceId` and before the membership is looked up: a malformed `userId` (over 128 code
+points, blank, a control character) is `400 auth.validation` naming `userId` even on a workspace
+the caller cannot see. The shared `MemberRouteParamsDto` pattern accepts a blank value, so the rule
+is the guard's and not the DTO's.
+
+**Refusals.** The last owner cannot leave, be removed or be demoted: the repository decides it in
+the write's own transaction (`MemberChangeOutcome::LastOwner`, `409 auth.last_owner`). A role
+change and a removal carry the role the guard resolved for the actor and the role read for the
+target; a write whose actor no longer holds its role answers `403
+auth.insufficient_workspace_role`, and one whose target changed answers the identical 404. Every
+refusal writes nothing, the audit row included.
+
+**Audit, cache and events.** Every successful write persists its `WorkspaceAuditEvent` in the
+repository's transaction, filled in by the library: the tenant and workspace of the call, the
+actor (`None` for the finalize job), one ISO-8601 instant written as `toISOString` writes it, and
+the kind. AFTER the write the cached access it affects is ended
+(`workspaceMembershipCache.workspaceWideEvents`): scheduling, restoring and finalizing a deletion
+bump the workspace counter; a role change, a removal and leaving bump that membership's counter; a
+hand-over bumps both memberships. A failed bump is `500 auth.internal` with the change committed,
+and nothing is reported to the hook for it. Then the event is handed to
+`AuthHooks::on_workspace_event`, detached and best-effort; a failure is logged with the event's
+type only. `workspace.switched` reaches the hook only.
+
+`AuthEngine::finalize_workspace_deletion` is the host job's call: it deletes a workspace pending
+deletion whose grace period has ended, conditional on the status and the instant it read, and
+answers with a `FinalizeOutcome`.
 
 **Literal segments.** A literal route under the same prefix, such as
 `workspaces/invitations/preview`, coexists with `workspaces/{workspaceId}/...` because a static
