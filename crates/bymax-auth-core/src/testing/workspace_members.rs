@@ -207,6 +207,11 @@ impl MembershipRepository for InMemoryWorkspaces {
         &self,
         params: RemoveAllForUser<'_>,
     ) -> Result<RemoveAllOutcome, RepositoryError> {
+        if self.account_removals_fail.load(Ordering::SeqCst) {
+            return Err(RepositoryError::Conflict(
+                "the store is unreachable".to_owned(),
+            ));
+        }
         let mut state = lock(&self.state);
         let mut blocking: Vec<String> = state
             .sole_owned(OwnedBy {

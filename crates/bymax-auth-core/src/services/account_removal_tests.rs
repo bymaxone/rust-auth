@@ -287,6 +287,25 @@ async fn a_workspace_that_became_solely_owned_after_the_read_refuses_with_its_id
 }
 
 #[tokio::test]
+async fn a_repository_that_fails_during_the_removal_leaves_everything_in_place() {
+    let places = [
+        place("w1", WorkspaceStatus::Active, "member"),
+        place("w2", WorkspaceStatus::PendingDeletion, "owner"),
+    ];
+    let Some(f) = seeded(&places) else { return };
+    f.repo.set_account_removals_failing(true);
+    let outcome = remove(&f, RemovalAuthority::Account).await;
+    assert!(matches!(
+        &outcome,
+        Err(AccountRemovalError::Failed(AuthError::Internal(_)))
+    ));
+    assert!(stored(&f, "t1", "w1", "u").is_some());
+    assert!(stored(&f, "t1", "w2", "u").is_some());
+    assert!(f.repo.audit_events().is_empty());
+    assert!(f.cache.operations().is_empty());
+}
+
+#[tokio::test]
 async fn a_refusal_names_at_most_the_number_of_workspaces_the_contract_allows() {
     let rule = contract()["workspaceAccountRemoval"]["rules"]["blocking"]
         .as_str()

@@ -47,6 +47,7 @@ pub struct InMemoryWorkspaces {
     pub(super) state: Mutex<State>,
     pub(super) sole_owned_reads_stale: AtomicBool,
     pub(super) sole_owned_reads: AtomicUsize,
+    pub(super) account_removals_fail: AtomicBool,
 }
 
 pub(super) fn lock(state: &Mutex<State>) -> MutexGuard<'_, State> {
@@ -226,6 +227,12 @@ impl InMemoryWorkspaces {
     /// real state.
     pub fn set_sole_owned_reads_stale(&self, stale: bool) {
         self.sole_owned_reads_stale.store(stale, Ordering::SeqCst);
+    }
+
+    /// Makes `remove_all_for_user` fail as a repository does when its store is unreachable, while
+    /// `failing` is set; nothing is removed.
+    pub fn set_account_removals_failing(&self, failing: bool) {
+        self.account_removals_fail.store(failing, Ordering::SeqCst);
     }
 
     /// How many pages `list_sole_owned` has answered, so a caller's paging is observable.
