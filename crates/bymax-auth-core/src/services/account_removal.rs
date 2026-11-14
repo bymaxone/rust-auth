@@ -261,8 +261,9 @@ impl AuthEngine {
         let failed = runtime.bump_removed(who, &memberships).await;
         self.report_removals(&removal, actor, &at, &memberships, ctx);
         if !failed.is_empty() {
+            let count = failed.len();
             tracing::warn!(
-                failed = failed.len(),
+                failed = count,
                 "account removal committed but some membership counters were not bumped"
             );
             return Err(AccountRemovalError::BumpsFailed {

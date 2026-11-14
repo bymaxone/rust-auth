@@ -310,6 +310,26 @@ async fn a_refusal_names_at_most_the_number_of_workspaces_the_contract_allows() 
     assert!(f.repo.audit_events().is_empty());
 }
 
+#[test]
+fn the_route_error_of_a_removal_is_the_409_for_a_refusal_and_the_opaque_error_for_the_rest() {
+    let blocker = BlockingWorkspace {
+        id: "w1".to_owned(),
+        name: Some("One".to_owned()),
+        status: Some("active".to_owned()),
+    };
+    let refused = AuthError::from(AccountRemovalError::Blocked {
+        workspaces: vec![blocker.clone()],
+    });
+    assert!(matches!(&refused, AuthError::LastOwnerWithDetails(w) if *w == [blocker]));
+    let bumps = AuthError::from(AccountRemovalError::BumpsFailed {
+        removed: vec![removed("w1", "owner")],
+        failed: vec!["w1".to_owned()],
+    });
+    assert_eq!(bumps.code(), AuthErrorCode::Internal);
+    let other = AuthError::from(AccountRemovalError::Failed(AuthError::WorkspaceNotFound));
+    assert!(matches!(other, AuthError::WorkspaceNotFound));
+}
+
 /// The blockers a refusal named, by id, and how many pages of the sole-owned read it took.
 async fn refusal_and_reads(places: &[Place]) -> Option<(Vec<String>, usize)> {
     let f = seeded(places)?;
