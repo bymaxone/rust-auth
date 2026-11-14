@@ -2098,7 +2098,7 @@ On logout, the access token's `jti` is written to `rv:{jti}` with TTL = remainin
 `issue_mfa_temp_token`:
 1. `jti = Uuid::new_v4()`; sign `MfaTempClaims { jti, sub: user_id, type:"mfa_challenge", context, iat, exp }` with 300 s expiry, HS256.
 2. `set_session("mfa:{sha256(jti)}", user_id, 300)` (key derived from `jti`, not the full token, to minimize keyspace disclosure).
-3. Reset the per-user MFA-challenge brute-force counter `del("lf:{hmac_sha256(\"challenge:{userSubject}\")}")` — a fresh login proves renewed password possession and restarts the MFA budget from zero (the counter still caps wrong codes within a single token).
+3. Clear no brute-force counter — password possession is the attacker's assumed capability, so a fresh login must not restart the MFA budget (`lf:{hmac_sha256(hmacKey, 'challenge:{userSubject}')}`); a successful challenge is the one event that clears it.
 4. Return the signed token.
 
 `verify_mfa_temp_token` (does **not** consume): verify signature + expiry (HS256); `GET` (not GETDEL) `mfa:{sha256(jti)}`; if `None`, return `MfaTempTokenInvalid`; cross-check stored `user_id == sub` (defense-in-depth); return `{ user_id, context, jti }`. **Why split:** an atomic GETDEL here would consume the token on a single mistyped digit, dead-ending the retry as `MfaTempTokenInvalid` instead of the retryable `MfaInvalidCode`. The split keeps the token alive within its TTL for retries; the brute-force counter caps attempts; the residual TOCTOU collapses into "two valid sessions for the same legitimate user" — benign.
