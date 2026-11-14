@@ -285,6 +285,7 @@ impl MembershipRepository for InMemoryWorkspaces {
         &self,
         params: ListSoleOwned<'_>,
     ) -> Result<Page<Workspace>, RepositoryError> {
+        self.sole_owned_reads.fetch_add(1, Ordering::SeqCst);
         let state = lock(&self.state);
         let stale = self.sole_owned_reads_stale.load(Ordering::SeqCst);
         let rows = state

@@ -310,6 +310,61 @@ async fn a_refusal_names_at_most_the_number_of_workspaces_the_contract_allows() 
     assert!(f.repo.audit_events().is_empty());
 }
 
+/// The blockers a refusal named, by id, and how many pages of the sole-owned read it took.
+async fn refusal_and_reads(places: &[Place]) -> Option<(Vec<String>, usize)> {
+    let f = seeded(places)?;
+    let outcome = remove(&f, RemovalAuthority::Account).await;
+    let ids = match outcome {
+        Err(AccountRemovalError::Blocked { workspaces }) => {
+            workspaces.into_iter().map(|w| w.id).collect()
+        }
+        _ => Vec::new(),
+    };
+    Some((ids, f.repo.sole_owned_reads()))
+}
+
+#[tokio::test]
+async fn a_blocker_on_a_later_page_is_named_after_pages_that_hold_none() {
+    // A page holds 100 workspaces, ordered by creation: the first page blocks nothing.
+    let mut places: Vec<Place> = (0..101)
+        .map(|n| {
+            place(
+                &format!("p{n:03}"),
+                WorkspaceStatus::PendingDeletion,
+                "owner",
+            )
+        })
+        .collect();
+    places.push(place("w-late", WorkspaceStatus::Active, "owner"));
+    let Some((ids, reads)) = refusal_and_reads(&places).await else {
+        return;
+    };
+    assert_eq!(ids, vec!["w-late".to_owned()]);
+    assert_eq!(reads, 2);
+}
+
+#[tokio::test]
+async fn a_single_page_of_workspaces_is_read_once() {
+    let places = [place("w1", WorkspaceStatus::Active, "owner")];
+    let Some((ids, reads)) = refusal_and_reads(&places).await else {
+        return;
+    };
+    assert_eq!(ids, vec!["w1".to_owned()]);
+    assert_eq!(reads, 1);
+}
+
+#[tokio::test]
+async fn the_read_stops_paging_once_it_holds_the_cap_of_blockers() {
+    let places: Vec<Place> = (0..BLOCKING_WORKSPACES_MAX * 2 + 50)
+        .map(|n| place(&format!("w{n:03}"), WorkspaceStatus::Active, "owner"))
+        .collect();
+    let Some((ids, reads)) = refusal_and_reads(&places).await else {
+        return;
+    };
+    assert_eq!(ids.len(), BLOCKING_WORKSPACES_MAX);
+    assert_eq!(reads, 1);
+}
+
 #[tokio::test]
 async fn every_bump_is_attempted_and_the_failure_carries_what_was_removed_and_what_failed() {
     let places = [
