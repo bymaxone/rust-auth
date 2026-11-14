@@ -2808,7 +2808,7 @@ their ordering reproduces the NestJS guard pipeline.
 > access token alone cannot rewrite the credential it was minted from. A wrong password is
 > counted in the `lf:` counter `lf:{hmac_sha256(hmacKey, 'reauth:change-password:{userSubject}')}`
 > (`changePasswordFailureCounter`), keyed by the tenant-scoped dashboard `userSubject` so two
-> tenants' users with the same id never share a budget, and byte-identical to nest-auth's.
+> tenants' users with the same id never share a budget; `reproofCounterVectors` in the shared contract pins its bytes.
 > `forgot-password`, `resend-otp` are anti-enumeration: the
 > handler always returns the same status/body regardless of email existence, and
 > the engine normalizes timing.
