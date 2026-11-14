@@ -4,7 +4,7 @@
 //!
 //! Test layer: the engine's auth services over the in-memory repositories and stores.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use bymax_auth_types::{AuthError, CreateUserData, MfaContext};
@@ -86,14 +86,42 @@ fn the_section_and_its_vectors_carry_exactly_the_declared_keys() {
     );
 }
 
+/// The `userSubjectDerivedKeys` entries that count a failed password re-proof: the MFA flow's own
+/// and one per flow of this crate.
+const REPROOF_TEMPLATES: [&str; 3] = [
+    "reauthFailureCounter",
+    "changePasswordFailureCounter",
+    "emailChangeFailureCounter",
+];
+
 #[test]
 fn the_derived_key_templates_name_the_flows_the_code_uses() {
-    let derived = &contract()["userSubjectDerivedKeys"];
+    let contract = contract();
+    let derived = contract["userSubjectDerivedKeys"]
+        .as_object()
+        .cloned()
+        .unwrap_or_default();
+    // Every entry of the section whose template derives a re-proof counter, found by reading the
+    // whole section, so a counter added to the contract without a flow here fails this test.
+    let found: BTreeMap<String, String> = derived
+        .iter()
+        .filter_map(|(name, template)| {
+            let template = template.as_str()?;
+            template
+                .contains("'reauth:")
+                .then(|| (name.clone(), template.to_owned()))
+        })
+        .collect();
+    assert_eq!(
+        found.keys().cloned().collect::<BTreeSet<_>>(),
+        set_of(&REPROOF_TEMPLATES),
+        "the contract's re-proof counter templates and the ones this crate derives differ"
+    );
     for (name, flow) in [
         ("changePasswordFailureCounter", FLOWS[0]),
         ("emailChangeFailureCounter", FLOWS[1]),
     ] {
-        let template = text(derived, name);
+        let template = found.get(name).map(String::as_str).unwrap_or_default();
         assert!(
             template.contains(&format!("'reauth:{flow}:{{userSubject}}'")),
             "`userSubjectDerivedKeys.{name}` does not derive the `{flow}` counter: {template}"
