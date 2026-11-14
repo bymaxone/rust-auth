@@ -5,7 +5,9 @@
 use bymax_auth_types::AuthError;
 use time::{Duration, OffsetDateTime};
 
-use super::workspace_lifecycle::{FinalizeOutcome, OwnedWorkspace, WORKSPACE_CREATE_REFUSED};
+use super::workspace_lifecycle::{
+    FinalizeOutcome, OwnedWorkspace, WORKSPACE_CREATE_REFUSED, finalize_refusal, restorable,
+};
 use super::workspace_test_support::{
     Fixture, PASSWORD, acting_member, active, build, config, contract, membership, seed_account,
     workspace,
@@ -602,4 +604,36 @@ async fn finalizing_deletes_only_a_due_pending_workspace_with_no_actor() {
             .iter()
             .all(|c| c.tenant_id.as_deref() == Some("t1"))
     );
+}
+
+/// `w1` pending deletion, scheduled at `due`.
+fn due_at(due: OffsetDateTime) -> crate::workspace::domain::Workspace {
+    let mut seeded = workspace("t1", "w1", WorkspaceStatus::PendingDeletion, 1);
+    seeded.deletion_scheduled_at = Some(due);
+    seeded
+}
+
+#[test]
+fn a_deletion_is_final_at_its_scheduled_instant_and_not_a_tick_before() {
+    let due = OffsetDateTime::UNIX_EPOCH + Duration::days(14);
+    let tick = Duration::nanoseconds(1);
+    let w = due_at(due);
+    assert_eq!(
+        finalize_refusal(&w, due - tick),
+        Some(FinalizeOutcome::NotDue)
+    );
+    assert_eq!(finalize_refusal(&w, due), None);
+    assert_eq!(finalize_refusal(&w, due + tick), None);
+}
+
+#[test]
+fn a_restore_applies_strictly_before_the_scheduled_instant() {
+    let due = OffsetDateTime::UNIX_EPOCH + Duration::days(14);
+    let tick = Duration::nanoseconds(1);
+    let w = due_at(due);
+    assert!(restorable(&w, due - tick));
+    assert!(!restorable(&w, due));
+    assert!(!restorable(&w, due + tick));
+    let active = workspace("t1", "w1", WorkspaceStatus::Active, 1);
+    assert!(!restorable(&active, due));
 }

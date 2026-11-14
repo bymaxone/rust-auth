@@ -105,7 +105,10 @@ pub(crate) fn rename_outcome(outcome: RenameOutcome) -> Result<(), AuthError> {
 }
 
 /// Why a workspace read now cannot be finalized, or `None` when its grace period is over.
-fn finalize_refusal(workspace: &Workspace, now: OffsetDateTime) -> Option<FinalizeOutcome> {
+pub(super) fn finalize_refusal(
+    workspace: &Workspace,
+    now: OffsetDateTime,
+) -> Option<FinalizeOutcome> {
     if workspace.status != WorkspaceStatus::PendingDeletion {
         return Some(FinalizeOutcome::NotPending);
     }
@@ -113,6 +116,13 @@ fn finalize_refusal(workspace: &Workspace, now: OffsetDateTime) -> Option<Finali
         .deletion_scheduled_at
         .is_some_and(|due| due > now)
         .then_some(FinalizeOutcome::NotDue)
+}
+
+/// Whether a restore at `now` still applies: the workspace is pending deletion and its scheduled
+/// instant, when it has one, is strictly after `now`. At the instant itself the deletion is final.
+pub(super) fn restorable(workspace: &Workspace, now: OffsetDateTime) -> bool {
+    workspace.status == WorkspaceStatus::PendingDeletion
+        && workspace.deletion_scheduled_at.is_none_or(|due| due > now)
 }
 
 /// The hook context of a change no request made, such as the job that finalizes a deletion.
@@ -380,11 +390,10 @@ impl AuthEngine {
         let workspace = member.workspace();
         let read = runtime.workspaces.find_by_id(workspace).await;
         let now = OffsetDateTime::now_utc();
-        let restorable = read.map_err(internal)?.is_some_and(|found| {
-            found.status == WorkspaceStatus::PendingDeletion
-                && found.deletion_scheduled_at.is_none_or(|due| due > now)
-        });
-        if !restorable {
+        let open = read
+            .map_err(internal)?
+            .is_some_and(|found| restorable(&found, now));
+        if !open {
             return Err(AuthError::WorkspaceNotFound);
         }
         let kind = AuditKind::WorkspaceRestored;

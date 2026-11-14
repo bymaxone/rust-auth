@@ -34,6 +34,8 @@ use crate::workspace::audit::{AuditKind, WorkspaceAuditEvent};
 use crate::workspace::domain::{
     Membership, MembershipRef, MembershipStatus, Workspace, WorkspaceRef, WorkspaceStatus,
 };
+use crate::workspace::keys::membership_version_id;
+use crate::workspace::membership_cache::VersionCounter;
 
 /// `w1` of `t1` with `(user, role, status)` members, and its homonym in `t2` with the same members.
 fn seeded(members: &[(&str, &str, MembershipStatus)]) -> Option<Fixture> {
@@ -391,6 +393,35 @@ async fn a_hand_over_promotes_the_receiver_demotes_the_giver_and_bumps_both() {
         .transfer_workspace_ownership(&owner, to("a", None, Some(PASSWORD)), &ctx())
         .await;
     assert!(matches!(again, Err(AuthError::WorkspaceNotFound)));
+}
+
+/// Whether `user`'s membership version counter in `w1` of `t1` exists, which means it was bumped.
+fn membership_bumped(f: &Fixture, user: &str) -> bool {
+    let key = MembershipRef {
+        tenant_id: "t1",
+        workspace_id: "w1",
+        user_id: user,
+    };
+    let id = membership_version_id(f.engine.config().hmac_key(), "t1", "w1", key.user_id);
+    id.is_ok_and(|id| {
+        f.cache
+            .counter_ttl(VersionCounter::Membership, &id)
+            .is_some()
+    })
+}
+
+#[tokio::test]
+async fn a_hand_over_ends_the_cached_access_of_the_giver_and_of_the_receiver_alone() {
+    let Some((f, owner)) = hand_over_fixture().await else { return };
+    let done = f
+        .engine
+        .transfer_workspace_ownership(&owner, to("m", None, Some(PASSWORD)), &ctx())
+        .await;
+    assert!(done.is_ok(), "{done:?}");
+    assert!(membership_bumped(&f, &owner.user_id));
+    assert!(membership_bumped(&f, "m"));
+    // A member the hand-over did not name keeps its cached access.
+    assert!(!membership_bumped(&f, "a"));
 }
 
 #[tokio::test]
