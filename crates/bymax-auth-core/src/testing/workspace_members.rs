@@ -3,6 +3,8 @@
 //! Every ownership rule is decided under the same lock as the write it guards, which is what a
 //! host's transaction must do.
 
+use std::sync::atomic::Ordering;
+
 use async_trait::async_trait;
 
 use super::workspace::{
@@ -284,9 +286,11 @@ impl MembershipRepository for InMemoryWorkspaces {
         params: ListSoleOwned<'_>,
     ) -> Result<Page<Workspace>, RepositoryError> {
         let state = lock(&self.state);
+        let stale = self.sole_owned_reads_stale.load(Ordering::SeqCst);
         let rows = state
             .sole_owned(params.owner)
             .into_iter()
+            .filter(|_| !stale)
             .map(|w| (sort_key(w.created_at, &w.id), w.clone()))
             .collect();
         let owner = params.owner;

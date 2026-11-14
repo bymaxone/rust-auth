@@ -425,6 +425,24 @@ async fn a_hand_over_ends_the_cached_access_of_the_giver_and_of_the_receiver_alo
 }
 
 #[tokio::test]
+async fn a_failed_first_bump_of_a_hand_over_does_not_skip_the_second() {
+    let Some((f, owner)) = hand_over_fixture().await else { return };
+    // The giver's bump is the first call the store receives, the receiver's the second.
+    f.cache.fail_membership_bump(1);
+    let done = f
+        .engine
+        .transfer_workspace_ownership(&owner, to("m", None, Some(PASSWORD)), &ctx())
+        .await;
+    assert!(matches!(done, Err(AuthError::Internal(_))), "{done:?}");
+    assert_eq!(f.cache.operations(), ["bump_membership", "bump_membership"]);
+    assert!(!membership_bumped(&f, &owner.user_id));
+    assert!(membership_bumped(&f, "m"));
+    // The hand-over itself committed, and the failure was never reported to the hook.
+    assert_eq!(f.repo.audit_events().len(), 1);
+    assert!(f.hooks.events(1).await.is_empty());
+}
+
+#[tokio::test]
 async fn a_hand_over_without_a_demotion_keeps_both_owners() {
     let Some((f, owner)) = hand_over_fixture().await else { return };
     let done = f

@@ -9,7 +9,9 @@
 //! than against a table written down here. See [`catalog`] for why that distinction is the
 //! point of this file and not an implementation detail of it.
 
-use bymax_auth_types::{AuthError, AuthErrorCode, AuthErrorResponse, FieldError};
+use bymax_auth_types::{
+    AuthError, AuthErrorCode, AuthErrorResponse, BlockingWorkspace, FieldError,
+};
 use std::collections::BTreeMap;
 
 /// Every catalog code paired with its exact wire string.
@@ -143,6 +145,7 @@ fn all_errors() -> Vec<AuthError> {
         AuthError::WorkspaceNotFound,
         AuthError::InsufficientWorkspaceRole,
         AuthError::LastOwner,
+        AuthError::LastOwnerWithDetails(Vec::new()),
         AuthError::AlreadyMember,
         AuthError::InvitationEmailMismatch,
         AuthError::RegistrationClosed,
@@ -294,6 +297,37 @@ fn a_host_refusal_is_forbidden_with_its_reason_under_details() {
         json["error"]["details"],
         serde_json::json!([{ "field": "name", "message": "no seats" }])
     );
+}
+
+#[test]
+fn a_refused_account_removal_is_a_409_last_owner_naming_each_workspace() {
+    // The refusal answers the code and status of `auth.last_owner`, with the workspaces under
+    // `details.workspaces`: `{id, name, status}` when they were read, `{id}` alone when the
+    // repository named only the id.
+    let err = AuthError::LastOwnerWithDetails(vec![
+        BlockingWorkspace {
+            id: "w1".to_owned(),
+            name: Some("Acme".to_owned()),
+            status: Some("suspended".to_owned()),
+        },
+        BlockingWorkspace {
+            id: "w2".to_owned(),
+            name: None,
+            status: None,
+        },
+    ]);
+    assert_eq!(err.code(), AuthErrorCode::LastOwner);
+    assert_eq!(err.http_status(), AuthError::LastOwner.http_status());
+    let json = serde_json::to_value(err.to_envelope()).unwrap_or_default();
+    assert_eq!(json["error"]["code"], "auth.last_owner");
+    assert_eq!(
+        json["error"]["details"],
+        serde_json::json!({ "workspaces": [
+            { "id": "w1", "name": "Acme", "status": "suspended" },
+            { "id": "w2" },
+        ] })
+    );
+    assert!(AuthError::LastOwner.details().is_none());
 }
 
 #[test]

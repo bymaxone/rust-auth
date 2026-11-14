@@ -44,7 +44,7 @@ pub(super) struct RecordingHooks {
 
 impl RecordingHooks {
     /// Makes `before_workspace_create` answer `decision` (`Err` with a text is a
-    /// `HookError::Rejected`, `Err("internal")` a `HookError::Internal`).
+    /// `HookError::Rejected`, `Err("internal")` a `HookError::Internal`, and `Err("internal:<text>")` one carrying `<text>`).
     pub(super) fn decide(&self, decision: Result<BeforeWorkspaceCreateResult, &'static str>) {
         if let Ok(mut slot) = self.decision.lock() {
             *slot = Some(decision);
@@ -95,6 +95,9 @@ impl AuthHooks for RecordingHooks {
             None => Ok(BeforeWorkspaceCreateResult::Allow),
             Some(Ok(result)) => Ok(result),
             Some(Err("internal")) => Err(HookError::Internal("hook down".into())),
+            Some(Err(text)) if text.starts_with("internal:") => {
+                Err(HookError::Internal(text.to_owned().into()))
+            }
             Some(Err(text)) => Err(HookError::Rejected(text.to_owned())),
         }
     }

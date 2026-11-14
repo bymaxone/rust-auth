@@ -13,7 +13,8 @@ use super::workspace_support_tests::{
     workspace,
 };
 use crate::services::auth::test_support::ctx;
-use crate::traits::{BeforeWorkspaceCreateResult, HookContext, HookPlane};
+use crate::traits::membership_repository::OwnedBy;
+use crate::traits::{BeforeWorkspaceCreateResult, HookContext, HookPlane, MembershipRepository};
 use crate::workspace::access::WorkspaceMember;
 use crate::workspace::audit::{AuditKind, WorkspaceAuditEvent};
 use crate::workspace::domain::{MembershipRef, WorkspaceRef, WorkspaceStatus};
@@ -253,6 +254,37 @@ async fn a_host_refusal_is_forbidden_naming_the_name_with_its_reason_or_the_cont
         .await;
     assert!(matches!(failed, Err(AuthError::Internal(_))));
     assert!(f.repo.audit_events().is_empty());
+}
+
+#[tokio::test]
+async fn a_hook_that_fails_without_refusing_creates_nothing_and_leaks_nothing() {
+    const SECRET: &str = "internal:db password=hunter2 at pg-primary.internal";
+    let Some(f) = fixture() else { return };
+    let owner = seed_account(&f, "t1", "o@e.com", true).await;
+    f.hooks.decide(Err(SECRET));
+    let failed = f
+        .engine
+        .create_workspace("t1", &owner, "Acme", &ctx())
+        .await;
+    assert!(matches!(failed, Err(AuthError::Internal(_))), "{failed:?}");
+    let Err(error) = failed else { return };
+    // The wire answer is the generic 500: neither the hook's text nor a type name is in it.
+    assert_eq!(error.http_status(), 500);
+    let body = serde_json::to_string(&error.to_envelope()).unwrap_or_default();
+    assert!(body.contains("auth.internal"), "{body}");
+    for leaked in ["hunter2", "pg-primary", "Internal(", "HookError", "Box<"] {
+        assert!(!body.contains(leaked), "{leaked} leaked into {body}");
+    }
+    // Nothing was created, audited or cached, and no event was reported.
+    let owned = OwnedBy {
+        tenant_id: "t1",
+        user_id: &owner,
+        owner_role: "owner",
+    };
+    assert_eq!(f.repo.count_owned(owned).await.ok(), Some(0));
+    assert!(f.repo.audit_events().is_empty());
+    assert!(f.cache.operations().is_empty());
+    assert!(f.hooks.events(1).await.is_empty());
 }
 
 #[tokio::test]

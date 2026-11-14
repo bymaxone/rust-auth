@@ -23,6 +23,10 @@
 
 use serde::{Deserialize, Serialize};
 
+mod details;
+
+pub use details::{BlockingWorkspace, FieldError};
+
 /// Stable, serializable error code. Each variant serializes to its exact `auth.*`
 /// string literal, byte-identical to nest-auth's `AUTH_ERROR_CODES`, and maps to a fixed
 /// HTTP status via [`AuthErrorCode::http_status`]. Both the string and the status are
@@ -399,19 +403,6 @@ impl AuthErrorCode {
     }
 }
 
-/// A single field-level validation failure, surfaced under `error.details` for the
-/// adapter-originated [`AuthErrorCode::Validation`] code.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts-export", derive(ts_rs::TS))]
-#[cfg_attr(feature = "ts-export", ts(export_to = "auth-error.types.ts"))]
-#[serde(rename_all = "camelCase")]
-pub struct FieldError {
-    /// The offending request field (dotted path for nested fields).
-    pub field: String,
-    /// Human-readable reason the field was rejected.
-    pub message: String,
-}
-
 /// The reduced, client-parsed error shape exported for the typed client: the
 /// authoritative `code` plus an advisory/localizable `message`. The full wire body is
 /// [`AuthErrorEnvelope`]; this is the projection clients decode.
@@ -630,6 +621,10 @@ pub enum AuthError {
     /// The change would leave the workspace with no active owner.
     #[error("last owner")]
     LastOwner,
+    /// An account removal refused because the account is the only active owner of workspaces:
+    /// `auth.last_owner` with the blocking workspaces under `error.details.workspaces`.
+    #[error("last owner of workspaces")]
+    LastOwnerWithDetails(Vec<BlockingWorkspace>),
     /// An invitation or add named someone who already belongs to the workspace.
     #[error("already a member")]
     AlreadyMember,
@@ -707,7 +702,7 @@ impl AuthError {
             Self::WorkspaceRequired => AuthErrorCode::WorkspaceRequired,
             Self::WorkspaceNotFound => AuthErrorCode::WorkspaceNotFound,
             Self::InsufficientWorkspaceRole => AuthErrorCode::InsufficientWorkspaceRole,
-            Self::LastOwner => AuthErrorCode::LastOwner,
+            Self::LastOwner | Self::LastOwnerWithDetails(_) => AuthErrorCode::LastOwner,
             Self::AlreadyMember => AuthErrorCode::AlreadyMember,
             Self::InvitationEmailMismatch => AuthErrorCode::InvitationEmailMismatch,
             Self::RegistrationClosed => AuthErrorCode::RegistrationClosed,
@@ -766,6 +761,9 @@ impl AuthError {
             // degrading to a detail-less envelope rather than panicking.
             Self::Validation { details } => serde_json::to_value(details).ok(),
             Self::ForbiddenWithDetails(details) => serde_json::to_value(details).ok(),
+            Self::LastOwnerWithDetails(workspaces) => {
+                serde_json::to_value(serde_json::json!({ "workspaces": workspaces })).ok()
+            }
             _ => None,
         }
     }

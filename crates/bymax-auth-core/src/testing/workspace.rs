@@ -9,6 +9,7 @@
 //! call writes nothing, the audit event included.
 
 use std::collections::BTreeMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
 use async_trait::async_trait;
@@ -44,6 +45,7 @@ pub(super) struct State {
 #[derive(Default)]
 pub struct InMemoryWorkspaces {
     pub(super) state: Mutex<State>,
+    pub(super) sole_owned_reads_stale: AtomicBool,
 }
 
 pub(super) fn lock(state: &Mutex<State>) -> MutexGuard<'_, State> {
@@ -218,6 +220,13 @@ impl State {
 }
 
 impl InMemoryWorkspaces {
+    /// Makes `list_sole_owned` answer an empty page while `stale` is set, as a read that ran
+    /// before the account became the only owner of a workspace does; the writes still see the
+    /// real state.
+    pub fn set_sole_owned_reads_stale(&self, stale: bool) {
+        self.sole_owned_reads_stale.store(stale, Ordering::SeqCst);
+    }
+
     /// An empty repository.
     #[must_use]
     pub fn new() -> Self {

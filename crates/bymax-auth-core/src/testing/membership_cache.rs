@@ -11,7 +11,7 @@
 use std::collections::HashMap;
 use std::num::NonZeroU64;
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
@@ -111,6 +111,8 @@ pub struct InMemoryMembershipCache {
     state: Mutex<State>,
     unavailable: AtomicBool,
     fills_failing: AtomicBool,
+    membership_bumps: AtomicUsize,
+    failing_membership_bump: AtomicUsize,
 }
 
 impl InMemoryMembershipCache {
@@ -129,6 +131,12 @@ impl InMemoryMembershipCache {
     /// that went away between a resolution's read and its refill.
     pub fn set_fills_failing(&self, failing: bool) {
         self.fills_failing.store(failing, Ordering::SeqCst);
+    }
+
+    /// Makes exactly one `bump_membership` call fail: the `nth` one counted from the first call
+    /// the store ever received (1 is the first), every other bump answering. `0` disarms it.
+    pub fn fail_membership_bump(&self, nth: usize) {
+        self.failing_membership_bump.store(nth, Ordering::SeqCst);
     }
 
     /// The store calls made so far, oldest first: `read`, `fill`, `bump_workspace` and
@@ -242,7 +250,11 @@ impl MembershipCacheStore for InMemoryMembershipCache {
     }
 
     async fn bump_membership(&self, membership_id: &str) -> Result<u64, AuthError> {
+        let call = self.membership_bumps.fetch_add(1, Ordering::SeqCst) + 1;
         let mut state = self.begin("bump_membership")?;
+        if call == self.failing_membership_bump.load(Ordering::SeqCst) {
+            return Err(AuthError::Internal("membership bump refused".into()));
+        }
         Ok(state.bump(VersionCounter::Membership, membership_id))
     }
 }
