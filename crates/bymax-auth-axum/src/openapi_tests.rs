@@ -91,7 +91,7 @@ fn mounting(on: &[RouteGroup]) -> RouteGroups {
     }
 }
 
-const ALL_GROUPS: [RouteGroup; 7] = [
+const ALL_GROUPS: [RouteGroup; 8] = [
     RouteGroup::Auth,
     RouteGroup::PasswordReset,
     RouteGroup::Mfa,
@@ -99,11 +99,12 @@ const ALL_GROUPS: [RouteGroup; 7] = [
     RouteGroup::PlatformMfa,
     RouteGroup::Invitations,
     RouteGroup::EmailChange,
+    RouteGroup::Workspaces,
 ];
 
 /// The schemas nest-auth contributes per controller family (`REQUEST_SCHEMAS_BY_CONTROLLER` in
-/// `src/server/openapi/request-schema-mounts.ts`, v1.4.22), for the families rust mounts as
-/// groups. Sessions and OAuth take no body schema there.
+/// `src/server/openapi/request-schema-mounts.ts`; the `workspaces` family as of v1.5.1), for the
+/// families rust mounts as groups. Sessions and OAuth take no body schema there.
 fn nest_schemas(group: RouteGroup) -> Vec<&'static str> {
     let mut names = match group {
         RouteGroup::Auth => vec![
@@ -139,7 +140,14 @@ fn nest_schemas(group: RouteGroup) -> Vec<&'static str> {
             "AcceptInvitationDto",
         ],
         RouteGroup::EmailChange => vec!["ChangeEmailDto", "ConfirmEmailChangeDto"],
-        RouteGroup::Sessions | RouteGroup::OAuth | RouteGroup::Workspaces => Vec::new(),
+        RouteGroup::Workspaces => vec![
+            "CreateWorkspaceDto",
+            "RenameWorkspaceDto",
+            "ScheduleWorkspaceDeletionDto",
+            "ChangeMemberRoleDto",
+            "TransferOwnershipDto",
+        ],
+        RouteGroup::Sessions | RouteGroup::OAuth => Vec::new(),
     };
     names.sort_unstable();
     names
@@ -149,8 +157,14 @@ fn nest_schemas(group: RouteGroup) -> Vec<&'static str> {
 fn every_route_names_a_schema_the_artefact_has() {
     for route in request_body_routes() {
         assert!(request_schema(route.schema).is_some(), "{route:?}");
-        assert_eq!(route.method, "POST", "{route:?}");
         assert!(route.path.starts_with('/'), "{route:?}");
+        // A body route is an operation of the operation table, under the same group, method and
+        // path, so the two tables cannot disagree about what a route is.
+        let listed = crate::openapi::operation_security().iter().any(|op| {
+            op.group == route.group && op.method == route.method && op.path == route.path
+        });
+        assert!(listed, "{route:?}");
+        assert!(matches!(route.method, "POST" | "PATCH"), "{route:?}");
     }
 }
 

@@ -18,6 +18,10 @@
 //!   with nest-auth, and the bumps that invalidate it.
 //! - [`workspace`] — the workspace guard's decision and the read services behind the workspace
 //!   routes.
+//! - [`workspace_lifecycle`] — creating a workspace (the path shared with a bootstrap acceptance),
+//!   renaming it, and scheduling, restoring and finalizing its deletion.
+//! - [`workspace_members`] — changing a member's role, removing a member, leaving, and handing
+//!   ownership over.
 //! - [`auth`] — the local authentication flows (register, login, logout, me, refresh,
 //!   email verification, password reset, invitations, and password-less issuance).
 //! - `platform` (feature `platform`) — the [`platform::PlatformAuthService`]: the operator
@@ -49,17 +53,25 @@ pub mod password;
 #[cfg(feature = "platform")]
 pub mod platform;
 mod rate_limit;
+mod reauthentication;
 pub mod session;
 mod tenant_binding;
 pub mod token_manager;
 mod verifier;
 pub mod workspace;
+pub mod workspace_lifecycle;
+#[cfg(test)]
+mod workspace_lifecycle_tests;
 #[cfg(test)]
 mod workspace_list_tests;
+pub mod workspace_members;
 #[cfg(test)]
-mod workspace_test_support;
+mod workspace_members_tests;
+#[cfg(test)]
+mod workspace_support_tests;
 #[cfg(test)]
 mod workspace_tests;
+mod workspace_writes;
 
 use bymax_auth_types::{AuthError, MfaContext};
 use time::OffsetDateTime;

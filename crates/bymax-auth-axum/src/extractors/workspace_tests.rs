@@ -30,7 +30,10 @@ use serde_json::Value;
 use time::OffsetDateTime;
 use tower::ServiceExt;
 
-use super::workspace::{AnyWorkspaceMember, RequireWorkspace, ViewMembers, WorkspacePolicy};
+use super::workspace::{
+    AnyWorkspaceMember, ManageMembers, RequireMemberRoute, RequireWorkspace, ViewMembers,
+    WorkspacePolicy,
+};
 use crate::dto::MemberRouteParamsDto;
 use crate::response::error_response;
 use crate::state::AuthState;
@@ -56,6 +59,13 @@ impl WorkspacePolicy for Nobody {
     fn accepted(_: &AuthEngine) -> AcceptedRoles {
         AcceptedRoles::Roles(Vec::new())
     }
+}
+
+/// A member route behind the member-route guard: the admitted workspace and the member it names.
+async fn managed_member(
+    RequireMemberRoute(member, target, _): RequireMemberRoute<ManageMembers>,
+) -> String {
+    format!("{}:{target}", member.workspace_id)
 }
 
 async fn role<P: WorkspacePolicy>(RequireWorkspace(member, _): RequireWorkspace<P>) -> String {
@@ -95,6 +105,7 @@ fn config(view_members: AcceptedRoles) -> AuthConfig {
     ]);
     config.workspaces.roles.owner_role = "owner".to_owned();
     config.workspaces.permissions.view_members = view_members;
+    config.workspaces.permissions.manage_members = Some(vec!["admin".to_owned()]);
     config
 }
 
@@ -128,6 +139,8 @@ async fn app_with(view_members: AcceptedRoles) -> Option<(Router, AuthState, Str
         .route("/restore/{workspaceId}", get(role::<Restorers>))
         .route("/nobody/{workspaceId}", get(role::<Nobody>))
         .route("/w/{workspaceId}/m/{userId}", get(member_route))
+        .route("/mm/{workspaceId}", get(role::<ManageMembers>))
+        .route("/mm/{workspaceId}/m/{userId}", get(managed_member))
         .route("/plain", get(role::<AnyWorkspaceMember>))
         .route("/other/{id}", get(role::<AnyWorkspaceMember>))
         .route("/members/{workspaceId}", get(role::<ViewMembers>))
@@ -242,6 +255,28 @@ async fn the_workspace_id_is_reported_before_any_other_parameter() {
     assert_eq!(fields(&body), ["userId"]);
     let (status, _, text) = get_as(&app, "/w/w-member/m/u9", &token).await;
     assert_eq!((status, text.as_str()), (StatusCode::OK, "w-member:u9"));
+}
+
+#[tokio::test]
+async fn the_member_route_guard_judges_the_policy_and_names_the_user_id_it_refuses() {
+    let Some((app, _, token)) = app().await else { return };
+    let (status, _, text) = get_as(&app, "/mm/w-admin/m/u9", &token).await;
+    assert_eq!((status, text.as_str()), (StatusCode::OK, "w-admin:u9"));
+    // A role below the policy is refused, whoever the route names.
+    let (status, body, _) = get_as(&app, "/mm/w-member/m/u9", &token).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert_eq!(body["error"]["code"], "auth.insufficient_workspace_role");
+    // A blank member is refused naming `userId` ahead of the policy, which would refuse this role.
+    let (status, body, _) = get_as(&app, "/mm/w-member/m/%20", &token).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(fields(&body), ["userId"]);
+    // Both malformed: the workspace, read first, is the only one named.
+    let (status, body, _) = get_as(&app, "/mm/%20/m/%20", &token).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(fields(&body), ["workspaceId"]);
+    // The same policy behind the plain guard, on a route with no member to name.
+    let (status, _, text) = get_as(&app, "/mm/w-admin", &token).await;
+    assert_eq!((status, text.as_str()), (StatusCode::OK, "admin"));
 }
 
 #[tokio::test]

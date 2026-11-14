@@ -166,7 +166,8 @@ fn concrete(path: &str) -> String {
     let filled = path
         .replace("{id}", "no-such-session")
         .replace("{provider}", "google")
-        .replace("{workspaceId}", "no-such-workspace");
+        .replace("{workspaceId}", "no-such-workspace")
+        .replace("{userId}", "no-such-member");
     format!("/auth{filled}")
 }
 
@@ -176,9 +177,10 @@ fn request(op: &OperationSecurity, p: Presented, s: &Session) -> Req {
     let mut req = match op.method {
         "GET" => Req::get(&path),
         "DELETE" => Req::delete(&path),
+        "PATCH" => Req::new(http::Method::PATCH, &path),
         _ => Req::post(&path),
     };
-    if op.method == "POST" {
+    if matches!(op.method, "POST" | "PATCH") {
         let token = if p.refresh_body {
             Some(&s.refresh)
         } else if p.platform_refresh_body {

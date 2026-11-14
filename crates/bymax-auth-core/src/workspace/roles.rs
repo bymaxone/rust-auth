@@ -49,6 +49,10 @@ pub struct RoleHierarchy {
 impl RoleHierarchy {
     /// Validates `includes` (role to the roles it includes) and `owner_role`.
     ///
+    /// The shape the contract gives the owner role's name (`workspaceOwnerRole`: 1 to 32 code points,
+    /// no control character) is enforced by the engine's configuration, before this runs, and not
+    /// here: a direct caller of this constructor is not held to it.
+    ///
     /// # Errors
     ///
     /// A [`RoleHierarchyError`] naming the first rule the input breaks.

@@ -232,10 +232,10 @@ impl AuthEngineBuilder {
         self
     }
 
-    /// Register the session, OTP, and brute-force stores from a single backend that
-    /// implements all three (the common case — one Redis handle behind every store trait).
-    /// When the same backend also implements the WebSocket-ticket, password-reset, and
-    /// invitation stores, those are wired too, so one handle satisfies every store seam.
+    /// Register the session, OTP, brute-force, rate-limit, status-cache, WebSocket-ticket,
+    /// password-reset and invitation stores from one backend (the one-Redis-handle case). The
+    /// membership cache store is not among them: it is required with `workspaces.enabled` and
+    /// refused without it, so it is set by [`AuthEngineBuilder::membership_cache_store`].
     #[cfg(not(feature = "mfa"))]
     #[must_use]
     pub fn redis_stores<S>(mut self, stores: Arc<S>) -> Self
@@ -261,9 +261,12 @@ impl AuthEngineBuilder {
         self
     }
 
-    /// Register every store seam from a single backend (the common one-Redis-handle case).
-    /// Under the `mfa` feature the backend must also implement [`MfaStore`], so the MFA
-    /// lifecycle's `mfa_setup:`/`mfa:`/`tu:` keyspaces are wired from the same handle.
+    /// Register every store seam but the membership cache from a single backend (the common
+    /// one-Redis-handle case). Under the `mfa` feature the backend must also implement
+    /// [`MfaStore`], so the MFA lifecycle's `mfa_setup:`/`mfa:`/`tu:` keyspaces are wired from the
+    /// same handle. The membership cache store is required with `workspaces.enabled` and refused
+    /// without it, so wiring it here would refuse every deployment without workspaces; it is set
+    /// by [`AuthEngineBuilder::membership_cache_store`] (`RedisStores` implements it).
     #[cfg(feature = "mfa")]
     #[must_use]
     pub fn redis_stores<S>(mut self, stores: Arc<S>) -> Self
@@ -903,8 +906,8 @@ mod tests {
         let _ = engine.session_store();
         let _ = engine.otp_store();
         let _ = engine.brute_force_store();
-        // The single backend handle satisfies every store seam, so `redis_stores` wires the
-        // ws-ticket, password-reset, and invitation stores from it too.
+        // The single backend handle wires the ws-ticket, password-reset, and invitation stores
+        // too; the membership cache store is supplied on its own.
         assert!(engine.ws_ticket_store().is_some());
         assert!(engine.password_reset_store().is_some());
         assert!(engine.invitation_store().is_some());

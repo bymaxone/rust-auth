@@ -108,7 +108,7 @@ use OperationKind as K;
 use RouteGroup as G;
 
 /// Every operation the auth router mounts and the credential each requires.
-static OPERATION_SECURITY: [OperationSecurity; 42] = [
+static OPERATION_SECURITY: [OperationSecurity; 50] = [
     op!(G::Auth, "POST", "/register", K::None),
     op!(G::Auth, "POST", "/login", K::None),
     op!(G::Auth, "POST", "/logout", K::OptionalAccessAndRefresh),
@@ -199,6 +199,49 @@ static OPERATION_SECURITY: [OperationSecurity; 42] = [
         G::Workspaces,
         "POST",
         "/workspaces/{workspaceId}/switch",
+        K::Access
+    ),
+    op!(G::Workspaces, "POST", "/workspaces", K::Access),
+    op!(
+        G::Workspaces,
+        "PATCH",
+        "/workspaces/{workspaceId}",
+        K::Access
+    ),
+    op!(
+        G::Workspaces,
+        "POST",
+        "/workspaces/{workspaceId}/schedule-deletion",
+        K::Access
+    ),
+    op!(
+        G::Workspaces,
+        "POST",
+        "/workspaces/{workspaceId}/restore",
+        K::Access
+    ),
+    op!(
+        G::Workspaces,
+        "PATCH",
+        "/workspaces/{workspaceId}/members/{userId}",
+        K::Access
+    ),
+    op!(
+        G::Workspaces,
+        "DELETE",
+        "/workspaces/{workspaceId}/members/{userId}",
+        K::Access
+    ),
+    op!(
+        G::Workspaces,
+        "POST",
+        "/workspaces/{workspaceId}/leave",
+        K::Access
+    ),
+    op!(
+        G::Workspaces,
+        "POST",
+        "/workspaces/{workspaceId}/transfer-ownership",
         K::Access
     ),
 ];

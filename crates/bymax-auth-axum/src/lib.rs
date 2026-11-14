@@ -77,7 +77,10 @@ pub use dto::{
     ResendOtpDto, ResendVerificationDto, ResetPasswordDto, RevokeInvitationDto, VerifyEmailDto,
     VerifyOtpDto,
 };
-pub use dto::{MemberRouteParamsDto, WorkspacePageQueryDto};
+pub use dto::{
+    ChangeMemberRoleDto, CreateWorkspaceDto, MemberRouteParamsDto, RenameWorkspaceDto,
+    ScheduleWorkspaceDeletionDto, TransferOwnershipDto, WorkspacePageQueryDto,
+};
 pub use extractors::{
     AdminRole, AnyWorkspaceMember, AuthUser, CurrentUser, MfaSatisfied, OptionalAuthUser,
     RequireRole, RequireWorkspace, Role, SelfOrAdmin, UserStatus, VerifiedUser, WorkspacePolicy,

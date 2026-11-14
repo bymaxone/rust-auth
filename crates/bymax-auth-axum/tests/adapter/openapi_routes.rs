@@ -23,7 +23,7 @@ use serde_json::{Value, json};
 use super::*;
 
 /// The route files, by the name they are listed under.
-const ROUTE_SOURCES: [(&str, &str); 10] = [
+const ROUTE_SOURCES: [(&str, &str); 11] = [
     ("auth", include_str!("../../src/routes/auth.rs")),
     (
         "email_change",
@@ -46,6 +46,10 @@ const ROUTE_SOURCES: [(&str, &str); 10] = [
     ),
     ("sessions", include_str!("../../src/routes/sessions.rs")),
     ("workspaces", include_str!("../../src/routes/workspaces.rs")),
+    (
+        "workspace_mutations",
+        include_str!("../../src/routes/workspace_mutations.rs"),
+    ),
 ];
 
 /// The prefix the harness router mounts everything under.
@@ -93,7 +97,7 @@ const BYTES_BODIES: [(&str, Option<&str>, &str); 7] = [
 ];
 
 /// Mounted routes that read no body, so no schema describes them.
-const NO_BODY_ROUTES: [(&str, &str); 12] = [
+const NO_BODY_ROUTES: [(&str, &str); 15] = [
     ("GET", "/me"),
     ("POST", "/ws-ticket"),
     ("GET", "/sessions"),
@@ -107,6 +111,10 @@ const NO_BODY_ROUTES: [(&str, &str); 12] = [
     ("GET", "/workspaces/{workspaceId}/members"),
     // A body is accepted and never read: the route records a switch, nothing more.
     ("POST", "/workspaces/{workspaceId}/switch"),
+    // The two others the contract lists as `whenBody`: a body is accepted and never read.
+    ("POST", "/workspaces/{workspaceId}/restore"),
+    ("POST", "/workspaces/{workspaceId}/leave"),
+    ("DELETE", "/workspaces/{workspaceId}/members/{userId}"),
 ];
 
 /// Rows reachable without a session. Every other row is probed with a session, a platform one
@@ -148,7 +156,7 @@ fn mounted_routes(app: &axum::Router) -> BTreeSet<(String, String)> {
     let mut mounted = BTreeSet::new();
     for entry in methods.split("RouteId(").skip(1) {
         let id = entry.split_once(')').map_or("", |(id, _)| id);
-        for verb in ["get", "post", "delete", "put"] {
+        for verb in ["get", "post", "delete", "put", "patch"] {
             if entry.contains(&format!("{verb}: Route")) {
                 let path = by_id.get(id).copied().unwrap_or_default();
                 mounted.insert((verb.to_uppercase(), path.to_owned()));
@@ -180,7 +188,7 @@ fn registrations(source: &str) -> Vec<(String, String, String)> {
         .filter_map(|chunk| {
             let path = between(chunk, "\"", "\"");
             let after = &chunk[chunk.find('"')? + path.len() + 2..];
-            let (verb, at) = ["get(", "post(", "delete(", "put("]
+            let (verb, at) = ["get(", "post(", "delete(", "put(", "patch("]
                 .iter()
                 .filter_map(|verb| after.find(verb).map(|at| (*verb, at)))
                 .min_by_key(|(_, at)| *at)?;
@@ -392,7 +400,21 @@ struct Sessions {
     platform: String,
 }
 
-/// Posts to `route` a body one character over the maximum of `broken`, with the session the
+/// The workspace and the member the probe's workspace rows are sent to; the probing account owns
+/// the workspace, so the guard admits it and the body is what is judged.
+const PROBE_WORKSPACE: &str = "w-probe";
+const PROBE_MEMBER: &str = "probe-member";
+
+/// The path of a row with its parameters filled in.
+fn probe_path(route: &RequestBodyRoute) -> String {
+    let path = route
+        .path
+        .replace("{workspaceId}", PROBE_WORKSPACE)
+        .replace("{userId}", PROBE_MEMBER);
+    format!("{PREFIX}{path}")
+}
+
+/// Sends to `route` a body one character over the maximum of `broken`, with the session the
 /// route needs, and checks the refusal: `400 auth.validation`, naming the field as the wire does.
 async fn probe_property(
     app: &axum::Router,
@@ -401,7 +423,8 @@ async fn probe_property(
     schema: &Value,
     broken: &str,
 ) {
-    let request = Req::post(&format!("{PREFIX}{}", route.path)).json(body_breaking(schema, broken));
+    let method = route.method.parse().unwrap_or(http::Method::POST);
+    let request = Req::new(method, &probe_path(route)).json(body_breaking(schema, broken));
     let request = if PUBLIC_ROWS.contains(&route.path) {
         request
     } else if route.path.starts_with("/platform/mfa/") {
@@ -441,8 +464,15 @@ async fn probe_property(
 #[tokio::test]
 async fn every_body_route_refuses_a_body_that_breaks_its_own_schema() {
     let Some((h, app)) = every_group() else { return };
-    seed_user(&h, "probe@e.com", "glidingwalnut42", "ADMIN").await;
+    let prober = seed_user(&h, "probe@e.com", "glidingwalnut42", "ADMIN").await;
     seed_admin(&h, "padmin@e.com", "SUPER_ADMIN").await;
+    let active = bymax_auth_core::workspace::domain::MembershipStatus::Active;
+    let open = bymax_auth_core::workspace::domain::WorkspaceStatus::Active;
+    h.workspaces.seed_workspace(PROBE_WORKSPACE, open);
+    h.workspaces
+        .seed_member(PROBE_WORKSPACE, &prober, "owner", active);
+    h.workspaces
+        .seed_member(PROBE_WORKSPACE, PROBE_MEMBER, "member", active);
     let sessions = Sessions {
         dashboard: login_access_cookie(&app, "probe@e.com", "glidingwalnut42").await,
         platform: platform_access(&platform_login(&app, "padmin@e.com").await),
