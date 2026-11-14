@@ -2098,7 +2098,7 @@ On logout, the access token's `jti` is written to `rv:{jti}` with TTL = remainin
 `issue_mfa_temp_token`:
 1. `jti = Uuid::new_v4()`; sign `MfaTempClaims { jti, sub: user_id, type:"mfa_challenge", context, iat, exp }` with 300 s expiry, HS256.
 2. `set_session("mfa:{sha256(jti)}", user_id, 300)` (key derived from `jti`, not the full token, to minimize keyspace disclosure).
-3. Reset the per-user MFA-challenge brute-force counter `del("lf:{hmac_sha256(\"challenge:{user_id}\")}")` — a fresh login proves renewed password possession and restarts the MFA budget from zero (the counter still caps wrong codes within a single token).
+3. Clear no brute-force counter — password possession is the attacker's assumed capability, so a fresh login must not restart the MFA budget (`lf:{hmac_sha256(hmacKey, 'challenge:{userSubject}')}`); a successful challenge is the one event that clears it.
 4. Return the signed token.
 
 `verify_mfa_temp_token` (does **not** consume): verify signature + expiry (HS256); `GET` (not GETDEL) `mfa:{sha256(jti)}`; if `None`, return `MfaTempTokenInvalid`; cross-check stored `user_id == sub` (defense-in-depth); return `{ user_id, context, jti }`. **Why split:** an atomic GETDEL here would consume the token on a single mistyped digit, dead-ending the retry as `MfaTempTokenInvalid` instead of the retryable `MfaInvalidCode`. The split keeps the token alive within its TTL for retries; the brute-force counter caps attempts; the residual TOCTOU collapses into "two valid sessions for the same legitimate user" — benign.
@@ -2813,7 +2813,10 @@ their ordering reproduces the NestJS guard pipeline.
 | POST   | `/auth/password/change`         | `change_password`  | `AuthUser`, `ValidatedJson<ChangePasswordDto>` | 204 | `ChangePasswordDto`   | always  |
 
 > The first four are public. `change` is not: it re-proves the current password, so a stolen
-> access token alone cannot rewrite the credential it was minted from.
+> access token alone cannot rewrite the credential it was minted from. A wrong password is
+> counted in the `lf:` counter `lf:{hmac_sha256(hmacKey, 'reauth:change-password:{userSubject}')}`
+> (`changePasswordFailureCounter`), keyed by the tenant-scoped dashboard `userSubject` so two
+> tenants' users with the same id never share a budget; `reproofCounterVectors` in the shared contract pins its bytes.
 > `forgot-password`, `resend-otp` are anti-enumeration: the
 > handler always returns the same status/body regardless of email existence, and
 > the engine normalizes timing.
@@ -2893,7 +2896,9 @@ their ordering reproduces the NestJS guard pipeline.
 > nothing about the account changes there. The confirmation is public because the person holding
 > that token is proving control of a mailbox, not of a session — requiring a login would break
 > the case the flow exists to serve. The old address is notified once the change lands
-> (NIST SP 800-63B §4.6).
+> (NIST SP 800-63B §4.6). A wrong password is counted in
+> `lf:{hmac_sha256(hmacKey, 'reauth:email-change:{userSubject}')}` (`emailChangeFailureCounter`),
+> tenant-scoped the same way and checked before the password is verified.
 
 > `create_invitation` derives `tenant_id` from the authenticated user's claims —
 > never from the body — to prevent cross-tenant injection. `accept` is public.
@@ -4964,7 +4969,7 @@ preimage and the full list of keys derived from it are pinned by `conformance/wi
 | `rp` | `auth:rp:{sha256(old_refresh_token)}` | JSON `SessionRecord` — the **new** session, never the raw token | `refresh_grace_window_seconds` (default 30 s) | Rotation grace pointer. Lets a legitimately-concurrent request still carrying the old token recover the rotated identity and be issued a fresh token, instead of being logged out. Stores the session record (not the raw refresh token), so a Redis snapshot never leaks a live credential. |
 | `cf` | `auth:cf:{sha256(consumed_refresh_token)}` | `familyId` of the lineage the consumed token belonged to | `refresh_expires_in_days` × 86400 s | Consumed-token family marker. Planted in the same atomic step that consumes a token, and deliberately outliving the much shorter grace pointer: once the pointer is gone, the marker's presence is what proves a presented token was legitimately issued and already rotated — a **reuse**, not a random string (§12.5.1). |
 | `fam` | `auth:fam:{familyId}` | Redis SET of **bare** `sha256(refresh_token)` hashes | `refresh_expires_in_days` × 86400 s | Dashboard refresh-token family index: one login lineage, minted at login and inherited by every rotation. Members are bare hashes, unlike `sess:` — a family only ever tracks live `rt:` sessions, so the keyspace is implied. Deleting this key revokes the lineage and, as a side effect, refuses any grace recovery that still names it. |
-| `lf` | `auth:lf:{hmac_sha256(hmac_key, "dashboard:" + tenantId + ":" + email)}` | Numeric counter (string) | `brute_force.window` (default 900 s) | Per-tenant failed-login counter. Fixed window — TTL set only on the 0→1 transition. Tenant scoping prevents cross-tenant lockout. |
+| `lf` | `auth:lf:{hmac_sha256(hmac_key, "dashboard:" + tenantId + ":" + email)}` | Numeric counter (string) | `brute_force.window` (default 900 s) | Per-tenant failed-login counter. Fixed window — TTL set only on the 0→1 transition. Tenant scoping prevents cross-tenant lockout. The same prefix holds the account-keyed counters of the password re-proof flows (`reauth:change-password:{userSubject}`, `reauth:email-change:{userSubject}`) and of the MFA flows, each keyed by the tenant-scoped `userSubject`. |
 | `pw_reset` | `auth:pw_reset:{sha256(reset_token)}` | `userId` | `password_reset.token_ttl` (default 600 s) | Password-reset token (`method = "token"`). Consumed on use. |
 | `otp` | `auth:otp:{purpose}:{hmac_sha256(tenantId + ":" + email)}` | Redis HASH with fields `code` and `attempts` (`HINCRBY` bumps `attempts`) | `otp_ttl_seconds` (per purpose) | OTP record. `attempts` tracks failures (max 5). Purposes: `password_reset`, `email_verification`. Tenant-scoped to prevent collision. |
 | `mfa` | `auth:mfa:{sha256(mfa_temp_token)}` | `userId` | 300 s (5 min) | MFA temp-token anti-replay/consumption marker. Issued after password step when MFA is enabled; deleted when the challenge succeeds or after the lockout threshold. |

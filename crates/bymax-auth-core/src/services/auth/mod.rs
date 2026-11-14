@@ -22,6 +22,8 @@ mod password_reset;
 #[cfg(test)]
 mod refresh_tenant_tests;
 mod register;
+#[cfg(test)]
+mod reproof_counter_tests;
 mod reset_request;
 mod session_ops;
 
@@ -45,7 +47,7 @@ use crate::config::resolvers::{RequestParts, TenantResolveError};
 use crate::context::RequestContext;
 use crate::engine::AuthEngine;
 use crate::services::session::normalize_session_metadata;
-use crate::services::{internal_error, now_offset, to_hex};
+use crate::services::{MfaContext, internal_error, now_offset, to_hex, user_subject};
 use crate::traits::{HookContext, SessionRecord};
 
 /// The minimum total elapsed time, in milliseconds, for an email-existence-revealing
@@ -295,11 +297,25 @@ impl AuthEngine {
     /// entirely. Winning the guess buys the whole account: replace the credential, or move the
     /// address recovery runs through.
     ///
+    /// Derives `hex(hmac_sha256(hmac_key, "reauth:{flow}:{user_subject}"))`, where `user_subject`
+    /// is the dashboard subject of `(tenant_id, user_id)` — the same tenant-scoped, length-prefixed
+    /// form the MFA counters use. The result is the identifier behind the `lf:` counter named
+    /// `changePasswordFailureCounter` or `emailChangeFailureCounter` in the wire contract, so
+    /// nest-auth reads and writes the same counter for the same account.
+    ///
     /// Namespaced by `flow` so an authenticated caller cannot spend the owner's `login` budget
-    /// and lock them out of their own sign-in, and keyed on the user id rather than the address
+    /// and lock them out of their own sign-in, and keyed on the account rather than the address
     /// because that is what the caller is attacking here.
-    pub(crate) fn reproof_identifier(&self, flow: &str, user_id: &str) -> String {
-        let input = format!("reauth:{flow}:{user_id}");
+    ///
+    /// The tenant is part of the preimage because a repository id is unique only within a
+    /// tenant: on a host that numbers users per tenant, a bare id would let failed guesses
+    /// against `t1/u1` lock `t2/u1` out of the same flow with no credential. The tenant's byte
+    /// length prefixes it, so no tenant or user id can move the boundary between the two. Both
+    /// callers pass the tenant they just loaded the account under; the dashboard is the only
+    /// plane with a password re-proof flow.
+    pub(crate) fn reproof_identifier(&self, flow: &str, tenant_id: &str, user_id: &str) -> String {
+        let subject = user_subject(MfaContext::Dashboard, Some(tenant_id), user_id);
+        let input = format!("reauth:{flow}:{subject}");
         to_hex(&hmac_sha256(self.config().hmac_key(), input.as_bytes()))
     }
 
@@ -1254,15 +1270,34 @@ mod tests {
     #[tokio::test]
     async fn the_reproof_identifier_is_stable_and_scoped_to_flow_and_user() {
         let Some(h) = test_support::harness(test_support::base_config(), None) else { return };
-        let id = h.engine.reproof_identifier("change-password", "user-1");
+        let id = h
+            .engine
+            .reproof_identifier("change-password", "t1", "user-1");
 
         assert_eq!(id.len(), 64);
         assert!(id.chars().all(|c| c.is_ascii_hexdigit()));
         assert!(!id.contains("user-1"));
-        assert_eq!(id, h.engine.reproof_identifier("change-password", "user-1"));
+        assert_eq!(
+            id,
+            h.engine
+                .reproof_identifier("change-password", "t1", "user-1")
+        );
 
-        assert_ne!(id, h.engine.reproof_identifier("email-change", "user-1"));
-        assert_ne!(id, h.engine.reproof_identifier("change-password", "user-2"));
+        assert_ne!(
+            id,
+            h.engine.reproof_identifier("email-change", "t1", "user-1")
+        );
+        assert_ne!(
+            id,
+            h.engine
+                .reproof_identifier("change-password", "t1", "user-2")
+        );
+        // The same user id in another tenant is another account with its own budget.
+        assert_ne!(
+            id,
+            h.engine
+                .reproof_identifier("change-password", "t2", "user-1")
+        );
         // Never the `login` budget of the same account.
         assert_ne!(id, h.engine.lockout_identifier("t1", "user-1"));
     }
