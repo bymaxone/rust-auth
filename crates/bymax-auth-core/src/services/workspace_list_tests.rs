@@ -6,7 +6,7 @@
 
 use bymax_auth_types::AuthError;
 
-use super::workspace_test_support::{Fixture, Seat, active, build, config, membership, workspace};
+use super::workspace_support_tests::{Fixture, Seat, active, build, config, membership, workspace};
 use std::sync::Arc;
 
 use crate::engine::AuthEngine;

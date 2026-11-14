@@ -68,7 +68,7 @@ pub mod workspace_members;
 #[cfg(test)]
 mod workspace_members_tests;
 #[cfg(test)]
-mod workspace_test_support;
+mod workspace_support_tests;
 #[cfg(test)]
 mod workspace_tests;
 mod workspace_writes;

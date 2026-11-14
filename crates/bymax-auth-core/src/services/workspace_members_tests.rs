@@ -10,7 +10,7 @@ use bymax_auth_types::AuthError;
 
 use super::workspace_lifecycle::{FinalizeOutcome, created_workspace, rename_outcome};
 use super::workspace_members::{OwnershipHandOver, transfer_outcome};
-use super::workspace_test_support::{
+use super::workspace_support_tests::{
     Fixture, PASSWORD, acting_member, active, build, config, contract, membership, seed_account,
     workspace,
 };

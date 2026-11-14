@@ -8,7 +8,7 @@ use time::{Duration, OffsetDateTime};
 use super::workspace_lifecycle::{
     FinalizeOutcome, OwnedWorkspace, WORKSPACE_CREATE_REFUSED, finalize_refusal, restorable,
 };
-use super::workspace_test_support::{
+use super::workspace_support_tests::{
     Fixture, PASSWORD, acting_member, active, build, config, contract, membership, seed_account,
     workspace,
 };

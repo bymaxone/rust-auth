@@ -95,7 +95,10 @@ impl Reproof<'_> {
         }
         // A missing password still pays the derivation, so "no password sent" and "wrong
         // password" take the same time.
-        let outcome = self.passwords.verify(password.unwrap_or(""), hash).await?;
+        let outcome = self
+            .passwords
+            .verify(password.unwrap_or_default(), hash)
+            .await?;
         if outcome.matched {
             self.brute_force.reset(&counter).await?;
             Ok(())
