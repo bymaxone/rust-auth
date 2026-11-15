@@ -16,6 +16,8 @@
 //!   eviction, device/IP metadata, ownership-checked revoke, and atomic detail rotation).
 //! - [`membership_cache`] — resolving a workspace membership through the versioned cache shared
 //!   with nest-auth, and the bumps that invalidate it.
+//! - [`account_removal`] — removing every workspace membership of an account a host is about to
+//!   delete, and dropping one membership's cached access by hand.
 //! - [`workspace`] — the workspace guard's decision and the read services behind the workspace
 //!   routes.
 //! - [`workspace_lifecycle`] — creating a workspace (the path shared with a bootstrap acceptance),
@@ -37,6 +39,9 @@ mod logout_pending;
 pub use adapter_api::{IssuedWsTicket, WS_TICKET_TTL_SECONDS};
 pub use verifier::{AuthPlane, VerifiedAccessToken, VerifyAccessOptions};
 
+pub mod account_removal;
+#[cfg(test)]
+mod account_removal_tests;
 #[cfg(feature = "api-keys")]
 pub mod api_key;
 pub mod auth;

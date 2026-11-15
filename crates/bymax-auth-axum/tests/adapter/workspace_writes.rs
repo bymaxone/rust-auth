@@ -17,7 +17,11 @@ use super::*;
 const PASSWORD: &str = "glidingwalnut42";
 const ACTIVE: MembershipStatus = MembershipStatus::Active;
 
-/// Hooks that refuse a workspace named `Refused` and record every workspace event.
+/// The text of the failure the hook raises for a workspace named `Explode`.
+const HOOK_FAILURE: &str = "db password=hunter2 at pg-primary.internal";
+
+/// Hooks that refuse a workspace named `Refused`, fail for one named `Explode`, and record every
+/// workspace event.
 #[derive(Default)]
 struct Hooks {
     events: Mutex<Vec<WorkspaceAuditEvent>>,
@@ -49,6 +53,9 @@ impl AuthHooks for Hooks {
         name: &str,
         _ctx: &HookContext,
     ) -> Result<BeforeWorkspaceCreateResult, HookError> {
+        if name == "Explode" {
+            return Err(HookError::Internal(HOOK_FAILURE.into()));
+        }
         Ok(if name == "Refused" {
             BeforeWorkspaceCreateResult::Reject {
                 reason: Some("Upgrade your plan".to_owned()),
@@ -174,6 +181,34 @@ async fn a_workspace_is_created_with_201_and_a_hook_refusal_is_403_with_its_reas
         json!([{ "field": "name", "message": "Upgrade your plan" }])
     );
     assert_eq!(o.hooks.types(1).await, ["workspace.created"]);
+}
+
+#[tokio::test]
+async fn a_hook_that_fails_without_refusing_is_a_generic_500_and_creates_nothing() {
+    let Some(o) = owner().await else { return };
+    let before = o.send(Method::GET, "/auth/workspaces", None).await.json();
+    let cache_before = o.h.workspaces.cache.operations();
+    let failed = o
+        .send(
+            Method::POST,
+            "/auth/workspaces",
+            Some(json!({ "name": "Explode" })),
+        )
+        .await;
+    assert_eq!(failed.status, StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(code(&failed), "auth.internal");
+    assert!(failed.json()["error"]["details"].is_null());
+    // Neither the failure's text nor a type name is in the body.
+    let text = String::from_utf8_lossy(&failed.body).into_owned();
+    for leaked in ["hunter2", "pg-primary", "HookError", "Internal("] {
+        assert!(!text.contains(leaked), "{leaked} leaked into {text}");
+    }
+    // Nothing was created, audited, cached or reported.
+    let after = o.send(Method::GET, "/auth/workspaces", None).await.json();
+    assert_eq!(after, before);
+    assert!(o.h.workspaces.repo.audit_events().is_empty());
+    assert_eq!(o.h.workspaces.cache.operations(), cache_before);
+    assert!(o.hooks.types(1).await.is_empty());
 }
 
 #[tokio::test]

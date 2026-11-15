@@ -12,6 +12,12 @@
 //! and the repository checks them in its own transaction. Changing a role and removing a member
 //! act only on an ACTIVE member; a suspended one answers the identical `404
 //! auth.workspace_not_found` (`workspaceInvitations.rules.membershipStatus`).
+//!
+//! The workspace's own status is decided by the guard that admits the caller, not by these writes:
+//! the repository checks the roles each write was judged against, not that the workspace is still
+//! active. A write that passed the guard can therefore commit on a workspace whose deletion was
+//! scheduled in between. The shared contract requires no atomic refusal for it, so the change
+//! stands and its counter is bumped as usual.
 
 use bymax_auth_types::AuthError;
 
@@ -302,7 +308,8 @@ impl AuthEngine {
     /// `userId` (oneself, or a receiver who is not an active member, checked before the password
     /// and again by the write) or `demoteSelfTo`, the re-proof's refusals,
     /// `auth.workspace_not_found` when the giver is no longer an active owner, and `auth.internal`
-    /// for a repository or cache failure.
+    /// for a repository or cache failure. Both memberships' counters are bumped even when the
+    /// first bump fails, and the first failure is the error.
     pub async fn transfer_workspace_ownership(
         &self,
         member: &WorkspaceMember,
@@ -332,8 +339,9 @@ impl AuthEngine {
             user_id: hand_over.to_user_id,
             ..member.key()
         };
-        runtime.invalidate_membership(member.key()).await?;
-        runtime.invalidate_membership(receiver).await?;
+        let giver_bump = runtime.invalidate_membership(member.key()).await;
+        let receiver_bump = runtime.invalidate_membership(receiver).await;
+        giver_bump.and(receiver_bump)?;
         self.notify_workspace_event(event, member_hook_context(ctx, member));
         Ok(())
     }

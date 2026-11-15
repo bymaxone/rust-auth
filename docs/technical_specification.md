@@ -2572,6 +2572,7 @@ Traits/crates: `bymax-auth-types` (`AuthResult`, `PlatformAuthResult`, `SafeAuth
 | `services::workspace` (`AuthEngine::authorize_workspace`, `list_my_workspaces`, `workspace_access`, `list_workspace_members`, `switch_workspace`) | `WorkspaceRepository`, `MembershipRepository`, `MembershipCacheStore`, `AuthHooks` | crypto (mac) | `membership_cache_fill` (through `resolve_membership`) |
 | `services::workspace_lifecycle` (`AuthEngine::create_workspace`, `create_owned_workspace`, `rename_workspace`, `schedule_workspace_deletion`, `restore_workspace`, `finalize_workspace_deletion`) | `WorkspaceRepository`, `MembershipRepository`, `MembershipCacheStore`, `UserRepository`, `BruteForceStore`, `SessionStore`, `AuthHooks` | crypto (mac, password) | `membership_cache_bump` |
 | `services::workspace_members` (`AuthEngine::change_member_role`, `remove_workspace_member`, `leave_workspace`, `transfer_workspace_ownership`) | `MembershipRepository`, `MembershipCacheStore`, `UserRepository`, `BruteForceStore`, `SessionStore`, `AuthHooks` | crypto (mac, password) | `membership_cache_bump` |
+| `services::account_removal` (`AuthEngine::remove_workspace_memberships_for_user`, `invalidate_membership`) | `MembershipRepository`, `MembershipCacheStore`, `AuthHooks` | crypto (mac) | `membership_cache_bump` |
 
 All cross-store mutations follow the security-before-availability ordering established above (credential change before session invalidation; uniqueness/status/verification gates before KDF work; brute-force ordering invariant). Every `after_*`/`on_*` hook is fire-and-forget; only `before_register` (and OAuth's `on_oauth_login`) can block a flow.
 ### 7.13 Service API keys (feature `api-keys`)
@@ -3036,7 +3037,7 @@ actor (`None` for the finalize job), one ISO-8601 instant written as `toISOStrin
 the kind. AFTER the write the cached access it affects is ended
 (`workspaceMembershipCache.workspaceWideEvents`): scheduling, restoring and finalizing a deletion
 bump the workspace counter; a role change, a removal and leaving bump that membership's counter; a
-hand-over bumps both memberships. A failed bump is `500 auth.internal` with the change committed,
+hand-over bumps both memberships, attempting both even when the first bump fails and answering the first failure. A failed bump is `500 auth.internal` with the change committed,
 and nothing is reported to the hook for it. Then the event is handed to
 `AuthHooks::on_workspace_event`, detached and best-effort; a failure is logged with the event's
 type only. `workspace.switched` reaches the hook only.
@@ -3044,6 +3045,56 @@ type only. `workspace.switched` reaches the hook only.
 `AuthEngine::finalize_workspace_deletion` is the host job's call: it deletes a workspace pending
 deletion whose grace period has ended, conditional on the status and the instant it read, and
 answers with a `FinalizeOutcome`.
+
+**A hook that fails.** `before_workspace_create` is the one hook on this path that can stop the
+write. A refusal is `403 auth.forbidden` with its reason; a hook that FAILS without refusing
+(`HookError::Internal`) creates nothing (no workspace, no membership, no audit row, no counter) and
+answers the generic `500 auth.internal`: the failure's text and its type name are not in the body.
+
+**Account removal (host-facing).** `AuthEngine::remove_workspace_memberships_for_user(
+AccountRemoval { tenant_id, user_id, authority }, &ctx)` is called by the host BEFORE it deletes
+or anonymises an account; the library never deletes a user and wires nothing automatically.
+`authority` is `RemovalAuthority::Account`, `Administrator(user_id)` or `Job`, and is the
+`actorUserId` of the events (the account itself, the administrator, or none). It covers every
+membership of the account in the tenant, in every membership status and every workspace status.
+The sole-owned workspaces are read first (`MembershipRepository::list_sole_owned`), only to name
+blockers; then ONE `MembershipRepository::remove_all_for_user` removes every membership, persists
+one `member.removed` event per removal carrying one ISO-8601 UTC instant for the whole call, and
+decides the last-owner rule again inside its own transaction. The account is refused while it is
+the only ACTIVE holder of the owner role of a workspace whose status is `active` or `suspended`
+(`WorkspaceStatus::blocks_account_removal`, the contract's `blockingVectors`); a workspace pending
+deletion or deleted never blocks, and the membership there is removed. The refusal is
+`AccountRemovalError::Blocked` and, as an `AuthError`, `AuthError::LastOwnerWithDetails`: `409
+auth.last_owner` with `details: { "workspaces": [...] }`, each entry `{ id, name, status }` (at
+most 100) or `{ id }` alone for a workspace the write found after the read; nothing is written, no
+audit row is persisted and no counter moves. After the commit every removed membership's counter is
+bumped, all of them attempted; if any fails the call returns
+`AccountRemovalError::BumpsFailed { removed, failed }` with the removal committed, so repeating it
+finds nothing to remove, and the host drops the failed ones with
+`AuthEngine::invalidate_membership(MembershipRef)` (blank identifiers are `400 auth.validation`) or
+waits out `workspaces.membership_cache_ttl_seconds`. The events are then reported to
+`AuthHooks::on_workspace_event`, detached and best-effort, even when a bump failed.
+
+**Writes racing a scheduled deletion.** A role change, a removal, a hand-over and a rename are
+admitted by the guard, which reads the workspace as active, and the repository write then checks the
+roles it was judged against but not the workspace's status. A write that passed the guard can
+therefore commit on a workspace whose deletion was scheduled in between, and a rename can commit
+and then answer `404` when the read back finds the workspace no longer active. The shared contract
+requires no atomic refusal here, so nothing is added; the change is committed and its counter
+bumped either way.
+
+**What this crate does here, by design.**
+
+- `workspaces.allow_create` is a boolean. A host that needs a per-user decision uses
+  `AuthHooks::before_workspace_create`, whose refusal carries `details`.
+- The password-less re-proof marker (`recentAuthMarker`) is keyed only by the user subject. It is
+  not bound to a session or a token id and is not consumed on use. Since the workspace write routes
+  it also gates `schedule-deletion` and `transfer-ownership`, so during its lifetime another
+  session's access token passes that re-proof repeatedly. Binding it to the session and consuming it
+  on a destructive use is a cross-implementation contract change that has not been made.
+- The re-proof failure counter is shared by MFA enrolment, `schedule-deletion` and
+  `transfer-ownership`, so a holder of a token can lock the owner out of those re-proofs. This is
+  by design.
 
 **Literal segments.** A literal route under the same prefix, such as
 `workspaces/invitations/preview`, coexists with `workspaces/{workspaceId}/...` because a static

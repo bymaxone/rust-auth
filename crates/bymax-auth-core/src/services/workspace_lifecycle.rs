@@ -295,6 +295,10 @@ impl AuthEngine {
     /// Renames the workspace `member` was admitted to and reads it back. A rename changes nothing
     /// a cached membership holds, so it bumps no counter.
     ///
+    /// The write checks the actor's role, not the workspace's status: a rename that passed the
+    /// guard can commit on a workspace whose deletion was scheduled in between, and the read back
+    /// then answers `auth.workspace_not_found` for a rename that did commit.
+    ///
     /// # Errors
     ///
     /// `auth.validation` naming `name`, `auth.workspace_not_found` when the workspace is gone or

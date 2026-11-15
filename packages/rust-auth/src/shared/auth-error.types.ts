@@ -18,7 +18,7 @@ message: string, };
 
 /**
  * A single field-level validation failure, surfaced under `error.details` for the
- * adapter-originated [`AuthErrorCode::Validation`] code.
+ * adapter-originated [`AuthErrorCode::Validation`](super::AuthErrorCode::Validation) code.
  */
 export type FieldError = { 
 /**

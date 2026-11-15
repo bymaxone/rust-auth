@@ -37,7 +37,8 @@ pub use domain::{
 };
 #[doc(inline)]
 pub use error::{
-    AuthError, AuthErrorBody, AuthErrorCode, AuthErrorEnvelope, AuthErrorResponse, FieldError,
+    AuthError, AuthErrorBody, AuthErrorCode, AuthErrorEnvelope, AuthErrorResponse,
+    BlockingWorkspace, FieldError,
 };
 #[doc(inline)]
 pub use results::{

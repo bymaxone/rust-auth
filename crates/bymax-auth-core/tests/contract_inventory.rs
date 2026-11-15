@@ -313,3 +313,30 @@ fn every_workspace_realtime_statement_is_read_or_pending() {
         ),
     );
 }
+
+#[test]
+fn every_account_removal_statement_is_read_or_pending() {
+    let root = contract();
+    let section = &root["workspaceAccountRemoval"];
+    inventory(
+        "workspaceAccountRemoval",
+        section,
+        (&["rules", "blockingVectors"], &[], &[]),
+    );
+    inventory(
+        "workspaceAccountRemoval.rules",
+        &section["rules"],
+        (
+            &[
+                "scope",
+                "blocking",
+                "pendingDeletion",
+                "atomicity",
+                "audit",
+                "cache",
+            ],
+            &[],
+            &[],
+        ),
+    );
+}

@@ -9,6 +9,7 @@
 //! call writes nothing, the audit event included.
 
 use std::collections::BTreeMap;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
 use async_trait::async_trait;
@@ -44,6 +45,9 @@ pub(super) struct State {
 #[derive(Default)]
 pub struct InMemoryWorkspaces {
     pub(super) state: Mutex<State>,
+    pub(super) sole_owned_reads_stale: AtomicBool,
+    pub(super) sole_owned_reads: AtomicUsize,
+    pub(super) account_removals_fail: AtomicBool,
 }
 
 pub(super) fn lock(state: &Mutex<State>) -> MutexGuard<'_, State> {
@@ -218,6 +222,25 @@ impl State {
 }
 
 impl InMemoryWorkspaces {
+    /// Makes `list_sole_owned` answer an empty page while `stale` is set, as a read that ran
+    /// before the account became the only owner of a workspace does; the writes still see the
+    /// real state.
+    pub fn set_sole_owned_reads_stale(&self, stale: bool) {
+        self.sole_owned_reads_stale.store(stale, Ordering::SeqCst);
+    }
+
+    /// Makes `remove_all_for_user` fail as a repository does when its store is unreachable, while
+    /// `failing` is set; nothing is removed.
+    pub fn set_account_removals_failing(&self, failing: bool) {
+        self.account_removals_fail.store(failing, Ordering::SeqCst);
+    }
+
+    /// How many pages `list_sole_owned` has answered, so a caller's paging is observable.
+    #[must_use]
+    pub fn sole_owned_reads(&self) -> usize {
+        self.sole_owned_reads.load(Ordering::SeqCst)
+    }
+
     /// An empty repository.
     #[must_use]
     pub fn new() -> Self {
