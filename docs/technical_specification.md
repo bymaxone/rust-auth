@@ -3080,9 +3080,8 @@ admitted by the guard, which reads the workspace as active, and the repository w
 roles it was judged against but not the workspace's status. A write that passed the guard can
 therefore commit on a workspace whose deletion was scheduled in between, and a rename can commit
 and then answer `404` when the read back finds the workspace no longer active. The shared contract
-requires no atomic refusal here (the status rules it states are the guard's decision, the cache's
-fill rule and the account-removal rules), so nothing is added; the change is committed and its
-counter bumped either way.
+requires no atomic refusal here, so nothing is added; the change is committed and its counter
+bumped either way.
 
 **What this crate does here, by design.**
 
@@ -3093,9 +3092,9 @@ counter bumped either way.
   it also gates `schedule-deletion` and `transfer-ownership`, so during its lifetime another
   session's access token passes that re-proof repeatedly. Binding it to the session and consuming it
   on a destructive use is a cross-implementation contract change that has not been made.
-- The re-proof failure counter is shared by every flow that re-proves (MFA enrolment,
-  `schedule-deletion`, `transfer-ownership` all use the MFA/reauthentication counter), so a holder
-  of a token can lock the owner out of re-proof. This is by design.
+- The re-proof failure counter is shared by MFA enrolment, `schedule-deletion` and
+  `transfer-ownership`, so a holder of a token can lock the owner out of those re-proofs. This is
+  by design.
 
 **Literal segments.** A literal route under the same prefix, such as
 `workspaces/invitations/preview`, coexists with `workspaces/{workspaceId}/...` because a static
