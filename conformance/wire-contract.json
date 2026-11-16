@@ -22,7 +22,7 @@
     "A case that needs an ill-formed string states it as UTF-16 code units beside its `case`, for",
     "example `unpairedSurrogateCodeUnits: [55296]`, and each library's test builds the string itself."
   ],
-  "version": 6,
+  "version": 7,
   "hmacKeyDerivation": {
     "$comment": [
       "The identifier-hashing key both sides derive from the identifier secret, and one",
@@ -1418,11 +1418,11 @@
       "body": {},
       "$comment": "Both routes acknowledge with 200 and an empty JSON object, whether or not the account exists: a body that differed by outcome would be the enumeration oracle the 200 exists to close. Pinned as an object, not left empty, so a client that parses every success body as JSON needs no special case for these two routes.",
   "failures": {
-    "before": "A failure before the account is known (the resend-cooldown store, the account lookup) answers 500 auth.internal after the floor: it is the same for every address, so it tells the caller nothing about one.",
-    "after": "A failure after the account is known (issuing or storing the code) is logged and the 200 acknowledgement stands: it happens only for a registered address, so a 5xx would answer the enumeration question.",
+    "before": "A failure before the account is known (the resend-cooldown store, the account lookup) answers after the floor, and the answer is the same for every address, so it tells the caller nothing about one: 503 auth.service_unavailable when the resend-cooldown store cannot answer (it timed out, the connection was refused or lost, or Redis replied that it cannot serve the command), 500 auth.internal for any other failure. The cooldown is the first thing every request consults, before any account-dependent step, which is what makes the 503 the same for an address that exists and one that does not.",
+    "after": "A failure after the account is known (issuing or storing the code) is logged and the 200 acknowledgement stands, a store that cannot answer included: it happens only for a registered address, so a 5xx would answer the enumeration question. A store that fails between the cooldown and the code costs that one mail and nothing else.",
     "cooldown": "The resend cooldown a request took is released when the request itself observes the failure: the account lookup, the code or token store, or a send awaited inside the request. The retry a 500 invites is then not refused for the rest of the window. A send that fails after the response has left is detached from the request and never releases it, because a release from there is a delete by key that can remove a later request's fresh cooldown. A request that fails nothing leaves the cooldown in place.",
     "floorMs": 300,
-    "floor": "Every exit waits until floorMs have passed since the request began, a cooldown hit and a 500 included, so releasing the cooldown for registered accounts opens no timing difference."
+    "floor": "Every exit waits until floorMs have passed since the request began, a cooldown hit, a 500 and a 503 included, so releasing the cooldown for registered accounts opens no timing difference."
   }
     }
   },
@@ -1489,7 +1489,8 @@
       "auth.registration_closed",
       "auth.workspace_limit_reached",
       "auth.workspace_pending_deletion",
-      "auth.internal"
+      "auth.internal",
+      "auth.service_unavailable"
     ],
     "internalOnly": [
       "auth.token_expired",
@@ -1576,7 +1577,66 @@
       "auth.registration_closed": 403,
       "auth.workspace_limit_reached": 403,
       "auth.workspace_pending_deletion": 409,
-      "auth.internal": 500
+      "auth.internal": 500,
+      "auth.service_unavailable": 503
+    }
+  },
+  "serviceUnavailable": {
+    "$comment": [
+      "Where `auth.service_unavailable` (503) is answered and which store failures count, so the two",
+      "libraries answer one Redis outage the same way on the same path. The code and its status are in",
+      "`errorCatalog`; this section says what raises it. The body is the library envelope with",
+      "`details: null`, nothing of the store's error is in the response, and no `Retry-After` is sent,",
+      "because nothing here knows when the store returns."
+    ],
+    "appliesTo": [
+      "Any request whose handling reads or writes the shared store, when that call cannot answer and `absorption` does not absorb it.",
+      "Sign-in, registration and refresh, including reuse detection; logout; every authenticated request, whose revocation, epoch and account-status reads come first, so an outage is a 503 and never a 401.",
+      "MFA setup, challenge and management; OTP, password reset and email change; the per-address, per-account and per-IP counters and lockouts.",
+      "Session listing and revocation; workspace and invitation operations that write the store, the membership-cache invalidation after a change included, which refuses rather than report a change as done.",
+      "OAuth initiate and callback, delivered as every other callback failure is; the WebSocket ticket mint and redeem; the platform plane."
+    ],
+    "passwordResetRequest": "A reset or resend request answers 503 when the resend-cooldown store cannot answer, after the timing floor and the same for every address. A store that cannot answer after the account is known leaves the 200, as `passwordResetRequest.failures.after` says.",
+    "absorption": {
+      "rule": "A call whose result the answer does not depend on is logged and absorbed: it never changes the status or the body. A call the answer does depend on is never absorbed, whatever its kind: a counter, a revocation read and a write that decides the operation all answer 503.",
+      "examples": [
+        "The workspace membership cache read and fill: the repository answers.",
+        "The denied-access event counter.",
+        "The lockout reads after a failed login that only feed the `onLockout` hook: the login still answers its 401. The lockout pre-check before the password is judged is not absorbed and answers 503.",
+        "Cleanup after a decision already made: a logout whose revocation writes succeeded and whose session-metadata cleanup fails still answers 204; the write of the logout retry marker; a best-effort delete that rolls back after a failure that is itself the answer.",
+        "Work that follows the answer's cause: the session-limit eviction at sign-in, which leaves the limit unenforced for that sign-in; the session-detail rotation after a refresh; the prune of dead index entries after a session listing; the opportunistic re-encryption of an MFA secret; the account-status cache invalidation after an email is verified."
+      ]
+    },
+    "outage": {
+      "clientErrors": [
+        "A command that got no reply before the client's command timeout.",
+        "A command refused because the connection is closed, or is down and the client holds no offline queue.",
+        "A command the client gave up on after its allowed retries."
+      ],
+      "networkErrorCodes": [
+        "ECONNREFUSED",
+        "ECONNRESET",
+        "ETIMEDOUT",
+        "EPIPE",
+        "ENOTFOUND",
+        "EAI_AGAIN",
+        "EHOSTUNREACH",
+        "ENETUNREACH"
+      ],
+      "replyPrefixes": [
+        "READONLY",
+        "LOADING",
+        "MASTERDOWN",
+        "CLUSTERDOWN",
+        "TRYAGAIN"
+      ],
+      "notAnOutageReplyPrefixes": [
+        "NOSCRIPT",
+        "WRONGTYPE",
+        "ERR"
+      ],
+      "notAnOutage": "Any other error reply from the server, and any error that is not about the store, answers 500 auth.internal: it is a defect, not a condition that clears.",
+      "open": "BUSY and MISCONF are not classified today and answer 500 auth.internal. Adding either is a change to `replyPrefixes` in both libraries."
     }
   },
   "errorEnvelope": {
@@ -1899,7 +1959,7 @@
       "bootstrap": "A bootstrap invitation is issued by the host through a service call, with no route: the platform plane's authorization is the host's. The call returns the workspace id the invitation reserves; each call is its own invitation for its own workspace. Accepting creates the workspace and the owner membership in one repository call, then spends the record. A retry that finds the workspace already created, with this caller as its active owner, is success and spends the record. A bootstrap invitation is withdrawn by the host through a second service call keyed by that workspace id; no workspace route can reach it, because its workspace does not exist.",
       "acceptLimits": "accept is limited to 10 per minute per IP and accept-signup to 5 per minute per IP; the token is 256 bits, so no per-account limit adds anything.",
       "membershipStatus": "Every path that reads a membership decides its status explicitly, and only an ACTIVE membership of an ACTIVE workspace grants anything. Access, and the cache that serves it, fill and read back only an active membership. Changing a member's role and removing a member act only on an ACTIVE member; a suspended one answers 404 auth.workspace_not_found. The receiver of an ownership hand-over must be ACTIVE (400 auth.validation naming `userId`), checked before the giver's password is looked at and again by the repository's write. Leaving, and the role the acting member holds, are reached only through the workspace guard, which resolves an ACTIVE membership, so a suspended member reaches neither. Inviting an address that has a membership in any status is 409 auth.already_member, and accepting with a non-active membership is 400 auth.invalid_invitation_token: an invitation never reinstates a member.",
-      "bootstrapCreate": "Accepting a bootstrap invitation applies to the workspace it creates what the create route applies to a workspace an account creates for itself, except the self-serve switch: first the owner cap (`workspaces.maxWorkspacesPerUser`, counted as the workspaces the account owns with the owner role), then the host's `beforeWorkspaceCreate`, then the workspace is created. The platform has already decided that this account may own a workspace, so `allowCreate` is never consulted; the acceptance may land days after the invitation, so the cap and the hook are. A refusal by the cap answers `auth.workspace_limit_reached`, a refusal by the hook `403 auth.forbidden` with `details: [{field: 'name', message: <the hook's reason, or 'Workspace creation was refused'>}]`, and neither spends the record. The retry of an acceptance whose workspace already exists with the caller as its active owner applies neither.",
+      "bootstrapCreate": "Accepting a bootstrap invitation applies to the workspace it creates what the create route applies to a workspace an account creates for itself, except the self-serve switch: first the owner cap (`workspaces.maxWorkspacesPerUser`, counted as the workspaces the account owns with the owner role), then the host's `beforeWorkspaceCreate`, then the workspace is created. The platform has already decided that this account may own a workspace, so `allowCreate` is never consulted; the acceptance may land days after the invitation, so the cap and the hook are. A refusal by the cap answers `auth.workspace_limit_reached`, a refusal by the hook `403 auth.forbidden` with `details: [{field: 'name', message: <the hook's reason, or 'Workspace creation was refused'>}]`, and neither spends the record. The retry of an acceptance whose workspace already exists with the caller as its active owner applies neither. A `beforeWorkspaceCreate` that fails without refusing creates nothing and answers 500 `auth.internal`; the failure's text is not in the response. A workspace event hook is told after the write has committed; its failure is logged and changes neither the response nor the write.",
       "oauthAccept": "GET oauth/{provider}?workspaceInvitation=<token> starts an OAuth flow that accepts the invitation; the token is exactly 64 characters (else 400 auth.validation) and the start answers 400 auth.invalid_invitation_token when workspaces are not enabled. The start response carries `Referrer-Policy: no-referrer` and the state record gains `workspaceInvitation`, the SHA-256 of the token: the raw token is never stored, and the flow stays bound to the browser that started it by the state cookie. On the callback, before the host's `onOAuthLogin` hook runs, the record is read by that hash and must be a record of a known role in the flow's tenant (else 400 auth.invalid_invitation_token); the provider's address must equal the record's, compared in lowercase (else 403 auth.invitation_email_mismatch); the provider must report that address verified (else 403 auth.email_not_verified); and the workspace and inviter must still stand, as for accept. Then the hook decides create, link or reject as for any OAuth sign-in, and the account it resolves must be the invited address, in the invitation's tenant, and verified. An account with a second factor is sent to the MFA challenge and the invitation is neither completed nor spent: its holder completes the challenge and accepts as a signed-in account. Otherwise the record is read again and the inviter's standing and the workspace are judged again immediately before the write, because the host's hook and the account write ran since the vetting: a record revoked, replaced by a resend or expired in that time, an inviter who no longer stands and a workspace that is no longer active all answer 400 auth.invalid_invitation_token with nothing written or spent; then the membership is written, the record is spent and the sign-in is delivered as for any OAuth sign-in. A bootstrap invitation applies the owner cap and `beforeWorkspaceCreate` as in `bootstrapCreate`. No refusal spends the record, and a refusal after the hook created the account leaves that account created, as for accept-signup. A refusal is delivered as every other callback failure is and never carries the token. #298 section 6 says the library links an existing account \"when oauth.linkByVerifiedEmail is enabled\": there is no such option, the host's `onOAuthLogin` hook decides whether to link.",
       "oauthAcceptMfa": "An account with a second factor that signs in through an OAuth invitation receives the MFA challenge exactly as any OAuth sign-in does, and the invitation is neither completed nor spent: OAuth proves the mailbox and the provider account, not the second factor, and a membership is a privilege. Its holder completes the challenge and then accepts with POST workspaces/invitations/accept as a signed-in account, which spends the record as for any signed-in acceptance. A reader that completed the invitation before the challenge would grant a membership to a session that never passed the second factor.",
       "registration": "`registration: 'invitation-only'` closes the self sign-up paths. POST register answers 403 auth.registration_closed before anything else is read or run, and the OAuth `create` action answers it unless the flow carries an invitation that passed the checks in `oauthAccept`. Signing in an existing account, linking an identity and every accept route are unaffected. Startup refuses the mode when `workspaces.enabled` and `invitations.enabled` are both false, naming both, since no account could ever be created.",

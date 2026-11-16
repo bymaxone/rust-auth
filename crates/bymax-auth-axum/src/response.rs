@@ -38,17 +38,22 @@ impl IntoResponse for AuthRejection {
 /// Build the canonical HTTP response for an [`AuthError`]: the JSON envelope, the status
 /// the shared contract pins for the wire code, and — for the lockout and rate-limit codes —
 /// a `Retry-After` header computed from the error's `retry_after_seconds`. An
-/// [`AuthError::Internal`] logs its cause via `tracing` and renders only the generic 500
-/// envelope, never the cause.
+/// [`AuthError::Internal`] and [`AuthError::ServiceUnavailable`] log their cause via `tracing`
+/// and render only the generic envelope (500 and 503), never the cause; no `Retry-After` is sent
+/// for the 503, because nothing here knows when the store returns.
 ///
 /// The OTP cap is deliberately absent from that list: it reaches the client as
 /// `auth.otp_invalid`, so a `Retry-After` would hand back through a header exactly what the
 /// code collapse withholds — only a record that exists can reach an attempt ceiling.
 #[must_use]
 pub fn error_response(error: &AuthError) -> Response {
-    if let AuthError::Internal(cause) = error {
-        // The cause is for operators only — log it, but never serialize it into the body.
-        tracing::error!(%cause, "internal auth error");
+    // The cause is for operators only — log it, but never serialize it into the body.
+    match error {
+        AuthError::Internal(cause) => tracing::error!(%cause, "internal auth error"),
+        AuthError::ServiceUnavailable(cause) => {
+            tracing::error!(%cause, "auth store unavailable");
+        }
+        _ => {}
     }
 
     let status =
@@ -89,6 +94,30 @@ pub fn error_response(error: &AuthError) -> Response {
 pub fn anti_enumerating_outcome(outcome: &Result<(), AuthError>, uniform: Response) -> Response {
     match outcome {
         Err(error @ AuthError::Validation { .. }) => error_response(error),
+        _ => uniform,
+    }
+}
+
+/// Render the outcome of a password-reset request (`forgot-password`, `resend-otp`): the uniform
+/// response for everything the account's state could explain, and the real error for what no
+/// account explains.
+///
+/// Three errors are surfaced, each decided before the account is known or without regard to it,
+/// so each is the same for every address and tells the caller nothing about one: the request-shape
+/// [`AuthError::Validation`] (see [`anti_enumerating_outcome`]), [`AuthError::ServiceUnavailable`]
+/// (the resend-cooldown store cannot answer, `503`) and [`AuthError::Internal`] (any other failure
+/// before the account is known, `500`). The engine waits out the timing floor before returning
+/// any of them. A failure after the account is known never reaches this function as an error: the
+/// engine logs it and the `Ok` stands, because a `5xx` there would answer the enumeration
+/// question for a registered address.
+#[must_use]
+pub fn reset_request_outcome(outcome: &Result<(), AuthError>, uniform: Response) -> Response {
+    match outcome {
+        Err(
+            error @ (AuthError::Validation { .. }
+            | AuthError::ServiceUnavailable(_)
+            | AuthError::Internal(_)),
+        ) => error_response(error),
         _ => uniform,
     }
 }
@@ -149,6 +178,45 @@ mod tests {
                 "an account-dependent outcome escaped the uniform response: {outcome:?}"
             );
         }
+    }
+
+    #[test]
+    fn a_reset_request_surfaces_what_no_account_explains_and_nothing_else() {
+        let uniform = || StatusCode::OK.into_response();
+        let down = || Box::new(std::io::Error::other("secret detail"));
+
+        let unavailable = Err(AuthError::ServiceUnavailable(down()));
+        let response = reset_request_outcome(&unavailable, uniform());
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert!(response.headers().get(header::RETRY_AFTER).is_none());
+
+        let internal = Err(AuthError::Internal(down()));
+        let response = reset_request_outcome(&internal, uniform());
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+
+        let unscopable = Err(AuthError::Validation { details: vec![] });
+        let response = reset_request_outcome(&unscopable, uniform());
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+        for outcome in [
+            Ok(()),
+            Err(AuthError::OtpInvalid),
+            Err(AuthError::AccountBanned),
+        ] {
+            assert_eq!(
+                reset_request_outcome(&outcome, uniform()).status(),
+                StatusCode::OK,
+                "an account-dependent outcome escaped the uniform response: {outcome:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_unavailable_store_renders_a_generic_503_without_leaking_the_cause() {
+        let cause = std::io::Error::other("secret detail");
+        let response = error_response(&AuthError::ServiceUnavailable(Box::new(cause)));
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert!(response.headers().get(header::RETRY_AFTER).is_none());
     }
 
     #[test]

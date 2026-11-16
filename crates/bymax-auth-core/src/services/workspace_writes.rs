@@ -114,9 +114,13 @@ pub(crate) fn status_refusal(
     }
 }
 
-/// A bump that failed, as the error the change is answered with.
+/// A bump that failed, as the error the change is answered with: the outage when the store could
+/// not answer (the change is refused rather than reported as invalidated), otherwise internal.
 fn bump_failed(error: BumpError) -> AuthError {
-    AuthError::Internal(Box::new(error))
+    match error {
+        BumpError::Store(outage @ AuthError::ServiceUnavailable(_)) => outage,
+        other => AuthError::Internal(Box::new(other)),
+    }
 }
 
 impl WorkspaceRuntime {

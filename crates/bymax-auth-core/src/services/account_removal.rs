@@ -43,7 +43,9 @@ const SOLE_OWNED_PAGES_MAX: usize = 100;
 pub enum RemovalAuthority<'a> {
     /// The account itself asked for its removal.
     Account,
-    /// An administrator, named by user id, removed the account.
+    /// An administrator, named by user id, removed the account. The engine does not check that
+    /// the administrator may remove this account: the id only names the actor in the events, and
+    /// the host authorizes the call.
     Administrator(&'a str),
     /// A job removed the account: the events carry no actor.
     Job,
@@ -91,6 +93,8 @@ pub enum AccountRemovalError {
         removed: Vec<RemovedMembership>,
         /// The workspace ids whose membership counter could not be bumped.
         failed: Vec<String>,
+        /// Whether a failed bump was a store that cannot answer, which a route answers `503`.
+        outage: bool,
     },
     /// Any other failure: a blank identifier, the workspace layer off or a repository failure.
     #[error(transparent)]
@@ -99,10 +103,14 @@ pub enum AccountRemovalError {
 
 impl From<AccountRemovalError> for AuthError {
     /// The error a route would answer: `409 auth.last_owner` with `details.workspaces` for a
-    /// refusal, `auth.internal` for the failed bumps.
+    /// refusal, `auth.service_unavailable` for failed bumps when the store could not answer and
+    /// `auth.internal` otherwise.
     fn from(error: AccountRemovalError) -> Self {
         match error {
             AccountRemovalError::Blocked { workspaces } => Self::LastOwnerWithDetails(workspaces),
+            AccountRemovalError::BumpsFailed { outage: true, .. } => {
+                Self::ServiceUnavailable(Box::new(error))
+            }
             AccountRemovalError::BumpsFailed { .. } => Self::Internal(Box::new(error)),
             AccountRemovalError::Failed(error) => error,
         }
@@ -186,24 +194,26 @@ impl WorkspaceRuntime {
     }
 
     /// Bumps the counter of every membership in `removed`, all of them attempted, and answers the
-    /// workspace ids of those that failed.
+    /// workspace ids of those that failed and whether any failure was a store that cannot answer.
     async fn bump_removed(
         &self,
         (tenant_id, user_id): (&str, &str),
         removed: &[RemovedMembership],
-    ) -> Vec<String> {
+    ) -> (Vec<String>, bool) {
         let mut failed = Vec::new();
+        let mut outage = false;
         for membership in removed {
             let key = MembershipRef {
                 tenant_id,
                 workspace_id: &membership.workspace_id,
                 user_id,
             };
-            if self.invalidate_membership(key).await.is_err() {
+            if let Err(error) = self.invalidate_membership(key).await {
+                outage |= matches!(error, AuthError::ServiceUnavailable(_));
                 failed.push(membership.workspace_id.clone());
             }
         }
-        failed
+        (failed, outage)
     }
 }
 
@@ -258,7 +268,7 @@ impl AuthEngine {
             RemoveAllOutcome::Removed(memberships) => memberships,
         };
         let who = (removal.tenant_id, removal.user_id);
-        let failed = runtime.bump_removed(who, &memberships).await;
+        let (failed, outage) = runtime.bump_removed(who, &memberships).await;
         self.report_removals(&removal, actor, &at, &memberships, ctx);
         if !failed.is_empty() {
             let count = failed.len();
@@ -269,6 +279,7 @@ impl AuthEngine {
             return Err(AccountRemovalError::BumpsFailed {
                 removed: memberships,
                 failed,
+                outage,
             });
         }
         Ok(RemovedMemberships { memberships, at })

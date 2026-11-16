@@ -52,7 +52,7 @@ impl InMemoryStores {
             return Ok(());
         }
         armed.1 -= 1;
-        Err(AuthError::Internal(
+        Err(AuthError::ServiceUnavailable(
             "logout pending store unavailable".into(),
         ))
     }

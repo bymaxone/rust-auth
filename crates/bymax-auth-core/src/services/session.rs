@@ -2284,7 +2284,7 @@ mod tests {
 
         assert!(matches!(
             svc.revoke_all_except_current("t1", &uid, &current).await,
-            Err(AuthError::Internal(_))
+            Err(AuthError::ServiceUnavailable(_))
         ));
         assert!(matches!(
             store

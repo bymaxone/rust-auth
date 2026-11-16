@@ -71,7 +71,10 @@ pub(crate) async fn resolve_owner(
         .map_err(|error| {
             let cause = crate::services::error_chain(&error);
             tracing::warn!(%cause, "logout: pending owner lookup failed");
-            crate::services::internal_error("a logout could not read its pending owner")
+            crate::services::answer_store_failure(
+                error,
+                "a logout could not read its pending owner",
+            )
         })?;
     Ok(ResolvedOwner {
         from_marker: marker.is_some(),
@@ -130,7 +133,10 @@ pub(crate) async fn settle_completed(
             .map_err(|error| {
                 let cause = crate::services::error_chain(&error);
                 tracing::warn!(%cause, "logout: the pending owner could not be claimed");
-                crate::services::internal_error("a logout could not claim its pending owner")
+                crate::services::answer_store_failure(
+                    error,
+                    "a logout could not claim its pending owner",
+                )
             });
     }
     match store.claim_logout_pending(kind, hash).await {
@@ -161,9 +167,12 @@ async fn confirm_no_stale_marker(
     match store.read_logout_pending(kind, hash).await {
         Ok(None) => Ok(true),
         Ok(Some(_)) => Err(refused()),
-        Err(_) => {
+        Err(read) => {
             remember_failed_attempt(store, kind, Some(hash), resolved, ttl_secs).await;
-            Err(refused())
+            Err(crate::services::answer_store_failure(
+                read,
+                "a logout could not remove its stale pending owner",
+            ))
         }
     }
 }

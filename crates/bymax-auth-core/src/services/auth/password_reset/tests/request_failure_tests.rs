@@ -230,7 +230,7 @@ async fn landed(failed: &AtomicUsize, count: usize) -> bool {
 }
 
 #[tokio::test]
-async fn a_failing_cooldown_gate_answers_500_after_the_floor() {
+async fn a_cooldown_store_that_cannot_answer_answers_503_after_the_floor() {
     for entry in ENTRIES {
         let Some(rig) = rig(ResetMethod::Otp, Arc::new(DownMailer::failing()), false).await else {
             return;
@@ -240,7 +240,7 @@ async fn a_failing_cooldown_gate_answers_500_after_the_floor() {
         let (outcome, took) = request(&rig, entry, REGISTERED).await;
 
         assert!(
-            matches!(outcome, Err(AuthError::Internal(_))),
+            matches!(outcome, Err(AuthError::ServiceUnavailable(_))),
             "{entry:?}: {outcome:?}"
         );
         assert!(took >= FLOOR, "{entry:?}: {took:?}");

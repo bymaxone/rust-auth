@@ -781,7 +781,9 @@ impl InMemoryStores {
             return Ok(());
         }
         *armed = (0, remaining - 1);
-        Err(AuthError::Internal("brute-force store unavailable".into()))
+        Err(AuthError::ServiceUnavailable(
+            "brute-force store unavailable".into(),
+        ))
     }
 
     /// Consume one armed failure, if any, returning the error the caller should surface.
@@ -791,7 +793,9 @@ impl InMemoryStores {
             return Ok(());
         }
         *remaining -= 1;
-        Err(AuthError::Internal("session store unavailable".into()))
+        Err(AuthError::ServiceUnavailable(
+            "session store unavailable".into(),
+        ))
     }
 
     /// The TTL the last created session was stored with, in seconds. A test-only inspection
@@ -2428,11 +2432,11 @@ mod tests {
         // Armed: a backend error, not the `SessionNotFound` an absent session would give.
         assert!(matches!(
             store.revoke_session(kind, &subject("u9"), "a1").await,
-            Err(AuthError::Internal(_))
+            Err(AuthError::ServiceUnavailable(_))
         ));
         assert!(matches!(
             store.delete_grace_pointer(kind, "a1").await,
-            Err(AuthError::Internal(_))
+            Err(AuthError::ServiceUnavailable(_))
         ));
         // Disarmed: the session is still there (both armed calls failed before touching it),
         // so this one succeeds — which it could not if the counter had grown or stalled.

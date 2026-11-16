@@ -93,6 +93,16 @@ pub(crate) fn internal_error(context: &'static str) -> AuthError {
     AuthError::Internal(context.into())
 }
 
+/// The answer to a store failure that is logged and not echoed: a store that cannot answer stays
+/// [`AuthError::ServiceUnavailable`] (a condition that clears, `503`), and any other failure is
+/// the opaque internal error naming `context`.
+pub(crate) fn answer_store_failure(error: AuthError, context: &'static str) -> AuthError {
+    match error {
+        AuthError::ServiceUnavailable(_) => error,
+        _ => internal_error(context),
+    }
+}
+
 /// The text an operator reads for `error`: its `Display` and then each `source()` in turn,
 /// joined with `": "`.
 ///
@@ -117,7 +127,8 @@ const ERROR_CHAIN_DEPTH: usize = 8;
 /// A logout attempts all of its writes (the access-token blacklist, the refresh-session delete,
 /// the grace-pointer delete) whatever an earlier one did, so one refused write never leaves a
 /// later one unattempted; it then answers the first failure. The cause is logged and the answer
-/// is a generic internal error: a store's own message names its backend.
+/// is a generic internal error, or the outage when the store could not answer: a store's own
+/// message names its backend.
 pub(crate) fn note_logout_failure(
     first: &mut Option<AuthError>,
     step: &str,
@@ -126,7 +137,8 @@ pub(crate) fn note_logout_failure(
     if let Err(error) = result {
         let cause = error_chain(&error);
         tracing::warn!(%cause, "{step}");
-        first.get_or_insert_with(|| internal_error("a logout revocation write failed"));
+        first
+            .get_or_insert_with(|| answer_store_failure(error, "a logout revocation write failed"));
     }
 }
 

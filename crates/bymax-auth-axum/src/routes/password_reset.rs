@@ -19,7 +19,7 @@ use crate::dto::{
     ChangePasswordDto, ForgotPasswordDto, ResendOtpDto, ResetPasswordDto, VerifyOtpDto,
 };
 use crate::extractors::{AuthUser, UserStatus};
-use crate::response::{anti_enumerating_outcome, error_response};
+use crate::response::{error_response, reset_request_outcome};
 use crate::shared_limit::Throttle;
 use crate::state::{AuthState, AxumAuthConfig};
 use crate::validation::ValidatedJson;
@@ -65,12 +65,13 @@ async fn forgot_password(
         tenant_id: dto.tenant_id,
     };
     // Anti-enumeration: the response is uniform regardless of what the account's state turns
-    // out to be (existence, blocked status, or an infra hiccup), so those `Err`s collapse to the
-    // same 200 body — surfacing one would leak a distinguishable signal the engine's
-    // timing-normalized contract forbids. A request that cannot be scoped at all is the
-    // exception; see `anti_enumerating_outcome`.
+    // out to be (existence, blocked status), so those `Err`s collapse to the same 200 body —
+    // surfacing one would leak a distinguishable signal the engine's timing-normalized contract
+    // forbids. What no account explains is surfaced after the floor: a request that cannot be
+    // scoped, and a store that fails before the account is known (503 or 500); see
+    // `reset_request_outcome`.
     let outcome = state.engine().initiate_reset(input, &ctx).await;
-    anti_enumerating_outcome(&outcome, (StatusCode::OK, Json(json!({}))).into_response())
+    reset_request_outcome(&outcome, (StatusCode::OK, Json(json!({}))).into_response())
 }
 
 /// `POST /auth/password/change` (204). **Authenticated** — the only route in this group that
@@ -169,7 +170,7 @@ async fn resend_otp(
         tenant_id: dto.tenant_id,
     };
     // Anti-enumeration: uniform response regardless of the account's state (see
-    // `forgot_password`), with the same unscopable-request exception.
+    // `forgot_password`), with the same surfaced failures.
     let outcome = state.engine().resend_reset_otp(input, &ctx).await;
-    anti_enumerating_outcome(&outcome, (StatusCode::OK, Json(json!({}))).into_response())
+    reset_request_outcome(&outcome, (StatusCode::OK, Json(json!({}))).into_response())
 }

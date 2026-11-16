@@ -104,7 +104,7 @@ impl AuthEngine {
             .await
             .map_err(|error| {
                 tracing::warn!(%error, "logout: session lookup failed");
-                crate::services::internal_error("a logout could not read its session")
+                crate::services::answer_store_failure(error, "a logout could not read its session")
             })?;
         Ok(found.map(|record| LogoutOwner {
             user_id: record.user_id,
@@ -1057,7 +1057,7 @@ mod tests {
             h.engine
                 .logout(&auth.access_token, &auth.refresh_token)
                 .await,
-            Err(AuthError::Internal(_))
+            Err(AuthError::ServiceUnavailable(_))
         ));
         drop(capture);
 

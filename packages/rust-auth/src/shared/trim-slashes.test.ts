@@ -49,33 +49,65 @@ describe("slash trimming is linear, which is why the regexes went", () => {
   // the anchor expects it: the engine retries the greedy `\/+` from every position. Measured
   // on Node 24 with `"a" + "/".repeat(n) + "b"`, the trailing-strip regex took 36 ms at
   // n=10_000, 843 ms at 50_000, 3.3 s at 100_000 and 13.2 s at 200_000 — doubling the input
-  // quadrupled the time, and the last figure is the event loop stopped for 13 seconds.
+  // quadrupled the time.
   //
-  // The threshold is deliberately loose. The point is the SHAPE: at 200_000 the regex needed
-  // seconds, so anything in the tens of milliseconds proves the quadratic term is gone
-  // without making the test a benchmark that fails on a loaded CI runner.
-  it("handles a 200k-character slash run well inside a second", () => {
-    const pathological = `a${"/".repeat(200_000)}b`;
+  // The assertion is the SHAPE, as a ratio, never a wall-clock bound: the same work on an input
+  // `SCALE` times longer must cost far less than `SCALE ** 2` times as much. A linear scan lands
+  // near `SCALE` and the regex near `SCALE ** 2`, so a threshold between them holds on a loaded
+  // CI runner, where any absolute number is a coin flip. Each side is the best of several runs,
+  // which discards the runs a noisy neighbour inflated.
+  const SMALL = 5_000;
+  const SCALE = 40;
+  const RUNS = 7;
+  /** Between the linear expectation (SCALE) and the quadratic one (SCALE ** 2). */
+  const MAX_RATIO = SCALE * 10;
+  /** A floor under the small timing, so a clock that reads 0 cannot make the ratio infinite. */
+  const FLOOR_MS = 0.05;
 
-    const started = performance.now();
-    expect(trimSlashes(pathological)).toBe(pathological);
-    expect(trimTrailingSlashes(pathological)).toBe(pathological);
-    expect(trimLeadingSlashes(pathological)).toBe(pathological);
-    const elapsed = performance.now() - started;
+  const trimAll = (value: string): void => {
+    trimSlashes(value);
+    trimTrailingSlashes(value);
+    trimLeadingSlashes(value);
+  };
 
-    expect(elapsed).toBeLessThan(500);
+  const bestOf = (value: string): number => {
+    let best = Number.POSITIVE_INFINITY;
+    for (let run = 0; run < RUNS; run += 1) {
+      const started = performance.now();
+      trimAll(value);
+      best = Math.min(best, performance.now() - started);
+    }
+    return best;
+  };
+
+  const ratioFor = (make: (n: number) => string): number => {
+    const small = Math.max(bestOf(make(SMALL)), FLOOR_MS);
+    return bestOf(make(SMALL * SCALE)) / small;
+  };
+
+  it("costs about SCALE times as much for an input SCALE times longer", () => {
+    const pathological = (n: number): string => `a${"/".repeat(n)}b`;
+
+    expect(ratioFor(pathological)).toBeLessThan(MAX_RATIO);
   });
 
   // The all-slashes input is the other extreme: everything is stripped, so the scan runs the
   // full length rather than stopping at the first non-slash.
-  it("handles 200k slashes with nothing to keep", () => {
+  it("costs about SCALE times as much when there is nothing to keep", () => {
+    const allSlashes = (n: number): string => "/".repeat(n);
+
+    expect(ratioFor(allSlashes)).toBeLessThan(MAX_RATIO);
+  });
+
+  it("still returns the right answer for the long inputs", () => {
+    const pathological = `a${"/".repeat(200_000)}b`;
     const allSlashes = "/".repeat(200_000);
 
-    const started = performance.now();
+    expect(trimSlashes(pathological)).toBe(pathological);
+    expect(trimTrailingSlashes(pathological)).toBe(pathological);
+    expect(trimLeadingSlashes(pathological)).toBe(pathological);
     expect(trimSlashes(allSlashes)).toBe("");
     expect(trimTrailingSlashes(allSlashes)).toBe("");
     expect(trimLeadingSlashes(allSlashes)).toBe("");
-
-    expect(performance.now() - started).toBeLessThan(500);
   });
 });

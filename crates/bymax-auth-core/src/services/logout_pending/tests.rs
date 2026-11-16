@@ -110,7 +110,7 @@ async fn a_gone_session_takes_its_owner_from_the_marker_and_an_unreadable_marker
     assert_eq!(nobody.ok().map(|r| r.owner), Some(None));
     store.fail_logout_pending_ops(0, 1);
     let unreadable = resolve_owner(&store, SessionKind::Dashboard, Some(HASH), None).await;
-    assert!(matches!(unreadable, Err(AuthError::Internal(_))));
+    assert!(matches!(unreadable, Err(AuthError::ServiceUnavailable(_))));
 }
 
 #[tokio::test]
@@ -169,7 +169,7 @@ async fn a_marker_owner_announces_only_for_the_call_that_removed_the_marker() {
     mark(&store, 900).await;
     store.fail_logout_pending_ops(0, 1);
     let unclaimable = settle_completed(&store, kind, Some(HASH), &marked, 900).await;
-    assert!(matches!(unclaimable, Err(AuthError::Internal(_))));
+    assert!(matches!(unclaimable, Err(AuthError::ServiceUnavailable(_))));
 }
 
 #[tokio::test]
@@ -212,7 +212,7 @@ async fn a_stale_marker_that_cannot_be_removed_is_announced_only_when_shown_abse
     );
     store.fail_logout_pending_ops(0, 2);
     let unknown = settle_completed(&store, kind, Some(HASH), &live, 450).await;
-    assert!(matches!(unknown, Err(AuthError::Internal(_))));
+    assert!(matches!(unknown, Err(AuthError::ServiceUnavailable(_))));
     assert_eq!(store.peek_logout_pending(kind, HASH), Some((owner(), 450)));
 }
 

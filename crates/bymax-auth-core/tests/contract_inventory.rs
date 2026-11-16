@@ -149,6 +149,7 @@ fn every_section_of_the_contract_is_read_or_pending() {
                 "requestFieldBounds",
                 "responseBodies",
                 "rotationSemantics",
+                "serviceUnavailable",
                 "sessionIndexMembers",
                 "transportErrors",
                 "userStatusCache",
@@ -336,6 +337,40 @@ fn every_account_removal_statement_is_read_or_pending() {
                 "cache",
             ],
             &[],
+            &[],
+        ),
+    );
+}
+
+#[test]
+fn every_service_unavailable_statement_is_read_or_exempt() {
+    let root = contract();
+    inventory(
+        "serviceUnavailable",
+        &root["serviceUnavailable"],
+        (
+            &["outage"],
+            // Prose rules, enforced where each flow answers: `appliesTo` and `absorption` by the
+            // per-flow outage tests (login pre-check, logout, guards, workspace bumps, the reset
+            // routes) and `passwordResetRequest` by the known/unknown-address pair in the adapter
+            // tests, which reads `responseBodies.passwordResetRequest.failures`.
+            &["appliesTo", "absorption", "passwordResetRequest"],
+            &[],
+        ),
+    );
+    inventory(
+        "serviceUnavailable.outage",
+        &root["serviceUnavailable"]["outage"],
+        (
+            &[
+                "networkErrorCodes",
+                "notAnOutageReplyPrefixes",
+                "replyPrefixes",
+            ],
+            // The client-library conditions are the Node client's; the Rust equivalents are the
+            // I/O failures `RedisStoreError::is_outage` classifies, which the network codes name.
+            // The two prose entries state what the lists above already pin.
+            &["clientErrors", "notAnOutage", "open"],
             &[],
         ),
     );

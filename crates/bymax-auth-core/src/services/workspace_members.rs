@@ -211,8 +211,9 @@ impl AuthEngine {
                 .await
                 .map_err(internal)?,
         )?;
-        runtime.invalidate_membership(key).await?;
+        let bumped = runtime.invalidate_membership(key).await;
         self.notify_workspace_event(event, member_hook_context(ctx, member));
+        bumped?;
         runtime.current(key).await
     }
 
@@ -292,9 +293,9 @@ impl AuthEngine {
             audit: &event,
         };
         member_change(runtime.memberships.remove(params).await.map_err(internal)?)?;
-        runtime.invalidate_membership(removal.member).await?;
+        let bumped = runtime.invalidate_membership(removal.member).await;
         self.notify_workspace_event(event, member_hook_context(ctx, actor));
-        Ok(())
+        bumped
     }
 
     /// Hands ownership of the workspace `member` was admitted to over to another ACTIVE member,
@@ -341,8 +342,8 @@ impl AuthEngine {
         };
         let giver_bump = runtime.invalidate_membership(member.key()).await;
         let receiver_bump = runtime.invalidate_membership(receiver).await;
-        giver_bump.and(receiver_bump)?;
+        let bumped = giver_bump.and(receiver_bump);
         self.notify_workspace_event(event, member_hook_context(ctx, member));
-        Ok(())
+        bumped
     }
 }

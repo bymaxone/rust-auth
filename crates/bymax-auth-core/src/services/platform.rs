@@ -361,7 +361,7 @@ impl PlatformAuthService {
             .await
             .map_err(|error| {
                 tracing::warn!(%error, "logout: session lookup failed");
-                crate::services::internal_error("a logout could not read its session")
+                crate::services::answer_store_failure(error, "a logout could not read its session")
             })?;
         Ok(found.map(|record| LogoutOwner {
             user_id: record.user_id,
