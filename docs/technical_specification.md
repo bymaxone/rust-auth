@@ -7607,9 +7607,11 @@ Mirroring nest-auth's required set (these gate Scorecard and are part of the
   channel (GitHub Security Advisories / a security contact), expected response
   window, supported-versions table, and the commitment to credit reporters. For
   an auth library this is a product requirement, not boilerplate.
-- `CHANGELOG.md` (Keep-a-Changelog; **SemVer**; the release job reads the tag's
-  section). The wire/contract surface (§13–§15) is treated as the public API for
-  SemVer purposes — a breaking wire change is a major bump.
+- `CHANGELOG.md` (Keep-a-Changelog; the release job reads the tag's section). The version
+  number carries no compatibility information while the API is not declared stable: the
+  BREAKING note on an entry, with its **Apply** instructions, is the compatibility contract. The
+  wire/contract surface (§13–§15) is the public API, and a breaking change to it is marked
+  BREAKING rather than signalled by the number.
 - `CONTRIBUTING.md` (build/test/coverage/commit-convention expectations)
 - `CODE_OF_CONDUCT.md`
 - **`README.md` (strong, the front door of a public library).** It must carry, in
