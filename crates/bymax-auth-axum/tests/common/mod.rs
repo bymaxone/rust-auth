@@ -611,6 +611,7 @@ pub fn mint_dashboard_token(sub: &str, role: &str, status: &str) -> String {
         iat: 1_700_000_000,
         exp: 4_700_000_000,
         epoch: 0,
+        sid: None,
     };
     let key = bymax_auth_jwt::HsKey::from_bytes(JWT_SECRET.as_bytes());
     bymax_auth_jwt::sign(&claims, &key).unwrap_or_default()
@@ -631,6 +632,7 @@ pub fn mint_platform_token(sub: &str, role: &str) -> String {
         iat: 1_700_000_000,
         exp: 4_700_000_000,
         epoch: 0,
+        sid: None,
     };
     let key = bymax_auth_jwt::HsKey::from_bytes(JWT_SECRET.as_bytes());
     bymax_auth_jwt::sign(&claims, &key).unwrap_or_default()
@@ -711,20 +713,33 @@ fn fail() -> bymax_auth_types::AuthError {
 
 #[async_trait]
 impl bymax_auth_core::traits::SessionStore for FailingStores {
-    async fn mark_recent_auth(
+    async fn create_session_with_recent_auth(
         &self,
-        _user_id_hash: &str,
-        _ttl: u64,
+        kind: bymax_auth_core::traits::SessionKind,
+        subject_hash: &str,
+        token_hash: &str,
+        detail: &bymax_auth_core::traits::SessionRecord,
+        ttl_secs: u64,
+        recent_auth_ttl_secs: u64,
     ) -> Result<(), bymax_auth_types::AuthError> {
-        // Succeeds deliberately. This double exists to fail ONE named operation per test; a
-        // marker write that failed too would turn every login in this file into an error and
-        // hide the arm the test is actually about.
-        Ok(())
+        // Delegates like `create_session`: this double exists to fail ONE named operation per
+        // test, and a login that proved a credential must not fail on a different one.
+        self.inner
+            .create_session_with_recent_auth(
+                kind,
+                subject_hash,
+                token_hash,
+                detail,
+                ttl_secs,
+                recent_auth_ttl_secs,
+            )
+            .await
     }
 
     async fn has_recent_auth(
         &self,
         _user_id_hash: &str,
+        _sid: &str,
     ) -> Result<bool, bymax_auth_types::AuthError> {
         Ok(false)
     }

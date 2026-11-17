@@ -22,7 +22,7 @@
     "A case that needs an ill-formed string states it as UTF-16 code units beside its `case`, for",
     "example `unpairedSurrogateCodeUnits: [55296]`, and each library's test builds the string itself."
   ],
-  "version": 7,
+  "version": 8,
   "hmacKeyDerivation": {
     "$comment": [
       "The identifier-hashing key both sides derive from the identifier secret, and one",
@@ -68,8 +68,17 @@
       "password, where there is nothing to re-prove and a stolen access token was otherwise",
       "enough to enrol a factor the attacker holds — irreversibly, since disable and",
       "regenerate both demand a live TOTP and the reset flow refuses a passwordless account.",
-      "Keyed hmac_sha256('{plane}:{userId}') like every other user-derived key, and",
-      "plane-bound so ids colliding across the two repositories cannot satisfy each other."
+      "Keyed hmac_sha256(hmacKey, userSubject) like every other user-derived key, and",
+      "plane-bound so ids colliding across the two repositories cannot satisfy each other.",
+      "",
+      "Since v8 the key ends in `:{sid}`, the refresh family id the session carries in its access",
+      "token (`accessTokenClaims.sessionClaim`), so the mark belongs to the session that earned it",
+      "and another session of the same account cannot ride a real sign-in it did not perform. Only",
+      "the dashboard plants and reads it: platform admins always hold a local password, so the",
+      "passwordless branch is not reachable there, and their tokens carry `sid` that nothing",
+      "consumes. Cutover: marks planted under the v7 shape are never read by a v8 reader, and a",
+      "token minted before `sid` fails closed for a passwordless account until its next refresh",
+      "or sign-in, so a mixed deployment on one Redis must expect one extra re-authentication."
     ],
     "dashboardRefreshSession": "rt",
     "dashboardGracePointer": "rp",
@@ -736,6 +745,42 @@
       "into a code the account can see but can never use."
     ]
   },
+  "recentAuthMarkerVectors": {
+    "$comment": [
+      "The recent-authentication mark pinned with known answers, because the template in",
+      "`userSubjectDerivedKeys` is text on both sides. The key is `ra:`, the lowercase hex of HMAC-SHA256",
+      "whose KEY is the TEXT of `hmacKeyDerivation.vectors[0].derivedKeyHex` and whose message is the",
+      "userSubject, then `:` and the sid appended as is (36 fixed characters, never hashed: the first",
+      "field is 64 fixed hex characters, so the boundary is unambiguous). Dashboard only."
+    ],
+    "hmacKeySource": "hmacKeyDerivation.vectors[0].derivedKeyHex, as text",
+    "vectors": [
+      {
+        "tenantId": "acme",
+        "userId": "u1",
+        "userSubject": "dashboard:4:acme:u1",
+        "sid": "11111111-2222-4333-8444-555555555555",
+        "identifierHex": "67cd4738626d812f41f0c5329c3092b5778af9dd32094dd07d2733c9f3bab41b",
+        "key": "ra:67cd4738626d812f41f0c5329c3092b5778af9dd32094dd07d2733c9f3bab41b:11111111-2222-4333-8444-555555555555"
+      },
+      {
+        "tenantId": "a:b",
+        "userId": "c",
+        "userSubject": "dashboard:3:a:b:c",
+        "sid": "11111111-2222-4333-8444-555555555555",
+        "identifierHex": "ee454d898fc64c5c6021212945ac239004538d927c35f7b32f544aa0b68eb962",
+        "key": "ra:ee454d898fc64c5c6021212945ac239004538d927c35f7b32f544aa0b68eb962:11111111-2222-4333-8444-555555555555"
+      },
+      {
+        "tenantId": "açaí",
+        "userId": "u1",
+        "userSubject": "dashboard:6:açaí:u1",
+        "sid": "11111111-2222-4333-8444-555555555555",
+        "identifierHex": "e12380df7654737fbd3590f6d49ae2461ce8ed41e862b64dfc92dc460fae358b",
+        "key": "ra:e12380df7654737fbd3590f6d49ae2461ce8ed41e862b64dfc92dc460fae358b:11111111-2222-4333-8444-555555555555"
+      }
+    ]
+  },
   "reproofCounterVectors": {
     "$comment": [
       "The failure counters of the two flows that ask for the CURRENT PASSWORD again,",
@@ -801,7 +846,7 @@
   },
   "userSubjectDerivedKeys": {
     "mfaSetupRecord": "mfa_setup:{hmac_sha256(hmacKey, userSubject)}",
-    "recentAuthMarker": "ra:{hmac_sha256(hmacKey, userSubject)}",
+    "recentAuthMarker": "ra:{hmac_sha256(hmacKey, userSubject)}:{sid}",
     "totpAntiReplay": "tu:{hmac_sha256(hmacKey, '{userSubject}:{code}')}",
     "challengeFailureCounter": "lf:{hmac_sha256(hmacKey, 'challenge:{userSubject}')}",
     "disableFailureCounter": "lf:{hmac_sha256(hmacKey, 'disable:{userSubject}')}",
@@ -1340,6 +1385,20 @@
       "inert until the user's first bump. Absent from the MFA challenge token, which grants no",
       "resource access on its own."
     ],
+    "sessionClaim": {
+      "claim": "sid",
+      "type": "string, or absent",
+      "on": "dashboard and platform access tokens; absent from the MFA challenge token",
+      "format": "36 characters, lowercase hexadecimal and hyphens in 8-4-4-4-12 (a UUID v4 as stored)",
+      "value": "the refresh family id of the session, kept through every rotation",
+      "readerRule": "a missing or non-conforming sid reads as absent, and an absent sid fails closed for the passwordless-account gate",
+      "$comment": [
+        "The access token's `jti` changes at every refresh, so it cannot name a session. The family",
+        "id is stable across rotation and exists when the session is born, which is when the",
+        "recent-authentication mark is written. It is not a secret and not a credential: the",
+        "refresh token is a separate opaque value."
+      ]
+    },
     "issuerAndAudience": {
       "claims": [
         "iss",

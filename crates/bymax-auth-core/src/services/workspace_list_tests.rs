@@ -218,6 +218,7 @@ fn admitted(workspace: &str, user: &str, role: &str) -> WorkspaceMember {
         workspace_id: workspace.to_owned(),
         user_id: user.to_owned(),
         role: role.to_owned(),
+        sid: None,
     }
 }
 
@@ -315,7 +316,7 @@ async fn every_workspace_call_on_an_engine_without_the_layer_is_internal() {
         allow_pending: false,
     };
     let internal = |result: Result<(), AuthError>| matches!(result, Err(AuthError::Internal(_)));
-    let guard = engine.authorize_workspace("t1", "u1", request).await;
+    let guard = engine.authorize_workspace("t1", "u1", None, request).await;
     assert!(internal(guard.map(drop)));
     let mine = engine
         .list_my_workspaces("t1", "u1", PageQuery::default())

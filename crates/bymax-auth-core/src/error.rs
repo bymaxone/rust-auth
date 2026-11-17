@@ -235,6 +235,29 @@ pub enum ConfigError {
     /// created (`EXPIRE key 0`) and silently disables the account lockout.
     #[error("brute_force.window must be at least 1s (a zero window deletes the counter)")]
     BruteForceWindowInvalid,
+    /// A one-time-code or reset-token lifetime is zero. The store refuses `SET key value EX 0`, so
+    /// every request that issues one would fail, and the failure would first appear on a user's
+    /// first reset instead of at startup.
+    #[error("{field} must be at least 1s (a zero lifetime cannot be stored)")]
+    TtlInvalid {
+        /// The setting that was zero.
+        field: &'static str,
+    },
+    /// `sessions.default_max_sessions` is zero, which would evict every session as it is created.
+    #[error("sessions.default_max_sessions must be a positive integer (got {got})")]
+    DefaultMaxSessionsInvalid {
+        /// The rejected cap.
+        got: u32,
+    },
+    /// `user_status_cache_ttl` is longer than the ceiling. It is how long a suspended account
+    /// still passes, so an unbounded value is an unbounded revocation delay.
+    #[error("user_status_cache_ttl must not exceed {max}s (got {got}s)")]
+    UserStatusCacheTtlCeiling {
+        /// The configured TTL, in seconds.
+        got: u64,
+        /// The ceiling, in seconds.
+        max: u64,
+    },
     /// `brute_force.max_attempts` is outside the accepted `1..=100` range.
     #[error("brute_force.max_attempts must be within 1..=100 (got {got})")]
     BruteForceAttemptsRange {

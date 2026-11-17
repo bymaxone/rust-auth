@@ -120,6 +120,14 @@ pub struct DashboardClaims {
     #[serde(default)]
     #[cfg_attr(feature = "ts-export", ts(as = "Option::<f64>", optional))]
     pub epoch: u64,
+    /// The session this token belongs to: the refresh family id (a UUID v4 in its stored form),
+    /// kept through every rotation. The recent-authentication mark is keyed by it, so another
+    /// session of the same account cannot ride a sign-in it did not perform (`sessionClaim` in the
+    /// shared contract). Absent from a token minted before the claim existed, which names no
+    /// session: the passwordless-account gate then fails closed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts-export", ts(optional))]
+    pub sid: Option<String>,
     /// The `iss` claim, present only when the deployment configured `jwt.issuer`.
     ///
     /// Absent by default. When the verifier is configured with a value, a token carrying a
@@ -174,6 +182,14 @@ pub struct PlatformClaims {
     #[serde(default)]
     #[cfg_attr(feature = "ts-export", ts(as = "Option::<f64>", optional))]
     pub epoch: u64,
+    /// The session this token belongs to: the refresh family id (a UUID v4 in its stored form),
+    /// kept through every rotation. The recent-authentication mark is keyed by it, so another
+    /// session of the same account cannot ride a sign-in it did not perform (`sessionClaim` in the
+    /// shared contract). Absent from a token minted before the claim existed, which names no
+    /// session: the passwordless-account gate then fails closed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts-export", ts(optional))]
+    pub sid: Option<String>,
     /// The `iss` claim, present only when the deployment configured `jwt.issuer`.
     ///
     /// Absent by default. When the verifier is configured with a value, a token carrying a
@@ -276,6 +292,7 @@ mod tests {
             iat: 1_700_000_000,
             exp: 1_700_000_900,
             epoch: 3,
+            sid: None,
         }
     }
 
@@ -325,6 +342,7 @@ mod tests {
             iat: 1,
             exp: 2,
             epoch: 0,
+            sid: None,
         };
         let json = serde_json::to_value(claims).unwrap_or_default();
         assert_eq!(json["type"], "platform");
@@ -465,6 +483,7 @@ mod tests {
             iat: 1,
             exp: 2,
             epoch: 7,
+            sid: None,
         })
         .unwrap_or_default();
         assert_eq!(platform.get("epoch"), Some(&serde_json::json!(7)));

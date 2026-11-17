@@ -435,6 +435,10 @@ impl TokenManagerService {
             .session_store
             .current_epoch(SessionKind::Dashboard, &subject)
             .await?;
+        // A fresh login opens a new refresh-token family. The token names it as its session
+        // (`sid`), every rotation inherits it, and the whole lineage can be revoked together on
+        // reuse detection.
+        let family_id = new_uuid_v4();
         let claims = DashboardClaims {
             iss: None,
             aud: None,
@@ -449,6 +453,7 @@ impl TokenManagerService {
             iat: now,
             exp: now.saturating_add(self.access_ttl.as_secs().min(i64::MAX as u64) as i64),
             epoch,
+            sid: Some(family_id.clone()),
         };
         let access_token = self.issue_access(&claims)?;
 
@@ -467,54 +472,35 @@ impl TokenManagerService {
             // Persisted only when this session cleared the challenge, so a rotation can carry
             // the claim forward instead of minting `false`.
             mfa_verified,
-            // A fresh login opens a new refresh-token family; every rotation inherits this id,
-            // so the whole lineage can be revoked together on reuse detection.
-            family_id: new_uuid_v4(),
-            // …and stamps the lineage's birth, which the absolute-lifetime cap measures from.
+            family_id,
+            // The lineage's birth, which the absolute-lifetime cap measures from.
             family_created_at: Some(now_offset()),
         };
-        self.session_store
-            .create_session(
-                SessionKind::Dashboard,
-                &subject,
-                &refresh.redis_hash(),
-                &record,
-                self.refresh_ttl_secs,
-            )
-            .await?;
-
-        // Record that a REAL authentication just completed, for the flows that need to know how
-        // recently rather than merely whether. Planted here and nowhere else: this method is the
-        // single point where a dashboard session is born, while `reissue_tokens` deliberately
-        // does not plant one, because a refresh proves possession of a token rather than of a
-        // credential. That asymmetry is the whole value — an attacker holding a stolen session
-        // can rotate it forever and never make the mark fresh again.
-        // The SAME subject the session index and the epoch use. It had its own derivation —
-        // `hmac_sha256("{plane}:{userId}")`, with no tenant and no length prefix — and that
-        // derivation never matched the one the reader uses. `MfaService`'s re-authentication
-        // gate reads `ra:{hmac_sha256(hmacKey, userSubject)}`, which is what the contract's
-        // `recentAuthMarker` names, so on the dashboard plane the marker was planted at a key
-        // nobody read: every password-less (OAuth-provisioned) account was refused MFA
-        // enrolment with `ReauthenticationRequired`, permanently. It failed CLOSED, which is
-        // why it was survivable, and it was invisible because the tests plant the marker by
-        // hand at the reader's key rather than signing in — each half correct, never compared.
-        //
-        // The old preimage also carried no tenant, so two accounts sharing an id in different
-        // tenants shared one marker. Inert only because nothing read that key.
-        // Only when a credential was actually proved. `issue_tokens` is shared by the login,
-        // MFA-challenge, OAuth-callback and register paths — which all prove one — AND by
-        // `issue_tokens_for_user_id`, the documented password-less workspace-switch and
-        // impersonation API, which proves nothing about the account holder.
-        //
-        // Planting it unconditionally would be worse than the bug it replaced. For an account
-        // with no local password, `MfaService::assert_reauthenticated` has no password to verify
-        // and relies on this marker alone, so an impersonation session could enrol an
-        // attacker-controlled second factor — and enrolling revokes the owner's sessions and
-        // displays the recovery codes once, to whoever enrolled. That is the takeover the marker
-        // exists to prevent, reached through the one door that never authenticated.
+        // The recent-authentication mark is written with the session, in one atomic step, and only
+        // when a credential was actually proved: `issue_tokens` is shared by the login,
+        // MFA-challenge, OAuth-callback and register paths, which all prove one, and by
+        // `issue_tokens_for_user_id`, the password-less workspace-switch and impersonation API,
+        // which proves nothing about the account holder. A mark planted there would let an
+        // impersonation session enrol a second factor on an account with no password. A refresh
+        // never plants one either (`reissue_tokens`): it proves possession of a token, so a stolen
+        // session cannot make the mark fresh by rotating. The key names the session
+        // (`ra:{subject}:{sid}`), so another session of the same account cannot use it.
+        let hash = refresh.redis_hash();
+        let ttl = self.refresh_ttl_secs;
         if proof == CredentialProof::Proved {
             self.session_store
-                .mark_recent_auth(&subject, RECENT_AUTH_TTL_SECS)
+                .create_session_with_recent_auth(
+                    SessionKind::Dashboard,
+                    &subject,
+                    &hash,
+                    &record,
+                    ttl,
+                    RECENT_AUTH_TTL_SECS,
+                )
+                .await?;
+        } else {
+            self.session_store
+                .create_session(SessionKind::Dashboard, &subject, &hash, &record, ttl)
                 .await?;
         }
 
@@ -768,6 +754,8 @@ impl TokenManagerService {
             .session_store
             .current_epoch(SessionKind::Platform, &subject)
             .await?;
+        // The family id is the session's `sid`, as on the dashboard plane.
+        let family_id = new_uuid_v4();
         let claims = PlatformClaims {
             iss: None,
             aud: None,
@@ -780,6 +768,7 @@ impl TokenManagerService {
             iat: now,
             exp: now.saturating_add(self.access_ttl.as_secs().min(i64::MAX as u64) as i64),
             epoch,
+            sid: Some(family_id.clone()),
         };
         let access_token = self.issue_platform_access(&claims)?;
 
@@ -798,7 +787,7 @@ impl TokenManagerService {
             // Persisted only when this session cleared the challenge, as on the dashboard plane.
             mfa_verified,
             // A fresh platform login opens a new refresh-token family (section 12.5.2).
-            family_id: new_uuid_v4(),
+            family_id,
             family_created_at: Some(now_offset()),
         };
         self.session_store
@@ -1066,6 +1055,7 @@ impl TokenManagerService {
             iat: now,
             exp: now.saturating_add(self.access_ttl.as_secs().min(i64::MAX as u64) as i64),
             epoch,
+            sid: session_claim(&record.family_id),
         }
     }
 
@@ -1524,8 +1514,16 @@ impl TokenManagerService {
             iat: now,
             exp: now.saturating_add(self.access_ttl.as_secs().min(i64::MAX as u64) as i64),
             epoch,
+            sid: session_claim(&record.family_id),
         }
     }
+}
+
+/// The `sid` claim a rotated token carries: the session's refresh family id, or none for a record
+/// whose family id is not the 36-character form the claim is defined for (an older or foreign
+/// writer's), which names no session.
+fn session_claim(family_id: &str) -> Option<String> {
+    crate::services::session_id(family_id).map(str::to_owned)
 }
 
 /// Map a JWT signing failure to the opaque internal error. Signing the crate's concrete
@@ -2091,21 +2089,34 @@ mod tests {
             .as_bytes(),
         ));
 
-        assert!(matches!(store.has_recent_auth(&expected).await, Ok(false)));
-        assert!(
-            svc.issue_tokens(
+        let issued = svc
+            .issue_tokens(
                 &user,
                 "10.0.0.1",
                 "agent/1.0",
                 false,
-                CredentialProof::Proved
+                CredentialProof::Proved,
             )
+            .await;
+        assert!(issued.is_ok(), "the login must succeed");
+        let Ok(issued) = issued else {
+            return;
+        };
+        // The mark belongs to the session the token names: its `sid`, appended as it is.
+        let sid = svc
+            .verify_access(&issued.access_token)
             .await
-            .is_ok()
-        );
+            .ok()
+            .and_then(|claims| claims.sid)
+            .unwrap_or_default();
         assert!(
-            matches!(store.has_recent_auth(&expected).await, Ok(true)),
-            "the login planted no marker at the tenant-scoped subject the MFA gate reads"
+            matches!(store.has_recent_auth(&expected, &sid).await, Ok(true)),
+            "the login planted no marker at the tenant-scoped subject and sid the MFA gate reads"
+        );
+        let other = "00000000-0000-4000-8000-000000000000";
+        assert!(
+            matches!(store.has_recent_auth(&expected, other).await, Ok(false)),
+            "another session of the account must not read the mark"
         );
 
         // …and NOT at the tenant-less preimage it used to use, which two accounts sharing an id
@@ -2115,9 +2126,18 @@ mod tests {
             format!("dashboard:{}", user.id).as_bytes(),
         ));
         assert!(
-            matches!(store.has_recent_auth(&old_shape).await, Ok(false)),
+            matches!(store.has_recent_auth(&old_shape, &sid).await, Ok(false)),
             "the tenant-less recent-auth key is still being written"
         );
+    }
+
+    /// The `sid` claim of an issued access token, empty when it carries none.
+    async fn sid_of(svc: &TokenManagerService, issued: &AuthResult) -> String {
+        let claims = svc.verify_access(&issued.access_token).await;
+        claims
+            .ok()
+            .and_then(|claims| claims.sid)
+            .unwrap_or_default()
     }
 
     #[tokio::test]
@@ -2148,37 +2168,53 @@ mod tests {
             .as_bytes(),
         ));
 
-        assert!(
-            svc.issue_tokens(
+        let unproven = svc
+            .issue_tokens(
                 &user,
                 "10.0.0.1",
                 "agent/1.0",
                 false,
-                CredentialProof::Unproven
+                CredentialProof::Unproven,
             )
-            .await
-            .is_ok(),
-            "the session itself must still be issued — only the proof is withheld"
-        );
+            .await;
         assert!(
-            matches!(store.has_recent_auth(&marker).await, Ok(false)),
+            unproven.is_ok(),
+            "the session itself must still be issued, only the proof is withheld"
+        );
+        let Ok(unproven) = unproven else {
+            return;
+        };
+        assert!(
+            matches!(
+                store
+                    .has_recent_auth(&marker, &sid_of(&svc, &unproven).await)
+                    .await,
+                Ok(false)
+            ),
             "a password-less issuance counted as a recent authentication"
         );
 
         // …and the proved path still plants it, so the check above is measuring the flag rather
         // than a marker that never lands at all.
-        assert!(
-            svc.issue_tokens(
+        let proved = svc
+            .issue_tokens(
                 &user,
                 "10.0.0.1",
                 "agent/1.0",
                 false,
-                CredentialProof::Proved
+                CredentialProof::Proved,
             )
-            .await
-            .is_ok()
-        );
-        assert!(matches!(store.has_recent_auth(&marker).await, Ok(true)));
+            .await;
+        assert!(proved.is_ok(), "the proved login must succeed");
+        let Ok(proved) = proved else {
+            return;
+        };
+        assert!(matches!(
+            store
+                .has_recent_auth(&marker, &sid_of(&svc, &proved).await)
+                .await,
+            Ok(true)
+        ));
     }
 
     #[tokio::test]
@@ -2447,6 +2483,7 @@ mod tests {
             iat: now - 1_000,
             exp: now - 500,
             epoch: 0,
+            sid: None,
         };
         let Ok(token) = svc.issue_access(&expired) else { return };
         assert!(matches!(
@@ -3514,6 +3551,7 @@ mod tests {
             iat: 1_000,
             exp: 1_900,
             epoch: 0,
+            sid: None,
         }
     }
 
@@ -3655,6 +3693,7 @@ mod tests {
             iat: 1_000,
             exp: 1_900,
             epoch: 0,
+            sid: None,
         }
     }
 

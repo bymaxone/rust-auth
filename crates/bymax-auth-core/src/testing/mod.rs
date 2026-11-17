@@ -585,7 +585,7 @@ pub struct InMemoryStores {
     /// so a post-grace replay of the consumed token is detected as a reuse rather than a plain
     /// invalid. Keyed by `(kind, old_hash)`.
     consumed: Mutex<HashMap<(SessionKind, String), String>>,
-    /// Recent-authentication markers, keyed by plane + id hash. No TTL is modelled: the double
+    /// Recent-authentication markers, keyed by `{subject hash}:{sid}`. No TTL is modelled: the double
     /// is driven by explicit calls, so expiry is expressed by not planting one.
     recent_auth: Mutex<HashMap<String, ()>>,
     /// `fam:` family index: a family id → the set of its live session hashes, so a whole
@@ -899,6 +899,22 @@ impl SessionStore for InMemoryStores {
         self.create_session(kind, subject_hash, token_hash, detail, ttl_secs)
             .await?;
         Ok(true)
+    }
+
+    async fn create_session_with_recent_auth(
+        &self,
+        kind: SessionKind,
+        subject_hash: &str,
+        token_hash: &str,
+        detail: &SessionRecord,
+        ttl_secs: u64,
+        _recent_auth_ttl_secs: u64,
+    ) -> Result<(), AuthError> {
+        self.create_session(kind, subject_hash, token_hash, detail, ttl_secs)
+            .await?;
+        let mark = format!("{subject_hash}:{}", detail.family_id);
+        lock(&self.recent_auth).insert(mark, ());
+        Ok(())
     }
 
     async fn create_session(
@@ -1228,13 +1244,8 @@ impl SessionStore for InMemoryStores {
             .unwrap_or(0))
     }
 
-    async fn mark_recent_auth(&self, user_id_hash: &str, _ttl: u64) -> Result<(), AuthError> {
-        lock(&self.recent_auth).insert(user_id_hash.to_owned(), ());
-        Ok(())
-    }
-
-    async fn has_recent_auth(&self, user_id_hash: &str) -> Result<bool, AuthError> {
-        Ok(lock(&self.recent_auth).contains_key(user_id_hash))
+    async fn has_recent_auth(&self, user_id_hash: &str, sid: &str) -> Result<bool, AuthError> {
+        Ok(lock(&self.recent_auth).contains_key(&format!("{user_id_hash}:{sid}")))
     }
 
     async fn bump_epoch(&self, kind: SessionKind, subject_hash: &str) -> Result<u64, AuthError> {
