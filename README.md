@@ -900,7 +900,7 @@ Route groups mount only when their feature **and** runtime toggle are enabled, s
 | Extractor               | Purpose                                                          |
 | ----------------------- | ---------------------------------------------------------------- |
 | `AuthUser`              | Validates the dashboard JWT (cookie or `Authorization` header)   |
-| `OptionalAuthUser`      | Routes that differ for anonymous vs. authenticated users         |
+| `OptionalAuthUser`      | Routes that differ for anonymous (no token) vs. authenticated users; a bad token is rejected |
 | `RequireRole<R>`        | Hierarchical role check                                          |
 | `PlatformUser`          | Platform-admin JWT validation                                    |
 | `RequirePlatformRole<R>`| Platform role hierarchy enforcement                              |
