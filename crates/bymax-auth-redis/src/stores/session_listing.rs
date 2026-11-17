@@ -9,6 +9,7 @@ use redis::AsyncCommands;
 
 use super::session::{SessionDetailValue, index_member, kind_prefixes, live_member_hash};
 use crate::error::RedisStoreError;
+use crate::keys::Prefix;
 use crate::pool::RedisStores;
 use crate::script;
 
@@ -72,6 +73,21 @@ pub(super) fn settle_prune(pruned: Result<Vec<String>, RedisStoreError>) -> Vec<
         tracing::warn!(%error, "listing sessions: the dead-member prune failed; it is retried on the next listing");
         Vec::new()
     })
+}
+
+/// The listing once the prune has been tried: a prune that answered drops the detail-less entries
+/// it removed (their `rt:` key is gone, so the session is dead, not merely detail-less), and a prune
+/// that failed (see [`settle_prune`]) drops none.
+pub(super) fn settle_listing(
+    mut entries: Vec<SessionEntry>,
+    pruned: Result<Vec<String>, RedisStoreError>,
+    rt: Prefix,
+) -> Vec<SessionEntry> {
+    let removed = settle_prune(pruned);
+    entries.retain(|entry| {
+        entry.detail.is_some() || !removed.contains(&index_member(rt, &entry.session_hash))
+    });
+    entries
 }
 
 impl RedisStores {
@@ -146,13 +162,7 @@ impl RedisStores {
             }
         }
         let pruned = prune_dead_members(&mut conn, keys.namespace(), &sess_key, &stale).await;
-        let removed = settle_prune(pruned);
-        // A removed member's key is gone: that session is dead, not merely detail-less.
-        entries.retain(|entry| {
-            entry.detail.is_some()
-                || !removed.contains(&index_member(prefixes.rt, &entry.session_hash))
-        });
-        Ok(entries)
+        Ok(settle_listing(entries, pruned, prefixes.rt))
     }
 }
 
@@ -167,18 +177,41 @@ mod tests {
         )
     }
 
-    #[test]
-    fn a_failed_prune_removes_nothing_and_does_not_fail_the_listing() {
-        let decode = serde_json::from_str::<u8>("x").err();
-        assert!(decode.is_some(), "the fixture must be a decode failure");
-        let Some(source) = decode else { return };
-        assert!(settle_prune(Err(RedisStoreError::Decode(source))).is_empty());
+    /// A listing of one fully described session and two with no detail record.
+    fn three_entries() -> Vec<SessionEntry> {
+        let detail = match read_detail("a", Some(&valid("Firefox"))) {
+            DetailRead::Listed(detail) => Some(detail),
+            DetailRead::Excluded => None,
+        };
+        let entry = |hash: &str, detail| SessionEntry {
+            session_hash: hash.to_owned(),
+            detail,
+        };
+        vec![entry("a", detail), entry("b", None), entry("c", None)]
+    }
+
+    fn hashes(entries: &[SessionEntry]) -> Vec<&str> {
+        entries
+            .iter()
+            .map(|entry| entry.session_hash.as_str())
+            .collect()
     }
 
     #[test]
-    fn a_prune_that_answered_keeps_what_it_removed() {
-        let removed = vec!["rt:a".to_owned(), "rp:b".to_owned()];
-        assert_eq!(settle_prune(Ok(removed.clone())), removed);
+    fn a_failed_prune_leaves_every_entry_listed() {
+        let decode = serde_json::from_str::<u8>("x").err();
+        assert!(decode.is_some(), "the fixture must be a decode failure");
+        let Some(source) = decode else { return };
+        let failed = Err(RedisStoreError::Decode(source));
+        let listed = settle_listing(three_entries(), failed, Prefix::Rt);
+        assert_eq!(hashes(&listed), ["a", "b", "c"]);
+    }
+
+    #[test]
+    fn a_prune_that_answered_drops_the_detail_less_entries_it_removed() {
+        let removed = Ok(vec!["rt:b".to_owned(), "rp:x".to_owned()]);
+        let listed = settle_listing(three_entries(), removed, Prefix::Rt);
+        assert_eq!(hashes(&listed), ["a", "c"]);
     }
 
     #[test]
