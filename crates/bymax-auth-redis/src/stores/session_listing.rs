@@ -63,6 +63,17 @@ pub(super) async fn prune_dead_members(
     Ok(invocation.invoke_async(conn).await?)
 }
 
+/// What a failed prune means for the listing: nothing. The prune is a tidy-up that did not happen,
+/// not a listing that should fail, so every candidate stays listed (it is not known to be dead) and
+/// the next listing tries again. The listing also feeds session-cap enforcement at login, which a
+/// failed tidy-up must not stop.
+pub(super) fn settle_prune(pruned: Result<Vec<String>, RedisStoreError>) -> Vec<String> {
+    pruned.unwrap_or_else(|error| {
+        tracing::warn!(%error, "listing sessions: the dead-member prune failed; it is retried on the next listing");
+        Vec::new()
+    })
+}
+
 impl RedisStores {
     /// List a user's live sessions by reading the `sess:` SET and each member's `sd:` detail.
     ///
@@ -134,7 +145,8 @@ impl RedisStores {
                 }
             }
         }
-        let removed = prune_dead_members(&mut conn, keys.namespace(), &sess_key, &stale).await?;
+        let pruned = prune_dead_members(&mut conn, keys.namespace(), &sess_key, &stale).await;
+        let removed = settle_prune(pruned);
         // A removed member's key is gone: that session is dead, not merely detail-less.
         entries.retain(|entry| {
             entry.detail.is_some()
@@ -153,6 +165,20 @@ mod tests {
         format!(
             r#"{{"device":"{device}","ip":"1.2.3.4","createdAt":1700000000000,"lastActivityAt":1700000001000}}"#
         )
+    }
+
+    #[test]
+    fn a_failed_prune_removes_nothing_and_does_not_fail_the_listing() {
+        let failed = Err(RedisStoreError::Decode(
+            serde_json::from_str::<u8>("x").unwrap_err(),
+        ));
+        assert!(settle_prune(failed).is_empty());
+    }
+
+    #[test]
+    fn a_prune_that_answered_keeps_what_it_removed() {
+        let removed = vec!["rt:a".to_owned(), "rp:b".to_owned()];
+        assert_eq!(settle_prune(Ok(removed.clone())), removed);
     }
 
     #[test]
