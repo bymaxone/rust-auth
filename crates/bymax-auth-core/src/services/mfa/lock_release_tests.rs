@@ -95,8 +95,12 @@ async fn rig(store: Arc<LockStore>) -> Option<(MfaService, String)> {
     Some((service_over(store, users), uid))
 }
 
+/// What a transition writes: MFA on or off, the stored secret and the recovery codes, or `None`
+/// to abandon.
+type Change = Option<(bool, Option<String>, Option<Vec<String>>)>;
+
 /// The change a transition writes: MFA on, with a stored secret and one recovery code.
-fn write(_view: &super::MfaUserView) -> Option<(bool, Option<String>, Option<Vec<String>>)> {
+fn write(_view: &super::MfaUserView) -> Change {
     Some((
         true,
         Some("secret".to_owned()),
@@ -107,7 +111,7 @@ fn write(_view: &super::MfaUserView) -> Option<(bool, Option<String>, Option<Vec
 async fn transition(
     service: &MfaService,
     uid: &str,
-    mutate: fn(&super::MfaUserView) -> Option<(bool, Option<String>, Option<Vec<String>>)>,
+    mutate: fn(&super::MfaUserView) -> Change,
 ) -> Result<bool, AuthError> {
     service
         .transition_mfa_record(uid, MfaContext::Dashboard, Some(TENANT), mutate)
