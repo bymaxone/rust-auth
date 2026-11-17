@@ -2064,9 +2064,7 @@ mod tests {
             )
             .await;
         assert!(issued.is_ok(), "the login must succeed");
-        let Ok(issued) = issued else {
-            return;
-        };
+        let Ok(issued) = issued else { return };
         // The mark belongs to the session the token names: its `sid`, appended as it is.
         let sid = svc
             .verify_access(&issued.access_token)
@@ -2146,9 +2144,7 @@ mod tests {
             unproven.is_ok(),
             "the session itself must still be issued, only the proof is withheld"
         );
-        let Ok(unproven) = unproven else {
-            return;
-        };
+        let Ok(unproven) = unproven else { return };
         assert!(
             matches!(
                 store
@@ -2171,9 +2167,7 @@ mod tests {
             )
             .await;
         assert!(proved.is_ok(), "the proved login must succeed");
-        let Ok(proved) = proved else {
-            return;
-        };
+        let Ok(proved) = proved else { return };
         assert!(matches!(
             store
                 .has_recent_auth(&marker, &sid_of(&svc, &proved).await)
