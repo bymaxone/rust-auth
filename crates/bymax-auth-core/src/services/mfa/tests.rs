@@ -2546,6 +2546,18 @@ async fn plant_recent_auth(service: &MfaService, user_id: &str) {
 /// The session the arranged sign-in belongs to: the `sid` claim of the caller's token.
 const SID: &str = "11111111-2222-4333-8444-555555555555";
 
+/// Begin dashboard enrolment for `uid` as the caller whose token carries `sid`.
+async fn enrol(
+    service: &MfaService,
+    uid: &str,
+    password: Option<&str>,
+    sid: Option<&str>,
+) -> Result<super::MfaSetupResult, AuthError> {
+    service
+        .setup(uid, MfaContext::Dashboard, Some("t1"), password, sid)
+        .await
+}
+
 /// Seed a fresh user (not MFA-enabled) and return its id.
 async fn seed_user(users: &InMemoryUserRepository, email: &str) -> Option<String> {
     let created = users
@@ -4369,9 +4381,7 @@ async fn enrolment_re_authenticates_against_the_account_password() {
     // No password, and the wrong password, are both refused — with the same error a failed
     // login returns, so an attacker holding a stolen token learns nothing new.
     for attempt in [None, Some("wrong")] {
-        let refused = service
-            .setup(&user.id, MfaContext::Dashboard, Some("t1"), attempt, None)
-            .await;
+        let refused = enrol(&service, &user.id, attempt, None).await;
         assert!(
             matches!(refused, Err(AuthError::InvalidCredentials)),
             "enrolment must refuse {attempt:?}, got {refused:?}"
@@ -4379,19 +4389,28 @@ async fn enrolment_re_authenticates_against_the_account_password() {
     }
 
     // The correct password enrols.
-    let allowed = service
-        .setup(
-            &user.id,
-            MfaContext::Dashboard,
-            Some("t1"),
-            Some(password),
-            None,
-        )
-        .await;
+    let allowed = enrol(&service, &user.id, Some(password), None).await;
     assert!(
         allowed.is_ok(),
         "the right password must enrol, got {allowed:?}"
     );
+}
+
+/// A token with no `sid`, another session's, or one that is not the claim's form earns nothing,
+/// however fresh the planted mark is.
+async fn assert_no_session_rides_the_mark(service: &MfaService, uid: &str) {
+    for sid in [
+        None,
+        Some("22222222-2222-4333-8444-555555555555"),
+        Some("not-a-session-id"),
+        Some(""),
+    ] {
+        let refused = enrol(service, uid, None, sid).await;
+        assert!(
+            matches!(refused, Err(AuthError::ReauthenticationRequired)),
+            "sid {sid:?} must not ride another session's sign-in, got {refused:?}"
+        );
+    }
 }
 
 #[tokio::test]
@@ -4416,31 +4435,15 @@ async fn enrolment_on_a_passwordless_account_takes_a_recent_authentication_inste
     let service = service_over(Arc::new(InMemoryStores::new()), users);
 
     // No marker: the caller holds a token but has not proved it authenticated recently.
-    let refused = service
-        .setup(&uid, MfaContext::Dashboard, Some("t1"), None, None)
-        .await;
+    let refused = enrol(&service, &uid, None, None).await;
     assert!(
         matches!(refused, Err(AuthError::ReauthenticationRequired)),
         "a stolen token alone must not enrol a factor, got {refused:?}"
     );
 
-    // …and after a real sign-in, the proof is the caller's OWN: a token with no `sid`, another
-    // session's, or one that is not the claim's form earns nothing, however fresh the mark is.
+    // …and after a real sign-in, the proof is the caller's OWN.
     plant_recent_auth(&service, &uid).await;
-    for sid in [
-        None,
-        Some("22222222-2222-4333-8444-555555555555"),
-        Some("not-a-session-id"),
-        Some(""),
-    ] {
-        let refused = service
-            .setup(&uid, MfaContext::Dashboard, Some("t1"), None, sid)
-            .await;
-        assert!(
-            matches!(refused, Err(AuthError::ReauthenticationRequired)),
-            "sid {sid:?} must not ride another session's sign-in, got {refused:?}"
-        );
-    }
+    assert_no_session_rides_the_mark(&service, &uid).await;
     // The same call from the session that signed in proceeds: the gate is a delay, not a wall.
     let enrolled = service
         .setup(&uid, MfaContext::Dashboard, Some("t1"), None, Some(SID))
