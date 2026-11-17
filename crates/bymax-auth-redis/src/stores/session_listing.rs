@@ -169,10 +169,10 @@ mod tests {
 
     #[test]
     fn a_failed_prune_removes_nothing_and_does_not_fail_the_listing() {
-        let failed = Err(RedisStoreError::Decode(
-            serde_json::from_str::<u8>("x").unwrap_err(),
-        ));
-        assert!(settle_prune(failed).is_empty());
+        let decode = serde_json::from_str::<u8>("x").err();
+        assert!(decode.is_some(), "the fixture must be a decode failure");
+        let Some(source) = decode else { return };
+        assert!(settle_prune(Err(RedisStoreError::Decode(source))).is_empty());
     }
 
     #[test]
