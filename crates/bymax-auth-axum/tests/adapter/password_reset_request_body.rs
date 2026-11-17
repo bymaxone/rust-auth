@@ -62,6 +62,60 @@ async fn the_listed_routes_answer_the_contract_body_for_a_known_and_an_unknown_a
     }
 }
 
+#[tokio::test]
+async fn a_cooldown_store_that_cannot_answer_is_the_same_503_for_a_known_and_an_unknown_account() {
+    // The resend cooldown is the first store call of every request, before the account is
+    // looked up, so the failure it surfaces cannot depend on the address: one status, one raw
+    // body and the contract's timing floor, whether the account exists or not.
+    let entry = contract_entry();
+    let floor =
+        std::time::Duration::from_millis(entry["failures"]["floorMs"].as_u64().unwrap_or(0));
+    assert!(!floor.is_zero(), "the contract floor was not read");
+
+    let Some(h) = build(EngineSpec::default()) else { return };
+    let app = router(&h);
+    seed_user(&h, "known@e.com", "glidingwalnut42", "USER").await;
+
+    for route in contract_routes(&entry) {
+        let mut raw_bodies = Vec::new();
+        for email in ["known@e.com", "ghost@e.com"] {
+            h.stores.fail_next_resend_gates(1);
+            let started = std::time::Instant::now();
+            let resp = Req::post(&route)
+                .json(serde_json::json!({ "email": email, "tenantId": TENANT }))
+                .send(&app)
+                .await;
+            assert!(
+                started.elapsed() >= floor,
+                "{route} {email}: answered inside the floor"
+            );
+            assert_eq!(
+                resp.status,
+                StatusCode::SERVICE_UNAVAILABLE,
+                "{route} {email}"
+            );
+            assert_eq!(
+                resp.json(),
+                serde_json::json!({ "error": {
+                    "code": "auth.service_unavailable",
+                    "message": "Service temporarily unavailable",
+                    "details": null
+                } }),
+                "{route} {email}"
+            );
+            assert!(
+                !resp.headers.contains_key(header::RETRY_AFTER),
+                "{route} {email}"
+            );
+            raw_bodies.push(resp.body);
+        }
+        assert_eq!(
+            raw_bodies[0], raw_bodies[1],
+            "{route}: the raw bodies differ"
+        );
+    }
+}
+
 /// The keys of the contract's `failures` object: the rules this crate implements and tests.
 const FAILURE_RULES: [&str; 5] = ["after", "before", "cooldown", "floor", "floorMs"];
 

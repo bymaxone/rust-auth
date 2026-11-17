@@ -64,13 +64,17 @@ impl AuthEngine {
             let masked = mask_email(&input.email);
             let tenant = log_safe(&tenant_id);
             tracing::warn!(email = %masked, tenant_id = %tenant, "login: account locked");
-            self.fire_login_failed(
-                &input.email,
-                &tenant_id,
-                None,
-                LoginFailureReason::LockedOut,
-                &hook_ctx,
-            );
+            // Only a lock is announced as one: a store that could not answer the lockout read
+            // says nothing about the account, and answers `503` without telling the hook.
+            if matches!(error, AuthError::AccountLocked { .. }) {
+                self.fire_login_failed(
+                    &input.email,
+                    &tenant_id,
+                    None,
+                    LoginFailureReason::LockedOut,
+                    &hook_ctx,
+                );
+            }
             return Err(error);
         }
         self.hooks()
@@ -1239,6 +1243,33 @@ mod tests {
             vec![format!("lockout:ttl@example.com:{window}")],
             "the hook must fire once, carrying the configured window"
         );
+    }
+
+    #[tokio::test]
+    async fn a_lockout_read_that_cannot_answer_is_a_503_and_never_announced_as_a_lock() {
+        // The pre-check before the password is judged decides the answer, so an outage there is
+        // `ServiceUnavailable`; the failure hook is told nothing, because the account is not
+        // known to be locked.
+        let spy = Arc::new(FailureSpy::default());
+        let mut cfg = base_config();
+        cfg.email_verification.required = false;
+        let Some(h) = harness(cfg, Some(spy.clone())) else { return };
+        let _ = h.seed(SeedUser::active("down@example.com", "right")).await;
+
+        h.stores.fail_lockout_reads(0, 1);
+        let refused = h
+            .engine
+            .login(login_input("down@example.com", "right"), &ctx())
+            .await;
+
+        assert!(
+            matches!(refused, Err(AuthError::ServiceUnavailable(_))),
+            "{refused:?}"
+        );
+        // A failure hook that fires is detached, so give it the moment it needs before asserting
+        // it stayed silent: nothing at all reaches the spy.
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+        assert!(spy.seen().is_empty(), "the hook was told: {:?}", spy.seen());
     }
 
     #[tokio::test]

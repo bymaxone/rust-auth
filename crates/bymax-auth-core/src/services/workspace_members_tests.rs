@@ -433,13 +433,16 @@ async fn a_failed_first_bump_of_a_hand_over_does_not_skip_the_second() {
         .engine
         .transfer_workspace_ownership(&owner, to("m", None, Some(PASSWORD)), &ctx())
         .await;
-    assert!(matches!(done, Err(AuthError::Internal(_))), "{done:?}");
+    assert!(
+        matches!(done, Err(AuthError::ServiceUnavailable(_))),
+        "{done:?}"
+    );
     assert_eq!(f.cache.operations(), ["bump_membership", "bump_membership"]);
     assert!(!membership_bumped(&f, &owner.user_id));
     assert!(membership_bumped(&f, "m"));
-    // The hand-over itself committed, and the failure was never reported to the hook.
+    // The hand-over itself committed, so the hook is told of it although a bump failed.
     assert_eq!(f.repo.audit_events().len(), 1);
-    assert!(f.hooks.events(1).await.is_empty());
+    assert_eq!(f.hooks.events(1).await.len(), 1);
 }
 
 #[tokio::test]
@@ -477,7 +480,8 @@ async fn a_member_change_whose_bump_fails_is_an_error_after_the_write() {
     let removed = f.engine.remove_workspace_member(&owner, "m", &ctx()).await;
     assert!(matches!(removed, Err(AuthError::Internal(_))));
     assert!(stored(&f, "t1", "m").is_none());
-    assert!(f.hooks.events(1).await.is_empty());
+    // Both writes committed, so the host is told of both although each bump failed.
+    assert_eq!(f.hooks.events(2).await.len(), 2);
 }
 
 #[tokio::test]

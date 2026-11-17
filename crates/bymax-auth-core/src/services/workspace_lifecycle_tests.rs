@@ -552,8 +552,8 @@ async fn a_failed_bump_is_an_error_and_the_committed_change_stays() {
         stored(&f).await.map(|w| w.status),
         Some(WorkspaceStatus::PendingDeletion)
     );
-    // Nothing is reported for a change that was not invalidated.
-    assert!(f.hooks.events(1).await.is_empty());
+    // The change committed, so the host is told of it even though the bump failed.
+    assert_eq!(f.hooks.events(1).await.len(), 1);
 }
 
 /// Seeds `w1` pending deletion, due `due_in` from now.

@@ -63,9 +63,11 @@ fn every_code_is_named_in_an_exhaustive_match() {
         | RegistrationClosed
         | WorkspaceLimitReached
         | WorkspacePendingDeletion
-        | Internal => true,
+        | Internal
+        | ServiceUnavailable => true,
     };
     assert!(named(AuthErrorCode::Internal));
+    assert!(named(AuthErrorCode::ServiceUnavailable));
 }
 
 #[test]

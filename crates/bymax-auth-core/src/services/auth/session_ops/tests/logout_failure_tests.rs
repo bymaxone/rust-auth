@@ -88,7 +88,7 @@ async fn refused_cleanup_writes_fail_the_logout_yet_the_access_token_is_revoked(
     drop(capture);
 
     assert!(
-        matches!(outcome, Err(AuthError::Internal(_))),
+        matches!(outcome, Err(AuthError::ServiceUnavailable(_))),
         "{outcome:?}"
     );
     assert!(events.contains_at(tracing::Level::WARN, "logout: session cleanup"));
@@ -169,7 +169,7 @@ async fn a_refused_session_delete_keeps_the_session_indexed_for_a_later_revoke_a
         .logout(&auth.access_token, &auth.refresh_token)
         .await;
     assert!(
-        matches!(outcome, Err(AuthError::Internal(_))),
+        matches!(outcome, Err(AuthError::ServiceUnavailable(_))),
         "{outcome:?}"
     );
     assert!(session_alive(&h, &auth).await);

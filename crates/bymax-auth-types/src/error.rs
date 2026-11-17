@@ -24,6 +24,7 @@
 use serde::{Deserialize, Serialize};
 
 mod details;
+mod messages;
 
 pub use details::{BlockingWorkspace, FieldError};
 
@@ -239,6 +240,12 @@ pub enum AuthErrorCode {
     /// generic message reach the client, preserving the consistent envelope.
     #[serde(rename = "auth.internal")]
     Internal,
+    /// The shared store could not answer a call the response depends on (timeout, refused or lost
+    /// connection, or a reply saying the server cannot serve the command). Unlike `Internal` it is
+    /// a condition that clears, so a caller may retry. `serviceUnavailable` in the shared contract
+    /// says where it is raised; the body carries no detail and no `Retry-After` is sent.
+    #[serde(rename = "auth.service_unavailable")]
+    ServiceUnavailable,
 }
 
 impl AuthErrorCode {
@@ -303,73 +310,7 @@ impl AuthErrorCode {
             | Self::Validation => 400,
             Self::AccountLocked | Self::OtpMaxAttempts | Self::TooManyRequests => 429,
             Self::Internal => 500,
-        }
-    }
-
-    /// The English default client message — the exact strings nest-auth ships in
-    /// `AUTH_ERROR_MESSAGES`. End-user-facing defaults, not internal diagnostics;
-    /// localization is the host's responsibility, keyed on the stable code.
-    #[must_use]
-    pub fn client_message(self) -> &'static str {
-        match self {
-            Self::InvalidCredentials => "Invalid email or password",
-            Self::AccountLocked => "Account temporarily locked. Please try again in a few minutes.",
-            Self::AccountInactive => "Account inactive",
-            Self::AccountSuspended => "Account suspended",
-            Self::AccountBanned => "Account banned",
-            Self::PendingApproval => "Account pending approval",
-            Self::TokenExpired => "Token expired",
-            Self::TokenRevoked => "Token revoked",
-            Self::TokenInvalid => "Invalid token",
-            Self::RefreshTokenInvalid => "Invalid or expired refresh token",
-            Self::SessionNotFound => "Session not found",
-            Self::TokenMissing => "Token missing",
-            Self::EmailAlreadyExists => "Email already registered",
-            Self::EmailNotVerified => "Email not verified",
-            Self::EmailChangeTokenInvalid => "Invalid or expired email change link",
-            Self::MfaRequired => "Two-factor authentication required",
-            Self::MfaInvalidCode => "Invalid MFA code",
-            Self::MfaAlreadyEnabled => "MFA is already enabled",
-            Self::MfaNotEnabled => "MFA is not enabled",
-            Self::MfaSetupRequired => "MFA setup required",
-            Self::MfaTempTokenInvalid => "Invalid or expired temporary MFA token",
-            Self::MfaStateConflict => "Another MFA change is in progress. Please try again.",
-            Self::PasswordCompromised => {
-                "This password has appeared in a data breach. Please choose a different one."
-            }
-            Self::PasswordResetTokenInvalid => "Invalid password reset token",
-            Self::OtpInvalid => "Invalid OTP code",
-            Self::OtpExpired => "Expired OTP code",
-            Self::OtpMaxAttempts => "Maximum number of attempts exceeded",
-            Self::InsufficientRole => "Insufficient permission",
-            Self::Forbidden => "Access denied",
-            Self::UntrustedOrigin => "Request origin not allowed",
-            Self::ReauthenticationRequired => {
-                "Please sign in again to change your security settings."
-            }
-            Self::InvalidInvitationToken => "Invalid or expired invitation token",
-            Self::OauthFailed => "OAuth authentication failed",
-            Self::OauthEmailMismatch => "OAuth email does not match",
-            Self::PlatformAuthRequired => "Platform authentication required",
-            Self::ApiKeyInvalid => "Invalid API key",
-            Self::ApiKeyScopeInsufficient => "API key lacks the required scope",
-            Self::ApiKeyNotFound => "API key not found",
-            Self::Validation => "Validation failed",
-            Self::TooManyRequests => "Too many requests. Please slow down and try again shortly.",
-            Self::WorkspaceRequired => "A workspace is required",
-            Self::WorkspaceNotFound => "Workspace not found",
-            Self::InsufficientWorkspaceRole => "Insufficient workspace role",
-            Self::LastOwner => "A workspace needs at least one owner",
-            Self::AlreadyMember => "Already a member of this workspace",
-            Self::InvitationEmailMismatch => {
-                "This invitation was sent to a different email address"
-            }
-            Self::RegistrationClosed => "Registration is closed",
-            Self::WorkspaceLimitReached => {
-                "Workspace limit reached. Workspaces pending deletion count toward the limit."
-            }
-            Self::WorkspacePendingDeletion => "Workspace is scheduled for deletion",
-            Self::Internal => "Internal server error",
+            Self::ServiceUnavailable => 503,
         }
     }
 
@@ -645,6 +586,10 @@ pub enum AuthError {
     /// Unexpected internal failure; the cause is logged, never serialized.
     #[error("internal error")]
     Internal(#[source] Box<dyn std::error::Error + Send + Sync>),
+    /// The shared store could not answer; see [`AuthErrorCode::ServiceUnavailable`]. The cause is
+    /// logged by the caller, never serialized.
+    #[error("service unavailable")]
+    ServiceUnavailable(#[source] Box<dyn std::error::Error + Send + Sync>),
 }
 
 impl AuthError {
@@ -709,6 +654,7 @@ impl AuthError {
             Self::WorkspaceLimitReached => AuthErrorCode::WorkspaceLimitReached,
             Self::WorkspacePendingDeletion => AuthErrorCode::WorkspacePendingDeletion,
             Self::Internal(_) => AuthErrorCode::Internal,
+            Self::ServiceUnavailable(_) => AuthErrorCode::ServiceUnavailable,
         }
     }
 

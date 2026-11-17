@@ -253,7 +253,9 @@ impl MembershipCacheStore for InMemoryMembershipCache {
         let call = self.membership_bumps.fetch_add(1, Ordering::SeqCst) + 1;
         let mut state = self.begin("bump_membership")?;
         if call == self.failing_membership_bump.load(Ordering::SeqCst) {
-            return Err(AuthError::Internal("membership bump refused".into()));
+            return Err(AuthError::ServiceUnavailable(
+                "membership bump refused".into(),
+            ));
         }
         Ok(state.bump(VersionCounter::Membership, membership_id))
     }

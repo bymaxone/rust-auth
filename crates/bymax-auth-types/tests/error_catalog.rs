@@ -82,6 +82,7 @@ fn catalog() -> Vec<(AuthErrorCode, &'static str)> {
         (WorkspaceLimitReached, "auth.workspace_limit_reached"),
         (WorkspacePendingDeletion, "auth.workspace_pending_deletion"),
         (Internal, "auth.internal"),
+        (ServiceUnavailable, "auth.service_unavailable"),
     ]
 }
 
@@ -152,6 +153,7 @@ fn all_errors() -> Vec<AuthError> {
         AuthError::WorkspaceLimitReached,
         AuthError::WorkspacePendingDeletion,
         AuthError::Internal(Box::<dyn std::error::Error + Send + Sync>::from("boom")),
+        AuthError::ServiceUnavailable(Box::<dyn std::error::Error + Send + Sync>::from("down")),
     ]
 }
 
@@ -160,7 +162,7 @@ fn every_code_serializes_to_its_string_and_round_trips() {
     // Table-driven wire-string check: each code's `auth.*` string must match the catalog
     // exactly. The catalog covers every code; the status each one answers is asserted
     // against the shared contract in `every_code_answers_the_wire_status_the_contract_pins`.
-    assert_eq!(catalog().len(), 50);
+    assert_eq!(catalog().len(), 51);
     for (code, wire) in catalog() {
         let json = serde_json::to_string(&code).unwrap_or_default();
         assert_eq!(json, format!("\"{wire}\""), "wrong string for {code:?}");
@@ -393,6 +395,14 @@ fn display_is_a_log_string_distinct_from_the_client_message() {
     let internal = AuthError::Internal(Box::<dyn std::error::Error + Send + Sync>::from("db"));
     assert_eq!(format!("{internal}"), "internal error");
     assert_eq!(internal.code(), AuthErrorCode::Internal);
+    // The outage variant keeps its cause for logs as well, and serializes nothing of it.
+    let outage = AuthError::ServiceUnavailable(Box::<dyn std::error::Error + Send + Sync>::from(
+        "redis down",
+    ));
+    assert_eq!(format!("{outage}"), "service unavailable");
+    assert_eq!(outage.http_status(), 503);
+    assert_eq!(outage.client_message(), "Service temporarily unavailable");
+    assert_eq!(outage.details(), None);
 }
 
 #[test]

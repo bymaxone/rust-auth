@@ -481,9 +481,18 @@ pub fn build_oauth_with_redirects() -> Option<Harness> {
 /// infrastructure failure has to surface to monitoring rather than be dressed up as a user
 /// declining consent.
 pub fn build_oauth_with_failing_state_store() -> Option<Harness> {
+    build_oauth_over(FailingStores::with_failing_oauth_state())
+}
+
+/// As [`build_oauth_with_failing_state_store`], with a failure that is a defect, not an outage.
+pub fn build_oauth_with_defective_state_store() -> Option<Harness> {
+    build_oauth_over(FailingStores::with_defective_oauth_state())
+}
+
+fn build_oauth_over(failing: FailingStores) -> Option<Harness> {
     let users = Arc::new(InMemoryUserRepository::new());
     let admins = Arc::new(InMemoryPlatformUserRepository::new());
-    let failing = Arc::new(FailingStores::with_failing_oauth_state());
+    let failing = Arc::new(failing);
     let inert = Arc::new(InMemoryStores::new());
 
     let mut config = AuthConfig::default();
@@ -628,6 +637,8 @@ pub struct FailingStores {
     /// `OauthFailed` — the one input that proves an infrastructure failure is NOT swallowed
     /// into the friendly `?error=oauth_failed` redirect.
     oauth_state_fails: bool,
+    /// With `oauth_state_fails`, the failure is a defect (`auth.internal`) rather than an outage.
+    oauth_state_defect: bool,
     /// When set, the invitation index read fails, so the revoke handler's store-failure arm is
     /// reachable after the extractors have passed.
     invitation_index_fails: bool,
@@ -639,6 +650,7 @@ impl FailingStores {
             inner: Arc::new(InMemoryStores::new()),
             blacklist_fails: false,
             oauth_state_fails: false,
+            oauth_state_defect: false,
             invitation_index_fails: false,
         }
     }
@@ -654,24 +666,31 @@ impl FailingStores {
         Self {
             inner: Arc::new(InMemoryStores::new()),
             blacklist_fails: true,
-            oauth_state_fails: false,
-            invitation_index_fails: false,
+            ..Self::new()
         }
     }
 
     fn with_failing_oauth_state() -> Self {
         Self {
             inner: Arc::new(InMemoryStores::new()),
-            blacklist_fails: false,
             oauth_state_fails: true,
-            invitation_index_fails: false,
+            ..Self::new()
+        }
+    }
+
+    fn with_defective_oauth_state() -> Self {
+        Self {
+            oauth_state_defect: true,
+            ..Self::with_failing_oauth_state()
         }
     }
 }
 
-/// A fresh internal error for the failing-store methods.
+/// A fresh outage error for the failing-store methods: the store cannot answer.
 fn fail() -> bymax_auth_types::AuthError {
-    bymax_auth_types::AuthError::Internal(Box::new(std::io::Error::other("store unavailable")))
+    bymax_auth_types::AuthError::ServiceUnavailable(Box::new(std::io::Error::other(
+        "store unavailable",
+    )))
 }
 
 #[async_trait]
@@ -1125,7 +1144,11 @@ impl bymax_auth_core::traits::OAuthStateStore for FailingStores {
         state_hash: &str,
     ) -> Result<Option<String>, bymax_auth_types::AuthError> {
         if self.oauth_state_fails {
-            return Err(fail());
+            return Err(if self.oauth_state_defect {
+                bymax_auth_types::AuthError::Internal("oauth state defect".into())
+            } else {
+                fail()
+            });
         }
         self.inner.take_state(state_hash).await
     }

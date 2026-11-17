@@ -343,8 +343,15 @@ fn the_route_error_of_a_removal_is_the_409_for_a_refusal_and_the_opaque_error_fo
     let bumps = AuthError::from(AccountRemovalError::BumpsFailed {
         removed: vec![removed("w1", "owner")],
         failed: vec!["w1".to_owned()],
+        outage: false,
     });
     assert_eq!(bumps.code(), AuthErrorCode::Internal);
+    let outage = AuthError::from(AccountRemovalError::BumpsFailed {
+        removed: vec![removed("w1", "owner")],
+        failed: vec!["w1".to_owned()],
+        outage: true,
+    });
+    assert_eq!(outage.code(), AuthErrorCode::ServiceUnavailable);
     let other = AuthError::from(AccountRemovalError::Failed(AuthError::WorkspaceNotFound));
     assert!(matches!(other, AuthError::WorkspaceNotFound));
 }
@@ -416,7 +423,15 @@ async fn every_bump_is_attempted_and_the_failure_carries_what_was_removed_and_wh
     f.cache.fail_membership_bump(2);
     let outcome = remove(&f, RemovalAuthority::Account).await;
     let carried = match outcome {
-        Err(AccountRemovalError::BumpsFailed { removed, failed }) => Some((removed, failed)),
+        Err(AccountRemovalError::BumpsFailed {
+            removed,
+            failed,
+            outage,
+        }) => {
+            // The double refuses with a store that cannot answer, so the outage is reported.
+            assert!(outage);
+            Some((removed, failed))
+        }
         _ => None,
     };
     let all = vec![

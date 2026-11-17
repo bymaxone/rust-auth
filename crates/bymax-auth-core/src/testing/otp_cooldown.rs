@@ -8,9 +8,9 @@ use super::{InMemoryStores, lock};
 use crate::traits::OtpPurpose;
 
 impl InMemoryStores {
-    /// Make the next `count` resend-cooldown gate calls fail with a backend error. The flows
-    /// that begin a resend must answer a failure of the gate itself, which a store that always
-    /// succeeds never exercises.
+    /// Make the next `count` resend-cooldown gate calls fail as a store that cannot answer does
+    /// (`ServiceUnavailable`). The flows that begin a resend must answer a failure of the gate
+    /// itself, which a store that always succeeds never exercises.
     pub fn fail_next_resend_gates(&self, count: usize) {
         *lock(&self.forced_resend_gate_failures) = count;
     }
@@ -43,6 +43,8 @@ impl InMemoryStores {
             return Ok(());
         }
         *remaining -= 1;
-        Err(AuthError::Internal("resend cooldown unavailable".into()))
+        Err(AuthError::ServiceUnavailable(
+            "resend cooldown unavailable".into(),
+        ))
     }
 }

@@ -122,9 +122,9 @@ mod workspace_reads;
 mod workspace_writes;
 
 use common::{
-    Captured, EngineSpec, Req, TENANT, build, build_oauth_with_failing_state_store,
-    build_oauth_with_redirects, current_totp, enable_mfa_flag, router, router_with, seed_admin,
-    seed_user, set_status,
+    Captured, EngineSpec, Req, TENANT, build, build_oauth_with_defective_state_store,
+    build_oauth_with_failing_state_store, build_oauth_with_redirects, current_totp,
+    enable_mfa_flag, router, router_with, seed_admin, seed_user, set_status,
 };
 use http::{HeaderName, Method, StatusCode, header};
 
@@ -2288,15 +2288,39 @@ async fn a_provider_error_callback_is_an_oauth_failure_not_a_validation_error() 
 }
 
 #[tokio::test]
-async fn an_infrastructure_failure_on_the_callback_does_not_become_an_error_redirect() {
-    // The error redirect exists to explain a refusal to a user. A store that is down is not a
-    // refusal: dressing it up as `?error=oauth_failed` would tell the user to try again while
-    // hiding an outage from whatever watches 5xx. Only a refusal gets the redirect.
+async fn a_store_outage_on_the_callback_is_delivered_as_every_other_callback_failure_is() {
+    // `serviceUnavailable.appliesTo`: the OAuth callback is delivered as every other callback
+    // failure is, so an outage that clears reaches the browser as the error redirect carrying
+    // its own code, `?error=service_unavailable`, and the user is told to try again.
     let Some(h) = build_oauth_with_failing_state_store() else { return };
     let app = router(&h);
 
     // A well-formed 64-hex state: a malformed one is refused on shape before the store is
     // ever consulted, and the test would pass on the wrong path.
+    let state = "a".repeat(64);
+    let res = Req::get(&format!(
+        "/auth/oauth/google/callback?code=abc&state={state}"
+    ))
+    .cookie("oauth_state", &state)
+    .send(&app)
+    .await;
+
+    assert_eq!(res.status, StatusCode::FOUND);
+    let location = res
+        .headers
+        .get(header::LOCATION)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or_default();
+    assert_eq!(location, "http://localhost/error?error=service_unavailable");
+}
+
+#[tokio::test]
+async fn a_defect_on_the_callback_is_not_dressed_up_as_an_error_redirect() {
+    // The error redirect explains a refusal, or an outage that clears, to a user. A defect is
+    // neither: it stays a 500 that monitoring sees, with no redirect.
+    let Some(h) = build_oauth_with_defective_state_store() else { return };
+    let app = router(&h);
+
     let state = "a".repeat(64);
     let res = Req::get(&format!(
         "/auth/oauth/google/callback?code=abc&state={state}"
@@ -3168,21 +3192,21 @@ async fn sessions_list_and_revoke_all_store_failure_arms() {
     let access = reg.cookie_value("access_token").unwrap_or_default();
     let refresh = reg.cookie_value("refresh_token").unwrap_or_default();
 
-    // `list_sessions` fails in the store → the list handler error arm renders a 500.
+    // `list_sessions` fails in the store → the list handler error arm renders a 503.
     let list = Req::get("/auth/sessions")
         .cookie("access_token", &access)
         .cookie("refresh_token", &refresh)
         .send(&app)
         .await;
-    assert_eq!(list.status, StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(list.status, StatusCode::SERVICE_UNAVAILABLE);
 
-    // `revoke_all` fails in the store → the revoke-all handler error arm renders a 500.
+    // `revoke_all` fails in the store → the revoke-all handler error arm renders a 503.
     let revoke = Req::post("/auth/sessions/revoke-all")
         .cookie("access_token", &access)
         .cookie("refresh_token", &refresh)
         .send(&app)
         .await;
-    assert_eq!(revoke.status, StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(revoke.status, StatusCode::SERVICE_UNAVAILABLE);
 }
 
 #[tokio::test]
@@ -3198,12 +3222,12 @@ async fn ws_ticket_mint_store_failure_arm() {
         .send(&app)
         .await;
     let access = reg.cookie_value("access_token").unwrap_or_default();
-    // `issue_ws_ticket` mint fails in the store → the ws_ticket handler error arm renders a 500.
+    // `issue_ws_ticket` mint fails in the store → the ws_ticket handler error arm renders a 503.
     let mint = Req::post("/auth/ws-ticket")
         .cookie("access_token", &access)
         .send(&app)
         .await;
-    assert_eq!(mint.status, StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(mint.status, StatusCode::SERVICE_UNAVAILABLE);
 }
 
 #[tokio::test]
@@ -3213,13 +3237,13 @@ async fn platform_revoke_all_store_failure_arm() {
     };
     let app = router(&h);
     // A minted platform token passes the extractor (blacklist delegates), then revoke-all's
-    // store op fails → the platform revoke-all error arm renders a 500.
+    // store op fails → the platform revoke-all error arm renders a 503.
     let token = common::mint_platform_token("padmin", "SUPER_ADMIN");
     let revoke = Req::delete("/auth/platform/sessions")
         .bearer(&token)
         .send(&app)
         .await;
-    assert_eq!(revoke.status, StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(revoke.status, StatusCode::SERVICE_UNAVAILABLE);
 }
 
 #[tokio::test]
@@ -3247,8 +3271,8 @@ async fn refresh_surfaces_a_failure_to_re_read_the_account_after_rotation() {
         .cookie("refresh_token", &refresh)
         .send(&app)
         .await;
-    assert_eq!(rotated.status, StatusCode::INTERNAL_SERVER_ERROR);
-    assert_eq!(rotated.json()["error"]["code"], "auth.internal");
+    assert_eq!(rotated.status, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(rotated.json()["error"]["code"], "auth.service_unavailable");
 }
 
 #[tokio::test]
@@ -3269,8 +3293,8 @@ async fn platform_refresh_surfaces_a_failure_to_re_read_the_admin_after_rotation
         .json(serde_json::json!({ "refreshToken": refresh }))
         .send(&app)
         .await;
-    assert_eq!(rotated.status, StatusCode::INTERNAL_SERVER_ERROR);
-    assert_eq!(rotated.json()["error"]["code"], "auth.internal");
+    assert_eq!(rotated.status, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(rotated.json()["error"]["code"], "auth.service_unavailable");
 }
 
 #[tokio::test]
@@ -3288,8 +3312,8 @@ async fn platform_extractor_propagates_internal_errors_but_masks_token_failures(
         .bearer(&token)
         .send(&app)
         .await;
-    assert_eq!(internal.status, StatusCode::INTERNAL_SERVER_ERROR);
-    assert_eq!(internal.json()["error"]["code"], "auth.internal");
+    assert_eq!(internal.status, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(internal.json()["error"]["code"], "auth.service_unavailable");
 
     // A token-auth failure (a malformed/invalid token) never reaches the revocation check, so it
     // collapses to the opaque `token_invalid` (401) — the masking is correct for THIS case, and

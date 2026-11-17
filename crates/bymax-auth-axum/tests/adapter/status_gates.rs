@@ -129,5 +129,5 @@ async fn a_store_failure_while_revoking_is_reported_after_the_account_gate_passe
         .json(serde_json::json!({ "email": "invitee@e.com" }))
         .send(&app)
         .await;
-    assert_eq!(revoke.status, StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(revoke.status, StatusCode::SERVICE_UNAVAILABLE);
 }

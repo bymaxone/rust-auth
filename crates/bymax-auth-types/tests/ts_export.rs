@@ -68,7 +68,7 @@ fn shared_dir() -> PathBuf {
 }
 
 /// Every catalog code, in a fixed order, so the generated map is deterministic.
-fn all_error_codes() -> [AuthErrorCode; 50] {
+fn all_error_codes() -> [AuthErrorCode; 51] {
     use AuthErrorCode::*;
     [
         InvalidCredentials,
@@ -121,6 +121,7 @@ fn all_error_codes() -> [AuthErrorCode; 50] {
         WorkspaceLimitReached,
         WorkspacePendingDeletion,
         Internal,
+        ServiceUnavailable,
     ]
 }
 

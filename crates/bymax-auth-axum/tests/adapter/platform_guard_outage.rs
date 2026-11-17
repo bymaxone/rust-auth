@@ -71,7 +71,7 @@ async fn a_token_of_another_kind_is_refused_as_such_while_the_revocation_store_i
 }
 
 #[tokio::test]
-async fn a_platform_token_still_surfaces_the_store_failure_as_a_500() {
+async fn a_platform_token_surfaces_the_store_failure_as_a_503() {
     let Some(h) = common::build_failing_blacklist() else { return };
     let app = router(&h);
 
@@ -81,6 +81,6 @@ async fn a_platform_token_still_surfaces_the_store_failure_as_a_500() {
         .send(&app)
         .await;
 
-    assert_eq!(outage.status, StatusCode::INTERNAL_SERVER_ERROR);
-    assert_eq!(outage.json()["error"]["code"], "auth.internal");
+    assert_eq!(outage.status, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(outage.json()["error"]["code"], "auth.service_unavailable");
 }

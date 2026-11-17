@@ -26,6 +26,8 @@ mod error;
 mod keys;
 #[cfg(test)]
 mod membership_cache_script_tests;
+#[cfg(test)]
+mod outage_tests;
 mod pool;
 mod script;
 mod stores;

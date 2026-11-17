@@ -141,11 +141,14 @@ fn job_hook_context(tenant_id: &str) -> HookContext {
 impl WorkspaceRuntime {
     /// Turns a status write into the caller's answer: a refusal is its catalog code, read again
     /// for a lost compare-and-set, and a write that applied ends every member's cached access.
+    ///
+    /// The outer error is a refusal, so nothing was written. The inner result is the counter bump
+    /// of a write that committed: the caller reports the change to the host first and returns it.
     async fn settle_status(
         &self,
         outcome: UpdateStatusOutcome,
         workspace: WorkspaceRef<'_>,
-    ) -> Result<(), AuthError> {
+    ) -> Result<Result<(), AuthError>, AuthError> {
         let current = if outcome == UpdateStatusOutcome::StatusConflict {
             let read = self.workspaces.find_by_id(workspace).await;
             read.map_err(internal)?.map(|found| found.status)
@@ -155,7 +158,7 @@ impl WorkspaceRuntime {
         if let Some(refusal) = status_refusal(outcome, current) {
             return Err(refusal);
         }
-        self.invalidate_workspace(workspace).await
+        Ok(self.invalidate_workspace(workspace).await)
     }
 
     /// The workspace as it reads now, when it is active.
@@ -366,10 +369,11 @@ impl AuthEngine {
             audit: &event,
         };
         let outcome = runtime.workspaces.update_status(params).await;
-        runtime
+        let bumped = runtime
             .settle_status(outcome.map_err(internal)?, workspace)
             .await?;
         self.notify_workspace_event(event, member_hook_context(ctx, member));
+        bumped?;
         Ok(ScheduledDeletion {
             status,
             deletion_scheduled_at: scheduled,
@@ -412,10 +416,11 @@ impl AuthEngine {
             audit: &event,
         };
         let outcome = runtime.workspaces.update_status(params).await;
-        runtime
+        let bumped = runtime
             .settle_status(outcome.map_err(internal)?, workspace)
             .await?;
         self.notify_workspace_event(event, member_hook_context(ctx, member));
+        bumped?;
         Ok(())
     }
 
@@ -466,8 +471,9 @@ impl AuthEngine {
             UpdateStatusOutcome::NotFound => return Ok(FinalizeOutcome::NotFound),
             _ => return self.finalize_lost(runtime, workspace).await,
         }
-        runtime.invalidate_workspace(workspace).await?;
+        let bumped = runtime.invalidate_workspace(workspace).await;
         self.notify_workspace_event(event, job_hook_context(workspace.tenant_id));
+        bumped?;
         Ok(FinalizeOutcome::Deleted)
     }
 
