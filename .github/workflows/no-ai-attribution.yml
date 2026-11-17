@@ -1,0 +1,12 @@
+name: No AI attribution
+# Its own file, because an edit of a pull request's title or body has to run it again.
+on:
+  pull_request:
+    types: [opened, edited, synchronize, reopened]
+
+jobs:
+  attribution:
+    permissions:
+      contents: read
+      pull-requests: read
+    uses: bymaxone/.github/.github/workflows/no-ai-attribution.yml@v1
