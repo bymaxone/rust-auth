@@ -409,7 +409,7 @@ pub struct WsTicketSnapshot {
 /// Every method that names an ACCOUNT rather than a token takes a `subject_hash`: the
 /// `hmac_sha256(identifier_key, user_subject)` suffix the shared contract lists under
 /// `userSubjectDerivedKeys`, in lower-case hex. The engine derives it; a store never sees the
-/// raw id and never holds the hashing key, exactly as [`SessionStore::mark_recent_auth`] and
+/// raw id and never holds the hashing key, exactly as [`SessionStore::has_recent_auth`] and
 /// the MFA store already work.
 ///
 /// Two properties come from that, and both were absent while these keys were built from the

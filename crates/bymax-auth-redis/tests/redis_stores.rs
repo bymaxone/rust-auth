@@ -1015,11 +1015,15 @@ async fn platform_sessions_use_the_platform_keyspace() {
     assert!(matches!(stores.list_sessions(kind, &subject("padmin")).await, Ok(v) if v.is_empty()));
 }
 
+/// Whether the store answers that the session `sid` of `subject` earned a recent authentication.
+async fn marked(stores: &bymax_auth_redis::RedisStores, subject: &str, sid: &str) -> bool {
+    matches!(stores.has_recent_auth(subject, sid).await, Ok(true))
+}
+
 #[tokio::test]
-async fn the_recent_auth_marker_is_written_with_its_session_read_without_being_spent_and_expires() {
+async fn the_recent_auth_marker_is_written_with_its_session_and_read_without_being_spent() {
     // The marker is the whole proof behind enrolling MFA on an account with no local password:
-    // presence means THIS session completed a REAL authentication within the TTL. Its store
-    // contract has four parts, and each one is load-bearing.
+    // presence means THIS session completed a REAL authentication within the TTL.
     let Some(redis) = common::try_start().await else {
         return;
     };
@@ -1028,10 +1032,7 @@ async fn the_recent_auth_marker_is_written_with_its_session_read_without_being_s
 
     // Absent until a sign-in writes it: the default answer is "no proof", so a store that cannot
     // see the key fails CLOSED rather than admitting an unproven caller.
-    assert!(matches!(
-        stores.has_recent_auth("s-a", "fam-a").await,
-        Ok(false)
-    ));
+    assert!(!marked(&stores, "s-a", "fam-a").await);
 
     // Written with the session in one step: both exist afterwards.
     let created = stores
@@ -1042,10 +1043,7 @@ async fn the_recent_auth_marker_is_written_with_its_session_read_without_being_s
         stores.find_session(kind, "tok-a").await,
         Ok(Some(_))
     ));
-    assert!(matches!(
-        stores.has_recent_auth("s-a", "fam-a").await,
-        Ok(true)
-    ));
+    assert!(marked(&stores, "s-a", "fam-a").await);
     assert!(
         redis.ttl("auth:ra:s-a:fam-a").await > 0,
         "the mark has its own lifetime"
@@ -1054,30 +1052,26 @@ async fn the_recent_auth_marker_is_written_with_its_session_read_without_being_s
     // READ, never consumed. A user who signs in and then makes two security changes in a row
     // must not have the second refused because the first spent the proof, which is what a
     // `GETDEL` here would do.
-    assert!(matches!(
-        stores.has_recent_auth("s-a", "fam-a").await,
-        Ok(true)
-    ));
+    assert!(marked(&stores, "s-a", "fam-a").await);
 
     // Scoped to the session: another session of the same account, and another account, read none.
-    assert!(matches!(
-        stores.has_recent_auth("s-a", "fam-b").await,
-        Ok(false)
-    ));
-    assert!(matches!(
-        stores.has_recent_auth("s-b", "fam-a").await,
-        Ok(false)
-    ));
+    assert!(!marked(&stores, "s-a", "fam-b").await);
+    assert!(!marked(&stores, "s-b", "fam-a").await);
+}
 
-    // A session created without a credential leaves no mark.
+#[tokio::test]
+async fn a_session_created_without_a_credential_leaves_no_mark_and_a_mark_expires_on_its_own() {
+    let Some(redis) = common::try_start().await else {
+        return;
+    };
+    let Some(stores) = redis.stores() else { return };
+    let kind = SessionKind::Dashboard;
+
     let plain = stores
         .create_session(kind, "s-b", "tok-b", &record("b"), 3600)
         .await;
     assert!(plain.is_ok());
-    assert!(matches!(
-        stores.has_recent_auth("s-b", "fam-b").await,
-        Ok(false)
-    ));
+    assert!(!marked(&stores, "s-b", "fam-b").await);
 
     // The TTL is real: the shortest observable one is waited out, because the mark has to age out
     // on its own or "recent" would mean "ever".
@@ -1085,11 +1079,9 @@ async fn the_recent_auth_marker_is_written_with_its_session_read_without_being_s
         .create_session_with_recent_auth(kind, "s-c", "tok-c", &record("c"), 3600, 1)
         .await;
     assert!(short.is_ok());
+    assert!(marked(&stores, "s-c", "fam-c").await);
     tokio::time::sleep(std::time::Duration::from_millis(1_400)).await;
-    assert!(matches!(
-        stores.has_recent_auth("s-c", "fam-c").await,
-        Ok(false)
-    ));
+    assert!(!marked(&stores, "s-c", "fam-c").await);
 }
 
 #[tokio::test]
