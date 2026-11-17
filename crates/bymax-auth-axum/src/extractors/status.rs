@@ -149,6 +149,7 @@ mod tests {
             iat: 1_700_000_000,
             exp: 4_102_444_800,
             epoch: 0,
+            sid: None,
         };
         let mut parts = parts_with_cookie(&mint_token(&elsewhere));
         let refused = UserStatus::from_request_parts(&mut parts, &s.state).await;

@@ -91,6 +91,7 @@ mod tests {
             iat: 1_700_000_000,
             exp: future_exp(),
             epoch: 0,
+            sid: None,
         };
         let unverified = mint_token(&claims);
         let mut parts = parts_with_cookie(&unverified);
@@ -124,6 +125,7 @@ mod tests {
             iat: 1_700_000_000,
             exp: future_exp(),
             epoch: 0,
+            sid: None,
         }
     }
 

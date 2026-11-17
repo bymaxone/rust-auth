@@ -150,6 +150,7 @@ pub(super) fn acting_member(
         workspace_id: workspace.to_owned(),
         user_id: user.to_owned(),
         role: role.to_owned(),
+        sid: None,
     }
 }
 
@@ -272,5 +273,7 @@ pub(super) async fn authorize(
         accepted,
         allow_pending,
     };
-    f.engine.authorize_workspace(tenant, user, request).await
+    f.engine
+        .authorize_workspace(tenant, user, None, request)
+        .await
 }

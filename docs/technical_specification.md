@@ -3089,11 +3089,14 @@ bumped either way.
 
 - `workspaces.allow_create` is a boolean. A host that needs a per-user decision uses
   `AuthHooks::before_workspace_create`, whose refusal carries `details`.
-- The password-less re-proof marker (`recentAuthMarker`) is keyed only by the user subject. It is
-  not bound to a session or a token id and is not consumed on use. Since the workspace write routes
-  it also gates `schedule-deletion` and `transfer-ownership`, so during its lifetime another
-  session's access token passes that re-proof repeatedly. Binding it to the session and consuming it
-  on a destructive use is a cross-implementation contract change that has not been made.
+- The password-less re-proof marker (`recentAuthMarker`) is bound to the session that earned it
+  (shared contract version 8): its key is `ra:{hmac_sha256(hmacKey, userSubject)}:{sid}`, with the
+  `sid` the access token carries (the refresh family id), and the mark is written in the same
+  atomic step as the session, only when a credential was presented. A token with no usable `sid`
+  earns no proof, so another session of the same account cannot ride a real sign-in it did not
+  perform, on MFA enrolment, `schedule-deletion` or `transfer-ownership`. It is not consumed on use,
+  so within its lifetime the signed-in session passes that re-proof repeatedly; consuming it on a
+  destructive use is a further contract change that has not been made.
 - The re-proof failure counter is shared by MFA enrolment, `schedule-deletion` and
   `transfer-ownership`, so a holder of a token can lock the owner out of those re-proofs. This is
   by design.

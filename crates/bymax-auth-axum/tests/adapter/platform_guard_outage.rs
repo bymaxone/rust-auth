@@ -24,6 +24,7 @@ fn dashboard_token() -> String {
         iat: 1_700_000_000,
         exp: 4_700_000_000,
         epoch: 0,
+        sid: None,
     };
     let key = bymax_auth_jwt::HsKey::from_bytes(common::JWT_SECRET.as_bytes());
     bymax_auth_jwt::sign(&claims, &key).unwrap_or_default()

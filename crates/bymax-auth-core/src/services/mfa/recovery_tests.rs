@@ -23,7 +23,7 @@ async fn stored_dashboard_codes(h: &Harness, uid: &str) -> Vec<String> {
 async fn enrol_dashboard(h: &Harness, uid: &str) -> Option<(String, String)> {
     let mfa = h.engine.mfa()?;
     let setup = mfa
-        .setup(uid, MfaContext::Dashboard, Some("t1"), Some(PASSWORD))
+        .setup(uid, MfaContext::Dashboard, Some("t1"), Some(PASSWORD), None)
         .await
         .ok()?;
     let enabled = mfa
@@ -115,7 +115,7 @@ async fn enrol_platform(h: &Harness) -> Option<(String, String)> {
     });
     let mfa = h.engine.mfa()?;
     let setup = mfa
-        .setup("p-spend", MfaContext::Platform, None, Some(PASSWORD))
+        .setup("p-spend", MfaContext::Platform, None, Some(PASSWORD), None)
         .await
         .ok()?;
     let enabled = mfa

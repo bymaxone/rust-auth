@@ -436,6 +436,25 @@ pub trait SessionStore: Send + Sync {
         ttl_secs: u64,
     ) -> Result<(), AuthError>;
 
+    /// [`Self::create_session`], and in the same atomic step the recent-authentication mark of the
+    /// session it creates: `ra:{subject_hash}:{detail.family_id}` with `recent_auth_ttl_secs` as
+    /// its lifetime. Either both are written or neither, so a login never leaves a session without
+    /// the proof it earned, nor a proof without its session.
+    ///
+    /// Called only where a dashboard session is BORN from a credential the caller presented, never
+    /// on a refresh rotation, which proves possession of a token rather than of a credential: a
+    /// stolen session can be rotated indefinitely and never make the mark fresh again.
+    /// `detail.family_id` must be the refresh family id the session's access token carries as `sid`.
+    async fn create_session_with_recent_auth(
+        &self,
+        kind: SessionKind,
+        subject_hash: &str,
+        token_hash: &str,
+        detail: &SessionRecord,
+        ttl_secs: u64,
+        recent_auth_ttl_secs: u64,
+    ) -> Result<(), AuthError>;
+
     /// Atomic rotation with a grace window, driven by a [`SessionRotation`] bundle.
     async fn rotate(
         &self,
@@ -675,24 +694,15 @@ pub trait SessionStore: Send + Sync {
     /// above the new value remain valid.
     async fn bump_epoch(&self, kind: SessionKind, subject_hash: &str) -> Result<u64, AuthError>;
 
-    /// Record that the account completed a REAL authentication, at `ra:{user_id_hash}` with a
-    /// short TTL. Presence is the whole meaning; the value carries nothing.
+    /// Whether the session `sid` earned a recent real authentication, at `ra:{user_id_hash}:{sid}`.
     ///
-    /// Called only where a session is BORN — never on a refresh rotation, which proves
-    /// possession of a token rather than of a credential. That asymmetry is what the marker is
-    /// for: a stolen session can be rotated indefinitely and never make the mark fresh again.
-    /// `user_id_hash` is already plane-bound — it is `hmac_sha256("{plane}:{userId}")`, held
-    /// byte-identical with nest-auth's `recentAuthKey` — so this takes no `SessionKind`. It
-    /// briefly did, and the parameter was ignored by the Redis store while the in-memory double
-    /// keyed on it: two implementations disagreeing about the keyspace, which is the shape of
-    /// bug where a test passes against the double and the real store behaves otherwise.
-    async fn mark_recent_auth(&self, user_id_hash: &str, ttl: u64) -> Result<(), AuthError>;
-
-    /// Whether the account authenticated within the marker's TTL.
+    /// `user_id_hash` is the plane-bound `hmac_sha256(hmacKey, userSubject)` and `sid` the refresh
+    /// family id the session's access token carries, appended as it is. The mark belongs to the
+    /// session that earned it, so another session of the same account never reads it.
     ///
     /// Read, never consumed: a user who signs in and then makes two security changes in a row
     /// should not have the second refused because the first spent the proof.
-    async fn has_recent_auth(&self, user_id_hash: &str) -> Result<bool, AuthError>;
+    async fn has_recent_auth(&self, user_id_hash: &str, sid: &str) -> Result<bool, AuthError>;
 }
 
 /// One-time-password records for email verification and OTP-based password reset.

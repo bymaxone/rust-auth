@@ -3,7 +3,7 @@
 //! An account with a password proves it again, counted by the `reauthFailureCounter` of
 //! `userSubjectDerivedKeys` (`lf:{hmac_sha256(hmacKey, 'reauth:{userSubject}')}`), so a stolen
 //! access token cannot guess the password here without limit. An account with no password (one
-//! provisioned through OAuth) proves a recent real sign-in instead, by the `recentAuthMarker`. Every door that asks for a
+//! provisioned through OAuth) proves a recent real sign-in instead, by the `recentAuthMarker` of its OWN session (`ra:…:{sid}`). Every door that asks for a
 //! re-proof goes through here, so there is one derivation of each key to be right.
 
 use bymax_auth_crypto::mac::hmac_sha256;
@@ -11,7 +11,7 @@ use bymax_auth_types::{AuthError, MfaContext};
 
 use crate::services::brute_force::BruteForceService;
 use crate::services::password::PasswordService;
-use crate::services::{to_hex, user_subject, user_subject_hash};
+use crate::services::{session_id, to_hex, user_subject, user_subject_hash};
 use crate::traits::SessionStore;
 
 /// The collaborators a re-proof reads and counts with.
@@ -38,6 +38,10 @@ pub(crate) struct ProvingAccount<'a> {
     pub(crate) user_id: &'a str,
     /// The stored password hash, `None` for an account with no local password.
     pub(crate) password_hash: Option<&'a str>,
+    /// The caller's session: the `sid` claim of the access token it presented. The recent-sign-in
+    /// proof of an account with no password is the caller's OWN, so a token with no usable `sid`
+    /// earns none.
+    pub(crate) sid: Option<&'a str>,
 }
 
 impl Reproof<'_> {
@@ -76,10 +80,16 @@ impl Reproof<'_> {
             tenant_id,
             user_id,
             password_hash,
+            sid,
         } = account;
         let Some(hash) = password_hash else {
             let marker = user_subject_hash(self.identifier_key, plane, tenant_id, user_id);
-            if !self.session_store.has_recent_auth(&marker).await? {
+            // A missing or non-conforming `sid` names no session, so no key is read for it.
+            let recent = match sid.and_then(session_id) {
+                Some(sid) => self.session_store.has_recent_auth(&marker, sid).await?,
+                None => false,
+            };
+            if !recent {
                 tracing::warn!(%user_id, "reauthenticate: no recent authentication");
                 return Err(AuthError::ReauthenticationRequired);
             }

@@ -123,7 +123,7 @@ pub(super) fn seed_admin(h: &Harness) {
 pub(super) async fn enrol_admin(h: &Harness) -> Option<String> {
     let mfa = h.engine.mfa()?;
     let setup = mfa
-        .setup("p1", MfaContext::Platform, None, Some(PASSWORD))
+        .setup("p1", MfaContext::Platform, None, Some(PASSWORD), None)
         .await
         .ok()?;
     let enabled = mfa
@@ -208,7 +208,13 @@ async fn a_dashboard_users_mfa_hook_still_says_dashboard_and_names_the_tenant() 
     let Some(uid) = register(&h.engine, "d@example.com").await else { return };
     let Some(mfa) = h.engine.mfa() else { return };
     let Ok(setup) = mfa
-        .setup(&uid, MfaContext::Dashboard, Some("t1"), Some(PASSWORD))
+        .setup(
+            &uid,
+            MfaContext::Dashboard,
+            Some("t1"),
+            Some(PASSWORD),
+            None,
+        )
         .await
     else {
         return;
@@ -266,7 +272,13 @@ async fn a_dashboard_user_who_clears_the_challenge_gets_a_last_login_and_the_log
     let Some(uid) = register(&h.engine, "c@example.com").await else { return };
     let Some(mfa) = h.engine.mfa() else { return };
     let Ok(setup) = mfa
-        .setup(&uid, MfaContext::Dashboard, Some("t1"), Some(PASSWORD))
+        .setup(
+            &uid,
+            MfaContext::Dashboard,
+            Some("t1"),
+            Some(PASSWORD),
+            None,
+        )
         .await
     else {
         return;
@@ -323,7 +335,7 @@ async fn last_login_moved(h: &Harness, uid: &str) -> bool {
 pub(super) async fn enrol_user(h: &Harness, uid: &str) -> Option<String> {
     let mfa = h.engine.mfa()?;
     let setup = mfa
-        .setup(uid, MfaContext::Dashboard, Some("t1"), Some(PASSWORD))
+        .setup(uid, MfaContext::Dashboard, Some("t1"), Some(PASSWORD), None)
         .await
         .ok()?;
     let enabled = mfa

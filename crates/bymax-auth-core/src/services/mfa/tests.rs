@@ -263,7 +263,13 @@ async fn full_dashboard_lifecycle() {
     let Some(mfa) = h.engine.mfa() else { return };
 
     let Ok(setup) = mfa
-        .setup(&uid, MfaContext::Dashboard, Some("t1"), Some(PASSWORD))
+        .setup(
+            &uid,
+            MfaContext::Dashboard,
+            Some("t1"),
+            Some(PASSWORD),
+            None,
+        )
         .await
     else {
         return;
@@ -280,7 +286,13 @@ async fn full_dashboard_lifecycle() {
 
     // Idempotent setup returns the same material (fast-path).
     let Ok(again) = mfa
-        .setup(&uid, MfaContext::Dashboard, Some("t1"), Some(PASSWORD))
+        .setup(
+            &uid,
+            MfaContext::Dashboard,
+            Some("t1"),
+            Some(PASSWORD),
+            None,
+        )
         .await
     else {
         return;
@@ -313,8 +325,14 @@ async fn full_dashboard_lifecycle() {
     );
     // No read path re-exposes the secret: a further setup is rejected, never re-returning it.
     assert!(matches!(
-        mfa.setup(&uid, MfaContext::Dashboard, Some("t1"), Some(PASSWORD))
-            .await,
+        mfa.setup(
+            &uid,
+            MfaContext::Dashboard,
+            Some("t1"),
+            Some(PASSWORD),
+            None
+        )
+        .await,
         Err(AuthError::MfaAlreadyEnabled)
     ));
 
@@ -536,7 +554,13 @@ async fn every_mfa_state_change_alerts_the_account_owner() {
     };
     let Some(mfa) = h.engine.mfa() else { return };
     let Ok(setup) = mfa
-        .setup(&uid, MfaContext::Dashboard, Some("t1"), Some(PASSWORD))
+        .setup(
+            &uid,
+            MfaContext::Dashboard,
+            Some("t1"),
+            Some(PASSWORD),
+            None,
+        )
         .await
     else {
         return;
@@ -624,7 +648,13 @@ async fn a_challenge_registers_its_session_with_the_session_service() {
     };
     let Some(mfa) = h.engine.mfa() else { return };
     let Ok(setup) = mfa
-        .setup(&uid, MfaContext::Dashboard, Some("t1"), Some(PASSWORD))
+        .setup(
+            &uid,
+            MfaContext::Dashboard,
+            Some("t1"),
+            Some(PASSWORD),
+            None,
+        )
         .await
     else {
         return;
@@ -676,7 +706,13 @@ async fn anti_replay_rejects_a_code_already_used_on_enable() {
     };
     let Some(mfa) = h.engine.mfa() else { return };
     let Ok(setup) = mfa
-        .setup(&uid, MfaContext::Dashboard, Some("t1"), Some(PASSWORD))
+        .setup(
+            &uid,
+            MfaContext::Dashboard,
+            Some("t1"),
+            Some(PASSWORD),
+            None,
+        )
         .await
     else {
         return;
@@ -713,19 +749,25 @@ async fn setup_rejects_already_enabled_and_a_platform_context_without_a_repo() {
     let Some(mfa) = h.engine.mfa() else { return };
     // No platform repository is wired, so a platform context fails fast.
     assert!(matches!(
-        mfa.setup(&uid, MfaContext::Platform, None, Some(PASSWORD))
+        mfa.setup(&uid, MfaContext::Platform, None, Some(PASSWORD), None)
             .await,
         Err(AuthError::MfaNotEnabled)
     ));
     // An unknown user is also `MfaNotEnabled`.
     assert!(matches!(
-        mfa.setup("ghost", MfaContext::Dashboard, Some("t1"), None)
+        mfa.setup("ghost", MfaContext::Dashboard, Some("t1"), None, None)
             .await,
         Err(AuthError::MfaNotEnabled)
     ));
     // Enable, then a second setup is rejected.
     let Ok(setup) = mfa
-        .setup(&uid, MfaContext::Dashboard, Some("t1"), Some(PASSWORD))
+        .setup(
+            &uid,
+            MfaContext::Dashboard,
+            Some("t1"),
+            Some(PASSWORD),
+            None,
+        )
         .await
     else {
         return;
@@ -743,8 +785,14 @@ async fn setup_rejects_already_enabled_and_a_platform_context_without_a_repo() {
         .is_ok()
     );
     assert!(matches!(
-        mfa.setup(&uid, MfaContext::Dashboard, Some("t1"), Some(PASSWORD))
-            .await,
+        mfa.setup(
+            &uid,
+            MfaContext::Dashboard,
+            Some("t1"),
+            Some(PASSWORD),
+            None
+        )
+        .await,
         Err(AuthError::MfaAlreadyEnabled)
     ));
     assert!(matches!(
@@ -782,7 +830,13 @@ async fn enable_requires_a_pending_record_and_rejects_a_wrong_code() {
         Err(AuthError::MfaSetupRequired)
     ));
     let Ok(setup) = mfa
-        .setup(&uid, MfaContext::Dashboard, Some("t1"), Some(PASSWORD))
+        .setup(
+            &uid,
+            MfaContext::Dashboard,
+            Some("t1"),
+            Some(PASSWORD),
+            None,
+        )
         .await
     else {
         return;
@@ -904,7 +958,13 @@ async fn challenge_locks_out_after_repeated_wrong_codes() {
     };
     let Some(mfa) = h.engine.mfa() else { return };
     let Ok(setup) = mfa
-        .setup(&uid, MfaContext::Dashboard, Some("t1"), Some(PASSWORD))
+        .setup(
+            &uid,
+            MfaContext::Dashboard,
+            Some("t1"),
+            Some(PASSWORD),
+            None,
+        )
         .await
     else {
         return;
@@ -941,7 +1001,7 @@ async fn challenge_locks_out_after_repeated_wrong_codes() {
         return;
     };
     let Ok(other_setup) = mfa
-        .setup(&other, MfaContext::Dashboard, Some("t1"), None)
+        .setup(&other, MfaContext::Dashboard, Some("t1"), None, None)
         .await
     else {
         return;
@@ -989,13 +1049,13 @@ async fn two_users_setting_up_never_share_a_pending_record() {
     let Some(mfa) = h.engine.mfa() else { return };
 
     let Ok(a) = mfa
-        .setup(&first, MfaContext::Dashboard, Some("t1"), None)
+        .setup(&first, MfaContext::Dashboard, Some("t1"), None, None)
         .await
     else {
         return;
     };
     let Ok(b) = mfa
-        .setup(&second, MfaContext::Dashboard, Some("t1"), None)
+        .setup(&second, MfaContext::Dashboard, Some("t1"), None, None)
         .await
     else {
         return;
@@ -1052,7 +1112,13 @@ async fn disable_is_totp_only_and_regenerate_keeps_sessions() {
         Err(AuthError::MfaNotEnabled)
     ));
     let Ok(setup) = mfa
-        .setup(&uid, MfaContext::Dashboard, Some("t1"), Some(PASSWORD))
+        .setup(
+            &uid,
+            MfaContext::Dashboard,
+            Some("t1"),
+            Some(PASSWORD),
+            None,
+        )
         .await
     else {
         return;
@@ -1128,7 +1194,13 @@ async fn disable_locks_out_after_repeated_wrong_codes() {
     };
     let Some(mfa) = h.engine.mfa() else { return };
     let Ok(setup) = mfa
-        .setup(&uid, MfaContext::Dashboard, Some("t1"), Some(PASSWORD))
+        .setup(
+            &uid,
+            MfaContext::Dashboard,
+            Some("t1"),
+            Some(PASSWORD),
+            None,
+        )
         .await
     else {
         return;
@@ -1179,7 +1251,7 @@ async fn disable_locks_out_after_repeated_wrong_codes() {
         return;
     };
     let Ok(other_setup) = mfa
-        .setup(&other, MfaContext::Dashboard, Some("t1"), None)
+        .setup(&other, MfaContext::Dashboard, Some("t1"), None, None)
         .await
     else {
         return;
@@ -1235,7 +1307,13 @@ async fn the_platform_recovery_splice_abandons_when_mfa_vanished_under_the_lock(
     h.platform.insert(admin);
     let Some(mfa) = h.engine.mfa() else { return };
     let Ok(setup) = mfa
-        .setup("p-abandon", MfaContext::Platform, None, Some(PASSWORD))
+        .setup(
+            "p-abandon",
+            MfaContext::Platform,
+            None,
+            Some(PASSWORD),
+            None,
+        )
         .await
     else {
         return;
@@ -1301,7 +1379,7 @@ async fn platform_context_routes_to_the_platform_repository() {
     h.platform.insert(admin);
     let Some(mfa) = h.engine.mfa() else { return };
     let Ok(setup) = mfa
-        .setup("p1", MfaContext::Platform, None, Some(PASSWORD))
+        .setup("p1", MfaContext::Platform, None, Some(PASSWORD), None)
         .await
     else {
         return;
@@ -1379,7 +1457,7 @@ async fn platform_challenge_exchanges_a_temp_token_for_a_full_platform_session()
     // Enable MFA on the platform admin so a challenge has a secret to verify against.
     let base = now_secs();
     let Ok(setup) = mfa
-        .setup("p1", MfaContext::Platform, None, Some(PASSWORD))
+        .setup("p1", MfaContext::Platform, None, Some(PASSWORD), None)
         .await
     else {
         return;
@@ -1490,7 +1568,7 @@ async fn platform_challenge_rejects_a_wrong_code_and_keeps_the_temp_token_alive(
     let Some(mfa) = h.engine.mfa() else { return };
     let base = now_secs();
     let Ok(setup) = mfa
-        .setup("p2", MfaContext::Platform, None, Some(PASSWORD))
+        .setup("p2", MfaContext::Platform, None, Some(PASSWORD), None)
         .await
     else {
         return;
@@ -1649,7 +1727,7 @@ async fn a_transition_is_refused_while_another_one_holds_the_lock() {
     // `setup` writes only the pending record, so it does not contend; `verify_and_enable` is
     // the first call that rewrites the account, and it is the one refused.
     let Ok(setup) = mfa
-        .setup(&uid, MfaContext::Dashboard, Some("t1"), None)
+        .setup(&uid, MfaContext::Dashboard, Some("t1"), None, Some(SID))
         .await
     else {
         return;
@@ -1754,7 +1832,7 @@ async fn the_transition_releases_with_the_token_it_acquired_with() {
     // arrange one — without it `setup` refuses and the case below silently becomes a no-op.
     plant_recent_auth(&mfa, &uid).await;
     let Ok(setup) = mfa
-        .setup(&uid, MfaContext::Dashboard, Some("t1"), None)
+        .setup(&uid, MfaContext::Dashboard, Some("t1"), None, Some(SID))
         .await
     else {
         return;
@@ -1822,7 +1900,13 @@ async fn the_recovery_splice_abandons_when_mfa_vanished_under_the_lock() {
     let Some(mfa) = h.engine.mfa() else { return };
     let base = now_secs();
     let Ok(setup) = mfa
-        .setup(&uid, MfaContext::Dashboard, Some("t1"), Some(PASSWORD))
+        .setup(
+            &uid,
+            MfaContext::Dashboard,
+            Some("t1"),
+            Some(PASSWORD),
+            None,
+        )
         .await
     else {
         return;
@@ -1895,7 +1979,7 @@ async fn a_transition_abandons_when_mfa_is_disabled_under_the_lock() {
     // Enrol first: the account really does have MFA when the caller starts.
     let base = now_secs();
     let Ok(setup) = mfa
-        .setup(&uid, MfaContext::Dashboard, Some("t1"), None)
+        .setup(&uid, MfaContext::Dashboard, Some("t1"), None, Some(SID))
         .await
     else {
         return;
@@ -2440,8 +2524,27 @@ async fn plant_recent_auth(service: &MfaService, user_id: &str) {
         &[9u8; 64],
         format!("dashboard:{}:{TENANT}:{user_id}", TENANT.len()).as_bytes(),
     ));
-    let _ = service.session_store.mark_recent_auth(&hash, 300).await;
+    let record = crate::traits::SessionRecord {
+        user_id: user_id.to_owned(),
+        tenant_id: Some(TENANT.to_owned()),
+        role: "USER".to_owned(),
+        device: String::new(),
+        ip: String::new(),
+        created_at: OffsetDateTime::UNIX_EPOCH,
+        mfa_enabled: false,
+        mfa_verified: false,
+        family_id: SID.to_owned(),
+        family_created_at: None,
+    };
+    let planted = service
+        .session_store
+        .create_session_with_recent_auth(SessionKind::Dashboard, &hash, "th", &record, 600, 300)
+        .await;
+    assert!(planted.is_ok());
 }
+
+/// The session the arranged sign-in belongs to: the `sid` claim of the caller's token.
+const SID: &str = "11111111-2222-4333-8444-555555555555";
 
 /// Seed a fresh user (not MFA-enabled) and return its id.
 async fn seed_user(users: &InMemoryUserRepository, email: &str) -> Option<String> {
@@ -2509,7 +2612,7 @@ async fn setup_returns_the_winner_record_after_a_lost_nx_race() {
     let svc = service_over(store, users);
     plant_recent_auth(&svc, &uid).await;
     let result = svc
-        .setup(&uid, MfaContext::Dashboard, Some("t1"), None)
+        .setup(&uid, MfaContext::Dashboard, Some("t1"), None, Some(SID))
         .await;
     assert!(matches!(&result, Ok(r) if r.recovery_codes == ["WINNER-0000-CODE"]));
 }
@@ -2529,7 +2632,7 @@ async fn setup_errors_when_the_record_vanishes_after_a_lost_race() {
     let svc = service_over(store, users);
     plant_recent_auth(&svc, &uid).await;
     assert!(matches!(
-        svc.setup(&uid, MfaContext::Dashboard, Some("t1"), None)
+        svc.setup(&uid, MfaContext::Dashboard, Some("t1"), None, Some(SID))
             .await,
         Err(AuthError::Internal(_))
     ));
@@ -2553,7 +2656,7 @@ async fn setup_fast_path_rejects_a_corrupt_or_undecryptable_record() {
     plant_recent_auth(&garbage_svc, &uid).await;
     assert!(matches!(
         garbage_svc
-            .setup(&uid, MfaContext::Dashboard, Some("t1"), None)
+            .setup(&uid, MfaContext::Dashboard, Some("t1"), None, Some(SID))
             .await,
         Err(AuthError::Internal(_))
     ));
@@ -2573,7 +2676,7 @@ async fn setup_fast_path_rejects_a_corrupt_or_undecryptable_record() {
     plant_recent_auth(&undecryptable_svc, &uid).await;
     assert!(matches!(
         undecryptable_svc
-            .setup(&uid, MfaContext::Dashboard, Some("t1"), None)
+            .setup(&uid, MfaContext::Dashboard, Some("t1"), None, Some(SID))
             .await,
         Err(AuthError::Internal(_))
     ));
@@ -2590,7 +2693,7 @@ async fn setup_fast_path_rejects_a_corrupt_or_undecryptable_record() {
     plant_recent_auth(&codes_undecryptable_svc, &uid).await;
     assert!(matches!(
         codes_undecryptable_svc
-            .setup(&uid, MfaContext::Dashboard, Some("t1"), None)
+            .setup(&uid, MfaContext::Dashboard, Some("t1"), None, Some(SID))
             .await,
         Err(AuthError::Internal(_))
     ));
@@ -2609,7 +2712,7 @@ async fn setup_fast_path_rejects_a_corrupt_or_undecryptable_record() {
     plant_recent_auth(&codes_undecodable_svc, &uid).await;
     assert!(matches!(
         codes_undecodable_svc
-            .setup(&uid, MfaContext::Dashboard, Some("t1"), None)
+            .setup(&uid, MfaContext::Dashboard, Some("t1"), None, Some(SID))
             .await,
         Err(AuthError::Internal(_))
     ));
@@ -2670,7 +2773,13 @@ async fn challenge_rejects_a_wrong_six_digit_totp_code() {
     let Some(uid) = register(&h.engine, "wrong-totp@example.com").await else { return };
     let Some(mfa) = h.engine.mfa() else { return };
     let Ok(setup) = mfa
-        .setup(&uid, MfaContext::Dashboard, Some("t1"), Some(PASSWORD))
+        .setup(
+            &uid,
+            MfaContext::Dashboard,
+            Some("t1"),
+            Some(PASSWORD),
+            None,
+        )
         .await
     else {
         return;
@@ -2703,7 +2812,13 @@ async fn challenge_succeeds_with_session_tracking_disabled() {
     let Some(uid) = register(&h.engine, "nosess@example.com").await else { return };
     let Some(mfa) = h.engine.mfa() else { return };
     let Ok(setup) = mfa
-        .setup(&uid, MfaContext::Dashboard, Some("t1"), Some(PASSWORD))
+        .setup(
+            &uid,
+            MfaContext::Dashboard,
+            Some("t1"),
+            Some(PASSWORD),
+            None,
+        )
         .await
     else {
         return;
@@ -2736,7 +2851,13 @@ async fn challenge_collapses_an_undecryptable_secret_to_an_opaque_error() {
     let Some(uid) = register(&h.engine, "decrypt@example.com").await else { return };
     let Some(mfa) = h.engine.mfa() else { return };
     let Ok(setup) = mfa
-        .setup(&uid, MfaContext::Dashboard, Some("t1"), Some(PASSWORD))
+        .setup(
+            &uid,
+            MfaContext::Dashboard,
+            Some("t1"),
+            Some(PASSWORD),
+            None,
+        )
         .await
     else {
         return;
@@ -2868,7 +2989,13 @@ async fn concurrent_distinct_valid_codes_issue_one_session() {
     {
         let Some(mfa) = h.engine.mfa() else { return };
         let Ok(setup) = mfa
-            .setup(&uid, MfaContext::Dashboard, Some("t1"), Some(PASSWORD))
+            .setup(
+                &uid,
+                MfaContext::Dashboard,
+                Some("t1"),
+                Some(PASSWORD),
+                None,
+            )
             .await
         else {
             return;
@@ -3131,6 +3258,14 @@ fn the_mfa_subject_preimages_match_the_shared_contract() {
             .and_then(serde_json::Value::as_str),
         Some("{ep|pep}:{hmac_sha256(hmacKey, userSubject)}"),
         "the token epoch drifted from the shared contract"
+    );
+    // The mark names the session that earned it: the sid is appended as it is.
+    assert_eq!(
+        derived
+            .get("recentAuthMarker")
+            .and_then(serde_json::Value::as_str),
+        Some("ra:{hmac_sha256(hmacKey, userSubject)}:{sid}"),
+        "the recent-authentication mark drifted from the shared contract"
     );
 
     // …and the session keyspace derives that suffix through the SAME function the MFA keyspace
@@ -3532,7 +3667,13 @@ async fn an_mfa_state_change_kills_the_outstanding_access_tokens() {
     // Enable MFA. Distinct TOTP steps per verification, as in the lifecycle test.
     let Some(mfa) = h.engine.mfa() else { return };
     let Ok(setup) = mfa
-        .setup(&uid, MfaContext::Dashboard, Some("t1"), Some(PASSWORD))
+        .setup(
+            &uid,
+            MfaContext::Dashboard,
+            Some("t1"),
+            Some(PASSWORD),
+            None,
+        )
         .await
     else {
         return;
@@ -3620,7 +3761,13 @@ async fn a_spent_recovery_code_is_written_out_of_the_right_tenants_row() {
     };
     let Some(mfa) = h.engine.mfa() else { return };
     let Ok(setup) = mfa
-        .setup(&uid, MfaContext::Dashboard, Some(TENANT), Some(PASSWORD))
+        .setup(
+            &uid,
+            MfaContext::Dashboard,
+            Some(TENANT),
+            Some(PASSWORD),
+            None,
+        )
         .await
     else {
         return;
@@ -3689,7 +3836,13 @@ async fn a_challenge_token_cannot_reach_an_account_in_another_tenant() {
     };
     let Some(mfa) = h.engine.mfa() else { return };
     let Ok(setup) = mfa
-        .setup(&uid, MfaContext::Dashboard, Some(TENANT), Some(PASSWORD))
+        .setup(
+            &uid,
+            MfaContext::Dashboard,
+            Some(TENANT),
+            Some(PASSWORD),
+            None,
+        )
         .await
     else {
         return;
@@ -4227,7 +4380,7 @@ async fn enrolment_re_authenticates_against_the_account_password() {
     // login returns, so an attacker holding a stolen token learns nothing new.
     for attempt in [None, Some("wrong")] {
         let refused = service
-            .setup(&user.id, MfaContext::Dashboard, Some("t1"), attempt)
+            .setup(&user.id, MfaContext::Dashboard, Some("t1"), attempt, None)
             .await;
         assert!(
             matches!(refused, Err(AuthError::InvalidCredentials)),
@@ -4237,7 +4390,13 @@ async fn enrolment_re_authenticates_against_the_account_password() {
 
     // The correct password enrols.
     let allowed = service
-        .setup(&user.id, MfaContext::Dashboard, Some("t1"), Some(password))
+        .setup(
+            &user.id,
+            MfaContext::Dashboard,
+            Some("t1"),
+            Some(password),
+            None,
+        )
         .await;
     assert!(
         allowed.is_ok(),
@@ -4268,17 +4427,33 @@ async fn enrolment_on_a_passwordless_account_takes_a_recent_authentication_inste
 
     // No marker: the caller holds a token but has not proved it authenticated recently.
     let refused = service
-        .setup(&uid, MfaContext::Dashboard, Some("t1"), None)
+        .setup(&uid, MfaContext::Dashboard, Some("t1"), None, None)
         .await;
     assert!(
         matches!(refused, Err(AuthError::ReauthenticationRequired)),
         "a stolen token alone must not enrol a factor, got {refused:?}"
     );
 
-    // …and after a real sign-in, the same call proceeds — the gate is a delay, not a wall.
+    // …and after a real sign-in, the proof is the caller's OWN: a token with no `sid`, another
+    // session's, or one that is not the claim's form earns nothing, however fresh the mark is.
     plant_recent_auth(&service, &uid).await;
+    for sid in [
+        None,
+        Some("22222222-2222-4333-8444-555555555555"),
+        Some("not-a-session-id"),
+        Some(""),
+    ] {
+        let refused = service
+            .setup(&uid, MfaContext::Dashboard, Some("t1"), None, sid)
+            .await;
+        assert!(
+            matches!(refused, Err(AuthError::ReauthenticationRequired)),
+            "sid {sid:?} must not ride another session's sign-in, got {refused:?}"
+        );
+    }
+    // The same call from the session that signed in proceeds: the gate is a delay, not a wall.
     let enrolled = service
-        .setup(&uid, MfaContext::Dashboard, Some("t1"), None)
+        .setup(&uid, MfaContext::Dashboard, Some("t1"), None, Some(SID))
         .await;
     assert!(
         enrolled.is_ok(),
@@ -4312,7 +4487,7 @@ async fn the_recent_auth_marker_is_derived_per_plane() {
     assert!(
         !service
             .session_store
-            .has_recent_auth(&platform_marker)
+            .has_recent_auth(&platform_marker, SID)
             .await
             .unwrap_or(true),
         "a dashboard authentication must not answer for the platform plane"
@@ -4341,7 +4516,7 @@ async fn a_rotation_cannot_refresh_the_recent_authentication_proof() {
         assert!(
             service
                 .session_store
-                .has_recent_auth(&hash)
+                .has_recent_auth(&hash, SID)
                 .await
                 .unwrap_or(false),
             "reading the proof must not spend it"
@@ -4529,7 +4704,13 @@ async fn reset_mfa_removes_the_factor_without_a_code_and_tells_the_owner() {
     };
     let Some(mfa) = h.engine.mfa() else { return };
     let Ok(setup) = mfa
-        .setup(&uid, MfaContext::Dashboard, Some("t1"), Some(PASSWORD))
+        .setup(
+            &uid,
+            MfaContext::Dashboard,
+            Some("t1"),
+            Some(PASSWORD),
+            None,
+        )
         .await
     else {
         return;

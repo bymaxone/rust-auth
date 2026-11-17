@@ -320,6 +320,7 @@ mod tests {
             iat: 10,
             exp: 20,
             epoch: 0,
+            sid: None,
         };
         assert_eq!(JwtClaims::iat(&dashboard), 10);
         assert_eq!(JwtClaims::exp(&dashboard), 20);
@@ -336,6 +337,7 @@ mod tests {
             iat: 11,
             exp: 21,
             epoch: 0,
+            sid: None,
         };
         assert_eq!(JwtClaims::iat(&platform), 11);
         assert_eq!(JwtClaims::exp(&platform), 21);

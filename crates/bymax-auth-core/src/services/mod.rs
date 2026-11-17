@@ -59,6 +59,8 @@ pub mod password;
 pub mod platform;
 mod rate_limit;
 mod reauthentication;
+#[cfg(test)]
+mod recent_auth_tests;
 pub mod session;
 mod tenant_binding;
 pub mod token_manager;
@@ -537,4 +539,19 @@ mod tests {
         }
         assert_eq!(error_chain(&error).split(": ").count(), ERROR_CHAIN_DEPTH);
     }
+}
+
+/// The session id a token's `sid` claim names, or `None` when `candidate` is not the form the
+/// claim is defined for (`sessionClaim` in the shared contract): 36 characters, lowercase
+/// hexadecimal and hyphens in 8-4-4-4-12. A missing or non-conforming `sid` reads as absent, and
+/// an absent one fails closed for the passwordless-account gate.
+pub(crate) fn session_id(candidate: &str) -> Option<&str> {
+    let groups = [8, 4, 4, 4, 12];
+    let mut parts = candidate.split('-');
+    let well_formed = groups.iter().all(|&width| {
+        parts.next().is_some_and(|part| {
+            part.len() == width && part.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+        })
+    });
+    (well_formed && parts.next().is_none()).then_some(candidate)
 }

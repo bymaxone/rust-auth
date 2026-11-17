@@ -69,6 +69,7 @@ async fn setup(
             // A platform admin is cross-tenant by definition, so there is no tenant to scope by.
             None,
             dto.password.as_deref(),
+            user.0.sid.as_deref(),
         )
         .await
     {

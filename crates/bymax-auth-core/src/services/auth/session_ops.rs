@@ -891,6 +891,7 @@ mod tests {
             iat: now - 1_000,
             exp: now - 500,
             epoch: 0,
+            sid: None,
         };
         let Ok(token) = h.engine.tokens().issue_access(&expired) else { return };
         assert!(h.engine.logout(&token, "unknown-refresh").await.is_ok());
