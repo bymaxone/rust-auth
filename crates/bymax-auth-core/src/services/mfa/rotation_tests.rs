@@ -455,3 +455,44 @@ async fn a_failed_rewrite_does_not_fail_a_platform_totp_challenge_that_already_s
         "got {answered:?}"
     );
 }
+
+#[tokio::test]
+async fn the_failed_rewrite_log_carries_a_closed_cause_and_nothing_the_error_or_account_holds() {
+    let retired_bytes = [3u8; 32];
+    let retired_b64 = base64::engine::general_purpose::STANDARD.encode(retired_bytes);
+    let Some(h) = build_rotating(retired_b64) else { return };
+    let email = "dash-log-fields@example.com";
+    let Some((raw_secret, _codes, uid)) = retired_key_user(&h, email, retired_bytes).await else {
+        return;
+    };
+    let Some(temp) = login_temp_token(&h.engine, email).await else { return };
+    let users = h.users.clone();
+    h.stores
+        .run_on_next_mfa_lock(move || users.fail_next_reads(1));
+    let Some(mfa) = h.engine.mfa() else { return };
+    let code = raw_code(&raw_secret, now_secs());
+    let (events, capture) = crate::log_capture::capture_events();
+    let answered = mfa.challenge(&temp, &code, "1.2.3.4", "ua").await;
+    drop(capture);
+    assert!(answered.is_ok(), "got {answered:?}");
+    let event = "re-encrypting the secret under the current key failed";
+    assert!(events.contains_at(tracing::Level::WARN, event));
+    // Only this event is under test: other events of the challenge name the account on purpose.
+    let ours: Vec<String> = events
+        .iter()
+        .into_iter()
+        .filter(|captured| captured.rendered.contains(event))
+        .map(|captured| captured.rendered)
+        .collect();
+    assert_eq!(ours.len(), 1, "exactly one event: {ours:?}");
+    assert!(
+        ours[0].contains("cause=internal"),
+        "a closed cause: {ours:?}"
+    );
+    for forbidden in [uid.as_str(), email, "forced read failure", "1.2.3.4"] {
+        assert!(
+            !ours[0].contains(forbidden),
+            "the event carries {forbidden:?}: {ours:?}"
+        );
+    }
+}

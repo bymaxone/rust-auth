@@ -248,7 +248,7 @@ impl MfaService {
                     },
                 )
                 .await;
-            note_unmigrated_secret(&user_id, migrated);
+            note_unmigrated_secret(migrated);
         }
 
         // Mint a full session with `mfa_verified = true`.
@@ -414,7 +414,7 @@ impl MfaService {
                     ))
                 })
                 .await;
-            note_unmigrated_secret(&admin.id, migrated);
+            note_unmigrated_secret(migrated);
         }
 
         // Mint a full PLATFORM session with `mfa_verified = true`; it carries no tenant.
@@ -649,11 +649,19 @@ impl MfaService {
 /// What a failed rewrite of a secret stored under a retired key means for the challenge that
 /// triggered it: nothing. The user is already authenticated and the retired key still opens the
 /// secret, so a store that cannot answer costs the migration and nothing else; it is retried by
-/// the next challenge. The failure is logged for operators.
-fn note_unmigrated_secret(account: &str, migrated: Result<bool, AuthError>) {
+/// the next challenge. The failure is logged for operators with a closed cause and nothing else:
+/// no account, secret, ciphertext or store text, which an error's own message can carry.
+fn note_unmigrated_secret(migrated: Result<bool, AuthError>) {
     if let Err(error) = migrated {
-        let cause = crate::services::error_chain(&error);
-        tracing::warn!(%account, %cause, "mfa challenge: re-encrypting the secret under the current key failed; retried by the next challenge");
+        let cause = match error {
+            AuthError::ServiceUnavailable(_) => "store_unavailable",
+            AuthError::MfaStateConflict => "transition_locked",
+            _ => "internal",
+        };
+        tracing::warn!(
+            cause,
+            "mfa challenge: re-encrypting the secret under the current key failed; retried by the next challenge"
+        );
     }
 }
 
