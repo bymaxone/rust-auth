@@ -2145,13 +2145,10 @@ mod tests {
             "the session itself must still be issued, only the proof is withheld"
         );
         let Ok(unproven) = unproven else { return };
+        let sid = sid_of(&svc, &unproven).await;
+        let counted = store.has_recent_auth(&marker, &sid).await;
         assert!(
-            matches!(
-                store
-                    .has_recent_auth(&marker, &sid_of(&svc, &unproven).await)
-                    .await,
-                Ok(false)
-            ),
+            matches!(counted, Ok(false)),
             "a password-less issuance counted as a recent authentication"
         );
 
@@ -2168,12 +2165,12 @@ mod tests {
             .await;
         assert!(proved.is_ok(), "the proved login must succeed");
         let Ok(proved) = proved else { return };
-        assert!(matches!(
-            store
-                .has_recent_auth(&marker, &sid_of(&svc, &proved).await)
-                .await,
-            Ok(true)
-        ));
+        let sid = sid_of(&svc, &proved).await;
+        let planted = store.has_recent_auth(&marker, &sid).await;
+        assert!(
+            matches!(planted, Ok(true)),
+            "the proved login planted no mark"
+        );
     }
 
     #[tokio::test]
