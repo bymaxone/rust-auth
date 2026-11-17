@@ -607,7 +607,10 @@ Everything is configured through `AuthConfig`. Two ready-made profiles bundle se
 > with no way back — their authenticator simply stops matching. With it, a stored secret that
 > opened under a retired key is *re-encrypted under the current one* on the next successful
 > challenge, so the rotation drains on its own instead of requiring the retired key to stay
-> configured forever. `build()` holds each entry to the same bar as the current key (base64,
+> configured forever. The rewrite is best-effort after a TOTP challenge: the user is already
+> authenticated and the retired key still opens the secret, so a store that cannot answer the
+> rewrite is logged and costs only the migration (the next challenge retries it); it never fails
+> the challenge. `build()` holds each entry to the same bar as the current key (base64,
 > exactly 32 bytes, and never equal to the current key or to another entry), because a malformed
 > one would otherwise surface at a user's first challenge rather than at boot. Drop the entry
 > once your enrolled users have had time to authenticate at least once. `nest-auth` exposes the

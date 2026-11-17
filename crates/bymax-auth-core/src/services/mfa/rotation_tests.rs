@@ -396,3 +396,62 @@ async fn a_dashboard_recovery_splice_never_puts_back_a_replaced_secret() {
     };
     assert_eq!(stored, replacement);
 }
+
+/// The stored secret of the dashboard account `uid`, as a `Vec` of nothing when it cannot be read.
+async fn stored_dashboard_secret(h: &Harness, uid: &str) -> String {
+    match h.users.find_by_id(uid, None).await {
+        Ok(Some(user)) => user.mfa_secret.unwrap_or_default(),
+        _ => String::new(),
+    }
+}
+
+#[tokio::test]
+async fn a_failed_rewrite_does_not_fail_a_dashboard_totp_challenge_that_already_succeeded() {
+    // The challenge has authenticated the user and the retired key still opens the secret, so a
+    // store that cannot answer the rewrite costs the migration and nothing else.
+    let retired_bytes = [3u8; 32];
+    let retired_b64 = base64::engine::general_purpose::STANDARD.encode(retired_bytes);
+    let Some(h) = build_rotating(retired_b64) else { return };
+    let email = "dash-rewrite-fails@example.com";
+    let Some((raw_secret, _codes, uid)) = retired_key_user(&h, email, retired_bytes).await else {
+        return;
+    };
+    let before = stored_dashboard_secret(&h, &uid).await;
+    let Some(temp) = login_temp_token(&h.engine, email).await else { return };
+    let users = h.users.clone();
+    h.stores
+        .run_on_next_mfa_lock(move || users.fail_next_reads(1));
+    let Some(mfa) = h.engine.mfa() else { return };
+    let code = raw_code(&raw_secret, now_secs());
+    let answered = mfa.challenge(&temp, &code, "1.2.3.4", "ua").await;
+    assert!(
+        matches!(answered, Ok(LoginResultMfa::Dashboard(_))),
+        "got {answered:?}"
+    );
+    assert_eq!(
+        stored_dashboard_secret(&h, &uid).await,
+        before,
+        "the failed rewrite wrote nothing"
+    );
+}
+
+#[tokio::test]
+async fn a_failed_rewrite_does_not_fail_a_platform_totp_challenge_that_already_succeeded() {
+    let Some((h, retired_bytes)) = retired_platform_harness() else { return };
+    let Some((raw_secret, _codes, _admin)) =
+        retired_key_admin(&h, "p-rewrite-fails", retired_bytes)
+    else {
+        return;
+    };
+    let Some(temp) = platform_temp_token(&h, "p-rewrite-fails").await else { return };
+    let admins = h.platform.clone();
+    h.stores
+        .run_on_next_mfa_lock(move || admins.fail_next_reads(1));
+    let Some(mfa) = h.engine.mfa() else { return };
+    let code = raw_code(&raw_secret, now_secs());
+    let answered = mfa.challenge(&temp, &code, "1.2.3.4", "ua").await;
+    assert!(
+        matches!(answered, Ok(LoginResultMfa::Platform(_))),
+        "got {answered:?}"
+    );
+}
