@@ -65,11 +65,10 @@ impl RedisStoreError {
 }
 
 /// Whether a Redis error is an outage: any I/O failure (a timeout, a refused, reset or dropped
-/// connection, an unresolvable host) or a reply whose prefix says the server cannot serve now.
+/// connection, an unresolvable host; the client's timeout and dropped-connection predicates are
+/// subsets of it) or a reply whose prefix says the server cannot serve now.
 fn command_is_outage(error: &redis::RedisError) -> bool {
     error.is_io_error()
-        || error.is_timeout()
-        || error.is_connection_dropped()
         || error
             .code()
             .is_some_and(|code| OUTAGE_REPLY_PREFIXES.contains(&code))

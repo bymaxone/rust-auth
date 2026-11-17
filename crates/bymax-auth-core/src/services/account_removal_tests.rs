@@ -424,8 +424,14 @@ async fn every_bump_is_attempted_and_the_failure_carries_what_was_removed_and_wh
     let outcome = remove(&f, RemovalAuthority::Account).await;
     let carried = match outcome {
         Err(AccountRemovalError::BumpsFailed {
-            removed, failed, ..
-        }) => Some((removed, failed)),
+            removed,
+            failed,
+            outage,
+        }) => {
+            // The double refuses with a store that cannot answer, so the outage is reported.
+            assert!(outage);
+            Some((removed, failed))
+        }
         _ => None,
     };
     let all = vec![
