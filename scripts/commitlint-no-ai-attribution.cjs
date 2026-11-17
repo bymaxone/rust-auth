@@ -51,6 +51,18 @@ function messageOf(parsed) {
   return (end === -1 ? lines : lines.slice(0, end)).join('\n')
 }
 
+/** The longest run of blank-like or mark characters a message may carry before the rule reads it. */
+const PADDING = 300
+
+/**
+ * A run of blank-like characters (any space, a tab, a carriage return, a line break) and marks, in any mix, of at least
+ * `PADDING` characters. No commit message has one; padding does, and the engine that runs here backtracks: such a run
+ * after a credit verb took seconds to minutes, once per start of the run. It is refused instead of read, which leaves
+ * every pattern meaning what it means and hides nothing. GitHub reads the same patterns in a linear-time engine and is
+ * not affected.
+ */
+const PADDED = new RegExp(`[\\s>*_\`~.:|"'<@{}()[\\]\u201c\u201d\u2018\u2019-]{${PADDING},}`)
+
 /**
  * The text shown to the committer on one line: a control character or a line or paragraph separator becomes a space.
  *
@@ -85,7 +97,13 @@ function build(profile = 'strict') {
           throw new Error(
             "no-ai-attribution has an always form only: configure it as [2, 'always']",
           )
-        const match = pattern.exec(messageOf(parsed))
+        const text = messageOf(parsed)
+        if (PADDED.test(text))
+          return [
+            false,
+            `the message has a run of ${PADDING} or more blank or mark characters; padding stalls the check, shorten it`,
+          ]
+        const match = pattern.exec(text)
         if (match === null) return [true]
         const found = oneLine(match[0])
         return [
