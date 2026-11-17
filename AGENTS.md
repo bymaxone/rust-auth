@@ -113,7 +113,9 @@ Both are settled deliberately, and reopening either costs a round trip and chang
   referenced by the `@v1` alias on purpose: a fix has to land once and reach every repository, the
   tag is immutable and the alias moves only on a release, and pinning was measured to cost ~58
   dependency pull requests to propagate one change. Third-party actions are the opposite case and
-  **are** pinned by SHA.
+  **are** pinned by SHA. The one exception among the `bymaxone/.github` reusables is `agents-sync.yml`:
+  it is handed the sync App's private key, so a caller pins it to a release commit; do not propose
+  moving it back to `@v1`.
 
 **Safe path:** if you believe a settled decision is now wrong, say so as a question in the pull
 request rather than as a finding.
@@ -158,6 +160,8 @@ will hit on the other path — what the alternative did, what it costs in number
 constraint it supports, however it was obtained. What ages is the part that cannot recur for them:
 what a previous version of this code did, a version number, a registry state, a review round, a
 failure that has since been fixed. Flag those; keep the measurement.
+
+A test's title states only what its assertions establish; a title that names a behaviour no assertion checks is a finding.
 
 ### Size and layering
 
