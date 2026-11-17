@@ -653,15 +653,20 @@ impl MfaService {
 /// no account, secret, ciphertext or store text, which an error's own message can carry.
 fn note_unmigrated_secret(migrated: Result<bool, AuthError>) {
     if let Err(error) = migrated {
-        let cause = match error {
-            AuthError::ServiceUnavailable(_) => "store_unavailable",
-            AuthError::MfaStateConflict => "transition_locked",
-            _ => "internal",
-        };
+        let cause = unmigrated_cause(&error);
         tracing::warn!(
             cause,
             "mfa challenge: re-encrypting the secret under the current key failed; retried by the next challenge"
         );
+    }
+}
+
+/// The closed set of causes a failed rewrite is logged under.
+pub(super) fn unmigrated_cause(error: &AuthError) -> &'static str {
+    match error {
+        AuthError::ServiceUnavailable(_) => "store_unavailable",
+        AuthError::MfaStateConflict => "transition_locked",
+        _ => "internal",
     }
 }
 

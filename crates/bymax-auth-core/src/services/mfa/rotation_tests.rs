@@ -496,3 +496,18 @@ async fn the_failed_rewrite_log_carries_a_closed_cause_and_nothing_the_error_or_
         );
     }
 }
+
+#[test]
+fn a_failed_rewrite_is_logged_under_one_of_three_closed_causes() {
+    use super::challenge::unmigrated_cause;
+    let unavailable = bymax_auth_types::AuthError::ServiceUnavailable("store down".into());
+    assert_eq!(unmigrated_cause(&unavailable), "store_unavailable");
+    let conflict = bymax_auth_types::AuthError::MfaStateConflict;
+    assert_eq!(unmigrated_cause(&conflict), "transition_locked");
+    for other in [
+        bymax_auth_types::AuthError::Internal("defect".into()),
+        bymax_auth_types::AuthError::MfaNotEnabled,
+    ] {
+        assert_eq!(unmigrated_cause(&other), "internal");
+    }
+}
