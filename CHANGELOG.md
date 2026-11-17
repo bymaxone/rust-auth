@@ -2,11 +2,12 @@
 
 All notable changes to this project are documented in this file.
 
-The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
-and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
-The wire/contract surface (token shapes, cookie names, the error envelope) is
-treated as the public API for SemVer purposes — a breaking wire change is a major
-version bump.
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
+The version number carries no compatibility information while the API is not declared stable:
+breaking changes ship in minor and patch releases. The BREAKING note, on the entries that carry
+one, and its **Apply** instructions are the compatibility contract. The wire/contract surface
+(token shapes, cookie names, the error envelope) is the public API: a breaking change to it is
+marked BREAKING, never signalled by the number.
 
 ## [Unreleased]
 
