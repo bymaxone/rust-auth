@@ -179,10 +179,13 @@ mod tests {
 
     /// A listing of one fully described session and two with no detail record.
     fn three_entries() -> Vec<SessionEntry> {
-        let detail = match read_detail("a", Some(&valid("Firefox"))) {
-            DetailRead::Listed(detail) => Some(detail),
-            DetailRead::Excluded => None,
-        };
+        let detail = Some(SessionDetail {
+            session_hash: "a".to_owned(),
+            device: "Firefox".to_owned(),
+            ip: "1.2.3.4".to_owned(),
+            created_at: time::OffsetDateTime::UNIX_EPOCH,
+            last_activity_at: time::OffsetDateTime::UNIX_EPOCH,
+        });
         let entry = |hash: &str, detail| SessionEntry {
             session_hash: hash.to_owned(),
             detail,
