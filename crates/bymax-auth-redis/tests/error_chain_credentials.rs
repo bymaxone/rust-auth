@@ -43,10 +43,8 @@ async fn a_connection_failure_never_echoes_the_url_user_password_or_host() {
         format!("rediss://operator:{SENTINEL}@127.0.0.1:1/0"),
     ];
     for url in urls {
-        let Some(chain) = failure_chain(&url).await else {
-            assert!(false, "{url} unexpectedly connected");
-            return;
-        };
+        let chain = failure_chain(&url).await.unwrap_or_default();
+        assert!(!chain.is_empty(), "{url} unexpectedly connected");
         for secret in [SENTINEL, "operator", "no-such-host", "127.0.0.1"] {
             assert!(
                 !chain.contains(secret),
