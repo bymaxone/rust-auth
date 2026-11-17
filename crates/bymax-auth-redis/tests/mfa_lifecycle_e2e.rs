@@ -139,7 +139,7 @@ async fn full_lifecycle_against_real_redis() {
     // setup → enable. Compute the lifecycle's distinct TOTP codes from one captured base
     // (steps s, s+1, s+2, s-1), so they never collide as the clock advances mid-test.
     let Ok(setup) = mfa
-        .setup(&uid, MfaContext::Dashboard, Some("t1"), None)
+        .setup(&uid, MfaContext::Dashboard, Some("t1"), None, None)
         .await
     else {
         return;
@@ -250,7 +250,7 @@ async fn concurrent_correct_totp_yields_one_session() {
     {
         let Some(mfa) = engine.mfa() else { return };
         let Ok(setup) = mfa
-            .setup(&uid, MfaContext::Dashboard, Some("t1"), None)
+            .setup(&uid, MfaContext::Dashboard, Some("t1"), None, None)
             .await
         else {
             return;
@@ -318,7 +318,7 @@ async fn concurrent_distinct_valid_codes_yield_one_session() {
     {
         let Some(mfa) = engine.mfa() else { return };
         let Ok(setup) = mfa
-            .setup(&uid, MfaContext::Dashboard, Some("t1"), None)
+            .setup(&uid, MfaContext::Dashboard, Some("t1"), None, None)
             .await
         else {
             return;

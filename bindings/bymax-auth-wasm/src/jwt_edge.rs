@@ -253,6 +253,7 @@ mod tests {
             iat,
             exp,
             epoch: 0,
+            sid: None,
         }
     }
 
@@ -357,6 +358,7 @@ mod tests {
             iat: 1_000,
             exp: 2_000,
             epoch: 0,
+            sid: None,
         };
         let token = sign(&claims, &HsKey::from_bytes(SECRET)).unwrap_or_default();
         let json = verify_claims_json(&token, secret_string(), 0, 1_500, None, None, None);
@@ -486,6 +488,7 @@ mod tests {
                 iat: 1_000,
                 exp: 2_000,
                 epoch: 0,
+                sid: None,
             },
             &HsKey::from_bytes(SECRET),
         )
@@ -626,6 +629,7 @@ mod tests {
             iat: 1_000,
             exp: 9_999_999_999,
             epoch: 0,
+            sid: None,
         }
     }
 

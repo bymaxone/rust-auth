@@ -31,6 +31,7 @@ pub(super) fn claims_for(sub: &str) -> DashboardClaims {
         iat: now_unix(),
         exp: now_unix() + 900,
         epoch: 0,
+        sid: None,
     }
 }
 

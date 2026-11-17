@@ -163,6 +163,52 @@ fn interpret_rotate(raw: Option<String>) -> Result<RotateParsed, RedisStoreError
 }
 
 impl RedisStores {
+    /// Register the session in its family index (skipped for a legacy record with no family), so
+    /// the whole lineage can be revoked on reuse detection. The index carries the refresh TTL so it
+    /// ages out with the sessions it tracks.
+    fn queue_family_membership(
+        &self,
+        pipe: &mut redis::Pipeline,
+        kind: SessionKind,
+        detail: &SessionRecord,
+        token_hash: &str,
+        ttl_window: i64,
+    ) {
+        if detail.family_id.is_empty() {
+            return;
+        }
+        let fam_key = self.keys().key(kind_prefixes(kind).fam, &detail.family_id);
+        pipe.cmd("SADD")
+            .arg(&fam_key)
+            .arg(token_hash)
+            .ignore()
+            .cmd("EXPIRE")
+            .arg(&fam_key)
+            .arg(ttl_window)
+            .ignore();
+    }
+
+    /// Queue the recent-authentication mark of the session being created: the key the reader
+    /// derives, `ra:{subject}:{sid}`, the sid being the family id the session's access token
+    /// carries. Queued in the same `MULTI/EXEC`, so a login leaves the session and its proof or
+    /// neither.
+    fn queue_recent_auth(
+        &self,
+        pipe: &mut redis::Pipeline,
+        subject_hash: &str,
+        detail: &SessionRecord,
+        mark_ttl: u64,
+    ) {
+        let suffix = format!("{subject_hash}:{}", detail.family_id);
+        let mark_key = self.keys().key(Prefix::Ra, &suffix);
+        pipe.cmd("SET")
+            .arg(&mark_key)
+            .arg("1")
+            .arg("EX")
+            .arg(mark_ttl)
+            .ignore();
+    }
+
     /// Persist a freshly-issued refresh session: the record under `rt:`, the `rt:{hash}`
     /// member in the owner's `sess:` SET, and the detail under `sd:`, each with the refresh TTL.
     async fn create_session_inner(
@@ -172,6 +218,7 @@ impl RedisStores {
         token_hash: &str,
         detail: &SessionRecord,
         ttl_secs: u64,
+        recent_auth_ttl_secs: Option<u64>,
     ) -> Result<(), RedisStoreError> {
         let prefixes = kind_prefixes(kind);
         let keys = self.keys();
@@ -214,19 +261,9 @@ impl RedisStores {
             .arg(&sess_key)
             .arg(ttl_window)
             .ignore();
-        // Register the session in its family index (skipped for a legacy record with no family),
-        // so the whole lineage can be revoked on reuse detection. The index carries the refresh
-        // TTL so it ages out with the sessions it tracks.
-        if !detail.family_id.is_empty() {
-            let fam_key = keys.key(prefixes.fam, &detail.family_id);
-            pipe.cmd("SADD")
-                .arg(&fam_key)
-                .arg(token_hash)
-                .ignore()
-                .cmd("EXPIRE")
-                .arg(&fam_key)
-                .arg(ttl_window)
-                .ignore();
+        self.queue_family_membership(&mut pipe, kind, detail, token_hash, ttl_window);
+        if let Some(mark_ttl) = recent_auth_ttl_secs {
+            self.queue_recent_auth(&mut pipe, subject_hash, detail, mark_ttl);
         }
 
         let mut conn = self.connection().await?;
@@ -660,39 +697,18 @@ impl RedisStores {
     /// (re)apply its TTL, returning the new value. The TTL is deliberately far longer than any
     /// access token lives, so a bump stays effective for the whole window a pre-bump token could
     /// still be presented, while still bounding growth to a small integer per reset-affected user.
-    /// Plant the recent-authentication marker. `SET key 1 EX ttl` — presence is the meaning,
-    /// so the value is a constant and a re-authentication simply refreshes the window.
-    ///
-    /// The plane is part of the key because a dashboard user and a platform admin can carry the
-    /// same id from different consumer repositories; without it one could satisfy the other's
-    /// freshness check, the same collision the `lf:` lockout identifier was fixed for.
-    async fn mark_recent_auth_inner(
-        &self,
-        user_id_hash: &str,
-        ttl: u64,
-    ) -> Result<(), RedisStoreError> {
-        // `ra:{hash}` and nothing more. The plane is already inside the hash's preimage
-        // (`hmac_sha256("{plane}:{userId}")`), held byte-identical with nest-auth's
-        // `recentAuthKey` — adding a segment here would split the shared keyspace.
-        let key = self.keys().key(Prefix::Ra, user_id_hash);
-        let mut conn = self.connection().await?;
-        redis::cmd("SET")
-            .arg(&key)
-            .arg("1")
-            .arg("EX")
-            .arg(ttl)
-            .query_async::<()>(&mut conn)
-            .await?;
-        Ok(())
-    }
-
     /// Read the marker. `EXISTS`, never `GETDEL`: a user who signs in and then makes two
     /// security changes in a row must not have the second refused because the first spent it.
-    async fn has_recent_auth_inner(&self, user_id_hash: &str) -> Result<bool, RedisStoreError> {
-        // `ra:{hash}` and nothing more. The plane is already inside the hash's preimage
-        // (`hmac_sha256("{plane}:{userId}")`), held byte-identical with nest-auth's
-        // `recentAuthKey` — adding a segment here would split the shared keyspace.
-        let key = self.keys().key(Prefix::Ra, user_id_hash);
+    async fn has_recent_auth_inner(
+        &self,
+        user_id_hash: &str,
+        sid: &str,
+    ) -> Result<bool, RedisStoreError> {
+        // `ra:{hash}:{sid}` and nothing more, held byte-identical with nest-auth's `recentAuthKey`:
+        // the hash carries the plane and the tenant in its preimage, the sid is appended as it is.
+        let key = self
+            .keys()
+            .key(Prefix::Ra, &format!("{user_id_hash}:{sid}"));
         let mut conn = self.connection().await?;
         let present: bool = redis::cmd("EXISTS")
             .arg(&key)
@@ -745,7 +761,22 @@ impl SessionStore for RedisStores {
         detail: &SessionRecord,
         ttl_secs: u64,
     ) -> Result<(), AuthError> {
-        self.create_session_inner(kind, subject_hash, token_hash, detail, ttl_secs)
+        self.create_session_inner(kind, subject_hash, token_hash, detail, ttl_secs, None)
+            .await
+            .map_err(AuthError::from)
+    }
+
+    async fn create_session_with_recent_auth(
+        &self,
+        kind: SessionKind,
+        subject_hash: &str,
+        token_hash: &str,
+        detail: &SessionRecord,
+        ttl_secs: u64,
+        recent_auth_ttl_secs: u64,
+    ) -> Result<(), AuthError> {
+        let mark = Some(recent_auth_ttl_secs);
+        self.create_session_inner(kind, subject_hash, token_hash, detail, ttl_secs, mark)
             .await
             .map_err(AuthError::from)
     }
@@ -933,14 +964,8 @@ impl SessionStore for RedisStores {
             .map_err(AuthError::from)
     }
 
-    async fn mark_recent_auth(&self, user_id_hash: &str, ttl: u64) -> Result<(), AuthError> {
-        self.mark_recent_auth_inner(user_id_hash, ttl)
-            .await
-            .map_err(AuthError::from)
-    }
-
-    async fn has_recent_auth(&self, user_id_hash: &str) -> Result<bool, AuthError> {
-        self.has_recent_auth_inner(user_id_hash)
+    async fn has_recent_auth(&self, user_id_hash: &str, sid: &str) -> Result<bool, AuthError> {
+        self.has_recent_auth_inner(user_id_hash, sid)
             .await
             .map_err(AuthError::from)
     }

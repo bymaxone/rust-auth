@@ -114,6 +114,7 @@ mod tests {
             iat: 1_700_000_000,
             exp: 4_700_000_000,
             epoch: 0,
+            sid: None,
         }
     }
 

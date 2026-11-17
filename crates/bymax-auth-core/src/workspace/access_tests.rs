@@ -328,6 +328,7 @@ fn a_member_names_the_membership_and_the_workspace_it_was_admitted_to() {
         workspace_id: "w1".to_owned(),
         user_id: "u1".to_owned(),
         role: "owner".to_owned(),
+        sid: None,
     };
     assert_eq!(member.workspace().tenant_id, "t1");
     assert_eq!(member.workspace().workspace_id, "w1");

@@ -123,7 +123,7 @@ pub(super) fn seed_admin(h: &Harness) {
 pub(super) async fn enrol_admin(h: &Harness) -> Option<String> {
     let mfa = h.engine.mfa()?;
     let setup = mfa
-        .setup("p1", MfaContext::Platform, None, Some(PASSWORD))
+        .setup("p1", MfaContext::Platform, None, Some(PASSWORD), None)
         .await
         .ok()?;
     let enabled = mfa
@@ -206,24 +206,7 @@ async fn disabling_mfa_on_a_platform_admin_fires_the_hook() {
 async fn a_dashboard_users_mfa_hook_still_says_dashboard_and_names_the_tenant() {
     let Some((h, spy)) = rig() else { return };
     let Some(uid) = register(&h.engine, "d@example.com").await else { return };
-    let Some(mfa) = h.engine.mfa() else { return };
-    let Ok(setup) = mfa
-        .setup(&uid, MfaContext::Dashboard, Some("t1"), Some(PASSWORD))
-        .await
-    else {
-        return;
-    };
-    let enabled = mfa
-        .verify_and_enable(
-            &uid,
-            &code(&setup.secret, 0),
-            "1.2.3.4",
-            "ua",
-            MfaContext::Dashboard,
-            Some("t1"),
-        )
-        .await;
-    assert!(enabled.is_ok(), "{enabled:?}");
+    assert!(enrol_user(&h, &uid).await.is_some(), "enrolment failed");
     let call = spy.call("after_mfa_enabled").await;
     assert!(call.is_some(), "after_mfa_enabled never fired");
     let Some((_, plane, user)) = call else { return };
@@ -265,23 +248,7 @@ async fn a_dashboard_user_who_clears_the_challenge_gets_a_last_login_and_the_log
     let Some((h, spy)) = rig() else { return };
     let Some(uid) = register(&h.engine, "c@example.com").await else { return };
     let Some(mfa) = h.engine.mfa() else { return };
-    let Ok(setup) = mfa
-        .setup(&uid, MfaContext::Dashboard, Some("t1"), Some(PASSWORD))
-        .await
-    else {
-        return;
-    };
-    let enabled = mfa
-        .verify_and_enable(
-            &uid,
-            &code(&setup.secret, 0),
-            "1.2.3.4",
-            "ua",
-            MfaContext::Dashboard,
-            Some("t1"),
-        )
-        .await;
-    assert!(enabled.is_ok(), "{enabled:?}");
+    let Some(secret) = enrol_user(&h, &uid).await else { return };
     let before = h.users.find_by_id(&uid, Some("t1")).await;
     assert!(
         matches!(before, Ok(Some(ref u)) if u.last_login_at.is_none()),
@@ -290,7 +257,7 @@ async fn a_dashboard_user_who_clears_the_challenge_gets_a_last_login_and_the_log
 
     let Some(temp) = login_temp_token(&h.engine, "c@example.com").await else { return };
     let result = mfa
-        .challenge(&temp, &code(&setup.secret, 30), "1.2.3.4", "ua")
+        .challenge(&temp, &code(&secret, 30), "1.2.3.4", "ua")
         .await;
     assert!(
         matches!(result, Ok(LoginResultMfa::Dashboard(_))),
@@ -323,7 +290,7 @@ async fn last_login_moved(h: &Harness, uid: &str) -> bool {
 pub(super) async fn enrol_user(h: &Harness, uid: &str) -> Option<String> {
     let mfa = h.engine.mfa()?;
     let setup = mfa
-        .setup(uid, MfaContext::Dashboard, Some("t1"), Some(PASSWORD))
+        .setup(uid, MfaContext::Dashboard, Some("t1"), Some(PASSWORD), None)
         .await
         .ok()?;
     let enabled = mfa

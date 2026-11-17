@@ -214,6 +214,7 @@ mod tests {
             iat,
             exp,
             epoch: 0,
+            sid: None,
         };
         sign(&claims, &HsKey::from_bytes(secret.as_bytes())).unwrap_or_default()
     }

@@ -274,6 +274,7 @@ impl AuthEngine {
         &self,
         tenant_id: &str,
         user_id: &str,
+        sid: Option<&str>,
         request: WorkspaceAccessRequest<'_>,
     ) -> Result<WorkspaceMember, AuthError> {
         let runtime = self.workspace_runtime()?;
@@ -303,6 +304,7 @@ impl AuthEngine {
             workspace_id: workspace_id.to_owned(),
             user_id: user_id.to_owned(),
             role,
+            sid: sid.map(str::to_owned),
         })
     }
 

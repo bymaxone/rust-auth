@@ -407,6 +407,7 @@ impl AuthEngine {
             // This is a redeemed socket-authorization snapshot, never a re-verified access JWT, so
             // the epoch is not consulted for it; it carries the inert default.
             epoch: 0,
+            sid: None,
         })
     }
 
@@ -443,7 +444,9 @@ impl AuthEngine {
     ///
     /// Returns [`AuthError::MfaNotEnabled`] when MFA is not configured, [`AuthError::MfaAlreadyEnabled`]
     /// when already enrolled, [`AuthError::InvalidCredentials`] when the account has a password
-    /// and `password` is absent or wrong, or a store/crypto [`AuthError`].
+    /// and `password` is absent or wrong, [`AuthError::ReauthenticationRequired`] when it has none and
+    /// `sid` (the caller's own session, the `sid` claim of its access token) earned no recent
+    /// sign-in, or a store/crypto [`AuthError`].
     #[cfg(feature = "mfa")]
     pub async fn mfa_setup(
         &self,
@@ -451,10 +454,11 @@ impl AuthEngine {
         ctx: MfaContext,
         tenant_id: Option<&str>,
         password: Option<&str>,
+        sid: Option<&str>,
     ) -> Result<MfaSetupResult, AuthError> {
         self.mfa()
             .ok_or(AuthError::MfaNotEnabled)?
-            .setup(user_id, ctx, tenant_id, password)
+            .setup(user_id, ctx, tenant_id, password, sid)
             .await
     }
 
@@ -909,6 +913,7 @@ mod tests {
             iat: now_unix(),
             exp: now_unix() + 900,
             epoch: 0,
+            sid: None,
         }
     }
 
@@ -1263,7 +1268,7 @@ mod tests {
         let Some(h) = harness(base_config(), None) else { return };
         assert!(matches!(
             h.engine
-                .mfa_setup("u", MfaContext::Dashboard, Some("t1"), None)
+                .mfa_setup("u", MfaContext::Dashboard, Some("t1"), None, None)
                 .await,
             Err(AuthError::MfaNotEnabled)
         ));

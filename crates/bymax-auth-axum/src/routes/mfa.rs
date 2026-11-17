@@ -99,6 +99,7 @@ async fn setup(
             // the operation touching another.
             Some(user.0.tenant_id.as_str()),
             dto.password.as_deref(),
+            user.0.sid.as_deref(),
         )
         .await
     {

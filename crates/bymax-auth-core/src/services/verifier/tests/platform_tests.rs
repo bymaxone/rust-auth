@@ -56,6 +56,7 @@ fn claims_for(sub: &str) -> PlatformClaims {
         iat: now_unix(),
         exp: now_unix() + 900,
         epoch: 0,
+        sid: None,
     }
 }
 

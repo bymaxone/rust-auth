@@ -78,6 +78,9 @@ pub struct WorkspaceMember {
     pub user_id: String,
     /// The caller's role in that workspace.
     pub role: String,
+    /// The caller's session, the `sid` claim of the verified credential: what a re-proof by recent
+    /// sign-in is checked against.
+    pub sid: Option<String>,
 }
 
 impl WorkspaceMember {
