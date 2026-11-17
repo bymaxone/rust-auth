@@ -829,16 +829,7 @@ async fn enable_requires_a_pending_record_and_rejects_a_wrong_code() {
         .await,
         Err(AuthError::MfaSetupRequired)
     ));
-    let Ok(setup) = mfa
-        .setup(
-            &uid,
-            MfaContext::Dashboard,
-            Some("t1"),
-            Some(PASSWORD),
-            None,
-        )
-        .await
-    else {
+    let Ok(setup) = enrol(mfa, &uid, Some(PASSWORD), None).await else {
         return;
     };
     // A wrong code does not enable and does not consume the pending record.
