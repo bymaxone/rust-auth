@@ -251,9 +251,12 @@ mod tests {
     fn a_store_failure_and_an_internal_error_log_their_cause_for_operators() {
         let captured = Captured::default();
         tracing::subscriber::with_default(captured.clone(), || {
-            error_response(&AuthError::Internal("defect cause".into()));
-            error_response(&AuthError::ServiceUnavailable("store cause".into()));
-            error_response(&AuthError::TokenInvalid);
+            let answered = [
+                error_response(&AuthError::Internal("defect cause".into())),
+                error_response(&AuthError::ServiceUnavailable("store cause".into())),
+                error_response(&AuthError::TokenInvalid),
+            ];
+            assert_eq!(answered.len(), 3);
         });
         let lines = captured.0.lock().map(|l| l.clone()).unwrap_or_default();
         let has = |needle: &str| lines.iter().any(|l| l.contains(needle));
