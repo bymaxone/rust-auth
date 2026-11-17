@@ -75,31 +75,34 @@ fn a_reply_about_the_command_or_an_unclassified_one_stays_internal() {
 }
 
 /// The `io::ErrorKind` each contract network code surfaces as through the Redis client.
-fn io_kind(code: &str) -> Option<IoKind> {
-    match code {
-        "ECONNREFUSED" => Some(IoKind::ConnectionRefused),
-        "ECONNRESET" => Some(IoKind::ConnectionReset),
-        "ETIMEDOUT" => Some(IoKind::TimedOut),
-        "EPIPE" => Some(IoKind::BrokenPipe),
-        "EHOSTUNREACH" | "ENETUNREACH" | "ENOTFOUND" | "EAI_AGAIN" => Some(IoKind::Other),
-        _ => None,
-    }
-}
+const IO_KINDS: [(&str, IoKind); 8] = [
+    ("ECONNREFUSED", IoKind::ConnectionRefused),
+    ("ECONNRESET", IoKind::ConnectionReset),
+    ("ETIMEDOUT", IoKind::TimedOut),
+    ("EPIPE", IoKind::BrokenPipe),
+    ("EHOSTUNREACH", IoKind::Other),
+    ("ENETUNREACH", IoKind::Other),
+    ("ENOTFOUND", IoKind::Other),
+    ("EAI_AGAIN", IoKind::Other),
+];
 
 #[test]
 fn every_network_error_of_the_contract_is_an_outage() {
-    let codes = outage_list("networkErrorCodes");
+    let contract = outage_list("networkErrorCodes");
     assert!(
-        !codes.is_empty(),
+        !contract.is_empty(),
         "the contract lists no network error codes"
     );
-    for code in &codes {
-        let kind = io_kind(code);
-        assert!(
-            kind.is_some(),
-            "{code} has no io mapping: add one with its test"
-        );
-        let io = IoError::new(kind.unwrap_or(IoKind::Other), code.as_str());
+    let mapped: BTreeSet<String> = IO_KINDS
+        .iter()
+        .map(|(code, _)| (*code).to_owned())
+        .collect();
+    assert_eq!(
+        mapped, contract,
+        "the io mapping drifted from the contract's network error codes"
+    );
+    for (code, kind) in IO_KINDS {
+        let io = IoError::new(kind, code);
         let error: AuthError = RedisStoreError::Command(io.into()).into();
         assert!(is_unavailable(&error), "{code} must answer 503");
     }

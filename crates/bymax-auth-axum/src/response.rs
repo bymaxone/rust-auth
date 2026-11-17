@@ -251,6 +251,11 @@ mod tests {
     fn a_store_failure_and_an_internal_error_log_their_cause_for_operators() {
         let captured = Captured::default();
         tracing::subscriber::with_default(captured.clone(), || {
+            // A span drives the subscriber's span hooks, which the trait requires and events do not.
+            let span = tracing::info_span!("answered", total = tracing::field::Empty);
+            span.record("total", 3);
+            span.follows_from(&span);
+            let _entered = span.enter();
             let answered = [
                 error_response(&AuthError::Internal("defect cause".into())),
                 error_response(&AuthError::ServiceUnavailable("store cause".into())),

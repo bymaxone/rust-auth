@@ -1,7 +1,7 @@
 //! The English default client message of every [`AuthErrorCode`] (layer: wire types).
 //!
-//! Split from `error.rs` so that file stays within the repository's size limit; the strings are
-//! the exact ones nest-auth ships, and `errorCatalog` in the shared contract pins them.
+//! The strings are the exact ones nest-auth ships, and `errorCatalog` in the shared contract pins
+//! them, so a change here is a change to the contract in both repositories.
 
 use super::AuthErrorCode;
 
