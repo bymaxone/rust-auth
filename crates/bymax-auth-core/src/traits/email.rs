@@ -259,13 +259,13 @@ pub enum EmailError {
 
 /// The default email provider installed when the host supplies none. Every method
 /// returns `Ok(())` without sending anything, emitting a `tracing` debug line that
-/// records the event and a MASKED recipient, and redacts tokens and OTPs — keeping local
-/// development and tests running without an email backend.
+/// records the kind of message and nothing about its recipient, and redacts tokens and OTPs —
+/// keeping local development and tests running without an email backend.
 ///
-/// The address is masked for the same reason every other log line in the engine masks it: a
-/// debug level is not a private one. Whoever ships these logs to an aggregator is not
-/// necessarily the operator, and a provider that only runs when none is configured is exactly
-/// the one likeliest to be running with verbose logging turned on.
+/// The recipient and the tenant stay out of the line: a debug level is not a private one. Whoever
+/// ships these logs to an aggregator is not necessarily the operator, and a provider that only
+/// runs when none is configured is exactly the one likeliest to be running with verbose logging
+/// turned on.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct NoOpEmailProvider;
 
