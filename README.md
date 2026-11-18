@@ -534,13 +534,14 @@ export const POST = createLogoutHandler({
 ```
 
 ```typescript
-// app/auth/silent-refresh/route.ts — the proxy redirects here when the access token has
+// app/api/auth/silent-refresh/route.ts — the proxy redirects here when the access token has
 // expired but a `has_session` signal is present
 import { createSilentRefreshHandler } from '@bymax-one/rust-auth/nextjs'
 
 export const GET = createSilentRefreshHandler({
   backendUrl: process.env.API_BASE_URL!,
   loginPath: '/login',
+  refreshCookiePath: '/api/auth', // the backend's cookies.refresh_cookie_path
 })
 ```
 
