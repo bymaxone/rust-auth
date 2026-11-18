@@ -225,9 +225,12 @@ fn require_plane_tenant(ctx: MfaContext, tenant_id: Option<&str>) -> Result<(), 
     if plane_tenant_is_well_formed(ctx, tenant_id) {
         return Ok(());
     }
+    // Bound first: a macro argument is not evaluated when no subscriber is listening, which
+    // would leave its line unexecuted under a test that installs none.
+    let plane = ctx.as_str();
     tracing::warn!(
         event = "RUST_AUTH_MFA_TENANT_PLANE_MISMATCH",
-        plane = ctx.as_str(),
+        plane,
         "mfa: tenant does not match the plane"
     );
     Err(AuthError::Validation {

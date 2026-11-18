@@ -1165,7 +1165,7 @@ impl TokenManagerService {
     #[cfg(not(feature = "mfa"))]
     pub async fn issue_mfa_temp_token(
         &self,
-        user_id: &str,
+        _user_id: &str,
         context: MfaContext,
         tenant_id: Option<&str>,
     ) -> Result<String, AuthError> {

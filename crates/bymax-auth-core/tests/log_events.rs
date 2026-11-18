@@ -10,12 +10,29 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-/// The only field names an event may carry: the code, a closed `cause` written bare (a
-/// `&'static str`, never `%cause` or `?cause`, which would format an error), a plane, a flow, a
-/// status, a number, or a name the code itself fixes.
-const ALLOWED_FIELDS: [&str; 12] = [
-    "event", "cause", "plane", "flow", "status", "failed", "count", "context", "method", "route",
-    "step", "kind",
+/// The argument forms, besides the `event` code and a `kind` literal, an event may carry. Each is
+/// closed or numeric by what it names, not by its field name alone: a bare `cause` is bound from
+/// a closed classification (see [`CLOSED_CAUSES`]), a plane or flow is a name the library fixes,
+/// and a status or a count is a number. A new form has to be added here, which is the review.
+const ALLOWED_ARGS: [&str; 8] = [
+    "cause",
+    "plane",
+    "%flow",
+    "context = ?ctx",
+    "failed = count",
+    "%method",
+    "route = %pattern",
+    "status = response.status",
+];
+
+/// The functions a `let cause = ...` may bind from: each returns a `&'static str` out of a
+/// closed set and never formats the error it was given.
+const CLOSED_CAUSES: [&str; 5] = [
+    "crate::services::failure_cause(",
+    "failure_cause(",
+    "unmigrated_cause(",
+    "unsent_cause(",
+    "provider_cause(",
 ];
 
 /// The levels a `tracing` macro names.
@@ -245,22 +262,87 @@ fn every_production_call_names_a_closed_code() {
     );
 }
 
+/// Whether `arg`, with its whitespace collapsed, is a form an event may carry.
+fn is_allowed_arg(arg: &str) -> bool {
+    let arg = arg.split_whitespace().collect::<Vec<_>>().join(" ");
+    let literal = |name: &str| {
+        arg.strip_prefix(name)
+            .and_then(|rest| rest.strip_prefix(" = \""))
+            .is_some_and(|rest| rest.ends_with('"') && !rest[..rest.len() - 1].contains('"'))
+    };
+    ALLOWED_ARGS.contains(&arg.as_str()) || literal("kind") || arg == "kind = event"
+}
+
 #[test]
 fn every_field_is_closed_or_numeric() {
     let mut offenders = Vec::new();
     for call in all_calls() {
         for arg in &call.args {
-            let Some(name) = field_name(arg) else { continue };
-            let is_bare = arg == &name;
-            let closed_cause = name != "cause" || is_bare;
-            if !ALLOWED_FIELDS.contains(&name.as_str()) || !closed_cause {
-                offenders.push(format!("{}:{} field `{arg}`", call.file, call.line));
+            let is_code = field_name(arg).as_deref() == Some("event");
+            if field_name(arg).is_none() || is_code || is_allowed_arg(arg) {
+                continue;
             }
+            offenders.push(format!("{}:{} field `{arg}`", call.file, call.line));
         }
     }
     assert!(
         offenders.is_empty(),
         "fields that could carry an account or error text: {offenders:?}"
+    );
+}
+
+#[test]
+fn a_field_form_is_rejected_when_its_value_is_not_closed() {
+    for allowed in [
+        "cause",
+        "kind = \"mfa_enabled\"",
+        "kind = event",
+        "%flow",
+        "status = response.status",
+    ] {
+        assert!(is_allowed_arg(allowed), "{allowed}");
+    }
+    for refused in [
+        "kind = _email",
+        "cause = %error",
+        "%cause",
+        "kind = \"a\" + email",
+        "email = %masked",
+        "plane = tenant_id",
+        "?cause",
+    ] {
+        assert!(!is_allowed_arg(refused), "{refused}");
+    }
+}
+
+#[test]
+fn a_cause_is_bound_from_a_closed_classification() {
+    let root = workspace_root();
+    let mut unbound = Vec::new();
+    for path in production_sources() {
+        let Ok(source) = fs::read_to_string(&path) else { continue };
+        let text = production_part(&source);
+        for (at, _) in text.match_indices("let cause = ") {
+            let rhs = text[at + "let cause = ".len()..]
+                .split(';')
+                .next()
+                .unwrap_or_default();
+            if !CLOSED_CAUSES
+                .iter()
+                .any(|closed| rhs.trim_start().starts_with(closed))
+            {
+                let name = path
+                    .strip_prefix(&root)
+                    .unwrap_or(&path)
+                    .to_string_lossy()
+                    .into_owned();
+                unbound.push(format!("{name}: let cause = {}", rhs.trim()));
+            }
+        }
+    }
+    assert!(
+        unbound.is_empty(),
+        "a cause bound from something other than a closed classification: {unbound:?}"
     );
 }
 
