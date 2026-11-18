@@ -231,22 +231,24 @@ impl MfaService {
             // A TOTP challenge persists nothing on its own, so the rewrite needs its own write.
             // Serialized like every other transition, and carrying the code list from the
             // record inside the lock so the rewrite cannot roll back a concurrent regenerate.
-            self.transition_mfa_record(
-                &user_id,
-                MfaContext::Dashboard,
-                Some(user.tenant_id.as_str()),
-                |current| {
-                    if !self.holds_challenged_secret(current, &raw_secret) {
-                        return None;
-                    }
-                    Some((
-                        true,
-                        Some(stored_secret),
-                        current.mfa_recovery_codes.clone(),
-                    ))
-                },
-            )
-            .await?;
+            let migrated = self
+                .transition_mfa_record(
+                    &user_id,
+                    MfaContext::Dashboard,
+                    Some(user.tenant_id.as_str()),
+                    |current| {
+                        if !self.holds_challenged_secret(current, &raw_secret) {
+                            return None;
+                        }
+                        Some((
+                            true,
+                            Some(stored_secret),
+                            current.mfa_recovery_codes.clone(),
+                        ))
+                    },
+                )
+                .await;
+            note_unmigrated_secret(migrated);
         }
 
         // Mint a full session with `mfa_verified = true`.
@@ -400,17 +402,19 @@ impl MfaService {
             // A TOTP challenge persists nothing on its own, so the rewrite needs its own write,
             // serialized like every other transition and carrying the code list from the record
             // inside the lock so it cannot roll back a concurrent regenerate.
-            self.transition_mfa_record(&admin.id, MfaContext::Platform, None, |current| {
-                if !self.holds_challenged_secret(current, &raw_secret) {
-                    return None;
-                }
-                Some((
-                    true,
-                    Some(stored_secret),
-                    current.mfa_recovery_codes.clone(),
-                ))
-            })
-            .await?;
+            let migrated = self
+                .transition_mfa_record(&admin.id, MfaContext::Platform, None, |current| {
+                    if !self.holds_challenged_secret(current, &raw_secret) {
+                        return None;
+                    }
+                    Some((
+                        true,
+                        Some(stored_secret),
+                        current.mfa_recovery_codes.clone(),
+                    ))
+                })
+                .await;
+            note_unmigrated_secret(migrated);
         }
 
         // Mint a full PLATFORM session with `mfa_verified = true`; it carries no tenant.
@@ -639,6 +643,30 @@ impl MfaService {
         self.sessions
             .after_session_created(&record, &new_hash, &hook_ctx)
             .await
+    }
+}
+
+/// What a failed rewrite of a secret stored under a retired key means for the challenge that
+/// triggered it: nothing. The user is already authenticated and the retired key still opens the
+/// secret, so a store that cannot answer costs the migration and nothing else; it is retried by
+/// the next challenge. The failure is logged for operators with a closed cause and nothing else:
+/// no account, secret, ciphertext or store text, which an error's own message can carry.
+fn note_unmigrated_secret(migrated: Result<bool, AuthError>) {
+    if let Err(error) = migrated {
+        let cause = unmigrated_cause(&error);
+        tracing::warn!(
+            cause,
+            "mfa challenge: re-encrypting the secret under the current key failed; retried by the next challenge"
+        );
+    }
+}
+
+/// The closed set of causes a failed rewrite is logged under.
+pub(super) fn unmigrated_cause(error: &AuthError) -> &'static str {
+    match error {
+        AuthError::ServiceUnavailable(_) => "store_unavailable",
+        AuthError::MfaStateConflict => "transition_locked",
+        _ => "internal",
     }
 }
 

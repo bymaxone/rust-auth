@@ -396,3 +396,129 @@ async fn a_dashboard_recovery_splice_never_puts_back_a_replaced_secret() {
     };
     assert_eq!(stored, replacement);
 }
+
+/// The stored secret of the dashboard account `uid`, as a `Vec` of nothing when it cannot be read.
+async fn stored_dashboard_secret(h: &Harness, uid: &str) -> String {
+    match h.users.find_by_id(uid, None).await {
+        Ok(Some(user)) => user.mfa_secret.unwrap_or_default(),
+        _ => String::new(),
+    }
+}
+
+/// The stored secret of the platform admin `id`, empty when it cannot be read.
+async fn stored_platform_secret(h: &Harness, id: &str) -> String {
+    match h.platform.find_by_id(id).await {
+        Ok(Some(admin)) => admin.mfa_secret.unwrap_or_default(),
+        _ => String::new(),
+    }
+}
+
+#[tokio::test]
+async fn a_failed_rewrite_does_not_fail_a_dashboard_totp_challenge_that_already_succeeded() {
+    // The challenge has authenticated the user and the retired key still opens the secret, so a
+    // store that cannot answer the rewrite costs the migration and nothing else.
+    let retired_bytes = [3u8; 32];
+    let retired_b64 = base64::engine::general_purpose::STANDARD.encode(retired_bytes);
+    let Some(h) = build_rotating(retired_b64) else { return };
+    let email = "dash-rewrite-fails@example.com";
+    let Some((raw_secret, _codes, uid)) = retired_key_user(&h, email, retired_bytes).await else {
+        return;
+    };
+    let before = stored_dashboard_secret(&h, &uid).await;
+    let Some(temp) = login_temp_token(&h.engine, email).await else { return };
+    let users = h.users.clone();
+    h.stores
+        .run_on_next_mfa_lock(move || users.fail_next_reads(1));
+    let Some(mfa) = h.engine.mfa() else { return };
+    let code = raw_code(&raw_secret, now_secs());
+    let answered = mfa.challenge(&temp, &code, "1.2.3.4", "ua").await;
+    assert!(
+        matches!(answered, Ok(LoginResultMfa::Dashboard(_))),
+        "got {answered:?}"
+    );
+    assert_eq!(
+        stored_dashboard_secret(&h, &uid).await,
+        before,
+        "the failed rewrite wrote nothing"
+    );
+}
+
+#[tokio::test]
+async fn a_failed_rewrite_does_not_fail_a_platform_totp_challenge_that_already_succeeded() {
+    let Some((h, retired_bytes)) = retired_platform_harness() else { return };
+    let Some((raw_secret, _codes, _admin)) =
+        retired_key_admin(&h, "p-rewrite-fails", retired_bytes)
+    else {
+        return;
+    };
+    let before = stored_platform_secret(&h, "p-rewrite-fails").await;
+    let Some(temp) = platform_temp_token(&h, "p-rewrite-fails").await else { return };
+    let admins = h.platform.clone();
+    h.stores
+        .run_on_next_mfa_lock(move || admins.fail_next_reads(1));
+    let Some(mfa) = h.engine.mfa() else { return };
+    let code = raw_code(&raw_secret, now_secs());
+    let answered = mfa.challenge(&temp, &code, "1.2.3.4", "ua").await;
+    assert!(
+        matches!(answered, Ok(LoginResultMfa::Platform(_))),
+        "got {answered:?}"
+    );
+    // The failure really happened: the rewrite did not land, so the secret is as it was.
+    assert_eq!(stored_platform_secret(&h, "p-rewrite-fails").await, before);
+}
+
+#[tokio::test]
+async fn the_failed_rewrite_log_carries_a_closed_cause_and_nothing_the_error_or_account_holds() {
+    let retired_bytes = [3u8; 32];
+    let retired_b64 = base64::engine::general_purpose::STANDARD.encode(retired_bytes);
+    let Some(h) = build_rotating(retired_b64) else { return };
+    let email = "dash-log-fields@example.com";
+    let Some((raw_secret, _codes, uid)) = retired_key_user(&h, email, retired_bytes).await else {
+        return;
+    };
+    let Some(temp) = login_temp_token(&h.engine, email).await else { return };
+    let users = h.users.clone();
+    h.stores
+        .run_on_next_mfa_lock(move || users.fail_next_reads(1));
+    let Some(mfa) = h.engine.mfa() else { return };
+    let code = raw_code(&raw_secret, now_secs());
+    let (events, capture) = crate::log_capture::capture_events();
+    let answered = mfa.challenge(&temp, &code, "1.2.3.4", "ua").await;
+    drop(capture);
+    assert!(answered.is_ok(), "got {answered:?}");
+    let event = "re-encrypting the secret under the current key failed";
+    assert!(events.contains_at(tracing::Level::WARN, event));
+    // Only this event is under test: other events of the challenge name the account on purpose.
+    let ours: Vec<String> = events
+        .iter()
+        .into_iter()
+        .filter(|captured| captured.rendered.contains(event))
+        .map(|captured| captured.rendered)
+        .collect();
+    assert_eq!(ours.len(), 1, "exactly one event: {ours:?}");
+    assert!(
+        ours[0].contains("cause=internal"),
+        "a closed cause: {ours:?}"
+    );
+    for forbidden in [uid.as_str(), email, "forced read failure", "1.2.3.4"] {
+        assert!(
+            !ours[0].contains(forbidden),
+            "the event carries {forbidden:?}: {ours:?}"
+        );
+    }
+}
+
+#[test]
+fn a_failed_rewrite_is_logged_under_one_of_three_closed_causes() {
+    use super::challenge::unmigrated_cause;
+    let unavailable = bymax_auth_types::AuthError::ServiceUnavailable("store down".into());
+    assert_eq!(unmigrated_cause(&unavailable), "store_unavailable");
+    let conflict = bymax_auth_types::AuthError::MfaStateConflict;
+    assert_eq!(unmigrated_cause(&conflict), "transition_locked");
+    for other in [
+        bymax_auth_types::AuthError::Internal("defect".into()),
+        bymax_auth_types::AuthError::MfaNotEnabled,
+    ] {
+        assert_eq!(unmigrated_cause(&other), "internal");
+    }
+}

@@ -446,9 +446,18 @@ pub struct InMemoryPlatformUserRepository {
     /// The platform twin of the dashboard repository's MFA-gone flag, for the transitions that
     /// route to this repository.
     mfa_gone_flag: Mutex<Option<Arc<AtomicBool>>>,
+    /// Armed count of `find_by_id` reads that must fail with a datastore error, as on the
+    /// dashboard repository.
+    forced_read_failures: Mutex<usize>,
 }
 
 impl InMemoryPlatformUserRepository {
+    /// Fail the next `count` `find_by_id` reads with a datastore error. See
+    /// [`InMemoryUserRepository::fail_next_reads`].
+    pub fn fail_next_reads(&self, count: usize) {
+        *lock(&self.forced_read_failures) = count;
+    }
+
     /// Report MFA gone on every read taken once `flag` is raised. See
     /// [`InMemoryUserRepository::report_mfa_gone_when`].
     pub fn report_mfa_gone_when(&self, flag: Arc<AtomicBool>) {
@@ -481,6 +490,13 @@ impl InMemoryPlatformUserRepository {
 #[async_trait]
 impl PlatformUserRepository for InMemoryPlatformUserRepository {
     async fn find_by_id(&self, id: &str) -> Result<Option<AuthPlatformUser>, RepositoryError> {
+        {
+            let mut armed = lock(&self.forced_read_failures);
+            if *armed > 0 {
+                *armed -= 1;
+                return Err(RepositoryError::Backend("forced read failure".into()));
+            }
+        }
         let answer = lock(&self.users).get(id).cloned();
         let gone = lock(&self.mfa_gone_flag)
             .as_ref()
