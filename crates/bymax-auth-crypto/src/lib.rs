@@ -17,8 +17,10 @@
 //! - **`scrypt`** *(default)* — scrypt password hashing (the parity default writer).
 //! - **`argon2`** — Argon2id password hashing (recommended for new deployments).
 //! - **`mfa`** — the multi-factor set: AES-256-GCM secret encryption ([`aead`]) and
-//!   RFC 6238 TOTP ([`totp`]). Pulls in `aes-gcm`, `sha1`, and `data-encoding`, all
-//!   of which are absent from a build without this feature.
+//!   RFC 6238 TOTP ([`totp`]). Pulls in `aes-gcm`, `sha1`, and `data-encoding`;
+//!   `aes-gcm` and `data-encoding` are absent from a build without this feature.
+//! - **`breach`** — SHA-1 on its own, for the breach-corpus range query. Pulls in
+//!   `sha1`, so `sha1` is absent only from a build with neither `mfa` nor `breach`.
 //!
 //! At least one password-hasher feature must be enabled; see the `compile_error!`
 //! below.

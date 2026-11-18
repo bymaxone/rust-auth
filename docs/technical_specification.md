@@ -214,7 +214,7 @@ This is only possible if a clearly delimited set of crates is kept **pure and sy
 | `bymax-auth-core` | async orchestration | **no** | holds trait objects performing async I/O; depends on `tokio` |
 | `bymax-auth-redis` | async I/O | **no** | network client (`SessionStore`/`OtpStore`/`BruteForceStore` backed by Redis) |
 | `bymax-auth-axum` | async HTTP server | **no** | tower/hyper/axum — server-only |
-| `bymax-auth-client` | async HTTP client | **no** | `reqwest`-based typed client; native + browser builds, not part of the edge-verify artifact |
+| `bymax-auth-client` | async HTTP client | **no** | `reqwest`-based typed client; native only (the browser is served by the npm `./client`), not part of the edge-verify artifact |
 
 **The boundary is enforced by the dependency graph, not by convention.** `bymax-auth-crypto`, `bymax-auth-jwt`, and `bymax-auth-types` must never gain a dependency (direct or transitive) on `tokio`, on a network/file API, or on any crate that pulls one in. Because `bymax-auth-wasm` depends *only* on `jwt` + `types`, any accidental introduction of an async/server-only dependency into that subtree breaks the `wasm32-unknown-unknown` build immediately. The WASM target is therefore a **compile-time tripwire** that keeps the shared crates honest: if it stops building, the purity invariant has been violated. CI compiles the WASM crate as a first-class check for exactly this reason.
 
@@ -379,10 +379,10 @@ The rule for `rust-auth`:
 #[async_trait]
 pub trait UserRepository: Send + Sync {
     async fn find_by_id(&self, id: &str, tenant_id: Option<&str>)
-        -> Result<Option<AuthUser>, RepoError>;
+        -> Result<Option<AuthUser>, RepositoryError>;
     async fn find_by_email(&self, email: &str, tenant_id: &str)
-        -> Result<Option<AuthUser>, RepoError>;
-    async fn create(&self, data: CreateUserData) -> Result<AuthUser, RepoError>;
+        -> Result<Option<AuthUser>, RepositoryError>;
+    async fn create(&self, data: CreateUserData) -> Result<AuthUser, RepositoryError>;
     // … parity with IUserRepository
 }
 ```
@@ -439,7 +439,7 @@ rust-auth/
 │   ├── bymax-auth-core/            # AuthEngine + AuthEngineBuilder, all flows, plugin traits
 │   ├── bymax-auth-redis/           # SessionStore/OtpStore/BruteForceStore over Redis (Lua)
 │   ├── bymax-auth-axum/            # Axum adapter: router, extractors, cookie delivery
-│   └── bymax-auth-client/          # reqwest typed client (native + browser) — Rust consumers
+│   └── bymax-auth-client/          # reqwest typed client (native only) — Rust consumers
 │
 ├── bindings/                       # ── WASM, npm-only (not published to crates.io) ──
 │   └── bymax-auth-wasm/            # wasm-bindgen facade over jwt + types (edge verification)
@@ -481,7 +481,7 @@ Notes:
 | `bymax-auth-core` | `AuthEngine` + `AuthEngineBuilder`; all auth flows; object-safe plugin traits (incl. `HttpClient`) | `bymax-auth-{types,crypto,jwt}`, `tokio`, `async-trait`, `tracing`; optional `reqwest` only under `oauth-reqwest` (default `ReqwestHttpClient`) |
 | `bymax-auth-redis` | Redis-backed `SessionStore`/`OtpStore`/`BruteForceStore` (atomic Lua ops, namespacing) | `bymax-auth-core` (traits), `bymax-auth-types`, a Redis client, `tokio`, `async-trait` |
 | `bymax-auth-axum` | Axum HTTP adapter — router, JWT extractors, error→status mapping, cookie delivery | `bymax-auth-core`, `axum`, `tower`, `tokio`, cookie/headers crates |
-| `bymax-auth-client` | `reqwest`-based typed auth client for Rust consumers (native + browser) | `bymax-auth-types`, `reqwest`, `tokio` |
+| `bymax-auth-client` | `reqwest`-based typed auth client for Rust consumers (native only) | `bymax-auth-types`, `reqwest`, `tokio` |
 | `bymax-auth-wasm` | `wasm-bindgen` facade exposing edge JWT verification to JS | `bymax-auth-jwt`, `bymax-auth-types`, `wasm-bindgen` |
 
 ```mermaid
@@ -528,26 +528,29 @@ Two invariants the graph makes visible. First, each crate has **exactly one resp
 
 ### 4.3 The facade crate `bymax-auth`
 
-`bymax-auth` exists so a Rust consumer adds **one dependency and imports from one root** (`bymax_auth::…`), regardless of how the internals are split. The internal crates are still published to crates.io (semver, docs.rs, transitive resolution), but they are **transparent**: users are not expected to depend on them directly. The facade pattern is the Rust counterpart to `nest-auth`'s single npm package with subpaths — here the "subpaths" are Cargo features.
+`bymax-auth` exists so a Rust consumer adds **one dependency and imports from one root** (`bymax_auth::…`), regardless of how the internals are split. The internal crates are still published to crates.io (semver, docs.rs, transitive resolution). The facade re-exports `bymax-auth-core` as `bymax_auth::core` and `bymax-auth-types` as `bymax_auth::types`, plus the optional adapters as `bymax_auth::{redis, axum, client}`; `bymax-auth-crypto` and `bymax-auth-jwt` are **not** re-exported, so a host that needs them directly depends on those crates by name. The facade pattern is the Rust counterpart to `nest-auth`'s single npm package with subpaths — here the "subpaths" are Cargo features.
 
 Feature → crate(s) → capability:
 
 | Feature | Enables crate(s) | Adds |
 |---|---|---|
-| *(base, no feature)* | `bymax-auth-{types,crypto,jwt}` + `bymax-auth-core` | core types, password hashing, JWT sign/verify, and the **always-compiled** engine: the `auth` and `password-reset` flows ship unconditionally. There is **no `core` feature**, and no `auth`/`password-reset` feature — those flows are opt-**out** at *runtime* via `ControllerToggles` (§5.1.8), never gated at compile time. |
-| `scrypt` *(default)* | `bymax-auth-crypto/scrypt` | scrypt password hasher (default algorithm) |
-| `argon2` | `bymax-auth-crypto/argon2` | Argon2id hasher; with `scrypt` enables rehash-on-verify migration |
-| `sessions` | `bymax-auth-core/sessions` | refresh-session lifecycle, listing, revocation, FIFO eviction |
-| `mfa` | `bymax-auth-core/mfa` | TOTP setup/verify/challenge/disable, recovery codes |
-| `oauth` | `bymax-auth-core/oauth` + `OAuthProvider`/`HttpClient` traits | OAuth orchestration + Google provider built-in; **no HTTP-client dependency** — transport is injected (§11.1.1) |
+| *(base, no feature)* | `bymax-auth-core` + `bymax-auth-types` | core types and the **always-compiled** engine (password hashing and JWT sign/verify run inside it): the `auth` and `password-reset` flows ship unconditionally. There is **no `core` feature**, and no `auth`/`password-reset` feature — those flows are opt-**out** at *runtime* via `ControllerToggles` (§5.1.8), never gated at compile time. |
+| `scrypt` *(default)* | `bymax-auth-core/scrypt` | scrypt password hasher (default algorithm) |
+| `argon2` | `bymax-auth-core/argon2` | Argon2id hasher; with `scrypt` enables rehash-on-verify migration |
+| `sessions` | `bymax-auth-core/sessions` + `bymax-auth-axum?/sessions` | refresh-session lifecycle, listing, revocation, FIFO eviction |
+| `mfa` | `bymax-auth-core/mfa` + `bymax-auth-axum?/mfa` + `bymax-auth-redis?/mfa` | TOTP setup/verify/challenge/disable, recovery codes |
+| `oauth` | `bymax-auth-core/oauth` + `bymax-auth-axum?/oauth` + `bymax-auth-redis?/oauth` | OAuth orchestration + Google provider built-in; **no HTTP-client dependency** — transport is injected (§11.1.1) |
 | `oauth-reqwest` | `oauth` + `dep:reqwest` (`ReqwestHttpClient`) | bundled `reqwest`-backed `HttpClient` default for the built-in provider; off by default — omit it and supply your own `HttpClient` to add zero HTTP deps |
-| `platform` | `bymax-auth-core/platform` + `PlatformUserRepository` | platform-admin auth surface |
-| `invitations` | `bymax-auth-core/invitations` | invitation create/accept |
+| `platform` | `bymax-auth-core/platform` + `bymax-auth-axum?/platform` + `bymax-auth-redis?/platform` | platform-admin auth surface |
+| `invitations` | `bymax-auth-core/invitations` + `bymax-auth-axum?/invitations` | invitation create/accept |
+| `breach` | `bymax-auth-core/breach` | breached-password check (HIBP k-anonymity) over the injected `HttpClient` |
+| `api-keys` | `bymax-auth-core/api-keys` + `bymax-auth-axum?/api-keys` | scoped service API keys; with `axum`, also the layer, extractor and flush task (§7.13, §8.9) |
+| `openapi` | `bymax-auth-axum?/openapi` | with `axum`, the OpenAPI request-body schemas of the auth routes (§8.4.4) |
 | `redis` | `bymax-auth-redis` | Redis-backed `SessionStore`/`OtpStore`/`BruteForceStore` |
 | `axum` | `bymax-auth-axum` | Axum router, extractors, cookie delivery |
 | `client` | `bymax-auth-client` | `reqwest` typed client for Rust consumers |
-| _(no facade feature)_ | `bymax-auth-{types,crypto,jwt}` | the `wasm32`-safe subset is the facade built with all server features off (`--no-default-features --features scrypt`). The npm edge bindings are a **separate** crate, `bymax-auth-wasm`, that depends directly on those three base crates — not reached through the facade |
-| `full` | all of the above | everything (convenience meta-feature) |
+| _(no facade feature)_ | `bymax-auth-{types,crypto,jwt}` | the npm edge bindings are a **separate** crate, `bymax-auth-wasm`, that depends directly on those three base crates — not reached through the facade |
+| `full` | all of the above | everything (convenience meta-feature): `scrypt`, `argon2`, `sessions`, `mfa`, `oauth`, `oauth-reqwest`, `platform`, `invitations`, `breach`, `api-keys`, `openapi`, `redis`, `axum`, `client` |
 
 Representative `crates/bymax-auth/Cargo.toml` `[features]` block:
 
@@ -555,20 +558,24 @@ Representative `crates/bymax-auth/Cargo.toml` `[features]` block:
 [features]
 default = ["scrypt"]
 
-# crypto algorithm selection (forwarded to bymax-auth-crypto)
-scrypt = ["bymax-auth-crypto/scrypt"]
-argon2 = ["bymax-auth-crypto/argon2"]
+# crypto algorithm selection (forwarded through bymax-auth-core); at least one is required
+scrypt = ["bymax-auth-core/scrypt"]
+argon2 = ["bymax-auth-core/argon2"]
 
 # engine flows: the `auth` and `password-reset` flows are NOT features — they are
 # always compiled into bymax-auth-core and toggled at runtime via ControllerToggles.
-# The optional flows below each enable a bymax-auth-core sub-feature. There is no
-# `core` feature: bymax-auth-core is a non-optional dependency (see [dependencies]).
-sessions       = ["bymax-auth-core/sessions"]
-mfa            = ["bymax-auth-core/mfa"]
-oauth          = ["bymax-auth-core/oauth"]                  # OAuth orchestration + traits; NO http client
+# The optional flows below each enable a bymax-auth-core sub-feature and, through a weak
+# dependency feature (`adapter?/flow`), the same flow in the adapters that are selected.
+# There is no `core` feature: bymax-auth-core is a non-optional dependency (see [dependencies]).
+sessions       = ["bymax-auth-core/sessions", "bymax-auth-axum?/sessions"]
+mfa            = ["bymax-auth-core/mfa", "bymax-auth-axum?/mfa", "bymax-auth-redis?/mfa"]
+oauth          = ["bymax-auth-core/oauth", "bymax-auth-axum?/oauth", "bymax-auth-redis?/oauth"] # OAuth orchestration + traits; NO http client
 oauth-reqwest  = ["oauth", "bymax-auth-core/oauth-reqwest"] # default ReqwestHttpClient (pulls reqwest)
-platform       = ["bymax-auth-core/platform"]
-invitations    = ["bymax-auth-core/invitations"]
+platform       = ["bymax-auth-core/platform", "bymax-auth-axum?/platform", "bymax-auth-redis?/platform"]
+invitations    = ["bymax-auth-core/invitations", "bymax-auth-axum?/invitations"]
+breach         = ["bymax-auth-core/breach"]                 # HIBP k-anonymity over the HttpClient seam
+api-keys       = ["bymax-auth-core/api-keys", "bymax-auth-axum?/api-keys"]
+openapi        = ["bymax-auth-axum?/openapi"]
 
 # infrastructure / adapters (optional crates pulled in only when selected)
 redis  = ["dep:bymax-auth-redis"]
@@ -576,19 +583,17 @@ axum   = ["dep:bymax-auth-axum"]
 client = ["dep:bymax-auth-client"]
 # NOTE: there is deliberately no `wasm` facade feature. The npm edge bindings live in
 # the separate `bymax-auth-wasm` crate (bindings/), which depends directly on
-# bymax-auth-{crypto,jwt,types}. The wasm32-safe subset of the facade itself is simply
-# `--no-default-features --features scrypt` (no redis/axum/client). Keeping the binding
-# out of the facade avoids a published crate depending on an npm-only artifact.
+# bymax-auth-{crypto,jwt,types}. Keeping the binding out of the facade avoids a published
+# crate depending on an npm-only artifact.
 
 full = [
     "scrypt", "argon2", "sessions", "mfa",
-    "oauth", "oauth-reqwest", "platform", "invitations", "redis", "axum", "client",
+    "oauth", "oauth-reqwest", "platform", "invitations", "breach", "api-keys", "openapi",
+    "redis", "axum", "client",
 ]
 
 [dependencies]
 bymax-auth-types  = { version = "=0.1.0", path = "../bymax-auth-types" }
-bymax-auth-crypto = { version = "=0.1.0", path = "../bymax-auth-crypto", default-features = false }
-bymax-auth-jwt    = { version = "=0.1.0", path = "../bymax-auth-jwt" }
 bymax-auth-core   = { version = "=0.1.0", path = "../bymax-auth-core", default-features = false } # always linked — no `core` feature
 bymax-auth-redis  = { version = "=0.1.0", path = "../bymax-auth-redis",  optional = true }
 bymax-auth-axum   = { version = "=0.1.0", path = "../bymax-auth-axum",   optional = true }
@@ -602,7 +607,7 @@ features = ["full"]
 rustdoc-args = ["--cfg", "docsrs"]
 ```
 
-`src/lib.rs` re-exports a flat surface and gates the optional pieces with `#[cfg(feature = …)]`, so `AuthEngine`, the plugin traits, and the error/result types are reachable as `bymax_auth::…` and the adapter as `bymax_auth::axum::…` only when compiled in.
+`src/lib.rs` re-exports the crates as modules and gates the optional ones with `#[cfg(feature = …)]`, so `AuthEngine`, the plugin traits and the config are reachable as `bymax_auth::core::…`, the shared types and error catalogue as `bymax_auth::types::…`, and the adapter as `bymax_auth::axum::…` only when compiled in. Building with neither `scrypt` nor `argon2` is a `compile_error!`.
 
 **Feature-flag discipline.** The feature set is deliberately small, additive, and one-feature-per-capability. *Additive* is load-bearing: because Cargo unifies features across a dependency graph, enabling a feature may only *add* items and wiring — never remove or alter existing behavior — so one dependency turning on `mfa` or `argon2` can never change the API another dependency observes. The taxonomy stays fixed: `default = ["scrypt"]`; one feature per optional flow (`sessions`, `mfa`, `oauth`, `platform`, `invitations`) and per adapter (`redis`, `axum`, `client`); the capability split `scrypt` / `argon2`; and the deliberate `oauth` / `oauth-reqwest` separation so OAuth orchestration pulls in **no** HTTP-client dependency unless the consumer opts into the bundled `reqwest` transport (§11.1.1). A consumer pays — in compile time, binary size, and attack surface — only for the features it turns on; everything else is not merely inert but **absent from the build**.
 
@@ -729,15 +734,19 @@ pub struct AuthConfig {
     pub email_verification: EmailVerificationConfig,
     pub platform: PlatformConfig,
     pub invitations: InvitationConfig,
+    /// Address-change policy (`token_ttl`, default 3600s). The flow itself is
+    /// switched on by `controllers.email_change`.
+    pub email_change: EmailChangeConfig,
     pub oauth: OAuthConfig,
     pub route_prefix: String,
     pub blocked_statuses: Vec<String>,
     pub user_status_cache_ttl: Duration,
     pub controllers: ControllerToggles,
     /// Resolves the tenant id from request parts. When `Some`, the resolved
-    /// value is authoritative and any `tenant_id` in the request body is
-    /// ignored entirely — never read, merged, or used as a fallback
-    /// (anti-spoofing parity with nest-auth's `tenantIdResolver`; see §5.7).
+    /// value is authoritative and a request that names a `tenant_id` of its own
+    /// is refused with `auth.validation` on that field rather than having it
+    /// discarded; `null` and an absent field are accepted, since they assert
+    /// nothing to contradict (anti-spoofing; see §5.7).
     pub tenant_id_resolver: Option<Arc<dyn TenantIdResolver>>,
     /// Refuse an authenticated request whose token tenant differs from the tenant
     /// `tenant_id_resolver` names for it (default `false`). Requires `tenant_id_resolver`;
@@ -746,6 +755,10 @@ pub struct AuthConfig {
     /// The secret the identifier-hashing key derives from; `None` derives it from `jwt.secret`.
     /// Pin it to the current `jwt.secret` before rotating the signing secret.
     pub identifier_key: Option<SecretString>,
+    /// Scoped service API keys for machine callers; off unless `api_keys.enabled` (§7.13).
+    pub api_keys: ApiKeysConfig,
+    /// The workspace layer; off unless `workspaces.enabled` (§8.2.9).
+    pub workspaces: WorkspacesConfig,
 }
 ```
 
@@ -757,16 +770,30 @@ pub struct JwtConfig {
     /// Signing secret. Required. Validated at startup (length + entropy).
     /// Never logged — only length/entropy appear in error messages.
     pub secret: SecretString,
+    /// Secrets retired by a rotation, accepted for **verification only**. Default:
+    /// empty. Signing always uses `secret`; each entry is validated like the current
+    /// secret, and should be removed once the longest-lived token signed under it
+    /// has expired.
+    pub previous_secrets: Vec<SecretString>,
     /// Access token lifetime. Default: 15m.
     pub access_expires_in: Duration,
     /// Access-token cookie `Max-Age`. Default: 15m (kept consistent with `access_expires_in`).
     pub access_cookie_max_age: Duration,
     /// Refresh token lifetime in days. Default: 7.
     pub refresh_expires_in_days: u32,
+    /// Hard cap, in days, on how long one login can be extended by rotation.
+    /// Default 30; `0` disables the cap.
+    pub absolute_session_lifetime_days: u32,
     /// Pinned to `Hs256`. The enum carries a single variant so callers cannot
     /// select an asymmetric algorithm (algorithm-confusion prevention).
     pub algorithm: JwtAlgorithm,
-    /// Grace window during which a rotated refresh token stays valid. Default: 30s.
+    /// `iss` stamped on every minted token and REQUIRED on every verified one.
+    /// Default `None`. Both backends of one deployment must carry the same value.
+    pub issuer: Option<String>,
+    /// `aud`, with the same semantics as `issuer`. Default `None`.
+    pub audience: Option<String>,
+    /// Grace window during which a rotated refresh token stays valid. Default: 30s;
+    /// at most 300s (`RefreshGraceCeiling`, §5.5).
     pub refresh_grace_window: Duration,
 }
 
@@ -807,6 +834,10 @@ pub struct PasswordConfig {
     /// algorithm — or is weaker than current params — triggers a transparent
     /// rehash. The engine calls `UserRepository::update_password` with the new hash.
     pub rehash_on_verify: bool,
+    /// Minimum length, in characters, of a password being SET. Default 15
+    /// (NIST SP 800-63B-4 single-factor floor); validated to `8..=128`
+    /// (`PasswordMinLengthRange`). Never applied on login or on a rehash.
+    pub min_length: u32,
     /// Deployment-specific words the default password screen refuses, reduced the way a
     /// candidate is (case, trailing digits and punctuation, leet). Ignored when the host
     /// supplies its own screen.
@@ -876,6 +907,9 @@ pub struct CookieConfig {
     pub refresh_cookie_path: String, // default "/auth" — scopes refresh cookie to the refresh endpoint
     pub mfa_temp_cookie_path: String,// default "/auth/mfa" — scopes the OAuth-MFA temp cookie
     pub same_site: SameSite,         // default Lax
+    /// Full origins allowed to make state-changing requests carrying the session cookie
+    /// (no wildcards). Only meaningful under `SameSite::None`; required there, refused elsewhere.
+    pub trusted_origins: Vec<String>, // default []
     /// Resolves cookie `Domain`(s) from the request host (multi-domain support).
     pub resolve_domains: Option<Arc<dyn CookieDomainResolver>>,
 }
@@ -901,11 +935,15 @@ pub struct MfaConfig {
     /// AES-256-GCM key for TOTP-secret encryption. Required when `mfa` is `Some`.
     /// Must decode (base64, standard or url-safe) to exactly 32 bytes.
     pub encryption_key: SecretString,
+    /// Keys retired by a rotation, accepted for **decryption only**. Default: empty.
+    /// A secret decrypted with one of these is re-encrypted under `encryption_key`
+    /// the next time its owner passes a challenge. Each is validated like the current key.
+    pub previous_encryption_keys: Vec<SecretString>,
     /// Issuer shown in authenticator apps. Required when `mfa` is `Some`.
     pub issuer: String,
     /// Recovery codes generated on enable. Default 8.
     pub recovery_code_count: u8,
-    /// Accepted ± periods of 30s drift. Default 1.
+    /// Accepted ± periods of 30s drift. Default 1; `0..=2` (`TotpWindowRange`).
     pub totp_window: u8,
 }
 ```
@@ -961,6 +999,11 @@ pub struct InvitationConfig {
     pub enabled: bool,          // default false
     pub token_ttl: Duration,    // default 172_800s (48h)
 }
+
+#[derive(Clone, Copy)]
+pub struct EmailChangeConfig {
+    pub token_ttl: Duration,    // default 3600s (1h)
+}
 ```
 
 #### 5.1.7 OAuth
@@ -1010,6 +1053,8 @@ pub struct ControllerToggles {
     pub platform: bool,       // default false (auto-true when platform.enabled)
     pub oauth: bool,          // default false (opt-in; requires an OAuth provider)
     pub invitations: bool,    // default false (auto-true when invitations.enabled)
+    pub email_change: bool,   // default false (opt-in)
+    pub workspaces: bool,     // default false (opt-in; requires `workspaces.enabled`)
 }
 ```
 
@@ -1060,12 +1105,16 @@ The **Default** column lists `AuthConfig::default()` (≡ `nest_compat_defaults(
 | `jwt.access_cookie_max_age` | `Duration` | No | `15m` | Access cookie `Max-Age` |
 | `jwt.refresh_expires_in_days` | `u32` | No | `7` | Refresh lifetime (days) |
 | `jwt.algorithm` | `JwtAlgorithm` | No | `Hs256` | Pinned — HS256 only |
-| `jwt.refresh_grace_window` | `Duration` | No | `30s` | Must be < refresh lifetime |
+| `jwt.refresh_grace_window` | `Duration` | No | `30s` | Must be < refresh lifetime (`RefreshGraceTooLarge`) and at most `300s` (`RefreshGraceCeiling`): it is the replay window for an already-consumed refresh token, so it covers a network retry, not a session policy |
+| `jwt.previous_secrets` | `Vec<SecretString>` | No | `[]` | Secrets retired by a rotation, accepted for verification only; each held to the bar of `jwt.secret`, and none may repeat it or another entry (`PreviousSecretRepeated`) |
+| `jwt.issuer` | `Option<String>` | No | `None` | `iss` stamped on every minted token and required on every verified one; both backends of one deployment must carry the same value |
+| `jwt.audience` | `Option<String>` | No | `None` | `aud`, with the same semantics as `jwt.issuer` |
 | `jwt.absolute_session_lifetime_days` | `u32` | No | `30` | Caps how long one login can be extended by rotation; `0` disables the cap |
 | `roles.hierarchy` | `HashMap<String, Vec<String>>` | Yes | — | Non-empty; referential integrity enforced |
 | `roles.platform_hierarchy` | `Option<HashMap<…>>` | Cond. | `None` | Required when `platform.enabled` |
 | `password.active_algorithm` | `PasswordAlgorithm` | No | `Scrypt` | New-hash algorithm; `Argon2id` requires the `argon2` feature (§5.1.9) |
 | `password.rehash_on_verify` | `bool` | No | `true` | Transparent upgrade on verify |
+| `password.min_length` | `u32` | No | `15` | Minimum length, in characters, of a password being SET; `8..=128` (`PasswordMinLengthRange`, checked when `build()` assembles the password service). Never applied on login or on a rehash, so refusing a password someone already has cannot lock them out. 15 is the NIST SP 800-63B-4 floor for a single-factor password; the request DTOs keep a structural floor of 8 |
 | `password.blocklist` | `Vec<String>` | No | `[]` | Extra words the default screen refuses (the deployment's own names; ASVS v5 §6.2.11). Ignored when `AuthEngineBuilder::breach_checker` supplies a screen. **Rust-side addition, bounded at startup** (`ConfigError::PasswordBlocklistSize` / `PasswordBlocklistEntry`): a size cap, a per-entry length cap, and no entry reducing to nothing; nest-auth applies no bound |
 | `api_keys.enabled` | `bool` | No | `false` | Scoped service API keys for machine callers. Needs the `api-keys` cargo feature and an `ApiKeyRepository` on the builder; either without the other is a startup error (`ConfigError::ApiKeysFeatureDisabled`, `ApiKeysRepositoryRequired`, `ApiKeysRepositoryUnused`). Nothing below is checked while it is `false` |
 | `api_keys.pepper` | `SecretString` | Cond. | — | HMAC key every digest is computed under; same strength bar as `jwt.secret` (32 characters, 3.5 bits/char). Must equal none of `jwt.secret`, a retired JWT secret, `identifier_key`, `mfa.encryption_key` or a retired MFA key (`ApiKeysPepperReused`). Changing it makes every issued key unverifiable |
@@ -1102,14 +1151,15 @@ The **Default** column lists `AuthConfig::default()` (≡ `nest_compat_defaults(
 | `mfa` | `Option<MfaConfig>` | Cond. | `None` | Presence enables MFA config |
 | `mfa.encryption_key` | `SecretString` | Cond. | — | Decodes to exactly 32 bytes |
 | `mfa.issuer` | `String` | Cond. | — | Shown in authenticator apps |
-| `mfa.recovery_code_count` | `u8` | No | `8` | |
-| `mfa.totp_window` | `u8` | No | `1` | ± 30s periods |
+| `mfa.previous_encryption_keys` | `Vec<SecretString>` | No | `[]` | Keys retired by a rotation, accepted for decryption only; a secret read with one is re-encrypted under `mfa.encryption_key` the next time its owner passes a challenge. Each is validated like the current key; none may repeat it or another entry (`PreviousSecretRepeated`) |
+| `mfa.recovery_code_count` | `u8` | No | `8` | `1..=50` (`RecoveryCodeCountRange`) |
+| `mfa.totp_window` | `u8` | No | `1` | ± 30s periods; `0..=2` (`TotpWindowRange`), the drift window the verifier applies (`bymax_auth_crypto::totp::MAX_VERIFY_WINDOW`) |
 | `sessions.enabled` | `bool` | No | `false` | |
 | `sessions.default_max_sessions` | `u32` | No | `5` | Fallback when no resolver is set or the resolver fails |
 | `sessions.eviction_strategy` | `EvictionStrategy` | No | `Fifo` | |
 | `sessions.max_sessions_resolver` | `Option<Arc<dyn …>>` | No | `None` | Per-user override |
-| `brute_force.max_attempts` | `u32` | No | `5` | |
-| `brute_force.window` | `Duration` | No | `900s` | Fixed window |
+| `brute_force.max_attempts` | `u32` | No | `5` | `1..=100` (`BruteForceAttemptsRange`) |
+| `brute_force.window` | `Duration` | No | `900s` | Fixed window; at least `1s` (`BruteForceWindowInvalid`) |
 | `password_reset.method` | `ResetMethod` | No | `Token` | |
 | `password_reset.token_ttl` | `Duration` | No | `600s` | |
 | `password_reset.otp_ttl` | `Duration` | No | `600s` | |
@@ -1119,6 +1169,7 @@ The **Default** column lists `AuthConfig::default()` (≡ `nest_compat_defaults(
 | `platform.enabled` | `bool` | No | `false` | Requires platform hierarchy + repo |
 | `invitations.enabled` | `bool` | No | `false` | |
 | `invitations.token_ttl` | `Duration` | No | `172_800s` | 48h |
+| `email_change.token_ttl` | `Duration` | No | `3600s` | Lifetime of the address-change verification token. The flow itself is switched on by `controllers.email_change` |
 | `oauth.success_redirect_url` | `Option<String>` | No | `None` | Requires `Cookie`/`Both` |
 | `oauth.mfa_redirect_url` | `Option<String>` | No | `None` | Any delivery mode |
 | `oauth.error_redirect_url` | `Option<String>` | No | `None` | Appends `?error=<code>` |
@@ -1128,7 +1179,7 @@ The **Default** column lists `AuthConfig::default()` (≡ `nest_compat_defaults(
 | `blocked_statuses` | `Vec<String>` | No | `["BANNED","INACTIVE","SUSPENDED"]` | |
 | `user_status_cache_ttl` | `Duration` | No | `60s` | How long an account's cached status (and, where `email_verification.required`, its verified-address flag) answers the per-request status gate before the repository is read again. A status change reaches requests within this TTL, or at once after `AuthEngine::invalidate_account_status`. `0` turns the cache off. The platform plane is never cached |
 | `controllers.*` | `ControllerToggles` | No | see 5.1.8 | Gates router mounting |
-| `tenant_id_resolver` | `Option<Arc<dyn …>>` | No | `None` | Anti-spoofing |
+| `tenant_id_resolver` | `Option<Arc<dyn …>>` | No | `None` | Anti-spoofing: when set, its value is authoritative and a request body naming its own `tenant_id` is refused with `auth.validation`; `null` or an absent field is accepted (§5.7) |
 | `enforce_tenant_binding` | `bool` | No | `false` | Refuses a token minted for another tenant than the resolver names for the request; requires `tenant_id_resolver` |
 
 > **Open divergence from nest-auth: the tenant binding reads `Host` only.** With
@@ -1175,7 +1226,7 @@ let engine: AuthEngine = AuthEngine::builder()
     })
     // Required collaborators (compile-time path to a buildable engine):
     .user_repository(Arc::new(SqlxUserRepository::new(pool.clone())))
-    .redis_stores(Arc::new(RedisStores::connect(&redis_url).await?)) // SessionStore + OtpStore + BruteForceStore
+    .redis_stores(Arc::new(RedisStores::connect(&redis_url, "auth")?)) // SessionStore + OtpStore + BruteForceStore
     // Optional collaborators:
     .email_provider(Arc::new(ResendEmailProvider::new(api_key)))     // else NoOpEmailProvider
     .hooks(Arc::new(AppAuthHooks::new(audit.clone())))               // else NoOpAuthHooks
@@ -1189,7 +1240,10 @@ When `platform.enabled` is set without `.platform_user_repository(..)`, or when 
 `build()` resolves defaults and then validates every security-critical invariant, returning the first violation as a `ConfigError`. The Axum adapter surfaces this at application boot, so a misconfigured deployment never starts. Validation is total — it never logs the secret, only its measured properties.
 
 ```rust
+// Abridged: the rules table below names every variant and its bound, and the
+// rustdoc of `ConfigError` is the authoritative list.
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum ConfigError {
     #[error("jwt.secret must be at least 32 characters (got {len})")]
     JwtSecretTooShort { len: usize },
@@ -1259,16 +1313,23 @@ Validation rules, in the order applied (parity with `resolveOptions`):
 | 2 | `jwt.secret` Shannon entropy >= 3.5 bits/char | `JwtSecretLowEntropy` |
 | 2a | `identifier_key`, when set: >= 32 chars and Shannon entropy >= 3.5 bits/char | `IdentifierKeyTooShort`, `IdentifierKeyLowEntropy` |
 | 3 | `jwt.refresh_expires_in_days > 0` and finite | `RefreshLifetimeInvalid` |
-| 4 | `jwt.refresh_grace_window < refresh_expires_in_days * 86400` | `RefreshGraceTooLarge` |
+| 4 | `jwt.refresh_grace_window < refresh_expires_in_days * 86400` and `<= 300` seconds | `RefreshGraceTooLarge`, `RefreshGraceCeiling` |
+| 4a | `brute_force.window >= 1s` and `brute_force.max_attempts` in `1..=100` | `BruteForceWindowInvalid`, `BruteForceAttemptsRange` |
+| 4b | `jwt.access_expires_in` does not exceed the token-epoch retention window (30 days), so an epoch bump cannot lapse while a pre-bump access token is still presentable | `AccessLifetimeExceedsEpochRetention` |
+| 4c | every `jwt.previous_secrets` entry clears the bar of rule 1-2 and no entry repeats `jwt.secret` or another entry; every `mfa.previous_encryption_keys` entry decodes like the current key and repeats none | `PreviousSecretRepeated`, `JwtSecretTooShort`, `JwtSecretLowEntropy`, `MfaKeyInvalidBase64` |
 | 5 | `roles.hierarchy` non-empty | `EmptyRoleHierarchy` |
 | 6 | every child role is declared as a key (referential integrity) | `UnknownRoleReference` |
 | 7 | `platform.enabled` ⇒ `roles.platform_hierarchy` present | `MissingPlatformHierarchy` |
 | 8 | `platform.enabled` ⇒ `PlatformUserRepository` supplied | `MissingPlatformRepository` |
-| 9 | `password.scrypt.cost_factor` power of two and >= 16384 | `ScryptCostFactor` |
-| 10 | `password.argon2.memory_kib >= 19456` and `iterations >= 2` (OWASP production floor) | `Argon2Memory` / `Argon2Iterations` |
-| 11 | `mfa.encryption_key` decodes (base64 std or url-safe) to 32 bytes | `MfaKeyLength` |
+| 9 | `password.scrypt.cost_factor` power of two and >= 16384; `block_size >= 8`; `parallelization >= 1` (compiled-in `scrypt` only) | `ScryptCostFactor`, `ScryptBlockSize`, `ScryptParallelization` |
+| 9a | `password.blocklist` has at most 10 000 entries, none longer than 128 characters or reducing to nothing | `PasswordBlocklistSize`, `PasswordBlocklistEntry` |
+| 9b | `password.min_length` in `8..=128` (checked when `build()` assembles the password service) | `PasswordMinLengthRange` |
+| 9c | the `active_algorithm` hasher is compiled in | `HasherNotEnabled` |
+| 10 | `password.argon2.memory_kib >= 19456`, `iterations >= 2` (OWASP production floor) and `parallelism >= 1` (compiled-in `argon2` only) | `Argon2Memory` / `Argon2Iterations` / `Argon2Parallelism` |
+| 11 | `mfa.encryption_key` is valid base64 (std or url-safe) and decodes to 32 bytes | `MfaKeyInvalidBase64`, `MfaKeyLength` |
 | 12 | `mfa` present ⇒ `issuer` non-empty | `MfaIssuerMissing` |
 | 13 | `controllers.mfa` ⇒ `mfa` config present | `MfaToggleWithoutConfig` |
+| 13b | `mfa.totp_window` in `0..=2` and `mfa.recovery_code_count` in `1..=50` | `TotpWindowRange`, `RecoveryCodeCountRange` |
 | 14 | `password_reset.otp_length` in `4..=8` | `OtpLengthRange` |
 | 15 | each configured OAuth provider has `client_id`/`client_secret`/`callback_url` | `OAuthFieldMissing` |
 | 16 | OAuth `callback_url` is https in production | `OAuthCallbackInsecure` |
@@ -1276,11 +1337,17 @@ Validation rules, in the order applied (parity with `resolveOptions`):
 | 18 | `success`/`mfa`/`error` redirect URLs are https or `/`-relative in production, and — when `oauth.redirect_allowlist` is non-empty — every `*_redirect_url` and provider `callback_url` resolves to an allowlisted host | `OAuthRedirectInsecure` / `OAuthRedirectNotAllowlisted` |
 | 19 | `cookies.same_site = None` ⇒ `secure_cookies` resolved `true` | `SameSiteNoneRequiresSecure` |
 | 19a | `secure_cookies = Some(false)` ⇒ `environment` is `Development` or `Test` (an unset environment is production, and a TLS-terminating proxy does not make an HTTP cookie safe); checked after 19 | `SecureCookiesRequiredInProduction` |
+| 19b | `cookies.same_site = None` ⇒ `cookies.trusted_origins` non-empty, and every entry a bare absolute origin (`scheme://host[:port]`); a list under `Lax`/`Strict` is refused too | `TrustedOriginsRequired`, `TrustedOriginMalformed` |
 | 20 | `route_prefix != "auth"` ⇒ `cookies.refresh_cookie_path` set | `RefreshPathMismatch` |
 | 20b | a cookie name starting `__Secure-` ⇒ `secure_cookies` resolved `true`; starting `__Host-` ⇒ also `Path=/` (the refresh cookie uses `cookies.refresh_cookie_path`) and no `cookies.resolve_domains` — a browser drops a `Set-Cookie` that breaks its prefix | `CookiePrefixUnsatisfied` |
 | 21 | `controllers.oauth` ⇒ at least one OAuth provider registered | `OAuthToggleWithoutProvider` |
 | 22 | `UserRepository` supplied | `MissingUserRepository` |
 | 23 | session/OTP/brute-force stores supplied | `MissingStores` |
+| 23a | `enforce_tenant_binding` ⇒ `tenant_id_resolver` set (checked first, before rule 1) | `TenantBindingWithoutResolver` |
+| 23b | `controllers.oauth` ⇒ an `OAuthStateStore` supplied (`oauth` feature) | `OAuthStateStoreMissing` |
+| 23c | `invitations.enabled` ⇒ an `InvitationStore` supplied | `MissingInvitationStore` |
+| 23d | the adapter's `TrustedForwardedFor` client-address source ⇒ an `is_trusted_proxy` predicate (raised by the adapter, §8.1) | `TrustedForwardedForRequiresPredicate` |
+| 23e | the anti-enumeration sentinel hash computes from the validated password parameters; effectively unreachable once the floors pass, reported rather than panicked | `SentinelHashFailed` |
 | 24 | `api_keys.enabled` ⇒ the `api-keys` feature is compiled in, an `ApiKeyRepository` is supplied, and — when `audit_mode` is `Required` — hooks are supplied; a repository without `enabled` is refused too | `ApiKeysFeatureDisabled`, `ApiKeysRepositoryRequired`, `ApiKeysAuditRequiresHooks`, `ApiKeysRepositoryUnused` |
 | 25 | `api_keys.enabled` ⇒ the pepper is ≥ 32 characters, ≥ 3.5 bits/char and equals none of `jwt.secret`, a retired JWT secret, `identifier_key`, `mfa.encryption_key` or a retired MFA key; the scope vocabulary is non-empty, distinct and well-formed; `header` is a lowercase name the library does not read; `prefix` fits the key grammar; `last_used_flush` is a whole number of seconds from 1 to 3600 | `ApiKeysPepperTooShort`, `ApiKeysPepperLowEntropy`, `ApiKeysPepperReused`, `ApiKeysScopes`, `ApiKeysTransport`, `ApiKeysFlushInterval` |
 | 26 | `controllers.workspaces` ⇒ `workspaces.enabled`; `workspaces.enabled` ⇒ both repositories and the membership cache store are supplied, the owner role is 1 to 32 code points with no control character (checked first, so a malformed name is reported as that and not as an unknown owner; no other role is constrained), the hierarchy and owner role are valid, every permission names only roles of it, the cache lifetime is at most 3600, the owner cap at most 1 000 000 and the deletion grace period at most 365 days; any collaborator without `enabled` is refused too | `WorkspacesControllerWithoutWorkspaces`, `MissingWorkspaceRepositories`, `MissingMembershipCacheStore`, `WorkspaceCollaboratorsUnused`, `WorkspaceOwnerRole`, `WorkspaceRoles`, `WorkspacePermissionUnknownRole`, `WorkspaceMembershipCacheTtl`, `WorkspaceOptionOutOfRange` |
@@ -1330,7 +1397,7 @@ Multi-tenant deployments derive tenant scope from the request context, never fro
 
 - **Tenant and platform are separate identity domains with separate role hierarchies.** `roles.hierarchy` governs dashboard/tenant users (`AuthUser`); `roles.platform_hierarchy` governs platform administrators (`AuthPlatformUser`), who are **not tenant-scoped at all** (§6.3) and authenticate through a distinct surface (the platform routes of §5.6). The two hierarchies are validated independently (§5.5, rules 5–8) and never share roles by accident: a tenant role grants nothing on the platform side, and vice versa.
 
-The net effect mirrors nest-auth's `tenantIdResolver` contract exactly: resolver-supplied scope wins, body-supplied scope is discarded, and the operator/tenant split is a hard boundary rather than a role convention.
+The net effect mirrors nest-auth's `tenantIdResolver` contract exactly: resolver-supplied scope wins, a body-supplied scope is refused rather than honoured, and the operator/tenant split is a hard boundary rather than a role convention.
 ## 6. Repository & Provider Contracts
 
 The engine owns no database, ORM, or schema. Everything that persists state behind the auth flows is reached through a small set of object-safe traits that the consuming application implements against its own storage. This is the Rust counterpart of nest-auth's `IUserRepository` / `IPlatformUserRepository` injection tokens: the library defines the canonical user shapes and the contract; the consumer bridges them to a real table.
@@ -1984,7 +2051,7 @@ Derived-key length is 32 bytes for both algorithms. Salt is 16 random bytes from
 Unlike nest-auth's bespoke `scrypt:{salt_hex}:{derived_hex}` format, `rust-auth` stores the **standard PHC string** (`$<id>$<params>$<b64salt>$<b64hash>`), which self-describes the algorithm and parameters and makes `needs_rehash` trivial and unambiguous:
 
 - Argon2id: `$argon2id$v=19$m=19456,t=2,p=1$<b64salt>$<b64hash>`
-- scrypt: `$scrypt$ln=15,r=8,p=1$<b64salt>$<b64hash>` (`ln = log2(N)`)
+- scrypt: `$scrypt$ln=17,r=8,p=1$<b64salt>$<b64hash>` (`ln = log2(N)`)
 
 Base64 is the PHC standard (no padding). The `password-hash` crate family (`argon2`, `scrypt`, `password-hash`) produces and parses these strings. A legacy nest-auth `scrypt:hex:hex` value, if present in a migrated DB, is recognized by a compatibility parser and always reported by `needs_rehash` as stale so it is upgraded to PHC form on the next successful login.
 
@@ -2634,6 +2701,46 @@ so a half-configured deployment never starts. The pepper clears the signing secr
 no other key the deployment holds; the scope vocabulary, header, prefix and flush interval are
 validated as the §5.3 rows state.
 
+### 7.14 Public engine methods for adapters and hosts
+
+The Axum adapter is built only on public `AuthEngine` methods, so a host that authenticates outside the extractors (a WebSocket gateway, an SSE stream, a background job) or administers workspaces from its own code calls the same ones. A repository id is unique only within a tenant (§6.2), so every method that names an account takes the tenant explicitly or reads it from a verified token or `WorkspaceMember`; none defaults to a cross-tenant lookup. The tables list the signature shape, where the tenant comes from, and the refusals specific to the method; a store failure is an `AuthError` throughout, and the complete signatures are the rustdoc.
+
+**Verification, status and sessions** (`services/adapter_api.rs`, `services/account_status.rs`):
+
+| Method | Tenant | Returns / refusals |
+| --- | --- | --- |
+| `verify_access_token(token)` | in the token | `DashboardClaims`; every token refusal is `token_invalid` at the boundary |
+| `verify_platform_token(token)` (`platform`) | none (platform plane) | `PlatformClaims`; a token of another kind is `token_invalid` |
+| `verify_platform_request_token(token)` (`platform`) | none | as above, but a validly signed dashboard or MFA-challenge token is `platform_auth_required` (the guard table of §8.3.7) |
+| `role_satisfies(held, required)` / `platform_role_satisfies(held, required)` | none | `bool` against the dashboard / platform hierarchy; the platform form is `false` with no platform hierarchy |
+| `assert_user_active(sub, tenant_id)` | argument | `()`; the status-specific code for a blocked account, `token_invalid` for an unknown subject |
+| `assert_user_active_and_verified(sub, tenant_id)` | argument | as above, plus `email_not_verified` when `email_verification.required` and the address is unproven |
+| `invalidate_account_status(user_id, tenant_id)` | argument | `()`; drops the cached status and verified flag so the next check reads the repository |
+| `list_user_sessions(tenant_id, user_id, raw_refresh)` | argument | `Vec<SessionInfo>`, the current session flagged when `raw_refresh` names it |
+| `revoke_user_session(tenant_id, user_id, session_hash)` | argument | `()`; a malformed or unowned hash is `session_not_found`; bumps the account's token epoch afterwards |
+| `revoke_other_user_sessions(tenant_id, user_id, raw_refresh)` | argument | `()`; without a refresh token naming the current session the call is refused with `session_not_found` rather than answered as a no-op |
+| `issue_ws_ticket(&claims)` / `redeem_ws_ticket(ticket)` | in the claims / the snapshot | `IssuedWsTicket` / `DashboardClaims`; issue refuses an MFA-enrolled session that has not cleared its challenge and a blocked account |
+| `platform_logout(access_token, raw_refresh)` / `platform_revoke_all(admin_id)` (`platform`) | none | `platform_auth_required` when the platform domain is off |
+
+**Workspaces** (`services/workspace*.rs`, `account_removal.rs`; the layer is off unless `workspaces.enabled`, and every method then answers `auth.internal`). The route-facing methods take the `WorkspaceMember` the `RequireWorkspace` extractor produced (§8.3.8), which carries the tenant, the workspace and the caller:
+
+| Method | Tenant | Returns / refusals |
+| --- | --- | --- |
+| `authorize_workspace(tenant_id, user_id, request)` | argument | `WorkspaceMember`; `forbidden` for a surface declaring no role, `validation` on `workspaceId`, `workspace_not_found`, `workspace_pending_deletion`, `insufficient_workspace_role` |
+| `list_my_workspaces(tenant_id, user_id, query)` | argument | `MyWorkspaces`; `validation` on `limit` / `cursor` |
+| `create_workspace(tenant_id, user_id, name, ctx)` | argument | `Workspace`; `forbidden` when `workspaces.allow_create` is off, `workspace_limit_reached` at the owner cap |
+| `create_owned_workspace(request, hook_ctx)` | in the request | `Workspace`; the path a bootstrap acceptance shares, which never consults `allow_create` |
+| `workspace_access(&member)` / `list_workspace_members(&member, query)` | member | `WorkspaceAccessView` / `Page<Membership>`; `workspace_not_found` when the workspace is no longer active |
+| `switch_workspace(&member, ctx)` | member | `()`; records the last-active workspace where the repository supports it; the session is unchanged |
+| `rename_workspace(&member, name, ctx)` | member | `Workspace`; `validation` on `name`, `workspace_not_found`, `insufficient_workspace_role` |
+| `schedule_workspace_deletion(&member, password, ctx)` / `restore_workspace(&member, ctx)` | member | `ScheduledDeletion` / `()`; the first re-proves the caller; `workspace_pending_deletion`, `workspace_not_found` |
+| `finalize_workspace_deletion(workspace_ref)` | in the ref | `FinalizeOutcome`; the host's job calls it once the grace period is over |
+| `change_member_role(&member, target_user_id, role, ctx)` | member | `Membership`; `last_owner`, `insufficient_workspace_role`, `workspace_not_found` |
+| `remove_workspace_member(&member, target_user_id, ctx)` / `leave_workspace(&member, ctx)` | member | `()`; `last_owner` for the last owner |
+| `transfer_workspace_ownership(&member, hand_over, ctx)` | member | `()`; re-proves the giver; `validation` on `userId` / `demoteSelfTo` |
+| `remove_workspace_memberships_for_user(removal, ctx)` | in the removal | `RemovedMemberships`; `AccountRemovalError::Blocked` (`409 auth.last_owner`) while the account is the only active owner of an active or suspended workspace, `BumpsFailed` after a committed removal whose cache bumps did not all succeed |
+| `invalidate_membership(membership_ref)` | in the ref | `()`; drops one membership's cached access; `validation` on a blank identifier |
+
 ## 8. HTTP Adapter — Axum
 
 The `bymax-auth-axum` crate is the **first** HTTP adapter built on top of the
@@ -2680,18 +2787,38 @@ controllers, guards, and services are not registered."
 /// Persistence/crypto config lives on the engine, not here — and **which route
 /// groups mount is NOT configured here**: it is derived from the engine's
 /// resolved `ControllerToggles` (see `RouteGroups`).
+#[derive(Clone)]
 pub struct AxumAuthConfig {
     /// Path prefix applied to every mounted group. Default: "auth".
     pub route_prefix: String,
+    /// Maximum accepted request-body size in bytes. Default: `DEFAULT_MAX_BODY_BYTES`.
+    pub max_body_bytes: usize,
+    /// Per-route edge rate-limit configuration; defaults reproduce `AUTH_THROTTLE_CONFIGS` (§16).
+    pub rate_limits: RateLimitConfig,
+    /// How the client IP is derived: `PeerAddr` or `TrustedForwardedFor`. No safe default exists.
+    pub client_ip_source: ClientIpSource,
+    /// Which TCP peers are the deployment's own proxies. Required by
+    /// `TrustedForwardedFor`, ignored by `PeerAddr`; set it with `AxumAuthConfig::is_trusted_proxy`.
+    pub is_trusted_proxy: Option<TrustedProxyFn>,
+    /// Optional CORS layer, applied outermost when set. Off by default.
+    pub cors: Option<tower_http::cors::CorsLayer>,
     // Route groups are derived from the engine, not supplied — see `RouteGroups`.
+}
+
+impl AxumAuthConfig {
+    /// There is deliberately no `Default`: `ClientIpSource` has no safe default, so the
+    /// type refuses to be built without one. Everything else takes its default.
+    pub fn new(client_ip_source: ClientIpSource) -> Self;
+    /// Name the TCP peers that are this deployment's own proxies.
+    pub fn is_trusted_proxy(self, predicate: impl Fn(IpAddr) -> bool + Send + Sync + 'static) -> Self;
 }
 
 /// Per-group enable flags, **derived** from the engine's resolved
 /// `ControllerToggles` (§5.1.8) at router-build time — never supplied
 /// independently by the consumer, so routing can never disagree with what the
 /// engine actually wired. Mapping: `auth`/`mfa`/`password_reset`/`sessions`/
-/// `platform`/`oauth`/`invitations` copy the matching toggle; the combined
-/// `platform_mfa = platform && mfa`.
+/// `platform`/`oauth`/`invitations`/`email_change`/`workspaces` copy the matching
+/// toggle; the combined `platform_mfa = platform && mfa`.
 pub struct RouteGroups {
     pub auth: bool,
     pub mfa: bool,
@@ -2701,6 +2828,8 @@ pub struct RouteGroups {
     pub platform_mfa: bool,
     pub oauth: bool,
     pub invitations: bool,
+    pub email_change: bool,
+    pub workspaces: bool,
 }
 
 /// Shared state handed to every handler/extractor via `State<AuthState>`.
@@ -2729,20 +2858,25 @@ pub fn auth_router(engine: AuthEngine, config: AxumAuthConfig) -> Result<Router,
 // the IPv6 /64 there only) and the engine context (session address, lockout key, hooks).
 ```
 
-Group assembly is internal and feature-gated. Each `*_routes` function returns a
-`Router<AuthState>` whose paths are **relative** (no prefix); the factory nests
+Group assembly is internal and feature-gated. Each group module exposes one
+`pub(crate) fn routes(config: &AxumAuthConfig, ip_source: &Throttle) -> Router<AuthState>`
+whose paths are **relative** (no prefix); the factory merges the enabled groups and nests
 them under the configured prefix, exactly as the NestJS controllers use relative
-prefixes and rely on `setGlobalPrefix`/`RouterModule`:
+prefixes and rely on `setGlobalPrefix`/`RouterModule`. The `config` argument supplies the
+per-route rate limits and `ip_source` the client-address throttle key:
 
 ```rust
-fn auth_routes() -> Router<AuthState>;            // AuthController
-fn mfa_routes() -> Router<AuthState>;             // MfaController            (feature = "mfa")
-fn password_reset_routes() -> Router<AuthState>;  // PasswordResetController
-fn session_routes() -> Router<AuthState>;         // SessionController        (feature = "sessions")
-fn platform_routes() -> Router<AuthState>;        // PlatformAuthController   (feature = "platform")
-fn platform_mfa_routes() -> Router<AuthState>;    // PlatformMfaController     (feature = "platform" + "mfa")
-fn oauth_routes() -> Router<AuthState>;           // OAuthController          (feature = "oauth")
-fn invitation_routes() -> Router<AuthState>;      // InvitationController     (feature = "invitations")
+// crate::routes::<module>::routes(&config, &throttle) -> Router<AuthState>
+//   auth            AuthController
+//   password_reset  PasswordResetController
+//   mfa             MfaController            (feature = "mfa")
+//   sessions        SessionController        (feature = "sessions")
+//   platform        PlatformAuthController   (feature = "platform")
+//   platform_mfa    PlatformMfaController    (feature = "platform" + "mfa")
+//   oauth           OAuthController          (feature = "oauth")
+//   invitations     InvitationController     (feature = "invitations")
+//   email_change    EmailChangeController    (no Cargo feature; runtime toggle only)
+//   workspaces      WorkspaceController      (no Cargo feature; runtime toggle only)
 ```
 
 A Cargo feature being **off** removes the code entirely (compile-time); a group
@@ -2765,16 +2899,19 @@ their ordering reproduces the NestJS guard pipeline.
 | ------ | ----------------------------- | --------------------- | -------------------------------------------- | ------- | ------------------------- | ------- |
 | POST   | `/auth/register`              | `register`            | `ValidatedJson<RegisterDto>`                 | 201     | `RegisterDto`             | always  |
 | POST   | `/auth/login`                 | `login`               | `ValidatedJson<LoginDto>`                    | 200     | `LoginDto`                | always  |
-| POST   | `/auth/logout`                | `logout`              | `AuthUser`                                   | 204     | —                         | always  |
+| POST   | `/auth/logout`                | `logout`              | (public; refresh token from cookie/body)     | 204     | `RefreshDto` (bearer mode)| always  |
 | POST   | `/auth/refresh`               | `refresh`             | (refresh token from cookie/body)             | 200     | `RefreshDto` (bearer mode)| always  |
 | GET    | `/auth/me`                    | `me`                  | `AuthUser`                                   | 200     | —                         | always  |
 | POST   | `/auth/verify-email`          | `verify_email`        | `ValidatedJson<VerifyEmailDto>`              | 204     | `VerifyEmailDto`          | always  |
 | POST   | `/auth/resend-verification`   | `resend_verification` | `ValidatedJson<ResendVerificationDto>`       | 204     | `ResendVerificationDto`   | always  |
 | POST   | `/auth/ws-ticket`             | `ws_ticket`           | `AuthUser`, `UserStatus`, `MfaSatisfied`     | 200     | —                         | websocket |
 
-> `register`, `login`, `refresh`, `verify-email`, and `resend-verification` are
+> `register`, `login`, `refresh`, `logout`, `verify-email`, and `resend-verification` are
 > **public** (no `AuthUser`); they correspond to nest-auth's `@Public()` routes.
-> `logout` and `me` require a valid access token. `ws-ticket` (compiled only
+> `logout` is deliberately not behind `AuthUser`: the refresh token (cookie or body)
+> authorizes it, and the engine reads the session's owner from the stored record, so a
+> user whose access token has expired can still sign out and an absent or forged access
+> token cannot aim the revocation elsewhere. `me` requires a valid access token. `ws-ticket` (compiled only
 > under the `websocket` Cargo feature) mints the single-use WebSocket upgrade
 > ticket of §8.7 and requires a fully-authorized, MFA-satisfied session; the
 > access token is read from the cookie/header as usual and **never** echoed into
@@ -2784,11 +2921,11 @@ their ordering reproduces the NestJS guard pipeline.
 
 | Method | Path                       | Handler                   | Extractors / guards                  | Success | Body DTO                          | Feature |
 | ------ | -------------------------- | ------------------------- | ------------------------------------ | ------- | --------------------------------- | ------- |
-| POST   | `/auth/mfa/setup`          | `mfa_setup`               | `AuthUser` (+ `SkipMfa` semantics)   | 201     | —                                 | mfa     |
-| POST   | `/auth/mfa/verify-enable`  | `mfa_verify_enable`       | `AuthUser` (+ `SkipMfa`)             | 204     | `MfaVerifyDto`                    | mfa     |
+| POST   | `/auth/mfa/setup`          | `mfa_setup`               | `AuthUser`, `VerifiedUser` (+ `SkipMfa` semantics) | 201 | —                              | mfa     |
+| POST   | `/auth/mfa/verify-enable`  | `mfa_verify_enable`       | `AuthUser`, `VerifiedUser` (+ `SkipMfa`) | 204 | `MfaVerifyDto`                    | mfa     |
 | POST   | `/auth/mfa/challenge`      | `mfa_challenge`           | `ValidatedJson<MfaChallengeDto>`     | 200     | `MfaChallengeDto`                 | mfa     |
-| POST   | `/auth/mfa/disable`        | `mfa_disable`             | `AuthUser`                           | 204     | `MfaDisableDto`                   | mfa     |
-| POST   | `/auth/mfa/recovery-codes` | `mfa_regen_recovery`      | `AuthUser`                           | 200     | `MfaRegenerateRecoveryCodesDto`   | mfa     |
+| POST   | `/auth/mfa/disable`        | `mfa_disable`             | `AuthUser`, `VerifiedUser`           | 204     | `MfaDisableDto`                   | mfa     |
+| POST   | `/auth/mfa/recovery-codes` | `mfa_regen_recovery`      | `AuthUser`, `VerifiedUser`           | 200     | `MfaRegenerateRecoveryCodesDto`   | mfa     |
 
 > `mfa/challenge` is **public** + carries the MFA temp token in its body (and/or
 > the `mfa_temp_token` cookie); it serves a temp token of either plane (a platform token is
@@ -2797,7 +2934,11 @@ their ordering reproduces the NestJS guard pipeline.
 > management routes (`setup`, `verify-enable`) require an authenticated user but
 > must bypass the MFA-required check so a user *enrolling* MFA is not locked out
 > — this is the `@SkipMfa()` semantic encoded by **not** composing
-> `MfaSatisfied` into those handlers (see §8.4.7). `mfa/recovery-codes`
+> `MfaSatisfied` into those handlers (see §8.4.7). All four management routes
+> (`setup`, `verify-enable`, `disable`, `recovery-codes`) also take `VerifiedUser`
+> (§8.3.7): enrolling or removing a second factor on an account whose address nobody
+> has proven would bind the factor and its recovery path to a mailbox that may not be
+> the holder's. `challenge` is not gated that way — it is part of signing in. `mfa/recovery-codes`
 > (`mfa_regen_recovery`) is a **first-class v1 endpoint**, not a deferred
 > primitive: it requires an authenticated `AuthUser` plus a valid TOTP code in
 > `MfaRegenerateRecoveryCodesDto` (the strong re-auth gate), atomically
@@ -2845,11 +2986,16 @@ their ordering reproduces the NestJS guard pipeline.
 | POST   | `/auth/platform/login`          | `platform_login`   | `ValidatedJson<PlatformLoginDto>` | 200 | `PlatformLoginDto`  | platform |
 | POST   | `/auth/platform/mfa/challenge`  | `platform_mfa_challenge` | `ValidatedJson<MfaChallengeDto>` | 200 | `MfaChallengeDto`   | platform |
 | GET    | `/auth/platform/me`             | `platform_me`      | `PlatformUser`              | 200     | —                   | platform |
-| POST   | `/auth/platform/logout`         | `platform_logout`  | `PlatformUser`              | 204     | —                   | platform |
+| POST   | `/auth/platform/logout`         | `platform_logout`  | (public; refresh token from the body) | 204 | `RefreshDto`        | platform |
 | POST   | `/auth/platform/refresh`        | `platform_refresh` | (refresh token from cookie/body) | 200 | `RefreshDto` (bearer) | platform |
 | DELETE | `/auth/platform/sessions`       | `platform_revoke_all` | `PlatformUser`           | 204     | —                   | platform |
 
-> `platform/login`, `platform/mfa/challenge`, and `platform/refresh` are public. A dashboard temp
+> `platform/login`, `platform/mfa/challenge`, `platform/refresh`, and `platform/logout` are public.
+> `platform/logout` is deliberately not behind `PlatformUser`, which refuses an expired access
+> token: the refresh token authorizes the call, the stored record names its owner, and the access
+> token is still verified (signature and pinned algorithm, expiry aside) before its `jti` is
+> blacklisted. The refresh token is read from the body only, since platform delivery plants no
+> cookie. A dashboard temp
 > token presented at `platform/mfa/challenge` is refused with `auth.platform_auth_required`
 > **before** the challenge runs, from the token's own `context` claim, so the refusal creates no
 > session, stamps no last-login time, fires no hook and leaves the token redeemable at its own route.
@@ -2884,13 +3030,13 @@ their ordering reproduces the NestJS guard pipeline.
 
 | Method | Path                        | Handler             | Extractors / guards                                       | Success | Body DTO              | Feature     |
 | ------ | --------------------------- | ------------------- | --------------------------------------------------------- | ------- | --------------------- | ----------- |
-| POST   | `/auth/invitations`         | `create_invitation` | `AuthUser` (+ `RequireRole<InviterRole>` when configured) | 204     | `CreateInvitationDto` | invitations |
+| POST   | `/auth/invitations`         | `create_invitation` | `AuthUser`, `UserStatus`, `ValidatedJson<CreateInvitationDto>` | 204     | `CreateInvitationDto` | invitations |
 | POST   | `/auth/invitations/accept`  | `accept_invitation` | `ValidatedJson<AcceptInvitationDto>`                      | 201     | `AcceptInvitationDto` | invitations |
-| POST   | `/auth/invitations/revoke`  | `revoke_invitation` | `AuthUser`                                                | 204     | `RevokeInvitationDto` | invitations |
+| POST   | `/auth/invitations/revoke`  | `revoke_invitation` | `AuthUser`, `UserStatus`, `ValidatedJson<RevokeInvitationDto>` | 204     | `RevokeInvitationDto` | invitations |
 
 | Method | Path                            | Handler            | Extractors / guards                            | Success | Body DTO                 | Feature |
 | ------ | ------------------------------- | ------------------ | ---------------------------------------------- | ------- | ------------------------ | ------- |
-| POST   | `/auth/email/change`            | `request`          | `AuthUser`, `ValidatedJson<ChangeEmailDto>`    | 204     | `ChangeEmailDto`         | always  |
+| POST   | `/auth/email/change`            | `request`          | `AuthUser`, `UserStatus`, `ValidatedJson<ChangeEmailDto>` | 204 | `ChangeEmailDto`         | always  |
 | POST   | `/auth/email/change/confirm`    | `confirm`          | `ValidatedJson<ConfirmEmailChangeDto>`         | 204     | `ConfirmEmailChangeDto`  | always  |
 
 > The request re-proves the current password and mails a single-use token to the NEW address;
@@ -3140,7 +3286,7 @@ where
     AuthState: FromRef<S>,
     S: Send + Sync,
 {
-    type Rejection = AuthError; // IntoResponse — produces the JSON envelope of §8.6
+    type Rejection = AuthRejection; // a newtype around `AuthError`; IntoResponse — produces the JSON envelope of §8.6
 
     async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection>;
 }
@@ -3155,14 +3301,16 @@ where
 | `JwtPlatformGuard`               | `PlatformUser`                          | validate platform access JWT (`type = platform`)                           |
 | `RolesGuard` + `@Roles(...)`     | `RequireRole<R>`                        | role hierarchy check against dashboard hierarchy                           |
 | `PlatformRolesGuard` + `@PlatformRoles(...)` | `RequirePlatformRole<R>`    | role hierarchy check against platform hierarchy                            |
-| `UserStatusGuard`                | `UserStatus` (or folded into `AuthUser`)| Redis-cached blocked-status check                                          |
+| `UserStatusGuard`                | `UserStatus` (or folded into `AuthUser`)| Redis-cached blocked-status check; also refuses an unverified address when `email_verification.required` |
+| *(no nest-auth equivalent)*      | `VerifiedUser`                          | the same check as `UserStatus`, as its own type so a route states that it must not be reachable from an unproven address (MFA management) |
 | `MfaRequiredGuard`               | `MfaSatisfied`                          | require `mfa_verified` claim when account has MFA                          |
 | `SelfOrAdminGuard`               | `SelfOrAdmin` (path-param aware)        | allow when the path id (8.3.7) `== claims.sub` or role ≥ admin                    |
 | `@CurrentUser()`                 | `CurrentUser` (param)                   | the verified claims as a handler parameter                                 |
 | `@CurrentUser('sub')`            | `CurrentUser` + field access            | read a single claim off `CurrentUser`                                      |
 | `@Public()`                      | **absence** of `AuthUser` in the handler| public = the handler simply does not request an auth extractor            |
 | `@SkipMfa()`                     | **absence** of `MfaSatisfied`           | skip-MFA = the handler requests `AuthUser` but not `MfaSatisfied`          |
-| `WsJwtGuard`                     | `WsAuthUser` (ws upgrade extractor)     | validate dashboard JWT for the WebSocket upgrade (see §8.7)                |
+| `WsJwtGuard`                     | `WsAuthUser` / `WsAuthUserFromHeader`   | the WebSocket upgrade: `WsAuthUser` redeems the single-use `ticket` query value, `WsAuthUserFromHeader` validates the access JWT in the handshake `Authorization` header; never from the URL (see §8.7) |
+| *(service API-key guard)*        | `CurrentApiKey` (feature `api-keys`)    | the key a request was admitted with (id, label, scopes), available only behind `require_api_key_scopes` (§8.9) |
 | `WorkspaceGuard` + `@WorkspaceRoles` / `@WorkspacePermission` / `@AllowPendingWorkspace` | `RequireWorkspace<P: WorkspacePolicy>` | the access decision in the workspace the route's `{workspaceId}` names (§8.3.8) |
 
 The two "absence" rows are the key insight: in NestJS, `@Public` and `@SkipMfa`
@@ -3227,7 +3375,7 @@ pub trait Role { const NAME: &'static str; }
 
 /// Requires `AuthUser` AND that the user's role satisfies `R` per the hierarchy.
 /// 403 `INSUFFICIENT_ROLE` on failure.
-pub struct RequireRole<R: Role>(pub DashboardClaims, PhantomData<R>);
+pub struct RequireRole<R: Role>(pub DashboardClaims, pub PhantomData<R>);
 ```
 
 Failure maps to `AuthError::InsufficientRole` (403). Because `RequireRole<R>`
@@ -3253,10 +3401,10 @@ role against the **platform** hierarchy (`roles.platformHierarchy`). 403
 `INSUFFICIENT_ROLE` on failure.
 
 ```rust
-pub struct RequirePlatformRole<R: PlatformRole>(pub PlatformClaims, PhantomData<R>);
+pub struct RequirePlatformRole<R: PlatformRole>(pub PlatformClaims, pub PhantomData<R>);
 ```
 
-#### 8.3.7 `CurrentUser`, `UserStatus`, `MfaSatisfied`, `SelfOrAdmin`
+#### 8.3.7 `CurrentUser`, `UserStatus`, `VerifiedUser`, `MfaSatisfied`, `SelfOrAdmin`
 
 - **`CurrentUser`** — the `@CurrentUser()` param decorator. Functionally the same
   as `AuthUser` (it requires and exposes the verified claims); the distinct name
@@ -3278,11 +3426,20 @@ pub struct RequirePlatformRole<R: PlatformRole>(pub PlatformClaims, PhantomData<
   `PendingApproval` (all 403); a blocked status is reported before an unverified address. The
   keys and values are pinned by the shared wire contract (`userStatusCache`), so nest-auth and
   this library can serve one deployment off one Redis. The cache and its invalidation are engine
-  responsibilities: the extractor calls `AuthEngine::assert_user_active(sub, tenant_id)` with the
-  token's tenant, `verify_email` drops the account's entries best-effort once the flag is
+  responsibilities: the extractor calls `AuthEngine::assert_user_active_and_verified(sub, tenant_id)`
+  with the token's tenant, which also refuses an unverified address with `EmailNotVerified` when
+  `email_verification.required` (a blocked status is reported first), `verify_email` drops the account's entries best-effort once the flag is
   committed, and a host that changes an account's status calls
   `AuthEngine::invalidate_account_status(user_id, tenant_id)`. That narrows the window to one
   repository read, not to zero: a check already resolving can write the old value back.
+
+- **`VerifiedUser`** — the gate for operations that must not be reachable from an address nobody
+  has proven, MFA enrolment above all: a second factor enrolled on an unverified account binds it
+  to a mailbox never shown to belong to the person, and its recovery path runs back through that
+  address. It resolves `AuthUser` and applies the same `assert_user_active_and_verified` rule as
+  `UserStatus`, kept as its own type so a route states that intent by name. `GET /auth/me`
+  deliberately takes neither: a pending or suspended client still has to read its own profile to
+  render the "verify your email" or "suspended" screen.
 
 - **`MfaSatisfied`** — the `MfaRequiredGuard`. Resolves `AuthUser`, then requires
   `claims.mfa_verified == true` when the account has MFA enabled; otherwise
@@ -3881,20 +4038,32 @@ request in declaration order on the way in and reverse on the way out.
 
 | Layer                         | Crate / type                              | Purpose                                                                 |
 | ----------------------------- | ----------------------------------------- | ----------------------------------------------------------------------- |
-| Tracing                       | `tower_http::trace::TraceLayer`           | structured request/response spans (method, path, status, latency)       |
-| Request body limit            | `tower_http::limit::RequestBodyLimitLayer`| cap body size (defense against oversized payloads to the JSON extractor)|
-| Sensitive-header redaction    | `tower_http::sensitive_headers`           | strip `authorization`/`cookie` from trace output (parity with `sanitizeHeaders`) |
-| CORS (optional)               | `tower_http::cors::CorsLayer`             | consumer-supplied; off by default                                       |
-| Rate limiting (per-route)     | `tower_governor` (see §16)                | edge IP rate limiting, applied **per route group**, not globally        |
+| Tracing                       | `tower_http::trace::TraceLayer`           | structured request/response spans (method, path, status, latency); outermost, so even a CORS preflight is traced |
+| CORS (optional)               | `tower_http::cors::CorsLayer`             | consumer-supplied; off by default; answers the preflight before the layers below run |
+| Response cache stamp          | `SetResponseHeaderLayer`                  | every response carries `Cache-Control: no-store` and `Pragma: no-cache` (RFC 6749 §5.1), stamped as a layer so no route can forget it; outside the body limit so even a `413` is uncacheable |
+| Sensitive-header redaction    | `tower_http::sensitive_headers`           | mark `authorization`/`cookie`/`x-csrf-token` on requests and `Set-Cookie` on responses sensitive, so neither reaches trace output (parity with `sanitizeHeaders`) |
+| Encoding policy               | `encoding_policy::refuse_undecoded_body`  | refuses a request declaring an encoding the adapter does not decode, outside every route layer and the body limit: it reaches neither authentication nor a rate limiter |
+| `413` envelope                | `transport::envelope_for_layer_payload_too_large` | gives the body limit's plain-text `413` the library's error envelope |
+| Request body limit            | `tower_http::limit::RequestBodyLimitLayer`| cap body size (`AxumAuthConfig::max_body_bytes`; defense against oversized payloads to the JSON extractor) |
 | Cookie management             | `tower_cookies::CookieManagerLayer`       | makes the typed `CookieJar` available to extractors and delivery        |
+| Client address                | `client_ip::resolve_client_ip`            | resolves the client address once (`ClientIpSource`), so the rate limiters and the engine context share one answer |
+| Trusted origin                | `trusted_origin::enforce_trusted_origin`  | innermost, next to the handlers: the cross-site `Origin`/`Sec-Fetch-Site` check against `cookies.trusted_origins`; never answers a CORS preflight |
+| Rate limiting (per-route)     | `tower_governor` (see §16)                | edge IP rate limiting, applied **per route group**, not globally        |
+
+The table lists the layers outermost first. The rate limiters are attached to the routes, not
+to this stack, so they sit inside all of the above.
 
 ```rust
-// Illustrative composition inside `auth_router`.
-let middleware = ServiceBuilder::new()
-    .layer(TraceLayer::new_for_http())
-    .layer(RequestBodyLimitLayer::new(MAX_BODY_BYTES))
-    .layer(CookieManagerLayer::new());
-router.layer(middleware)
+// Illustrative; the real stack is `middleware::apply_middleware`, applied inside `auth_router`.
+router
+    .layer(from_fn_with_state(state, enforce_trusted_origin))   // innermost
+    .layer(from_fn_with_state(client_ip, resolve_client_ip))
+    .layer(CookieManagerLayer::new())
+    .layer(RequestBodyLimitLayer::new(max_body_bytes))
+    .layer(map_response(envelope_for_layer_payload_too_large))
+    .layer(from_fn_with_state(encoding, refuse_undecoded_body))
+    // ... sensitive-header redaction, cache stamp, optional CORS ...
+    .layer(TraceLayer::new_for_http())                          // outermost
 ```
 
 Rate-limit layers are **not** in this global stack — they are attached to
@@ -4892,33 +5061,20 @@ plaintext-free in production (the OAuth-layer view of the redirect invariants in
 
 Redis access lives in the dedicated crate **`bymax-auth-redis`**. It depends only on `bymax-auth-types` (for `AuthError`/`AuthErrorCode` and the shared value DTOs) and on an async Redis driver. It is `#![forbid(unsafe_code)]` and never linked into the `wasm32-unknown-unknown` edge build — the edge proxy is stateless with respect to Redis and only validates JWT signatures locally (see §13).
 
-Two client stacks are supported behind the same trait surface; the choice is a build/wiring decision, not an API decision:
+Two client stacks fit behind the same trait surface; the shipped implementation is the default one (`redis` + `deadpool-redis`), and `fred` is an alternative that is not implemented:
 
 | Option | Crates | When to pick |
 | --- | --- | --- |
 | **Default** | `redis` (with `tokio-comp`, `script`, `keep-alive` features) + `deadpool-redis` for pooling | Matches the ioredis single-connection-pool model of nest-auth; smallest dependency surface; `redis::Script` gives first-class `EVALSHA`-with-fallback for the Lua scripts in §12.5. |
 | **Alternative** | `fred` | Picked when the deployment needs built-in automatic reconnection, RESP3, client-side tracking, or Redis Cluster/Sentinel topology out of the box. `fred` owns its pool, so `deadpool-redis` is dropped in this configuration. |
 
-Both drivers expose pipelining and `EVAL`/`EVALSHA`. The concrete driver is hidden behind the store traits below, so swapping `redis` ⇄ `fred` — or substituting an in-memory fake for tests/`cargo-mutants` — never touches service code.
+Both drivers expose pipelining and `EVAL`/`EVALSHA`. The concrete driver is hidden behind the store traits below, so replacing it — or substituting an in-memory fake for tests/`cargo-mutants` — never touches service code. There is no connection-abstraction trait: `RedisStores` owns the `deadpool-redis` pool and the key builder of §12.2, and every store trait is implemented on it.
 
 ```rust
-/// Connection handle abstraction so services hold a clonable, pooled handle
-/// regardless of the underlying driver (deadpool-redis or fred).
-#[async_trait::async_trait]
-pub trait RedisConn: Send + Sync + Clone + 'static {
-    async fn get(&self, key: &str) -> Result<Option<String>, AuthError>;
-    async fn set_ex(&self, key: &str, value: &str, ttl_secs: u64) -> Result<(), AuthError>;
-    async fn set_nx_ex(&self, key: &str, value: &str, ttl_secs: u64) -> Result<bool, AuthError>;
-    async fn del(&self, key: &str) -> Result<(), AuthError>;
-    async fn incr(&self, key: &str) -> Result<i64, AuthError>;
-    async fn ttl(&self, key: &str) -> Result<i64, AuthError>;
-    async fn sadd(&self, set: &str, member: &str) -> Result<i64, AuthError>;
-    async fn srem(&self, set: &str, member: &str) -> Result<i64, AuthError>;
-    async fn smembers(&self, set: &str) -> Result<Vec<String>, AuthError>;
-    async fn sismember(&self, set: &str, member: &str) -> Result<bool, AuthError>;
-    /// Runs a Lua script via EVALSHA, transparently falling back to EVAL+SCRIPT LOAD
-    /// on NOSCRIPT. Keys are passed already-namespaced.
-    async fn eval(&self, script: &Script, keys: &[String], args: &[String]) -> Result<RedisValue, AuthError>;
+/// The pooled handle that implements every store trait. `connect` is synchronous: the pool
+/// is created lazily, so no network I/O happens until first use.
+impl RedisStores {
+    pub fn connect(url: &str, namespace: impl Into<Box<str>>) -> Result<Self, RedisStoreError>;
 }
 ```
 
@@ -4927,38 +5083,41 @@ pub trait RedisConn: Send + Sync + Clone + 'static {
 Every key is transparently prefixed with `{namespace}:`. The namespace is the argument of `RedisStores::connect` (conventionally `auth`); `AuthConfig` carries no copy of it. It is applied in exactly one place — the namespaced wrapper — so no call site ever constructs a raw key.
 
 ```rust
-/// Wraps a `RedisConn`, prepending `{namespace}:` to every key before it reaches Redis.
-/// This is the ONLY component allowed to build a fully-qualified Redis key.
-pub struct NamespacedRedis<C: RedisConn> {
-    conn: C,
+/// Prepends `{namespace}:` to every key. This is the ONLY component allowed to build a
+/// fully-qualified Redis key. It is non-generic and holds no connection.
+pub struct NamespacedRedis {
     namespace: Box<str>,
 }
 
-impl<C: RedisConn> NamespacedRedis<C> {
-    pub fn new(conn: C, namespace: impl Into<Box<str>>) -> Self { /* ... */ }
-
-    /// Returns `{namespace}:{key}`. Used internally and by Lua call sites that must
-    /// reconstruct member keys from a SET (see `invalidate_user_sessions`).
-    #[inline]
-    fn key(&self, key: &str) -> String { /* format!("{}:{}", self.namespace, key) */ }
+impl NamespacedRedis {
+    pub fn new(namespace: impl Into<Box<str>>) -> Self;
+    /// The configured namespace, handed to a Lua script as an `ARGV` element.
+    pub fn namespace(&self) -> &str;
+    /// Returns `{namespace}:{prefix}:{id}`; `Prefix` is the typed catalog of §12.4.
+    pub fn key(&self, prefix: Prefix, id: &str) -> String;
+    /// Returns `{namespace}:rl:{route}:{bucket_hash}`, the rate-limit counter family, which
+    /// sits outside `Prefix` because route naming is each implementation's own.
+    pub fn rate_limit_key(&self, route: &str, bucket_hash: &str) -> String;
 }
 ```
 
-`eval` namespaces the `KEYS` array on the Rust side and additionally passes the namespace as an `ARGV` element for scripts that must rebuild member keys from a SET (the `sess:`/`psess:` invalidation script). This mirrors nest-auth's `invalidateUserSessions`, which passes the namespace as `ARGV[1]`.
+Every `KEYS` entry handed to a script is built by `NamespacedRedis`, which also supplies the namespace as an `ARGV` element for the scripts that must rebuild member keys from a SET (`invalidate_user_sessions`, `session_prune_dead`, `revoke_family`). This mirrors nest-auth's `invalidateUserSessions`, which passes the namespace as `ARGV[1]`.
 
 ### 12.3 Store trait abstraction (swappable Redis)
 
-Services never touch `NamespacedRedis` directly. They depend on three focused traits, each owning one slice of the keyspace. Redis is the only shipped implementation, but the seam exists so the backing store is swappable (e.g. a clustered impl, or an in-memory fake under test) and so each trait can be mutation-tested in isolation.
+Services never touch `NamespacedRedis` directly. They depend on three focused traits, each owning one slice of the keyspace. The blocks below are **abridged**: the signatures and the complete method lists are the rustdoc of `bymax_auth_core::traits` (`traits/store.rs`), and a host that implements a store trait itself implements that, not this sketch. Redis is the only shipped implementation, but the seam exists so the backing store is swappable (e.g. a clustered impl, or an in-memory fake under test) and so each trait can be mutation-tested in isolation.
 
 ```rust
 /// Refresh-session lifecycle + access-JWT revocation (`rt:`/`prt:`, `rp:`/`prp:`,
 /// `sess:`/`psess:`, `sd:`/`psd:`, `rv:`).
 #[async_trait::async_trait]
 pub trait SessionStore: Send + Sync {
-    /// Persist a freshly-issued refresh session and register it in the user's session SET.
-    async fn create_session(&self, kind: SessionKind, token_hash: &str, detail: &SessionRecord, ttl_secs: u64) -> Result<(), AuthError>;
-    /// Atomic rotation with grace window (Lua `refresh_rotate`, §12.5.1).
-    async fn rotate(&self, kind: SessionKind, old_hash: &str, new_hash: &str, new_raw: &str, new_record: &SessionRecord, refresh_ttl: u64, grace_ttl: u64) -> Result<RotateOutcome, AuthError>;
+    /// Persist a freshly-issued refresh session and register it in the account's session SET
+    /// (`subject_hash` is `hmac_sha256(hmacKey, userSubject)`, §12.4).
+    async fn create_session(&self, kind: SessionKind, subject_hash: &str, token_hash: &str, detail: &SessionRecord, ttl_secs: u64) -> Result<(), AuthError>;
+    /// Atomic rotation with grace window (Lua `refresh_rotate`, §12.5.1). The hashes, the new
+    /// raw token, the new record, the subject and both TTLs travel in a `SessionRotation`.
+    async fn rotate(&self, kind: SessionKind, rotation: &SessionRotation) -> Result<RotateOutcome, AuthError>;
     /// Look up a live session by refresh-token hash (no rotation).
     async fn find_session(&self, kind: SessionKind, token_hash: &str) -> Result<Option<SessionRecord>, AuthError>;
     /// List all live sessions for a user (SMEMBERS + MGET of detail keys).
@@ -4966,13 +5125,16 @@ pub trait SessionStore: Send + Sync {
     /// List every live session, with its detail when the store holds a whole one (`detail: None` otherwise). What revokes or counts sessions reads this; `list_sessions` is the display view. The default derives it from `list_sessions`.
     async fn list_session_entries(&self, kind: SessionKind, subject_hash: &str) -> Result<Vec<SessionEntry>, AuthError>;
     /// Ownership-checked single revoke (Lua `session_revoke`, §12.5.3) → SESSION_NOT_FOUND if not owned.
-    async fn revoke_session(&self, kind: SessionKind, user_id: &str, session_hash: &str) -> Result<(), AuthError>;
-    /// Revoke every session for a user in one Lua transaction (`invalidate_user_sessions`).
-    async fn revoke_all(&self, kind: SessionKind, user_id: &str) -> Result<(), AuthError>;
+    async fn revoke_session(&self, kind: SessionKind, subject_hash: &str, session_hash: &str) -> Result<(), AuthError>;
+    /// Revoke every session for an account in one Lua transaction (`invalidate_user_sessions`).
+    async fn revoke_all(&self, kind: SessionKind, subject_hash: &str) -> Result<(), AuthError>;
     /// Add a JTI (preferred) or full-JWT hash to the blacklist for its remaining lifetime.
     async fn blacklist_access(&self, jti_or_hash: &str, remaining_ttl_secs: u64) -> Result<(), AuthError>;
     /// Guard check consulted by JwtAuthGuard on every protected request.
     async fn is_blacklisted(&self, jti_or_hash: &str) -> Result<bool, AuthError>;
+    // Omitted here: `create_recovered_session`, `put/read/claim_logout_pending`,
+    // `delete_grace_pointer`, `grace_successor`, `sweep_grace_pointers`, `find_family_owner`,
+    // `revoke_family`, `current_epoch`, `bump_epoch`, `mark_recent_auth` and `has_recent_auth`.
 }
 
 /// One-time-password records for email verification and OTP-based password reset (`otp:`, `resend:`).
@@ -4998,7 +5160,7 @@ pub trait BruteForceStore: Send + Sync {
 }
 ```
 
-Auxiliary single-purpose keyspaces (MFA pending setup, MFA temp token, MFA anti-replay, OAuth state, password-reset token/verified, invitations, user-status cache, workspace-membership cache, and — under the `websocket` feature — the single-use WebSocket upgrade ticket) are served by small store traits in the same crate (`MfaStore`, `OAuthStateStore`, `PasswordResetStore`, `InvitationStore`, `UserStatusCache`, `MembershipCacheStore`, `WsTicketStore`) following the identical pattern; their keys are catalogued in §12.4. `SessionKind` is `{ Dashboard, Platform }` and selects the prefix pair (`rt`/`prt`, `rp`/`prp`, `sess`/`psess`, `sd`/`psd`).
+Auxiliary single-purpose keyspaces (MFA pending setup, MFA temp token, MFA anti-replay, OAuth state, password-reset token/verified, invitations, user-status cache, workspace-membership cache, and — under the `websocket` feature — the single-use WebSocket upgrade ticket) are served by small store traits (`MfaStore`, `OAuthStateStore`, `PasswordResetStore`, `InvitationStore`, `UserStatusCache`, `MembershipCacheStore`, `WsTicketStore`, and `RateLimitStore`, the fixed-window counter behind the edge rate limiter of §16, which shares the `brute_force_incr` script) following the identical pattern; their keys are catalogued in §12.4. `SessionKind` is `{ Dashboard, Platform }` and selects the prefix pair (`rt`/`prt`, `rp`/`prp`, `sess`/`psess`, `sd`/`psd`).
 
 ### 12.4 Complete Redis key catalog
 
@@ -5049,6 +5211,14 @@ preimage and the full list of keys derived from it are pinned by `conformance/wi
 | `mfa_setup` | `auth:mfa_setup:{hmac_sha256(hmacKey, userSubject)}` | JSON `{ encryptedSecret, hashedCodes: string[], encryptedPlainCodes }` | 600 s (10 min) | MFA pending-setup data: AES-256-GCM-encrypted TOTP secret + HMAC-SHA-256-keyed recovery-code hashes + the AES-256-GCM-encrypted plaintext codes (so the idempotent `setup()` fast-path can re-return them), held between `setup()` and `verify_enable()`. Consumed on enable. The low-entropy account identifier is keyed via HMAC-SHA-256 over the tenant-scoped `userSubject` (§12.2), matching §7.5.1. |
 | `psess` | `auth:psess:{hmac_sha256(hmacKey, userSubject)}` | Redis SET of full key **suffixes**: `prt:{sha256(refresh_token)}` and `prp:{sha256(old_refresh_token)}` | max refresh TTL | Platform active-session index. Analogue of `sess`; the platform keyspace is deliberately separate. |
 | `psd` | `auth:psd:{sessionHash}` | JSON `{ device, ip, createdAt, lastActivityAt }` (Unix-millisecond timestamps, as `sd`) | max refresh TTL | Platform per-session detail. Analogue of `sd`. |
+| `rcu` | `auth:rcu:{hmac_sha256(hmacKey, userSubject + ":" + code)}` | `"1"` (`SET NX`) | 300 s | Single-use claim on an MFA recovery code, keyed like `tu`. Serializes two attempts at the *same* code for the span of a repository write; the durable record of consumption is the repository, so the claim is deliberately short-lived. |
+| `ra` | `auth:ra:{hmac_sha256(hmacKey, userSubject)}` | `"1"` | 300 s | Recent-authentication marker. Planted only where a credential was actually proved (login, MFA challenge, OAuth callback, registration) — never on a refresh rotation, which proves a token rather than a credential, and never on password-less issuance — and read with `EXISTS`, never consumed. Gates enrolling MFA on an account with no local password to re-prove. The plane is inside the subject, so the key carries no further segment. |
+| `ec` | `auth:ec:{sha256(token)}` | JSON `{ userId, newEmail, tenantId, passwordFingerprint }` (`newEmail` normalized; an absent `passwordFingerprint` reads as "no binding") | `email_change.token_ttl` (default 3600 s) | Pending address change. Consumed on confirm. |
+| `invidx` | `auth:invidx:{tenantId}:{invitee_hash}` | The invitation's token hash | `invitations.token_ttl` (default 172800 s) | Invitee index of a pending invitation: the only handle the issuing side has on a record keyed by a token it never saw. `invitee_hash` is the HMAC of the address, so a keyspace dump does not enumerate who a tenant has invited. Written with the compare-and-set script `claim_invitation_index` (§12.5.8). |
+| `us` | `auth:us:{hmac_sha256(hmacKey, userSubject)}` | The account's status string | `user_status_cache_ttl` (default 60 s) | Cached account status for the `UserStatus` gate (§8.3.7). Dashboard plane only; the platform status is never cached. Pinned by `userStatusCache` in the shared contract. |
+| `uev` | `auth:uev:{hmac_sha256(hmacKey, userSubject)}` | `"1"` verified, `"0"` not | `user_status_cache_ttl` | Cached verified-address flag, written only where `email_verification.required`; invalidated together with `us`. |
+| `mfalock` | `auth:mfalock:{hmac_sha256(hmacKey, userSubject)}` | A random per-acquisition token (`SET NX`) | 10 s | Per-account MFA transition lock. Serializes the read-modify-write every MFA state change performs over the one repository record that carries `mfa_enabled`, the secret and the recovery codes together. Released only while it still holds the caller's token (`release_lock`, §12.5.9). |
+| `rl` | `auth:rl:{route}:{bucket_hash}` | Numeric counter (string) | the route's rate-limit window, set on the first hit only | Edge rate-limit counter (§16). `route` is the adapter's label for the route; `bucket_hash` is a fixed-width keyed hash, so no raw address enters the key. Outside `Prefix` and outside the shared prefix contract: route naming is each implementation's own. |
 | `resend` | `auth:resend:{purpose}:{hmac_sha256(tenantId + ":" + email)}` | `"1"` | 60 s | OTP-resend cooldown. Stops an attacker from resetting the `attempts` counter by spamming resends. Purposes: `password_reset`, `email_verification`. |
 
 Values that are JSON are (de)serialized with `serde` + `serde_json`; the DTOs (`SessionRecord`, `SessionDetail`, the OTP record, the invitation record, the MFA-setup record) live in `bymax-auth-types` so the wire shape is shared and version-checked. Field names are camelCase to remain byte-identical with nest-auth payloads already in Redis.
@@ -5121,6 +5291,34 @@ The cache is three keys per membership (`wsv`, `wmv`, `wm`, §12.4), shared with
 - **`membership_cache_bump`** — **KEYS** `[1]` the counter; **ARGV** `[1]` the retention. **Contract:** `INCR KEYS[1]`, then `EXPIRE KEYS[1] ARGV[1]` on **every** bump; return the new value. A writer changes the repository first and bumps after, and a failed bump is an error: a change is never reported as invalidated when it was not.
 - **Rust mapping:** `FillOutcome::{ Written, Moved }`; a bump returns the new `u64`. Every key the scripts touch is declared in `KEYS`, and the entry key is derived from the versions the reader saw.
 - **Operational requirement (documented, not tested):** a counter evicted under memory pressure restarts at `0` and can make an entry written under an earlier `0:0` readable again for up to its TTL — the exposure the token-epoch counters have. Run the store with a no-eviction policy (`maxmemory-policy noeviction`) for the auth keyspace.
+
+#### 12.5.7 `recover_grace` — write a grace-recovered session only while the account still has one
+
+A grace recovery returns a record from the rotation grace pointer and must then write the `rt:`, `sess:`, `sd:` and `fam:` keys. Done as separate commands, a `revoke_all` landing in between sweeps an index that does not yet contain the session, and the session survives a revocation the user was told had happened. The script makes the check and the write one step. The witness is the account's session index: `invalidate_user_sessions` deletes the set once it has removed every member, so its absence is exactly "a revoke-all has run".
+
+- **KEYS** — `[1]` `rt:{new_hash}` (or `prt:`), `[2]` `sess:{subject_hash}` (or `psess:`), `[3]` `sd:{new_hash}` (or `psd:`), `[4]` `fam:{family_id}` (or `pfam:`; unused for an empty family).
+- **ARGV** — `[1]` session record JSON, `[2]` detail record JSON, `[3]` TTL (s), `[4]` family id (`''` for a record that belongs to no lineage), `[5]` the live index member (`rt:{new_hash}` / `prt:{new_hash}`), `[6]` the new hash.
+- **Contract:** return `0` and write nothing when `KEYS[2]` does not exist, or when a non-empty family's `KEYS[4]` does not (a `revoke_family` in between would otherwise be undone by the `SADD`). Else `SET KEYS[1]`, `SADD`+`EXPIRE` the index, `SET KEYS[3]`, and for a family `SADD`+`EXPIRE` `KEYS[4]`; return `1`.
+- **Rust mapping:** `create_recovered_session` returns `bool`; `false` refuses the recovery.
+
+#### 12.5.8 `claim_invitation_index` — compare-and-set of the invitee index
+
+The rank check reads the index and the claim writes it; as two round trips they can disagree about which invitation is being superseded.
+
+- **KEYS** — `[1]` `invidx:{tenantId}:{invitee_hash}`.
+- **ARGV** — `[1]` the new token hash, `[2]` TTL (s), `[3]` the hash the caller approved, or `''` for "no entry" (a real hash is always 64 hex characters, so the two cannot be confused).
+- **Contract:** if `GET KEYS[1]` (absent read as `''`) differs from `ARGV[3]` return `0`; else `SET KEYS[1] ARGV[1] EX ARGV[2]` and return `1`.
+- **Rust mapping:** `bool`; `false` means the index no longer held what the caller approved.
+
+#### 12.5.9 `mfa_challenge` and `release_lock` — the MFA anti-replay consume and the transition-lock release
+
+- **`mfa_challenge`** fuses "mark this TOTP code used" and "consume this challenge temp token", so a replayed code can never consume a second temp token and a temp token can never be consumed without burning its code. **KEYS** `[1]` `tu:{hmac(userSubject:code)}`, `[2]` `mfa:{sha256(jti)}`; **ARGV** `[1]` anti-replay TTL (s). **Contract:** `SET KEYS[1] '1' NX EX ARGV[1]`; if it already existed, return `0` (a replay) leaving both keys untouched. Else `DEL KEYS[2]`: if that removed the temp token, return `1` (the sole winner); otherwise `DEL KEYS[1]` (so a still-unused code is not burned) and return `0`. A single temp token may be challenged with several still-valid codes, each a different `tu:` key, so gating on the temp-token deletion is what collapses concurrent winners to one.
+- **`release_lock`** releases the `mfalock:` key only while it still holds the token the caller wrote: a bare `DEL` removes whichever transition holds the lock now, and the key can expire and be retaken between a client-side `GET` and `DEL`. **KEYS** `[1]` the lock key; **ARGV** `[1]` the caller's token. **Contract:** if `GET KEYS[1] == ARGV[1]` return `DEL KEYS[1]` (`1`); else `0`. Idempotent: a lock already expired or retaken is still a success for the caller.
+
+#### 12.5.10 `invalidate_user_sessions` and `session_prune_dead` — the index sweeps
+
+- **`invalidate_user_sessions`** (`revoke_all`) deletes every session of one account in one transaction. The members of the index are full key suffixes (`rt:{hash}`, `rp:{oldHash}`, and the platform `prt:`/`prp:`), so one `DEL {namespace}:{member}` covers a live session and a grace pointer alike, which is what stops a just-rotated token surviving a logout-all for its grace window. **KEYS** `[1]` `sess:{subjectHash}` (or `psess:`); **ARGV** `[1]` namespace, `[2]` live prefix (`rt`/`prt`), `[3]` detail prefix (`sd`/`psd`). **Contract:** for each `SMEMBERS` member `DEL {ns}:{member}`, and for a member under the live prefix also `DEL {ns}:{detail prefix}:{bare hash}`; then `DEL KEYS[1]` and return the member count. The deleted index is the witness `recover_grace` reads.
+- **`session_prune_dead`** removes index members whose own key is gone and leaves every other member. The existence check and the `SREM` are one step: a member written between a separate `EXISTS` and `SREM` would be dropped while live, and a live session missing from the index survives "sign out everywhere". **KEYS** `[1]` `sess:{subjectHash}`; **ARGV** `[1]` namespace, `[2..]` the candidate members, each a full key suffix. **Contract:** for each candidate with `EXISTS {ns}:{member} == 0`, `SREM KEYS[1] member`; return the list of members removed.
 
 > **Why Lua, in one line:** every one of these transitions has a read→decide→write shape where a second concurrent caller slipping between the read and the write would breach a security invariant (double session, cross-user revoke, lockout evasion, attempt-ceiling evasion). Redis runs each script to completion atomically, which is the cheapest correct primitive available and exactly what nest-auth relies on.
 
@@ -5360,7 +5558,7 @@ JWT/token-layer statement of the no-token-in-URL invariant catalogued in §24.
 
 ### 14.1 Cookie catalog
 
-Three cookies. `Secure` defaults to "on in production" (gated by the resolved `secure_cookies` flag, which defaults to `true` outside development). Defaults below are byte-identical to nest-auth.
+Three cookies on every deployment. `Secure` defaults to "on in production" (gated by the resolved `secure_cookies` flag, which defaults to `true` outside development). Defaults below are byte-identical to nest-auth.
 
 | Cookie | Default name | Path | HttpOnly | Secure | SameSite | Max-Age | Purpose |
 | --- | --- | --- | --- | --- | --- | --- | --- |
@@ -5368,11 +5566,12 @@ Three cookies. `Secure` defaults to "on in production" (gated by the resolved `s
 | Refresh token | `refresh_token` | `/auth` | **yes** | prod | **Strict** | refresh lifetime (`Duration`, `refresh_expires_in_days` days = 7) | Opaque refresh token. Path scoped to `/auth` so the browser only attaches it to refresh/logout endpoints, shrinking its exposure. `Strict` removes it from all cross-site requests (CSRF defense). |
 | Session signal | `has_session` | `/` | **no** | prod | **Lax** | tracks the refresh cookie (7 days) | Non-HttpOnly, JS/proxy-readable hint. Value is only `"1"` — **no token, no PII**. Lets the SPA / edge proxy decide whether to attempt a silent refresh without exposing any secret. |
 
-A fourth, ephemeral cookie exists only on the MFA-gated OAuth callback path:
+Two further, ephemeral cookies exist only on the OAuth path (feature `oauth`): the MFA temp cookie, planted on the MFA-gated callback, and the `oauth_state` cookie that binds the callback to the browser that started the flow:
 
 | Cookie | Name | Path | HttpOnly | Secure | SameSite | Max-Age | Purpose |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| MFA temp | `mfa_temp_token` | `/{route_prefix}/mfa` | **yes** | prod | aligns with refresh (`Lax`/`None` per cross-site need) | **300 s** (pinned to the MFA-temp JWT lifetime) | Plants the 5-min MFA-temp JWT after an OAuth callback that still needs an MFA challenge; consumed and cleared on successful challenge. Max-Age is pinned to the JWT's 300 s so the cookie can never outlive the JWT (which would surface as a misleading "invalid MFA temp token"). |
+| MFA temp | `mfa_temp_token` | `cookies.mfa_temp_cookie_path` (default `/auth/mfa`) | **yes** | prod | the configured `cookies.same_site`, as the access cookie carries it (not the refresh cookie's value) | **300 s** (pinned to the MFA-temp JWT lifetime) | Plants the 5-min MFA-temp JWT after an OAuth callback that still needs an MFA challenge; consumed and cleared on successful challenge. Max-Age is pinned to the JWT's 300 s so the cookie can never outlive the JWT (which would surface as a misleading "invalid MFA temp token"). |
+| OAuth state | `oauth_state` | `/` | **yes** | prod | **Lax**, always, never the configured value | **600 s** (the TTL of the server-side `os:` record) | Set at OAuth initiate, read and cleared at the callback, which refuses a request that does not return it. `Lax` is the tightest value that survives the provider's redirect back, a top-level cross-site GET that `Strict` would withhold the cookie on. |
 
 Shared defaults (in `bymax-auth-types`, mirroring nest-auth `./shared`):
 
@@ -5383,6 +5582,8 @@ pub const AUTH_HAS_SESSION_COOKIE_NAME: &str = "has_session";
 pub const AUTH_REFRESH_COOKIE_PATH: &str = "/auth"; // MUST track route_prefix
 pub const MFA_TEMP_COOKIE_NAME: &str = "mfa_temp_token";
 pub const MFA_TEMP_COOKIE_MAX_AGE_SECONDS: u64 = 300;
+pub const OAUTH_STATE_COOKIE_NAME: &str = "oauth_state";
+pub const OAUTH_STATE_COOKIE_MAX_AGE_SECONDS: u64 = 600;
 ```
 
 > **Route-prefix coupling.** If `route_prefix` is changed from `auth`, `cookies.refresh_cookie_path` and the MFA-temp cookie path MUST be updated to match (e.g. `route_prefix = "api/v1/auth"` ⇒ `refresh_cookie_path = "/api/v1/auth"`), or the browser will not attach the refresh cookie to the refresh endpoints. Resolved-options validation rejects a refresh path that is not a prefix of the refresh routes.
@@ -5519,10 +5720,10 @@ pub enum AuthError {
     /// Internal/unexpected failure (Redis down, serde failure, repository error).
     /// Maps to 500 with a generic code; the underlying cause is logged, never serialized.
     #[error("internal error")]
-    Internal(#[source] anyhow::Error),
+    Internal(#[source] Box<dyn std::error::Error + Send + Sync>),
     /// The shared store could not answer; `503 auth.service_unavailable` (§15.3).
     #[error("service unavailable")]
-    ServiceUnavailable(#[source] anyhow::Error),
+    ServiceUnavailable(#[source] Box<dyn std::error::Error + Send + Sync>),
 }
 
 impl AuthError {
@@ -5776,11 +5977,37 @@ pub struct RateLimitConfig {
     pub platform_login: Option<RateLimit>,
     pub invitation_create: Option<RateLimit>,
     pub invitation_accept: Option<RateLimit>,
+    pub invitation_revoke: Option<RateLimit>,
+    pub email_change_request: Option<RateLimit>,
+    pub email_change_confirm: Option<RateLimit>,
     pub list_sessions: Option<RateLimit>,
     pub revoke_session: Option<RateLimit>,
     pub revoke_all_sessions: Option<RateLimit>,
     pub oauth_initiate: Option<RateLimit>,
     pub oauth_callback: Option<RateLimit>,
+    pub change_password: Option<RateLimit>,
+    pub logout: Option<RateLimit>,
+    pub ws_ticket: Option<RateLimit>,
+    // The workspace routes (§8.2.9), one limit each:
+    pub workspace_list: Option<RateLimit>,
+    pub workspace_access: Option<RateLimit>,
+    pub workspace_switch: Option<RateLimit>,
+    pub workspace_members: Option<RateLimit>,
+    pub workspace_create: Option<RateLimit>,
+    pub workspace_rename: Option<RateLimit>,
+    pub workspace_schedule_deletion: Option<RateLimit>,
+    pub workspace_restore: Option<RateLimit>,
+    pub workspace_change_role: Option<RateLimit>,
+    pub workspace_remove_member: Option<RateLimit>,
+    pub workspace_leave: Option<RateLimit>,
+    pub workspace_transfer_ownership: Option<RateLimit>,
+    pub workspace_invite: Option<RateLimit>,
+    pub workspace_invitations: Option<RateLimit>,
+    pub workspace_invitation_resend: Option<RateLimit>,
+    pub workspace_invitation_revoke: Option<RateLimit>,
+    pub workspace_invitation_preview: Option<RateLimit>,
+    pub workspace_invitation_accept: Option<RateLimit>,
+    pub workspace_invitation_accept_signup: Option<RateLimit>,
 }
 
 impl Default for RateLimitConfig {
@@ -5838,6 +6065,7 @@ brute-force headroom per IP.
 | `POST /auth/mfa/verify-enable`          | `mfa_verify_enable`   | 5     | 60          | Bound enable attempts.                                                   |
 | `POST /auth/mfa/challenge`              | `mfa_challenge`       | 5     | 60          | Aligned with `login`; engine per-account counter is the primary defense. |
 | `POST /auth/mfa/disable`                | `mfa_disable`         | 3     | 300         | Protect MFA deactivation.                                                |
+| `POST /auth/mfa/recovery-codes`         | `mfa_disable`         | 3     | 300         | Shares the budget of `disable`: it is a TOTP-guessing surface, and a way to invalidate a victim's recovery codes repeatedly. |
 | `POST /auth/platform/login`             | `platform_login`      | 5     | 60          | Protect admin login.                                                     |
 | `POST /auth/invitations`                | `invitation_create`   | 10    | 3600        | Prevent invitation flooding / email abuse.                              |
 | `POST /auth/invitations/accept`         | `invitation_accept`   | 5     | 60          | Protect invitation acceptance (token-guess resistance).                  |
@@ -5851,8 +6079,33 @@ brute-force headroom per IP.
 | `GET /auth/oauth/{provider}/callback`   | `oauth_callback`      | 10    | 60          | Matches `oauth_initiate`; prevents callback-only flooding.              |
 
 > The platform MFA-management routes (`/auth/platform/mfa/*`) reuse the
-> dashboard MFA limits (`mfa_setup`, `mfa_verify_enable`, `mfa_disable`) — they
-> are authenticated management actions, not credential-entry paths.
+> dashboard MFA limits (`mfa_setup`, `mfa_verify_enable`, `mfa_disable`, the last
+> also for `recovery-codes` on both planes) — they are authenticated management
+> actions, not credential-entry paths.
+
+The workspace routes (§8.2.9) each carry their own limit; the defaults are:
+
+| Route                                                        | Config field                         | burst | per_seconds |
+| ------------------------------------------------------------ | ------------------------------------ | ----- | ----------- |
+| `GET /auth/workspaces`                                       | `workspace_list`                     | 30    | 60          |
+| `GET /auth/workspaces/{workspaceId}/access`                  | `workspace_access`                   | 60    | 60          |
+| `POST /auth/workspaces/{workspaceId}/switch`                 | `workspace_switch`                   | 20    | 60          |
+| `GET /auth/workspaces/{workspaceId}/members`                 | `workspace_members`                  | 30    | 60          |
+| `POST /auth/workspaces`                                      | `workspace_create`                   | 10    | 3600        |
+| `PATCH /auth/workspaces/{workspaceId}`                       | `workspace_rename`                   | 20    | 60          |
+| `POST /auth/workspaces/{workspaceId}/schedule-deletion`      | `workspace_schedule_deletion`        | 5     | 300         |
+| `POST /auth/workspaces/{workspaceId}/restore`                | `workspace_restore`                  | 5     | 300         |
+| `PATCH /auth/workspaces/{workspaceId}/members/{userId}`      | `workspace_change_role`              | 20    | 60          |
+| `DELETE /auth/workspaces/{workspaceId}/members/{userId}`     | `workspace_remove_member`            | 20    | 60          |
+| `POST /auth/workspaces/{workspaceId}/leave`                  | `workspace_leave`                    | 10    | 60          |
+| `POST /auth/workspaces/{workspaceId}/transfer-ownership`     | `workspace_transfer_ownership`       | 3     | 300         |
+| `POST /auth/workspaces/{workspaceId}/invitations`            | `workspace_invite`                   | 30    | 3600        |
+| `GET /auth/workspaces/{workspaceId}/invitations`             | `workspace_invitations`              | 30    | 60          |
+| `POST /auth/workspaces/{workspaceId}/invitations/resend`     | `workspace_invitation_resend`        | 10    | 300         |
+| `POST /auth/workspaces/{workspaceId}/invitations/revoke`     | `workspace_invitation_revoke`        | 20    | 60          |
+| `POST /auth/workspaces/invitations/preview`                  | `workspace_invitation_preview`       | 20    | 60          |
+| `POST /auth/workspaces/invitations/accept`                   | `workspace_invitation_accept`        | 10    | 60          |
+| `POST /auth/workspaces/invitations/accept-signup`            | `workspace_invitation_accept_signup` | 5     | 60          |
 
 Both platform refresh and dashboard refresh share the `refresh` limit, matching
 nest-auth (platform refresh is throttled with `AUTH_THROTTLE_CONFIGS.refresh`).
@@ -6714,7 +6967,7 @@ crate the WASM target and the server target both depend on for shapes.
 #### `bymax-auth-crypto`
 | Dependency        | Tier              | Why                                                              |
 | ----------------- | ----------------- | ---------------------------------------------------------------- |
-| `scrypt`          | default (`scrypt`) | Default password KDF (parity with nest-auth scrypt N=2^15,r=8,p=1) |
+| `scrypt`          | default (`scrypt`) | Default password KDF (parity with nest-auth scrypt N=2^17,r=8,p=1) |
 | `hmac` + `sha2`   | mandatory         | HMAC-SHA256 (brute-force identifier), SHA-256 (token/recovery hashing) |
 | `subtle`          | mandatory         | Constant-time comparison (replaces `crypto.timingSafeEqual`)     |
 | `rand` / `getrandom` | mandatory      | CSPRNG for salts, secrets, secure tokens; `getrandom` `wasm_js` feature on wasm |
@@ -6722,14 +6975,15 @@ crate the WASM target and the server target both depend on for shapes.
 | `zeroize`         | mandatory         | Wipe residual key/secret buffers after use (also the base `secrecy` builds on) |
 | `argon2`          | feature `argon2`  | Alternative password KDF (configurable; see §19.3)               |
 | `aes-gcm` (RustCrypto) | feature `mfa` | AES-256-GCM for TOTP-secret encryption at rest                  |
-| `sha1`            | feature `mfa`     | HMAC-SHA1 for TOTP **only** (RFC 6238 mandates SHA-1)            |
+| `sha1`            | feature `mfa` or `breach` | HMAC-SHA1 for TOTP (RFC 6238 mandates SHA-1) under `mfa`; the plain SHA-1 digest that indexes the breach-corpus range query under `breach` |
 | `data-encoding`   | feature `mfa`     | Base32 for TOTP `otpauth://` URIs (RFC 4648) — MFA-only          |
 
 All RustCrypto; no C/C++ bindings — preserves nest-auth's "no native-binding
 supply-chain risk" stance while gaining memory-zeroing the JS version lacked. The
-MFA primitives (`aes-gcm`, `sha1`, `data-encoding`) compile **only** under this
-crate's `mfa` feature (driven by the facade `mfa` feature), so a build without
-MFA links none of them. JWT base64url lives in `bymax-auth-jwt` via the `base64`
+MFA primitives (`aes-gcm`, `data-encoding`, and `sha1` for TOTP) compile **only**
+under this crate's `mfa` feature (driven by the facade `mfa` feature); `sha1` is
+also pulled in on its own by `breach`, so a build with neither `mfa` nor `breach`
+links none of them. JWT base64url lives in `bymax-auth-jwt` via the `base64`
 crate, **not** `data-encoding`.
 
 #### `bymax-auth-jwt`
@@ -6856,6 +7110,8 @@ always-on engine, nothing else.
 | `platform`     | platform service/guard paths                          | Platform-admin login/JWT/sessions                               |
 | `invitations`  | invitation service paths                              | Email invitations                                               |
 | `api-keys`     | `bymax-auth-core/api-keys` (+ `bymax-auth-axum/api-keys` when `axum` is on) | Scoped service API keys: repository port, verifier, issuing, audit hook, the axum layer, extractor and flush task (§7.13, §8.9) |
+| `breach`       | `bymax-auth-core/breach` (+ `bymax-auth-crypto/breach`, `sha1`) | Breached-password check (HIBP k-anonymity) over the injected `HttpClient` |
+| `openapi`      | `bymax-auth-axum/openapi` (when `axum` is on)         | OpenAPI request-body schemas of the auth routes (§8.4.4)        |
 | `oauth`        | `bymax-auth-core/oauth` (`OAuthProvider`/`HttpClient` traits) | OAuth 2.0 + PKCE orchestration; Google provider built-in — **no HTTP-client dependency** (transport injected, §11.1.1) |
 | `oauth-reqwest`| `oauth` + `reqwest` (`ReqwestHttpClient`)            | bundled `reqwest`-backed `HttpClient` default; **off by default** — omit it and supply your own `HttpClient` to add zero HTTP deps |
 | `client`       | `bymax-auth-client` (`reqwest`)                       | Native Rust HTTP auth client                                    |

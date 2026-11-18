@@ -51,13 +51,15 @@ pub fn sign<C: Serialize>(claims: &C, key: &HsKey) -> Result<String, JwtError> {
 /// Verify a compact HS256 JWS and deserialize its claims.
 ///
 /// Enforces, in order: three base64url segments → `header.alg == "HS256"` (before any
-/// signature math) → constant-time HMAC tag check → `exp`/`iat` per `opts`. JTI-blacklist
+/// signature math) → constant-time HMAC tag check → `exp`/`iat` per `opts` → the `iss`/`aud`
+/// binding when `opts` sets `expected_iss`/`expected_aud`. JTI-blacklist
 /// consultation is a separate guard/store step and is **not** performed here.
 ///
 /// # Errors
 ///
 /// - [`JwtError::Malformed`] — not three segments, a segment is not base64url, the header
-///   is not JSON, or `iat` is in the future beyond the leeway.
+///   is not JSON, `iat` is in the future beyond the leeway, or `iss`/`aud` is missing or
+///   different from the value `opts` expects.
 /// - [`JwtError::UnsupportedAlg`] — `alg` is anything other than `HS256` (including `none`).
 /// - [`JwtError::BadSignature`] — the HMAC tag does not match.
 /// - [`JwtError::Expired`] — `exp` is in the past beyond the leeway.

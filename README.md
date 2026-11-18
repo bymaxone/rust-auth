@@ -51,7 +51,7 @@ Instead of stitching together a dozen crates and packages for JWT, MFA, OAuth, s
 - **🦀 Pure-Rust crypto only** — Password hashing, MFA encryption, TOTP, and token generation run entirely on [RustCrypto](https://github.com/RustCrypto) (`scrypt`, `argon2`, `aes-gcm`, `hmac`, `sha2`, `subtle`). **No `ring`, no OpenSSL, no C bindings**, and `#![forbid(unsafe_code)]` on every first-party crate.
 - **⚡ Pay for what you use** — A tiny always-compiled core; every heavy integration (Redis, Axum, `reqwest`, MFA) is a Cargo feature or a trait you plug. A per-feature dependency budget is enforced in CI, so a minimal build pulls a minimal tree.
 - **🏢 Multi-tenant ready** — Every operation is scoped by `tenant_id`, taken from a resolver and **never the request body**. A separate platform-admin identity domain is isolated from tenant users from day one.
-- **🌐 Edge-native** — The same HS256 verifier that runs on the server compiles to `wasm32-unknown-unknown` and runs in the **Next.js Edge runtime with no network call** — one crypto implementation, server and edge, proven by tests. The edge is a fast *reject*, not the authority: with no network it cannot read the revocation list or the token epoch, so a revoked token still verifies there until it expires. Anything that must not outlive a revocation has to reach the backend.
+- **🌐 Edge-native** — The same HS256 verifier that runs on the server compiles to `wasm32-unknown-unknown` and runs in the **Next.js proxy (on the Node.js runtime) with no network call** — one crypto implementation, server and edge, proven by tests. The edge is a fast *reject*, not the authority: with no network it cannot read the revocation list or the token epoch, so a revoked token still verifies there until it expires. Anything that must not outlive a revocation has to reach the backend.
 
 ```bash
 cargo add bymax-auth --features "argon2,sessions,mfa,oauth,oauth-reqwest,redis,axum"
@@ -130,7 +130,8 @@ A thin facade over a set of focused internal crates. You enable only the capabil
 | `redis`          | Canonical Redis stores (`redis` + `deadpool-redis`) with atomic Lua        |
 | `axum`           | HTTP router, extractors, DTO validation, cookie delivery, per-route rate limiting, WebSocket tickets |
 | `breach`         | Opt-in breached-password check (`HibpBreachChecker`, HIBP k-anonymity)     |
-| `client`         | Native Rust typed auth client                                              |
+| `openapi`        | OpenAPI request-body schemas of the auth routes (with `axum`)              |
+| `client`         | Native Rust typed auth client (needs a backend with `bearer` or `both` token delivery; the default `cookie` delivery returns no tokens to it) |
 | `full`           | Every backend feature above                                                |
 
 > [!NOTE]
@@ -193,13 +194,16 @@ impl UserRepository for PgUserRepository {
         email: &str,
         tenant_id: &str,
     ) -> Result<Option<AuthUser>, RepositoryError> {
-        sqlx::query_as::<_, AuthUser>(
+        // `UserRow` is your own `#[derive(sqlx::FromRow)]` struct with an
+        // `impl From<UserRow> for AuthUser`: `AuthUser` does not implement `sqlx::FromRow`.
+        sqlx::query_as::<_, UserRow>(
             "SELECT * FROM users WHERE email = $1 AND tenant_id = $2",
         )
         .bind(email.to_lowercase())
         .bind(tenant_id)
         .fetch_optional(&self.pool)
         .await
+        .map(|row| row.map(AuthUser::from))
         .map_err(|e| RepositoryError::Backend(Box::new(e)))
     }
 
@@ -339,14 +343,23 @@ use bymax_auth::redis::RedisStores;
 async fn main() -> anyhow::Result<()> {
     let http = Arc::new(ReqwestHttpClient::new()?);
     let google_config = /* GoogleOAuthConfig { client id, secret, redirect URI, … } */;
+    let stores = Arc::new(RedisStores::connect("redis://127.0.0.1", "auth")?);
+
+    let mut config = AuthConfig::secure_defaults(); // or AuthConfig::nest_compat_defaults()
+    // The OAuth routes mount only when this toggle is on (it is off by default).
+    config.controllers.oauth = true;
+
     let engine = AuthEngine::builder()
-        .config(AuthConfig::secure_defaults()) // or AuthConfig::nest_compat_defaults()
+        .config(config)
         .environment(Environment::Production)   // resolves Secure cookies + prod redirect checks
         .user_repository(Arc::new(PgUserRepository { pool }))
         .email_provider(Arc::new(ResendEmailProvider { /* … */ }))
-        .redis_stores(Arc::new(RedisStores::connect("redis://127.0.0.1", "auth")?))
+        .redis_stores(stores.clone())
         .http_client(http.clone())
         .oauth_provider(Arc::new(GoogleOAuthProvider::new(google_config, http)))
+        // `redis_stores` does not wire the single-use OAuth `state` store: with
+        // `controllers.oauth` on, `build()` fails with `ConfigError::OAuthStateStoreMissing` without it.
+        .oauth_state_store(stores)
         .build()?;
 
     // `ClientIpSource` states how the caller's address is learned, for the per-route rate limiter
@@ -456,7 +469,7 @@ export function Profile() {
   const { logout } = useAuth()
 
   if (status === 'loading') return <div>Loading…</div>
-  if (status === 'unauthenticated') return <div>Please log in</div>
+  if (status === 'unauthenticated' || user === null) return <div>Please log in</div>
 
   return (
     <div>
@@ -469,19 +482,25 @@ export function Profile() {
 
 ### 7. Frontend integration (Next.js 16, edge JWT via WASM)
 
-Mount the auth proxy at the project root and expose the `/api/auth/*` route handlers. The proxy verifies the access token **at the edge** using the WebAssembly build of the same HS256 verifier the backend uses — no network round-trip.
+Mount the auth proxy at the project root and expose the route handlers below. The proxy verifies the access token **in the Next.js middleware layer** using the WebAssembly build of the same HS256 verifier the backend uses — no network round-trip. The WebAssembly glue needs the **Node.js runtime**; the lighter Edge runtime does not initialize it.
 
 ```typescript
-// proxy.ts — Next.js 16 Edge middleware
+// proxy.ts — Next.js 16 proxy (Node.js runtime)
 import { createAuthProxy } from '@bymax-one/rust-auth/nextjs'
 
 export const { proxy } = createAuthProxy({
-  accessTokenSecret: process.env.AUTH_ACCESS_TOKEN_SECRET ?? null, // verified at the edge via WASM
+  accessTokenSecret: process.env.AUTH_ACCESS_TOKEN_SECRET ?? null, // verified locally via WASM
+  // Set these whenever the backend configures `jwt.issuer` / `jwt.audience`. Left unset, the
+  // proxy also accepts a token minted for another issuer or audience under the same secret.
+  expectedIssuer: process.env.AUTH_JWT_ISSUER ?? null,
+  expectedAudience: process.env.AUTH_JWT_AUDIENCE ?? null,
   loginPath: '/login',
   // Prefixes at a segment boundary: never list '/', which would make every route public.
   // `/auth` is the same-origin forwarding route to the backend (login, register, ...) and
   // `/api/auth` holds the client-refresh and logout handlers; both must be reachable while
   // the caller is unauthenticated, or an expired access token can never be refreshed.
+  // The refresh cookie is sent only to paths under `cookies.refresh_cookie_path` (default
+  // `/auth`), so a handler that must read it has to be mounted under that path.
   publicPaths: ['/login', '/auth', '/api/auth'],
   // The silent-refresh handler lives UNDER `/auth` so the path-scoped refresh cookie (path
   // `/auth`) is sent to it; a handler under `/api/auth` would never receive that cookie.
@@ -490,7 +509,9 @@ export const { proxy } = createAuthProxy({
   blockedStatuses: ['BANNED', 'INACTIVE', 'SUSPENDED'],
 })
 
-export const config = { matcher: ['/((?!_next/static|_next/image|favicon.ico).*)'] }
+export const config = {
+  matcher: ['/((?!_next/static|_next/image|favicon.ico).*)'],
+}
 ```
 
 > `publicPaths` entries are prefixes that end at a segment boundary, and `'/'` is a prefix of every path:
@@ -533,8 +554,8 @@ Everything is configured through `AuthConfig`. Two ready-made profiles bundle se
 
 | Group              | Key options                                                                  | nest-compat default        |
 | ------------------ | ---------------------------------------------------------------------------- | -------------------------- |
-| **jwt**            | `secret` (required, ≥ 32 chars), `previous_secrets` (and the top-level `identifier_key`), `access_expires_in`, `refresh_expires_in_days`, `absolute_session_lifetime_days`, `issuer`, `audience` | `15m`, `7d`, `30` (`0` disables the cap), HS256 (pinned), both off |
-| **password**       | `active_algorithm`, scrypt `cost_factor` / Argon2id `memory_kib`             | scrypt N=2¹⁷, r=8, p=1     |
+| **jwt**            | `secret` (required, ≥ 32 chars), `previous_secrets` (and the top-level `identifier_key`), `access_expires_in`, `refresh_expires_in_days`, `refresh_grace_window`, `absolute_session_lifetime_days`, `issuer`, `audience` | `15m`, `7d`, `30 s` (at most 300 s), `30` (`0` disables the cap), HS256 (pinned), both off |
+| **password**       | `active_algorithm`, scrypt `cost_factor` / Argon2id `memory_kib`, `min_length`, `blocklist` | scrypt N=2¹⁷, r=8, p=1; `min_length = 15` (`8..=128`, applied only when a password is set, never on login or rehash); `blocklist = []` |
 | **token_delivery** | `Cookie` \| `Bearer` \| `Both`                                               | `Cookie`                   |
 | **cookies**        | names, `refresh_cookie_path`, `same_site`, `trusted_origins`, `resolve_domains` | HttpOnly, Secure, Lax (the refresh cookie is Strict), `[]` |
 | **mfa**            | `encryption_key` (32 bytes), `previous_encryption_keys`, `issuer`, `totp_window`, `recovery_code_count` | —              |
@@ -542,12 +563,18 @@ Everything is configured through `AuthConfig`. Two ready-made profiles bundle se
 | **brute_force**    | `max_attempts`, `window`                                                     | `5`, `900`                 |
 | **rate limiting**  | `AxumAuthConfig::rate_limits` — per-route limits counted in the shared store, pinned to the shared contract | on, per-route |
 | **password_reset** | `method` (`Token` \| `Otp`), `otp_length`, `token_ttl`                       | `Token`, 600 s             |
+| **email_verification** | `required`, `otp_ttl`                                                    | `true`, 600 s              |
+| **email_change**   | `token_ttl` (the routes mount only with `controllers.email_change`)          | 3600 s                     |
 | **platform**       | `enabled` (requires `roles.platform_hierarchy`)                              | `false`                    |
 | **invitations**    | `enabled`, `token_ttl`                                                       | `false`, 48 h              |
 | **api_keys**       | `enabled`, `pepper`, `scopes`, `header`, `prefix`, `last_used_flush`, `audit_mode` | `false`, —, —, `x-api-key`, `bak`, 60 s, best-effort |
 | **roles**          | `hierarchy` (required), `platform_hierarchy`                                 | —                          |
 | **oauth**          | `google`, `redirect_allowlist`, `*_redirect_url`                            | —                          |
-| **controllers**    | per-group route toggles                                                      | feature-driven             |
+| **controllers**    | per-group route toggles (`auth`, `password_reset`, `mfa`, `sessions`, `platform`, `oauth`, `invitations`, `email_change`, `workspaces`); `sessions`, `platform` and `invitations` follow their `enabled` flag | `auth` and `password_reset` on, the rest off |
+| **workspaces**     | `enabled` (needs `WorkspaceRepository`, `MembershipRepository` and a membership cache store on the builder), `roles` (`hierarchy`, `owner_role`), `permissions`, `membership_cache_ttl_seconds`, `allow_create`, `max_workspaces_per_user`, `deletion_grace_days` | `false`, —, owner-only except `view_members`, 60, `true`, `0` (no limit), 14 |
+| **route_prefix**   | the mount segment of every route; a value other than `auth` requires an explicit `cookies.refresh_cookie_path` (`RefreshPathMismatch`) | `auth`                     |
+| **tenancy**        | `tenant_id_resolver`, `enforce_tenant_binding` (refuses a token minted for another tenant than the resolver names; requires a resolver, else `TenantBindingWithoutResolver`) | none, `false`              |
+| **account status** | `blocked_statuses`, `user_status_cache_ttl` (how long a status change takes to reach a live token) | `BANNED`, `INACTIVE`, `SUSPENDED`; 60 s |
 
 > [!NOTE]
 > `build()` validates every cross-field invariant (secret length/entropy, role referential integrity, parameter floors, `SameSite=None ⇒ Secure`, `trusted_origins` reachable under the cookie posture, OAuth redirect allow-listing, required stores) and rejects an invalid config with a precise `ConfigError`.
@@ -592,7 +619,7 @@ Everything is configured through `AuthConfig`. Two ready-made profiles bundle se
 > | Before rotating | Once, set `identifier_key` to the value `jwt.secret` has **now** and deploy. Nothing moves: the derivation is unchanged. Later rotations leave it as it is. | Revoke what has to be revoked while the session index can still find it; afterwards nothing can be revoked through it, and refresh tokens, which are looked up by their own hash, keep working. Do not list the compromised secret in `jwt.previous_secrets`. |
 > | Rotating        | Put the new secret in `jwt.secret` and the old one in `jwt.previous_secrets`; keep `identifier_key` as it is. | Put the new secret in `jwt.secret` **and** choose a new `identifier_key`. |
 > | Names           | Unchanged. | Moved: sessions lose their index until they next refresh (meanwhile they are missing from the session list and cannot be revoked through it, and their refresh tokens still work until they expire), every epoch reads zero, MFA set-up state and lockout counters start empty, and stored recovery-code digests stop verifying. |
-> | Revoked tokens  | Stay revoked. | Tokens signed under the old secret no longer verify. A token signed under a secret that stays in `previous_secrets` and had been refused by an epoch is accepted again, because the epoch is renamed with the rest and revoking first does not carry it across: remove retired secrets from `previous_secrets` or wait out `jwt.access_ttl`. |
+> | Revoked tokens  | Stay revoked. | Tokens signed under the old secret no longer verify. A token signed under a secret that stays in `previous_secrets` and had been refused by an epoch is accepted again, because the epoch is renamed with the rest and revoking first does not carry it across: remove retired secrets from `previous_secrets` or wait out `jwt.access_expires_in`. |
 > | Afterwards      | Drop the old secret from `previous_secrets` once its last token has expired. | Users with MFA need new recovery codes: an old code is refused like any wrong code, and sign-in with the authenticator app is unaffected. A signed-in user replaces them with `POST /auth/mfa/recovery-codes` (`POST /auth/platform/mfa/recovery-codes` for an admin, both under the default `route_prefix`), proving a current TOTP code; the library does not regenerate them at the next sign-in or notify anyone, so your application prompts for it. Listing the secret the digests were keyed from (the old `identifier_key`, or the old `jwt.secret` if it was never set) in `previous_secrets` would keep the old codes working, and would keep tokens signed with it verifying if it was also a signing secret: that is the trade-off. |
 >
 > Pinning to the old secret leaves the derived Redis names computable by anyone who knows that
@@ -618,15 +645,19 @@ Everything is configured through `AuthConfig`. Two ready-made profiles bundle se
 
 > [!IMPORTANT]
 > **The parameters that carry a control's strength are bounded by `build()`.** `mfa.totp_window`
-> must be `0..=10` (`TotpWindowRange`): the window counts 30-second steps on *either* side of
-> now, so `2n + 1` codes are valid at once — three at 1, but 121 at 60, which makes a six-digit
-> code a hundred times easier to guess while the configuration still reads as "MFA enabled".
+> must be `0..=2` (`TotpWindowRange`; the ceiling is `MAX_VERIFY_WINDOW` in `bymax-auth-crypto`): the
+> window counts 30-second steps on *either* side of now, so `2n + 1` codes are valid at once —
+> three at 1, five at the maximum — and a wider window would make a six-digit code proportionally
+> easier to guess while the configuration still reads as "MFA enabled".
 > `mfa.recovery_code_count` must be `1..=50` (`RecoveryCodeCountRange`), because zero enrols an
 > account with no way back if the authenticator is lost. `password.scrypt.block_size` must be
 > at least 8 (`ScryptBlockSize`) and `password.scrypt.parallelization` at least 1
 > (`ScryptParallelization`): the memory cost is `128 * N * r`, so a smaller block size divides
 > the hardness that the cost-factor floor exists to guarantee — invisibly, since the bounded
-> parameter is still intact. `nest-auth` enforces the identical ranges.
+> parameter is still intact. `jwt.refresh_grace_window` must stay below the refresh lifetime
+> (`RefreshGraceTooLarge`) and at or under **300 seconds** (`RefreshGraceCeiling`): it is the span
+> in which an already-consumed refresh token still buys a session, so it is the replay window for
+> a stolen one and exists to cover a single network retry. `nest-auth` enforces the identical ranges.
 
 > [!IMPORTANT]
 > `jwt.access_expires_in` must not exceed **30 days**, the window a store keeps a bumped token
@@ -676,7 +707,7 @@ The library is a set of crates you embed in your Axum service — a framework-ag
 │                                                            │
 │   bymax-auth-axum   →  router · extractors · rate-limit    │
 │        │                                                   │
-│   bymax-auth-core   →  AuthEngine · services · 17 hooks    │
+│   bymax-auth-core   →  AuthEngine · services · 21 hooks    │
 │      ╱   │   ╲                                             │
 │  -crypto -jwt -types     (pure-Rust, wasm-safe)            │
 │        │                                                   │
@@ -853,13 +884,13 @@ wasm-pack test --node bindings/bymax-auth-wasm
 
 ### HTTP Endpoints
 
-Route groups mount only when their feature **and** runtime toggle are enabled, so an unconfigured group contributes zero routes. Paths are shown under the default `auth` prefix.
+Route groups mount only when their feature **and** runtime toggle are enabled, so an unconfigured group contributes zero routes. Paths are shown under the default `auth` prefix. `POST /auth/logout` and `POST /auth/platform/logout` are public on purpose: the refresh token authorizes them, so a caller whose access token has expired can still sign out.
 
 | Method | Path                          | Guard / Auth                    | Description                                          |
 | ------ | ----------------------------- | ------------------------------- | ---------------------------------------------------- |
 | POST   | `/auth/register`              | Public                          | Register a dashboard user and issue tokens           |
 | POST   | `/auth/login`                 | Public                          | Authenticate (may return an MFA challenge)           |
-| POST   | `/auth/logout`                | `AuthUser`                      | Revoke the access `jti` and the refresh session      |
+| POST   | `/auth/logout`                | Public (refresh token, cookie or body) | Revoke the access `jti` and the refresh session |
 | POST   | `/auth/refresh`               | Public (refresh cookie)         | Rotate the refresh token, issue a new access token   |
 | GET    | `/auth/me`                    | `AuthUser`                      | Current dashboard user                               |
 | POST   | `/auth/verify-email`          | Public                          | Verify email with an OTP                             |
@@ -869,28 +900,44 @@ Route groups mount only when their feature **and** runtime toggle are enabled, s
 | POST   | `/auth/password/verify-otp`   | Public                          | Verify a password-reset OTP                          |
 | POST   | `/auth/password/resend-otp`   | Public                          | Resend the password-reset OTP                        |
 | POST   | `/auth/password/change`       | `AuthUser` + `UserStatus`       | Change the password, proving the current one         |
-| POST   | `/auth/mfa/setup`             | `AuthUser`                      | Generate the TOTP secret + recovery codes            |
-| POST   | `/auth/mfa/verify-enable`     | `AuthUser`                      | Confirm setup and enable MFA                         |
+| POST   | `/auth/mfa/setup`             | `AuthUser` + `VerifiedUser` | Generate the TOTP secret + recovery codes            |
+| POST   | `/auth/mfa/verify-enable`     | `AuthUser` + `VerifiedUser` | Confirm setup and enable MFA                         |
 | POST   | `/auth/mfa/challenge`         | Public (MFA temp token)         | Submit a TOTP / recovery code after login            |
-| POST   | `/auth/mfa/disable`           | `AuthUser`                      | Disable MFA                                          |
-| POST   | `/auth/mfa/recovery-codes`    | `AuthUser`                      | Regenerate recovery codes (TOTP-gated)               |
+| POST   | `/auth/mfa/disable`           | `AuthUser` + `VerifiedUser` | Disable MFA                                          |
+| POST   | `/auth/mfa/recovery-codes`    | `AuthUser` + `VerifiedUser` | Regenerate recovery codes (TOTP-gated)               |
 | GET    | `/auth/sessions`              | `AuthUser`, `UserStatus`        | List active sessions                                 |
 | POST   | `/auth/sessions/revoke-all`   | `AuthUser`, `UserStatus`        | Revoke every session except the caller's own         |
 | DELETE | `/auth/sessions/:id`          | `AuthUser`, `UserStatus`        | Revoke a specific session (ownership-checked)        |
-| POST   | `/auth/invitations`           | `AuthUser`                      | Create a tenant invitation                           |
+| POST   | `/auth/invitations`           | `AuthUser` + `UserStatus`       | Create a tenant invitation                           |
 | POST   | `/auth/invitations/accept`    | Public                          | Accept an invitation and create the user             |
-| POST   | `/auth/invitations/revoke`    | `AuthUser`                      | Withdraw a pending invitation                        |
-| POST   | `/auth/email/change`          | `AuthUser`                      | Request an address change (re-proves the password)   |
+| POST   | `/auth/invitations/revoke`    | `AuthUser` + `UserStatus`       | Withdraw a pending invitation                        |
+| POST   | `/auth/email/change`          | `AuthUser` + `UserStatus`       | Request an address change (re-proves the password)   |
 | POST   | `/auth/email/change/confirm`  | Public                          | Confirm it with the token sent to the new address    |
 | POST   | `/auth/platform/login`        | Public                          | Platform-admin login (separate context)              |
 | POST   | `/auth/platform/mfa/challenge`| Public                          | Platform-admin MFA challenge                         |
 | GET    | `/auth/platform/me`           | `PlatformUser`                  | Current platform admin                               |
-| POST   | `/auth/platform/logout`       | `PlatformUser`                  | Revoke platform tokens                               |
+| POST   | `/auth/platform/mfa/setup`    | `PlatformUser`                  | Generate the platform admin's TOTP secret + recovery codes |
+| POST   | `/auth/platform/mfa/verify-enable` | `PlatformUser`             | Confirm setup and enable MFA                         |
+| POST   | `/auth/platform/mfa/disable`  | `PlatformUser`                  | Disable MFA                                          |
+| POST   | `/auth/platform/mfa/recovery-codes` | `PlatformUser`            | Regenerate recovery codes (TOTP-gated)               |
+| POST   | `/auth/platform/logout`       | Public (refresh token in the body) | Revoke platform tokens                            |
 | POST   | `/auth/platform/refresh`      | Public (platform refresh cookie)| Rotate the platform refresh token                    |
 | DELETE | `/auth/platform/sessions`     | `PlatformUser`                  | Revoke all platform sessions                         |
 | GET    | `/auth/oauth/:provider`       | Public                          | Initiate the OAuth authorize redirect                |
 | GET    | `/auth/oauth/:provider/callback` | Public                       | Handle the callback, exchange the code, issue tokens |
 | POST   | `/auth/ws-ticket`             | `AuthUser`, `UserStatus`, `MfaSatisfied` | Mint a single-use WebSocket upgrade ticket  |
+| GET    | `/auth/workspaces`            | `UserStatus`                    | List the caller's workspaces (cursor-paged)          |
+| POST   | `/auth/workspaces`            | `UserStatus`                    | Create a workspace owned by the caller               |
+| PATCH  | `/auth/workspaces/:workspaceId` | `RequireWorkspace` (`workspaces.permissions.manage_workspace`) | Rename a workspace |
+| GET    | `/auth/workspaces/:workspaceId/access` | `RequireWorkspace<AnyWorkspaceMember>` | The workspace and the caller's role in it |
+| GET    | `/auth/workspaces/:workspaceId/members` | `RequireWorkspace` (`workspaces.permissions.view_members`) | List the members (cursor-paged) |
+| POST   | `/auth/workspaces/:workspaceId/switch` | `RequireWorkspace<AnyWorkspaceMember>` | Record the workspace as the caller's last active one |
+| POST   | `/auth/workspaces/:workspaceId/schedule-deletion` | `RequireWorkspace` (`workspaces.permissions.delete_workspace`) | Schedule deletion, re-proving the password |
+| POST   | `/auth/workspaces/:workspaceId/restore` | `RequireWorkspace` (`workspaces.permissions.delete_workspace`) | Undo a scheduled deletion within its grace period |
+| PATCH  | `/auth/workspaces/:workspaceId/members/:userId` | `RequireWorkspace` (`workspaces.permissions.manage_members`) | Change a member's role |
+| DELETE | `/auth/workspaces/:workspaceId/members/:userId` | `RequireWorkspace` (`workspaces.permissions.manage_members`) | Remove a member |
+| POST   | `/auth/workspaces/:workspaceId/leave` | `RequireWorkspace<AnyWorkspaceMember>` | Leave the workspace                         |
+| POST   | `/auth/workspaces/:workspaceId/transfer-ownership` | `RequireWorkspace<AnyWorkspaceMember>` (the engine requires the owner) | Hand ownership to another member |
 
 > `GET /auth/oauth/:provider` plants an HttpOnly `oauth_state` cookie carrying the flow's
 > `state`, and the callback refuses any request that does not send it back — the binding
@@ -909,14 +956,40 @@ Route groups mount only when their feature **and** runtime toggle are enabled, s
 | `RequirePlatformRole<R>`| Platform role hierarchy enforcement                              |
 | `CurrentUser`           | Extracts the validated claims                                    |
 | `SelfOrAdmin`           | Ownership-or-admin access                                        |
-| `UserStatus`            | Blocks inactive/banned users (Redis-cached status)               |
+| `UserStatus`            | Blocks accounts in a blocked status (Redis-cached status), and an unverified address when `email_verification.required` |
+| `VerifiedUser`          | The same rule as `UserStatus`, named for routes that must never be reachable from an unproven address (MFA management) |
+| `RequireWorkspace<P>`   | Resolves the `{workspaceId}` path segment to the caller's membership and checks the policy `P` (`AnyWorkspaceMember` accepts any active member) |
+| `WsAuthUser`            | WebSocket upgrade authenticated by a single-use ticket (`ticket` query parameter) |
+| `WsAuthUserFromHeader`  | WebSocket upgrade authenticated by the access JWT in the `Authorization: Bearer` header |
+| `CurrentApiKey`         | The service API key a request was admitted with; only behind `require_api_key_scopes` |
 | `MfaSatisfied`          | Enforces a completed MFA verification on the request             |
+
+### Client (`@bymax-one/rust-auth/client`)
+
+| Export                 | Purpose                                                                                      |
+| ---------------------- | -------------------------------------------------------------------------------------------- |
+| `createAuthClient()`   | Typed `AuthClient`: `login`, `register`, `logout`, `refresh`, `getMe`, `mfaChallenge(tempToken, code)`, `forgotPassword`, `resetPassword`. `baseUrl` is required; `routePrefix` rebases the paths; `authFetch` reuses an existing wrapper |
+| `createAuthFetch()`    | A `fetch` wrapper with credentials, a timeout and a single-flight refresh-and-retry on a `401` (`refreshEndpoint`, default `/api/auth/client-refresh`; `onSessionExpired`) |
+| `AuthClientError`      | The error thrown for a non-2xx answer: the backend's `auth.*` code, the HTTP status and any details |
+
+The client has a typed method for the eight endpoints above only. `AUTH_ROUTES` adds constants for the MFA management, session, platform, OAuth, invitation-create/accept and ticket routes, but has none for password change, email change, invitation revoke or the workspace routes. Call every route without a method through `authFetch`.
+
+A login can need a second factor. `login()` resolves a `LoginResult`, which is either an `AuthResult` or an `MfaChallengeResult` (`{ mfaRequired: true, mfaTempToken }`). Complete it through the client, since no hook wraps it:
+
+```typescript
+const result = await client.login({ email, password })
+if ('mfaRequired' in result) {
+  await client.mfaChallenge(result.mfaTempToken, totpCode)
+}
+```
 
 ### React Hooks
 
+`AuthProvider` takes `client` (an `AuthClient`), `onSessionExpired` and `revalidateInterval` (milliseconds, default `300000`, `0` disables the background check).
+
 | Hook              | Returns                                                                              |
 | ----------------- | ------------------------------------------------------------------------------------ |
-| `useSession()`    | `{ user, status, isLoading, refresh(), lastValidation }` — session state + revalidate |
+| `useSession()`    | `{ user, status, isLoading, refresh(), lastValidation }` — session state + revalidate; `user` is `null` while loading or unauthenticated |
 | `useAuth()`       | `{ login(), logout(), register(), forgotPassword(), resetPassword() }` — auth actions |
 | `useAuthStatus()` | `{ isAuthenticated, isLoading }` — derived state                                     |
 
@@ -924,11 +997,17 @@ Route groups mount only when their feature **and** runtime toggle are enabled, s
 
 | Factory                        | Type         | Purpose                                          |
 | ------------------------------ | ------------ | ------------------------------------------------ |
-| `createAuthProxy()`            | Proxy config | Auth-aware edge proxy for `proxy.ts`             |
-| `createSilentRefreshHandler()` | GET handler  | iframe-based token refresh                       |
+| `createAuthProxy()`            | Proxy config | Auth-aware proxy for `proxy.ts`. Config: `accessTokenSecret`, `expectedIssuer`, `expectedAudience`, `loginPath`, `publicPaths`, `silentRefreshPath`, `roleRules`, `blockedStatuses`, `maxRedirects`, `routePrefix` |
+| `createSilentRefreshHandler()` | GET handler  | Refreshes cookie-to-cookie through the backend, relays the rotated cookies, then redirects to `redirectTo` (open-redirect-guarded) |
 | `createClientRefreshHandler()` | POST handler | Client-triggered token refresh                   |
 | `createLogoutHandler()`        | POST handler | Clear tokens and session                         |
-| `verifyJwtToken()`             | Edge helper  | WASM-backed HS256 verification (server/edge only)|
+| `verifyJwtToken(token, secret, binding?, expectedType?)` | Edge helper  | WASM-backed HS256 verification (server only). Pass `expectedType` (for example `'dashboard'`), or a valid `mfa_challenge` token also verifies |
+
+The `/nextjs` subpath also exports `decodeJwtToken` (reads a token without checking its signature), `getUserId`, `getUserRole`, `getTenantId`, `isTokenExpired`, `buildSilentRefreshUrl`, `resolveSafeDestination`, the cookie helpers `getSetCookieHeaders`, `dedupeSetCookieHeaders` and `parseSetCookieHeader`, `isBackgroundRequest`, and the route constants `SILENT_REFRESH_ROUTE`, `CLIENT_REFRESH_ROUTE` and `LOGOUT_ROUTE`.
+
+### Shared (`@bymax-one/rust-auth/shared`)
+
+Generated from the Rust source: the wire types (`AuthResult`, `LoginResult`, `MfaChallengeResult`, the user and claims types, the error envelope), the error codes, `AUTH_ROUTES` and `AUTH_ROUTE_PREFIX`, the cookie names and path constants, and `AuthClientError`.
 
 ---
 

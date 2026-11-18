@@ -268,9 +268,10 @@ pub enum ConfigError {
         /// The rejected parallelization.
         got: u32,
     },
-    /// `mfa.totp_window` is outside the accepted `0..=10` range.
+    /// `mfa.totp_window` is outside the accepted `0..=MAX_VERIFY_WINDOW` range (currently
+    /// `0..=2`, `bymax_auth_crypto::totp::MAX_VERIFY_WINDOW`).
     #[error(
-        "mfa.totp_window must be within 0..=10 (got {got}; {valid} codes would be valid at once)"
+        "mfa.totp_window must be within 0..=2 (got {got}; {valid} codes would be valid at once)"
     )]
     TotpWindowRange {
         /// The rejected window.

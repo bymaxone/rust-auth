@@ -14,7 +14,9 @@
 //! hashed here, and every key has a TTL (section 24, invariants 9 and 15). Stored JSON is
 //! camelCase, byte-identical to nest-auth so the two backends can share one Redis.
 //!
-//! A single [`RedisStores`] handle implements all four traits, so it wires straight into
+//! A single [`RedisStores`] handle implements every store trait the engine consumes: the four
+//! above plus the password-reset, invitation, rate-limit, membership-cache, MFA, OAuth-state
+//! and user-status-cache stores, so it wires straight into
 //! `AuthEngineBuilder::redis_stores`. This crate depends on `tokio` and the Redis driver and
 //! is **never** linked into the `wasm32` edge build.
 #![forbid(unsafe_code)]

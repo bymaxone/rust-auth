@@ -9,7 +9,7 @@
 //!
 //! # Storage format
 //!
-//! New hashes are written as standard PHC strings — `$scrypt$ln=15,r=8,p=1$…` or
+//! New hashes are written as standard PHC strings — `$scrypt$ln=17,r=8,p=1$…` or
 //! `$argon2id$v=19$m=19456,t=2,p=1$…` — which self-describe their algorithm and
 //! parameters. A hash is always verified under the parameters it records, never under
 //! whatever the deployment is configured to write today — which is what makes the cost
@@ -46,7 +46,7 @@ pub enum PasswordAlgorithm {
 /// `parallelization` is `p`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ScryptParams {
-    /// CPU/memory cost `N`. Power of two, `>= 2^14`. Default `2^15` (32768).
+    /// CPU/memory cost `N`. Power of two, `>= 2^14`. Default `2^17` (131072).
     pub cost_factor: u32,
     /// Block size `r`. Default 8.
     pub block_size: u32,

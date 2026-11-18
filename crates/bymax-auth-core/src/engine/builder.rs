@@ -389,6 +389,9 @@ impl AuthEngineBuilder {
     /// ([`ConfigError::MissingStores`]), the platform domain enabled without a platform
     /// repository ([`ConfigError::MissingPlatformRepository`]), or the OAuth controller
     /// enabled without a registered provider ([`ConfigError::OAuthToggleWithoutProvider`]).
+    /// This list is not exhaustive: assembling the optional runtimes (OAuth state store,
+    /// invitations, workspaces, API keys) and the password service can return further
+    /// [`ConfigError`] variants, so see [`ConfigError`] for the full set.
     pub fn build(self) -> Result<AuthEngine, ConfigError> {
         let AuthEngineBuilder {
             config,

@@ -13,8 +13,10 @@
 //!
 //! # Token handling
 //!
-//! The client speaks the `bearer` delivery mode: a successful login/register/MFA-challenge
-//! stores the access + refresh pair in memory, and [`AuthClient::me`] /
+//! The client speaks the `bearer` delivery mode, so the target backend must be configured with
+//! `bearer` or `both` token delivery; under the default `cookie` delivery the response carries
+//! no tokens and decoding it fails with [`AuthClientError::Decode`]. A successful
+//! login/register/MFA-challenge stores the access + refresh pair in memory, and [`AuthClient::me`] /
 //! [`AuthClient::logout`] / [`AuthClient::refresh`] use it automatically. On a `401` from
 //! [`AuthClient::me`], the client performs a single, serialized refresh (so concurrent
 //! `401`s queue behind one rotation rather than stampeding the backend) and retries once.
