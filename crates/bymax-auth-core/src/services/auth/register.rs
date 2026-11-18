@@ -254,6 +254,10 @@ mod tests {
         let (events, capture) = crate::log_capture::capture_events();
         let result = engine.register(input("unsent@example.com"), &ctx()).await;
         drop(capture);
+        assert!(
+            matches!(&result, Ok(LoginResult::Success(_))),
+            "got {result:?}"
+        );
         let Ok(LoginResult::Success(auth)) = result else { return };
         assert!(!auth.user.email_verified);
         let ours: Vec<String> = events
