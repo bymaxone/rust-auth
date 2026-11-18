@@ -405,6 +405,14 @@ async fn stored_dashboard_secret(h: &Harness, uid: &str) -> String {
     }
 }
 
+/// The stored secret of the platform admin `id`, empty when it cannot be read.
+async fn stored_platform_secret(h: &Harness, id: &str) -> String {
+    match h.platform.find_by_id(id).await {
+        Ok(Some(admin)) => admin.mfa_secret.unwrap_or_default(),
+        _ => String::new(),
+    }
+}
+
 #[tokio::test]
 async fn a_failed_rewrite_does_not_fail_a_dashboard_totp_challenge_that_already_succeeded() {
     // The challenge has authenticated the user and the retired key still opens the secret, so a
@@ -443,6 +451,7 @@ async fn a_failed_rewrite_does_not_fail_a_platform_totp_challenge_that_already_s
     else {
         return;
     };
+    let before = stored_platform_secret(&h, "p-rewrite-fails").await;
     let Some(temp) = platform_temp_token(&h, "p-rewrite-fails").await else { return };
     let admins = h.platform.clone();
     h.stores
@@ -454,6 +463,8 @@ async fn a_failed_rewrite_does_not_fail_a_platform_totp_challenge_that_already_s
         matches!(answered, Ok(LoginResultMfa::Platform(_))),
         "got {answered:?}"
     );
+    // The failure really happened: the rewrite did not land, so the secret is as it was.
+    assert_eq!(stored_platform_secret(&h, "p-rewrite-fails").await, before);
 }
 
 #[tokio::test]
