@@ -140,8 +140,9 @@ impl AuthEngine {
         if let Some(user) = found
             && !user.email_verified
         {
-            // Best-effort: a dispatch failure must not change the uniform response.
-            let _ = self.send_verification_otp(tenant_id, email, &user.id).await;
+            // Best-effort: a failure must not change the uniform response.
+            let sent = self.send_verification_otp(tenant_id, email, &user.id).await;
+            note_unsent_verification(sent);
         }
 
         normalize_anti_enum(started).await;
@@ -175,6 +176,28 @@ impl AuthEngine {
             otp,
         ));
         Ok(())
+    }
+}
+
+/// What a failed write of the verification code means once the account exists: nothing for the
+/// answer. The account stays unverified and a resend recovers, so failing after the commit would
+/// be the worse answer. The failure is logged by closed cause only, never the address or the
+/// store's message.
+pub(crate) fn note_unsent_verification(sent: Result<(), AuthError>) {
+    if let Err(error) = sent {
+        let cause = unsent_cause(&error);
+        tracing::warn!(
+            cause,
+            "verification code was not stored; the account stays unverified and a resend recovers"
+        );
+    }
+}
+
+/// The closed set of causes a failed verification-code write is logged under.
+pub(crate) fn unsent_cause(error: &AuthError) -> &'static str {
+    match error {
+        AuthError::ServiceUnavailable(_) => "store_unavailable",
+        _ => "internal",
     }
 }
 
@@ -262,6 +285,41 @@ mod tests {
                 .await,
             Err(AuthError::OtpExpired)
         ));
+    }
+
+    #[test]
+    fn a_failed_code_write_is_logged_under_one_of_two_closed_causes() {
+        let unavailable = AuthError::ServiceUnavailable("store down".into());
+        assert_eq!(unsent_cause(&unavailable), "store_unavailable");
+        assert_eq!(
+            unsent_cause(&AuthError::Internal("defect".into())),
+            "internal"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_failed_code_write_on_resend_keeps_the_uniform_answer_and_is_logged() {
+        let Some(h) = harness_with_verification() else { return };
+        let _ = h
+            .seed(SeedUser {
+                email: "resend-unsent@example.com".to_owned(),
+                password: "pw".to_owned(),
+                tenant_id: "t1".to_owned(),
+                status: "ACTIVE".to_owned(),
+                email_verified: false,
+                mfa_enabled: false,
+            })
+            .await;
+        h.stores.fail_next_otp_puts(1);
+        let (events, capture) = crate::log_capture::capture_events();
+        let answered = h
+            .engine
+            .resend_verification_email(Some("t1"), "resend-unsent@example.com", &ctx())
+            .await;
+        drop(capture);
+        assert!(answered.is_ok(), "got {answered:?}");
+        assert!(events.contains_at(tracing::Level::WARN, "verification code was not stored"));
+        assert!(events.contains("cause=internal"));
     }
 
     #[tokio::test]

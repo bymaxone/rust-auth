@@ -190,6 +190,8 @@ marked BREAKING, never signalled by the number.
 
 ### Fixed
 
+- **A failed write of the verification code after registration or a resend is logged by closed cause.** The code's store write after the account is created is best-effort: the account is committed, stays unverified, and a resend recovers, so failing after the commit would be the worse answer. The failure was discarded without a trace; it is now logged by closed cause, never the address or the store's message, while registration and the resend answer exactly as before. **Apply:** none.
+
 - **A failed re-encryption of an MFA secret no longer fails the TOTP challenge that triggered it.** A secret that opens under a retired `mfa.previous_encryption_keys` entry is rewritten under the current key after a successful TOTP challenge, and that rewrite's failure was propagated: a store that could not answer it failed a challenge that had already authenticated the user (and, with an outage, answered `503`). The rewrite is now best-effort on both planes: its failure is logged with a closed cause only (never the account, the secret or the store's message) and the challenge answers what it did, because the retired key still opens the secret and the next challenge retries the migration. The recovery-code path is unchanged: there the same write also spends the code and stays a required write. **Apply:** none; a host that watched the challenge fail during a store outage now sees the sign-in succeed and the migration retry later.
 
 - **An ownership hand-over attempts both counter bumps.** A failed bump of the giver's membership skipped the receiver's, leaving the receiver's stale cached role in place until it expired. Both are attempted now and the first failure is the error.
