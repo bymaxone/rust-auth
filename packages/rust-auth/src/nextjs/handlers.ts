@@ -58,6 +58,18 @@ export interface AuthHandlerConfig {
    * credential in the jar plus a stale `has_session` driving pointless silent-refresh bounces.
    */
   cookieDomain?: string;
+  /**
+   * The `Path` the backend planted the refresh cookie with: `cookies.refresh_cookie_path` there.
+   * Defaults to `/auth`, the backend's default.
+   *
+   * The browser sends the refresh cookie only to URLs under this path, so the route handlers
+   * that need it (client refresh, silent refresh, logout) must be mounted beneath it. A handler
+   * at `/api/auth/*` receives the cookie only when the backend is configured with
+   * `cookies.refresh_cookie_path = "/api/auth"`; otherwise the refresh answers `401`. Set this
+   * to the same value so a logout clears the cookie at the path it was planted with: a browser
+   * matches a deletion on name, domain and path.
+   */
+  refreshCookiePath?: string;
 }
 
 /** The fully-resolved handler configuration. */
@@ -66,6 +78,7 @@ interface ResolvedHandlerConfig {
   routePrefix: string;
   loginPath: string;
   cookieDomain: string | undefined;
+  refreshCookiePath: string;
 }
 
 /** Apply defaults and strip a trailing slash from the backend origin. */
@@ -77,6 +90,7 @@ function resolveHandlerConfig(
     routePrefix: config.routePrefix ?? AUTH_ROUTE_PREFIX,
     loginPath: config.loginPath ?? DEFAULT_LOGIN_PATH,
     cookieDomain: config.cookieDomain,
+    refreshCookiePath: config.refreshCookiePath ?? AUTH_REFRESH_COOKIE_PATH,
   };
 }
 
@@ -126,6 +140,7 @@ function forwardSetCookies(from: Headers, to: NextResponse): void {
 function clearSessionCookies(
   response: NextResponse,
   domain: string | undefined,
+  refreshCookiePath: string,
 ): void {
   response.cookies.set(AUTH_ACCESS_COOKIE_NAME, "", {
     path: "/",
@@ -138,7 +153,7 @@ function clearSessionCookies(
     domain,
   });
   response.cookies.set(AUTH_REFRESH_COOKIE_NAME, "", {
-    path: AUTH_REFRESH_COOKIE_PATH,
+    path: refreshCookiePath,
     maxAge: 0,
     domain,
   });
@@ -218,7 +233,11 @@ export function createSilentRefreshHandler(
     );
     if (!backendResponse || !backendResponse.ok) {
       const failure = buildLoginRedirect(resolved.loginPath, origin);
-      clearSessionCookies(failure, resolved.cookieDomain);
+      clearSessionCookies(
+        failure,
+        resolved.cookieDomain,
+        resolved.refreshCookiePath,
+      );
       return failure;
     }
 
@@ -318,7 +337,11 @@ export function createLogoutHandler(
     }
 
     const response = NextResponse.json({ ok: true }, { status: 200 });
-    clearSessionCookies(response, resolved.cookieDomain);
+    clearSessionCookies(
+      response,
+      resolved.cookieDomain,
+      resolved.refreshCookiePath,
+    );
     return response;
   };
 }

@@ -165,6 +165,26 @@ describe("createLogoutHandler", () => {
     },
   );
 
+  // A browser matches a deletion on name, domain AND path, so a refresh cookie planted at
+  // `/api/auth` (the proxy topology, `cookies.refresh_cookie_path`) is removed only by a clear
+  // that names that path; the default `/auth` clear leaves it in the jar.
+  it.each([
+    [undefined, "/auth"],
+    ["/api/auth", "/api/auth"],
+  ])("clears the refresh cookie at the path it was planted with (%s)", async (configured, path) => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(null, { status: 200 })));
+
+    const response = await createLogoutHandler({
+      backendUrl: BACKEND,
+      refreshCookiePath: configured,
+    })(requestWith());
+
+    const refresh = setCookies(response).find((cookie) =>
+      cookie.startsWith(`${AUTH_REFRESH_COOKIE_NAME}=`),
+    );
+    expect(refresh).toContain(`Path=${path}`);
+  });
+
   // A backend that failed to revoke leaves the session alive. Clearing the browser's cookies then
   // would report a sign-out that did not happen and strand a live session the user can no longer
   // end, so the failure is answered as it came and nothing is cleared.

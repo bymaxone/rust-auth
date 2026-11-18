@@ -63,6 +63,9 @@ fn build_engine() -> Result<AuthEngine, Box<dyn std::error::Error>> {
     // verification gate so the E2E user can log in immediately after registering.
     config.token_delivery = TokenDelivery::Cookie;
     config.email_verification.required = false;
+    // The Next route handlers (client refresh, silent refresh, logout) live under
+    // `/api/auth`, and the browser sends the refresh cookie only to URLs under its `Path`.
+    config.cookies.refresh_cookie_path = "/api/auth".to_owned();
     config.sessions.enabled = true;
     config.controllers.sessions = true;
     config.roles.hierarchy = HashMap::from([("USER".to_owned(), Vec::new())]);

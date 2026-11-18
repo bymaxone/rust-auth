@@ -21,7 +21,12 @@ test.describe("auth flow (real DOM, edge WASM verification)", () => {
     await request.dispose();
   });
 
-  test("login -> protected request -> silent refresh -> logout", async ({ page, context }) => {
+  test("login -> protected request -> silent refresh -> logout", async ({
+    page,
+    context,
+    playwright,
+    baseURL,
+  }) => {
     // 1. LOGIN — drive the real form; the backend sets HttpOnly session cookies on the
     //    app origin (via the same-origin /auth forwarding route).
     await page.goto("/login");
@@ -51,7 +56,7 @@ test.describe("auth flow (real DOM, edge WASM verification)", () => {
     const accessBefore = (await context.cookies()).find((c) => c.name === "access_token")?.value;
     expect(accessBefore, "an access token exists before the refresh").toBeTruthy();
 
-    const refreshResponse = await page.request.get("/auth/silent-refresh?redirectTo=/dashboard", {
+    const refreshResponse = await page.request.get("/api/auth/silent-refresh?redirectTo=/dashboard", {
       maxRedirects: 0,
     });
     // The handler redirects (3xx) to the guarded destination on success, relaying the
@@ -70,6 +75,28 @@ test.describe("auth flow (real DOM, edge WASM verification)", () => {
     // is admitted by the middleware (WASM verification) and renders the dashboard.
     await page.goto("/dashboard");
     await expect(page.getByTestId("dashboard-heading")).toBeVisible();
+
+    // 3b. CLIENT REFRESH through the Next handler at /api/auth. The browser sends the refresh
+    //    cookie only to URLs under its Path, so the backend plants it at /api/auth
+    //    (`cookies.refresh_cookie_path`). The same valid cookie planted at the backend's
+    //    default /auth is never sent to the handler, and the refresh answers 401.
+    const refreshCookie = (await context.cookies()).find((c) => c.name === "refresh_token");
+    expect(refreshCookie?.path, "the refresh cookie is planted at the handlers' path").toBe(
+      "/api/auth",
+    );
+    const atDefaultPath = await playwright.request.newContext({
+      baseURL,
+      storageState: {
+        cookies: [{ ...refreshCookie!, path: "/auth" }],
+        origins: [],
+      },
+    });
+    const misplaced = await atDefaultPath.post("/api/auth/client-refresh");
+    expect(misplaced.status(), "a refresh cookie at the default /auth path never arrives").toBe(401);
+    await atDefaultPath.dispose();
+
+    const clientRefresh = await page.request.post("/api/auth/client-refresh");
+    expect(clientRefresh.status(), "the cookie at /api/auth reaches the handler").toBe(200);
 
     // 4. LOGOUT — clears the session cookies; a subsequent protected navigation is
     //    redirected to /login by the edge (fail-closed).

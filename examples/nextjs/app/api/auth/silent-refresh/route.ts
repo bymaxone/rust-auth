@@ -6,4 +6,8 @@ import { createSilentRefreshHandler } from "@bymax-one/rust-auth/nextjs";
 // user to /login.
 const backendUrl = process.env.AUTH_BACKEND_URL ?? "http://127.0.0.1:8080";
 
-export const GET = createSilentRefreshHandler({ backendUrl, loginPath: "/login" });
+export const GET = createSilentRefreshHandler({
+  backendUrl,
+  loginPath: "/login",
+  refreshCookiePath: "/api/auth",
+});

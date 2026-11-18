@@ -4,4 +4,4 @@ import { createLogoutHandler } from "@bymax-one/rust-auth/nextjs";
 // `{ ok: true }`.
 const backendUrl = process.env.AUTH_BACKEND_URL ?? "http://127.0.0.1:8080";
 
-export const POST = createLogoutHandler({ backendUrl });
+export const POST = createLogoutHandler({ backendUrl, refreshCookiePath: "/api/auth" });
