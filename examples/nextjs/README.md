@@ -6,9 +6,11 @@ A Next.js 16 app using `@bymax-one/rust-auth/nextjs`:
   token **at the edge via WASM** (no network call), gates protected routes, runs
   coarse role-based access control, attempts a silent refresh, and forwards UX-only
   `x-user-*` headers. It **fails closed** without `AUTH_ACCESS_TOKEN_SECRET`.
-- **`app/api/auth/*`** — the client-refresh and logout route handlers.
-- **`app/auth/silent-refresh`** — the silent-refresh handler, mounted **under
-  `/auth`** so the path-scoped refresh cookie (path `/auth`) is sent to it.
+- **`app/api/auth/*`** — the client-refresh, silent-refresh and logout route handlers.
+  The browser sends the refresh cookie only to URLs under its `Path`, so the backend
+  runs with `cookies.refresh_cookie_path = "/api/auth"` (see `examples/e2e-backend`)
+  and the handlers are given the same `refreshCookiePath`. With the default `/auth` the
+  cookie never reaches these handlers and a refresh answers `401`.
 - **`app/auth/[...path]`** — a same-origin forwarding route to the Rust backend so
   the HttpOnly cookies land on this origin.
 - **`app/dashboard`** — a protected server page that reads the forwarded identity

@@ -5,4 +5,7 @@ import { createClientRefreshHandler } from "@bymax-one/rust-auth/nextjs";
 // client can react. Its path matches the client's default `refreshEndpoint`.
 const backendUrl = process.env.AUTH_BACKEND_URL ?? "http://127.0.0.1:8080";
 
-export const POST = createClientRefreshHandler({ backendUrl });
+export const POST = createClientRefreshHandler({
+  backendUrl,
+  refreshCookiePath: "/api/auth",
+});

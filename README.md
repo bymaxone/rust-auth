@@ -500,11 +500,11 @@ export const { proxy } = createAuthProxy({
   // `/api/auth` holds the client-refresh and logout handlers; both must be reachable while
   // the caller is unauthenticated, or an expired access token can never be refreshed.
   // The refresh cookie is sent only to paths under `cookies.refresh_cookie_path` (default
-  // `/auth`), so a handler that must read it has to be mounted under that path.
+  // `/auth`), so a handler that must read it has to be mounted under that path. These
+  // handlers are under `/api/auth`, so the backend sets `cookies.refresh_cookie_path` to
+  // `/api/auth` (see "Proxy topology" below).
   publicPaths: ['/login', '/auth', '/api/auth'],
-  // The silent-refresh handler lives UNDER `/auth` so the path-scoped refresh cookie (path
-  // `/auth`) is sent to it; a handler under `/api/auth` would never receive that cookie.
-  silentRefreshPath: '/auth/silent-refresh',
+  silentRefreshPath: '/api/auth/silent-refresh',
   roleRules: [{ pathPrefix: '/admin', roles: ['ADMIN'] }],
   blockedStatuses: ['BANNED', 'INACTIVE', 'SUSPENDED'],
 })
@@ -513,6 +513,8 @@ export const config = {
   matcher: ['/((?!_next/static|_next/image|favicon.ico).*)'],
 }
 ```
+
+**Proxy topology.** The browser sends the refresh cookie only to URLs under its `Path`, which is `cookies.refresh_cookie_path` on the backend and defaults to `/auth`. The Next route handlers (`client-refresh`, `silent-refresh`, `logout`) sit at `/api/auth/*`, so with the default the browser never sends them the refresh cookie and every refresh answers `401`. Set `cookies.refresh_cookie_path` to `/api/auth` on the backend, and pass the same value as `refreshCookiePath` to the handlers so a clear names the cookie at the path it was planted with. The library default is unchanged and matches `@bymax-one/nest-auth`.
 
 > `publicPaths` entries are prefixes that end at a segment boundary, and `'/'` is a prefix of every path:
 > `'/'` makes every route public. List each public prefix instead.
@@ -527,17 +529,19 @@ import { createLogoutHandler } from '@bymax-one/rust-auth/nextjs'
 export const POST = createLogoutHandler({
   backendUrl: process.env.API_BASE_URL!,
   loginPath: '/login',
+  refreshCookiePath: '/api/auth', // the backend's cookies.refresh_cookie_path
 })
 ```
 
 ```typescript
-// app/auth/silent-refresh/route.ts — the proxy redirects here when the access token has
+// app/api/auth/silent-refresh/route.ts — the proxy redirects here when the access token has
 // expired but a `has_session` signal is present
 import { createSilentRefreshHandler } from '@bymax-one/rust-auth/nextjs'
 
 export const GET = createSilentRefreshHandler({
   backendUrl: process.env.API_BASE_URL!,
   loginPath: '/login',
+  refreshCookiePath: '/api/auth', // the backend's cookies.refresh_cookie_path
 })
 ```
 

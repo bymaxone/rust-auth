@@ -12,10 +12,12 @@ const { proxy, config: proxyConfig } = createAuthProxy({
   // `/api/auth` are the client-refresh/logout handlers. Both must be reachable while
   // unauthenticated.
   publicPaths: ["/login", "/auth", "/api/auth"],
-  // The silent-refresh handler lives UNDER `/auth` so the path-scoped refresh cookie
-  // (path `/auth`) is sent to it; a handler under `/api/auth` would never receive that
-  // cookie and so could not refresh.
-  silentRefreshPath: "/auth/silent-refresh",
+  // The refresh cookie is sent only to URLs under its `Path`, and the handlers that need it
+  // live under `/api/auth`, so the backend is configured with
+  // `cookies.refresh_cookie_path = "/api/auth"` (see `examples/e2e-backend`). With the
+  // default `/auth` the browser would never send the cookie to these handlers and every
+  // refresh would answer 401.
+  silentRefreshPath: "/api/auth/silent-refresh",
   roleRules: [{ pathPrefix: "/admin", roles: ["ADMIN"] }],
 });
 

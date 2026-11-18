@@ -6596,6 +6596,13 @@ export function createSilentRefreshHandler(config: SilentRefreshHandlerConfig): 
 export function createClientRefreshHandler(config: ClientRefreshHandlerConfig): ClientRefreshHandler // (req) => Promise<Response>
 export function createLogoutHandler(config: LogoutHandlerConfig): LogoutHandler                      // (req) => Promise<Response>
 
+// Proxy topology: the handlers sit at `/api/auth/*`, and the browser sends the refresh cookie
+// only to URLs under its `Path` (`cookies.refresh_cookie_path`, default `/auth`). With the
+// default, the cookie never reaches them and every refresh answers 401, so the backend sets
+// `cookies.refresh_cookie_path = '/api/auth'` and the handlers are given the same value as
+// `refreshCookiePath` (default `/auth`), the `Path` the logout clear names: a browser matches
+// a deletion on name, domain and path. The library default is unchanged and matches nest-auth.
+
 // Canonical proxy route constants (= the AUTH_PROXY_ROUTES values)
 export const SILENT_REFRESH_ROUTE: '/api/auth/silent-refresh'
 export const CLIENT_REFRESH_ROUTE: '/api/auth/client-refresh'
