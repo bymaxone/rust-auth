@@ -151,10 +151,12 @@ impl AuthEngine {
             .map_err(map_repository_error)?;
 
         if verification_required {
-            // Best-effort: an OTP-dispatch failure never fails registration.
-            let _ = self
+            // Best-effort: the account is committed and unverified, so a failure of the code's
+            // write never fails registration and a resend recovers.
+            let sent = self
                 .send_verification_otp(tenant_id, &user.email, &user.id)
                 .await;
+            super::email_verification::note_unsent_verification(sent);
         }
         Ok(user)
     }
@@ -232,6 +234,40 @@ mod tests {
         let result = engine.register(input("verify@example.com"), &ctx()).await;
         let Ok(LoginResult::Success(auth)) = result else { return };
         assert!(!auth.user.email_verified);
+    }
+
+    #[tokio::test]
+    async fn a_failed_code_write_after_the_account_exists_is_logged_with_a_closed_cause() {
+        // The account is committed, so a store that cannot take the verification code leaves it
+        // unverified and registration answers as usual; the failure is logged by closed cause.
+        let mut cfg = base_config();
+        cfg.email_verification.required = true;
+        let stores = Arc::new(InMemoryStores::new());
+        let built = AuthEngine::builder()
+            .config(cfg)
+            .environment(Environment::Test)
+            .user_repository(Arc::new(InMemoryUserRepository::new()))
+            .redis_stores(stores.clone())
+            .build();
+        let Ok(engine) = built else { return };
+        stores.fail_next_otp_puts(1);
+        let (events, capture) = crate::log_capture::capture_events();
+        let result = engine.register(input("unsent@example.com"), &ctx()).await;
+        drop(capture);
+        let Ok(LoginResult::Success(auth)) = result else { return };
+        assert!(!auth.user.email_verified);
+        let ours: Vec<String> = events
+            .iter()
+            .into_iter()
+            .filter(|event| event.rendered.contains("verification code was not stored"))
+            .map(|event| event.rendered)
+            .collect();
+        assert_eq!(ours.len(), 1, "exactly one event: {ours:?}");
+        assert!(ours[0].contains("cause="), "a closed cause: {ours:?}");
+        assert!(
+            !ours[0].contains("unsent@example.com"),
+            "no address: {ours:?}"
+        );
     }
 
     #[tokio::test]
