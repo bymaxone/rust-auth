@@ -128,14 +128,25 @@ async fn the_unenforced_cap_is_reported_once_with_its_cause_and_without_a_hash()
     assert_eq!(reported.len(), 1, "one line per login: {reported:?}");
     let line = &reported[0];
     assert_eq!(line.level, tracing::Level::WARN);
-    // The cause is what an operator needs: AuthError's Display alone prints just "internal error".
+    // The closed cause and the code are what an operator filters on; neither the store's own
+    // text nor the account is on the line.
     assert!(
-        line.rendered.contains("forced session listing failure"),
+        line.rendered.contains("cause=internal"),
         "{}",
         line.rendered
     );
     assert!(
-        line.rendered.contains(&format!("user_id={uid}")),
+        line.rendered.contains("RUST_AUTH_SESSION_CAP_NOT_ENFORCED"),
+        "{}",
+        line.rendered
+    );
+    assert!(
+        !line.rendered.contains("forced session listing failure"),
+        "{}",
+        line.rendered
+    );
+    assert!(
+        !line.rendered.contains(&format!("user_id={uid}")),
         "{}",
         line.rendered
     );
@@ -168,7 +179,7 @@ impl std::fmt::Display for HostStoreError {
 impl std::error::Error for HostStoreError {}
 
 #[tokio::test]
-async fn a_host_stores_error_is_logged_by_its_display_chain_not_its_debug() {
+async fn a_host_stores_error_is_logged_as_a_closed_cause_not_its_text() {
     const MARKER: &str = "MARKER-203.0.113.9-Pixel-7";
     let inner = Arc::new(InMemoryStores::new());
     let users = Arc::new(InMemoryUserRepository::new());
@@ -204,12 +215,15 @@ async fn a_host_stores_error_is_logged_by_its_display_chain_not_its_debug() {
         .filter(|event| event.rendered.contains("the session cap was not enforced"))
         .collect();
     assert_eq!(reported.len(), 1, "{reported:?}");
-    // The error and each source, by `Display`, joined: what the error's author chose to say.
+    // The closed cause, not the error's `Display`: a host store's message may name its backend.
     assert!(
-        reported[0]
-            .rendered
-            .contains("cause=internal error: host store unavailable"),
+        reported[0].rendered.contains("cause=internal"),
         "{}",
+        reported[0].rendered
+    );
+    assert!(
+        !events.contains("host store unavailable"),
+        "the store's text was logged: {}",
         reported[0].rendered
     );
     // What `Debug` would add - the held session details - must not reach the log.

@@ -777,6 +777,124 @@ When integrating `bymax-auth` in production, verify each of the following:
 - HS256 pinning, constant-time comparisons (`subtle`), and CSPRNG (`OsRng`) are never bypassed
 - HttpOnly + `Secure` (outside development); refresh cookie path-scoped with `SameSite=Strict`
 
+### Log events
+
+Every operational `tracing` event the crates emit carries an `event` field naming a closed code, so an operator can filter, count and alert on a code instead of matching message text. The messages stay as they are for a human reading a log.
+
+The fields on these events are closed or numeric: a closed `cause` (`store_unavailable`, `internal`, ...), a plane or flow name, a status code or a count. No event carries an account, an email address, a token, an IP address or the text of an error: an identifier in a log line is the first thing a log-shipping pipeline copies to a third party, and a store's own error text names its backend. Repository, store and host-hook failures are told apart by the code and `cause`, never by their message.
+
+A test (`crates/bymax-auth-core/tests/log_events.rs`) reads every crate's sources and this table: each production `tracing` call must carry `event = "RUST_AUTH_..."` and no forbidden field, and the codes in the sources and in this table must be the same set, with the same level, in both directions.
+
+| Code | Level | Emitted when |
+| ---- | ----- | ------------ |
+| `RUST_AUTH_ACCOUNT_REMOVAL_COUNTERS_NOT_BUMPED` | warn | An account removal committed but some workspace membership counters were not bumped |
+| `RUST_AUTH_ACCOUNT_STATUS_CACHE_INVALIDATION_FAILED` | error | Invalidating the account-status cache failed |
+| `RUST_AUTH_API_KEY_AUDIT_HOOK_FAILED` | error | The API-key audit hook returned an error |
+| `RUST_AUTH_API_KEY_AUDIT_HOOK_TIMEOUT` | error | The API-key audit hook exceeded its timeout ceiling |
+| `RUST_AUTH_API_KEY_LAST_USED_FLUSH_FAILED` | warn | The background flush of API-key last-used timestamps failed; the next round retries |
+| `RUST_AUTH_API_KEY_ROUTE_WITHOUT_SCOPES` | error | An API-key guarded route declares no scopes and was refused |
+| `RUST_AUTH_API_KEY_STORE_UNAVAILABLE` | error | The API-key store could not answer |
+| `RUST_AUTH_BREACH_CHECK_BAD_BODY` | warn | The breach-check service answered a non-UTF-8 body; the password was allowed |
+| `RUST_AUTH_BREACH_CHECK_UNAVAILABLE` | warn | The breach-check service answered with a failure status; the password was allowed |
+| `RUST_AUTH_BREACH_CHECK_UNREACHABLE` | warn | The breach-check service was unreachable; the password was allowed |
+| `RUST_AUTH_BRUTE_FORCE_IDENTIFIER_REJECTED` | error | A brute-force identifier was rejected by the key-injection guard |
+| `RUST_AUTH_EMAIL_CHANGE_ACCOUNT_LOCKED` | warn | An email change was refused: the account is locked |
+| `RUST_AUTH_EMAIL_CHANGE_COMPLETED` | info | An account's email address was changed |
+| `RUST_AUTH_EMAIL_CHANGE_DELIVERY_FAILED` | error | The email-change verification message could not be delivered |
+| `RUST_AUTH_EMAIL_CHANGE_NOTICE_FAILED` | error | The notice to the previous address failed after the change |
+| `RUST_AUTH_EMAIL_CHANGE_PASSWORD_REJECTED` | warn | An email change was refused: the current password was wrong |
+| `RUST_AUTH_EMAIL_CHANGE_TOKEN_STALE` | warn | An email-change token was refused: it is no longer bound to the account password |
+| `RUST_AUTH_EMAIL_CHANGE_VERIFICATION_SENT` | info | An email-change verification was sent |
+| `RUST_AUTH_EMAIL_DELIVERY_FAILED` | error | An email could not be delivered by the configured sender |
+| `RUST_AUTH_EMAIL_NOOP` | debug | The no-op email sender received a message |
+| `RUST_AUTH_EMAIL_NOOP_OTP_REDACTED` | debug | The no-op email sender received a message and redacted its one-time code |
+| `RUST_AUTH_EMAIL_NOOP_TOKEN_REDACTED` | debug | The no-op email sender received a message and redacted its token |
+| `RUST_AUTH_EMAIL_VERIFICATION_CODE_NOT_STORED` | warn | The verification code could not be stored; a resend recovers |
+| `RUST_AUTH_EMAIL_VERIFIED` | info | An email address was verified |
+| `RUST_AUTH_INTERNAL_ERROR` | error | A request failed with an internal error (the response body stays generic) |
+| `RUST_AUTH_INVITATION_ACCEPTED` | info | An invitation was accepted |
+| `RUST_AUTH_INVITATION_CREATED` | info | An invitation was created |
+| `RUST_AUTH_INVITATION_DELIVERY_FAILED` | error | An invitation message could not be delivered (the invitation stands) |
+| `RUST_AUTH_INVITATION_INVITER_CANNOT_GRANT` | warn | An invitation was refused: its inviter can no longer grant it |
+| `RUST_AUTH_INVITATION_RECORD_REJECTED` | warn | A stored invitation record was rejected as empty or carrying an undeclared role |
+| `RUST_AUTH_INVITATION_REVOKE_OUTRANKED` | warn | An invitation revocation was refused: the revoker is outranked |
+| `RUST_AUTH_INVITATION_SUPERSEDE_CONTENDED` | warn | A superseding invitation was refused: the pending one kept changing under the rank check |
+| `RUST_AUTH_INVITATION_SUPERSEDE_OUTRANKED` | warn | A superseding invitation was refused: it is outranked by the pending one |
+| `RUST_AUTH_INVITATION_UNCONFIRMED_WITHDRAW_FAILED` | warn | The record of an unconfirmed invitation could not be withdrawn |
+| `RUST_AUTH_INVITATION_WITHDRAWN` | info | An invitation was withdrawn |
+| `RUST_AUTH_LOGIN_ACCOUNT_LOCKED` | warn | A login was refused: the account is locked |
+| `RUST_AUTH_LOGIN_INVALID_CREDENTIALS` | warn | A login was refused: invalid credentials |
+| `RUST_AUTH_LOGIN_LOCKOUT_CLEARED` | info | An account's lockout was cleared |
+| `RUST_AUTH_LOGIN_LOCKOUT_REMAINING_UNREADABLE` | error | The remaining lockout time could not be read; the configured window is reported |
+| `RUST_AUTH_LOGIN_LOCKOUT_STATE_UNREADABLE` | error | The lockout state could not be read for the hook |
+| `RUST_AUTH_LOGIN_MFA_CHALLENGE_ISSUED` | info | A login succeeded and an MFA challenge was issued |
+| `RUST_AUTH_LOGIN_SUCCEEDED` | info | A login succeeded |
+| `RUST_AUTH_LOGIN_TENANT_MISMATCH` | warn | The user repository returned an account outside the requested tenant |
+| `RUST_AUTH_LOGOUT_PENDING_LOOKUP_FAILED` | warn | The pending-owner lookup of a logout failed |
+| `RUST_AUTH_LOGOUT_PENDING_NOT_CLAIMED` | warn | The pending owner of a logout could not be claimed |
+| `RUST_AUTH_LOGOUT_PENDING_NOT_RECORDED` | warn | The pending owner of a logout could not be recorded |
+| `RUST_AUTH_LOGOUT_PENDING_STALE_NOT_REMOVED` | warn | A stale pending owner could not be removed |
+| `RUST_AUTH_LOGOUT_REVOCATION_WRITE_FAILED` | warn | A logout revocation write failed (the step is named in the message) |
+| `RUST_AUTH_LOGOUT_SESSION_CLOSED` | info | A session was closed by a logout |
+| `RUST_AUTH_LOGOUT_SESSION_LOOKUP_FAILED` | warn | A logout could not look up the session |
+| `RUST_AUTH_MEMBERSHIP_CACHE_UNAVAILABLE` | warn | The workspace membership cache could not answer and the call proceeded |
+| `RUST_AUTH_MFA_ACCOUNT_LOCKED` | warn | An MFA call was refused: the account is locked |
+| `RUST_AUTH_MFA_CHALLENGE_PASSED` | info | An MFA challenge was passed |
+| `RUST_AUTH_MFA_CHALLENGE_REFUSED` | warn | An MFA challenge was refused at issuance |
+| `RUST_AUTH_MFA_CHALLENGE_TENANT_MISMATCH` | warn | The user repository returned an account outside the MFA token's tenant |
+| `RUST_AUTH_MFA_DISABLED` | info | MFA was disabled |
+| `RUST_AUTH_MFA_DISABLE_INVALID_CODE` | warn | Disabling MFA was refused: invalid code |
+| `RUST_AUTH_MFA_ENABLED` | info | MFA was enabled |
+| `RUST_AUTH_MFA_INVALID_CODE` | warn | An MFA challenge was refused: invalid code |
+| `RUST_AUTH_MFA_PLATFORM_CHALLENGE_PASSED` | info | A platform MFA challenge was passed |
+| `RUST_AUTH_MFA_RESET_ADMINISTRATIVE` | warn | MFA was removed administratively |
+| `RUST_AUTH_MFA_RESET_NOTHING_TO_REMOVE` | info | An administrative MFA reset found no second factor to remove |
+| `RUST_AUTH_MFA_SECRET_NOT_MIGRATED` | warn | Re-encrypting an MFA secret under the current key failed; the next challenge retries |
+| `RUST_AUTH_MFA_SETUP_INITIATED` | info | MFA setup was initiated |
+| `RUST_AUTH_MFA_SETUP_INVALID_CODE` | warn | MFA setup was refused: invalid TOTP code |
+| `RUST_AUTH_MFA_SETUP_PENDING_CONSUMED` | warn | MFA setup was refused: the pending record was consumed by a concurrent request |
+| `RUST_AUTH_MFA_SURFACE_MISSING` | error | An MFA challenge was requested but this build has no MFA surface |
+| `RUST_AUTH_MFA_TENANT_PLANE_MISMATCH` | warn | An MFA call was refused: the tenant does not match the plane |
+| `RUST_AUTH_OAUTH_CALLBACK_PROVIDER_ERROR` | warn | The OAuth callback carried an error from the provider |
+| `RUST_AUTH_OAUTH_HOOKS_MISSING` | warn | The OAuth controller was enabled without custom hooks, so every OAuth sign-in is denied |
+| `RUST_AUTH_OAUTH_PROVIDER_ERROR_MAPPED` | warn | An OAuth provider error was mapped to oauth_failed |
+| `RUST_AUTH_PASSWORD_CHANGED` | info | A password was changed and the other sessions revoked |
+| `RUST_AUTH_PASSWORD_CHANGE_ACCOUNT_LOCKED` | warn | A password change was refused: the account is locked |
+| `RUST_AUTH_PASSWORD_CHANGE_PASSWORD_REJECTED` | warn | A password change was refused: the current password was wrong |
+| `RUST_AUTH_PASSWORD_RESET_COMPLETED` | info | A password was reset and every session revoked |
+| `RUST_AUTH_PASSWORD_RESET_COOLDOWN_NOT_RELEASED` | warn | The password-reset resend cooldown could not be released |
+| `RUST_AUTH_PASSWORD_RESET_PROOF_NOT_ISSUED` | warn | A password-reset proof could not be issued |
+| `RUST_AUTH_PASSWORD_RESET_PROOF_STALE` | warn | A password reset was refused: the proof was issued against a password that has since changed |
+| `RUST_AUTH_PASSWORD_RESET_ROLLBACK_FAILED` | error | The rollback of a stored password-reset token failed |
+| `RUST_AUTH_PLATFORM_LOGIN_ACCOUNT_LOCKED` | warn | A platform login was refused: the account is locked |
+| `RUST_AUTH_PLATFORM_LOGIN_INVALID_CREDENTIALS` | warn | A platform login was refused: invalid credentials |
+| `RUST_AUTH_PLATFORM_LOGIN_MFA_CHALLENGE_ISSUED` | info | A platform login succeeded and an MFA challenge was issued |
+| `RUST_AUTH_PLATFORM_LOGIN_SUCCEEDED` | info | A platform login succeeded |
+| `RUST_AUTH_PLATFORM_LOGOUT_SESSION_LOOKUP_FAILED` | warn | A platform logout could not look up the session |
+| `RUST_AUTH_PLATFORM_REFRESH_FAMILY_REVOKED` | warn | A platform refresh-token family was revoked after reuse detection |
+| `RUST_AUTH_PLATFORM_REFRESH_NO_SESSION` | warn | A platform refresh found no live session or grace window |
+| `RUST_AUTH_PLATFORM_REFRESH_REUSE_DETECTED` | warn | Reuse of a consumed platform refresh token was detected |
+| `RUST_AUTH_RATE_LIMITER_OUTSIDE_RUNTIME` | warn | A rate limiter was built outside a Tokio runtime, so its key map is never swept |
+| `RUST_AUTH_REAUTH_ACCOUNT_LOCKED` | warn | A re-authentication was refused: the account is locked |
+| `RUST_AUTH_REAUTH_NOT_RECENT` | warn | A re-authentication check was refused: no recent authentication |
+| `RUST_AUTH_REFRESH_ABSOLUTE_LIFETIME_EXCEEDED` | warn | A rotation was refused: the session outlived the absolute lifetime cap |
+| `RUST_AUTH_REFRESH_FAMILY_REVOKED` | warn | A refresh-token family was revoked after reuse detection |
+| `RUST_AUTH_REFRESH_NO_SESSION` | warn | A refresh found no live session or grace window |
+| `RUST_AUTH_REFRESH_RECOVERED_WITHOUT_TENANT` | warn | A grace recovery was refused: the dashboard session names no tenant |
+| `RUST_AUTH_REFRESH_REUSE_DETECTED` | warn | Reuse of a consumed refresh token was detected |
+| `RUST_AUTH_REFRESH_SESSION_WITHOUT_TENANT` | warn | A refresh was refused: the dashboard session record names no tenant |
+| `RUST_AUTH_REGISTERED` | info | A user registered |
+| `RUST_AUTH_SESSIONS_OTHER_DEVICES_REVOKED` | info | Every other device was signed out and the token epoch advanced |
+| `RUST_AUTH_SESSION_CAP_NOT_ENFORCED` | warn | The session cap could not be enforced |
+| `RUST_AUTH_SESSION_EVICTION_FAILED` | warn | Evicting an over-cap session failed |
+| `RUST_AUTH_SIDE_EFFECT_FAILED` | warn | A detached side effect returned an error, which is ignored |
+| `RUST_AUTH_SIDE_EFFECT_TIMEOUT` | warn | A detached side effect exceeded its timeout ceiling and is ignored |
+| `RUST_AUTH_STORE_UNAVAILABLE` | error | A request failed because a store could not answer (answered 503) |
+| `RUST_AUTH_TENANT_BINDING_NOT_APPLIED` | warn | Tenant binding is on but no request was supplied, so it was not applied |
+| `RUST_AUTH_WS_TICKET_REFUSED_MFA_PENDING` | warn | A WebSocket ticket was refused: the session has not satisfied its second factor |
+| `RUST_AUTH_WS_TICKET_REFUSED_NO_TENANT` | warn | A WebSocket ticket was refused: the snapshot names no tenant |
+| `RUST_AUTH_WS_TICKET_REFUSED_TOKEN_REVOKED` | warn | A WebSocket ticket was refused: the token it was minted from is revoked |
+
 ---
 
 ## 🛡️ Security Table

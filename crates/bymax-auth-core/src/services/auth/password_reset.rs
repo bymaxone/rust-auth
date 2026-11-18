@@ -464,7 +464,10 @@ impl AuthEngine {
         let bf_id = self.reproof_identifier("change-password", tenant_id, user_id);
         if self.brute_force().is_locked(&bf_id).await? {
             let retry = self.brute_force().remaining_lockout_secs(&bf_id).await?;
-            tracing::warn!(user_id = %user_id, "password change: account locked");
+            tracing::warn!(
+                event = "RUST_AUTH_PASSWORD_CHANGE_ACCOUNT_LOCKED",
+                "password change: account locked"
+            );
             return Err(AuthError::AccountLocked {
                 retry_after_seconds: Some(retry),
             });
@@ -477,7 +480,10 @@ impl AuthEngine {
             .matched
         {
             self.brute_force().record_failure(&bf_id).await?;
-            tracing::warn!(user_id = %user_id, "password change: current password rejected");
+            tracing::warn!(
+                event = "RUST_AUTH_PASSWORD_CHANGE_PASSWORD_REJECTED",
+                "password change: current password rejected"
+            );
             return Err(AuthError::InvalidCredentials);
         }
         self.brute_force().reset(&bf_id).await?;
@@ -508,7 +514,10 @@ impl AuthEngine {
         self.end_other_sessions(tenant_id, user_id, kept.as_deref())
             .await?;
 
-        tracing::info!(user_id = %user_id, "password change: completed, other sessions revoked");
+        tracing::info!(
+            event = "RUST_AUTH_PASSWORD_CHANGED",
+            "password change: completed, other sessions revoked"
+        );
         self.notify_password_changed(tenant_id, user_id).await;
         Ok(())
     }
@@ -618,7 +627,7 @@ impl AuthEngine {
             return Ok(());
         }
         tracing::warn!(
-            user_id = %context.user_id,
+            event = "RUST_AUTH_PASSWORD_RESET_PROOF_STALE",
             "password reset: refusing a proof issued against a password that has since changed"
         );
         Err(AuthError::PasswordResetTokenInvalid)
@@ -665,7 +674,10 @@ impl AuthEngine {
         // A completed reset is the event an operator correlates an account takeover against:
         // it revokes every session the account had and invalidates its outstanding access
         // tokens, so it belongs in the audit trail even when nothing failed.
-        tracing::info!(user_id = %context.user_id, "password reset: completed, all sessions revoked");
+        tracing::info!(
+            event = "RUST_AUTH_PASSWORD_RESET_COMPLETED",
+            "password reset: completed, all sessions revoked"
+        );
 
         // A reset needs the notice at least as much as a change does: the classic takeover
         // completes one from a compromised mailbox and deletes the mail.
@@ -1363,9 +1375,10 @@ mod tests {
             .collect();
         assert_eq!(reported.len(), 1, "{reported:?}");
         let line = &reported[0].rendered;
+        assert!(line.contains("cause=internal"), "{line}");
         assert!(
-            line.contains("cause=internal error: otp store unavailable"),
-            "{line}"
+            !line.contains("otp store unavailable"),
+            "the store's text was logged: {line}"
         );
         assert!(
             !events.contains("logged@example.com"),

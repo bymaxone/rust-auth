@@ -319,6 +319,7 @@ where
 {
     let Ok(handle) = tokio::runtime::Handle::try_current() else {
         tracing::warn!(
+            event = "RUST_AUTH_RATE_LIMITER_OUTSIDE_RUNTIME",
             "rate limiter built outside a Tokio runtime — its key map will not be swept; \
              build the auth router inside the runtime that serves it"
         );

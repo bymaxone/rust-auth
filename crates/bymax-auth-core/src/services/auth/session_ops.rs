@@ -103,7 +103,10 @@ impl AuthEngine {
             .find_session(SessionKind::Dashboard, hash)
             .await
             .map_err(|error| {
-                tracing::warn!(%error, "logout: session lookup failed");
+                tracing::warn!(
+                    event = "RUST_AUTH_LOGOUT_SESSION_LOOKUP_FAILED",
+                    "logout: session lookup failed"
+                );
                 crate::services::answer_store_failure(error, "a logout could not read its session")
             })?;
         Ok(found.map(|record| LogoutOwner {
@@ -146,11 +149,10 @@ impl AuthEngine {
         let ttl = marker_ttl_secs(self.tokens().access_ttl());
         let announce =
             settle_completed(store, SessionKind::Dashboard, session_hash, resolved, ttl).await?;
-        let user_id = resolved
-            .owner
-            .as_ref()
-            .map_or("", |owner| owner.user_id.as_str());
-        tracing::info!(%user_id, "logout: session closed");
+        tracing::info!(
+            event = "RUST_AUTH_LOGOUT_SESSION_CLOSED",
+            "logout: session closed"
+        );
         if let (true, Some(owner)) = (announce, &resolved.owner) {
             let hook_ctx = identity_only_context(&owner.user_id, None, owner.tenant_id.clone());
             spawn_guarded(run_after_logout(

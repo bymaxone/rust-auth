@@ -39,12 +39,29 @@ fn found(url: &str) -> Response {
     }
 }
 
-/// A provider-supplied query value as it is written to the log: `<absent>` when the provider
-/// sent none, `<malformed>` when it carries a control character, and the value itself
-/// otherwise. The provider chooses these strings, and a newline or an escape sequence in one
-/// would forge a log record, so none of them is logged raw.
-fn logged(value: Option<&str>) -> String {
-    value.map_or_else(|| "<absent>".to_owned(), bymax_auth_core::log_safe)
+/// The `error` codes RFC 6749 §4.1.2.1 lets a provider answer an authorization request with.
+const PROVIDER_ERROR_CODES: [&str; 7] = [
+    "invalid_request",
+    "unauthorized_client",
+    "access_denied",
+    "unsupported_response_type",
+    "invalid_scope",
+    "server_error",
+    "temporarily_unavailable",
+];
+
+/// The closed cause a provider's `error` query value is logged as: the RFC 6749 code when it is
+/// one, `absent` when the provider sent none and `other` for anything else. The provider chooses
+/// these strings, and a newline or an escape sequence in one would forge a log record, so no
+/// provider text is ever logged.
+fn provider_cause(value: Option<&str>) -> &'static str {
+    value.map_or("absent", |value| {
+        PROVIDER_ERROR_CODES
+            .iter()
+            .copied()
+            .find(|code| *code == value)
+            .unwrap_or("other")
+    })
 }
 
 /// The `?error=` value for a refusal: the wire code of `error` without its `auth.` namespace
@@ -140,16 +157,10 @@ async fn callback(
     // on the query only so the error response can validate, never so a codeless exchange can
     // proceed.
     let Some(code) = query.code.as_deref().filter(|_| query.error.is_none()) else {
-        // Bound to locals first: a macro argument is not evaluated when no subscriber is
-        // listening, and the sanitising must not depend on one.
-        let provider_error = logged(query.error.as_deref());
-        let error_description = logged(query.error_description.as_deref());
-        let error_uri = logged(query.error_uri.as_deref());
+        let cause = provider_cause(query.error.as_deref());
         tracing::warn!(
-            provider = %provider,
-            error = %provider_error,
-            error_description = %error_description,
-            error_uri = %error_uri,
+            event = "RUST_AUTH_OAUTH_CALLBACK_PROVIDER_ERROR",
+            cause,
             "oauth callback carried a provider error or no code"
         );
         return oauth_failure(&state, &bymax_auth_types::AuthError::OauthFailed);

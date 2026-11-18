@@ -301,7 +301,10 @@ impl AuthEngine {
         // a host reaches without that extractor, and it is judged before any read, as the
         // second factor is the first thing nest-auth's `issue` asks.
         if claims.mfa_enabled && !claims.mfa_verified {
-            tracing::warn!("ws ticket: refused, the session has not satisfied its second factor");
+            tracing::warn!(
+                event = "RUST_AUTH_WS_TICKET_REFUSED_MFA_PENDING",
+                "ws ticket: refused, the session has not satisfied its second factor"
+            );
             return Err(AuthError::MfaRequired);
         }
 
@@ -383,11 +386,17 @@ impl AuthEngine {
         // verification does. A revoked ticket gets the answer of an unknown one, so a caller
         // cannot tell the two apart.
         let Some(tenant) = snapshot.tenant_id.clone().filter(|t| !t.is_empty()) else {
-            tracing::warn!("ws ticket: refused, the snapshot names no tenant");
+            tracing::warn!(
+                event = "RUST_AUTH_WS_TICKET_REFUSED_NO_TENANT",
+                "ws ticket: refused, the snapshot names no tenant"
+            );
             return Err(AuthError::TokenInvalid);
         };
         if self.ws_ticket_is_revoked(&snapshot, &tenant).await? {
-            tracing::warn!("ws ticket: refused, the token it was minted from is revoked");
+            tracing::warn!(
+                event = "RUST_AUTH_WS_TICKET_REFUSED_TOKEN_REVOKED",
+                "ws ticket: refused, the token it was minted from is revoked"
+            );
             return Err(AuthError::TokenInvalid);
         }
         let now = now_unix();

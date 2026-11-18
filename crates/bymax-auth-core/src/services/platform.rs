@@ -29,7 +29,7 @@ use bymax_auth_types::{
     RotatedTokens, SafeAuthPlatformUser,
 };
 
-use crate::normalize::{mask_email, normalize_email};
+use crate::normalize::normalize_email;
 use crate::services::auth::{normalize_anti_enum, spawn_guarded};
 use crate::services::brute_force::BruteForceService;
 use crate::services::logout_pending::{
@@ -123,7 +123,10 @@ impl PlatformAuthService {
 
         // Brute-force gate first, so an already-locked account never increments again.
         if let Err(error) = self.assert_not_locked(&identifier).await {
-            tracing::warn!(email = %mask_email(email), "platform login: account locked");
+            tracing::warn!(
+                event = "RUST_AUTH_PLATFORM_LOGIN_ACCOUNT_LOCKED",
+                "platform login: account locked"
+            );
             return Err(error);
         }
 
@@ -192,7 +195,10 @@ impl PlatformAuthService {
                 // asserted absence the verifier requires, not a missing value.
                 .issue_mfa_temp_token(&admin.id, MfaContext::Platform, None)
                 .await?;
-            tracing::info!(admin_id = %admin.id, "platform login: MFA challenge issued");
+            tracing::info!(
+                event = "RUST_AUTH_PLATFORM_LOGIN_MFA_CHALLENGE_ISSUED",
+                "platform login: MFA challenge issued"
+            );
             return Ok(PlatformLoginResult::MfaChallenge(MfaChallengeResult {
                 mfa_required: true,
                 mfa_temp_token,
@@ -360,7 +366,10 @@ impl PlatformAuthService {
             .find_session(SessionKind::Platform, hash)
             .await
             .map_err(|error| {
-                tracing::warn!(%error, "logout: session lookup failed");
+                tracing::warn!(
+                    event = "RUST_AUTH_PLATFORM_LOGOUT_SESSION_LOOKUP_FAILED",
+                    "logout: session lookup failed"
+                );
                 crate::services::answer_store_failure(error, "a logout could not read its session")
             })?;
         Ok(found.map(|record| LogoutOwner {
@@ -485,7 +494,10 @@ impl PlatformAuthService {
             .tokens
             .issue_platform_tokens(&safe, ip, user_agent, false)
             .await?;
-        tracing::info!(%admin_id, "platform login: success");
+        tracing::info!(
+            event = "RUST_AUTH_PLATFORM_LOGIN_SUCCEEDED",
+            "platform login: success"
+        );
         spawn_guarded(run_update_platform_last_login(self.repo.clone(), admin_id));
         Ok(PlatformLoginResult::Success(Box::new(result)))
     }
@@ -498,7 +510,10 @@ impl PlatformAuthService {
         identifier: &str,
         started: Instant,
     ) -> Result<T, AuthError> {
-        tracing::warn!("platform login: invalid credentials");
+        tracing::warn!(
+            event = "RUST_AUTH_PLATFORM_LOGIN_INVALID_CREDENTIALS",
+            "platform login: invalid credentials"
+        );
         self.brute_force.record_failure(identifier).await?;
         normalize_anti_enum(started).await;
         Err(AuthError::InvalidCredentials)

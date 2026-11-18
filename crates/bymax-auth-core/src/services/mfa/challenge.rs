@@ -120,8 +120,7 @@ impl MfaService {
         // without it rather than resolving the account by id alone.
         let tenant_id = tenant_id.as_deref();
         let bf_id = self.challenge_bf_id(MfaContext::Dashboard, tenant_id, &user_id);
-        self.assert_not_locked("challenge", &user_id, &bf_id)
-            .await?;
+        self.assert_not_locked("challenge", &bf_id).await?;
 
         // Fetch the dashboard user concretely; the combined guard rejects both a missing user
         // and one without MFA configured. Scoped by `(id, tenant)`, never by id alone. Passing `None` here resolved the account
@@ -149,6 +148,7 @@ impl MfaService {
             .is_some_and(|candidate| Some(candidate.tenant_id.as_str()) != tenant_id)
         {
             tracing::warn!(
+                event = "RUST_AUTH_MFA_CHALLENGE_TENANT_MISMATCH",
                 "mfa challenge: repository returned an account outside the token's tenant — \
                  check that UserRepository::find_by_id scopes by its tenant_id argument"
             );
@@ -189,7 +189,7 @@ impl MfaService {
                 )
                 .await?
             {
-                return self.reject_code("challenge", &user_id, &bf_id).await;
+                return self.reject_code("challenge", &bf_id).await;
             }
             None
         } else {
@@ -209,7 +209,7 @@ impl MfaService {
                     }
                     Some(index)
                 }
-                None => return self.reject_code("challenge", &user_id, &bf_id).await,
+                None => return self.reject_code("challenge", &bf_id).await,
             }
         };
 
@@ -275,7 +275,10 @@ impl MfaService {
             safe.id.clone(),
         ));
         spawn_guarded(run_after_login(self.hooks.clone(), safe, hook_ctx));
-        tracing::info!(user_id = %user_id, "mfa: challenge passed");
+        tracing::info!(
+            event = "RUST_AUTH_MFA_CHALLENGE_PASSED",
+            "mfa: challenge passed"
+        );
         Ok(LoginResultMfa::Dashboard(result))
     }
 
@@ -294,8 +297,7 @@ impl MfaService {
     ) -> Result<LoginResultMfa, AuthError> {
         let MfaTempVerified { user_id, jti, .. } = verified;
         let bf_id = self.challenge_bf_id(MfaContext::Platform, None, &user_id);
-        self.assert_not_locked("platform challenge", &user_id, &bf_id)
-            .await?;
+        self.assert_not_locked("platform challenge", &bf_id).await?;
 
         // The platform repository is required for a platform challenge; without it the build has
         // no platform surface, so the challenge fails closed (never persist a platform secret on
@@ -342,9 +344,7 @@ impl MfaService {
                 )
                 .await?
             {
-                return self
-                    .reject_code("platform challenge", &user_id, &bf_id)
-                    .await;
+                return self.reject_code("platform challenge", &bf_id).await;
             }
             None
         } else {
@@ -365,9 +365,7 @@ impl MfaService {
                     Some(index)
                 }
                 None => {
-                    return self
-                        .reject_code("platform challenge", &user_id, &bf_id)
-                        .await;
+                    return self.reject_code("platform challenge", &bf_id).await;
                 }
             }
         };
@@ -432,7 +430,10 @@ impl MfaService {
         ));
         let hook_ctx = self.hook_context(HookPlane::Platform, &user_id, &email, ip, user_agent);
         spawn_guarded(run_after_login(self.hooks.clone(), hook_user, hook_ctx));
-        tracing::info!(user_id = %user_id, "mfa: platform challenge passed");
+        tracing::info!(
+            event = "RUST_AUTH_MFA_PLATFORM_CHALLENGE_PASSED",
+            "mfa: platform challenge passed"
+        );
         Ok(LoginResultMfa::Platform(result))
     }
 
@@ -599,13 +600,8 @@ impl MfaService {
 
     /// Record a failed challenge attempt and return the retryable [`AuthError::MfaInvalidCode`]
     /// (the temp token stays alive; the lockout eventually fires).
-    async fn reject_code(
-        &self,
-        flow: &str,
-        user_id: &str,
-        bf_id: &str,
-    ) -> Result<LoginResultMfa, AuthError> {
-        tracing::warn!(%flow, %user_id, "mfa: invalid code");
+    async fn reject_code(&self, flow: &str, bf_id: &str) -> Result<LoginResultMfa, AuthError> {
+        tracing::warn!(event = "RUST_AUTH_MFA_INVALID_CODE", %flow, "mfa: invalid code");
         self.brute_force.record_failure(bf_id).await?;
         Err(AuthError::MfaInvalidCode)
     }
@@ -655,6 +651,7 @@ fn note_unmigrated_secret(migrated: Result<bool, AuthError>) {
     if let Err(error) = migrated {
         let cause = unmigrated_cause(&error);
         tracing::warn!(
+            event = "RUST_AUTH_MFA_SECRET_NOT_MIGRATED",
             cause,
             "mfa challenge: re-encrypting the secret under the current key failed; retried by the next challenge"
         );

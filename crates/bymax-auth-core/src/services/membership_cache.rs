@@ -15,7 +15,7 @@ use async_trait::async_trait;
 use bymax_auth_types::AuthError;
 
 use crate::RepositoryError;
-use crate::services::error_chain;
+use crate::services::failure_cause;
 use crate::traits::{MembershipCacheStore, MembershipRepository, WorkspaceRepository};
 use crate::workspace::domain::{
     Membership, MembershipRef, MembershipStatus, Workspace, WorkspaceRef,
@@ -203,8 +203,12 @@ async fn from_rows<R: MembershipRows + ?Sized>(
 
 /// Logs a store failure the cache absorbs. No identifier is logged.
 fn unavailable(error: &AuthError, outcome: &'static str) {
-    let cause = error_chain(error);
-    tracing::warn!(error = %cause, "workspace membership cache unavailable; {outcome}");
+    let cause = failure_cause(error);
+    tracing::warn!(
+        event = "RUST_AUTH_MEMBERSHIP_CACHE_UNAVAILABLE",
+        cause,
+        "workspace membership cache unavailable; {outcome}"
+    );
 }
 
 /// Drops the cached access of EVERY member of `workspace`, for an event that changes the whole

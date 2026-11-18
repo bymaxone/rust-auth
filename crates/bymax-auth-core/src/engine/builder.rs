@@ -479,6 +479,7 @@ impl AuthEngineBuilder {
         // `OAuthFailed` (§24 invariant 12). Make that loud rather than silent at startup.
         if oauth_enabled_without_custom_hook(config.controllers.oauth, hooks_supplied) {
             tracing::warn!(
+                event = "RUST_AUTH_OAUTH_HOOKS_MISSING",
                 "OAuth controller enabled but no custom AuthHooks supplied: on_oauth_login \
                  defaults to a secure deny, so every OAuth sign-in will fail until it is \
                  implemented"

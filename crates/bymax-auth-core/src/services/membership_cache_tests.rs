@@ -342,8 +342,10 @@ async fn a_store_failure_the_cache_absorbs_is_reported_as_a_warning_with_its_cau
         warn,
         "membership cache unavailable; the answer was not cached"
     ));
-    // The cause is on the line; no identifier is.
-    assert!(events.contains_at(warn, "membership cache fill refused"));
+    // The closed cause is on the line; neither the store's text nor an identifier is.
+    assert!(events.contains("RUST_AUTH_MEMBERSHIP_CACHE_UNAVAILABLE"));
+    assert!(events.contains("cause=internal"));
+    assert!(!events.contains("membership cache fill refused"));
     let lines = events.iter();
     assert_eq!(lines.len(), 2, "{lines:?}");
     let named = |line: &crate::log_capture::CapturedEvent| {

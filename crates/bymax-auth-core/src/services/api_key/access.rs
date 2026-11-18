@@ -92,7 +92,7 @@ impl Guarded<'_> {
         // installed subscriber, which would leave these lines unexercised.
         let method = log_safe(self.route.method);
         let pattern = log_safe(self.route.pattern);
-        tracing::error!(%method, route = %pattern, "api-key: route is guarded but declares no scopes; refused");
+        tracing::error!(event = "RUST_AUTH_API_KEY_ROUTE_WITHOUT_SCOPES", %method, route = %pattern, "api-key: route is guarded but declares no scopes; refused");
         self.refuse(ApiKeyDenyReason::RouteUndeclared, None).await;
         AuthError::Forbidden
     }
@@ -107,7 +107,10 @@ impl Guarded<'_> {
                 Err(AuthError::ApiKeyInvalid)
             }
             Err(error) => {
-                tracing::error!(error = %error, "api-key: key store unavailable");
+                tracing::error!(
+                    event = "RUST_AUTH_API_KEY_STORE_UNAVAILABLE",
+                    "api-key: key store unavailable"
+                );
                 self.refuse(ApiKeyDenyReason::StoreError, None).await;
                 Err(AuthError::Internal(Box::new(error)))
             }
@@ -197,12 +200,18 @@ pub(super) type AuditFuture<'a> = Pin<Box<dyn Future<Output = Result<(), HookErr
 pub(super) async fn run_required_audit(timeout: Duration, call: AuditFuture<'_>) -> bool {
     match tokio::time::timeout(timeout, call).await {
         Ok(Ok(())) => true,
-        Ok(Err(error)) => {
-            tracing::error!(error = %error, "api-key: audit hook failed");
+        Ok(Err(_)) => {
+            tracing::error!(
+                event = "RUST_AUTH_API_KEY_AUDIT_HOOK_FAILED",
+                "api-key: audit hook failed"
+            );
             false
         }
         Err(_) => {
-            tracing::error!("api-key: audit hook exceeded the timeout ceiling");
+            tracing::error!(
+                event = "RUST_AUTH_API_KEY_AUDIT_HOOK_TIMEOUT",
+                "api-key: audit hook exceeded the timeout ceiling"
+            );
             false
         }
     }

@@ -13,7 +13,6 @@
 use bymax_auth_types::AuthError;
 
 use crate::engine::AuthEngine;
-use crate::normalize::log_safe;
 use crate::services::auth::map_repository_error;
 use crate::traits::{SessionKind, UserStatusCacheStore};
 
@@ -131,11 +130,13 @@ impl AuthEngine {
     /// there is nothing left to retry. The worst a missed invalidation costs is the staleness it
     /// exists to avoid, bounded by the TTL.
     pub(crate) async fn drop_cached_account_facts(&self, user_id: &str, tenant_id: &str) {
-        if let Err(error) = self.invalidate_account_status(user_id, tenant_id).await {
-            let tenant = log_safe(tenant_id);
+        if self
+            .invalidate_account_status(user_id, tenant_id)
+            .await
+            .is_err()
+        {
             tracing::error!(
-                tenant_id = %tenant,
-                %error,
+                event = "RUST_AUTH_ACCOUNT_STATUS_CACHE_INVALIDATION_FAILED",
                 "account status cache: invalidation failed"
             );
         }

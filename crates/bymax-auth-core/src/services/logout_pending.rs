@@ -69,8 +69,12 @@ pub(crate) async fn resolve_owner(
         .read_logout_pending(kind, hash)
         .await
         .map_err(|error| {
-            let cause = crate::services::error_chain(&error);
-            tracing::warn!(%cause, "logout: pending owner lookup failed");
+            let cause = crate::services::failure_cause(&error);
+            tracing::warn!(
+                event = "RUST_AUTH_LOGOUT_PENDING_LOOKUP_FAILED",
+                cause,
+                "logout: pending owner lookup failed"
+            );
             crate::services::answer_store_failure(
                 error,
                 "a logout could not read its pending owner",
@@ -98,8 +102,12 @@ pub(crate) async fn remember_failed_attempt(
         return;
     };
     if let Err(error) = store.put_logout_pending(kind, hash, owner, ttl_secs).await {
-        let cause = crate::services::error_chain(&error);
-        tracing::warn!(%cause, "logout: the pending owner could not be recorded");
+        let cause = crate::services::failure_cause(&error);
+        tracing::warn!(
+            event = "RUST_AUTH_LOGOUT_PENDING_NOT_RECORDED",
+            cause,
+            "logout: the pending owner could not be recorded"
+        );
     }
 }
 
@@ -131,8 +139,12 @@ pub(crate) async fn settle_completed(
             .claim_logout_pending(kind, hash)
             .await
             .map_err(|error| {
-                let cause = crate::services::error_chain(&error);
-                tracing::warn!(%cause, "logout: the pending owner could not be claimed");
+                let cause = crate::services::failure_cause(&error);
+                tracing::warn!(
+                    event = "RUST_AUTH_LOGOUT_PENDING_NOT_CLAIMED",
+                    cause,
+                    "logout: the pending owner could not be claimed"
+                );
                 crate::services::answer_store_failure(
                     error,
                     "a logout could not claim its pending owner",
@@ -160,8 +172,12 @@ async fn confirm_no_stale_marker(
     removal: &AuthError,
     (resolved, ttl_secs): (&ResolvedOwner, u64),
 ) -> Result<bool, AuthError> {
-    let cause = crate::services::error_chain(removal);
-    tracing::warn!(%cause, "logout: a stale pending owner could not be removed");
+    let cause = crate::services::failure_cause(removal);
+    tracing::warn!(
+        event = "RUST_AUTH_LOGOUT_PENDING_STALE_NOT_REMOVED",
+        cause,
+        "logout: a stale pending owner could not be removed"
+    );
     let refused =
         || crate::services::internal_error("a logout could not remove its stale pending owner");
     match store.read_logout_pending(kind, hash).await {

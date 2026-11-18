@@ -400,7 +400,11 @@ impl DefaultAuthEmailProvider {
                 // would walk the recipient straight back into this line. A sink that wants its
                 // diagnostics recorded is the right place to record them, where it knows what
                 // its own error contains.
-                tracing::error!(%error, event, "auth email: delivery failed");
+                tracing::error!(
+                    event = "RUST_AUTH_EMAIL_DELIVERY_FAILED",
+                    kind = event,
+                    "auth email: delivery failed"
+                );
                 // Log first, then honour the configured policy: a deployment on `Rethrow` wants
                 // the failure to reach the caller that reacts to it, not to be absorbed here.
                 match self.on_delivery_error {
@@ -826,7 +830,7 @@ mod tests {
             "the delivery failure was not reported at all"
         );
         assert!(
-            events.contains("event=email_verification_otp"),
+            events.contains("kind=email_verification_otp"),
             "the failure line does not name which message failed"
         );
         assert!(

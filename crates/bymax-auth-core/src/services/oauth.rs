@@ -542,8 +542,11 @@ fn oauth_state_serialize_failed(_error: serde_json::Error) -> AuthError {
 /// Map any provider-layer error to the opaque client-facing `OauthFailed`, logging the cause
 /// for monitoring. Provider internals (status, transport detail, token type) never reach the
 /// caller; only the generic code does.
-fn provider_error(error: OAuthProviderError) -> AuthError {
-    tracing::warn!(%error, "oauth provider error mapped to oauth_failed");
+fn provider_error(_error: OAuthProviderError) -> AuthError {
+    tracing::warn!(
+        event = "RUST_AUTH_OAUTH_PROVIDER_ERROR_MAPPED",
+        "oauth provider error mapped to oauth_failed"
+    );
     AuthError::OauthFailed
 }
 

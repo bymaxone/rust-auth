@@ -169,8 +169,12 @@ impl SessionService {
             Err(error) => {
                 // One line per login, carrying the store's error chain (by `Display`) and the
                 // user id. A partial list would evict the wrong sessions, so none is evicted.
-                let cause = crate::services::error_chain(&error);
-                tracing::warn!(%cause, %user_id, "sessions: the session cap was not enforced");
+                let cause = crate::services::failure_cause(&error);
+                tracing::warn!(
+                    event = "RUST_AUTH_SESSION_CAP_NOT_ENFORCED",
+                    cause,
+                    "sessions: the session cap was not enforced"
+                );
                 return;
             }
         };
@@ -213,8 +217,12 @@ impl SessionService {
             {
                 // Swallowed, but visible: a store that keeps refusing the eviction is a cap
                 // that is not being enforced, which reads as "no error" on every response.
-                let cause = crate::services::error_chain(&error);
-                tracing::warn!(%cause, %user_id, "sessions: eviction of an over-cap session failed");
+                let cause = crate::services::failure_cause(&error);
+                tracing::warn!(
+                    event = "RUST_AUTH_SESSION_EVICTION_FAILED",
+                    cause,
+                    "sessions: eviction of an over-cap session failed"
+                );
             }
             self.fire_session_evicted(user_id, &victim.session_hash, ctx);
         }
@@ -405,7 +413,10 @@ impl SessionService {
         self.store
             .bump_epoch(SessionKind::Dashboard, &subject)
             .await?;
-        tracing::info!(%user_id, "sessions: revoked all other devices, token epoch advanced");
+        tracing::info!(
+            event = "RUST_AUTH_SESSIONS_OTHER_DEVICES_REVOKED",
+            "sessions: revoked all other devices, token epoch advanced"
+        );
         Ok(())
     }
 
@@ -2132,7 +2143,8 @@ mod tests {
             tracing::Level::WARN,
             "sessions: eviction of an over-cap session failed"
         ));
-        assert!(events.contains(&format!("user_id={uid}")));
+        assert!(events.contains("RUST_AUTH_SESSION_EVICTION_FAILED"));
+        assert!(!events.contains(&format!("user_id={uid}")));
 
         // A `SessionNotFound` is NOT: it is what a concurrent logout leaves behind, and an
         // operator watching for a cap that stopped being enforced must not have to sift it out

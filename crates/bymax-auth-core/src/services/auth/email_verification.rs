@@ -10,7 +10,7 @@ use bymax_auth_types::{AuthError, SafeAuthUser};
 
 use crate::context::RequestContext;
 use crate::engine::AuthEngine;
-use crate::normalize::{log_safe, normalize_email};
+use crate::normalize::normalize_email;
 use crate::services::auth::detached::{run_after_email_verified, run_send_verification_email};
 use crate::services::auth::{map_repository_error, normalize_anti_enum, spawn_guarded};
 use crate::traits::{HookContext, HookPlane, OtpPurpose};
@@ -67,8 +67,10 @@ impl AuthEngine {
         self.mark_email_verified(&user.id, tenant_id).await?;
 
         // Sanitized into a binding rather than inline in the field; see the note in `login`.
-        let tenant = log_safe(tenant_id);
-        tracing::info!(user_id = %user.id, tenant_id = %tenant, "verify email: address verified");
+        tracing::info!(
+            event = "RUST_AUTH_EMAIL_VERIFIED",
+            "verify email: address verified"
+        );
         let hook_ctx = verification_context(&user.id, &user.email, tenant_id);
         let safe = SafeAuthUser::from(user);
         spawn_guarded(run_after_email_verified(
@@ -187,6 +189,7 @@ pub(crate) fn note_unsent_verification(sent: Result<(), AuthError>) {
     if let Err(error) = sent {
         let cause = unsent_cause(&error);
         tracing::warn!(
+            event = "RUST_AUTH_EMAIL_VERIFICATION_CODE_NOT_STORED",
             cause,
             "verification code was not stored; the account stays unverified and a resend recovers"
         );
@@ -263,9 +266,8 @@ mod tests {
             "the verification mail never carried a code"
         );
         let Some(code) = mailed else { return };
-        // Captured so the event's fields are actually rendered: `log_safe` is the second lock on
-        // a host-supplied tenant reaching a log line, and with no subscriber installed the call
-        // never runs, which leaves the sanitization unfalsifiable from a test.
+        // Captured so the event's fields are actually rendered: with no subscriber installed the
+        // call never runs, which would leave the absence of an account field unfalsifiable.
         let (events, capture) = crate::log_capture::capture_events();
         assert!(
             h.engine
@@ -275,7 +277,9 @@ mod tests {
         );
         drop(capture);
         assert!(events.contains_at(tracing::Level::INFO, "verify email: address verified"));
-        assert!(events.contains("tenant_id=t1"));
+        assert!(events.contains("RUST_AUTH_EMAIL_VERIFIED"));
+        assert!(!events.contains("tenant_id"));
+        assert!(!events.contains("v@example.com"));
         let stored = h.users.find_by_id(&id, None).await;
         assert!(matches!(stored, Ok(Some(u)) if u.email_verified));
         // The OTP is consumed: a second submission is now expired.
