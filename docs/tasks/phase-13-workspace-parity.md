@@ -1,6 +1,6 @@
 # Phase 13 — Workspace parity with `nest-auth`: plan
 
-> **Status**: 🔄 In progress · **Progress**: 0 / 12 slices · **Last updated**: 2026-11-11
+> **Status**: 🔄 In progress · **Progress**: 7 / 12 slices (13.0 to 13.5b merged, with the follow-ups 13.2b and 13.5c, the account-removal service) · **Last updated**: 2026-11-17
 > **Source roadmap**: [`docs/development_plan.md`](../development_plan.md) (this phase is not in its dashboard)
 > **Source spec**: [`docs/technical_specification.md`](../technical_specification.md)
 
@@ -61,13 +61,13 @@ Because every one of those lists is compared with this repository's own tables i
 
 | ID | Slice | Status | Depends on |
 |---|---|---|---|
-| 13.0 | Copy the contract; track what is not built | 📋 ToDo | entry gate |
-| 13.1 | Error codes, statuses and wire envelope | 📋 ToDo | 13.0 |
-| 13.2 | Keys, preimages, rate limits, encoding, bounds, scoped names (data only) | 📋 ToDo | 13.0 |
-| 13.3 | Domain model and repository traits | 📋 ToDo | 13.1 |
-| 13.4 | Membership cache store and its scripts | 📋 ToDo | 13.2, 13.3 |
-| 13.5a | Workspace reads: list, access, members, switch, and the guard | 📋 ToDo | 13.1, 13.3, 13.4 |
-| 13.5b | Workspace mutations: create, rename, deletion lifecycle, role, remove, leave, transfer | 📋 ToDo | 13.5a |
+| 13.0 | Copy the contract; track what is not built | ✅ Done (#383) | entry gate |
+| 13.1 | Error codes, statuses and wire envelope | ✅ Done (#384) | 13.0 |
+| 13.2 | Keys, preimages, rate limits, encoding, bounds, scoped names (data only) | ✅ Done (#392 and #395) | 13.0 |
+| 13.3 | Domain model and repository traits | ✅ Done (#393) | 13.1 |
+| 13.4 | Membership cache store and its scripts | ✅ Done (#394) | 13.2, 13.3 |
+| 13.5a | Workspace reads: list, access, members, switch, and the guard | ✅ Done (#396) | 13.1, 13.3, 13.4 |
+| 13.5b | Workspace mutations: create, rename, deletion lifecycle, role, remove, leave, transfer | ✅ Done (#398) | 13.5a |
 | 13.6 | Invitations core: invite, resend, revoke, list, preview | 📋 ToDo | 13.2, 13.3, 13.5a |
 | 13.7 | Acceptance family and bootstrap invitations | 📋 ToDo | 13.5b, 13.6 |
 | 13.8 | OAuth invitation, invitation-only registration, the OAuth MFA branch | 📋 ToDo | 13.7 |
