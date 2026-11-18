@@ -514,7 +514,7 @@ export const config = {
 }
 ```
 
-**Proxy topology.** The browser sends the refresh cookie only to URLs under its `Path`, which is `cookies.refresh_cookie_path` on the backend and defaults to `/auth`. The Next route handlers (`client-refresh`, `silent-refresh`, `logout`) sit at `/api/auth/*`, so with the default the browser never sends them the refresh cookie and every refresh answers `401`. Set `cookies.refresh_cookie_path` to `/api/auth` on the backend, and pass the same value as `refreshCookiePath` to the handlers so a logout clears the cookie at the path it was planted with. The library default is unchanged and matches `@bymax-one/nest-auth`, which documents the same requirement for its proxy topology.
+**Proxy topology.** The browser sends the refresh cookie only to URLs under its `Path`, which is `cookies.refresh_cookie_path` on the backend and defaults to `/auth`. The Next route handlers (`client-refresh`, `silent-refresh`, `logout`) sit at `/api/auth/*`, so with the default the browser never sends them the refresh cookie and every refresh answers `401`. Set `cookies.refresh_cookie_path` to `/api/auth` on the backend, and pass the same value as `refreshCookiePath` to the handlers so a clear names the cookie at the path it was planted with. The library default is unchanged and matches `@bymax-one/nest-auth`.
 
 > `publicPaths` entries are prefixes that end at a segment boundary, and `'/'` is a prefix of every path:
 > `'/'` makes every route public. List each public prefix instead.
