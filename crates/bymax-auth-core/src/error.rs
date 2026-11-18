@@ -481,3 +481,16 @@ pub enum RepositoryError {
 fn scope_position(index: &Option<usize>) -> String {
     index.map_or_else(String::new, |i| format!("[{i}]"))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::ConfigError;
+
+    #[test]
+    fn the_totp_window_refusal_names_the_range_the_crypto_crate_allows() {
+        let message = ConfigError::TotpWindowRange { got: 3, valid: 7 }.to_string();
+        let max = bymax_auth_crypto::totp::MAX_VERIFY_WINDOW;
+        assert!(message.contains(&format!("0..={max}")), "{message}");
+        assert!(message.contains("got 3"), "{message}");
+    }
+}
