@@ -318,6 +318,62 @@ fn every_group() -> Option<(common::Harness, axum::Router)> {
     Some((harness, app))
 }
 
+/// The repository README, whose HTTP Endpoints table is the user-facing list of routes.
+const README: &str = include_str!("../../../../README.md");
+
+/// A path with every parameter segment (`{name}` or `:name`) reduced to `{}`, so the README may
+/// spell a parameter as it likes and the comparison is on the shape.
+fn shape(path: &str) -> String {
+    path.split('/')
+        .map(|segment| {
+            if segment.starts_with(':') || segment.starts_with('{') {
+                "{}"
+            } else {
+                segment
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
+/// The `(verb, path)` rows of the README's HTTP Endpoints table: a row whose first cell is a verb
+/// and whose second cell is a code span starting with the router prefix.
+fn readme_routes() -> BTreeSet<(String, String)> {
+    README
+        .lines()
+        .filter_map(|line| {
+            let mut cells = line.split('|').map(str::trim).skip(1);
+            let verb = cells.next()?;
+            let path = cells.next()?.trim_matches('`');
+            let verb_ok = ["GET", "POST", "PUT", "PATCH", "DELETE"].contains(&verb);
+            (verb_ok && path.starts_with(PREFIX)).then(|| (verb.to_owned(), shape(path)))
+        })
+        .collect()
+}
+
+/// The README documents the routes the router mounts when every group is on, and nothing else:
+/// a route added without a README row fails here, and so does a README row for a route that is
+/// not mounted.
+#[tokio::test]
+async fn the_readme_endpoint_table_lists_exactly_the_mounted_routes() {
+    let Some((_, app)) = every_group() else { return };
+    let mounted: BTreeSet<(String, String)> = mounted_routes(&app)
+        .into_iter()
+        .map(|(verb, path)| (verb, shape(&path)))
+        .collect();
+    assert!(
+        mounted.contains(&("POST".to_owned(), format!("{PREFIX}/login"))),
+        "the route table could not be read: update mounted_routes()"
+    );
+    let documented = readme_routes();
+    let undocumented: Vec<_> = mounted.difference(&documented).collect();
+    let unmounted: Vec<_> = documented.difference(&mounted).collect();
+    assert!(
+        undocumented.is_empty() && unmounted.is_empty(),
+        "mounted but not in the README table: {undocumented:?}; in the README table but not mounted: {unmounted:?}"
+    );
+}
+
 #[tokio::test]
 async fn the_mounted_set_is_the_rows_the_named_lists_and_nothing_else() {
     let Some((_, app)) = every_group() else { return };

@@ -4,7 +4,8 @@
 //! CRYPTOGRAPHY is the same Rust code the native server runs — eliminating the historical
 //! Web-Crypto-vs-Node drift. The JS surface is three thin wrappers: [`verify_jwt_hs256`]
 //! (signature-checked), [`decode_jwt`] (decode-only header+payload), and [`extract_claims`]
-//! (decode-only typed projection).
+//! (decode-only typed projection). A fourth export, `verify_password`, exists only behind the
+//! `wasm-extra` feature and is excluded from the npm build.
 //!
 //! # The edge is a fast reject, not the authority
 //!
@@ -53,7 +54,7 @@ use wasm_bindgen::prelude::wasm_bindgen;
 ///
 /// Only HS256 is accepted (`none`/`RS256`/`ES256` are rejected in Rust). `leeway_secs` is
 /// the clock-skew tolerance for `exp`/`iat`; when omitted it defaults to the edge default
-/// (30 seconds). The current time is read from the host clock (the JS `Date` clock on the
+/// (30 seconds), and values above 300 seconds are clamped to 300. The current time is read from the host clock (the JS `Date` clock on the
 /// edge). The `secret` is consumed and zeroized immediately after the HMAC check — it must
 /// never be exposed to a browser bundle.
 ///

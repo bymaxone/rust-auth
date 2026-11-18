@@ -268,9 +268,10 @@ pub enum ConfigError {
         /// The rejected parallelization.
         got: u32,
     },
-    /// `mfa.totp_window` is outside the accepted `0..=10` range.
+    /// `mfa.totp_window` is outside the accepted `0..=MAX_VERIFY_WINDOW` range (currently
+    /// `0..=2`, `bymax_auth_crypto::totp::MAX_VERIFY_WINDOW`).
     #[error(
-        "mfa.totp_window must be within 0..=10 (got {got}; {valid} codes would be valid at once)"
+        "mfa.totp_window must be within 0..=2 (got {got}; {valid} codes would be valid at once)"
     )]
     TotpWindowRange {
         /// The rejected window.
@@ -479,4 +480,17 @@ pub enum RepositoryError {
 /// The position suffix of an `api_keys.scopes` message: `[2]` for an entry, nothing for the list.
 fn scope_position(index: &Option<usize>) -> String {
     index.map_or_else(String::new, |i| format!("[{i}]"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ConfigError;
+
+    #[test]
+    fn the_totp_window_refusal_names_the_range_the_crypto_crate_allows() {
+        let message = ConfigError::TotpWindowRange { got: 3, valid: 7 }.to_string();
+        let max = bymax_auth_crypto::totp::MAX_VERIFY_WINDOW;
+        assert!(message.contains(&format!("0..={max}")), "{message}");
+        assert!(message.contains("got 3"), "{message}");
+    }
 }

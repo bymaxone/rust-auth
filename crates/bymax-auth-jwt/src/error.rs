@@ -16,7 +16,8 @@
 #[derive(Debug, PartialEq, Eq, thiserror::Error)]
 #[non_exhaustive]
 pub enum JwtError {
-    /// The token is not three base64url segments, or a segment is not valid base64url.
+    /// The token is not three base64url segments, a segment is not valid base64url, or its
+    /// `iss`/`aud` is missing or different from the value the verify options expect.
     #[error("malformed token")]
     Malformed,
     /// The header's `alg` is not `HS256` (covers `none`, `RS256`, `ES256`, and every
