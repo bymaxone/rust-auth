@@ -1,6 +1,6 @@
 # Phase 13 — Workspace parity with `nest-auth`: plan
 
-> **Status**: 🔄 In progress · **Progress**: 7 / 12 slices (13.0 to 13.5b merged, with the follow-ups 13.2b and 13.5c, the account-removal service) · **Last updated**: 2026-11-17
+> **Status**: 🔄 In progress · **Progress**: 7 / 12 slices · **Last updated**: 2026-11-17
 > **Source roadmap**: [`docs/development_plan.md`](../development_plan.md) (this phase is not in its dashboard)
 > **Source spec**: [`docs/technical_specification.md`](../technical_specification.md)
 

@@ -645,7 +645,7 @@ Everything is configured through `AuthConfig`. Two ready-made profiles bundle se
 
 > [!IMPORTANT]
 > **The parameters that carry a control's strength are bounded by `build()`.** `mfa.totp_window`
-> must be `0..=2` (`TotpWindowRange`; the ceiling is `MAX_VERIFY_WINDOW` in `bymax-auth-crypto`): the
+> must be `0..=2` (`TotpWindowRange`): the
 > window counts 30-second steps on *either* side of now, so `2n + 1` codes are valid at once —
 > three at 1, five at the maximum — and a wider window would make a six-digit code proportionally
 > easier to guess while the configuration still reads as "MFA enabled".
@@ -657,7 +657,7 @@ Everything is configured through `AuthConfig`. Two ready-made profiles bundle se
 > parameter is still intact. `jwt.refresh_grace_window` must stay below the refresh lifetime
 > (`RefreshGraceTooLarge`) and at or under **300 seconds** (`RefreshGraceCeiling`): it is the span
 > in which an already-consumed refresh token still buys a session, so it is the replay window for
-> a stolen one and exists to cover a single network retry. `nest-auth` enforces the identical ranges.
+> a stolen one and exists to cover a single network retry.
 
 > [!IMPORTANT]
 > `jwt.access_expires_in` must not exceed **30 days**, the window a store keeps a bumped token
@@ -972,7 +972,7 @@ Route groups mount only when their feature **and** runtime toggle are enabled, s
 | `createAuthFetch()`    | A `fetch` wrapper with credentials, a timeout and a single-flight refresh-and-retry on a `401` (`refreshEndpoint`, default `/api/auth/client-refresh`; `onSessionExpired`) |
 | `AuthClientError`      | The error thrown for a non-2xx answer: the backend's `auth.*` code, the HTTP status and any details |
 
-The client has a typed method for the eight endpoints above only. `AUTH_ROUTES` adds constants for the MFA management, session, platform, OAuth, invitation-create/accept and ticket routes, but has none for password change, email change, invitation revoke or the workspace routes. Call every route without a method through `authFetch`.
+The client has a typed method only for the endpoints above. Call every other route through `authFetch`.
 
 A login can need a second factor. `login()` resolves a `LoginResult`, which is either an `AuthResult` or an `MfaChallengeResult` (`{ mfaRequired: true, mfaTempToken }`). Complete it through the client, since no hook wraps it:
 

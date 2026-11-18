@@ -550,7 +550,7 @@ Feature → crate(s) → capability:
 | `axum` | `bymax-auth-axum` | Axum router, extractors, cookie delivery |
 | `client` | `bymax-auth-client` | `reqwest` typed client for Rust consumers |
 | _(no facade feature)_ | `bymax-auth-{types,crypto,jwt}` | the npm edge bindings are a **separate** crate, `bymax-auth-wasm`, that depends directly on those three base crates — not reached through the facade |
-| `full` | all of the above | everything (convenience meta-feature): `scrypt`, `argon2`, `sessions`, `mfa`, `oauth`, `oauth-reqwest`, `platform`, `invitations`, `breach`, `api-keys`, `openapi`, `redis`, `axum`, `client` |
+| `full` | all of the above | everything (convenience meta-feature) |
 
 Representative `crates/bymax-auth/Cargo.toml` `[features]` block:
 
