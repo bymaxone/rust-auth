@@ -512,6 +512,18 @@ fn lex_code(text: &str) -> (String, bool) {
     (out, block_depth == 0)
 }
 
+/// Whether the `r` at `chars[at]` opens a raw string: it follows no identifier character, or only
+/// a `b` or `c` that itself follows none (`r"..."`, `br#"..."#`, `cr"..."`), unlike the `r` that
+/// ends an identifier.
+fn raw_string_starts_here(chars: &[char], at: usize) -> bool {
+    let ident = |i: usize| chars[i].is_alphanumeric() || chars[i] == '_';
+    match at {
+        0 => true,
+        1 => !ident(0) || matches!(chars[0], 'b' | 'c'),
+        _ => !ident(at - 1) || (matches!(chars[at - 1], 'b' | 'c') && !ident(at - 2)),
+    }
+}
+
 /// The width of the string, raw string or char literal that starts at `chars[at]`, or `None` when
 /// none does there (a lifetime such as `'a` is not a literal).
 fn literal_width(chars: &[char], at: usize) -> Option<usize> {
@@ -531,7 +543,7 @@ fn literal_width(chars: &[char], at: usize) -> Option<usize> {
             }
             None
         }
-        'r' if at == 0 || !(chars[at - 1].is_alphanumeric() || chars[at - 1] == '_') => {
+        'r' if raw_string_starts_here(chars, at) => {
             let hashes = chars[at + 1..].iter().take_while(|c| **c == '#').count();
             (chars.get(at + 1 + hashes) == Some(&'"')).then_some(())?;
             find_close(at + 2 + hashes, &|i| {
@@ -632,6 +644,8 @@ fn the_unscanned_forms_are_recognised() {
         "let q = '\"'; use tracing::warn as w; w!(x); let s = \"a\";",
         "let q = '\\''; let s = r#\"say \"hi\"#; use tracing::warn as w;",
         "let s = r##\"a \"# b\"##; use tracing::warn as w;",
+        "let s = br#\"unused \"#; use tracing::warn as w; w!(x); let tail = \"x\";",
+        "let s = cr#\"say \" hi\"#; use tracing::warn as w;",
     ] {
         assert!(!unscanned_forms(bypass).is_empty(), "{bypass}");
     }
@@ -658,6 +672,8 @@ fn the_unscanned_forms_are_recognised() {
 fn a_lexer_that_loses_its_place_is_reported() {
     assert!(lex_code("let s = \"closed\"; // done").1);
     assert!(lex_code("let q = '\"'; let s = r#\"a \" b\"#;").1);
+    assert!(lex_code("let s = br#\"say \" hi\"#; let t = cr\"x\";").1);
+    assert!(lex_code("let bar = 1; let s = \"x\";").1);
     assert!(!lex_code("let s = \"never closed;").1);
     assert!(!lex_code("/* never closed").1);
 }
