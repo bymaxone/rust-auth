@@ -461,7 +461,9 @@ fn a_capture_is_read_out_of_a_message_literal() {
 
 /// The `tracing` macro forms in `text` that `calls_in` does not read: a macro called without its
 /// `tracing::` path (after a `use`), `tracing::event!`, `tracing::span!`, or a `!` and its `(`
-/// split by whitespace.
+/// split by whitespace. Any import of `tracing` is one too: an alias (`use tracing::warn as
+/// log_warn;`) would hide a call under a name the scan does not look for, so production code
+/// names every call as `tracing::<level>!`.
 fn unscanned_forms(text: &str) -> Vec<String> {
     let mut found = Vec::new();
     for (at, _) in text.match_indices('!') {
@@ -478,6 +480,15 @@ fn unscanned_forms(text: &str) -> Vec<String> {
             && text[at + 1..].starts_with('(');
         if !scanned {
             found.push(format!("{name}!"));
+        }
+    }
+    for line in text.lines().map(str::trim_start) {
+        let line = line.strip_prefix("pub ").unwrap_or(line);
+        if ["use tracing", "use ::tracing", "extern crate tracing"]
+            .iter()
+            .any(|import| line.starts_with(import))
+        {
+            found.push(line.to_owned());
         }
     }
     found
@@ -507,6 +518,9 @@ fn the_unscanned_forms_are_recognised() {
         "tracing::warn! (event = \"RUST_AUTH_X\");",
         "tracing::span!(Level::INFO, \"x\");",
         "info!(x);",
+        "use tracing::warn as log_warn;\nlog_warn!(\"x {email}\", email = email);",
+        "    pub use ::tracing::{warn, info};",
+        "extern crate tracing;",
     ] {
         assert!(!unscanned_forms(bypass).is_empty(), "{bypass}");
     }
