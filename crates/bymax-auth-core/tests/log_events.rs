@@ -470,49 +470,87 @@ fn a_capture_is_read_out_of_a_message_literal() {
     assert!(captures_of("\"a {{braced}} message\"").is_empty());
 }
 
-/// `text` with every comment and the inside of every string literal blanked to spaces, so what is
-/// left is code: an identifier in a doc line or in a message is not a use of it.
-fn code_only(text: &str) -> String {
-    let (mut out, mut chars) = (String::with_capacity(text.len()), text.chars().peekable());
-    let (mut in_string, mut line_comment, mut block_depth) = (false, false, 0_usize);
-    while let Some(c) = chars.next() {
-        let blank = |c: char| if c == '\n' { '\n' } else { ' ' };
-        if line_comment {
-            line_comment = c != '\n';
-            out.push(blank(c));
-        } else if block_depth > 0 {
-            if c == '*' && chars.peek() == Some(&'/') {
-                chars.next();
-                block_depth -= 1;
-                out.push_str("  ");
-            } else if c == '/' && chars.peek() == Some(&'*') {
-                chars.next();
-                block_depth += 1;
-                out.push_str("  ");
-            } else {
-                out.push(blank(c));
-            }
-        } else if in_string {
-            if c == '\\' {
+/// `text` with every comment and the inside of every string, raw string and char literal blanked
+/// to spaces, so what is left is code: an identifier in a doc line or in a message is not a use
+/// of it. The flag is `false` when the text ends inside a string or a block comment, which means
+/// the lexer lost its place and what it blanked cannot be trusted.
+fn lex_code(text: &str) -> (String, bool) {
+    let chars: Vec<char> = text.chars().collect();
+    let blank = |c: char| if c == '\n' { '\n' } else { ' ' };
+    let (mut out, mut at) = (String::with_capacity(text.len()), 0_usize);
+    let mut block_depth = 0_usize;
+    while at < chars.len() {
+        let (c, next) = (chars[at], chars.get(at + 1).copied());
+        if block_depth > 0 {
+            let (open, close) = (c == '/' && next == Some('*'), c == '*' && next == Some('/'));
+            block_depth = block_depth + usize::from(open) - usize::from(close);
+            let width = if open || close { 2 } else { 1 };
+            out.extend(chars[at..at + width].iter().map(|c| blank(*c)));
+            at += width;
+        } else if c == '/' && next == Some('/') {
+            while at < chars.len() && chars[at] != '\n' {
                 out.push(' ');
-                out.extend(chars.next().map(blank));
-            } else {
-                in_string = c != '"';
-                out.push(if c == '"' { '"' } else { blank(c) });
+                at += 1;
             }
-        } else if c == '/' && chars.peek() == Some(&'/') {
-            line_comment = true;
-            out.push(' ');
-        } else if c == '/' && chars.peek() == Some(&'*') {
-            chars.next();
+        } else if c == '/' && next == Some('*') {
             block_depth = 1;
             out.push_str("  ");
+            at += 2;
+        } else if let Some(width) = literal_width(&chars, at) {
+            out.push(chars[at]);
+            out.extend(chars[at + 1..at + width - 1].iter().map(|c| blank(*c)));
+            out.push(chars[at + width - 1]);
+            at += width;
+        } else if c == '"' {
+            // An opening quote with no closing one: the lexer lost its place.
+            return (out, false);
         } else {
-            in_string = c == '"';
             out.push(c);
+            at += 1;
         }
     }
-    out
+    (out, block_depth == 0)
+}
+
+/// The width of the string, raw string or char literal that starts at `chars[at]`, or `None` when
+/// none does there (a lifetime such as `'a` is not a literal).
+fn literal_width(chars: &[char], at: usize) -> Option<usize> {
+    let find_close = |from: usize, close: &dyn Fn(usize) -> bool| {
+        (from..chars.len()).find(|i| close(*i)).map(|i| i + 1 - at)
+    };
+    match chars[at] {
+        '"' => {
+            let mut i = at + 1;
+            while i < chars.len() {
+                match chars[i] {
+                    '\\' => i += 1,
+                    '"' => return Some(i + 1 - at),
+                    _ => {}
+                }
+                i += 1;
+            }
+            None
+        }
+        'r' if at == 0 || !(chars[at - 1].is_alphanumeric() || chars[at - 1] == '_') => {
+            let hashes = chars[at + 1..].iter().take_while(|c| **c == '#').count();
+            (chars.get(at + 1 + hashes) == Some(&'"')).then_some(())?;
+            find_close(at + 2 + hashes, &|i| {
+                chars[i] == '"' && (1..=hashes).all(|k| chars.get(i + k) == Some(&'#'))
+            })
+            .map(|width| width + hashes)
+        }
+        '\'' => match (chars.get(at + 1), chars.get(at + 2), chars.get(at + 3)) {
+            (Some('\\'), _, _) => find_close(at + 3, &|i| chars[i] == '\''),
+            (Some(c), Some('\''), _) if *c != '\'' => Some(3),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// `text` with comments and literals blanked; see [`lex_code`].
+fn code_only(text: &str) -> String {
+    lex_code(text).0
 }
 
 /// Where `text`, read as code, names `tracing` in any way but the one spelling the scan reads,
@@ -560,7 +598,11 @@ fn the_scan_sees_every_form_a_tracing_call_can_take() {
         .iter()
         .filter_map(|path| {
             let source = fs::read_to_string(path).ok()?;
-            let forms = unscanned_forms(production_part(&source));
+            let part = production_part(&source);
+            if !lex_code(part).1 {
+                return Some(format!("{}: the lexer lost its place", path.display()));
+            }
+            let forms = unscanned_forms(part);
             (!forms.is_empty()).then(|| format!("{}: {forms:?}", path.display()))
         })
         .collect();
@@ -587,6 +629,9 @@ fn the_unscanned_forms_are_recognised() {
         "tracing::warn! (x);",
         "tracing_core::Event::dispatch(x);",
         "info!(x);",
+        "let q = '\"'; use tracing::warn as w; w!(x); let s = \"a\";",
+        "let q = '\\''; let s = r#\"say \"hi\"#; use tracing::warn as w;",
+        "let s = r##\"a \"# b\"##; use tracing::warn as w;",
     ] {
         assert!(!unscanned_forms(bypass).is_empty(), "{bypass}");
     }
@@ -598,6 +643,8 @@ fn the_unscanned_forms_are_recognised() {
         "// uses tracing::event! and `use tracing::warn;` in a note\nlet x = 1;",
         "/// the `tracing` crate\n/* use tracing::warn; */ let x = \"a tracing b\";",
         "let tracing_enabled = true;",
+        "let q = '\"'; let s = \"tracing::event!\"; let l: &'a str = r#\"use tracing::warn;\"#;",
+        "let r#type = 1; let q = 'x';",
     ] {
         assert!(
             unscanned_forms(read).is_empty(),
@@ -605,4 +652,12 @@ fn the_unscanned_forms_are_recognised() {
             unscanned_forms(read)
         );
     }
+}
+
+#[test]
+fn a_lexer_that_loses_its_place_is_reported() {
+    assert!(lex_code("let s = \"closed\"; // done").1);
+    assert!(lex_code("let q = '\"'; let s = r#\"a \" b\"#;").1);
+    assert!(!lex_code("let s = \"never closed;").1);
+    assert!(!lex_code("/* never closed").1);
 }
