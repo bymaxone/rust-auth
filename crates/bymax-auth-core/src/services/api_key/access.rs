@@ -84,13 +84,26 @@ struct Guarded<'a> {
     ctx: &'a RequestContext,
 }
 
+/// The method as a closed label: one of the standard HTTP methods, or `other`. The method a
+/// route reports comes from the request, so a client can choose it; a log line must not carry it.
+pub(super) fn method_label(method: &str) -> &'static str {
+    const STANDARD: [&str; 9] = [
+        "GET", "HEAD", "POST", "PUT", "DELETE", "CONNECT", "OPTIONS", "TRACE", "PATCH",
+    ];
+    STANDARD
+        .iter()
+        .find(|standard| **standard == method)
+        .copied()
+        .unwrap_or("other")
+}
+
 impl Guarded<'_> {
     /// The route is guarded but declares no scopes: a configuration error, refused before the
     /// key is read.
     async fn undeclared_route(&self) -> AuthError {
         // Bound first: a call inside a `tracing` field expression is not evaluated without an
         // installed subscriber, which would leave these lines unexercised.
-        let method = log_safe(self.route.method);
+        let method = method_label(self.route.method);
         let pattern = log_safe(self.route.pattern);
         tracing::error!(event = "RUST_AUTH_API_KEY_ROUTE_WITHOUT_SCOPES", %method, route = %pattern, "api-key: route is guarded but declares no scopes; refused");
         self.refuse(ApiKeyDenyReason::RouteUndeclared, None).await;

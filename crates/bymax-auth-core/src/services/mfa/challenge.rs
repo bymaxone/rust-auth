@@ -600,7 +600,11 @@ impl MfaService {
 
     /// Record a failed challenge attempt and return the retryable [`AuthError::MfaInvalidCode`]
     /// (the temp token stays alive; the lockout eventually fires).
-    async fn reject_code(&self, flow: &str, bf_id: &str) -> Result<LoginResultMfa, AuthError> {
+    async fn reject_code(
+        &self,
+        flow: &'static str,
+        bf_id: &str,
+    ) -> Result<LoginResultMfa, AuthError> {
         tracing::warn!(event = "RUST_AUTH_MFA_INVALID_CODE", %flow, "mfa: invalid code");
         self.brute_force.record_failure(bf_id).await?;
         Err(AuthError::MfaInvalidCode)

@@ -124,7 +124,7 @@ pub(crate) fn failure_cause(error: &AuthError) -> &'static str {
 /// message names its backend.
 pub(crate) fn note_logout_failure(
     first: &mut Option<AuthError>,
-    step: &str,
+    step: &'static str,
     result: Result<(), AuthError>,
 ) {
     if let Err(error) = result {

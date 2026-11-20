@@ -5,6 +5,14 @@
 //! The sources are read as text, so a call added without a code, with a field that could carry an
 //! account, an address, a token or an error's text, or with a code the README does not list, fails
 //! here instead of reaching a log pipeline.
+//!
+//! What a text scan can and cannot say: it sees the form of every argument (a `kind` is a
+//! literal, a `cause` is bound from a closed classifier, a message capture is an allow-listed
+//! name), but not the type behind a bare name such as `plane` or `%flow`. Those stay closed
+//! because the functions that bind them take a `&'static str`, and a diff that loosens one is a
+//! diff a reviewer reads. The scan also stops at the first inline `#[cfg(test)] mod name { }`
+//! of a file, so a production call placed after it is not seen; the sources keep such a module
+//! last.
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -34,6 +42,11 @@ const CLOSED_CAUSES: [&str; 5] = [
     "unsent_cause(",
     "provider_cause(",
 ];
+
+/// The inline captures a message may name. Each is a `&'static str` the library fixes (a logout
+/// step, a cache outcome), so a message carries no account, address or error text. A capture in
+/// any other name, or a positional `{}`, has to be added here, which is the review.
+const ALLOWED_CAPTURES: [&str; 2] = ["step", "outcome"];
 
 /// The levels a `tracing` macro names.
 const LEVELS: [&str; 5] = ["error", "warn", "info", "debug", "trace"];
@@ -389,4 +402,119 @@ fn the_codes_in_the_sources_are_the_readme_table_with_the_same_levels() {
         wrong_level.is_empty(),
         "levels that differ: {wrong_level:?}"
     );
+}
+
+/// The inline captures of a format string literal, `{name}` and `{name:spec}`, with `{{` and
+/// `}}` escapes skipped; a positional `{}` is the empty name.
+fn captures_of(literal: &str) -> Vec<String> {
+    let inner = literal.trim_matches('"');
+    let (mut names, mut chars) = (Vec::new(), inner.chars().peekable());
+    while let Some(c) = chars.next() {
+        match c {
+            '{' if chars.peek() == Some(&'{') => {
+                chars.next();
+            }
+            '{' => {
+                let body: String = chars.by_ref().take_while(|c| *c != '}').collect();
+                names.push(body.split(':').next().unwrap_or_default().to_owned());
+            }
+            _ => {}
+        }
+    }
+    names
+}
+
+/// The message argument of a call: the one that is a string literal.
+fn message_of(call: &Call) -> Option<&String> {
+    call.args.iter().find(|arg| arg.starts_with('"'))
+}
+
+#[test]
+fn every_message_names_only_closed_captures() {
+    let mut offenders = Vec::new();
+    for call in all_calls() {
+        let Some(message) = message_of(&call) else { continue };
+        for name in captures_of(message) {
+            if !ALLOWED_CAPTURES.contains(&name.as_str()) {
+                offenders.push(format!(
+                    "{}:{} message capture `{{{name}}}`",
+                    call.file, call.line
+                ));
+            }
+        }
+    }
+    assert!(
+        offenders.is_empty(),
+        "a message may interpolate only a closed capture: {offenders:?}"
+    );
+}
+
+#[test]
+fn a_capture_is_read_out_of_a_message_literal() {
+    assert_eq!(captures_of("\"{step}\""), ["step"]);
+    assert_eq!(
+        captures_of("\"a {outcome}; b {x:?} {}\""),
+        ["outcome", "x", ""]
+    );
+    assert!(captures_of("\"a {{braced}} message\"").is_empty());
+}
+
+/// The `tracing` macro forms in `text` that `calls_in` does not read: a macro called without its
+/// `tracing::` path (after a `use`), `tracing::event!`, `tracing::span!`, or a `!` and its `(`
+/// split by whitespace.
+fn unscanned_forms(text: &str) -> Vec<String> {
+    let mut found = Vec::new();
+    for (at, _) in text.match_indices('!') {
+        let before = &text[..at];
+        let name_start = before
+            .rfind(|c: char| !(c.is_alphanumeric() || c == '_'))
+            .map_or(0, |i| i + 1);
+        let name = &before[name_start..];
+        if !(LEVELS.contains(&name) || ["event", "span"].contains(&name)) {
+            continue;
+        }
+        let scanned = before[..name_start].ends_with("tracing::")
+            && LEVELS.contains(&name)
+            && text[at + 1..].starts_with('(');
+        if !scanned {
+            found.push(format!("{name}!"));
+        }
+    }
+    found
+}
+
+#[test]
+fn the_scan_sees_every_form_a_tracing_call_can_take() {
+    let offenders: Vec<String> = production_sources()
+        .iter()
+        .filter_map(|path| {
+            let source = fs::read_to_string(path).ok()?;
+            let forms = unscanned_forms(production_part(&source));
+            (!forms.is_empty()).then(|| format!("{}: {forms:?}", path.display()))
+        })
+        .collect();
+    assert!(
+        offenders.is_empty(),
+        "a tracing form the scan does not read: {offenders:?}"
+    );
+}
+
+#[test]
+fn the_unscanned_forms_are_recognised() {
+    for bypass in [
+        "use tracing::warn;\nwarn!(event = \"RUST_AUTH_X\");",
+        "tracing::event!(Level::WARN, \"x\");",
+        "tracing::warn! (event = \"RUST_AUTH_X\");",
+        "tracing::span!(Level::INFO, \"x\");",
+        "info!(x);",
+    ] {
+        assert!(!unscanned_forms(bypass).is_empty(), "{bypass}");
+    }
+    for read in [
+        "tracing::warn!(event = \"RUST_AUTH_X\");",
+        "debug_assert!(x);",
+        "assert!(x); format!(\"{x}\");",
+    ] {
+        assert!(unscanned_forms(read).is_empty(), "{read}");
+    }
 }

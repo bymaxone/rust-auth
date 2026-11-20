@@ -856,7 +856,7 @@ impl MfaService {
     ///
     /// Returns [`AuthError::AccountLocked`] when the window is tripped, or a store
     /// [`AuthError`] on failure.
-    async fn assert_not_locked(&self, flow: &str, bf_id: &str) -> Result<(), AuthError> {
+    async fn assert_not_locked(&self, flow: &'static str, bf_id: &str) -> Result<(), AuthError> {
         if self.brute_force.is_locked(bf_id).await? {
             let retry = self.brute_force.remaining_lockout_secs(bf_id).await?;
             // The lockout itself is the security event an operator watches for: repeated hits
