@@ -79,13 +79,20 @@ jobs:
             fi
             git diff "${MUTATION_BASE}" HEAD -- crates/ > "${RUNNER_TEMP}/mutants.diff"
             total="$(cargo mutants --list --in-diff "${RUNNER_TEMP}/mutants.diff" | grep -c . || true)"
+            if [ "${total}" -eq 0 ]; then
+              # cargo-mutants exits before it creates its output directory when the diff holds no
+              # mutant, so a shard would have nothing to report and the summary would call the sweep
+              # incomplete. Say so here instead.
+              echo "::error::the changes since '${MUTATION_BASE}' hold no mutant; there is nothing to sweep"
+              exit 1
+            fi
             SHARDS=$(( (total + MUTANTS_PER_SHARD - 1) / MUTANTS_PER_SHARD ))
-            [ "${SHARDS}" -ge 1 ] || SHARDS=1
           else
             total="$(cargo mutants --list | grep -c .)"
           fi
           budget=$(( TIMEOUT_MINUTES * 60 / SECONDS_PER_MUTANT ))
-          # cargo-mutants deals mutants out round-robin, so the fullest shard holds the ceiling.
+          # cargo-mutants gives each shard a contiguous slice of ceil(total / SHARDS) mutants, so the
+          # fullest shard holds that ceiling.
           per_shard=$(( (total + SHARDS - 1) / SHARDS ))
           needed=$(( (total + budget - 1) / budget ))
           echo "mutants: ${total}; shards: ${SHARDS}; fullest shard: ${per_shard}; budget per shard: ${budget} (${TIMEOUT_MINUTES} min at ${SECONDS_PER_MUTANT} s)"
