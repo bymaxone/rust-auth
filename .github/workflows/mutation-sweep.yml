@@ -5,12 +5,26 @@ name: mutation-sweep
 # of zero missed mutants. A full sweep is ~3000 mutants and does not fit one job's limit, so
 # `cargo mutants --shard k/n` (https://mutants.rs/shards.html) divides it across a matrix.
 # Manual only: it is a measurement taken on demand, not a check on every change.
+#
+# With `mutation_base` set, only the mutants a diff touches are swept (`cargo mutants --in-diff`,
+# https://mutants.rs/in-diff.html), still split into shards. A mutant costs ~150 seconds (about 14 s
+# to build and 140 s to run the core suite), so even one change set of ~100 mutants overruns the
+# 240-minute limit of the single job the per-push gate in `ci.yml` runs. The number of shards then
+# follows the number of mutants instead of being fixed.
 
 on:
   workflow_dispatch:
     inputs:
       ref:
         description: Commit, branch or tag to sweep. Defaults to the ref the run was dispatched on.
+        required: false
+        default: ''
+        type: string
+      mutation_base:
+        description: >-
+          Commit to diff against. When set, only the mutants in the changes since it are swept (for
+          a pull request, its merge base), with the number of shards derived from their count.
+          Empty sweeps the whole workspace.
         required: false
         default: ''
         type: string
@@ -35,6 +49,8 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ inputs.ref }}
+          # The diff base has to be reachable.
+          fetch-depth: 0
       - uses: actions-rust-lang/setup-rust-toolchain@a188e68d0fd2bd36ad51dccb2b07ba6e75105f30 # v2.0.1
       - uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2.90.3
         with:
@@ -50,11 +66,33 @@ jobs:
           # ~2.5 minutes to build and test, so 150 seconds each is the budget, unviable
           # mutants (which are quick) included as a margin.
           SECONDS_PER_MUTANT: '150'
+          # A diff sweep sizes its shards by the mutants it holds, this many to a shard.
+          MUTANTS_PER_SHARD: '40'
+          # Read by the script, never pasted into it, so an input cannot inject shell.
+          MUTATION_BASE: ${{ inputs.mutation_base }}
         run: |
           set -euo pipefail
-          total="$(cargo mutants --list | grep -c .)"
+          if [ -n "${MUTATION_BASE}" ]; then
+            if ! git rev-parse --verify --quiet "${MUTATION_BASE}^{commit}" >/dev/null; then
+              echo "::error::mutation_base '${MUTATION_BASE}' is not a commit in this repository"
+              exit 1
+            fi
+            git diff "${MUTATION_BASE}" HEAD -- crates/ > "${RUNNER_TEMP}/mutants.diff"
+            total="$(cargo mutants --list --in-diff "${RUNNER_TEMP}/mutants.diff" | grep -c . || true)"
+            if [ "${total}" -eq 0 ]; then
+              # cargo-mutants exits before it creates its output directory when the diff holds no
+              # mutant, so a shard would have nothing to report and the summary would call the sweep
+              # incomplete. Say so here instead.
+              echo "::error::the changes since '${MUTATION_BASE}' hold no mutant; there is nothing to sweep"
+              exit 1
+            fi
+            SHARDS=$(( (total + MUTANTS_PER_SHARD - 1) / MUTANTS_PER_SHARD ))
+          else
+            total="$(cargo mutants --list | grep -c .)"
+          fi
           budget=$(( TIMEOUT_MINUTES * 60 / SECONDS_PER_MUTANT ))
-          # cargo-mutants deals mutants out round-robin, so the fullest shard holds the ceiling.
+          # cargo-mutants gives each shard a contiguous slice of ceil(total / SHARDS) mutants, so the
+          # fullest shard holds that ceiling.
           per_shard=$(( (total + SHARDS - 1) / SHARDS ))
           needed=$(( (total + budget - 1) / budget ))
           echo "mutants: ${total}; shards: ${SHARDS}; fullest shard: ${per_shard}; budget per shard: ${budget} (${TIMEOUT_MINUTES} min at ${SECONDS_PER_MUTANT} s)"
@@ -85,6 +123,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ inputs.ref }}
+          fetch-depth: 0
       - uses: actions-rust-lang/setup-rust-toolchain@a188e68d0fd2bd36ad51dccb2b07ba6e75105f30 # v2.0.1
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2.90.3
@@ -94,6 +133,7 @@ jobs:
         env:
           SHARD: ${{ matrix.shard }}
           SHARDS: ${{ needs.plan.outputs.shards }}
+          MUTATION_BASE: ${{ inputs.mutation_base }}
         # `cap_lints` and `--all-features` come from .cargo/mutants.toml, as in ci.yml, so a
         # replaced body is tested instead of failing to compile under `-D warnings`. That
         # setting also removes rustc's const-eval hang detection, hence `--build-timeout`
@@ -101,8 +141,13 @@ jobs:
         # The exit status is kept so the artifacts upload before the job reports it.
         run: |
           set +e
-          assigned="$(cargo mutants --list --shard "${SHARD}/${SHARDS}" | grep -c .)"
-          cargo mutants --in-place --build-timeout 300 --shard "${SHARD}/${SHARDS}"
+          scope=()
+          if [ -n "${MUTATION_BASE}" ]; then
+            git diff "${MUTATION_BASE}" HEAD -- crates/ > "${RUNNER_TEMP}/mutants.diff"
+            scope=(--in-diff "${RUNNER_TEMP}/mutants.diff")
+          fi
+          assigned="$(cargo mutants --list "${scope[@]}" --shard "${SHARD}/${SHARDS}" | grep -c .)"
+          cargo mutants --in-place --build-timeout 300 "${scope[@]}" --shard "${SHARD}/${SHARDS}"
           status=$?
           echo "cargo-mutants exit status: ${status}"
           echo "${status}" > mutants.out/exit-status
