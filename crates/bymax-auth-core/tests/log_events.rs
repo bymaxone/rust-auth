@@ -48,6 +48,15 @@ const CLOSED_CAUSES: [&str; 5] = [
 /// any other name, or a positional `{}`, has to be added here, which is the review.
 const ALLOWED_CAPTURES: [&str; 2] = ["step", "outcome"];
 
+/// The crates of the `tracing` family production code does not name: a call is `tracing::<level>!`.
+const TRACING_CRATES: [&str; 5] = [
+    "tracing_core",
+    "tracing_log",
+    "tracing_subscriber",
+    "tracing_appender",
+    "tracing_attributes",
+];
+
 /// The levels a `tracing` macro names.
 const LEVELS: [&str; 5] = ["error", "warn", "info", "debug", "trace"];
 
@@ -93,7 +102,9 @@ fn production_sources() -> Vec<PathBuf> {
     }
     files.retain(|path| {
         let name = path.to_string_lossy();
-        !name.ends_with("_tests.rs") && !name.ends_with("log_capture.rs")
+        !name.ends_with("_tests.rs")
+            && !name.ends_with("/tests.rs")
+            && !name.ends_with("log_capture.rs")
     });
     files.sort();
     files
@@ -459,36 +470,85 @@ fn a_capture_is_read_out_of_a_message_literal() {
     assert!(captures_of("\"a {{braced}} message\"").is_empty());
 }
 
-/// The `tracing` macro forms in `text` that `calls_in` does not read: a macro called without its
-/// `tracing::` path (after a `use`), `tracing::event!`, `tracing::span!`, or a `!` and its `(`
-/// split by whitespace. Any import of `tracing` is one too: an alias (`use tracing::warn as
-/// log_warn;`) would hide a call under a name the scan does not look for, so production code
-/// names every call as `tracing::<level>!`.
-fn unscanned_forms(text: &str) -> Vec<String> {
-    let mut found = Vec::new();
-    for (at, _) in text.match_indices('!') {
-        let before = &text[..at];
-        let name_start = before
-            .rfind(|c: char| !(c.is_alphanumeric() || c == '_'))
-            .map_or(0, |i| i + 1);
-        let name = &before[name_start..];
-        if !(LEVELS.contains(&name) || ["event", "span"].contains(&name)) {
-            continue;
-        }
-        let scanned = before[..name_start].ends_with("tracing::")
-            && LEVELS.contains(&name)
-            && text[at + 1..].starts_with('(');
-        if !scanned {
-            found.push(format!("{name}!"));
+/// `text` with every comment and the inside of every string literal blanked to spaces, so what is
+/// left is code: an identifier in a doc line or in a message is not a use of it.
+fn code_only(text: &str) -> String {
+    let (mut out, mut chars) = (String::with_capacity(text.len()), text.chars().peekable());
+    let (mut in_string, mut line_comment, mut block_depth) = (false, false, 0_usize);
+    while let Some(c) = chars.next() {
+        let blank = |c: char| if c == '\n' { '\n' } else { ' ' };
+        if line_comment {
+            line_comment = c != '\n';
+            out.push(blank(c));
+        } else if block_depth > 0 {
+            if c == '*' && chars.peek() == Some(&'/') {
+                chars.next();
+                block_depth -= 1;
+                out.push_str("  ");
+            } else if c == '/' && chars.peek() == Some(&'*') {
+                chars.next();
+                block_depth += 1;
+                out.push_str("  ");
+            } else {
+                out.push(blank(c));
+            }
+        } else if in_string {
+            if c == '\\' {
+                out.push(' ');
+                out.extend(chars.next().map(blank));
+            } else {
+                in_string = c != '"';
+                out.push(if c == '"' { '"' } else { blank(c) });
+            }
+        } else if c == '/' && chars.peek() == Some(&'/') {
+            line_comment = true;
+            out.push(' ');
+        } else if c == '/' && chars.peek() == Some(&'*') {
+            chars.next();
+            block_depth = 1;
+            out.push_str("  ");
+        } else {
+            in_string = c == '"';
+            out.push(c);
         }
     }
-    for line in text.lines().map(str::trim_start) {
-        let line = line.strip_prefix("pub ").unwrap_or(line);
-        if ["use tracing", "use ::tracing", "extern crate tracing"]
-            .iter()
-            .any(|import| line.starts_with(import))
-        {
-            found.push(line.to_owned());
+    out
+}
+
+/// Where `text`, read as code, names `tracing` in any way but the one spelling the scan reads,
+/// `tracing::<level>!(`, and every other `tracing` macro form. Production code names a call that
+/// one way so the scan sees all of them: an import (`use tracing::warn as log_warn;`, a glob, an
+/// `extern crate`), `tracing::event!`, `tracing::span!`, `#[tracing::instrument]`, a `tracing_*`
+/// crate, whitespace inside the path, or a bare level macro whose import the scan cannot see.
+fn unscanned_forms(text: &str) -> Vec<String> {
+    let code = code_only(text);
+    let is_ident = |c: char| c.is_alphanumeric() || c == '_';
+    let mut found = Vec::new();
+    for (at, _) in code.match_indices("tracing") {
+        let word_end = code[at..]
+            .find(|c: char| !is_ident(c))
+            .map_or(code.len(), |n| at + n);
+        let word = &code[at..word_end];
+        let names_the_crate = word == "tracing" || TRACING_CRATES.contains(&word);
+        if code[..at].chars().next_back().is_some_and(is_ident) || !names_the_crate {
+            continue;
+        }
+        let read = LEVELS.iter().any(|level| {
+            code[at..]
+                .strip_prefix("tracing::")
+                .and_then(|rest| rest.strip_prefix(level))
+                .is_some_and(|rest| rest.starts_with("!("))
+        });
+        if !read {
+            let end = code[at..].find('\n').map_or(code.len(), |n| at + n);
+            found.push(code[at..end].trim().to_owned());
+        }
+    }
+    for (at, _) in code.match_indices('!') {
+        let before = &code[..at];
+        let name = &before[before.rfind(|c: char| !is_ident(c)).map_or(0, |i| i + 1)..];
+        if LEVELS.contains(&name) && !before.trim_end_matches(is_ident).ends_with("tracing::") {
+            found.push(format!("{name}!"));
         }
     }
     found
@@ -514,21 +574,35 @@ fn the_scan_sees_every_form_a_tracing_call_can_take() {
 fn the_unscanned_forms_are_recognised() {
     for bypass in [
         "use tracing::warn;\nwarn!(event = \"RUST_AUTH_X\");",
-        "tracing::event!(Level::WARN, \"x\");",
-        "tracing::warn! (event = \"RUST_AUTH_X\");",
-        "tracing::span!(Level::INFO, \"x\");",
-        "info!(x);",
         "use tracing::warn as log_warn;\nlog_warn!(\"x {email}\", email = email);",
-        "    pub use ::tracing::{warn, info};",
-        "extern crate tracing;",
+        "use tracing::*;",
+        "pub use ::tracing::{warn, info};",
+        "extern crate tracing as t;\nt::warn!(x);",
+        "use tracing as t;",
+        "tracing::event!(Level::WARN, \"x\");",
+        "tracing::span!(Level::INFO, \"x\");",
+        "#[tracing::instrument]\nfn f() {}",
+        "tracing :: warn!(x);",
+        "tracing::warn !(x);",
+        "tracing::warn! (x);",
+        "tracing_core::Event::dispatch(x);",
+        "info!(x);",
     ] {
         assert!(!unscanned_forms(bypass).is_empty(), "{bypass}");
     }
     for read in [
         "tracing::warn!(event = \"RUST_AUTH_X\");",
+        "::tracing::error!(event = \"RUST_AUTH_X\");",
         "debug_assert!(x);",
         "assert!(x); format!(\"{x}\");",
+        "// uses tracing::event! and `use tracing::warn;` in a note\nlet x = 1;",
+        "/// the `tracing` crate\n/* use tracing::warn; */ let x = \"a tracing b\";",
+        "let tracing_enabled = true;",
     ] {
-        assert!(unscanned_forms(read).is_empty(), "{read}");
+        assert!(
+            unscanned_forms(read).is_empty(),
+            "{read}: {:?}",
+            unscanned_forms(read)
+        );
     }
 }
