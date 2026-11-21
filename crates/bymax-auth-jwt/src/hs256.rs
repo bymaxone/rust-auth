@@ -247,6 +247,10 @@ mod tests {
         UNIX_EPOCH.duration_since(UNIX_EPOCH + Duration::from_secs(1))
     }
 
+    fn unreadable_clock() -> Result<i64, JwtError> {
+        Err(JwtError::Clock)
+    }
+
     #[test]
     fn a_clock_before_the_epoch_is_an_error_and_never_zero() {
         // Read as zero, every `exp` is in the future and a token never expires.
@@ -264,7 +268,7 @@ mod tests {
     fn a_check_that_needs_the_clock_and_cannot_read_it_is_refused_with_the_clock_error() {
         let claims = dashboard(0, 100);
         let opts = VerifyOptions::default();
-        let refused = validate_temporal_with(&claims, &opts, || Err(JwtError::Clock));
+        let refused = validate_temporal_with(&claims, &opts, unreadable_clock);
         assert_eq!(refused, Err(JwtError::Clock));
         for only in [(true, false), (false, true)] {
             let opts = VerifyOptions {
@@ -272,7 +276,7 @@ mod tests {
                 validate_iat: only.1,
                 ..VerifyOptions::default()
             };
-            let refused = validate_temporal_with(&claims, &opts, || Err(JwtError::Clock));
+            let refused = validate_temporal_with(&claims, &opts, unreadable_clock);
             assert_eq!(refused, Err(JwtError::Clock), "{only:?}");
         }
     }
@@ -282,7 +286,7 @@ mod tests {
         let claims = dashboard(0, 100);
         let supplied = opts_at(50);
         assert_eq!(
-            validate_temporal_with(&claims, &supplied, || Err(JwtError::Clock)),
+            validate_temporal_with(&claims, &supplied, unreadable_clock),
             Ok(())
         );
         let unchecked = VerifyOptions {
@@ -291,7 +295,7 @@ mod tests {
             ..VerifyOptions::default()
         };
         assert_eq!(
-            validate_temporal_with(&claims, &unchecked, || Err(JwtError::Clock)),
+            validate_temporal_with(&claims, &unchecked, unreadable_clock),
             Ok(())
         );
     }
