@@ -148,9 +148,10 @@ pub async fn run_invitation_store_scenarios<S: InvitationStoreProbe + ?Sized>(st
     everything_expires_together_and_an_expired_index_is_replaced_like_any_other(store).await;
     the_inviter_counter_starts_its_hour_at_the_first_increment(store).await;
     a_bootstrap_record_reads_back_as_written(store).await;
+    an_uncapped_publication_leaves_a_dead_member_alone(store).await;
 }
 
-async fn a_first_publication_writes_all_three_structures_with_one_lifetime<
+pub(super) async fn a_first_publication_writes_all_three_structures_with_one_lifetime<
     S: InvitationStoreProbe + ?Sized,
 >(
     store: &S,
@@ -233,7 +234,7 @@ async fn a_writer_that_read_a_stale_index_writes_nothing<S: InvitationStoreProbe
     );
 }
 
-async fn the_cap_refuses_a_first_invitation_and_a_replacement_skips_it<
+pub(super) async fn the_cap_refuses_a_first_invitation_and_a_replacement_skips_it<
     S: InvitationStoreProbe + ?Sized,
 >(
     store: &S,
@@ -268,7 +269,9 @@ async fn the_cap_refuses_a_first_invitation_and_a_replacement_skips_it<
     );
 }
 
-async fn a_gone_record_is_dropped_before_the_cap_is_counted<S: InvitationStoreProbe + ?Sized>(
+pub(super) async fn a_gone_record_is_dropped_before_the_cap_is_counted<
+    S: InvitationStoreProbe + ?Sized,
+>(
     store: &S,
 ) {
     let f = Fixture::new("dead");
@@ -385,7 +388,9 @@ async fn the_listing_drops_what_is_gone_and_shows_the_time_left<
     );
 }
 
-async fn a_foreign_value_under_a_record_key_reads_as_absent<S: InvitationStoreProbe + ?Sized>(
+pub(super) async fn a_foreign_value_under_a_record_key_reads_as_absent<
+    S: InvitationStoreProbe + ?Sized,
+>(
     store: &S,
 ) {
     let f = Fixture::new("foreign");
@@ -413,7 +418,7 @@ async fn a_foreign_value_under_a_record_key_reads_as_absent<S: InvitationStorePr
     );
 }
 
-async fn everything_expires_together_and_an_expired_index_is_replaced_like_any_other<
+pub(super) async fn everything_expires_together_and_an_expired_index_is_replaced_like_any_other<
     S: InvitationStoreProbe + ?Sized,
 >(
     store: &S,
@@ -472,7 +477,9 @@ async fn the_inviter_counter_starts_its_hour_at_the_first_increment<
     assert!(later <= first, "a later increment never extends the hour");
 }
 
-async fn a_bootstrap_record_reads_back_as_written<S: InvitationStoreProbe + ?Sized>(store: &S) {
+pub(super) async fn a_bootstrap_record_reads_back_as_written<S: InvitationStoreProbe + ?Sized>(
+    store: &S,
+) {
     let fixture = Fixture::new("bootstrap-roundtrip");
     let key = fixture.key("record");
     let written = InvitationRecord::Bootstrap {
@@ -504,5 +511,26 @@ async fn a_bootstrap_record_reads_back_as_written<S: InvitationStoreProbe + ?Siz
     assert!(
         matches!(&read, Ok(Some(found)) if *found == written),
         "a bootstrap record did not read back as written: {read:?}"
+    );
+}
+
+/// With no cap there is nothing to count, so the set is not pruned.
+pub(super) async fn an_uncapped_publication_leaves_a_dead_member_alone<
+    S: InvitationStoreProbe + ?Sized,
+>(
+    store: &S,
+) {
+    let f = Fixture::new("uncapped");
+    let (dead, fresh) = (f.key("dead"), f.key("fresh"));
+    publish(store, &f.place, &dead, "a@x", 0, None, TTL).await;
+    store.delete_record(&dead).await;
+    let other = f.neighbour("b");
+    publish(store, &other, &fresh, "b@x", 0, None, TTL).await;
+    let mut expected = vec![dead, fresh];
+    expected.sort();
+    assert_eq!(
+        store.set_members(&f.place).await,
+        expected,
+        "an uncapped publication does not prune the set"
     );
 }

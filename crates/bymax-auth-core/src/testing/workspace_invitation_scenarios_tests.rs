@@ -10,7 +10,9 @@ use async_trait::async_trait;
 use bymax_auth_types::AuthError;
 
 use super::InMemoryWorkspaceInvitations;
-use super::workspace_invitation_scenarios::{InvitationStoreProbe, run_invitation_store_scenarios};
+use super::workspace_invitation_scenarios::{
+    self as scenarios, InvitationStoreProbe, run_invitation_store_scenarios,
+};
 use crate::traits::{
     IndexedInvitation, InvitationPlace, PendingInvitation, Publication, PublishOutcome,
     WorkspaceInvitationStore,
@@ -43,6 +45,18 @@ enum Fault {
     ListsDeadMembers,
     /// A count answers one whatever came before.
     ForgetsTheCount,
+    /// A publication leaves every lifetime shorter than the one it was given.
+    ShortensTheLifetimes,
+    /// A publication leaves the index living far longer than the record.
+    StretchesTheLifetimes,
+    /// A publication counts the members whose record is gone.
+    CountsGoneRecords,
+    /// A record key that holds no record reads as a record.
+    InventsARecord,
+    /// A bootstrap record reads as absent.
+    DropsBootstrapRecords,
+    /// A publication with no cap still prunes the set.
+    PrunesWhenUncapped,
 }
 
 struct Broken {
@@ -58,10 +72,55 @@ impl Broken {
     }
 }
 
+impl Broken {
+    /// Publishes, then leaves the index living for a different time than the one it was given.
+    async fn moves_the_index_lifetime(
+        &self,
+        publication: Publication<'_>,
+    ) -> Result<PublishOutcome, AuthError> {
+        let outcome = self.inner.publish(publication).await?;
+        let seconds = if matches!(self.fault, Fault::ShortensTheLifetimes) {
+            60
+        } else {
+            6_000
+        };
+        let ttl = Duration::from_secs(seconds);
+        self.inner
+            .point_index(publication.place, publication.record_key, ttl)
+            .await;
+        Ok(outcome)
+    }
+
+    /// The faults that act before the publication reaches the store: an answer of their own, or a
+    /// prune the store would not have made.
+    async fn before_publishing(
+        &self,
+        publication: &Publication<'_>,
+    ) -> Result<Option<PublishOutcome>, AuthError> {
+        let uncapped = publication.pending_limit == 0;
+        if matches!(self.fault, Fault::PrunesWhenUncapped) && uncapped {
+            self.inner.pending(publication.place).await?;
+        }
+        if matches!(self.fault, Fault::CountsGoneRecords) && !uncapped {
+            let held = self.inner.set_members(publication.place).await.len();
+            let limit = usize::try_from(publication.pending_limit).unwrap_or(usize::MAX);
+            if publication.expected_key.is_none() && held >= limit {
+                return Ok(Some(PublishOutcome::Full));
+            }
+        }
+        Ok(None)
+    }
+}
+
 #[async_trait]
 impl WorkspaceInvitationStore for Broken {
     async fn read_record(&self, record_key: &str) -> Result<Option<InvitationRecord>, AuthError> {
-        self.inner.read_record(record_key).await
+        let read = self.inner.read_record(record_key).await?;
+        Ok(match (self.fault, read) {
+            (Fault::InventsARecord, None) => InvitationRecord::parse(&record_json()),
+            (Fault::DropsBootstrapRecords, Some(InvitationRecord::Bootstrap { .. })) => None,
+            (_, read) => read,
+        })
     }
 
     async fn read_index(
@@ -72,6 +131,9 @@ impl WorkspaceInvitationStore for Broken {
     }
 
     async fn publish(&self, publication: Publication<'_>) -> Result<PublishOutcome, AuthError> {
+        if let Some(outcome) = self.before_publishing(&publication).await? {
+            return Ok(outcome);
+        }
         let mut changed = publication;
         match self.fault {
             Fault::IgnoresTheIndexComparison => {
@@ -101,6 +163,9 @@ impl WorkspaceInvitationStore for Broken {
                         .await;
                 }
                 return Ok(outcome);
+            }
+            Fault::ShortensTheLifetimes | Fault::StretchesTheLifetimes => {
+                return self.moves_the_index_lifetime(publication).await;
             }
             _ => {}
         }
@@ -264,4 +329,84 @@ async fn an_unavailable_store_fails_every_call_and_recovers_when_it_is_back() {
     assert!(matches!(store.count_inviter("rate").await, Ok(1)));
     assert!(matches!(store.read_record("winv:k").await, Ok(None)));
     assert!(matches!(store.read_index(&place).await, Ok(None)));
+}
+
+/// Whether one scenario, played alone, panics on a store with `fault`.
+async fn alone_fails<F, Fut>(fault: Fault, play: F) -> bool
+where
+    F: FnOnce(std::sync::Arc<Broken>) -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = ()> + Send + 'static,
+{
+    tokio::spawn(async move { play(std::sync::Arc::new(Broken::new(fault))).await })
+        .await
+        .is_err()
+}
+
+#[tokio::test]
+async fn each_scenario_alone_fails_on_the_store_it_is_written_for() {
+    let cases = [
+        alone_fails(Fault::ShortensTheLifetimes, |s| async move {
+            scenarios::a_first_publication_writes_all_three_structures_with_one_lifetime(&*s).await;
+        })
+        .await,
+        alone_fails(Fault::StretchesTheLifetimes, |s| async move {
+            scenarios::a_first_publication_writes_all_three_structures_with_one_lifetime(&*s).await;
+        })
+        .await,
+        alone_fails(Fault::IgnoresTheCap, |s| async move {
+            scenarios::the_cap_refuses_a_first_invitation_and_a_replacement_skips_it(&*s).await;
+        })
+        .await,
+        alone_fails(Fault::CountsGoneRecords, |s| async move {
+            scenarios::a_gone_record_is_dropped_before_the_cap_is_counted(&*s).await;
+        })
+        .await,
+        alone_fails(Fault::InventsARecord, |s| async move {
+            scenarios::a_foreign_value_under_a_record_key_reads_as_absent(&*s).await;
+        })
+        .await,
+        alone_fails(Fault::StretchesTheLifetimes, |s| async move {
+            scenarios::everything_expires_together_and_an_expired_index_is_replaced_like_any_other(
+                &*s,
+            )
+            .await;
+        })
+        .await,
+        alone_fails(Fault::DropsBootstrapRecords, |s| async move {
+            scenarios::a_bootstrap_record_reads_back_as_written(&*s).await;
+        })
+        .await,
+        alone_fails(Fault::PrunesWhenUncapped, |s| async move {
+            scenarios::an_uncapped_publication_leaves_a_dead_member_alone(&*s).await;
+        })
+        .await,
+    ];
+    assert_eq!(
+        cases, [true; 8],
+        "a scenario that passed on its broken store"
+    );
+}
+
+#[tokio::test]
+async fn a_record_is_readable_strictly_before_the_instant_it_expires() {
+    let store = InMemoryWorkspaceInvitations::new();
+    store.freeze_clock();
+    store
+        .plant_raw_record("winv:k", &record_json(), Duration::from_secs(10))
+        .await;
+    store.advance_clock(Duration::from_secs(9));
+    assert!(matches!(store.read_record("winv:k").await, Ok(Some(_))));
+    store.advance_clock(Duration::from_secs(1));
+    assert!(matches!(store.read_record("winv:k").await, Ok(None)));
+}
+
+#[tokio::test]
+async fn a_frozen_clock_stays_where_it_was_stopped() {
+    let store = InMemoryWorkspaceInvitations::new();
+    store.freeze_clock();
+    store
+        .plant_raw_record("winv:k", &record_json(), Duration::from_secs(600))
+        .await;
+    std::thread::sleep(Duration::from_millis(1_200));
+    assert_eq!(store.record_ttl("winv:k").await, Some(600));
 }
