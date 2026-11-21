@@ -243,10 +243,25 @@ async fn an_unavailable_store_fails_every_call_and_recovers_when_it_is_back() {
     store.set_unavailable(true);
     assert!(store.read_record("winv:k").await.is_err());
     assert!(store.read_index(&place).await.is_err());
+    let raw = r#"{"email":"a@example.com","role":"member","tenantId":"t1","workspaceId":"w1","createdAt":"2026-11-20T10:00:00.000Z","resendCount":0,"kind":"member","inviterUserId":"u1"}"#;
+    let record = InvitationRecord::parse(raw);
+    assert!(record.is_some(), "the fixture record must parse");
+    if let Some(record) = record {
+        let publication = Publication {
+            place: &place,
+            record_key: "winv:k",
+            record: &record,
+            ttl: std::num::NonZeroU64::MIN,
+            pending_limit: 0,
+            expected_key: None,
+        };
+        assert!(store.publish(publication).await.is_err());
+    }
     assert!(store.remove(&place, "winv:k").await.is_err());
     assert!(store.pending(&place).await.is_err());
     assert!(store.count_inviter("rate").await.is_err());
     store.set_unavailable(false);
     assert!(matches!(store.count_inviter("rate").await, Ok(1)));
     assert!(matches!(store.read_record("winv:k").await, Ok(None)));
+    assert!(matches!(store.read_index(&place).await, Ok(None)));
 }
