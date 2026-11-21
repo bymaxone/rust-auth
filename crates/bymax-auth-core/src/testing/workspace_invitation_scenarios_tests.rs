@@ -18,6 +18,7 @@ use crate::traits::{
     WorkspaceInvitationStore,
 };
 use crate::workspace::invitation::InvitationRecord;
+use crate::workspace::limits::INVITER_WINDOW_SECONDS;
 
 #[tokio::test]
 async fn the_in_memory_store_passes_every_scenario() {
@@ -57,6 +58,8 @@ enum Fault {
     DropsBootstrapRecords,
     /// A publication with no cap still prunes the set.
     PrunesWhenUncapped,
+    /// Every increment starts the counter's hour over.
+    ResetsTheWindow,
 }
 
 struct Broken {
@@ -245,7 +248,11 @@ impl InvitationStoreProbe for Broken {
         self.inner.set_ttl(place).await
     }
     async fn rate_ttl(&self, rate_id: &str) -> Option<u64> {
-        self.inner.rate_ttl(rate_id).await
+        let left = self.inner.rate_ttl(rate_id).await;
+        if matches!(self.fault, Fault::ResetsTheWindow) {
+            return left.map(|_| INVITER_WINDOW_SECONDS);
+        }
+        left
     }
 }
 
@@ -380,9 +387,13 @@ async fn a_scenario_written_for_a_fault_fails_alone_on_a_store_with_that_fault()
             scenarios::an_uncapped_publication_leaves_a_dead_member_alone(&*s).await;
         })
         .await,
+        alone_fails(Fault::ResetsTheWindow, |s| async move {
+            scenarios::the_inviter_counter_starts_its_hour_at_the_first_increment(&*s).await;
+        })
+        .await,
     ];
     assert_eq!(
-        cases, [true; 8],
+        cases, [true; 9],
         "a scenario that passed on its broken store"
     );
 }

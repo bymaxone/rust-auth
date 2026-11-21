@@ -454,7 +454,7 @@ pub(super) async fn everything_expires_together_and_an_expired_index_is_replaced
     );
 }
 
-async fn the_inviter_counter_starts_its_hour_at_the_first_increment<
+pub(super) async fn the_inviter_counter_starts_its_hour_at_the_first_increment<
     S: InvitationStoreProbe + ?Sized,
 >(
     store: &S,
@@ -474,7 +474,11 @@ async fn the_inviter_counter_starts_its_hour_at_the_first_increment<
     store.pass_time(Duration::from_secs(2)).await;
     store.count_inviter(rate).await.ok();
     let later = store.rate_ttl(rate).await;
-    assert!(later <= first, "a later increment never extends the hour");
+    let spent = matches!((first, later), (Some(first), Some(later)) if later < first);
+    assert!(
+        spent,
+        "a later increment leaves the hour running: {first:?} then {later:?}"
+    );
 }
 
 pub(super) async fn a_bootstrap_record_reads_back_as_written<S: InvitationStoreProbe + ?Sized>(
