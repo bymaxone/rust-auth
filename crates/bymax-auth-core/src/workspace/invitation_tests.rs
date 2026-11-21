@@ -193,6 +193,8 @@ fn a_record_missing_or_mistyping_a_common_field_reads_as_absent() {
             ("a missing email", Edit::Drop("email")),
             ("a non-string role", Edit::Set("role", 1.into())),
             ("a missing tenant", Edit::Drop("tenantId")),
+            ("an empty tenant", Edit::Set("tenantId", "".into())),
+            ("an empty workspace", Edit::Set("workspaceId", "".into())),
             ("a missing workspace", Edit::Drop("workspaceId")),
             ("a missing createdAt", Edit::Drop("createdAt")),
             (

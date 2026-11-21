@@ -575,7 +575,7 @@ Everything is configured through `AuthConfig`. Two ready-made profiles bundle se
 | **roles**          | `hierarchy` (required), `platform_hierarchy`                                 | —                          |
 | **oauth**          | `google`, `redirect_allowlist`, `*_redirect_url`                            | —                          |
 | **controllers**    | per-group route toggles (`auth`, `password_reset`, `mfa`, `sessions`, `platform`, `oauth`, `invitations`, `email_change`, `workspaces`); `sessions`, `platform` and `invitations` follow their `enabled` flag | `auth` and `password_reset` on, the rest off |
-| **workspaces**     | `enabled` (needs `WorkspaceRepository`, `MembershipRepository` and a membership cache store on the builder), `roles` (`hierarchy`, `owner_role`), `permissions`, `membership_cache_ttl_seconds`, `allow_create`, `max_workspaces_per_user`, `deletion_grace_days` | `false`, —, owner-only except `view_members`, 60, `true`, `0` (no limit), 14 |
+| **workspaces**     | `enabled` (needs `WorkspaceRepository`, `MembershipRepository` and a membership cache store on the builder), `roles` (`hierarchy`, `owner_role`), `permissions`, `membership_cache_ttl_seconds`, `allow_create`, `max_workspaces_per_user`, `deletion_grace_days`, `invitation_ttl_seconds`, `max_pending_invitations_per_workspace` | `false`, —, owner-only except `view_members`, 60, `true`, `0` (no limit), 14, 604800 (60 to 2592000), 100 (1 to 10000) |
 | **route_prefix**   | the mount segment of every route; a value other than `auth` requires an explicit `cookies.refresh_cookie_path` (`RefreshPathMismatch`) | `auth`                     |
 | **tenancy**        | `tenant_id_resolver`, `enforce_tenant_binding` (refuses a token minted for another tenant than the resolver names; requires a resolver, else `TenantBindingWithoutResolver`) | none, `false`              |
 | **account status** | `blocked_statuses`, `user_status_cache_ttl` (how long a status change takes to reach a live token) | `BANNED`, `INACTIVE`, `SUSPENDED`; 60 s |
@@ -891,6 +891,9 @@ A test (`crates/bymax-auth-core/tests/log_events.rs`) reads every crate's source
 | `RUST_AUTH_SIDE_EFFECT_TIMEOUT` | warn | A detached side effect exceeded its timeout ceiling and is ignored |
 | `RUST_AUTH_STORE_UNAVAILABLE` | error | A request failed because a store could not answer (answered 503) |
 | `RUST_AUTH_TENANT_BINDING_NOT_APPLIED` | warn | Tenant binding is on but no request was supplied, so it was not applied |
+| `RUST_AUTH_WORKSPACE_INVITATIONS_UNCONFIGURED` | warn | Workspaces are enabled with no invitation store, so workspace invitations are unavailable |
+| `RUST_AUTH_WORKSPACE_INVITATION_DELIVERY_FAILED` | warn | A workspace invitation message could not be delivered (the invitation stands) |
+| `RUST_AUTH_WORKSPACE_INVITATION_EMAIL_UNSUPPORTED` | error | The email provider does not implement workspace invitations |
 | `RUST_AUTH_WS_TICKET_REFUSED_MFA_PENDING` | warn | A WebSocket ticket was refused: the session has not satisfied its second factor |
 | `RUST_AUTH_WS_TICKET_REFUSED_NO_TENANT` | warn | A WebSocket ticket was refused: the snapshot names no tenant |
 | `RUST_AUTH_WS_TICKET_REFUSED_TOKEN_REVOKED` | warn | A WebSocket ticket was refused: the token it was minted from is revoked |

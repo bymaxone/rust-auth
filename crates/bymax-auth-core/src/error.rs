@@ -54,6 +54,22 @@ pub enum ConfigError {
         /// The largest value accepted.
         max: u32,
     },
+    /// A numeric `workspaces` option is under its lower bound.
+    #[error("workspaces.{option} must be at least {min}")]
+    WorkspaceOptionBelowMinimum {
+        /// The option, as the shared contract names it.
+        option: &'static str,
+        /// The smallest value accepted.
+        min: u64,
+    },
+    /// A numeric `workspaces` option is over its upper bound.
+    #[error("workspaces.{option} must be at most {max}")]
+    WorkspaceOptionAboveMaximum {
+        /// The option, as the shared contract names it.
+        option: &'static str,
+        /// The largest value accepted.
+        max: u64,
+    },
     /// `workspaces.membership_cache_ttl_seconds` is over the maximum.
     #[error(transparent)]
     WorkspaceMembershipCacheTtl(crate::workspace::membership_cache::MembershipCacheTtlTooLong),

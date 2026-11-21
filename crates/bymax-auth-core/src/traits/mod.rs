@@ -43,6 +43,7 @@ pub use default_email::{
 };
 pub use email::{
     EmailError, EmailProvider, InviteData, NoOpEmailProvider, PLATFORM_EMAIL_TENANT, SessionInfo,
+    WorkspaceInviteData, WorkspaceInviteKind,
 };
 #[doc(inline)]
 pub use hooks::{
@@ -78,7 +79,7 @@ pub use store::{
 #[doc(inline)]
 pub use user_status_cache::UserStatusCacheStore;
 pub use workspace_invitation_store::{
-    IndexedInvitation, InvitationPlace, PendingInvitation, Publication, PublishOutcome,
+    IndexedInvitation, InvitationPlace, PendingInvitation, Publication, PublishOutcome, Removal,
     WorkspaceInvitationStore,
 };
 #[doc(inline)]

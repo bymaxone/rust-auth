@@ -69,7 +69,7 @@ Because every one of those lists is compared with this repository's own tables i
 | 13.5a | Workspace reads: list, access, members, switch, and the guard | ✅ Done (#396) | 13.1, 13.3, 13.4 |
 | 13.5b | Workspace mutations: create, rename, deletion lifecycle, role, remove, leave, transfer | ✅ Done (#398) | 13.5a |
 | 13.6a | Invitation store: record, index, set, counter, and their scripts | 🔄 In review | 13.2, 13.3 |
-| 13.6b | Invitation services: invite, resend, revoke, list, preview | 📋 ToDo | 13.5a, 13.6a |
+| 13.6b | Invitation services: invite, resend, revoke, list, preview | 🔄 In review | 13.5a, 13.6a |
 | 13.6c | Invitation routes and DTOs | 📋 ToDo | 13.6b |
 | 13.7 | Acceptance family and bootstrap invitations | 📋 ToDo | 13.5b, 13.6 |
 | 13.8 | OAuth invitation, invitation-only registration, the OAuth MFA branch | 📋 ToDo | 13.7 |
@@ -225,6 +225,28 @@ Because every one of those lists is compared with this repository's own tables i
 **Behaviour to probe:** the role ceiling (the owner invites to any role; every other role invites only to a role strictly below its own); an address that has a membership in ANY status is refused with `409 auth.already_member`; invite, resend and revoke answer 204 with no body whether or not the address has an account, and the email provider is told `accountExists`; the 60 s cooldown and the limit of 5 resends apply to a second invitation as to a resend; the preview needs no credential, takes a token of exactly 64 characters, and answers a union on `kind` (`member` carries `inviterName`, `bootstrap` has none), with one `400 auth.invalid_invitation_token` for every failure cause and the same repository reads in each; a delivery failure is re-thrown without the failing text, which may quote the token.
 
 **Probes reused:** the indistinguishability harness of the declared-structures test (registered against unknown address: identical status and payload) extends to the invitation answers.
+
+
+### Design of 13.6b — the invitation services
+
+**Surface.** Five methods on `AuthEngine`, each `(&self, member: &WorkspaceMember, …, ctx: &RequestContext)` like the member services: `invite_workspace_member(email, role)`, `resend_workspace_invitation(email)`, `revoke_workspace_invitation(email)`, `list_workspace_invitations(PageQuery)` and, with no caller, `preview_workspace_invitation(token)`. Bootstrap invitations are 13.7.
+
+**What does not exist yet and is added here.**
+
+- `workspaces.invitationTtlSeconds` (default 604800, at most 2592000) and `workspaces.maxPendingInvitationsPerWorkspace` (default 100), resolved and validated like the other workspace options.
+- The store on the workspace runtime. A deployment with workspaces enabled and no invitation store refuses the invitation methods with an internal error; the routes of 13.6c mount only when one is configured.
+- `EmailProvider::send_workspace_invitation(tenant, email, &WorkspaceInviteData { inviter_name, workspace_name, role, invite_token, expires_at, account_exists, kind }, locale)`, a defaulted method that fails as unsupported, so a host that has not implemented it gets a delivery failure and not a compile error.
+- `IndexedInvitation` says whether the index names a key that holds a value which is not a record, so an unreadable record is told apart from one that has expired.
+
+**Order of an invitation** (the order nest-auth runs, because each step decides what the next one reveals): the role the actor may grant (the owner any known role; any other role strictly below its own; an unknown role is `auth.validation` naming `role`) → the address normalised → one count against the inviter's hour (more than 20 is `auth.too_many_requests`) → the index read → for a live record, the actor must be able to act on it (`auth.insufficient_workspace_role`) and the 60 s cooldown and 5 resends apply (`auth.too_many_requests`) → an address with a membership in any status is `auth.already_member` → the workspace must be active (`auth.workspace_not_found`) and the inviter must exist → a 32-byte token, its record, one publication (a replacement skips the cap; a first invitation is capped; anything but `Published` is `auth.too_many_requests`) → the email → the event.
+
+**A time that cannot be trusted is refused, never due.** `InvitationRecord::parse` already refuses a creation time that is not an RFC 3339 instant. An index that names a key holding such a value is an internal error on invite and resend, never "no cooldown"; revoke and preview treat it as nothing to act on. A creation time in the future counts as inside the cooldown.
+
+**Resend and revoke** answer success and change nothing for an address with no live invitation or one the actor may not act on, so neither confirms anything. **Preview** runs the same three reads (workspace, inviter, account) for every token, with a stand-in lookup where the token names nothing, and answers one `auth.invalid_invitation_token` for every failure.
+
+**Delivery.** A failure is logged under a closed `RUST_AUTH_` code with no address, token or hash and answered as an internal error without the provider's text; the record stays published. The log-event guard and the README table gain the code in the same change.
+
+**Tests, written first.** The role ceiling and its boundary, every limit, a lost compare-and-set, a first invitation at the cap against a replacement, an address that is a member in each status, an invalid creation time on invite and resend, delivery failure carrying no text, the events, and preview indistinguishability (the same error for each failure cause; the same three reads for every token follow from the code, which runs the lookups before it looks at the record).
 
 ---
 

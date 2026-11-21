@@ -379,6 +379,17 @@ impl AuthEngineBuilder {
         self
     }
 
+    /// Set the store of workspace invitations (`RedisStores` implements it). Optional: without it
+    /// the invitation methods answer an internal error, and the boot logs that.
+    #[must_use]
+    pub fn workspace_invitation_store(
+        mut self,
+        store: Arc<dyn crate::traits::WorkspaceInvitationStore>,
+    ) -> Self {
+        self.workspaces.invitations = Some(store);
+        self
+    }
+
     /// Validate the configuration and assemble the engine.
     ///
     /// # Errors

@@ -28,14 +28,28 @@ pub struct InvitationPlace {
     pub set_id: String,
 }
 
+/// Which records a removal may delete.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Removal {
+    /// Only a record the place owns: a revoke, which read the record's key from that place.
+    Owned,
+    /// The record whatever place it is asked under: the spend that follows an acceptance, where a
+    /// single-use record must go even when its set or its index no longer names it.
+    Spend,
+}
+
 /// What an address's index names.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IndexedInvitation {
     /// The record key the index holds, as stored: `winv:{sha256(token)}`.
     pub record_key: String,
-    /// The record under that key, or `None` when it has expired, been deleted, or is not a record
-    /// (a live index over a gone record).
+    /// The record under that key, or `None` when the key is gone or holds a value that is not a
+    /// record.
     pub record: Option<InvitationRecord>,
+    /// Whether the key exists and holds a value that is not a record. It tells an unreadable
+    /// record, which no later step can trust, from one that has expired or been deleted, which is
+    /// simply no invitation.
+    pub unreadable: bool,
 }
 
 /// One live invitation of a workspace, with the time it has left. The token is never part of it.
@@ -108,9 +122,17 @@ pub trait WorkspaceInvitationStore: Send + Sync {
     async fn publish(&self, publication: Publication<'_>) -> Result<PublishOutcome, AuthError>;
 
     /// Deletes the record, its place in the set, and the index only while it still names this
-    /// record, in one atomic step. Answers whether the index named it: `false` means another
-    /// writer had moved or deleted the index, and the record's own key is gone either way.
-    async fn remove(&self, place: &InvitationPlace, record_key: &str) -> Result<bool, AuthError>;
+    /// record, in one atomic step. With [`Removal::Owned`] only a record `place` owns goes: its set
+    /// holds the key or its index names it, so a place and a record key that do not belong together
+    /// delete nothing. With [`Removal::Spend`] the record goes whatever place it is asked under.
+    /// Answers whether the index named it: `false` means another writer had moved or deleted the
+    /// index (or that nothing was owned), and a deleted record's own key is gone either way.
+    async fn remove(
+        &self,
+        place: &InvitationPlace,
+        record_key: &str,
+        removal: Removal,
+    ) -> Result<bool, AuthError>;
 
     /// The workspace's live invitations, in no particular order. A set member whose record is gone
     /// is dropped from the set.

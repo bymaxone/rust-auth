@@ -11,7 +11,9 @@ use crate::error::ConfigError;
 use crate::workspace::access::AcceptedRoles;
 use crate::workspace::bounds::is_valid_owner_role;
 use crate::workspace::limits::{
-    DELETION_GRACE_DAYS_DEFAULT, DELETION_GRACE_DAYS_MAX, MAX_WORKSPACES_PER_USER_LIMIT,
+    DELETION_GRACE_DAYS_DEFAULT, DELETION_GRACE_DAYS_MAX, INVITATION_TTL_DEFAULT_SECONDS,
+    INVITATION_TTL_MAX_SECONDS, INVITATION_TTL_MIN_SECONDS, MAX_PENDING_INVITATIONS_DEFAULT,
+    MAX_PENDING_INVITATIONS_LIMIT, MAX_WORKSPACES_PER_USER_LIMIT,
     MEMBERSHIP_CACHE_TTL_DEFAULT_SECONDS,
 };
 use crate::workspace::membership_cache::MembershipCacheTtl;
@@ -52,6 +54,12 @@ pub struct WorkspacesConfig {
     /// How many days a workspace whose deletion was scheduled can still be restored: 0 to 365,
     /// default 14. `0` deletes the workspace when the deletion is asked for.
     pub deletion_grace_days: u32,
+    /// How long a workspace invitation stays valid, in seconds: 60 to 2 592 000 (30 days), default
+    /// 604 800 (a week).
+    pub invitation_ttl_seconds: u64,
+    /// The most pending invitations one workspace may hold: 1 to 10 000, default 100. A resend
+    /// replaces a live invitation and does not count again.
+    pub max_pending_invitations_per_workspace: u32,
 }
 
 impl Default for WorkspacesConfig {
@@ -64,6 +72,8 @@ impl Default for WorkspacesConfig {
             allow_create: true,
             max_workspaces_per_user: 0,
             deletion_grace_days: DELETION_GRACE_DAYS_DEFAULT,
+            invitation_ttl_seconds: INVITATION_TTL_DEFAULT_SECONDS,
+            max_pending_invitations_per_workspace: MAX_PENDING_INVITATIONS_DEFAULT,
         }
     }
 }
@@ -160,6 +170,10 @@ pub(crate) struct ResolvedWorkspaces {
     pub(crate) max_workspaces_per_user: u32,
     /// The deletion grace period in days, `0` to delete at once.
     pub(crate) deletion_grace_days: u32,
+    /// How long an invitation stays valid, in seconds.
+    pub(crate) invitation_ttl_seconds: u64,
+    /// The pending-invitation cap of one workspace.
+    pub(crate) max_pending_invitations_per_workspace: u32,
 }
 
 /// One permission's roles: the list given, or the owner role alone when none is.
@@ -194,6 +208,17 @@ fn known_roles(
 fn at_most(option: &'static str, value: u32, max: u32) -> Result<u32, ConfigError> {
     if value > max {
         return Err(ConfigError::WorkspaceOptionOutOfRange { option, max });
+    }
+    Ok(value)
+}
+
+/// `value`, refused when it is outside `min..=max`.
+fn between(option: &'static str, value: u64, min: u64, max: u64) -> Result<u64, ConfigError> {
+    if value < min {
+        return Err(ConfigError::WorkspaceOptionBelowMinimum { option, min });
+    }
+    if value > max {
+        return Err(ConfigError::WorkspaceOptionAboveMaximum { option, max });
     }
     Ok(value)
 }
@@ -254,6 +279,13 @@ impl WorkspacesConfig {
             self.deletion_grace_days,
             DELETION_GRACE_DAYS_MAX,
         )?;
+        let invitation_ttl_seconds = self.resolve_invitation_ttl()?;
+        let max_pending_invitations_per_workspace = between(
+            "maxPendingInvitationsPerWorkspace",
+            u64::from(self.max_pending_invitations_per_workspace),
+            1,
+            u64::from(MAX_PENDING_INVITATIONS_LIMIT),
+        )?;
         Ok(Some(ResolvedWorkspaces {
             hierarchy,
             ttl,
@@ -261,6 +293,21 @@ impl WorkspacesConfig {
             allow_create: self.allow_create,
             max_workspaces_per_user,
             deletion_grace_days,
+            invitation_ttl_seconds,
+            max_pending_invitations_per_workspace: u32::try_from(
+                max_pending_invitations_per_workspace,
+            )
+            .unwrap_or(MAX_PENDING_INVITATIONS_LIMIT),
         }))
+    }
+
+    /// The invitation lifetime, refused outside 60 seconds to 30 days.
+    fn resolve_invitation_ttl(&self) -> Result<u64, ConfigError> {
+        between(
+            "invitationTtlSeconds",
+            self.invitation_ttl_seconds,
+            INVITATION_TTL_MIN_SECONDS,
+            INVITATION_TTL_MAX_SECONDS,
+        )
     }
 }

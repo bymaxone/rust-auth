@@ -188,6 +188,24 @@ pub trait EmailProvider: Send + Sync {
         invite: &InviteData,
         locale: Option<&str>,
     ) -> Result<(), EmailError>;
+
+    /// Workspace invitation: the body should show the inviter, the workspace, the role, the accept
+    /// URL (built from `invite.invite_token`) and the expiry; `invite.account_exists` says whether
+    /// the address already has an account, so the message can point to signing in rather than
+    /// signing up. Never log `invite.invite_token`.
+    ///
+    /// The default answers [`EmailError::Unsupported`]: a host that has not implemented it gets an
+    /// explicit failure from the invitation call, never a success in which nothing was sent.
+    async fn send_workspace_invitation(
+        &self,
+        tenant_id: &str,
+        email: &str,
+        invite: &WorkspaceInviteData,
+        locale: Option<&str>,
+    ) -> Result<(), EmailError> {
+        let _ = (tenant_id, email, invite, locale);
+        Err(EmailError::Unsupported)
+    }
 }
 
 /// The tenant a platform-plane message is attributed to.
@@ -247,6 +265,76 @@ impl std::fmt::Debug for InviteData {
     }
 }
 
+/// Which kind of workspace invitation a message is for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum WorkspaceInviteKind {
+    /// A member of an existing workspace invites an address to it.
+    Member,
+    /// The platform invites an address to own a workspace that does not exist yet.
+    Bootstrap,
+}
+
+/// Data required to render a workspace-invitation email. The `Debug` impl redacts `invite_token`
+/// (a live single-use credential) so it cannot leak into a log.
+#[derive(Clone)]
+#[non_exhaustive]
+pub struct WorkspaceInviteData {
+    /// Display name of the inviter.
+    pub inviter_name: String,
+    /// Name of the workspace the invitee is joining or will own.
+    pub workspace_name: String,
+    /// The role the invitation grants.
+    pub role: String,
+    /// Raw invitation token (64 hex chars). The adapter builds the full accept URL.
+    pub invite_token: String,
+    /// UTC instant after which the invitation is no longer valid.
+    pub expires_at: OffsetDateTime,
+    /// Whether the address already has an account in the tenant.
+    pub account_exists: bool,
+    /// Which kind of invitation this is.
+    pub kind: WorkspaceInviteKind,
+}
+
+impl WorkspaceInviteData {
+    /// A message's data, with every field the adapter renders.
+    #[must_use]
+    pub fn new(
+        inviter_name: String,
+        workspace_name: String,
+        role: String,
+        invite_token: String,
+        expires_at: OffsetDateTime,
+        account_exists: bool,
+        kind: WorkspaceInviteKind,
+    ) -> Self {
+        Self {
+            inviter_name,
+            workspace_name,
+            role,
+            invite_token,
+            expires_at,
+            account_exists,
+            kind,
+        }
+    }
+}
+
+impl std::fmt::Debug for WorkspaceInviteData {
+    /// Redacts `invite_token`; the other fields are display-safe.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("WorkspaceInviteData")
+            .field("inviter_name", &self.inviter_name)
+            .field("workspace_name", &self.workspace_name)
+            .field("role", &self.role)
+            .field("invite_token", &"[REDACTED]")
+            .field("expires_at", &self.expires_at)
+            .field("account_exists", &self.account_exists)
+            .field("kind", &self.kind)
+            .finish()
+    }
+}
+
 /// A transactional-email failure.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
@@ -255,6 +343,9 @@ pub enum EmailError {
     /// logs this and continues for fire-and-forget sends.
     #[error("email delivery failed")]
     Delivery(#[source] Box<dyn std::error::Error + Send + Sync>),
+    /// The provider does not implement the message that was asked for.
+    #[error("email provider does not implement this message")]
+    Unsupported,
 }
 
 /// The default email provider installed when the host supplies none. Every method
@@ -355,6 +446,20 @@ impl EmailProvider for NoOpEmailProvider {
         );
         Ok(())
     }
+    async fn send_workspace_invitation(
+        &self,
+        _tenant_id: &str,
+        _email: &str,
+        _invite: &WorkspaceInviteData,
+        _locale: Option<&str>,
+    ) -> Result<(), EmailError> {
+        tracing::debug!(
+            event = "RUST_AUTH_EMAIL_NOOP_TOKEN_REDACTED",
+            kind = "workspace_invitation",
+            "noop email: token redacted"
+        );
+        Ok(())
+    }
     // `send_new_session_alert` is deliberately NOT overridden here. It is the one method with a
     // default, because the library never calls it — so the log line the other no-ops write
     // ("this is what would have been sent") could never fire for this one from library code, and
@@ -404,6 +509,127 @@ mod tests {
         assert!(!rendered.contains(&"0".repeat(64)));
         assert!(rendered.contains("[REDACTED]"));
         assert!(rendered.contains("Acme"));
+    }
+
+    fn workspace_invite() -> WorkspaceInviteData {
+        WorkspaceInviteData::new(
+            "Owner".into(),
+            "Acme".into(),
+            "member".into(),
+            "1".repeat(64),
+            OffsetDateTime::UNIX_EPOCH,
+            true,
+            WorkspaceInviteKind::Member,
+        )
+    }
+
+    #[test]
+    fn workspace_invite_data_debug_redacts_the_token() {
+        let rendered = format!("{:?}", workspace_invite());
+        assert!(!rendered.contains(&"1".repeat(64)));
+        assert!(rendered.contains("[REDACTED]"));
+        assert!(rendered.contains("Acme"));
+    }
+
+    /// A provider that implements only what the trait requires.
+    struct Bare;
+
+    #[async_trait]
+    impl EmailProvider for Bare {
+        async fn send_password_reset_token(
+            &self,
+            _tenant_id: &str,
+            _email: &str,
+            _token: &str,
+            _locale: Option<&str>,
+        ) -> Result<(), EmailError> {
+            Ok(())
+        }
+        async fn send_password_reset_otp(
+            &self,
+            _tenant_id: &str,
+            _email: &str,
+            _otp: &str,
+            _locale: Option<&str>,
+        ) -> Result<(), EmailError> {
+            Ok(())
+        }
+        async fn send_email_verification_otp(
+            &self,
+            _tenant_id: &str,
+            _email: &str,
+            _otp: &str,
+            _locale: Option<&str>,
+        ) -> Result<(), EmailError> {
+            Ok(())
+        }
+        async fn send_mfa_enabled(
+            &self,
+            _tenant_id: &str,
+            _email: &str,
+            _locale: Option<&str>,
+        ) -> Result<(), EmailError> {
+            Ok(())
+        }
+        async fn send_mfa_disabled(
+            &self,
+            _tenant_id: &str,
+            _email: &str,
+            _locale: Option<&str>,
+        ) -> Result<(), EmailError> {
+            Ok(())
+        }
+        async fn send_invitation(
+            &self,
+            _tenant_id: &str,
+            _email: &str,
+            _invite: &InviteData,
+            _locale: Option<&str>,
+        ) -> Result<(), EmailError> {
+            Ok(())
+        }
+        async fn send_password_changed(
+            &self,
+            _tenant_id: &str,
+            _email: &str,
+            _locale: Option<&str>,
+        ) -> Result<(), EmailError> {
+            Ok(())
+        }
+        async fn send_email_change_verification(
+            &self,
+            _tenant_id: &str,
+            _email: &str,
+            _token: &str,
+            _locale: Option<&str>,
+        ) -> Result<(), EmailError> {
+            Ok(())
+        }
+        async fn send_email_changed_notification(
+            &self,
+            _tenant_id: &str,
+            _email: &str,
+            _new_email: &str,
+            _locale: Option<&str>,
+        ) -> Result<(), EmailError> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn a_provider_without_workspace_invitations_answers_unsupported_not_success() {
+        let sent = Bare
+            .send_workspace_invitation("t1", "e@x.io", &workspace_invite(), None)
+            .await;
+        assert!(matches!(sent, Err(EmailError::Unsupported)), "{sent:?}");
+    }
+
+    #[tokio::test]
+    async fn the_noop_provider_accepts_a_workspace_invitation() {
+        let sent = NoOpEmailProvider
+            .send_workspace_invitation("t1", "e@x.io", &workspace_invite(), None)
+            .await;
+        assert!(sent.is_ok(), "{sent:?}");
     }
 
     #[tokio::test]
