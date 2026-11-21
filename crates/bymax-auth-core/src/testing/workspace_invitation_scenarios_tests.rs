@@ -350,7 +350,7 @@ where
 }
 
 #[tokio::test]
-async fn a_scenario_written_for_a_fault_fails_alone_on_a_store_with_that_fault() {
+async fn a_scenario_written_for_a_publication_fault_fails_alone_on_a_store_with_that_fault() {
     let cases = [
         alone_fails(Fault::ShortensTheLifetimes, |s| async move {
             scenarios::a_first_publication_writes_all_three_structures_with_one_lifetime(&*s).await;
@@ -368,8 +368,8 @@ async fn a_scenario_written_for_a_fault_fails_alone_on_a_store_with_that_fault()
             scenarios::a_gone_record_is_dropped_before_the_cap_is_counted(&*s).await;
         })
         .await,
-        alone_fails(Fault::InventsARecord, |s| async move {
-            scenarios::a_foreign_value_under_a_record_key_reads_as_absent(&*s).await;
+        alone_fails(Fault::PrunesWhenUncapped, |s| async move {
+            scenarios::an_uncapped_publication_leaves_a_dead_member_alone(&*s).await;
         })
         .await,
         alone_fails(Fault::StretchesTheLifetimes, |s| async move {
@@ -379,21 +379,36 @@ async fn a_scenario_written_for_a_fault_fails_alone_on_a_store_with_that_fault()
             .await;
         })
         .await,
-        alone_fails(Fault::DropsBootstrapRecords, |s| async move {
-            scenarios::a_bootstrap_record_reads_back_as_written(&*s).await;
+    ];
+    assert_eq!(
+        cases, [true; 6],
+        "a scenario that passed on its broken store"
+    );
+}
+
+#[tokio::test]
+async fn a_scenario_written_for_a_read_removal_or_counter_fault_fails_alone_on_a_store_with_that_fault()
+ {
+    let cases = [
+        alone_fails(Fault::InventsARecord, |s| async move {
+            scenarios::a_foreign_value_under_a_record_key_reads_as_absent(&*s).await;
         })
         .await,
-        alone_fails(Fault::PrunesWhenUncapped, |s| async move {
-            scenarios::an_uncapped_publication_leaves_a_dead_member_alone(&*s).await;
+        alone_fails(Fault::DropsBootstrapRecords, |s| async move {
+            scenarios::a_bootstrap_record_reads_back_as_written(&*s).await;
         })
         .await,
         alone_fails(Fault::ResetsTheWindow, |s| async move {
             scenarios::the_inviter_counter_starts_its_hour_at_the_first_increment(&*s).await;
         })
         .await,
+        alone_fails(Fault::KeepsTheRemovedRecord, |s| async move {
+            scenarios::a_removal_spends_the_record_the_index_and_the_set_member(&*s).await;
+        })
+        .await,
     ];
     assert_eq!(
-        cases, [true; 9],
+        cases, [true; 4],
         "a scenario that passed on its broken store"
     );
 }

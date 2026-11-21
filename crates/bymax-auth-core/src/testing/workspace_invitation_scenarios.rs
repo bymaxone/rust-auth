@@ -300,7 +300,7 @@ pub(super) async fn a_gone_record_is_dropped_before_the_cap_is_counted<
     );
 }
 
-async fn a_removal_spends_the_record_the_index_and_the_set_member<
+pub(super) async fn a_removal_spends_the_record_the_index_and_the_set_member<
     S: InvitationStoreProbe + ?Sized,
 >(
     store: &S,
