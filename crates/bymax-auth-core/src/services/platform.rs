@@ -1522,11 +1522,15 @@ mod tests {
                 .await,
             Ok(PlatformLoginResult::Success(_))
         ));
-        // Long enough for a spawned rehash to have landed if one had been spawned.
-        tokio::time::sleep(Duration::from_millis(500)).await;
-        let after = h.admins.find_by_id(&id).await;
-        let Ok(Some(after)) = after else { return };
-        assert_eq!(before.password_hash, after.password_hash);
+        // Watched for as long as the upgrade test waits for a rehash that was scheduled: a
+        // derivation lands well inside it on any runner, so a hash that never changes here is
+        // one that was never rewritten, not one that was slow.
+        for _ in 0..40 {
+            let after = h.admins.find_by_id(&id).await;
+            let Ok(Some(after)) = after else { return };
+            assert_eq!(before.password_hash, after.password_hash);
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
     }
 
     #[tokio::test]
