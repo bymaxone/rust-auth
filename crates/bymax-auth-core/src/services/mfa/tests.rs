@@ -4654,3 +4654,26 @@ async fn a_dashboard_mfa_write_without_a_tenant_is_refused() {
 
     assert!(matches!(written, Err(AuthError::Internal(_))));
 }
+
+#[test]
+fn a_time_before_the_epoch_is_an_error_for_the_totp_check_and_never_zero() {
+    // Read as zero, a code for the first 30 seconds of 1970 would be the one accepted.
+    for before in [-1, -30, i64::MIN] {
+        let seconds = super::unix_seconds(before);
+        assert!(
+            matches!(seconds, Err(AuthError::Internal(_))),
+            "{before}: {seconds:?}"
+        );
+    }
+}
+
+#[test]
+fn a_time_from_the_epoch_on_is_read_as_whole_seconds() {
+    for at in [0, 1, 1_700_000_000, i64::MAX] {
+        let seconds = super::unix_seconds(at);
+        assert!(
+            matches!(seconds, Ok(read) if i64::try_from(read) == Ok(at)),
+            "{at}"
+        );
+    }
+}

@@ -36,4 +36,10 @@ pub enum JwtError {
     /// The payload did not deserialize into the requested claims type.
     #[error("claims decode failed")]
     Decode,
+    /// The temporal check needed the host clock and it could not be read as a time since the
+    /// Unix epoch (it stands before it). The token is neither accepted nor called invalid: with
+    /// no trustworthy time, no `exp` can be judged, and reading the clock as zero would keep every
+    /// expired token valid.
+    #[error("system clock unavailable")]
+    Clock,
 }
