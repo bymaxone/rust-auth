@@ -2484,7 +2484,13 @@ mod tests {
                 "{iat} {exp}"
             );
         }
-        assert!(svc.issue_access(&dashboard_claims_at(0, 900)).is_ok());
+        // The epoch itself is a time a clock can read, for `iat` and for `exp` alike.
+        for (iat, exp) in [(0, 900), (0, 0)] {
+            assert!(
+                svc.issue_access(&dashboard_claims_at(iat, exp)).is_ok(),
+                "{iat} {exp}"
+            );
+        }
     }
 
     #[test]
