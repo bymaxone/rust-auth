@@ -103,24 +103,17 @@ pub(crate) fn answer_store_failure(error: AuthError, context: &'static str) -> A
     }
 }
 
-/// The text an operator reads for `error`: its `Display` and then each `source()` in turn,
-/// joined with `": "`.
+/// The closed cause a log line names for a failed store call: `store_unavailable` when the store
+/// could not answer, `internal` for any other failure.
 ///
-/// `Display` is what an error's author chose to say, so it is the part meant to be logged.
-/// `Debug` is not: a store's error type may derive it over the session details it was holding.
-/// `AuthError::Internal` displays as "internal error" and carries the cause as its source, so
-/// the chain is what makes a logged failure diagnosable. The walk stops after
-/// [`ERROR_CHAIN_DEPTH`] links, so a source that refers back to itself cannot stall the caller.
-pub(crate) fn error_chain(error: &(dyn std::error::Error + 'static)) -> String {
-    std::iter::successors(Some(error), |link| link.source())
-        .take(ERROR_CHAIN_DEPTH)
-        .map(ToString::to_string)
-        .collect::<Vec<_>>()
-        .join(": ")
+/// A store's own error text names its backend and can carry what it was holding, so a log line
+/// carries this classification and never the error's `Display`.
+pub(crate) fn failure_cause(error: &AuthError) -> &'static str {
+    match error {
+        AuthError::ServiceUnavailable(_) => "store_unavailable",
+        _ => "internal",
+    }
 }
-
-/// The most links [`error_chain`] renders.
-const ERROR_CHAIN_DEPTH: usize = 8;
 
 /// Keep the first failure of a logout's revocation writes, and report every one of them.
 ///
@@ -131,12 +124,16 @@ const ERROR_CHAIN_DEPTH: usize = 8;
 /// message names its backend.
 pub(crate) fn note_logout_failure(
     first: &mut Option<AuthError>,
-    step: &str,
+    step: &'static str,
     result: Result<(), AuthError>,
 ) {
     if let Err(error) = result {
-        let cause = error_chain(&error);
-        tracing::warn!(%cause, "{step}");
+        let cause = failure_cause(&error);
+        tracing::warn!(
+            event = "RUST_AUTH_LOGOUT_REVOCATION_WRITE_FAILED",
+            cause,
+            "{step}"
+        );
         first
             .get_or_insert_with(|| answer_store_failure(error, "a logout revocation write failed"));
     }
@@ -436,53 +433,12 @@ mod tests {
         assert!(now_offset().unix_timestamp() > 1_600_000_000);
     }
 
-    /// An error with one source, whose `Debug` differs from its `Display`.
-    #[derive(Debug)]
-    struct Link {
-        text: &'static str,
-        source: Option<Box<Link>>,
-    }
-
-    impl std::fmt::Display for Link {
-        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-            f.write_str(self.text)
-        }
-    }
-
-    impl std::error::Error for Link {
-        fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-            self.source
-                .as_deref()
-                .map(|link| link as &(dyn std::error::Error + 'static))
-        }
-    }
-
     #[test]
-    fn error_chain_joins_each_display_with_its_sources_in_order() {
-        let error = Link {
-            text: "outer",
-            source: Some(Box::new(Link {
-                text: "middle",
-                source: Some(Box::new(Link {
-                    text: "inner",
-                    source: None,
-                })),
-            })),
-        };
-        assert_eq!(error_chain(&error), "outer: middle: inner");
-        // An error with no source is just its own text, and the engine's opaque internal error
-        // shows its cause after "internal error".
-        assert_eq!(
-            error_chain(&Link {
-                text: "alone",
-                source: None
-            }),
-            "alone"
-        );
-        assert_eq!(
-            error_chain(&internal_error("the cause")),
-            "internal error: the cause"
-        );
+    fn a_failure_is_classified_as_an_outage_or_internal() {
+        let unavailable = AuthError::ServiceUnavailable("redis is down".into());
+        assert_eq!(failure_cause(&unavailable), "store_unavailable");
+        assert_eq!(failure_cause(&internal_error("the cause")), "internal");
+        assert_eq!(failure_cause(&AuthError::OauthFailed), "internal");
     }
 
     #[test]
@@ -511,30 +467,13 @@ mod tests {
             first_line.contains("logout: session cleanup failed"),
             "{first_line}"
         );
+        assert!(first_line.contains("cause=internal"), "{first_line}");
         assert!(
-            first_line.contains("cause=internal error: redis refused the write"),
+            !first_line.contains("redis refused the write"),
             "{first_line}"
         );
         // The caller still gets the generic answer for the first failure, not the cause.
-        let answer = first.map(|error| error_chain(&error));
-        assert_eq!(
-            answer.as_deref(),
-            Some("internal error: a logout revocation write failed")
-        );
-    }
-
-    #[test]
-    fn error_chain_stops_after_the_depth_limit() {
-        let mut error = Link {
-            text: "link",
-            source: None,
-        };
-        for _ in 0..(ERROR_CHAIN_DEPTH * 2) {
-            error = Link {
-                text: "link",
-                source: Some(Box::new(error)),
-            };
-        }
-        assert_eq!(error_chain(&error).split(": ").count(), ERROR_CHAIN_DEPTH);
+        let answer = first.map(|error| error.to_string());
+        assert_eq!(answer.as_deref(), Some("internal error"));
     }
 }

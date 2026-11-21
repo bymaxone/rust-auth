@@ -54,7 +54,10 @@ impl BruteForceService {
     /// Returns [`AuthError::Forbidden`] for any identifier that fails the contract.
     pub fn validate_identifier(&self, identifier: &str) -> Result<(), AuthError> {
         if identifier.len() > MAX_IDENTIFIER_LENGTH || identifier.contains([':', '\n', '\r']) {
-            tracing::error!("brute-force identifier rejected by the key-injection guard");
+            tracing::error!(
+                event = "RUST_AUTH_BRUTE_FORCE_IDENTIFIER_REJECTED",
+                "brute-force identifier rejected by the key-injection guard"
+            );
             return Err(AuthError::Forbidden);
         }
         Ok(())

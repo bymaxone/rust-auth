@@ -305,6 +305,7 @@ static UNBOUND_WARNED: std::sync::atomic::AtomicBool = std::sync::atomic::Atomic
 fn warn_unbound_once(flag: &std::sync::atomic::AtomicBool) {
     if !flag.swap(true, std::sync::atomic::Ordering::Relaxed) {
         tracing::warn!(
+            event = "RUST_AUTH_TENANT_BINDING_NOT_APPLIED",
             "verify_access: enforce_tenant_binding is on but no request was supplied, so the \
              tenant binding is not applied to this call"
         );

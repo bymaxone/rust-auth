@@ -97,10 +97,7 @@ impl MfaService {
         super::require_plane_tenant(ctx, tenant_id)?;
         let view = self.fetch_user_mfa(user_id, ctx, tenant_id).await?;
         if !view.mfa_enabled {
-            tracing::info!(
-                target: "bymax_auth::mfa",
-                user_id, "reset_mfa: no second factor to remove"
-            );
+            tracing::info!(target: "bymax_auth::mfa", event = "RUST_AUTH_MFA_RESET_NOTHING_TO_REMOVE", "reset_mfa: no second factor to remove");
             return Ok(());
         }
         self.transition_mfa_record(user_id, ctx, tenant_id, |_| Some((false, None, None)))
@@ -112,10 +109,7 @@ impl MfaService {
         self.session_store
             .bump_epoch(session_kind(ctx), &subject)
             .await?;
-        tracing::warn!(
-            target: "bymax_auth::mfa",
-            user_id, "reset_mfa: MFA removed administratively"
-        );
+        tracing::warn!(target: "bymax_auth::mfa", event = "RUST_AUTH_MFA_RESET_ADMINISTRATIVE", "reset_mfa: MFA removed administratively");
         // No request context: this call does not come from one. Empty rather than invented, so a
         // host logging the hook cannot mistake a placeholder for an address someone connected
         // from.
@@ -204,7 +198,7 @@ impl MfaService {
             return Err(AuthError::MfaNotEnabled);
         }
         let bf_id = self.disable_bf_id(ctx, tenant_id, user_id);
-        self.assert_not_locked("disable", user_id, &bf_id).await?;
+        self.assert_not_locked("disable", &bf_id).await?;
         // An enabled account with no stored secret is an inconsistency, not a user error.
         let encrypted = view.mfa_secret.clone().ok_or(AuthError::TokenInvalid)?;
         let raw_secret = self
@@ -214,12 +208,15 @@ impl MfaService {
             .verify_totp_with_anti_replay(ctx, tenant_id, user_id, &raw_secret, code)
             .await?
         {
-            tracing::warn!(%user_id, "mfa disable: invalid code");
+            tracing::warn!(
+                event = "RUST_AUTH_MFA_DISABLE_INVALID_CODE",
+                "mfa disable: invalid code"
+            );
             self.brute_force.record_failure(&bf_id).await?;
             return Err(AuthError::MfaInvalidCode);
         }
         self.brute_force.reset(&bf_id).await?;
-        tracing::info!(%user_id, "mfa: disabled");
+        tracing::info!(event = "RUST_AUTH_MFA_DISABLED", "mfa: disabled");
         Ok(())
     }
 

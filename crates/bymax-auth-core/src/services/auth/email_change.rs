@@ -86,7 +86,10 @@ impl AuthEngine {
         let bf_id = self.reproof_identifier("email-change", tenant_id, user_id);
         if self.brute_force().is_locked(&bf_id).await? {
             let retry = self.brute_force().remaining_lockout_secs(&bf_id).await?;
-            tracing::warn!(%user_id, "email change: account locked");
+            tracing::warn!(
+                event = "RUST_AUTH_EMAIL_CHANGE_ACCOUNT_LOCKED",
+                "email change: account locked"
+            );
             return Err(AuthError::AccountLocked {
                 retry_after_seconds: Some(retry),
             });
@@ -99,7 +102,10 @@ impl AuthEngine {
             .matched
         {
             self.brute_force().record_failure(&bf_id).await?;
-            tracing::warn!(%user_id, "email change: current password rejected");
+            tracing::warn!(
+                event = "RUST_AUTH_EMAIL_CHANGE_PASSWORD_REJECTED",
+                "email change: current password rejected"
+            );
             return Err(AuthError::InvalidCredentials);
         }
         self.brute_force().reset(&bf_id).await?;
@@ -125,12 +131,18 @@ impl AuthEngine {
         self.email_provider()
             .send_email_change_verification(&user.tenant_id, &new_email, &raw, None)
             .await
-            .map_err(|error| {
-                tracing::error!(%error, "email change: verification could not be delivered");
+            .map_err(|_| {
+                tracing::error!(
+                    event = "RUST_AUTH_EMAIL_CHANGE_DELIVERY_FAILED",
+                    "email change: verification could not be delivered"
+                );
                 crate::services::internal_error("email change verification delivery failed")
             })?;
 
-        tracing::info!(%user_id, "email change: verification sent");
+        tracing::info!(
+            event = "RUST_AUTH_EMAIL_CHANGE_VERIFICATION_SENT",
+            "email change: verification sent"
+        );
         Ok(())
     }
 
@@ -179,17 +191,24 @@ impl AuthEngine {
             .update_email(&context.user_id, &context.tenant_id, &context.new_email)
             .await
             .map_err(map_repository_error)?;
-        tracing::info!(user_id = %context.user_id, "email change: address changed");
+        tracing::info!(
+            event = "RUST_AUTH_EMAIL_CHANGE_COMPLETED",
+            "email change: address changed"
+        );
 
         // Fire-and-forget, but logged: a change the user asked for and proved is not rolled
         // back because a mail server was down, and an operator needs to know when the notice —
         // the owner's last chance to see a takeover — did not go out.
-        if let Err(error) = self
+        if self
             .email_provider()
             .send_email_changed_notification(&user.tenant_id, &old_email, &context.new_email, None)
             .await
+            .is_err()
         {
-            tracing::error!(%error, "email change: notification to the previous address failed");
+            tracing::error!(
+                event = "RUST_AUTH_EMAIL_CHANGE_NOTICE_FAILED",
+                "email change: notification to the previous address failed"
+            );
         }
         Ok(())
     }
@@ -245,7 +264,7 @@ fn assert_still_bound(context: &EmailChangeContext, user: &AuthUser) -> Result<(
         return Ok(());
     }
     tracing::warn!(
-        user_id = %context.user_id,
+        event = "RUST_AUTH_EMAIL_CHANGE_TOKEN_STALE",
         "email change: token no longer bound to the account password"
     );
     Err(AuthError::EmailChangeTokenInvalid)

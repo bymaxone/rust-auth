@@ -225,7 +225,14 @@ fn require_plane_tenant(ctx: MfaContext, tenant_id: Option<&str>) -> Result<(), 
     if plane_tenant_is_well_formed(ctx, tenant_id) {
         return Ok(());
     }
-    tracing::warn!(plane = ctx.as_str(), "mfa: tenant does not match the plane");
+    // Bound first: a macro argument is not evaluated when no subscriber is listening, which
+    // would leave its line unexecuted under a test that installs none.
+    let plane = ctx.as_str();
+    tracing::warn!(
+        event = "RUST_AUTH_MFA_TENANT_PLANE_MISMATCH",
+        plane,
+        "mfa: tenant does not match the plane"
+    );
     Err(AuthError::Validation {
         details: vec![bymax_auth_types::FieldError {
             field: "tenantId".to_owned(),
@@ -849,18 +856,13 @@ impl MfaService {
     ///
     /// Returns [`AuthError::AccountLocked`] when the window is tripped, or a store
     /// [`AuthError`] on failure.
-    async fn assert_not_locked(
-        &self,
-        flow: &str,
-        user_id: &str,
-        bf_id: &str,
-    ) -> Result<(), AuthError> {
+    async fn assert_not_locked(&self, flow: &'static str, bf_id: &str) -> Result<(), AuthError> {
         if self.brute_force.is_locked(bf_id).await? {
             let retry = self.brute_force.remaining_lockout_secs(bf_id).await?;
             // The lockout itself is the security event an operator watches for: repeated hits
-            // on one account are a second-factor guessing campaign. The identifier is the
-            // caller's user id, never the hashed brute-force key, which says nothing on its own.
-            tracing::warn!(%flow, %user_id, "mfa: account locked");
+            // on one account are a second-factor guessing campaign. The line names the flow and
+            // carries no account.
+            tracing::warn!(event = "RUST_AUTH_MFA_ACCOUNT_LOCKED", %flow, "mfa: account locked");
             return Err(AuthError::AccountLocked {
                 retry_after_seconds: Some(retry),
             });

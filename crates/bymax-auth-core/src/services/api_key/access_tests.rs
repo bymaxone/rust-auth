@@ -7,7 +7,7 @@ use std::time::Duration;
 use bymax_auth_types::AuthError;
 
 use super::ApiKeyRoute;
-use super::access::{deny_reason, run_required_audit};
+use super::access::{deny_reason, method_label, run_required_audit};
 use super::test_support::{Fixture, TestResult, bad_credentials, fixture, request_context};
 use crate::config::ApiKeyAuditMode;
 use crate::traits::{ApiKeyDenyReason, ApiKeyOutcome, HookError, HookPlane};
@@ -239,4 +239,16 @@ async fn authorizing_with_api_keys_off_is_an_internal_error() -> TestResult {
 
     assert!(matches!(error, Some(AuthError::Internal(_))));
     Ok(())
+}
+
+#[test]
+fn a_client_chosen_method_is_logged_as_a_standard_one_or_as_other() {
+    for standard in [
+        "GET", "HEAD", "POST", "PUT", "DELETE", "CONNECT", "OPTIONS", "TRACE", "PATCH",
+    ] {
+        assert_eq!(method_label(standard), standard);
+    }
+    for chosen in ["get", "BREW", "alice@example.com", "GET\n", ""] {
+        assert_eq!(method_label(chosen), "other", "{chosen:?}");
+    }
 }

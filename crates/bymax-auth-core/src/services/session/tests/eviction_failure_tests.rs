@@ -1,5 +1,5 @@
-//! A store that refuses to evict a session over the cap is logged by the error's `Display`
-//! chain, and the login that scheduled the eviction still succeeds.
+//! A store that refuses to evict a session over the cap is logged as a closed cause, and the
+//! login that scheduled the eviction still succeeds.
 
 use super::damaged_detail_tests::DamagedDetails;
 use super::listing_failure_tests::HostStoreError;
@@ -46,9 +46,10 @@ async fn a_refused_eviction_is_logged_with_its_cause_and_never_fails_the_login()
         .collect();
     assert_eq!(reported.len(), 1, "{reported:?}");
     let line = &reported[0].rendered;
+    assert!(line.contains("cause=internal"), "{line}");
     assert!(
-        line.contains("cause=internal error: host store unavailable"),
-        "{line}"
+        !events.contains("host store unavailable"),
+        "the store's text was logged: {line}"
     );
     assert!(
         !events.contains(MARKER),

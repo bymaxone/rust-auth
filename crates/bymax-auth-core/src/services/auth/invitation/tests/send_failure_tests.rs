@@ -148,7 +148,12 @@ async fn a_failed_send_is_a_fixed_internal_error_that_quotes_nothing_the_channel
     let tokens = mailer.tokens();
     assert_eq!(tokens.len(), 1, "one send was attempted");
     let token = &tokens[0];
-    let chain = crate::services::error_chain(&error);
+    let chain = std::iter::successors(Some(&error as &(dyn std::error::Error + 'static)), |link| {
+        link.source()
+    })
+    .map(ToString::to_string)
+    .collect::<Vec<_>>()
+    .join(": ");
     assert!(
         !chain.contains(token.as_str()),
         "the error chain quotes the token: {chain}"

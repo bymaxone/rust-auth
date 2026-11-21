@@ -14,7 +14,6 @@
 
 use async_trait::async_trait;
 
-use crate::normalize::{log_safe, mask_email};
 use time::OffsetDateTime;
 
 /// The transactional-email contract, held on the engine as `Arc<dyn EmailProvider>`.
@@ -260,13 +259,13 @@ pub enum EmailError {
 
 /// The default email provider installed when the host supplies none. Every method
 /// returns `Ok(())` without sending anything, emitting a `tracing` debug line that
-/// records the event and a MASKED recipient, and redacts tokens and OTPs — keeping local
-/// development and tests running without an email backend.
+/// records the kind of message and nothing about its recipient, and redacts tokens and OTPs —
+/// keeping local development and tests running without an email backend.
 ///
-/// The address is masked for the same reason every other log line in the engine masks it: a
-/// debug level is not a private one. Whoever ships these logs to an aggregator is not
-/// necessarily the operator, and a provider that only runs when none is configured is exactly
-/// the one likeliest to be running with verbose logging turned on.
+/// The recipient and the tenant stay out of the line: a debug level is not a private one. Whoever
+/// ships these logs to an aggregator is not necessarily the operator, and a provider that only
+/// runs when none is configured is exactly the one likeliest to be running with verbose logging
+/// turned on.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct NoOpEmailProvider;
 
@@ -274,16 +273,15 @@ pub struct NoOpEmailProvider;
 impl EmailProvider for NoOpEmailProvider {
     async fn send_email_change_verification(
         &self,
-        tenant_id: &str,
-        new_email: &str,
+        _tenant_id: &str,
+        _new_email: &str,
         token: &str,
         _locale: Option<&str>,
     ) -> Result<(), EmailError> {
         let _ = token;
         tracing::debug!(
-            event = "email_change_verification",
-            tenant_id = %log_safe(tenant_id),
-            email = %mask_email(new_email),
+            event = "RUST_AUTH_EMAIL_NOOP_TOKEN_REDACTED",
+            kind = "email_change_verification",
             "noop email: token redacted"
         );
         Ok(())
@@ -291,50 +289,70 @@ impl EmailProvider for NoOpEmailProvider {
 
     async fn send_password_reset_token(
         &self,
-        tenant_id: &str,
-        email: &str,
+        _tenant_id: &str,
+        _email: &str,
         _token: &str,
         _locale: Option<&str>,
     ) -> Result<(), EmailError> {
-        tracing::debug!(event = "password_reset_token", tenant_id = %log_safe(tenant_id), email = %mask_email(email), "noop email: token redacted");
+        tracing::debug!(
+            event = "RUST_AUTH_EMAIL_NOOP_TOKEN_REDACTED",
+            kind = "password_reset_token",
+            "noop email: token redacted"
+        );
         Ok(())
     }
     async fn send_password_reset_otp(
         &self,
-        tenant_id: &str,
-        email: &str,
+        _tenant_id: &str,
+        _email: &str,
         _otp: &str,
         _locale: Option<&str>,
     ) -> Result<(), EmailError> {
-        tracing::debug!(event = "password_reset_otp", tenant_id = %log_safe(tenant_id), email = %mask_email(email), "noop email: otp redacted");
+        tracing::debug!(
+            event = "RUST_AUTH_EMAIL_NOOP_OTP_REDACTED",
+            kind = "password_reset_otp",
+            "noop email: otp redacted"
+        );
         Ok(())
     }
     async fn send_email_verification_otp(
         &self,
-        tenant_id: &str,
-        email: &str,
+        _tenant_id: &str,
+        _email: &str,
         _otp: &str,
         _locale: Option<&str>,
     ) -> Result<(), EmailError> {
-        tracing::debug!(event = "email_verification_otp", tenant_id = %log_safe(tenant_id), email = %mask_email(email), "noop email: otp redacted");
+        tracing::debug!(
+            event = "RUST_AUTH_EMAIL_NOOP_OTP_REDACTED",
+            kind = "email_verification_otp",
+            "noop email: otp redacted"
+        );
         Ok(())
     }
     async fn send_mfa_enabled(
         &self,
-        tenant_id: &str,
-        email: &str,
+        _tenant_id: &str,
+        _email: &str,
         _locale: Option<&str>,
     ) -> Result<(), EmailError> {
-        tracing::debug!(event = "mfa_enabled", tenant_id = %log_safe(tenant_id), email = %mask_email(email), "noop email");
+        tracing::debug!(
+            event = "RUST_AUTH_EMAIL_NOOP",
+            kind = "mfa_enabled",
+            "noop email"
+        );
         Ok(())
     }
     async fn send_mfa_disabled(
         &self,
-        tenant_id: &str,
-        email: &str,
+        _tenant_id: &str,
+        _email: &str,
         _locale: Option<&str>,
     ) -> Result<(), EmailError> {
-        tracing::debug!(event = "mfa_disabled", tenant_id = %log_safe(tenant_id), email = %mask_email(email), "noop email");
+        tracing::debug!(
+            event = "RUST_AUTH_EMAIL_NOOP",
+            kind = "mfa_disabled",
+            "noop email"
+        );
         Ok(())
     }
     // `send_new_session_alert` is deliberately NOT overridden here. It is the one method with a
@@ -343,12 +361,16 @@ impl EmailProvider for NoOpEmailProvider {
     // inheriting the default is what keeps the no-op honest about that.
     async fn send_invitation(
         &self,
-        tenant_id: &str,
-        email: &str,
+        _tenant_id: &str,
+        _email: &str,
         _invite: &InviteData,
         _locale: Option<&str>,
     ) -> Result<(), EmailError> {
-        tracing::debug!(event = "invitation", tenant_id = %log_safe(tenant_id), email = %mask_email(email), "noop email: token redacted");
+        tracing::debug!(
+            event = "RUST_AUTH_EMAIL_NOOP_TOKEN_REDACTED",
+            kind = "invitation",
+            "noop email: token redacted"
+        );
         Ok(())
     }
 }

@@ -77,8 +77,12 @@ impl AuthEngine {
         if let Err(error) = issued {
             // No account, address or tenant in the line: it must read the same whichever
             // account the failure belonged to.
-            let cause = crate::services::error_chain(&error);
-            tracing::warn!(%cause, "password reset: the proof could not be issued");
+            let cause = crate::services::failure_cause(&error);
+            tracing::warn!(
+                event = "RUST_AUTH_PASSWORD_RESET_PROOF_NOT_ISSUED",
+                cause,
+                "password reset: the proof could not be issued"
+            );
             self.release_reset_cooldown(&identifier).await;
         }
         Ok(())
@@ -92,8 +96,12 @@ impl AuthEngine {
             .release_resend(OtpPurpose::PasswordReset, identifier)
             .await;
         if let Err(error) = released {
-            let cause = crate::services::error_chain(&error);
-            tracing::warn!(%cause, "password reset: the resend cooldown could not be released");
+            let cause = crate::services::failure_cause(&error);
+            tracing::warn!(
+                event = "RUST_AUTH_PASSWORD_RESET_COOLDOWN_NOT_RELEASED",
+                cause,
+                "password reset: the resend cooldown could not be released"
+            );
         }
     }
 
@@ -160,10 +168,13 @@ impl AuthEngine {
         )
         .await;
         if !matches!(sent, Ok(Ok(()))) {
-            if let Err(error) = store.delete_token(&raw).await {
+            if store.delete_token(&raw).await.is_err() {
                 // The rollback is what keeps an undeliverable token from lingering in a Redis
                 // snapshot for its whole TTL; the caller's line reports the delivery failure.
-                tracing::error!(%error, "password reset: rollback of the stored token failed");
+                tracing::error!(
+                    event = "RUST_AUTH_PASSWORD_RESET_ROLLBACK_FAILED",
+                    "password reset: rollback of the stored token failed"
+                );
             }
             return Err(crate::services::internal_error(
                 "password reset token delivery failed",

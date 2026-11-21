@@ -239,8 +239,11 @@ async fn flush_until_stopped(
 ) {
     loop {
         let keep_going = tokio::time::timeout(period, &mut stopped).await.is_err();
-        if let Err(error) = engine.flush_api_key_last_used().await {
-            tracing::warn!(error = %error, "api-key: last-used flush failed; retrying next round");
+        if engine.flush_api_key_last_used().await.is_err() {
+            tracing::warn!(
+                event = "RUST_AUTH_API_KEY_LAST_USED_FLUSH_FAILED",
+                "api-key: last-used flush failed; retrying next round"
+            );
         }
         if !keep_going {
             return;

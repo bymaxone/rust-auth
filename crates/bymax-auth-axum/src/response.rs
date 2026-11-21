@@ -49,9 +49,14 @@ impl IntoResponse for AuthRejection {
 pub fn error_response(error: &AuthError) -> Response {
     // The cause is for operators only — log it, but never serialize it into the body.
     match error {
-        AuthError::Internal(cause) => tracing::error!(%cause, "internal auth error"),
-        AuthError::ServiceUnavailable(cause) => {
-            tracing::error!(%cause, "auth store unavailable");
+        AuthError::Internal(_) => {
+            tracing::error!(event = "RUST_AUTH_INTERNAL_ERROR", "internal auth error")
+        }
+        AuthError::ServiceUnavailable(_) => {
+            tracing::error!(
+                event = "RUST_AUTH_STORE_UNAVAILABLE",
+                "auth store unavailable"
+            );
         }
         _ => {}
     }
@@ -248,7 +253,7 @@ mod tests {
     }
 
     #[test]
-    fn a_store_failure_and_an_internal_error_log_their_cause_for_operators() {
+    fn a_store_failure_and_an_internal_error_log_a_code_and_never_their_cause() {
         let captured = Captured::default();
         tracing::subscriber::with_default(captured.clone(), || {
             // A span drives the subscriber's span hooks, which the trait requires and events do not.
@@ -265,12 +270,18 @@ mod tests {
         });
         let lines = captured.0.lock().map(|l| l.clone()).unwrap_or_default();
         let has = |needle: &str| lines.iter().any(|l| l.contains(needle));
-        assert!(has("defect cause") && has("store cause"), "{lines:?}");
+        // Each failure is named by its code and message; the cause a failure carries can hold a
+        // store's own text, so it is never logged.
+        assert!(
+            has("RUST_AUTH_INTERNAL_ERROR") && has("RUST_AUTH_STORE_UNAVAILABLE"),
+            "{lines:?}"
+        );
         assert!(
             has("internal auth error") && has("auth store unavailable"),
             "{lines:?}"
         );
-        assert_eq!(lines.iter().filter(|l| l.starts_with("cause=")).count(), 2);
+        assert!(!has("defect cause") && !has("store cause"), "{lines:?}");
+        assert_eq!(lines.iter().filter(|l| l.starts_with("cause=")).count(), 0);
     }
 
     #[test]

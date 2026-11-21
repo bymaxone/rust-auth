@@ -112,18 +112,25 @@ impl PasswordBreachChecker for HibpBreachChecker {
         // that is not UTF-8 — none of them are evidence about the password, and treating them
         // as evidence would make a hardening measure a dependency of the credential path.
         let Ok(response) = self.http.send(request).await else {
-            tracing::warn!("breach check unreachable — password allowed");
+            tracing::warn!(
+                event = "RUST_AUTH_BREACH_CHECK_UNREACHABLE",
+                "breach check unreachable — password allowed"
+            );
             return false;
         };
         if !(200..300).contains(&response.status) {
             tracing::warn!(
+                event = "RUST_AUTH_BREACH_CHECK_UNAVAILABLE",
                 status = response.status,
                 "breach check unavailable — password allowed"
             );
             return false;
         }
         let Ok(body) = String::from_utf8(response.body) else {
-            tracing::warn!("breach check returned a non-UTF-8 body — password allowed");
+            tracing::warn!(
+                event = "RUST_AUTH_BREACH_CHECK_BAD_BODY",
+                "breach check returned a non-UTF-8 body — password allowed"
+            );
             return false;
         };
 

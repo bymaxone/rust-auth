@@ -273,6 +273,7 @@ impl AuthEngine {
         if !failed.is_empty() {
             let count = failed.len();
             tracing::warn!(
+                event = "RUST_AUTH_ACCOUNT_REMOVAL_COUNTERS_NOT_BUMPED",
                 failed = count,
                 "account removal committed but some membership counters were not bumped"
             );

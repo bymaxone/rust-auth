@@ -2240,7 +2240,7 @@ Constants: `MAX_IP_LENGTH: usize = 45` (IPv6 max — IP is truncated before stor
 #### 7.4.2 `enforce_session_limit` (FIFO eviction)
 
 1. `members = smembers("sess:{subject_hash}")`; keep only `rt:`-prefixed (exclude `rp:` grace pointers).
-   A listing the store cannot answer is not a login failure: the new session is already committed, so the cap is left unenforced for this login, **no session is evicted** (a partial list would evict the wrong ones), the error and each of its causes (by `Display`, never `Debug`) and the user id are logged once, and the new-session hook still fires. The user may stay over the cap until a later login lists normally.
+   A listing the store cannot answer is not a login failure: the new session is already committed, so the cap is left unenforced for this login, **no session is evicted** (a partial list would evict the wrong ones), the failure is logged once under the closed cause `store_unavailable` or `internal` (never the error's text, and no account), and the new-session hook still fires. The user may stay over the cap until a later login lists normally.
 2. `limit = resolve_session_limit(user_id)` — calls `config.sessions.max_sessions_resolver(user)` if set, else `default_max_sessions`; falls back to default if the user is missing or the resolver errors.
 3. If `rt_members.len() <= limit`, return.
 4. For each `rt:` member, read `sd:{hash}.created_at` (missing/unparseable → treated as oldest, `0`). Sort ascending by `created_at`.
@@ -4073,6 +4073,8 @@ nest-auth applies `@Throttle(AUTH_THROTTLE_CONFIGS.*)` per handler. See §16.
 Tracing follows the `tracing` ecosystem: the adapter emits spans/events but does
 not install a subscriber — the consuming application owns subscriber setup, so
 the adapter never dictates log formatting or transport.
+
+**Log events.** Every operational `tracing` event in every crate carries `event = "RUST_AUTH_<NAME>"`, a closed code an operator filters and alerts on, and only closed or numeric fields beside it: a `cause` (`store_unavailable` or `internal`, from the failed call's error variant, never its text), a plane or flow name, a status code or a count. No event carries an account, an email address, a token, an IP address or the text of an error, because a store's own text names its backend and can carry what it was holding. The README's "Log events" table lists every code with its level, and `crates/bymax-auth-core/tests/log_events.rs` fails the build when a call lacks a code, carries any other field, or the sources and the table are not the same set.
 ### 8.9 Service API-key guard (feature `api-keys`)
 
 ```rust
@@ -4352,7 +4354,7 @@ The error contract is split cleanly by hook kind, mirroring nest-auth's "before 
 | --- | --- | --- |
 | Blocking | `before_register`, `before_login` | Propagated. The engine aborts the operation and maps `HookError` to an `AuthError` so the client receives a definite failure. A `Reject` from `before_register` (not an `Err`) produces `auth.forbidden` with the supplied reason. |
 | Decision | `on_oauth_login` | Propagated. An `Err` aborts the OAuth flow; a `Reject` result maps to `auth.oauth_failed` with the reason. |
-| Fire-and-forget | every `after_*` and `on_*` notification | Caught. The engine logs the error via `tracing` (`warn`/`error` with the hook name and context ids, never with secret fields) and continues — the user-facing operation has already succeeded and its response is unaffected. |
+| Fire-and-forget | every `after_*` and `on_*` notification | Caught. The engine logs the error via `tracing` (`warn`/`error` under a closed `RUST_AUTH_*` event code, never with an identifier, a secret or the error's text) and continues — the user-facing operation has already succeeded and its response is unaffected. |
 
 ```rust
 #[derive(Debug, thiserror::Error)]
@@ -4500,7 +4502,7 @@ pub enum EmailError {
 
 ### 10.4 NoOp default
 
-When the consumer supplies no provider, the builder installs `NoOpEmailProvider`. Every method returns `Ok(())` without sending anything, emitting a `tracing` debug line that records the event and recipient but redacts tokens and OTPs. This keeps local development and tests running without an email backend and matches nest-auth's `NoOpEmailProvider` fallback.
+When the consumer supplies no provider, the builder installs `NoOpEmailProvider`. Every method returns `Ok(())` without sending anything, emitting a `tracing` debug line that names the kind of message (`kind`) but carries neither the recipient nor the tenant, and redacts tokens and OTPs. This keeps local development and tests running without an email backend and matches nest-auth's `NoOpEmailProvider` fallback.
 
 ```rust
 #[derive(Default)]

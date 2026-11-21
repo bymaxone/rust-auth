@@ -17,7 +17,7 @@ use time::OffsetDateTime;
 
 use crate::context::RequestContext;
 use crate::engine::AuthEngine;
-use crate::normalize::{log_safe, normalize_email};
+use crate::normalize::normalize_email;
 use crate::services::auth::detached::run_after_invitation_accepted;
 use crate::services::auth::{map_repository_error, spawn_guarded};
 use crate::traits::{HookContext, HookPlane, InviteData, StoredInvitation};
@@ -175,13 +175,18 @@ impl AuthEngine {
             .await
             .is_err()
         {
-            tracing::error!("invitation: delivery failed (the invitation stands)");
+            tracing::error!(
+                event = "RUST_AUTH_INVITATION_DELIVERY_FAILED",
+                "invitation: delivery failed (the invitation stands)"
+            );
             return Err(crate::services::internal_error(
                 "invitation delivery failed",
             ));
         }
-        let tenant = log_safe(tenant_id);
-        tracing::info!(tenant_id = %tenant, role = %invitation.role, "invitation: created");
+        tracing::info!(
+            event = "RUST_AUTH_INVITATION_CREATED",
+            "invitation: created"
+        );
         Ok(())
     }
 
@@ -243,6 +248,7 @@ impl AuthEngine {
             // here destroys the invitation rather than merely failing it, and an undeclared role
             // is what a tampered token looks like. Both are worth an operator's attention.
             tracing::warn!(
+                event = "RUST_AUTH_INVITATION_RECORD_REJECTED",
                 "invitation: stored record rejected as empty or carrying an undeclared role"
             );
             return Err(AuthError::InvalidInvitationToken);
@@ -322,7 +328,10 @@ impl AuthEngine {
         self.enforce_sessions_after_issue(&result, ip, user_agent, &hook_ctx)
             .await?;
 
-        tracing::info!(user_id = %safe.id, tenant_id = %safe.tenant_id, "invitation: accepted");
+        tracing::info!(
+            event = "RUST_AUTH_INVITATION_ACCEPTED",
+            "invitation: accepted"
+        );
         spawn_guarded(run_after_invitation_accepted(
             self.hooks().clone(),
             safe,
@@ -408,10 +417,8 @@ impl AuthEngine {
                 &self.config().config().roles.hierarchy,
             )
         {
-            let tenant = log_safe(tenant_id);
             tracing::warn!(
-                tenant_id = %tenant,
-                %revoker_user_id,
+                event = "RUST_AUTH_INVITATION_REVOKE_OUTRANKED",
                 "invitation: revoke refused — outranked by the invitation"
             );
             return Ok(false);
@@ -421,8 +428,10 @@ impl AuthEngine {
             .take_invitation_index(tenant_id, &self.invitee_identifier(&email))
             .await?;
         let removed = store.delete_invitation_by_hash(&hash).await?;
-        let tenant = log_safe(tenant_id);
-        tracing::info!(tenant_id = %tenant, %revoker_user_id, "invitation: withdrawn");
+        tracing::info!(
+            event = "RUST_AUTH_INVITATION_WITHDRAWN",
+            "invitation: withdrawn"
+        );
         Ok(removed)
     }
 
@@ -455,8 +464,7 @@ impl AuthEngine {
         });
         if !still_authorised {
             tracing::warn!(
-                inviter_user_id = %invitation.inviter_user_id,
-                role = %invitation.role,
+                event = "RUST_AUTH_INVITATION_INVITER_CANNOT_GRANT",
                 "invitation: the inviter can no longer grant this invitation"
             );
             return Err(AuthError::InvalidInvitationToken);
@@ -1298,7 +1306,8 @@ mod tests {
         drop(capture);
         assert!(events.contains_at(tracing::Level::INFO, "invitation: created"));
         assert!(events.contains_at(tracing::Level::INFO, "invitation: withdrawn"));
-        assert!(events.contains("tenant_id=t1"));
+        assert!(events.contains("RUST_AUTH_INVITATION_WITHDRAWN"));
+        assert!(!events.contains("tenant_id"));
         // Both the record and the pointer are gone — a surviving index would read to an
         // operator as "still pending".
         assert!(indexed(&s, "invitee@example.com").await.is_none());
@@ -1356,7 +1365,8 @@ mod tests {
             tracing::Level::WARN,
             "invitation: revoke refused — outranked by the invitation"
         ));
-        assert!(events.contains("tenant_id=t1"));
+        assert!(events.contains("RUST_AUTH_INVITATION_REVOKE_OUTRANKED"));
+        assert!(!events.contains("tenant_id"));
         // The same caller, against an address with nothing pending: the same answer.
         assert!(matches!(
             s.engine

@@ -10,7 +10,6 @@ use std::sync::Arc;
 use bymax_auth_types::AuthError;
 
 use crate::engine::AuthEngine;
-use crate::normalize::log_safe;
 use crate::services::auth::invitation::has_role;
 use crate::traits::InvitationStore;
 
@@ -60,9 +59,8 @@ impl AuthEngine {
                 return Ok(approved);
             }
         }
-        let tenant = log_safe(tenant_id);
         tracing::warn!(
-            tenant_id = %tenant,
+            event = "RUST_AUTH_INVITATION_SUPERSEDE_CONTENDED",
             "invitation: refused, the pending invitation kept changing under the rank check"
         );
         Err(AuthError::InsufficientRole)
@@ -105,8 +103,11 @@ impl AuthEngine {
             Ok(false) => AuthError::InsufficientRole,
             Err(error) => error,
         };
-        if let Err(error) = store.delete_invitation_by_hash(token_hash).await {
-            tracing::warn!(%error, "invitation: could not withdraw the record of an unconfirmed invite");
+        if store.delete_invitation_by_hash(token_hash).await.is_err() {
+            tracing::warn!(
+                event = "RUST_AUTH_INVITATION_UNCONFIRMED_WITHDRAW_FAILED",
+                "invitation: could not withdraw the record of an unconfirmed invite"
+            );
         }
         Err(outcome)
     }
@@ -131,9 +132,8 @@ impl AuthEngine {
                 &self.config().config().roles.hierarchy,
             )
         {
-            let tenant = log_safe(tenant_id);
             tracing::warn!(
-                tenant_id = %tenant,
+                event = "RUST_AUTH_INVITATION_SUPERSEDE_OUTRANKED",
                 "invitation: refused, outranked by the pending invitation"
             );
             return Err(AuthError::InsufficientRole);

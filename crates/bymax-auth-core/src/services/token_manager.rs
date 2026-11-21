@@ -557,6 +557,7 @@ impl TokenManagerService {
         // stay as they were and no successor is stored that no client holds.
         if live.as_ref().is_some_and(|record| !names_a_tenant(record)) {
             tracing::warn!(
+                event = "RUST_AUTH_REFRESH_SESSION_WITHOUT_TENANT",
                 "refresh: a dashboard session record names no tenant, so it cannot rotate"
             );
             return Err(AuthError::RefreshTokenInvalid);
@@ -614,6 +615,7 @@ impl TokenManagerService {
                 // pointer; nothing is written.
                 if !names_a_tenant(&recovered) {
                     tracing::warn!(
+                        event = "RUST_AUTH_REFRESH_RECOVERED_WITHOUT_TENANT",
                         "refresh: a recovered dashboard session names no tenant, so it cannot be recovered"
                     );
                     return Err(AuthError::RefreshTokenInvalid);
@@ -665,18 +667,15 @@ impl TokenManagerService {
                 // signature of a stolen token. Revoke the whole family (every live descendant
                 // of that login) so the thief's chain dies too, then reject: every holder must
                 // re-authenticate (§12.5.2, OWASP rotation with automatic reuse detection).
-                // Named, on both lines. This is the strongest compromise signal the library
-                // produces, and it used to be logged as bare prose: the account it concerns
-                // reached only a consumer who had wired `on_refresh_token_reuse_detected`,
-                // and the shipped hooks are no-ops. On a default deployment the one
-                // unambiguous theft signal was anonymous in the log and nowhere else, so an
-                // operator could tell that something happened and not to whom (ASVS 16.2.1).
+                // This is the strongest compromise signal the library produces. The log line
+                // carries its code and no account: the account it concerns reaches a consumer
+                // through `on_refresh_token_reuse_detected`, never through the log.
                 //
                 // Two events rather than one: the detection is the finding and the revocation
                 // is the response to it, and a `revoke_family` that fails must not take the
                 // finding down with it.
                 tracing::warn!(
-                    family_id = %family,
+                    event = "RUST_AUTH_REFRESH_REUSE_DETECTED",
                     "refresh: reuse of a consumed refresh token detected — revoking the token family"
                 );
                 // The owner is read from the family index, and can come from nowhere else: the
@@ -701,17 +700,18 @@ impl TokenManagerService {
                     .await?;
                 let owner_id = owner.as_ref().map(|record| record.user_id.as_str());
                 // Bound rather than inlined in the field; see the note in `login`.
-                let logged_owner = owner_id.unwrap_or("<unknown>");
                 tracing::warn!(
-                    user_id = logged_owner,
-                    family_id = %family,
+                    event = "RUST_AUTH_REFRESH_FAMILY_REVOKED",
                     "refresh: token family revoked after reuse detection"
                 );
                 self.fire_reuse_detected(HookPlane::Dashboard, owner_id, &family, ip, user_agent);
                 Err(AuthError::RefreshTokenInvalid)
             }
             RotateOutcome::Invalid => {
-                tracing::warn!("refresh: no live session or grace window for the presented token");
+                tracing::warn!(
+                    event = "RUST_AUTH_REFRESH_NO_SESSION",
+                    "refresh: no live session or grace window for the presented token"
+                );
                 Err(AuthError::RefreshTokenInvalid)
             }
         }
@@ -925,7 +925,7 @@ impl TokenManagerService {
                 // Named for the same reason as the dashboard plane, and more so: this is the
                 // highest-privilege identity in the system.
                 tracing::warn!(
-                    family_id = %family,
+                    event = "RUST_AUTH_PLATFORM_REFRESH_REUSE_DETECTED",
                     "platform refresh: reuse of a consumed refresh token detected — revoking the token family"
                 );
                 // The owner is read from the family index, and can come from nowhere else: the
@@ -943,10 +943,8 @@ impl TokenManagerService {
                     .revoke_family(SessionKind::Platform, &family, owner_subject.as_deref())
                     .await?;
                 let owner_id = owner.as_ref().map(|record| record.user_id.as_str());
-                let logged_owner = owner_id.unwrap_or("<unknown>");
                 tracing::warn!(
-                    user_id = logged_owner,
-                    family_id = %family,
+                    event = "RUST_AUTH_PLATFORM_REFRESH_FAMILY_REVOKED",
                     "platform refresh: token family revoked after reuse detection"
                 );
                 self.fire_reuse_detected(HookPlane::Platform, owner_id, &family, ip, user_agent);
@@ -954,6 +952,7 @@ impl TokenManagerService {
             }
             RotateOutcome::Invalid => {
                 tracing::warn!(
+                    event = "RUST_AUTH_PLATFORM_REFRESH_NO_SESSION",
                     "platform refresh: no live session or grace window for the presented token"
                 );
                 Err(AuthError::RefreshTokenInvalid)
@@ -1166,13 +1165,13 @@ impl TokenManagerService {
     #[cfg(not(feature = "mfa"))]
     pub async fn issue_mfa_temp_token(
         &self,
-        user_id: &str,
+        _user_id: &str,
         context: MfaContext,
         tenant_id: Option<&str>,
     ) -> Result<String, AuthError> {
         let _ = (context, tenant_id);
         tracing::error!(
-            %user_id,
+            event = "RUST_AUTH_MFA_SURFACE_MISSING",
             "mfa challenge requested, but this build has no MFA surface — enable the `mfa` \
              feature or clear `mfa_enabled` on the account"
         );
@@ -1216,7 +1215,11 @@ impl TokenManagerService {
             // field on its own line is only evaluated when a subscriber is listening, so it
             // reads as uncovered in every run that does not install one.
             let plane = context.as_str();
-            tracing::warn!(plane, "mfa challenge refused at issuance");
+            tracing::warn!(
+                event = "RUST_AUTH_MFA_CHALLENGE_REFUSED",
+                plane,
+                "mfa challenge refused at issuance"
+            );
             return Err(AuthError::Validation {
                 details: vec![bymax_auth_types::FieldError {
                     field: "tenantId".to_owned(),
@@ -1427,7 +1430,10 @@ impl TokenManagerService {
         };
         let age = now_offset() - born_at;
         if age.whole_seconds().unsigned_abs() > self.absolute_lifetime_secs && age.is_positive() {
-            tracing::warn!("rotation refused: session outlived the absolute lifetime cap");
+            tracing::warn!(
+                event = "RUST_AUTH_REFRESH_ABSOLUTE_LIFETIME_EXCEEDED",
+                "rotation refused: session outlived the absolute lifetime cap"
+            );
             return Err(AuthError::RefreshTokenInvalid);
         }
         Ok(())
@@ -1896,7 +1902,8 @@ mod tests {
             tracing::Level::WARN,
             "refresh: token family revoked after reuse detection"
         ));
-        assert!(events.contains("user_id=u1"));
+        assert!(events.contains("RUST_AUTH_REFRESH_FAMILY_REVOKED"));
+        assert!(!events.contains("user_id"));
         // ...and the reuse revoked the whole family, so the live rotated token no longer rotates.
         assert!(matches!(
             svc.reissue_tokens(&rotated.refresh_token, "10.0.0.1", "agent/1.0")
@@ -2271,7 +2278,8 @@ mod tests {
             tracing::Level::WARN,
             "platform refresh: token family revoked after reuse detection"
         ));
-        assert!(events.contains("user_id=p1"));
+        assert!(events.contains("RUST_AUTH_PLATFORM_REFRESH_FAMILY_REVOKED"));
+        assert!(!events.contains("user_id"));
         assert!(matches!(
             svc.reissue_platform_tokens(&rotated.refresh_token, "10.0.0.1", "agent/1.0")
                 .await,

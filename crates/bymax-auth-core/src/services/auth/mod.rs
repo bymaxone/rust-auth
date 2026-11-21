@@ -167,11 +167,17 @@ where
 {
     match tokio::time::timeout(timeout, future).await {
         Ok(Ok(_)) => {}
-        Ok(Err(error)) => {
-            tracing::warn!(%error, "detached auth side-effect returned an error (ignored)");
+        Ok(Err(_)) => {
+            tracing::warn!(
+                event = "RUST_AUTH_SIDE_EFFECT_FAILED",
+                "detached auth side-effect returned an error (ignored)"
+            );
         }
         Err(_) => {
-            tracing::warn!("detached auth side-effect exceeded the timeout ceiling (ignored)");
+            tracing::warn!(
+                event = "RUST_AUTH_SIDE_EFFECT_TIMEOUT",
+                "detached auth side-effect exceeded the timeout ceiling (ignored)"
+            );
         }
     }
 }

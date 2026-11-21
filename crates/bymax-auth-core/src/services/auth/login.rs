@@ -12,7 +12,7 @@ use bymax_auth_types::{
 
 use crate::context::RequestContext;
 use crate::engine::AuthEngine;
-use crate::normalize::{log_safe, mask_email, normalize_email};
+use crate::normalize::normalize_email;
 use crate::services::auth::detached::{
     run_after_login, run_on_lockout, run_on_login_failed, run_rehash_password,
     run_update_last_login,
@@ -61,9 +61,10 @@ impl AuthEngine {
             // field expression is not evaluated without an installed subscriber, so as its own
             // line it reads as uncovered under the 100% gate while being perfectly exercised.
             // That the redaction actually reaches the log is asserted under `log_capture`.
-            let masked = mask_email(&input.email);
-            let tenant = log_safe(&tenant_id);
-            tracing::warn!(email = %masked, tenant_id = %tenant, "login: account locked");
+            tracing::warn!(
+                event = "RUST_AUTH_LOGIN_ACCOUNT_LOCKED",
+                "login: account locked"
+            );
             // Only a lock is announced as one: a store that could not answer the lockout read
             // says nothing about the account, and answers `503` without telling the hook.
             if matches!(error, AuthError::AccountLocked { .. }) {
@@ -105,6 +106,7 @@ impl AuthEngine {
             .is_some_and(|candidate| candidate.tenant_id != tenant_id)
         {
             tracing::warn!(
+                event = "RUST_AUTH_LOGIN_TENANT_MISMATCH",
                 "login: repository returned an account outside the requested tenant — check \
                  that UserRepository::find_by_email scopes by its tenant_id argument"
             );
@@ -207,8 +209,10 @@ impl AuthEngine {
                 // different tenant's row than the password step authenticated.
                 .issue_mfa_temp_token(&user.id, MfaContext::Dashboard, Some(&user.tenant_id))
                 .await?;
-            let tenant = log_safe(&tenant_id);
-            tracing::info!(user_id = %user.id, tenant_id = %tenant, "login: MFA challenge issued");
+            tracing::info!(
+                event = "RUST_AUTH_LOGIN_MFA_CHALLENGE_ISSUED",
+                "login: MFA challenge issued"
+            );
             return Ok(LoginResult::MfaChallenge(MfaChallengeResult {
                 mfa_required: true,
                 mfa_temp_token,
@@ -216,8 +220,7 @@ impl AuthEngine {
         }
 
         // A fresh session is minted on success (session-fixation resistance).
-        let tenant = log_safe(&tenant_id);
-        tracing::info!(user_id = %user.id, tenant_id = %tenant, "login: success");
+        tracing::info!(event = "RUST_AUTH_LOGIN_SUCCEEDED", "login: success");
         self.issue_session_result(user, &ctx.ip, &ctx.user_agent, hook_ctx)
             .await
     }
@@ -239,16 +242,13 @@ impl AuthEngine {
         user_id: Option<&str>,
         hook_ctx: &HookContext,
     ) -> Result<T, AuthError> {
-        // Named, like the success line six lines up and like nest-auth's own refusal. Both
-        // values are parameters of this function and were simply unused: an operator reading a
-        // run of these could see that credentials were being refused and not for which account
-        // or tenant, which is the difference between a log and an audit trail (ASVS 16.2.1).
-        // The address is masked and the tenant sanitized — `tenant_id` is attacker-chosen from
-        // the request body whenever no `TenantIdResolver` is configured, which is the default,
-        // and a raw newline in it forges a record on a plain-text subscriber.
-        let masked = mask_email(email);
-        let tenant = log_safe(tenant_id);
-        tracing::warn!(email = %masked, tenant_id = %tenant, "login: invalid credentials");
+        // The line carries its code and no account or tenant: `tenant_id` is attacker-chosen from
+        // the request body whenever no `TenantIdResolver` is configured, and a refusal names
+        // the account only to a host that reads it from the `on_login_failed` hook.
+        tracing::warn!(
+            event = "RUST_AUTH_LOGIN_INVALID_CREDENTIALS",
+            "login: invalid credentials"
+        );
         self.brute_force().record_failure(identifier).await?;
         self.fire_login_failed(
             email,
@@ -306,8 +306,11 @@ impl AuthEngine {
     ) {
         let crossed = match self.brute_force().is_locked(identifier).await {
             Ok(locked) => locked,
-            Err(error) => {
-                tracing::error!(%error, "login: could not read the lockout state for the hook");
+            Err(_) => {
+                tracing::error!(
+                    event = "RUST_AUTH_LOGIN_LOCKOUT_STATE_UNREADABLE",
+                    "login: could not read the lockout state for the hook"
+                );
                 return;
             }
         };
@@ -319,9 +322,9 @@ impl AuthEngine {
         // bound on what is left, where `0` would tell the hook the account is not locked.
         let retry = match self.brute_force().remaining_lockout_secs(identifier).await {
             Ok(remaining) => remaining,
-            Err(error) => {
+            Err(_) => {
                 tracing::error!(
-                    %error,
+                    event = "RUST_AUTH_LOGIN_LOCKOUT_REMAINING_UNREADABLE",
                     "login: could not read the remaining lockout time for the hook; reporting the configured window"
                 );
                 self.brute_force().window_secs()
@@ -361,9 +364,7 @@ impl AuthEngine {
         // lockout actually wrote and the unlock silently does nothing.
         let identifier = self.lockout_identifier(tenant_id, &normalize_email(email));
         self.brute_force().reset(&identifier).await?;
-        let masked = mask_email(email);
-        let tenant = log_safe(tenant_id);
-        tracing::info!(email = %masked, tenant_id = %tenant, "lockout cleared");
+        tracing::info!(event = "RUST_AUTH_LOGIN_LOCKOUT_CLEARED", "lockout cleared");
         Ok(())
     }
 
@@ -486,7 +487,9 @@ mod tests {
         drop(capture);
         assert!(matches!(&result, Ok(LoginResult::Success(_))));
         assert!(events.contains_at(tracing::Level::INFO, "login: success"));
-        assert!(events.contains("tenant_id=t1"));
+        assert!(events.contains("RUST_AUTH_LOGIN_SUCCEEDED"));
+        assert!(!events.contains("tenant_id"));
+        assert!(!events.contains("ok@example.com"));
         let Ok(LoginResult::Success(auth)) = result else { return };
         assert_eq!(auth.user.email, "ok@example.com");
         assert!(!auth.access_token.is_empty());
@@ -623,9 +626,11 @@ mod tests {
         ));
         assert!(events.contains_at(tracing::Level::WARN, "login: invalid credentials"));
         assert!(events.contains_at(tracing::Level::WARN, "login: account locked"));
-        // The address is never logged whole, and the tenant passes through `log_safe`.
+        // Neither the address nor the tenant is logged: the codes name what happened.
+        assert!(events.contains("RUST_AUTH_LOGIN_ACCOUNT_LOCKED"));
+        assert!(events.contains("RUST_AUTH_LOGIN_INVALID_CREDENTIALS"));
         assert!(!events.contains("lock@example.com"));
-        assert!(events.contains("tenant_id=t1"));
+        assert!(!events.contains("tenant_id"));
     }
 
     #[tokio::test]
@@ -877,7 +882,8 @@ mod tests {
             }))
         ));
         assert!(events.contains_at(tracing::Level::INFO, "login: MFA challenge issued"));
-        assert!(events.contains("tenant_id=t1"));
+        assert!(events.contains("RUST_AUTH_LOGIN_MFA_CHALLENGE_ISSUED"));
+        assert!(!events.contains("tenant_id"));
     }
 
     #[tokio::test]
@@ -1391,7 +1397,8 @@ mod tests {
         );
         drop(capture);
         assert!(events.contains_at(tracing::Level::INFO, "lockout cleared"));
-        assert!(events.contains("tenant_id=t1"));
+        assert!(events.contains("RUST_AUTH_LOGIN_LOCKOUT_CLEARED"));
+        assert!(!events.contains("tenant_id"));
         assert!(!events.contains("Locked@Example.com"));
 
         assert!(matches!(

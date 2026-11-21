@@ -80,7 +80,10 @@ impl Reproof<'_> {
         let Some(hash) = password_hash else {
             let marker = user_subject_hash(self.identifier_key, plane, tenant_id, user_id);
             if !self.session_store.has_recent_auth(&marker).await? {
-                tracing::warn!(%user_id, "reauthenticate: no recent authentication");
+                tracing::warn!(
+                    event = "RUST_AUTH_REAUTH_NOT_RECENT",
+                    "reauthenticate: no recent authentication"
+                );
                 return Err(AuthError::ReauthenticationRequired);
             }
             return Ok(());
@@ -88,7 +91,10 @@ impl Reproof<'_> {
         let counter = self.failure_identifier(plane, tenant_id, user_id);
         if self.brute_force.is_locked(&counter).await? {
             let retry = self.brute_force.remaining_lockout_secs(&counter).await?;
-            tracing::warn!(%user_id, "reauthenticate: account locked");
+            tracing::warn!(
+                event = "RUST_AUTH_REAUTH_ACCOUNT_LOCKED",
+                "reauthenticate: account locked"
+            );
             return Err(AuthError::AccountLocked {
                 retry_after_seconds: Some(retry),
             });
