@@ -257,13 +257,11 @@ mod tests {
             30,
             (None, None, None),
         );
-        assert!(
-            matches!(
-                refused,
-                Err(jwt_edge::EdgeError::Jwt(bymax_auth_jwt::JwtError::Clock))
-            ),
-            "{refused:?}"
+        let clock_refusal = matches!(
+            &refused,
+            Err(jwt_edge::EdgeError::Jwt(bymax_auth_jwt::JwtError::Clock))
         );
+        assert!(clock_refusal);
         let read = verify_at(Ok(1_000), &token, secret.to_owned(), 30, (None, None, None));
         assert!(read.is_ok(), "{read:?}");
     }
