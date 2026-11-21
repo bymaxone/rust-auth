@@ -238,6 +238,7 @@ Rust has no DI container, and `rust-auth` deliberately does not emulate one. Ins
 | `OtpStore` | OTP/verification half of Redis | OTP records with attempt counters |
 | `BruteForceStore` | brute-force half of Redis | attempt counters with fixed TTL |
 | `MembershipCacheStore` | the `wsv`/`wmv`/`wm` keys and the `membership_cache_fill` / `membership_cache_bump` scripts | versioned workspace-membership cache shared with nest-auth (§12.5.6) |
+| `WorkspaceInvitationStore` | the `winv` / `winvidx` / `winvset` / `winvrl` keys and the `workspace_invitation_publish` / `workspace_invitation_remove` scripts | workspace invitations shared with nest-auth (§12.5.11) |
 | `OAuthProvider` | `OAuthProviderPlugin` | per-provider OAuth (Google built-in) |
 
 Conceptually (illustrative — see §7.0.1 for the authoritative engine shape):
@@ -5323,6 +5324,16 @@ The rank check reads the index and the claim writes it; as two round trips they 
 - **`session_prune_dead`** removes index members whose own key is gone and leaves every other member. The existence check and the `SREM` are one step: a member written between a separate `EXISTS` and `SREM` would be dropped while live, and a live session missing from the index survives "sign out everywhere". **KEYS** `[1]` `sess:{subjectHash}`; **ARGV** `[1]` namespace, `[2..]` the candidate members, each a full key suffix. **Contract:** for each candidate with `EXISTS {ns}:{member} == 0`, `SREM KEYS[1] member`; return the list of members removed.
 
 > **Why Lua, in one line:** every one of these transitions has a read→decide→write shape where a second concurrent caller slipping between the read and the write would breach a security invariant (double session, cross-user revoke, lockout evasion, attempt-ceiling evasion). Redis runs each script to completion atomically, which is the cheapest correct primitive available and exactly what nest-auth relies on.
+
+#### 12.5.11 `workspace_invitation_publish` and `workspace_invitation_remove` — the workspace invitation store
+
+An invitation is three structures and a counter (§12.4), shared with nest-auth and pinned by `workspaceInvitations` in the shared contract: the record `winv:{sha256(token)}`, the index `winvidx:` that names the ONE live invitation of an address in a workspace, the set `winvset:` of a workspace's record keys, and the inviter's hourly counter `winvrl:`. The index and the set hold the record key as the contract names it, `winv:{hash}` without the namespace, so a script receives that text in `ARGV` and the namespaced key in `KEYS`.
+
+- **`workspace_invitation_publish`** — **KEYS** `[1]` the index, `[2]` the new record, `[3]` the set, `[4]` the record the writer read from the index (the new record when none); **ARGV** `[1]` the new record key, `[2]` the record JSON, `[3]` the lifetime (s), `[4]` the pending limit (`0` is no limit), `[5]` the record key the writer read (`''` for none). **Contract:** ONE atomic step with no separate claim. If the index (absent read as `''`) differs from `ARGV[5]` return `'lost'`; if the limit is not `0` and `SCARD KEYS[3]` is at least the limit return `'full'`; else `SET` the record and the index with `EX ARGV[3]`, `SADD` the key and `EXPIRE` the set, and, when `ARGV[5]` is not `''`, `DEL KEYS[4]` and `SREM` it from the set; return `'published'`. Only `'published'` writes. A writer that read a stale index writes nothing, so two overlapping invitations for one address leave exactly one record.
+- **`workspace_invitation_remove`** — **KEYS** `[1]` the index, `[2]` the record, `[3]` the set; **ARGV** `[1]` the record key. **Contract:** `DEL` the record, `SREM` the key from the set, and `DEL` the index only while it still holds this key; return `1` when it did, else `0`. A revoke or resend that lands between an acceptance's write and its spend therefore cannot be undone by the spend.
+- **Dead members.** A set member whose record has expired still counts in `SCARD`, so before a publication with a limit and before a listing the store drops the members whose key is gone (the `session_prune_dead` script); a member whose value is not a record is left in place and not listed. The caller passes limit `0` when it replaces a record that is still alive, because the set does not grow; an index that names a gone record is a first invitation for the cap.
+- **The inviter counter** is the `brute_force_incr` script on a `winvrl:` key: `INCR`, and `EXPIRE` to 3600 s on the first increment only.
+- **Rust mapping:** `PublishOutcome::{ Published, Lost, Full }`; `remove` returns whether the index named the record; `read_record` answers `None` for a value that is not a record (`InvitationRecord::parse`). The scenarios run through one runner (`testing::workspace_invitation_scenarios`) against both `InMemoryWorkspaceInvitations` and a real Redis, and the contract's key vectors are replayed against the keys the Redis store writes.
 
 ### 12.6 Performance and operational notes
 
