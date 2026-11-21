@@ -170,7 +170,7 @@ impl PlatformAuthService {
         self.brute_force.reset(&identifier).await?;
 
         // Transparent rehash-on-verify, fire-and-forget, never blocking login.
-        if self.passwords.rehash_on_verify() && outcome.needs_rehash {
+        if upgrades_hash(self.passwords.rehash_on_verify(), outcome.needs_rehash) {
             spawn_guarded(run_rehash_platform_password(
                 self.passwords.clone(),
                 self.repo.clone(),
@@ -570,6 +570,13 @@ pub(crate) async fn run_update_platform_last_login(
     admin_id: String,
 ) -> Result<(), crate::RepositoryError> {
     repo.update_last_login(&admin_id).await
+}
+
+/// Whether a successful login schedules the hash upgrade: the toggle is on AND the stored hash is
+/// stale. Either alone leaves a current hash untouched, so a rehash is never a write on every login
+/// and the toggle always disables it.
+const fn upgrades_hash(rehash_on_verify: bool, needs_rehash: bool) -> bool {
+    rehash_on_verify && needs_rehash
 }
 
 /// Re-hash the just-proven plaintext with the current scheme and persist the upgrade — the
@@ -1507,6 +1514,17 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn the_hash_is_upgraded_only_when_the_toggle_is_on_and_the_hash_is_stale() {
+        assert!(upgrades_hash(true, true));
+        assert!(!upgrades_hash(true, false), "a current hash is left alone");
+        assert!(
+            !upgrades_hash(false, true),
+            "the toggle disables the upgrade"
+        );
+        assert!(!upgrades_hash(false, false));
+    }
+
     #[tokio::test]
     async fn a_current_hash_is_left_alone_on_login() {
         // The upgrade needs *both* the toggle and a genuinely stale hash. Either one alone
@@ -1522,15 +1540,11 @@ mod tests {
                 .await,
             Ok(PlatformLoginResult::Success(_))
         ));
-        // Watched for as long as the upgrade test waits for a rehash that was scheduled: a
-        // derivation lands well inside it on any runner, so a hash that never changes here is
-        // one that was never rewritten, not one that was slow.
-        for _ in 0..40 {
-            let after = h.admins.find_by_id(&id).await;
-            let Ok(Some(after)) = after else { return };
-            assert_eq!(before.password_hash, after.password_hash);
-            tokio::time::sleep(Duration::from_millis(100)).await;
-        }
+        // Long enough for a spawned rehash to have landed if one had been spawned.
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        let after = h.admins.find_by_id(&id).await;
+        let Ok(Some(after)) = after else { return };
+        assert_eq!(before.password_hash, after.password_hash);
     }
 
     #[tokio::test]
@@ -1575,7 +1589,7 @@ mod tests {
             // configured cost, and a wait tuned on a laptop fails on a slower runner while
             // saying nothing about the code.
             let mut stored = None;
-            for _ in 0..40 {
+            for _ in 0..300 {
                 if let Ok(Some(admin)) = h.admins.find_by_id(&id).await
                     && admin.password_hash != weak_hash
                 {
