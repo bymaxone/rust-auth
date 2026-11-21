@@ -102,12 +102,17 @@ jobs:
             SHARDS=$(( (total + MUTANTS_PER_SHARD - 1) / MUTANTS_PER_SHARD ))
           else
             SHARDS="${FULL_SWEEP_SHARDS:-48}"
-            if ! [[ "${SHARDS}" =~ ^[0-9]+$ ]] || [ "${SHARDS}" -lt 1 ] || [ "${SHARDS}" -gt 256 ]; then
+            # At most three digits, so no value can overflow the arithmetic that follows; the
+            # range is checked on the decimal value, which a leading zero would otherwise make octal.
+            if ! [[ "${SHARDS}" =~ ^[0-9]{1,3}$ ]]; then
               echo "::error::shards '${SHARDS}' is not a whole number from 1 to 256"
               exit 1
             fi
-            # Read as decimal: a leading zero would otherwise make the arithmetic below octal.
             SHARDS=$(( 10#${SHARDS} ))
+            if [ "${SHARDS}" -lt 1 ] || [ "${SHARDS}" -gt 256 ]; then
+              echo "::error::shards '${SHARDS}' is not a whole number from 1 to 256"
+              exit 1
+            fi
             total="$(cargo mutants --list | grep -c .)"
           fi
           budget=$(( TIMEOUT_MINUTES * 60 / SECONDS_PER_MUTANT ))
