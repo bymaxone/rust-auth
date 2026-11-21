@@ -343,7 +343,7 @@ where
 }
 
 #[tokio::test]
-async fn each_scenario_alone_fails_on_the_store_it_is_written_for() {
+async fn a_scenario_written_for_a_fault_fails_alone_on_a_store_with_that_fault() {
     let cases = [
         alone_fails(Fault::ShortensTheLifetimes, |s| async move {
             scenarios::a_first_publication_writes_all_three_structures_with_one_lifetime(&*s).await;
