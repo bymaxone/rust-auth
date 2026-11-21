@@ -106,6 +106,8 @@ jobs:
               echo "::error::shards '${SHARDS}' is not a whole number from 1 to 256"
               exit 1
             fi
+            # Read as decimal: a leading zero would otherwise make the arithmetic below octal.
+            SHARDS=$(( 10#${SHARDS} ))
             total="$(cargo mutants --list | grep -c .)"
           fi
           budget=$(( TIMEOUT_MINUTES * 60 / SECONDS_PER_MUTANT ))
