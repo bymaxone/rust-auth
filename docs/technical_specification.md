@@ -5280,7 +5280,7 @@ Called when `refresh_rotate` reports a reuse. Kills every live descendant of the
 
 Closes an IDOR/BOLA hole: a user must not revoke a session hash they do not own.
 
-- **KEYS** — `[1]` `sess:{subjectHash}` (or `psess:{subjectHash}`), `[2]` `rt:{sessionHash}` (or `prt:{sessionHash}`), `[3]` `sd:{sessionHash}` (or `psd:{sessionHash}`). All three arrive fully namespaced (built by `NamespacedRedis`), so **every** key the script touches is declared in `KEYS`, which Redis Cluster key routing requires. A script that touches several keys still needs them in one slot, so a cluster deployment gives the namespace a hash tag; the sweeps that name the keys they read in `ARGV` (`session_prune_dead`, and the invitation prune built on it) are served by a cluster only under that same condition.
+- **KEYS** — `[1]` `sess:{subjectHash}` (or `psess:{subjectHash}`), `[2]` `rt:{sessionHash}` (or `prt:{sessionHash}`), `[3]` `sd:{sessionHash}` (or `psd:{sessionHash}`). All three arrive fully namespaced (built by `NamespacedRedis`), so **every** key the script touches is declared in `KEYS`, which Redis Cluster key routing requires. A script that touches several keys still needs them in one slot, so a cluster deployment gives the namespace a hash tag; the sweeps that name the keys they read in `ARGV` (`session_prune_dead`) are served by a cluster only under that same condition.
 - **ARGV** — `[1]` `rt:{sessionHash}` (or `prt:{sessionHash}`) — the `sess:`-set member, which is the full key suffix, not a bare hash.
 - **Contract:**
   1. `SISMEMBER KEYS[1] ARGV[1]`. If `0` → **return `0`** ⇒ caller raises `AuthError::SessionNotFound` (404).

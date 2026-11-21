@@ -229,7 +229,7 @@ Because every one of those lists is compared with this repository's own tables i
 
 ### Design of 13.6b — the invitation services
 
-**Surface.** Five methods on `AuthEngine`, each `(&self, member: &WorkspaceMember, …, ctx: &RequestContext)` like the member services: `invite_workspace_member(email, role)`, `resend_workspace_invitation(email)`, `revoke_workspace_invitation(email)`, `list_workspace_invitations(PageQuery)` and, with no caller, `preview_workspace_invitation(token)`. Bootstrap invitations are 13.7.
+**Surface.** Five methods on `AuthEngine`, each `(&self, member: &WorkspaceMember, …, ctx: &RequestContext)` like the member services: `invite_workspace_member(email, role)`, `resend_workspace_invitation(email)`, `revoke_workspace_invitation(email)`, `list_workspace_invitations(PageQuery)` and `preview_workspace_invitation(token)`. Bootstrap invitations are 13.7.
 
 **What does not exist yet and is added here.**
 
@@ -244,9 +244,7 @@ Because every one of those lists is compared with this repository's own tables i
 
 **Resend and revoke** answer success and change nothing for an address with no live invitation or one the actor may not act on, so neither confirms anything. **Preview** runs the same three reads (workspace, inviter, account) for every token, with a stand-in lookup where the token names nothing, and answers one `auth.invalid_invitation_token` for every failure.
 
-**Delivery.** A failure is logged under a closed `RUST_AUTH_` code with no address, token or hash and answered as an internal error without the provider's text; the record stays published. The log-event guard and the README table gain the code in the same change.
-
-**Tests, written first.** The role ceiling and its boundary, every limit, a lost compare-and-set, a first invitation at the cap against a replacement, an address that is a member in each status, an invalid creation time on invite and resend, delivery failure carrying no text, the events, and preview indistinguishability (the same error for each failure cause; the same three reads for every token follow from the code, which runs the lookups before it looks at the record).
+**Delivery.** A failure is logged under a closed `RUST_AUTH_` code with no address, token or hash and answered as an internal error without the provider's text; the record stays published.
 
 ---
 
