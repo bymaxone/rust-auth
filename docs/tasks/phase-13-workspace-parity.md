@@ -68,7 +68,9 @@ Because every one of those lists is compared with this repository's own tables i
 | 13.4 | Membership cache store and its scripts | ✅ Done (#394) | 13.2, 13.3 |
 | 13.5a | Workspace reads: list, access, members, switch, and the guard | ✅ Done (#396) | 13.1, 13.3, 13.4 |
 | 13.5b | Workspace mutations: create, rename, deletion lifecycle, role, remove, leave, transfer | ✅ Done (#398) | 13.5a |
-| 13.6 | Invitations core: invite, resend, revoke, list, preview | 📋 ToDo | 13.2, 13.3, 13.5a |
+| 13.6a | Invitation store: record, index, set, counter, and their scripts | 🔄 In review | 13.2, 13.3 |
+| 13.6b | Invitation services: invite, resend, revoke, list, preview | 📋 ToDo | 13.5a, 13.6a |
+| 13.6c | Invitation routes and DTOs | 📋 ToDo | 13.6b |
 | 13.7 | Acceptance family and bootstrap invitations | 📋 ToDo | 13.5b, 13.6 |
 | 13.8 | OAuth invitation, invitation-only registration, the OAuth MFA branch | 📋 ToDo | 13.7 |
 | 13.9 | Realtime surfaces: verifier, sockets, job check, `access.denied` and its limiter | 📋 ToDo | 13.5a |

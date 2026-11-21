@@ -10,6 +10,7 @@ pub mod access;
 pub mod audit;
 pub mod bounds;
 pub mod domain;
+pub mod invitation;
 pub mod keys;
 pub mod limits;
 pub mod membership_cache;
@@ -20,6 +21,8 @@ pub mod scoped_name;
 mod access_tests;
 #[cfg(test)]
 mod domain_tests;
+#[cfg(test)]
+mod invitation_tests;
 #[cfg(test)]
 mod membership_cache_tests;
 #[cfg(test)]

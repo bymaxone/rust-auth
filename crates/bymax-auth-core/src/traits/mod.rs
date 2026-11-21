@@ -23,6 +23,7 @@ pub mod rate_limit;
 pub mod repository;
 pub mod store;
 pub mod user_status_cache;
+pub mod workspace_invitation_store;
 pub mod workspace_repository;
 
 #[cfg(feature = "api-keys")]
@@ -76,5 +77,9 @@ pub use store::{
 };
 #[doc(inline)]
 pub use user_status_cache::UserStatusCacheStore;
+pub use workspace_invitation_store::{
+    IndexedInvitation, InvitationPlace, PendingInvitation, Publication, PublishOutcome,
+    WorkspaceInvitationStore,
+};
 #[doc(inline)]
 pub use workspace_repository::WorkspaceRepository;
