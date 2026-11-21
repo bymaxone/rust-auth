@@ -11,6 +11,11 @@ name: mutation-sweep
 # to build and 140 s to run the core suite), so even one change set of ~100 mutants overruns the
 # 240-minute limit of the single job the per-push gate in `ci.yml` runs. The number of shards then
 # follows the number of mutants instead of being fixed.
+#
+# A whole-workspace sweep takes `shards` (default 48). A shard of ~62 mutants runs close to the
+# 240-minute limit, and the slowest of them did not finish in two runs, so a sweep that has to be
+# complete is dispatched with more shards, which halves each one; the plan refuses a layout whose
+# fullest shard cannot fit.
 
 on:
   workflow_dispatch:
@@ -27,6 +32,13 @@ on:
           Empty sweeps the whole workspace.
         required: false
         default: ''
+        type: string
+      shards:
+        description: >-
+          How many shards a whole-workspace sweep is split into, 1 to 256. Ignored when
+          mutation_base is set, which sizes the shards by the mutants it holds.
+        required: false
+        default: '48'
         type: string
 
 permissions:
@@ -58,9 +70,10 @@ jobs:
       - name: Plan the shards, and refuse a plan that cannot finish
         id: plan
         env:
-          # The three constants that decide the layout. A shard job takes its time limit from
-          # here, so the budget below is computed from the limit the job actually runs under.
-          SHARDS: '48'
+          # What decides the layout. A shard job takes its time limit from here, so the budget
+          # below is computed from the limit the job actually runs under. The shard count of a
+          # whole-workspace sweep comes from the `shards` input.
+          FULL_SWEEP_SHARDS: ${{ inputs.shards }}
           TIMEOUT_MINUTES: '240'
           # Measured: shards of ~124 mutants did not finish in 240 minutes. A mutant costs up to
           # ~2.5 minutes to build and test, so 150 seconds each is the budget, unviable
@@ -88,6 +101,18 @@ jobs:
             fi
             SHARDS=$(( (total + MUTANTS_PER_SHARD - 1) / MUTANTS_PER_SHARD ))
           else
+            SHARDS="${FULL_SWEEP_SHARDS:-48}"
+            # At most three digits, so no value can overflow the arithmetic that follows; the
+            # range is checked on the decimal value, which a leading zero would otherwise make octal.
+            if ! [[ "${SHARDS}" =~ ^[0-9]{1,3}$ ]]; then
+              echo "::error::shards '${SHARDS}' is not a whole number from 1 to 256"
+              exit 1
+            fi
+            SHARDS=$(( 10#${SHARDS} ))
+            if [ "${SHARDS}" -lt 1 ] || [ "${SHARDS}" -gt 256 ]; then
+              echo "::error::shards '${SHARDS}' is not a whole number from 1 to 256"
+              exit 1
+            fi
             total="$(cargo mutants --list | grep -c .)"
           fi
           budget=$(( TIMEOUT_MINUTES * 60 / SECONDS_PER_MUTANT ))
@@ -97,7 +122,7 @@ jobs:
           needed=$(( (total + budget - 1) / budget ))
           echo "mutants: ${total}; shards: ${SHARDS}; fullest shard: ${per_shard}; budget per shard: ${budget} (${TIMEOUT_MINUTES} min at ${SECONDS_PER_MUTANT} s)"
           if [ "${per_shard}" -gt "${budget}" ]; then
-            echo "::error::${per_shard} mutants per shard exceed the budget of ${budget} that fits ${TIMEOUT_MINUTES} minutes; set SHARDS to at least ${needed}"
+            echo "::error::${per_shard} mutants per shard exceed the budget of ${budget} that fits ${TIMEOUT_MINUTES} minutes; dispatch with shards of at least ${needed}"
             exit 1
           fi
           {
@@ -183,6 +208,19 @@ jobs:
         with:
           pattern: mutants-shard-*
           path: shards
+      - name: Give a lone artifact its own directory
+        # With exactly one matching artifact the download extracts it into `shards` itself, with
+        # no directory of its own, so a one-shard sweep would find no `shards/*/outcomes.json`
+        # and report itself incomplete.
+        run: |
+          set -euo pipefail
+          shopt -s nullglob dotglob
+          if [ -f shards/outcomes.json ]; then
+            lone="$(mktemp -d)"
+            mv shards/* "${lone}/"
+            mkdir -p shards/mutants-shard-0
+            mv "${lone}"/* shards/mutants-shard-0/
+          fi
       - name: Totals, and fail on any missed or untested mutant
         env:
           SHARDS: ${{ needs.plan.outputs.shards }}
