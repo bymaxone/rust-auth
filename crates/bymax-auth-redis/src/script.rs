@@ -78,6 +78,16 @@ pub static MEMBERSHIP_CACHE_FILL: LazyLock<LuaScript> =
 pub static MEMBERSHIP_CACHE_BUMP: LazyLock<LuaScript> =
     LazyLock::new(|| LuaScript::new(include_str!("lua/membership_cache_bump.lua")));
 
+/// `workspace_invitation_publish` — the one atomic publication of a workspace invitation: index
+/// compare-and-set, pending cap, record, index, set and the retirement of the replaced record.
+pub static WORKSPACE_INVITATION_PUBLISH: LazyLock<LuaScript> =
+    LazyLock::new(|| LuaScript::new(include_str!("lua/workspace_invitation_publish.lua")));
+
+/// `workspace_invitation_remove` — delete a record and its set member, and the index only while it
+/// still names the record.
+pub static WORKSPACE_INVITATION_REMOVE: LazyLock<LuaScript> =
+    LazyLock::new(|| LuaScript::new(include_str!("lua/workspace_invitation_remove.lua")));
+
 /// `otp_verify` — attempt-bounded verify + consume (section 12.5.4).
 pub static OTP_VERIFY: LazyLock<LuaScript> =
     LazyLock::new(|| LuaScript::new(include_str!("lua/otp_verify.lua")));

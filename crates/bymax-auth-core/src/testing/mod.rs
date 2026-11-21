@@ -39,6 +39,7 @@ pub use crate::traits::{NoOpAuthHooks, NoOpEmailProvider};
 pub use api_key::{InMemoryApiKeyRepository, ManualApiKeyClock};
 pub use membership_cache::InMemoryMembershipCache;
 pub use workspace::InMemoryWorkspaces;
+pub use workspace_invitations::InMemoryWorkspaceInvitations;
 
 /// Acquire a mutex guard, recovering the inner value if the lock was poisoned (a test
 /// double never needs to escalate a poisoned lock to a panic).
@@ -1776,6 +1777,10 @@ mod otp_cooldown;
 mod rate_limit;
 mod user_status;
 mod workspace;
+pub mod workspace_invitation_scenarios;
+#[cfg(test)]
+mod workspace_invitation_scenarios_tests;
+mod workspace_invitations;
 #[cfg(test)]
 mod workspace_member_tests;
 mod workspace_members;
