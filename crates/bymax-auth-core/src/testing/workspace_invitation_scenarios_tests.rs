@@ -232,3 +232,21 @@ async fn a_store_that_breaks_one_rule_fails_the_run() {
         assert!(run_fails(fault).await, "a store that {name} passed the run");
     }
 }
+
+#[tokio::test]
+async fn an_unavailable_store_fails_every_call_and_recovers_when_it_is_back() {
+    let store = InMemoryWorkspaceInvitations::new();
+    let place = InvitationPlace {
+        index_id: "index".to_owned(),
+        set_id: "set".to_owned(),
+    };
+    store.set_unavailable(true);
+    assert!(store.read_record("winv:k").await.is_err());
+    assert!(store.read_index(&place).await.is_err());
+    assert!(store.remove(&place, "winv:k").await.is_err());
+    assert!(store.pending(&place).await.is_err());
+    assert!(store.count_inviter("rate").await.is_err());
+    store.set_unavailable(false);
+    assert!(matches!(store.count_inviter("rate").await, Ok(1)));
+    assert!(matches!(store.read_record("winv:k").await, Ok(None)));
+}

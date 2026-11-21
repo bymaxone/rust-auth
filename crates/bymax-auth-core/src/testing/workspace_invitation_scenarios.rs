@@ -146,6 +146,7 @@ pub async fn run_invitation_store_scenarios<S: InvitationStoreProbe + ?Sized>(st
     a_foreign_value_under_a_record_key_reads_as_absent(store).await;
     everything_expires_together_and_an_expired_index_is_replaced_like_any_other(store).await;
     the_inviter_counter_starts_its_hour_at_the_first_increment(store).await;
+    a_bootstrap_record_reads_back_as_written(store).await;
 }
 
 async fn a_first_publication_writes_all_three_structures_with_one_lifetime<
@@ -461,4 +462,39 @@ async fn the_inviter_counter_starts_its_hour_at_the_first_increment<
     store.count_inviter(rate).await.ok();
     let later = store.rate_ttl(rate).await;
     assert!(later <= first, "a later increment never extends the hour");
+}
+
+async fn a_bootstrap_record_reads_back_as_written<S: InvitationStoreProbe + ?Sized>(store: &S) {
+    let fixture = Fixture::new("bootstrap-roundtrip");
+    let key = fixture.key("record");
+    let written = InvitationRecord::Bootstrap {
+        base: InvitationBase {
+            email: "owner@example.com".to_owned(),
+            role: "owner".to_owned(),
+            tenant_id: "t1".to_owned(),
+            workspace_id: "w1".to_owned(),
+            created_at: "2026-11-20T10:00:00.000Z".to_owned(),
+            resend_count: 0,
+        },
+        workspace_name: "Acme".to_owned(),
+    };
+    let outcome = store
+        .publish(Publication {
+            place: &fixture.place,
+            record_key: &key,
+            record: &written,
+            ttl: ttl(TTL),
+            pending_limit: 0,
+            expected_key: None,
+        })
+        .await;
+    assert!(
+        matches!(outcome, Ok(PublishOutcome::Published)),
+        "a bootstrap record was not published: {outcome:?}"
+    );
+    let read = store.read_record(&key).await;
+    assert!(
+        matches!(&read, Ok(Some(found)) if *found == written),
+        "a bootstrap record did not read back as written: {read:?}"
+    );
 }
