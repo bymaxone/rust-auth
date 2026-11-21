@@ -1534,6 +1534,8 @@ fn signing_failed(_error: bymax_auth_jwt::JwtError) -> AuthError {
 fn map_jwt_error(error: bymax_auth_jwt::JwtError) -> AuthError {
     match error {
         bymax_auth_jwt::JwtError::Expired => AuthError::TokenExpired,
+        // No time to judge the token by: a fault of this host, not a bad token.
+        bymax_auth_jwt::JwtError::Clock => internal_error("the system clock is unavailable"),
         _ => AuthError::TokenInvalid,
     }
 }
@@ -2424,6 +2426,23 @@ mod tests {
         assert!(matches!(
             svc.verify_access(&token).await,
             Err(AuthError::TokenExpired)
+        ));
+    }
+
+    #[test]
+    fn a_verification_that_could_not_read_the_clock_is_an_internal_error_not_a_bad_token() {
+        use bymax_auth_jwt::JwtError;
+        assert!(matches!(
+            map_jwt_error(JwtError::Clock),
+            AuthError::Internal(_)
+        ));
+        assert!(matches!(
+            map_jwt_error(JwtError::Expired),
+            AuthError::TokenExpired
+        ));
+        assert!(matches!(
+            map_jwt_error(JwtError::BadSignature),
+            AuthError::TokenInvalid
         ));
     }
 

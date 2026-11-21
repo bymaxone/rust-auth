@@ -126,9 +126,25 @@ fn split_segments(token: &str) -> Result<(&str, &str, &str), JwtError> {
 
 /// Validate `exp`/`iat` against `opts` and the resolved current time.
 fn validate_temporal<C: JwtClaims>(claims: &C, opts: &VerifyOptions) -> Result<(), JwtError> {
+    validate_temporal_with(claims, opts, system_now_unix)
+}
+
+/// [`validate_temporal`] over a given clock, which is read only when the check needs the time and
+/// the options do not supply it.
+fn validate_temporal_with<C: JwtClaims>(
+    claims: &C,
+    opts: &VerifyOptions,
+    clock: impl FnOnce() -> Result<i64, JwtError>,
+) -> Result<(), JwtError> {
+    if !(opts.validate_exp || opts.validate_iat) {
+        return Ok(());
+    }
     // Saturating cast: a leeway beyond `i64::MAX` is clamped rather than wrapped.
     let leeway = opts.leeway_secs.min(i64::MAX as u64) as i64;
-    let now = resolve_now(opts);
+    let now = match opts.now_unix {
+        Some(now) => now,
+        None => clock()?,
+    };
     // `exp` is the first instant the token is invalid: reject at `now >= exp + leeway`
     // (RFC 7519 / jsonwebtoken semantics), not strictly greater — so the boundary
     // second stays at parity with nest-auth.
@@ -165,23 +181,24 @@ fn validate_binding<C: JwtClaims>(claims: &C, opts: &VerifyOptions) -> Result<()
     }
 }
 
-/// The current Unix time for the temporal check: the caller-supplied `now_unix`, or the
-/// host system clock when `None` (native server). The bare-wasm edge always supplies
-/// `Some`, so the system-clock path is never taken there.
-fn resolve_now(opts: &VerifyOptions) -> i64 {
-    match opts.now_unix {
-        Some(now) => now,
-        None => system_now_unix(),
-    }
+/// Read the host system clock as Unix seconds, used when the options supply no time (native
+/// server); the bare-wasm edge always supplies one, so it never reaches this.
+///
+/// # Errors
+///
+/// [`JwtError::Clock`] when the clock stands before the Unix epoch.
+fn system_now_unix() -> Result<i64, JwtError> {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    unix_from(SystemTime::now().duration_since(UNIX_EPOCH))
 }
 
-/// Read the host system clock as Unix seconds (clamped to `0` before the epoch).
-fn system_now_unix() -> i64 {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|elapsed| elapsed.as_secs().min(i64::MAX as u64) as i64)
-        .unwrap_or(0)
+/// A clock reading as Unix seconds: a time before the epoch is an error and never zero, and one
+/// too far on to represent clamps to the largest time.
+fn unix_from(
+    since_epoch: Result<std::time::Duration, std::time::SystemTimeError>,
+) -> Result<i64, JwtError> {
+    let elapsed = since_epoch.map_err(|_| JwtError::Clock)?;
+    Ok(i64::try_from(elapsed.as_secs()).unwrap_or(i64::MAX))
 }
 
 #[cfg(test)]
@@ -222,6 +239,61 @@ mod tests {
             exp,
             epoch: 0,
         }
+    }
+
+    /// A clock reading from before the epoch, which `SystemTime` reports as an error.
+    fn before_the_epoch() -> Result<std::time::Duration, std::time::SystemTimeError> {
+        use std::time::{Duration, UNIX_EPOCH};
+        UNIX_EPOCH.duration_since(UNIX_EPOCH + Duration::from_secs(1))
+    }
+
+    #[test]
+    fn a_clock_before_the_epoch_is_an_error_and_never_zero() {
+        // Read as zero, every `exp` is in the future and a token never expires.
+        assert_eq!(unix_from(before_the_epoch()), Err(JwtError::Clock));
+    }
+
+    #[test]
+    fn the_clock_reads_whole_seconds_and_an_unrepresentable_one_clamps_to_the_maximum() {
+        use std::time::Duration;
+        assert_eq!(unix_from(Ok(Duration::from_secs(5))), Ok(5));
+        assert_eq!(unix_from(Ok(Duration::from_secs(u64::MAX))), Ok(i64::MAX));
+    }
+
+    #[test]
+    fn a_check_that_needs_the_clock_and_cannot_read_it_is_refused_with_the_clock_error() {
+        let claims = dashboard(0, 100);
+        let opts = VerifyOptions::default();
+        let refused = validate_temporal_with(&claims, &opts, || Err(JwtError::Clock));
+        assert_eq!(refused, Err(JwtError::Clock));
+        for only in [(true, false), (false, true)] {
+            let opts = VerifyOptions {
+                validate_exp: only.0,
+                validate_iat: only.1,
+                ..VerifyOptions::default()
+            };
+            let refused = validate_temporal_with(&claims, &opts, || Err(JwtError::Clock));
+            assert_eq!(refused, Err(JwtError::Clock), "{only:?}");
+        }
+    }
+
+    #[test]
+    fn a_supplied_time_or_no_temporal_check_never_consults_the_clock() {
+        let claims = dashboard(0, 100);
+        let supplied = opts_at(50);
+        assert_eq!(
+            validate_temporal_with(&claims, &supplied, || Err(JwtError::Clock)),
+            Ok(())
+        );
+        let unchecked = VerifyOptions {
+            validate_exp: false,
+            validate_iat: false,
+            ..VerifyOptions::default()
+        };
+        assert_eq!(
+            validate_temporal_with(&claims, &unchecked, || Err(JwtError::Clock)),
+            Ok(())
+        );
     }
 
     #[test]

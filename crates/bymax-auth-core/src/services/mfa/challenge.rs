@@ -452,7 +452,7 @@ impl MfaService {
         if !bymax_auth_crypto::totp::verify(
             raw_secret,
             code,
-            super::current_unix_time(),
+            super::current_unix_time()?,
             self.totp_window,
         ) {
             return Ok(false);
