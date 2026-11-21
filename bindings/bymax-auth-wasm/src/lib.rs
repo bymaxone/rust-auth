@@ -128,7 +128,14 @@ fn verify_at(
     leeway: u64,
     expected: Expected<'_>,
 ) -> Result<String, jwt_edge::EdgeError> {
-    let now = now?;
+    let now = match now {
+        Ok(now) => now,
+        Err(error) => {
+            // The secret is wiped on this path as on every other: the key zeroizes on drop.
+            drop(bymax_auth_jwt::HsKey::new(secret.into_bytes()));
+            return Err(error.into());
+        }
+    };
     jwt_edge::verify_claims_json(
         token, secret, leeway, now, expected.0, expected.1, expected.2,
     )
