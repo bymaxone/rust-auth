@@ -270,6 +270,58 @@ fn text(vector: &Value, field: &str) -> String {
     vector[field].as_str().unwrap_or_default().to_owned()
 }
 
+/// The place a vector's tenant, workspace and address derive.
+fn vector_place(vector: &Value) -> InvitationPlace {
+    let (tenant, workspace, email) = (
+        text(vector, "tenantId"),
+        text(vector, "workspaceId"),
+        text(vector, "email"),
+    );
+    InvitationPlace {
+        index_id: invitation_index_id(&identifier_key(), &tenant, &workspace, &email)
+            .unwrap_or_default(),
+        set_id: invitation_set_id(&identifier_key(), &tenant, &workspace).unwrap_or_default(),
+    }
+}
+
+/// Publishes the vector's invitation and requires the keys and values the contract names.
+async fn publish_and_compare(probe: &RedisProbe, namespace: &str, n: usize, vector: &Value) {
+    let place = vector_place(vector);
+    let key = record_key(&invitation_record_id(&text(vector, "token")));
+    let outcome = probe
+        .publish(Publication {
+            place: &place,
+            record_key: &key,
+            record: &record(&text(vector, "email")),
+            ttl: NonZeroU64::new(600).unwrap_or(NonZeroU64::MIN),
+            pending_limit: 0,
+            expected_key: None,
+        })
+        .await;
+    assert!(
+        matches!(outcome, Ok(PublishOutcome::Published)),
+        "{outcome:?}"
+    );
+    let named = |field: &str| text(vector, field).replace("{namespace}", namespace);
+    let mut expected = vec![named("indexKey"), named("setKey"), named("recordKey")];
+    expected.sort();
+    assert_eq!(
+        probe.all_keys().await,
+        expected,
+        "vector {n}: the keys written"
+    );
+    assert_eq!(
+        probe.text(&named("indexKey")).await,
+        Some(key.clone()),
+        "the index holds the record key"
+    );
+    assert_eq!(
+        probe.set_members(&place).await,
+        vec![key],
+        "the set holds the record key"
+    );
+}
+
 #[tokio::test]
 async fn the_keys_and_values_written_are_the_ones_the_contract_vectors_name() {
     let Some(redis) = try_start().await else { return };
@@ -279,50 +331,7 @@ async fn the_keys_and_values_written_are_the_ones_the_contract_vectors_name() {
     for (n, vector) in vectors.iter().enumerate() {
         let namespace = format!("vector{n}");
         let Some(probe) = redis.probe(&namespace).await else { return };
-        let (tenant, workspace, email) = (
-            text(vector, "tenantId"),
-            text(vector, "workspaceId"),
-            text(vector, "email"),
-        );
-        let place = InvitationPlace {
-            index_id: invitation_index_id(&identifier_key(), &tenant, &workspace, &email)
-                .unwrap_or_default(),
-            set_id: invitation_set_id(&identifier_key(), &tenant, &workspace).unwrap_or_default(),
-        };
-        let key = record_key(&invitation_record_id(&text(vector, "token")));
-        let ttl = NonZeroU64::new(600).unwrap_or(NonZeroU64::MIN);
-        let outcome = probe
-            .publish(Publication {
-                place: &place,
-                record_key: &key,
-                record: &record(&email),
-                ttl,
-                pending_limit: 0,
-                expected_key: None,
-            })
-            .await;
-        assert!(
-            matches!(outcome, Ok(PublishOutcome::Published)),
-            "{outcome:?}"
-        );
-        let named = |field: &str| text(vector, field).replace("{namespace}", &namespace);
-        let mut expected = vec![named("indexKey"), named("setKey"), named("recordKey")];
-        expected.sort();
-        assert_eq!(
-            probe.all_keys().await,
-            expected,
-            "vector {n}: the keys written"
-        );
-        assert_eq!(
-            probe.text(&named("indexKey")).await,
-            Some(key.clone()),
-            "the index holds the record key"
-        );
-        assert_eq!(
-            probe.set_members(&place).await,
-            vec![key],
-            "the set holds the record key"
-        );
+        publish_and_compare(&probe, &namespace, n, vector).await;
     }
 }
 

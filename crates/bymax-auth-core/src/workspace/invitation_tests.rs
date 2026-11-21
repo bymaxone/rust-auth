@@ -66,6 +66,18 @@ fn each_kind_stores_exactly_the_fields_the_contract_names() {
     let contract = contract_record();
     let common = names(&contract["fields"]);
     assert!(!common.is_empty(), "the contract lists no record fields");
+    let kinds: Vec<String> = contract["kinds"]
+        .as_object()
+        .map(|kinds| kinds.keys().cloned().collect())
+        .unwrap_or_default();
+    let mut tested = vec!["bootstrap".to_owned(), "member".to_owned()];
+    tested.sort();
+    let mut named = kinds;
+    named.sort();
+    assert_eq!(
+        named, tested,
+        "the contract's kinds and the tested kinds differ"
+    );
     for (record, kind) in [(member(), "member"), (bootstrap(), "bootstrap")] {
         let mut expected = common.clone();
         expected.extend(names(&contract["kinds"][kind]["adds"]));
@@ -90,139 +102,113 @@ fn a_record_survives_a_round_trip_and_the_key_names_it_by_its_token_hash() {
     assert_eq!(record_key("abc"), "winv:abc");
 }
 
-#[test]
-fn a_value_that_is_not_a_record_reads_as_absent() {
-    let member_json = member().to_json();
-    let bootstrap_json = bootstrap().to_json();
-    let with = |json: &str, edit: &dyn Fn(&mut serde_json::Map<String, Value>)| -> String {
-        let mut value: Value = serde_json::from_str(json).unwrap_or(Value::Null);
-        if let Some(fields) = value.as_object_mut() {
-            edit(fields);
+/// One change to a stored record.
+enum Edit {
+    Drop(&'static str),
+    Set(&'static str, Value),
+}
+
+fn edited(json: &str, edit: &Edit) -> String {
+    let mut value: Value = serde_json::from_str(json).unwrap_or(Value::Null);
+    if let Some(fields) = value.as_object_mut() {
+        match edit {
+            Edit::Drop(name) => {
+                fields.remove(*name);
+            }
+            Edit::Set(name, to) => {
+                fields.insert((*name).to_owned(), to.clone());
+            }
         }
-        value.to_string()
-    };
-    let cases: Vec<(&str, String)> = vec![
-        ("not json", "winv".to_owned()),
-        ("not an object", "[1]".to_owned()),
-        ("null", "null".to_owned()),
-        (
-            "no kind",
-            with(&member_json, &|f| {
-                f.remove("kind");
-            }),
-        ),
-        (
-            "another kind",
-            with(&member_json, &|f| {
-                f.insert("kind".to_owned(), "owner".into());
-            }),
-        ),
-        (
-            "a numeric kind",
-            with(&member_json, &|f| {
-                f.insert("kind".to_owned(), 1.into());
-            }),
-        ),
-        (
-            "a member with no inviter",
-            with(&member_json, &|f| {
-                f.remove("inviterUserId");
-            }),
-        ),
-        (
-            "a member with a non-string inviter",
-            with(&member_json, &|f| {
-                f.insert("inviterUserId".to_owned(), 7.into());
-            }),
-        ),
-        (
-            "a member carrying a workspace name",
-            with(&member_json, &|f| {
-                f.insert("workspaceName".to_owned(), "Acme".into());
-            }),
-        ),
-        (
-            "a member with a null workspace name",
-            with(&member_json, &|f| {
-                f.insert("workspaceName".to_owned(), Value::Null);
-            }),
-        ),
-        (
-            "a bootstrap carrying an inviter",
-            with(&bootstrap_json, &|f| {
-                f.insert("inviterUserId".to_owned(), "user-1".into());
-            }),
-        ),
-        (
-            "a bootstrap with no name",
-            with(&bootstrap_json, &|f| {
-                f.remove("workspaceName");
-            }),
-        ),
-        (
-            "a bootstrap with an untrimmed name",
-            with(&bootstrap_json, &|f| {
-                f.insert("workspaceName".to_owned(), " Acme".into());
-            }),
-        ),
-        (
-            "a bootstrap with an empty name",
-            with(&bootstrap_json, &|f| {
-                f.insert("workspaceName".to_owned(), "".into());
-            }),
-        ),
-        (
-            "a missing email",
-            with(&member_json, &|f| {
-                f.remove("email");
-            }),
-        ),
-        (
-            "a non-string role",
-            with(&member_json, &|f| {
-                f.insert("role".to_owned(), 1.into());
-            }),
-        ),
-        (
-            "a missing tenant",
-            with(&member_json, &|f| {
-                f.remove("tenantId");
-            }),
-        ),
-        (
-            "a missing workspace",
-            with(&member_json, &|f| {
-                f.remove("workspaceId");
-            }),
-        ),
-        (
-            "a missing createdAt",
-            with(&member_json, &|f| {
-                f.remove("createdAt");
-            }),
-        ),
-        (
-            "a string resend count",
-            with(&member_json, &|f| {
-                f.insert("resendCount".to_owned(), "2".into());
-            }),
-        ),
-        (
-            "a negative resend count",
-            with(&member_json, &|f| {
-                f.insert("resendCount".to_owned(), (-1).into());
-            }),
-        ),
-        (
-            "a fractional resend count",
-            with(&member_json, &|f| {
-                f.insert("resendCount".to_owned(), 1.5.into());
-            }),
-        ),
-    ];
-    for (why, raw) in cases {
+    }
+    value.to_string()
+}
+
+/// Requires every edit of `json` to read as absent.
+fn all_read_as_absent(json: &str, cases: Vec<(&str, Edit)>) {
+    for (why, edit) in cases {
+        let raw = edited(json, &edit);
         assert_eq!(InvitationRecord::parse(&raw), None, "{why}: {raw}");
     }
+}
+
+#[test]
+fn text_that_is_not_an_object_reads_as_absent() {
+    for raw in ["winv", "[1]", "null", ""] {
+        assert_eq!(InvitationRecord::parse(raw), None, "{raw}");
+    }
+}
+
+#[test]
+fn a_kind_that_is_missing_or_unknown_reads_as_absent() {
+    all_read_as_absent(
+        &member().to_json(),
+        vec![
+            ("no kind", Edit::Drop("kind")),
+            ("another kind", Edit::Set("kind", "owner".into())),
+            ("a numeric kind", Edit::Set("kind", 1.into())),
+        ],
+    );
+}
+
+#[test]
+fn a_member_that_breaks_its_shape_reads_as_absent() {
+    all_read_as_absent(
+        &member().to_json(),
+        vec![
+            ("no inviter", Edit::Drop("inviterUserId")),
+            ("a non-string inviter", Edit::Set("inviterUserId", 7.into())),
+            (
+                "a workspace name",
+                Edit::Set("workspaceName", "Acme".into()),
+            ),
+            (
+                "a null workspace name",
+                Edit::Set("workspaceName", Value::Null),
+            ),
+        ],
+    );
+}
+
+#[test]
+fn a_bootstrap_that_breaks_its_shape_reads_as_absent() {
+    all_read_as_absent(
+        &bootstrap().to_json(),
+        vec![
+            ("an inviter", Edit::Set("inviterUserId", "user-1".into())),
+            ("no name", Edit::Drop("workspaceName")),
+            (
+                "an untrimmed name",
+                Edit::Set("workspaceName", " Acme".into()),
+            ),
+            ("an empty name", Edit::Set("workspaceName", "".into())),
+        ],
+    );
+}
+
+#[test]
+fn a_record_missing_or_mistyping_a_common_field_reads_as_absent() {
+    all_read_as_absent(
+        &member().to_json(),
+        vec![
+            ("a missing email", Edit::Drop("email")),
+            ("a non-string role", Edit::Set("role", 1.into())),
+            ("a missing tenant", Edit::Drop("tenantId")),
+            ("a missing workspace", Edit::Drop("workspaceId")),
+            ("a missing createdAt", Edit::Drop("createdAt")),
+            (
+                "a string resend count",
+                Edit::Set("resendCount", "2".into()),
+            ),
+            (
+                "a negative resend count",
+                Edit::Set("resendCount", (-1).into()),
+            ),
+            (
+                "a fractional resend count",
+                Edit::Set("resendCount", 1.5.into()),
+            ),
+        ],
+    );
 }
 
 #[test]

@@ -141,7 +141,8 @@ pub async fn run_invitation_store_scenarios<S: InvitationStoreProbe + ?Sized>(st
     a_writer_that_read_a_stale_index_writes_nothing(store).await;
     the_cap_refuses_a_first_invitation_and_a_replacement_skips_it(store).await;
     a_gone_record_is_dropped_before_the_cap_is_counted(store).await;
-    a_removal_spends_the_record_and_the_index_only_while_it_names_it(store).await;
+    a_removal_spends_the_record_the_index_and_the_set_member(store).await;
+    a_removal_keeps_an_index_that_names_another_record(store).await;
     the_listing_drops_what_is_gone_and_shows_the_time_left(store).await;
     a_foreign_value_under_a_record_key_reads_as_absent(store).await;
     everything_expires_together_and_an_expired_index_is_replaced_like_any_other(store).await;
@@ -296,13 +297,13 @@ async fn a_gone_record_is_dropped_before_the_cap_is_counted<S: InvitationStorePr
     );
 }
 
-async fn a_removal_spends_the_record_and_the_index_only_while_it_names_it<
+async fn a_removal_spends_the_record_the_index_and_the_set_member<
     S: InvitationStoreProbe + ?Sized,
 >(
     store: &S,
 ) {
     let f = Fixture::new("remove");
-    let (old, new) = (f.key("old"), f.key("new"));
+    let old = f.key("old");
     publish(store, &f.place, &old, "a@x", 0, None, TTL).await;
     assert_eq!(
         store.remove(&f.place, &old).await.ok(),
@@ -323,6 +324,13 @@ async fn a_removal_spends_the_record_and_the_index_only_while_it_names_it<
         store.set_members(&f.place).await.is_empty(),
         "set member gone"
     );
+}
+
+async fn a_removal_keeps_an_index_that_names_another_record<S: InvitationStoreProbe + ?Sized>(
+    store: &S,
+) {
+    let f = Fixture::new("remove-other");
+    let (old, new) = (f.key("old"), f.key("new"));
     // A resend landed between the write and the spend: the index names the new record.
     publish(store, &f.place, &old, "a@x", 0, None, TTL).await;
     publish(store, &f.place, &new, "a@x", 0, Some(&old), TTL).await;
