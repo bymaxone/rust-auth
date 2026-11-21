@@ -119,6 +119,10 @@ jobs:
           # cargo-mutants gives each shard a contiguous slice of ceil(total / SHARDS) mutants, so the
           # fullest shard holds that ceiling.
           per_shard=$(( (total + SHARDS - 1) / SHARDS ))
+          # The last slices can come out empty (96 shards of 41 over 3862 mutants leave the last one
+          # nothing), and a shard with nothing to run writes no results, which the summary reads as an
+          # incomplete sweep. Fewer shards, each as full, deal the same mutants to none that is empty.
+          SHARDS=$(( (total + per_shard - 1) / per_shard ))
           needed=$(( (total + budget - 1) / budget ))
           echo "mutants: ${total}; shards: ${SHARDS}; fullest shard: ${per_shard}; budget per shard: ${budget} (${TIMEOUT_MINUTES} min at ${SECONDS_PER_MUTANT} s)"
           if [ "${per_shard}" -gt "${budget}" ]; then
@@ -182,10 +186,17 @@ jobs:
             echo "### Shard ${SHARD}/${SHARDS} (exit ${status}, ${assigned} assigned)"
             jq -r '"total \(.total_mutants) · caught \(.caught) · missed \(.missed) · timeout \(.timeout) · unviable \(.unviable)"' mutants.out/outcomes.json
           } >> "$GITHUB_STEP_SUMMARY"
-          # Exit 3 means only timeouts: a mutant that makes the suite hang is detected, since
-          # a test run that never finishes is not a passing one. Listed in the summary, not failed.
-          if [ "${status}" -eq 3 ]; then
+          # Exit 3 means timeouts: a mutant that makes the suite hang is detected, since a test run
+          # that never finishes is not a passing one. Listed in the summary, not failed. A shard that
+          # also missed a mutant exits 3 as well (the timeouts win), so the misses are counted here
+          # and a shard with one fails.
+          missed="$(jq '.missed' mutants.out/outcomes.json)"
+          if [ "${status}" -eq 3 ] && [ "${missed}" -eq 0 ]; then
             exit 0
+          fi
+          if [ "${status}" -eq 3 ]; then
+            echo "::error::shard ${SHARD} missed ${missed} mutant(s) and also timed out"
+            exit 2
           fi
           exit "${status}"
       - name: Upload shard results
