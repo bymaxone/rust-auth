@@ -126,7 +126,7 @@ fn split_segments(token: &str) -> Result<(&str, &str, &str), JwtError> {
 
 /// Validate `exp`/`iat` against `opts` and the resolved current time.
 fn validate_temporal<C: JwtClaims>(claims: &C, opts: &VerifyOptions) -> Result<(), JwtError> {
-    validate_temporal_with(claims, opts, system_now_unix)
+    validate_temporal_with(claims, opts, now_unix)
 }
 
 /// [`validate_temporal`] over a given clock, which is read only when the check needs the time and
@@ -181,13 +181,14 @@ fn validate_binding<C: JwtClaims>(claims: &C, opts: &VerifyOptions) -> Result<()
     }
 }
 
-/// Read the host system clock as Unix seconds, used when the options supply no time (native
-/// server); the bare-wasm edge always supplies one, so it never reaches this.
+/// Read the host system clock as Unix seconds: what [`verify`] reads when the options supply no
+/// time, and what any native caller that needs the time should read instead of clamping a failed
+/// clock to zero. The bare-wasm edge has no system clock and supplies its own.
 ///
 /// # Errors
 ///
 /// [`JwtError::Clock`] when the clock stands before the Unix epoch.
-fn system_now_unix() -> Result<i64, JwtError> {
+pub fn now_unix() -> Result<i64, JwtError> {
     use std::time::{SystemTime, UNIX_EPOCH};
     unix_from(SystemTime::now().duration_since(UNIX_EPOCH))
 }
@@ -249,6 +250,11 @@ mod tests {
 
     fn unreadable_clock() -> Result<i64, JwtError> {
         Err(JwtError::Clock)
+    }
+
+    #[test]
+    fn the_exported_clock_reads_the_real_time_as_whole_seconds() {
+        assert!(now_unix().is_ok_and(|now| now > 1_700_000_000));
     }
 
     #[test]

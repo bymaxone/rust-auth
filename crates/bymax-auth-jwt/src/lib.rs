@@ -33,6 +33,6 @@ pub mod keys;
 #[doc(inline)]
 pub use error::JwtError;
 #[doc(inline)]
-pub use hs256::{decode_unverified, sign, verify};
+pub use hs256::{decode_unverified, now_unix, sign, verify};
 #[doc(inline)]
 pub use keys::{HsKey, JwtClaims, RawRefreshToken, VerifyOptions};
