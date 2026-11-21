@@ -212,6 +212,44 @@ fn a_record_missing_or_mistyping_a_common_field_reads_as_absent() {
 }
 
 #[test]
+fn a_created_at_that_is_not_an_instant_reads_as_absent() {
+    let bad = [
+        "",
+        "garbage",
+        "1700000000",
+        "2026-11-20",
+        "2026-13-40T10:00:00.000Z",
+        "2026-11-20T25:00:00.000Z",
+        "2026-11-20 10:00:00",
+    ];
+    for kind in [member(), bootstrap()] {
+        for created_at in bad {
+            let raw = edited(&kind.to_json(), &Edit::Set("createdAt", created_at.into()));
+            assert_eq!(InvitationRecord::parse(&raw), None, "{created_at:?}");
+        }
+    }
+}
+
+#[test]
+fn a_created_at_in_any_rfc3339_form_reads_as_a_record() {
+    for created_at in [
+        "2026-11-20T10:00:00.000Z",
+        "2026-11-20T10:00:00Z",
+        "2026-11-20T10:00:00.123456+02:00",
+    ] {
+        let raw = edited(
+            &member().to_json(),
+            &Edit::Set("createdAt", created_at.into()),
+        );
+        let parsed = InvitationRecord::parse(&raw);
+        assert_eq!(
+            parsed.map(|record| record.base().created_at.clone()),
+            Some(created_at.to_owned())
+        );
+    }
+}
+
+#[test]
 fn a_field_the_contract_does_not_list_is_ignored() {
     let mut value: Value = serde_json::from_str(&member().to_json()).unwrap_or(Value::Null);
     if let Some(fields) = value.as_object_mut() {

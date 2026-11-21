@@ -7,6 +7,8 @@
 //! other combination is read as absent and answered as an invalid token.
 
 use serde_json::{Map, Value};
+use time::OffsetDateTime;
+use time::format_description::well_known::Rfc3339;
 
 use crate::workspace::bounds::normalize_workspace_name;
 
@@ -102,8 +104,9 @@ impl InvitationRecord {
     /// The record `raw` stores, or `None` when it is not one: not JSON, not an object, a field
     /// missing or of the wrong type, a kind other than `member` or `bootstrap`, a `member` that
     /// carries a workspace name or lacks an inviter, a `bootstrap` that carries an inviter or whose
-    /// name is not in the stored form, or a resend count that is not a non-negative integer.
-    /// Fields the contract does not list are ignored.
+    /// name is not in the stored form, a creation time that is not an RFC 3339 instant, or a
+    /// resend count that is not a non-negative integer. Fields the contract does not list are
+    /// ignored.
     #[must_use]
     pub fn parse(raw: &str) -> Option<Self> {
         let value: Value = serde_json::from_str(raw).ok()?;
@@ -114,7 +117,7 @@ impl InvitationRecord {
             role: text("role")?,
             tenant_id: text("tenantId")?,
             workspace_id: text("workspaceId")?,
-            created_at: text("createdAt")?,
+            created_at: text("createdAt").filter(|at| is_instant(at))?,
             resend_count: fields.get("resendCount").and_then(Value::as_u64)?,
         };
         match fields.get("kind").and_then(Value::as_str)? {
@@ -134,4 +137,10 @@ impl InvitationRecord {
             _ => None,
         }
     }
+}
+
+/// Whether `text` is an RFC 3339 instant. A record whose creation time is not one is not a
+/// record, so no later reading of the cooldown ever sees a time it cannot trust.
+fn is_instant(text: &str) -> bool {
+    OffsetDateTime::parse(text, &Rfc3339).is_ok()
 }
