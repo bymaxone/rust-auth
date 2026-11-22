@@ -8,6 +8,8 @@
 
 #[path = "../../bymax-auth-redis/tests/common/docker_gate.rs"]
 mod docker_gate;
+#[path = "../../bymax-auth-redis/tests/common/redis_ready.rs"]
+mod redis_ready;
 
 use std::collections::{BTreeMap, HashMap};
 use std::net::SocketAddr;
@@ -48,7 +50,9 @@ async fn try_start() -> Option<(ContainerAsync<Redis>, String)> {
     };
     let host = container.get_host().await.ok()?;
     let port = container.get_host_port_ipv4(REDIS_PORT).await.ok()?;
-    Some((container, format!("redis://{host}:{port}")))
+    let url = redis_ready::redis_url(&host.to_string(), port);
+    redis_ready::wait_until_ready(&url).await;
+    Some((container, url))
 }
 
 /// What the test holds of the engine it built.

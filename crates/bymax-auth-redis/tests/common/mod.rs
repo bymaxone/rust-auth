@@ -7,6 +7,7 @@
 //! defined here is exercised by the single integration test file that includes the module.
 
 mod docker_gate;
+mod redis_ready;
 
 use bymax_auth_redis::RedisStores;
 use testcontainers_modules::redis::{REDIS_PORT, Redis};
@@ -153,6 +154,7 @@ pub async fn try_start() -> Option<TestRedis> {
     };
     let host = container.get_host().await.ok()?;
     let port = container.get_host_port_ipv4(REDIS_PORT).await.ok()?;
-    let url = format!("redis://{host}:{port}");
+    let url = redis_ready::redis_url(&host.to_string(), port);
+    redis_ready::wait_until_ready(&url).await;
     Some(TestRedis { container, url })
 }
