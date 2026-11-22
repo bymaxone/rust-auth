@@ -470,8 +470,23 @@ async fn the_list_is_oldest_first_and_in_pages() {
     assert_eq!(first.items[0].inviter_user_id, inv.owner.user_id);
     assert!(first.next_cursor.is_some());
     let Ok(second) = page(&inv, first.next_cursor.as_deref(), "2").await else { return };
-    assert_eq!(second.items.len(), 1);
+    let emails: Vec<_> = second
+        .items
+        .iter()
+        .map(|view| view.email.as_str())
+        .collect();
+    assert_eq!(
+        emails,
+        ["l2@x.io"],
+        "the page after the cursor, not the cursor's own"
+    );
     assert_eq!(second.next_cursor, None);
+    let Ok(whole) = page(&inv, None, "3").await else { return };
+    assert_eq!(whole.items.len(), 3);
+    assert_eq!(
+        whole.next_cursor, None,
+        "a page that holds the rest has no next page"
+    );
 }
 
 #[tokio::test]
@@ -748,4 +763,92 @@ async fn a_member_with_a_blank_workspace_id_is_a_validation_error_naming_it() {
         matches!(&refused, Err(AuthError::Validation { details }) if details.iter().any(|d| d.field == "workspaceId")),
         "{refused:?}"
     );
+}
+
+/// An invitation issued `age_seconds` before `now`, as a record the reissue check reads.
+fn issued_ago(
+    age_seconds: i64,
+    now: time::OffsetDateTime,
+) -> crate::workspace::invitation::InvitationRecord {
+    let at = now - time::Duration::seconds(age_seconds);
+    crate::workspace::invitation::InvitationRecord::Member {
+        base: crate::workspace::invitation::InvitationBase {
+            email: "c@x.io".to_owned(),
+            role: "member".to_owned(),
+            tenant_id: "t1".to_owned(),
+            workspace_id: "w1".to_owned(),
+            created_at: crate::workspace::audit::iso_instant(at),
+            resend_count: 0,
+        },
+        inviter_user_id: "u".to_owned(),
+    }
+}
+
+#[tokio::test]
+async fn the_cooldown_is_sixty_seconds_and_ends_on_the_sixtieth() {
+    let Some(inv) = setup(config()).await else { return };
+    let Some(runtime) = inv.f.engine.workspaces() else { return };
+    let now = time::OffsetDateTime::now_utc()
+        .replace_nanosecond(0)
+        .unwrap_or(time::OffsetDateTime::now_utc());
+    for (age, limited) in [(0, true), (30, true), (59, true), (60, false), (61, false)] {
+        let checked = runtime.assert_may_reissue("owner", &issued_ago(age, now), now);
+        assert_eq!(
+            is_limited(&checked),
+            limited,
+            "an invitation {age} s old: {checked:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_resend_tells_the_provider_whether_the_address_has_an_account() {
+    let Some(inv) = setup(config()).await else { return };
+    seed_account(&inv.f, "t1", "has@x.io", false).await;
+    for email in ["has@x.io", "hasnt@x.io"] {
+        let old = Seeded {
+            email,
+            role: "member",
+            inviter: &inv.owner.user_id,
+            created_at: LONG_AGO,
+            resends: 0,
+        };
+        seed(&inv, &format!("{email}-old"), &old).await;
+        assert!(resends_ok(&inv, &inv.owner, email).await);
+    }
+    let sent = inv.mail.sent();
+    let flags: Vec<_> = sent
+        .iter()
+        .map(|(_, email, data)| (email.as_str(), data.account_exists))
+        .collect();
+    assert_eq!(flags, [("has@x.io", true), ("hasnt@x.io", false)]);
+}
+
+#[tokio::test]
+async fn an_invitation_expires_the_configured_lifetime_after_it_was_issued() {
+    let mut configured = config();
+    configured.workspaces.invitation_ttl_seconds = 3_600;
+    let Some(inv) = setup(configured).await else { return };
+    let before = time::OffsetDateTime::now_utc();
+    assert!(owner_invites(&inv, "ttl@x.io", "member").await.is_ok());
+    let sent = inv.mail.sent();
+    let Some((_, _, data)) = sent.first() else { return };
+    let lifetime = data.expires_at - before;
+    assert!(
+        lifetime >= time::Duration::seconds(3_599) && lifetime <= time::Duration::seconds(3_601),
+        "expires {lifetime} after it was issued"
+    );
+}
+
+#[tokio::test]
+async fn the_fixture_engine_builds_with_the_invitation_store_so_no_test_returns_early_without_one()
+{
+    let inv = setup(config()).await;
+    assert!(
+        inv.is_some(),
+        "the engine did not build with the store the builder was given"
+    );
+    let Some(inv) = inv else { return };
+    assert!(owner_invites(&inv, "built@x.io", "member").await.is_ok());
+    assert_eq!(inv.mail.sent().len(), 1);
 }
