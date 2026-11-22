@@ -255,18 +255,12 @@ impl TokenManagerService {
             expected_aud: self.binding.audience.as_deref(),
             ..*opts
         };
-        let current = verify::<C>(token, &self.key, &opts);
-        if current.is_ok() {
-            return current;
-        }
-        for key in &self.previous_keys {
-            // A retired signing key buys a signature acceptance and nothing else — the binding
-            // is checked inside `verify`, so it still has to hold.
-            if let Ok(claims) = verify::<C>(token, key, &opts) {
-                return Ok(claims);
-            }
-        }
-        current
+        // A retired signing key buys a signature acceptance and nothing else — the binding is
+        // checked inside `verify`, so it still has to hold.
+        let attempts = std::iter::once(&self.key)
+            .chain(self.previous_keys.iter())
+            .map(|key| verify::<C>(token, key, &opts));
+        first_acceptance(attempts)
     }
 
     /// Verify an access token's signature under the pinned algorithm while **ignoring its
@@ -382,6 +376,18 @@ impl TokenManagerService {
         claims.stamped(self.binding.issuer.clone(), self.binding.audience.clone())
     }
 
+    /// Stamp and sign `claims`. A time before the epoch is refused: no real clock gave it, and a
+    /// token minted with one would carry a window no verifier should have to reason about.
+    fn sign_claims<C>(&self, claims: &C) -> Result<String, AuthError>
+    where
+        C: Stampable + serde::Serialize + bymax_auth_jwt::JwtClaims,
+    {
+        if claims.iat() < 0 || claims.exp() < 0 {
+            return Err(internal_error("the system clock is before the Unix epoch"));
+        }
+        sign(&self.stamp(claims), &self.key).map_err(signing_failed)
+    }
+
     /// Attach the MFA temp-token support (the single-use `mfa:` marker store and the
     /// brute-force counter reset), enabling the store-backed single-use challenge path. Set by
     /// the builder when an MFA store is wired.
@@ -398,7 +404,7 @@ impl TokenManagerService {
     /// Returns [`AuthError::Internal`] only if claim serialization fails (unreachable for
     /// the crate's claim types).
     pub fn issue_access(&self, claims: &DashboardClaims) -> Result<String, AuthError> {
-        sign(&self.stamp(claims), &self.key).map_err(signing_failed)
+        self.sign_claims(claims)
     }
 
     /// Issue a fresh access JWT plus an opaque refresh token for `user`, persisting the
@@ -731,7 +737,7 @@ impl TokenManagerService {
     /// crate's claim types).
     #[cfg(feature = "platform")]
     pub fn issue_platform_access(&self, claims: &PlatformClaims) -> Result<String, AuthError> {
-        sign(&self.stamp(claims), &self.key).map_err(signing_failed)
+        self.sign_claims(claims)
     }
 
     /// Issue a fresh platform access JWT plus an opaque refresh token for `admin`, persisting
@@ -1142,7 +1148,7 @@ impl TokenManagerService {
             iat: now,
             exp: now.saturating_add(MFA_TEMP_TOKEN_TTL_SECONDS),
         };
-        let token = sign(&self.stamp(&claims), &self.key).map_err(signing_failed)?;
+        let token = self.sign_claims(&claims)?;
         Ok((token, jti))
     }
 
@@ -1529,11 +1535,33 @@ fn signing_failed(_error: bymax_auth_jwt::JwtError) -> AuthError {
     internal_error("token signing failed")
 }
 
+/// The outcome of trying each signing key in turn: the first acceptance, which stops the trying,
+/// else a clock that could not be read, from any key, since no key could then judge the token, else
+/// the first key's error, which is the current key's.
+fn first_acceptance<C>(
+    attempts: impl IntoIterator<Item = Result<C, bymax_auth_jwt::JwtError>>,
+) -> Result<C, bymax_auth_jwt::JwtError> {
+    use bymax_auth_jwt::JwtError;
+    let mut first = None;
+    for attempt in attempts {
+        match attempt {
+            Ok(claims) => return Ok(claims),
+            Err(JwtError::Clock) => return Err(JwtError::Clock),
+            Err(error) => {
+                first.get_or_insert(error);
+            }
+        }
+    }
+    Err(first.unwrap_or(JwtError::BadSignature))
+}
+
 /// Map a JWT verification failure onto the engine error catalog: an expired token uses the
 /// internal-only `token_expired`, everything else collapses to the public `token_invalid`.
 fn map_jwt_error(error: bymax_auth_jwt::JwtError) -> AuthError {
     match error {
         bymax_auth_jwt::JwtError::Expired => AuthError::TokenExpired,
+        // No time to judge the token by: a fault of this host, not a bad token.
+        bymax_auth_jwt::JwtError::Clock => internal_error("the system clock is unavailable"),
         _ => AuthError::TokenInvalid,
     }
 }
@@ -2424,6 +2452,97 @@ mod tests {
         assert!(matches!(
             svc.verify_access(&token).await,
             Err(AuthError::TokenExpired)
+        ));
+    }
+
+    fn dashboard_claims_at(iat: i64, exp: i64) -> DashboardClaims {
+        DashboardClaims {
+            iss: None,
+            aud: None,
+            sub: "u1".to_owned(),
+            jti: new_uuid_v4(),
+            tenant_id: "t1".to_owned(),
+            role: "MEMBER".to_owned(),
+            token_type: DashboardType::Dashboard,
+            status: "ACTIVE".to_owned(),
+            mfa_enabled: false,
+            mfa_verified: false,
+            iat,
+            exp,
+            epoch: 0,
+        }
+    }
+
+    #[test]
+    fn a_token_is_never_signed_for_a_time_before_the_epoch() {
+        // Minted with a negative `iat` and `exp`, a token carries a time no real clock gave.
+        let svc = service(Arc::new(InMemoryStores::new()));
+        for (iat, exp) in [(-1, 900), (0, -1), (-900, -1)] {
+            let refused = svc.issue_access(&dashboard_claims_at(iat, exp));
+            assert!(
+                matches!(refused, Err(AuthError::Internal(_))),
+                "{iat} {exp}"
+            );
+        }
+        // The epoch itself is a time a clock can read, for `iat` and for `exp` alike.
+        for (iat, exp) in [(0, 900), (0, 0)] {
+            assert!(
+                svc.issue_access(&dashboard_claims_at(iat, exp)).is_ok(),
+                "{iat} {exp}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_clock_error_from_any_signing_key_is_the_answer_and_otherwise_the_current_keys_error() {
+        use bymax_auth_jwt::JwtError;
+        let bad = |error| Err::<u8, JwtError>(error);
+        assert_eq!(
+            first_acceptance([bad(JwtError::BadSignature), bad(JwtError::Clock)]),
+            Err(JwtError::Clock)
+        );
+        assert_eq!(
+            first_acceptance([bad(JwtError::Clock), bad(JwtError::BadSignature)]),
+            Err(JwtError::Clock)
+        );
+        assert_eq!(
+            first_acceptance([bad(JwtError::BadSignature), bad(JwtError::Expired)]),
+            Err(JwtError::BadSignature)
+        );
+        assert_eq!(first_acceptance([bad(JwtError::Expired), Ok(7)]), Ok(7));
+        assert_eq!(first_acceptance::<u8>([]), Err(JwtError::BadSignature));
+    }
+
+    #[test]
+    fn the_keys_after_the_one_that_accepted_are_never_tried() {
+        use bymax_auth_jwt::JwtError;
+        let tried = std::cell::Cell::new(0);
+        let attempts = (0..3).map(|n| {
+            tried.set(tried.get() + 1);
+            if n == 1 {
+                Ok(n)
+            } else {
+                Err(JwtError::BadSignature)
+            }
+        });
+        assert_eq!(first_acceptance(attempts), Ok(1));
+        assert_eq!(tried.get(), 2);
+    }
+
+    #[test]
+    fn a_verification_that_could_not_read_the_clock_is_an_internal_error_not_a_bad_token() {
+        use bymax_auth_jwt::JwtError;
+        assert!(matches!(
+            map_jwt_error(JwtError::Clock),
+            AuthError::Internal(_)
+        ));
+        assert!(matches!(
+            map_jwt_error(JwtError::Expired),
+            AuthError::TokenExpired
+        ));
+        assert!(matches!(
+            map_jwt_error(JwtError::BadSignature),
+            AuthError::TokenInvalid
         ));
     }
 

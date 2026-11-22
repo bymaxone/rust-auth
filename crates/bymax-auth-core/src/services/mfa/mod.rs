@@ -601,7 +601,7 @@ impl MfaService {
         secret: &[u8],
         code: &str,
     ) -> Result<bool, AuthError> {
-        if !totp::verify(secret, code, current_unix_time(), self.totp_window) {
+        if !totp::verify(secret, code, current_unix_time()?, self.totp_window) {
             return Ok(false);
         }
         // The code is valid; mark it used. `mark_totp_used` returns whether the marker was
@@ -957,10 +957,19 @@ pub(crate) fn session_kind(ctx: MfaContext) -> SessionKind {
     }
 }
 
-/// The current Unix time as the `u64` seconds TOTP verification expects. A pre-epoch clock
-/// (unreachable in practice) clamps to zero rather than wrapping.
-fn current_unix_time() -> u64 {
-    u64::try_from(now_unix()).unwrap_or(0)
+/// The current Unix time as the `u64` seconds TOTP verification expects.
+///
+/// # Errors
+///
+/// `auth.internal` when the clock stands before the epoch: read as zero it would accept the code
+/// of the first window of 1970.
+fn current_unix_time() -> Result<u64, AuthError> {
+    unix_seconds(now_unix())
+}
+
+/// `at` as the `u64` seconds TOTP verification expects; a time before the epoch is an error.
+fn unix_seconds(at: i64) -> Result<u64, AuthError> {
+    u64::try_from(at).map_err(|_| internal_error("the system clock is before the Unix epoch"))
 }
 
 /// Generate one recovery code: 12 CSPRNG bytes rendered as 24 upper-case hex characters,

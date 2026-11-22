@@ -95,16 +95,50 @@ pub fn verify_jwt_hs256(
     let leeway = leeway_secs
         .map_or(jwt_edge::DEFAULT_EDGE_LEEWAY_SECS, u64::from)
         .min(jwt_edge::MAX_EDGE_LEEWAY_SECS);
-    jwt_edge::verify_claims_json(
+    // Every failure, an unreadable clock included, is `undefined` at this boundary: a token is
+    // either verified or it is not. The error is typed until here, so a clock that cannot be read
+    // is a refusal and never a time of zero.
+    verify_at(
+        now_unix_secs(),
         token,
         secret,
         leeway,
-        now_unix_secs(),
-        expected_iss.as_deref(),
-        expected_aud.as_deref(),
-        expected_type.as_deref(),
+        (
+            expected_iss.as_deref(),
+            expected_aud.as_deref(),
+            expected_type.as_deref(),
+        ),
     )
     .ok()
+}
+
+/// The expectations a verification holds the claims to: `iss`, `aud` and `type`.
+type Expected<'a> = (Option<&'a str>, Option<&'a str>, Option<&'a str>);
+
+/// [`jwt_edge::verify_claims_json`] at a time that may have failed to be read.
+///
+/// # Errors
+///
+/// [`jwt_edge::EdgeError::Jwt`] carrying `JwtError::Clock` when the time could not be read, then
+/// whatever the verification answers.
+fn verify_at(
+    now: Result<i64, bymax_auth_jwt::JwtError>,
+    token: &str,
+    secret: String,
+    leeway: u64,
+    expected: Expected<'_>,
+) -> Result<String, jwt_edge::EdgeError> {
+    let now = match now {
+        Ok(now) => now,
+        Err(error) => {
+            // The secret is wiped on this path as on every other: the key zeroizes on drop.
+            drop(bymax_auth_jwt::HsKey::new(secret.into_bytes()));
+            return Err(error.into());
+        }
+    };
+    jwt_edge::verify_claims_json(
+        token, secret, leeway, now, expected.0, expected.1, expected.2,
+    )
 }
 
 /// Decode a token's header and payload to `{"header":…,"payload":…}` JSON, or `undefined`
@@ -126,21 +160,35 @@ pub fn extract_claims(token: &str) -> Option<String> {
 
 /// Current Unix time in seconds, read from the JS `Date` clock on the wasm edge. The bare
 /// `wasm32-unknown-unknown` target has no system clock, so the time is sourced from JS.
+///
+/// # Errors
+///
+/// `JwtError::Clock` when the JS clock answers a time that is not a number or stands before the
+/// epoch.
 #[cfg(target_arch = "wasm32")]
-fn now_unix_secs() -> i64 {
-    // `Date::now()` is milliseconds since the epoch; floor to whole seconds.
-    (js_sys::Date::now() / 1000.0) as i64
+fn now_unix_secs() -> Result<i64, bymax_auth_jwt::JwtError> {
+    seconds_from_millis(js_sys::Date::now())
+}
+
+/// Whole seconds in `millis` since the epoch: a time that is not a number, or stands before the
+/// epoch, is an error and never zero.
+#[cfg(any(target_arch = "wasm32", test))]
+fn seconds_from_millis(millis: f64) -> Result<i64, bymax_auth_jwt::JwtError> {
+    if !millis.is_finite() || millis < 0.0 {
+        return Err(bymax_auth_jwt::JwtError::Clock);
+    }
+    Ok((millis / 1000.0) as i64)
 }
 
 /// Current Unix time in seconds, read from the host system clock. Used on non-wasm hosts
 /// (the unit-test/coverage build); the wasm edge uses the JS clock instead.
+///
+/// # Errors
+///
+/// `JwtError::Clock` when the clock stands before the epoch.
 #[cfg(not(target_arch = "wasm32"))]
-fn now_unix_secs() -> i64 {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|elapsed| elapsed.as_secs().min(i64::MAX as u64) as i64)
-        .unwrap_or(0)
+fn now_unix_secs() -> Result<i64, bymax_auth_jwt::JwtError> {
+    bymax_auth_jwt::now_unix()
 }
 
 /// Verify a password against its stored PHC hash at the edge — the optional `wasm-extra`
@@ -193,7 +241,39 @@ mod tests {
     #[test]
     fn now_unix_secs_reads_a_plausible_host_clock() {
         // The host branch returns a positive, post-2020 timestamp.
-        assert!(now_unix_secs() > 1_577_836_800);
+        assert!(now_unix_secs().is_ok_and(|now| now > 1_577_836_800));
+    }
+
+    #[test]
+    fn a_time_that_cannot_be_read_is_a_refusal_and_never_a_time_of_zero() {
+        let secret = "an-edge-test-hs256-secret-key-0123456789";
+        // Valid at the real clock and at zero alike: `exp` far ahead, `iat` zero.
+        let token = sign_dashboard(secret, 0, i64::MAX);
+        let unreadable = Err(bymax_auth_jwt::JwtError::Clock);
+        let refused = verify_at(
+            unreadable,
+            &token,
+            secret.to_owned(),
+            30,
+            (None, None, None),
+        );
+        let clock_refusal = matches!(
+            &refused,
+            Err(jwt_edge::EdgeError::Jwt(bymax_auth_jwt::JwtError::Clock))
+        );
+        assert!(clock_refusal);
+        let read = verify_at(Ok(1_000), &token, secret.to_owned(), 30, (None, None, None));
+        assert!(read.is_ok(), "{read:?}");
+    }
+
+    #[test]
+    fn the_js_clock_is_read_as_whole_seconds_and_a_bad_one_is_an_error() {
+        use bymax_auth_jwt::JwtError;
+        assert_eq!(seconds_from_millis(0.0), Ok(0));
+        assert_eq!(seconds_from_millis(1_700_000_000_999.0), Ok(1_700_000_000));
+        for bad in [-1.0, f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            assert_eq!(seconds_from_millis(bad), Err(JwtError::Clock), "{bad}");
+        }
     }
 
     /// Sign a dashboard token with the given secret and validity window for the wrapper
