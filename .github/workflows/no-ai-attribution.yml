@@ -4,6 +4,9 @@ on:
   pull_request:
     types: [opened, edited, synchronize, reopened]
 
+# Nothing is granted by default; the job below asks for exactly what the check reads.
+permissions: {}
+
 jobs:
   attribution:
     permissions:
