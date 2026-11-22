@@ -617,6 +617,27 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_provider_with_only_the_required_messages_sends_each_of_them() {
+        let sent = [
+            Bare.send_password_reset_token("t1", "e@x.io", "tok", None)
+                .await,
+            Bare.send_password_reset_otp("t1", "e@x.io", "123456", None)
+                .await,
+            Bare.send_email_verification_otp("t1", "e@x.io", "123456", None)
+                .await,
+            Bare.send_mfa_enabled("t1", "e@x.io", None).await,
+            Bare.send_mfa_disabled("t1", "e@x.io", None).await,
+            Bare.send_invitation("t1", "e@x.io", &invite(), None).await,
+            Bare.send_password_changed("t1", "e@x.io", None).await,
+            Bare.send_email_change_verification("t1", "n@x.io", "tok", None)
+                .await,
+            Bare.send_email_changed_notification("t1", "o@x.io", "n@x.io", None)
+                .await,
+        ];
+        assert!(sent.iter().all(Result::is_ok));
+    }
+
+    #[tokio::test]
     async fn a_provider_without_workspace_invitations_answers_unsupported_not_success() {
         let sent = Bare
             .send_workspace_invitation("t1", "e@x.io", &workspace_invite(), None)

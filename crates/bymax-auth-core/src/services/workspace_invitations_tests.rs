@@ -637,3 +637,115 @@ async fn a_token_whose_role_the_hierarchy_does_not_know_or_a_bootstrap_that_is_n
         );
     }
 }
+
+#[tokio::test]
+async fn the_list_orders_by_the_instant_whatever_offset_and_precision_the_times_use() {
+    let Some(inv) = setup(config()).await else { return };
+    // 10:00:00.000Z, and 08:00:00.123456Z written with an offset: the second is the older.
+    for (email, at) in [
+        ("late@x.io", "2026-11-20T10:00:00.000Z"),
+        ("early@x.io", "2026-11-20T10:00:00.123456+02:00"),
+    ] {
+        let item = Seeded {
+            email,
+            role: "member",
+            inviter: &inv.owner.user_id,
+            created_at: at,
+            resends: 0,
+        };
+        seed(&inv, &format!("{email}-token"), &item).await;
+    }
+    let Ok(first) = page(&inv, None, "1").await else { return };
+    assert_eq!(first.items[0].email, "early@x.io");
+    let Ok(second) = page(&inv, first.next_cursor.as_deref(), "1").await else { return };
+    assert_eq!(second.items[0].email, "late@x.io");
+    assert_eq!(second.next_cursor, None);
+}
+
+#[tokio::test]
+async fn an_invitation_over_a_live_one_to_a_role_above_the_actor_is_refused() {
+    let Some(inv) = setup(config()).await else { return };
+    let above = Seeded {
+        email: "up@x.io",
+        role: "admin",
+        inviter: &inv.owner.user_id,
+        created_at: LONG_AGO,
+        resends: 0,
+    };
+    seed(&inv, "up-token", &above).await;
+    let refused = inv
+        .f
+        .engine
+        .invite_workspace_member(&inv.admin, "up@x.io", "member", &ctx())
+        .await;
+    assert!(
+        matches!(refused, Err(AuthError::InsufficientWorkspaceRole)),
+        "{refused:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_blank_address_is_a_validation_error_naming_email() {
+    let Some(inv) = setup(config()).await else { return };
+    let refused = owner_invites(&inv, "   ", "member").await;
+    assert!(
+        matches!(&refused, Err(AuthError::Validation { details }) if details.iter().any(|d| d.field == "email")),
+        "{refused:?}"
+    );
+}
+
+#[tokio::test]
+async fn an_invitation_to_a_workspace_that_is_not_active_is_not_found() {
+    let Some(inv) = setup(config()).await else { return };
+    inv.f
+        .repo
+        .seed_workspace(super::workspace_support_tests::workspace(
+            "t1",
+            "w1",
+            crate::workspace::domain::WorkspaceStatus::PendingDeletion,
+            1,
+        ));
+    let refused = owner_invites(&inv, "nobody@x.io", "member").await;
+    assert!(
+        matches!(refused, Err(AuthError::WorkspaceNotFound)),
+        "{refused:?}"
+    );
+    assert!(inv.mail.sent().is_empty());
+}
+
+#[tokio::test]
+async fn a_stored_record_with_no_valid_creation_time_is_never_trusted_for_a_cooldown() {
+    let Some(inv) = setup(config()).await else { return };
+    let Some(runtime) = inv.f.engine.workspaces() else { return };
+    let record = crate::workspace::invitation::InvitationRecord::Member {
+        base: crate::workspace::invitation::InvitationBase {
+            email: "t@x.io".to_owned(),
+            role: "member".to_owned(),
+            tenant_id: "t1".to_owned(),
+            workspace_id: "w1".to_owned(),
+            created_at: "not a time".to_owned(),
+            resend_count: 0,
+        },
+        inviter_user_id: "u".to_owned(),
+    };
+    let refused = runtime.assert_may_reissue("owner", &record, time::OffsetDateTime::now_utc());
+    assert!(
+        matches!(refused, Err(AuthError::Internal(_))),
+        "{refused:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_member_with_a_blank_workspace_id_is_a_validation_error_naming_it() {
+    let Some(inv) = setup(config()).await else { return };
+    let blank = super::workspace_support_tests::acting_member("t1", "", "u", "owner");
+    let refused = inv
+        .f
+        .engine
+        .invite_workspace_member(&blank, "a@x.io", "member", &ctx())
+        .await;
+    assert!(
+        matches!(&refused, Err(AuthError::Validation { details }) if details.iter().any(|d| d.field == "workspaceId")),
+        "{refused:?}"
+    );
+}

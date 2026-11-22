@@ -141,6 +141,9 @@ impl WorkspaceRuntime {
         workspace: WorkspaceRef<'_>,
         email: &str,
     ) -> Result<InvitationPlace, AuthError> {
+        if email.is_empty() {
+            return Err(invalid("email", "email must not be blank".to_owned()));
+        }
         let key = &*self.identifier_key;
         let (tenant, id) = (workspace.tenant_id, workspace.workspace_id);
         let index_id = invitation_index_id(key, tenant, id, email).map_err(blank)?;
@@ -180,7 +183,7 @@ impl WorkspaceRuntime {
 
     /// Refuses to replace an invitation the actor may not act on, or one sent too recently or too
     /// often. A creation time in the future counts as inside the cooldown.
-    fn assert_may_reissue(
+    pub(super) fn assert_may_reissue(
         &self,
         actor: &str,
         record: &InvitationRecord,
@@ -215,9 +218,9 @@ fn too_many_requests() -> AuthError {
     }
 }
 
-/// A blank part of a key, which only a blank address can cause.
-fn blank(_: BlankPart) -> AuthError {
-    invalid("email", "email must not be blank".to_owned())
+/// A blank part of a key, named as the part that was blank.
+fn blank(error: BlankPart) -> AuthError {
+    invalid(error.part, format!("{} must not be blank", error.part))
 }
 
 /// Everything one issue needs, so the step that writes it takes one argument.
@@ -705,18 +708,17 @@ async fn publish(
     }
 }
 
-/// One page of the member invitations among `pending`, ordered by issue time and then record key
-/// so the order is total.
+/// One page of the member invitations among `pending`, ordered by the instant each was issued and
+/// then by record key, so the order is total whatever offset or precision the stored times use.
 fn page_of(
     pending: Vec<PendingInvitation>,
     limit: u32,
     cursor: Option<&str>,
     now: OffsetDateTime,
 ) -> Page<WorkspaceInvitationView> {
-    let mut members: Vec<(String, PendingInvitation)> = pending
+    let mut members: Vec<(String, WorkspaceInvitationView)> = pending
         .into_iter()
-        .filter(|entry| matches!(entry.record, InvitationRecord::Member { .. }))
-        .map(|entry| (position_of(&entry), entry))
+        .filter_map(|entry| member_entry(entry, now))
         .collect();
     members.sort_by(|a, b| a.0.cmp(&b.0));
     let after: Vec<_> = members
@@ -730,20 +732,21 @@ fn page_of(
         .last()
         .filter(|_| more)
         .map(|(position, _)| position.clone());
-    let items = taken
-        .into_iter()
-        .filter_map(|(_, entry)| view_of(entry, now))
-        .collect();
+    let items = taken.into_iter().map(|(_, view)| view).collect();
     Page { items, next_cursor }
 }
 
-/// Where an invitation stands in the order: when it was issued, then its record key.
-fn position_of(entry: &PendingInvitation) -> String {
-    format!("{}|{}", entry.record.base().created_at, entry.record_key)
-}
+/// Added to a time before the epoch (in nanoseconds) so every position is a non-negative number
+/// that sorts as text; it exceeds the earliest year a record can name.
+const POSITION_SHIFT: i128 = 1_000_000_000_000_000_000_000_000_000_000;
 
-/// The listing of one pending member invitation; `None` for one that has no inviter.
-fn view_of(entry: PendingInvitation, now: OffsetDateTime) -> Option<WorkspaceInvitationView> {
+/// A pending member invitation as its place in the order and its listing; `None` for a bootstrap
+/// invitation, which is not listed, and for a record whose creation time is not an instant, which
+/// a parsed record never holds.
+fn member_entry(
+    entry: PendingInvitation,
+    now: OffsetDateTime,
+) -> Option<(String, WorkspaceInvitationView)> {
     let InvitationRecord::Member {
         base,
         inviter_user_id,
@@ -751,13 +754,20 @@ fn view_of(entry: PendingInvitation, now: OffsetDateTime) -> Option<WorkspaceInv
     else {
         return None;
     };
+    let issued = OffsetDateTime::parse(&base.created_at, &Rfc3339).ok()?;
+    let position = format!(
+        "{:040}|{}",
+        issued.unix_timestamp_nanos() + POSITION_SHIFT,
+        entry.record_key
+    );
     let left = Duration::seconds(i64::try_from(entry.ttl_seconds).unwrap_or(i64::MAX));
-    Some(WorkspaceInvitationView {
+    let view = WorkspaceInvitationView {
         email: base.email,
         role: base.role,
         inviter_user_id,
         created_at: base.created_at,
         expires_at: iso_instant(now.saturating_add(left)),
         resend_count: base.resend_count,
-    })
+    };
+    Some((position, view))
 }
