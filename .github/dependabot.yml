@@ -9,8 +9,9 @@ updates:
     commit-message:
       prefix: chore
       include: scope
-    # zeroize 1.9.2 adds an unsafe bulk-zeroing module that no imported audit set covers, so the
-    # crate stays on the audited 1.9.1 until one does. Only that version is ignored.
+    # zeroize holds secrets and is mostly unsafe code, so a release is adopted only once an
+    # imported audit set covers it. The release ignored here is held back until then; remove the
+    # entry when that holds.
     ignore:
       - dependency-name: "zeroize"
         versions: ["1.9.2"]
@@ -24,8 +25,9 @@ updates:
     commit-message:
       prefix: chore
       include: scope
-    # zeroize 1.9.2 adds an unsafe bulk-zeroing module that no imported audit set covers, so the
-    # crate stays on the audited 1.9.1 until one does. Only that version is ignored.
+    # zeroize holds secrets and is mostly unsafe code, so a release is adopted only once an
+    # imported audit set covers it. The release ignored here is held back until then; remove the
+    # entry when that holds.
     ignore:
       - dependency-name: "zeroize"
         versions: ["1.9.2"]
