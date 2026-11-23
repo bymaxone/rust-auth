@@ -120,22 +120,35 @@ fn any_other_host_is_addressed_as_it_was_reported() {
     );
 }
 
+/// The same port number on `[::1]` and on `127.0.0.1`. `Ok(None)` when the host has no IPv6 loopback
+/// and so cannot stage the case at all (said on stderr, so a skip is never silent); an error when
+/// no port number was free on both families.
+async fn dual_stack_pair() -> Result<Option<(TcpListener, TcpListener, u16)>, String> {
+    for _ in 0..20 {
+        let Ok(v6) = TcpListener::bind("[::1]:0").await else {
+            eprintln!("skipped: no IPv6 loopback to stage a listener on");
+            return Ok(None);
+        };
+        let Ok(port) = v6.local_addr().map(|address| address.port()) else {
+            continue;
+        };
+        if let Ok(v4) = TcpListener::bind(("127.0.0.1", port)).await {
+            return Ok(Some((v6, v4, port)));
+        }
+    }
+    Err("no port number was free on both loopback families".to_owned())
+}
+
 #[tokio::test]
-async fn a_listener_on_ipv6_loopback_does_not_answer_for_a_container_on_ipv4() {
-    // The same port number held by a `[::1]` listener that is not Redis and an IPv4 listener that
-    // is: the name `localhost` reaches the first, the address `redis_url` builds reaches the second.
+async fn the_address_built_for_localhost_reaches_the_ipv4_listener_not_the_one_on_ipv6() {
+    // Neither connection depends on how `localhost` resolves here: the impostor is reached by its
+    // own address, and the container by the address `redis_url` builds for the name `localhost`.
     use tokio::io::AsyncReadExt;
     use tokio::net::TcpStream;
 
-    let v6 = TcpListener::bind("[::1]:0").await;
-    assert!(v6.is_ok(), "no IPv6 loopback to listen on: {v6:?}");
-    let Ok(v6) = v6 else { return };
-    let port = v6.local_addr().map(|address| address.port());
-    assert!(port.is_ok(), "no local address: {port:?}");
-    let Ok(port) = port else { return };
-    let v4 = TcpListener::bind(("127.0.0.1", port)).await;
-    assert!(v4.is_ok(), "the IPv4 side of port {port} is taken: {v4:?}");
-    let Ok(v4) = v4 else { return };
+    let pair = dual_stack_pair().await;
+    assert!(pair.is_ok(), "{pair:?}");
+    let Ok(Some((v6, v4, port))) = pair else { return };
     tokio::spawn(async move {
         while let Ok((mut socket, _)) = v6.accept().await {
             let _ = socket.write_all(b"HTTP/1.1 400 Bad Request\r\n\r\n").await;
@@ -153,12 +166,12 @@ async fn a_listener_on_ipv6_loopback_does_not_answer_for_a_container_on_ipv4() {
         socket.read_exact(&mut buffer).await.ok()?;
         Some(buffer)
     };
-    let by_name = first_bytes(format!("localhost:{port}")).await;
-    let by_address =
-        first_bytes(redis_ready::redis_url("localhost", port)["redis://".len()..].to_owned()).await;
+    let impostor = first_bytes(format!("[::1]:{port}")).await;
+    let built = redis_ready::redis_url("localhost", port);
+    let container = first_bytes(built["redis://".len()..].to_owned()).await;
 
-    assert_eq!(by_name, Some(*b"HTTP"));
-    assert_eq!(by_address, Some(*b"+PON"));
+    assert_eq!(impostor, Some(*b"HTTP"));
+    assert_eq!(container, Some(*b"+PON"));
 }
 
 /// A listener that answers one connection line by line with `answers`, in order, and then closes.
