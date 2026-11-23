@@ -120,14 +120,32 @@ fn any_other_host_is_addressed_as_it_was_reported() {
     );
 }
 
+/// The switch CI sets so that a case which could not run fails instead of passing. It is the one the
+/// Docker cases use, so a runner that skips here would skip there.
+const REQUIRE_SWITCH: &str = "BYMAX_REQUIRE_DOCKER";
+
+/// What a host with no IPv6 loopback does: where the switch is on it is an error, because a case
+/// that stages nothing would pass while asserting nothing; elsewhere the skip is said on stderr.
+fn without_ipv6(required: bool) -> Result<(), String> {
+    if required {
+        return Err(format!(
+            "{REQUIRE_SWITCH}=1 and the host has no IPv6 loopback to stage a listener on"
+        ));
+    }
+    eprintln!(
+        "skipped: no IPv6 loopback to stage a listener on; set {REQUIRE_SWITCH}=1 to make this a failure"
+    );
+    Ok(())
+}
+
 /// The same port number on `[::1]` and on `127.0.0.1`. `Ok(None)` when the host has no IPv6 loopback
-/// and so cannot stage the case at all (said on stderr, so a skip is never silent); an error when
-/// no port number was free on both families.
+/// and the switch is off; an error when the switch is on and it has none, or when no port number
+/// was free on both families.
 async fn dual_stack_pair() -> Result<Option<(TcpListener, TcpListener, u16)>, String> {
     for _ in 0..20 {
         let Ok(v6) = TcpListener::bind("[::1]:0").await else {
-            eprintln!("skipped: no IPv6 loopback to stage a listener on");
-            return Ok(None);
+            let required = std::env::var(REQUIRE_SWITCH).as_deref() == Ok("1");
+            return without_ipv6(required).map(|()| None);
         };
         let Ok(port) = v6.local_addr().map(|address| address.port()) else {
             continue;
@@ -137,6 +155,22 @@ async fn dual_stack_pair() -> Result<Option<(TcpListener, TcpListener, u16)>, St
         }
     }
     Err("no port number was free on both loopback families".to_owned())
+}
+
+#[test]
+fn a_host_without_ipv6_loopback_fails_the_impostor_case_where_the_switch_is_on() {
+    assert_eq!(
+        without_ipv6(true),
+        Err(
+            "BYMAX_REQUIRE_DOCKER=1 and the host has no IPv6 loopback to stage a listener on"
+                .to_owned()
+        )
+    );
+}
+
+#[test]
+fn a_host_without_ipv6_loopback_skips_the_impostor_case_where_the_switch_is_off() {
+    assert_eq!(without_ipv6(false), Ok(()));
 }
 
 #[tokio::test]
