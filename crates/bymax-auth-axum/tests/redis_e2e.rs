@@ -18,6 +18,8 @@
 
 #[path = "../../bymax-auth-redis/tests/common/docker_gate.rs"]
 mod docker_gate;
+#[path = "../../bymax-auth-redis/tests/common/redis_ready.rs"]
+mod redis_ready;
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -84,7 +86,8 @@ async fn try_start() -> Option<TestRedis> {
     };
     let host = container.get_host().await.ok()?;
     let port = container.get_host_port_ipv4(REDIS_PORT).await.ok()?;
-    let url = format!("redis://{host}:{port}");
+    let url = redis_ready::redis_url(&host.to_string(), port);
+    redis_ready::wait_until_ready(&url).await;
     Some(TestRedis { container, url })
 }
 
