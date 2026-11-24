@@ -20,7 +20,9 @@ use crate::services::membership_cache::{
 };
 use crate::services::workspace_writes::{audit_event, member_hook_context, now_iso};
 use crate::traits::membership_repository::{ListForUser, ListForWorkspace};
-use crate::traits::{MembershipCacheStore, MembershipRepository, WorkspaceRepository};
+use crate::traits::{
+    MembershipCacheStore, MembershipRepository, WorkspaceInvitationStore, WorkspaceRepository,
+};
 use crate::workspace::access::{
     AcceptedRoles, ResolvedAccess, SurfaceRules, WorkspaceMember, classify, decide,
 };
@@ -41,12 +43,18 @@ pub(crate) struct WorkspaceCollaborators {
     pub(crate) memberships: Option<Arc<dyn MembershipRepository>>,
     /// The store of the versioned membership cache.
     pub(crate) cache_store: Option<Arc<dyn MembershipCacheStore>>,
+    /// The store of workspace invitations; without it the invitation methods answer an internal
+    /// error and the boot says so.
+    pub(crate) invitations: Option<Arc<dyn WorkspaceInvitationStore>>,
 }
 
 impl WorkspaceCollaborators {
     /// Whether any collaborator was supplied.
     fn any(&self) -> bool {
-        self.workspaces.is_some() || self.memberships.is_some() || self.cache_store.is_some()
+        self.workspaces.is_some()
+            || self.memberships.is_some()
+            || self.cache_store.is_some()
+            || self.invitations.is_some()
     }
 }
 
@@ -55,6 +63,7 @@ pub(crate) struct WorkspaceRuntime {
     pub(crate) workspaces: Arc<dyn WorkspaceRepository>,
     pub(crate) memberships: Arc<dyn MembershipRepository>,
     pub(crate) cache_store: Arc<dyn MembershipCacheStore>,
+    pub(crate) invitations: Option<Arc<dyn WorkspaceInvitationStore>>,
     pub(crate) resolved: ResolvedWorkspaces,
     pub(crate) identifier_key: Zeroizing<[u8; 64]>,
 }
@@ -86,15 +95,23 @@ impl WorkspaceRuntime {
             workspaces,
             memberships,
             cache_store,
+            invitations,
         } = collaborators;
         let (Some(workspaces), Some(memberships)) = (workspaces, memberships) else {
             return Err(ConfigError::MissingWorkspaceRepositories);
         };
         let cache_store = cache_store.ok_or(ConfigError::MissingMembershipCacheStore)?;
+        if invitations.is_none() {
+            tracing::warn!(
+                event = "RUST_AUTH_WORKSPACE_INVITATIONS_UNCONFIGURED",
+                "workspaces are enabled with no invitation store: workspace invitations are unavailable"
+            );
+        }
         Ok(Some(Self {
             workspaces,
             memberships,
             cache_store,
+            invitations,
             resolved,
             identifier_key: Zeroizing::new(*identifier_key),
         }))
@@ -184,7 +201,7 @@ pub struct PageQuery<'a> {
 
 impl<'a> PageQuery<'a> {
     /// The page size and the cursor, with the bounds of `requestFieldBounds.pageLimit` applied.
-    fn checked(self) -> Result<(u32, Option<&'a str>), AuthError> {
+    pub(crate) fn checked(self) -> Result<(u32, Option<&'a str>), AuthError> {
         let limit = parse_page_limit(self.limit).map_err(|refused| {
             invalid(
                 refused.field,

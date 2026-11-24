@@ -36,3 +36,18 @@ pub const DELETION_GRACE_DAYS_DEFAULT: u32 = 14;
 
 /// The longest configurable deletion grace period, in days; `0` deletes at once.
 pub const DELETION_GRACE_DAYS_MAX: u32 = 365;
+
+/// The default lifetime of a workspace invitation: a week, in seconds.
+pub const INVITATION_TTL_DEFAULT_SECONDS: u64 = 604_800;
+
+/// The shortest configurable invitation lifetime, in seconds.
+pub const INVITATION_TTL_MIN_SECONDS: u64 = 60;
+
+/// The longest configurable invitation lifetime: 30 days, in seconds.
+pub const INVITATION_TTL_MAX_SECONDS: u64 = 2_592_000;
+
+/// The default number of pending invitations one workspace may hold.
+pub const MAX_PENDING_INVITATIONS_DEFAULT: u32 = 100;
+
+/// The most pending invitations a deployment may allow one workspace.
+pub const MAX_PENDING_INVITATIONS_LIMIT: u32 = 10_000;

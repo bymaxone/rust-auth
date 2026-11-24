@@ -23,7 +23,7 @@ use bymax_auth_core::testing::workspace_invitation_scenarios::{
     InvitationStoreProbe, run_invitation_store_scenarios,
 };
 use bymax_auth_core::traits::{
-    IndexedInvitation, InvitationPlace, PendingInvitation, Publication, PublishOutcome,
+    IndexedInvitation, InvitationPlace, PendingInvitation, Publication, PublishOutcome, Removal,
     WorkspaceInvitationStore,
 };
 use bymax_auth_core::workspace::invitation::{InvitationBase, InvitationRecord, record_key};
@@ -176,8 +176,13 @@ impl WorkspaceInvitationStore for RedisProbe {
         self.stores.publish(publication).await
     }
 
-    async fn remove(&self, place: &InvitationPlace, record_key: &str) -> Result<bool, AuthError> {
-        self.stores.remove(place, record_key).await
+    async fn remove(
+        &self,
+        place: &InvitationPlace,
+        record_key: &str,
+        removal: Removal,
+    ) -> Result<bool, AuthError> {
+        self.stores.remove(place, record_key, removal).await
     }
 
     async fn pending(&self, place: &InvitationPlace) -> Result<Vec<PendingInvitation>, AuthError> {
@@ -251,6 +256,48 @@ async fn the_scenarios_pass_against_a_real_redis() {
     let Some(redis) = try_start().await else { return };
     let Some(probe) = redis.probe("scenarios").await else { return };
     run_invitation_store_scenarios(&probe).await;
+}
+
+/// A record that parses but was written with no lifetime is not one a publication wrote: it reads
+/// as unreadable, and the listing leaves it out.
+#[tokio::test]
+async fn a_record_with_no_lifetime_reads_as_unreadable_and_is_not_listed() {
+    let Some(redis) = try_start().await else { return };
+    let Some(probe) = redis.probe("nolifetime").await else { return };
+    let place = InvitationPlace {
+        index_id: "no-lifetime-index".to_owned(),
+        set_id: "no-lifetime-set".to_owned(),
+    };
+    let key = "winv:no-lifetime".to_owned();
+    let mut conn = probe.raw.clone();
+    let planted: Result<(), _> = redis::cmd("SET")
+        .arg(probe.full(&key))
+        .arg(record("a@x").to_json())
+        .query_async(&mut conn)
+        .await;
+    assert!(planted.is_ok(), "the record was not planted");
+    probe
+        .point_index(&place, &key, Duration::from_secs(600))
+        .await;
+    let _: Result<i64, _> = redis::cmd("SADD")
+        .arg(probe.keys.key(Prefix::Winvset, &place.set_id))
+        .arg(&key)
+        .query_async(&mut conn)
+        .await;
+    assert_eq!(probe.read_record(&key).await.ok().flatten(), None);
+    let indexed = probe.read_index(&place).await.ok().flatten();
+    let seen = indexed.map(|i| (i.record.is_none(), i.unreadable));
+    assert_eq!(
+        seen,
+        Some((true, true)),
+        "a persistent record is unreadable"
+    );
+    assert!(
+        probe
+            .pending(&place)
+            .await
+            .is_ok_and(|listed| listed.is_empty())
+    );
 }
 
 /// A member record any case can publish.

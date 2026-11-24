@@ -104,7 +104,8 @@ impl InvitationRecord {
     /// The record `raw` stores, or `None` when it is not one: not JSON, not an object, a field
     /// missing or of the wrong type, a kind other than `member` or `bootstrap`, a `member` that
     /// carries a workspace name or lacks an inviter, a `bootstrap` that carries an inviter or whose
-    /// name is not in the stored form, a creation time that is not an RFC 3339 instant, or a
+    /// name is not in the stored form, a creation time that is not an RFC 3339 instant, an empty
+    /// tenant or workspace id, or a
     /// resend count that is not a non-negative integer. Fields the contract does not list are
     /// ignored.
     #[must_use]
@@ -115,8 +116,8 @@ impl InvitationRecord {
         let base = InvitationBase {
             email: text("email")?,
             role: text("role")?,
-            tenant_id: text("tenantId")?,
-            workspace_id: text("workspaceId")?,
+            tenant_id: text("tenantId").filter(|id| !id.is_empty())?,
+            workspace_id: text("workspaceId").filter(|id| !id.is_empty())?,
             created_at: text("createdAt").filter(|at| is_instant(at))?,
             resend_count: fields.get("resendCount").and_then(Value::as_u64)?,
         };

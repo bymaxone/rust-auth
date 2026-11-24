@@ -1133,6 +1133,8 @@ The **Default** column lists `AuthConfig::default()` (≡ `nest_compat_defaults(
 | `workspaces.allow_create` | `bool` | No | `true` | The self-serve switch of `POST /workspaces`; `false` answers `403 auth.forbidden`. Never consulted for a bootstrap acceptance |
 | `workspaces.max_workspaces_per_user` | `u32` | No | `0` | Most workspaces one account may own (owner role, not deleted, pending deletion included); `0` is no limit; at most 1 000 000 (`WorkspaceOptionOutOfRange`) |
 | `workspaces.deletion_grace_days` | `u32` | No | `14` | Days a scheduled deletion can be restored; `0` deletes at once; at most 365 (`WorkspaceOptionOutOfRange`) |
+| `workspaces.invitation_ttl_seconds` | `u64` | No | `604800` | How long a workspace invitation stays valid, 60 to 2 592 000 (`WorkspaceOptionBelowMinimum`, `WorkspaceOptionAboveMaximum`) |
+| `workspaces.max_pending_invitations_per_workspace` | `u32` | No | `100` | The most pending invitations one workspace holds, 1 to 10 000; a resend replaces a live invitation and does not count again |
 | `password.scrypt.cost_factor` | `u32` | No | `131072` | Power of 2, min `16384` |
 | `password.scrypt.block_size` | `u32` | No | `8` | scrypt r |
 | `password.scrypt.parallelization` | `u32` | No | `1` | scrypt p |
@@ -2640,6 +2642,7 @@ Traits/crates: `bymax-auth-types` (`AuthResult`, `PlatformAuthResult`, `SafeAuth
 | `services::workspace` (`AuthEngine::authorize_workspace`, `list_my_workspaces`, `workspace_access`, `list_workspace_members`, `switch_workspace`) | `WorkspaceRepository`, `MembershipRepository`, `MembershipCacheStore`, `AuthHooks` | crypto (mac) | `membership_cache_fill` (through `resolve_membership`) |
 | `services::workspace_lifecycle` (`AuthEngine::create_workspace`, `create_owned_workspace`, `rename_workspace`, `schedule_workspace_deletion`, `restore_workspace`, `finalize_workspace_deletion`) | `WorkspaceRepository`, `MembershipRepository`, `MembershipCacheStore`, `UserRepository`, `BruteForceStore`, `SessionStore`, `AuthHooks` | crypto (mac, password) | `membership_cache_bump` |
 | `services::workspace_members` (`AuthEngine::change_member_role`, `remove_workspace_member`, `leave_workspace`, `transfer_workspace_ownership`) | `MembershipRepository`, `MembershipCacheStore`, `UserRepository`, `BruteForceStore`, `SessionStore`, `AuthHooks` | crypto (mac, password) | `membership_cache_bump` |
+| `services::workspace_invitations` (`AuthEngine::invite_workspace_member`, `resend_workspace_invitation`, `revoke_workspace_invitation`, `list_workspace_invitations`, `preview_workspace_invitation`) | `WorkspaceInvitationStore`, `WorkspaceRepository`, `MembershipRepository`, `UserRepository`, `EmailProvider`, `AuthHooks` | crypto (token, hash) | `workspace_invitation_publish`, `workspace_invitation_remove` |
 | `services::account_removal` (`AuthEngine::remove_workspace_memberships_for_user`, `invalidate_membership`) | `MembershipRepository`, `MembershipCacheStore`, `AuthHooks` | crypto (mac) | `membership_cache_bump` |
 
 All cross-store mutations follow the security-before-availability ordering established above (credential change before session invalidation; uniqueness/status/verification gates before KDF work; brute-force ordering invariant). Every `after_*`/`on_*` hook is fire-and-forget; only `before_register` (and OAuth's `on_oauth_login`) can block a flow.
@@ -2741,6 +2744,10 @@ The Axum adapter is built only on public `AuthEngine` methods, so a host that au
 | `transfer_workspace_ownership(&member, hand_over, ctx)` | member | `()`; re-proves the giver; `validation` on `userId` / `demoteSelfTo` |
 | `remove_workspace_memberships_for_user(removal, ctx)` | in the removal | `RemovedMemberships`; `AccountRemovalError::Blocked` (`409 auth.last_owner`) while the account is the only active owner of an active or suspended workspace, `BumpsFailed` after a committed removal whose cache bumps did not all succeed |
 | `invalidate_membership(membership_ref)` | in the ref | `()`; drops one membership's cached access; `validation` on a blank identifier |
+| `invite_workspace_member(&member, email, role, ctx)` | member | `()`; `validation` on `role`, `insufficient_workspace_role` above the actor's ceiling, `already_member` for an address with a membership in any status, `too_many_requests` at a limit or when the address changed under the call, `workspace_not_found`; `internal` when the email provider fails or implements no workspace invitation, or when the index names a record that cannot be read |
+| `resend_workspace_invitation(&member, email, ctx)` / `revoke_workspace_invitation(&member, email, ctx)` | member | `()`; an address with no invitation, or one the actor may not act on, answers success and changes nothing; a resend inside the 60 s cooldown, past 5 resends or past the inviter's 20 an hour is `too_many_requests` |
+| `list_workspace_invitations(&member, query)` | member | `Page<WorkspaceInvitationView>`, oldest first, member invitations only; `validation` on `limit` / `cursor` |
+| `preview_workspace_invitation(token)` | none | `InvitationPreview`, a union on `kind`; one `invalid_invitation_token` for every token that cannot be previewed |
 
 ## 8. HTTP Adapter — Axum
 
@@ -4453,6 +4460,22 @@ pub trait EmailProvider: Send + Sync {
         invite: &InviteData,
         locale: Option<&str>,
     ) -> Result<(), EmailError>;
+
+    /// Workspace invitation: the inviter, the workspace, the role, the accept URL (built from
+    /// `invite.invite_token`), the expiry, and `invite.account_exists` to point to signing in
+    /// rather than signing up. The default answers `EmailError::Unsupported`, so a host that has
+    /// not implemented it gets an explicit failure from the invitation call and never a success
+    /// in which nothing was sent.
+    async fn send_workspace_invitation(
+        &self,
+        tenant_id: &str,
+        email: &str,
+        invite: &WorkspaceInviteData,
+        locale: Option<&str>,
+    ) -> Result<(), EmailError> {
+        let _ = (tenant_id, email, invite, locale);
+        Err(EmailError::Unsupported)
+    }
 }
 ```
 
@@ -5257,7 +5280,7 @@ Called when `refresh_rotate` reports a reuse. Kills every live descendant of the
 
 Closes an IDOR/BOLA hole: a user must not revoke a session hash they do not own.
 
-- **KEYS** — `[1]` `sess:{subjectHash}` (or `psess:{subjectHash}`), `[2]` `rt:{sessionHash}` (or `prt:{sessionHash}`), `[3]` `sd:{sessionHash}` (or `psd:{sessionHash}`). All three arrive fully namespaced (built by `NamespacedRedis`), so **every** key the script touches is declared in `KEYS` — required for Redis Cluster key routing.
+- **KEYS** — `[1]` `sess:{subjectHash}` (or `psess:{subjectHash}`), `[2]` `rt:{sessionHash}` (or `prt:{sessionHash}`), `[3]` `sd:{sessionHash}` (or `psd:{sessionHash}`). All three arrive fully namespaced (built by `NamespacedRedis`), so **every** key the script touches is declared in `KEYS`, which Redis Cluster key routing requires. A script that touches several keys still needs them in one slot, so a cluster deployment gives the namespace a hash tag.
 - **ARGV** — `[1]` `rt:{sessionHash}` (or `prt:{sessionHash}`) — the `sess:`-set member, which is the full key suffix, not a bare hash.
 - **Contract:**
   1. `SISMEMBER KEYS[1] ARGV[1]`. If `0` → **return `0`** ⇒ caller raises `AuthError::SessionNotFound` (404).
@@ -5330,7 +5353,7 @@ The rank check reads the index and the claim writes it; as two round trips they 
 An invitation is three structures and a counter (§12.4), shared with nest-auth and pinned by `workspaceInvitations` in the shared contract: the record `winv:{sha256(token)}`, the index `winvidx:` that names the ONE live invitation of an address in a workspace, the set `winvset:` of a workspace's record keys, and the inviter's hourly counter `winvrl:`. The index and the set hold the record key as the contract names it, `winv:{hash}` without the namespace, so a script receives that text in `ARGV` and the namespaced key in `KEYS`.
 
 - **`workspace_invitation_publish`** — **KEYS** `[1]` the index, `[2]` the new record, `[3]` the set, `[4]` the record the writer read from the index (the new record when none); **ARGV** `[1]` the new record key, `[2]` the record JSON, `[3]` the lifetime (s), `[4]` the pending limit (`0` is no limit), `[5]` the record key the writer read (`''` for none). **Contract:** ONE atomic step with no separate claim. If the index (absent read as `''`) differs from `ARGV[5]` return `'lost'`; if the limit is not `0` and `SCARD KEYS[3]` is at least the limit return `'full'`; else `SET` the record and the index with `EX ARGV[3]`, `SADD` the key and `EXPIRE` the set, and, when `ARGV[5]` is not `''`, `DEL KEYS[4]` and `SREM` it from the set; return `'published'`. Only `'published'` writes. A writer that read a stale index writes nothing, so two overlapping invitations for one address leave exactly one record.
-- **`workspace_invitation_remove`** — **KEYS** `[1]` the index, `[2]` the record, `[3]` the set; **ARGV** `[1]` the record key. **Contract:** `DEL` the record, `SREM` the key from the set, and `DEL` the index only while it still holds this key; return `1` when it did, else `0`. A revoke or resend that lands between an acceptance's write and its spend therefore cannot be undone by the spend.
+- **`workspace_invitation_remove`** — **KEYS** `[1]` the index, `[2]` the record, `[3]` the set; **ARGV** `[1]` the record key, `[2]` `'1'` to delete only a record this place owns (its set holds the key, or its index names it) or `'0'` to delete it whatever place it is asked under. **Contract:** with `'1'`, return `0` and change nothing when the place owns nothing; then `DEL` the record, `SREM` the key from the set, and `DEL` the index only while it still holds this key; return `1` when it did, else `0`. A revoke asks `'1'` (`Removal::Owned`), so a place and a record key that do not belong together delete nothing. The spend that follows an acceptance asks `'0'` (`Removal::Spend`): the contract has it delete the token's own record always, so a revoke or resend that lands between the acceptance's write and its spend cannot be undone by the spend, and a single-use record goes even when its set or index no longer names it. **Reads:** a record key that holds a value with no lifetime was not written by a publication, so it reads as unreadable (an internal error on an invitation or a resend) and the listing leaves it out. **Keyspace:** the scripts touch several keys, so a cluster deployment gives the namespace a hash tag that puts them in one slot.
 - **Dead members.** A set member whose record has expired still counts in `SCARD`, so before a publication with a limit and before a listing the store drops the members whose key is gone (the `session_prune_dead` script); a member whose value is not a record is left in place and not listed. The caller passes limit `0` when it replaces a record that is still alive, because the set does not grow; an index that names a gone record is a first invitation for the cap.
 - **The inviter counter** is the `brute_force_incr` script on a `winvrl:` key: `INCR`, and `EXPIRE` to 3600 s on the first increment only.
 - **Rust mapping:** `PublishOutcome::{ Published, Lost, Full }`; `remove` returns whether the index named the record; `read_record` answers `None` for a value that is not a record (`InvitationRecord::parse`). The scenarios run through one runner (`testing::workspace_invitation_scenarios`) against both `InMemoryWorkspaceInvitations` and a real Redis, and the contract's key vectors are replayed against the keys the Redis store writes.

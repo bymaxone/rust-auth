@@ -186,3 +186,63 @@ fn the_owner_cap_and_the_grace_period_are_bounded() {
     };
     assert!(matches!(disabled.resolve(), Ok(None)));
 }
+
+#[test]
+fn the_invitation_options_default_to_a_week_and_a_hundred_pending() {
+    let config = WorkspacesConfig::default();
+    assert_eq!(config.invitation_ttl_seconds, 604_800);
+    assert_eq!(config.max_pending_invitations_per_workspace, 100);
+    let Ok(Some(resolved)) = enabled().resolve() else { return };
+    assert_eq!(
+        (
+            resolved.invitation_ttl_seconds,
+            resolved.max_pending_invitations_per_workspace
+        ),
+        (604_800, 100)
+    );
+}
+
+#[test]
+fn the_invitation_lifetime_and_the_pending_cap_are_bounded_on_both_sides() {
+    for (seconds, accepted) in [
+        (0, false),
+        (59, false),
+        (60, true),
+        (2_592_000, true),
+        (2_592_001, false),
+    ] {
+        let mut config = enabled();
+        config.invitation_ttl_seconds = seconds;
+        assert_eq!(config.resolve().is_ok(), accepted, "ttl {seconds}");
+    }
+    for (cap, accepted) in [(0, false), (1, true), (10_000, true), (10_001, false)] {
+        let mut config = enabled();
+        config.max_pending_invitations_per_workspace = cap;
+        assert_eq!(config.resolve().is_ok(), accepted, "cap {cap}");
+    }
+}
+
+#[test]
+fn a_refused_invitation_option_is_named_with_its_bound() {
+    let message = |edit: &dyn Fn(&mut WorkspacesConfig)| {
+        let mut config = enabled();
+        edit(&mut config);
+        config.resolve().err().map(|error| error.to_string())
+    };
+    assert_eq!(
+        message(&|c| c.invitation_ttl_seconds = 59).as_deref(),
+        Some("workspaces.invitationTtlSeconds must be at least 60")
+    );
+    assert_eq!(
+        message(&|c| c.invitation_ttl_seconds = 2_592_001).as_deref(),
+        Some("workspaces.invitationTtlSeconds must be at most 2592000")
+    );
+    assert_eq!(
+        message(&|c| c.max_pending_invitations_per_workspace = 0).as_deref(),
+        Some("workspaces.maxPendingInvitationsPerWorkspace must be at least 1")
+    );
+    assert_eq!(
+        message(&|c| c.max_pending_invitations_per_workspace = 10_001).as_deref(),
+        Some("workspaces.maxPendingInvitationsPerWorkspace must be at most 10000")
+    );
+}

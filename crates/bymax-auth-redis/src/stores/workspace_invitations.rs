@@ -7,10 +7,13 @@
 //! so a script receives that text in `ARGV` and the namespaced key in `KEYS`. The inviter counter
 //! is the fixed-window counter the brute-force store uses: its lifetime starts at the first
 //! increment and a later one never extends it.
+//!
+//! The scripts touch several keys, and the dead-member prune names the keys it reads in `ARGV`, so
+//! a cluster deployment needs a namespace whose hash tag puts them all in one slot.
 
 use async_trait::async_trait;
 use bymax_auth_core::traits::{
-    IndexedInvitation, InvitationPlace, PendingInvitation, Publication, PublishOutcome,
+    IndexedInvitation, InvitationPlace, PendingInvitation, Publication, PublishOutcome, Removal,
     WorkspaceInvitationStore,
 };
 use bymax_auth_core::workspace::invitation::InvitationRecord;
@@ -22,6 +25,29 @@ use crate::error::RedisStoreError;
 use crate::keys::Prefix;
 use crate::pool::RedisStores;
 use crate::script;
+
+/// What `TTL` answers for a key that exists and has no expiry.
+const NO_LIFETIME: i64 = -1;
+
+/// What a record key held.
+enum Held {
+    /// Nothing.
+    Gone,
+    /// A value, written with a lifetime.
+    Value(String),
+    /// A value that has no lifetime, which a publication never writes.
+    NoLifetime,
+}
+
+impl Held {
+    /// The record the key holds, `None` when it holds no value or a value that is not a record.
+    fn record(&self) -> Option<InvitationRecord> {
+        match self {
+            Self::Value(raw) => InvitationRecord::parse(raw),
+            Self::Gone | Self::NoLifetime => None,
+        }
+    }
+}
 
 /// What `workspace_invitation_publish` answers when it wrote the record.
 const PUBLISHED: &str = "published";
@@ -36,17 +62,30 @@ impl RedisStores {
         format!("{}:{record_key}", self.keys().namespace())
     }
 
+    /// `GET` the value under `record_key`, and `TTL` of it: a record is written with a lifetime,
+    /// so one that has none was not written by a publication and is not trusted.
+    async fn read_invitation_raw(&self, record_key: &str) -> Result<Held, RedisStoreError> {
+        let mut conn = self.connection().await?;
+        let key = self.invitation_record_key(record_key);
+        let raw: Option<String> = redis::cmd("GET").arg(&key).query_async(&mut conn).await?;
+        let Some(raw) = raw else {
+            return Ok(Held::Gone);
+        };
+        let left: i64 = redis::cmd("TTL").arg(&key).query_async(&mut conn).await?;
+        Ok(if left == NO_LIFETIME {
+            Held::NoLifetime
+        } else {
+            Held::Value(raw)
+        })
+    }
+
     /// `GET` the record under `record_key` and parse it; anything that is not a record is `None`.
     async fn read_invitation_record(
         &self,
         record_key: &str,
     ) -> Result<Option<InvitationRecord>, RedisStoreError> {
-        let mut conn = self.connection().await?;
-        let raw: Option<String> = redis::cmd("GET")
-            .arg(self.invitation_record_key(record_key))
-            .query_async(&mut conn)
-            .await?;
-        Ok(raw.and_then(|raw| InvitationRecord::parse(&raw)))
+        let held = self.read_invitation_raw(record_key).await?;
+        Ok(held.record())
     }
 
     async fn read_invitation_index(
@@ -62,8 +101,14 @@ impl RedisStores {
         match record_key {
             None => Ok(None),
             Some(record_key) => {
-                let record = self.read_invitation_record(&record_key).await?;
-                Ok(Some(IndexedInvitation { record_key, record }))
+                let held = self.read_invitation_raw(&record_key).await?;
+                let record = held.record();
+                let unreadable = !matches!(held, Held::Gone) && record.is_none();
+                Ok(Some(IndexedInvitation {
+                    record_key,
+                    record,
+                    unreadable,
+                }))
             }
         }
     }
@@ -107,6 +152,7 @@ impl RedisStores {
         &self,
         place: &InvitationPlace,
         record_key: &str,
+        removal: Removal,
     ) -> Result<bool, RedisStoreError> {
         let mut conn = self.connection().await?;
         let released: u8 = script::WORKSPACE_INVITATION_REMOVE
@@ -115,6 +161,7 @@ impl RedisStores {
             .key(self.invitation_record_key(record_key))
             .key(self.keys().key(Prefix::Winvset, &place.set_id))
             .arg(record_key)
+            .arg(if removal == Removal::Owned { "1" } else { "0" })
             .invoke_async(&mut conn)
             .await?;
         Ok(released == 1)
@@ -140,6 +187,9 @@ impl RedisStores {
                 continue;
             };
             let left: i64 = redis::cmd("TTL").arg(&key).query_async(&mut conn).await?;
+            if left == NO_LIFETIME {
+                continue;
+            }
             live.push(PendingInvitation {
                 record_key: member.clone(),
                 record,
@@ -199,8 +249,13 @@ impl WorkspaceInvitationStore for RedisStores {
             .map_err(AuthError::from)
     }
 
-    async fn remove(&self, place: &InvitationPlace, record_key: &str) -> Result<bool, AuthError> {
-        self.remove_invitation(place, record_key)
+    async fn remove(
+        &self,
+        place: &InvitationPlace,
+        record_key: &str,
+        removal: Removal,
+    ) -> Result<bool, AuthError> {
+        self.remove_invitation(place, record_key, removal)
             .await
             .map_err(AuthError::from)
     }

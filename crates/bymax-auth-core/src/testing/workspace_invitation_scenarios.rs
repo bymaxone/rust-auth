@@ -14,7 +14,8 @@ use std::time::Duration;
 use async_trait::async_trait;
 
 use crate::traits::{
-    InvitationPlace, PendingInvitation, Publication, PublishOutcome, WorkspaceInvitationStore,
+    InvitationPlace, PendingInvitation, Publication, PublishOutcome, Removal,
+    WorkspaceInvitationStore,
 };
 use crate::workspace::invitation::{InvitationBase, InvitationRecord};
 use crate::workspace::limits::INVITER_WINDOW_SECONDS;
@@ -143,6 +144,7 @@ pub async fn run_invitation_store_scenarios<S: InvitationStoreProbe + ?Sized>(st
     a_gone_record_is_dropped_before_the_cap_is_counted(store).await;
     a_removal_spends_the_record_the_index_and_the_set_member(store).await;
     a_removal_keeps_an_index_that_names_another_record(store).await;
+    a_removal_under_a_place_that_does_not_own_the_record_deletes_nothing(store).await;
     the_listing_drops_what_is_gone_and_shows_the_time_left(store).await;
     a_foreign_value_under_a_record_key_reads_as_absent(store).await;
     everything_expires_together_and_an_expired_index_is_replaced_like_any_other(store).await;
@@ -168,6 +170,11 @@ pub(super) async fn a_first_publication_writes_all_three_structures_with_one_lif
     assert_eq!(
         indexed.as_ref().map(|i| i.record_key.as_str()),
         Some(key.as_str())
+    );
+    assert_eq!(
+        indexed.as_ref().map(|i| i.unreadable),
+        Some(false),
+        "a record is readable"
     );
     assert_eq!(indexed.and_then(|i| i.record), Some(record("a@x")));
     assert_eq!(store.set_members(&f.place).await, vec![key.clone()]);
@@ -278,6 +285,12 @@ pub(super) async fn a_gone_record_is_dropped_before_the_cap_is_counted<
     let (dead, fresh, replaced) = (f.key("dead"), f.key("fresh"), f.key("replaced"));
     publish(store, &f.place, &dead, "a@x", 1, None, TTL).await;
     store.delete_record(&dead).await;
+    let gone = store.read_index(&f.place).await.ok().flatten();
+    assert_eq!(
+        gone.map(|i| (i.record.is_none(), i.unreadable)),
+        Some((true, false)),
+        "an index over a gone record is not unreadable"
+    );
     // The dead member still sits in the set; a first invitation to b@x at the cap succeeds.
     let other = f.neighbour("b");
     let outcome = publish(store, &other, &fresh, "b@x", 1, None, TTL).await;
@@ -309,7 +322,7 @@ pub(super) async fn a_removal_spends_the_record_the_index_and_the_set_member<
     let old = f.key("old");
     publish(store, &f.place, &old, "a@x", 0, None, TTL).await;
     assert_eq!(
-        store.remove(&f.place, &old).await.ok(),
+        store.remove(&f.place, &old, Removal::Owned).await.ok(),
         Some(true),
         "index named it"
     );
@@ -341,7 +354,7 @@ async fn a_removal_keeps_an_index_that_names_another_record<S: InvitationStorePr
         .plant_raw_record(&old, &record("a@x").to_json(), Duration::from_secs(TTL))
         .await;
     assert_eq!(
-        store.remove(&f.place, &old).await.ok(),
+        store.remove(&f.place, &old, Removal::Spend).await.ok(),
         Some(false),
         "index named another"
     );
@@ -410,6 +423,11 @@ pub(super) async fn a_foreign_value_under_a_record_key_reads_as_absent<
     assert_eq!(
         indexed.as_ref().map(|i| i.record_key.as_str()),
         Some(key.as_str())
+    );
+    assert_eq!(
+        indexed.as_ref().map(|i| i.unreadable),
+        Some(true),
+        "a foreign value is unreadable"
     );
     assert_eq!(
         indexed.and_then(|i| i.record),
@@ -536,5 +554,49 @@ pub(super) async fn an_uncapped_publication_leaves_a_dead_member_alone<
         store.set_members(&f.place).await,
         expected,
         "an uncapped publication does not prune the set"
+    );
+}
+
+/// A place and a record key that do not belong together delete nothing.
+pub(super) async fn a_removal_under_a_place_that_does_not_own_the_record_deletes_nothing<
+    S: InvitationStoreProbe + ?Sized,
+>(
+    store: &S,
+) {
+    let (owner, stranger) = (Fixture::new("owned"), Fixture::new("stranger"));
+    let key = owner.key("record");
+    publish(store, &owner.place, &key, "a@x", 0, None, TTL).await;
+    let removed = store.remove(&stranger.place, &key, Removal::Owned).await;
+    assert_eq!(removed.ok(), Some(false), "nothing was owned");
+    assert_eq!(
+        store.read_record(&key).await.ok().flatten(),
+        Some(record("a@x")),
+        "the record stays"
+    );
+    let indexed = store.read_index(&owner.place).await.ok().flatten();
+    assert_eq!(
+        indexed.map(|i| i.record_key),
+        Some(key.clone()),
+        "the owner's index stays"
+    );
+    assert_eq!(
+        store.set_members(&owner.place).await,
+        vec![key.clone()],
+        "the owner's set keeps its member"
+    );
+    // A sibling address of the same workspace shares the set, so it owns the record through it.
+    let sibling = owner.neighbour("sibling");
+    let other = owner.key("other");
+    publish(store, &sibling, &other, "b@x", 0, None, TTL).await;
+    let through_the_set = store.remove(&sibling, &key, Removal::Owned).await;
+    assert_eq!(
+        through_the_set.ok(),
+        Some(false),
+        "its index names another record"
+    );
+    assert_eq!(
+        store.read_record(&key).await.ok().flatten(),
+        None,
+        "the set made the record the sibling's to remove"
     );
 }

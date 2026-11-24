@@ -14,7 +14,7 @@ use super::workspace_invitation_scenarios::{
     self as scenarios, InvitationStoreProbe, run_invitation_store_scenarios,
 };
 use crate::traits::{
-    IndexedInvitation, InvitationPlace, PendingInvitation, Publication, PublishOutcome,
+    IndexedInvitation, InvitationPlace, PendingInvitation, Publication, PublishOutcome, Removal,
     WorkspaceInvitationStore,
 };
 use crate::workspace::invitation::InvitationRecord;
@@ -60,6 +60,12 @@ enum Fault {
     PrunesWhenUncapped,
     /// Every increment starts the counter's hour over.
     ResetsTheWindow,
+    /// An index over a gone record is reported as unreadable.
+    CallsAGoneRecordUnreadable,
+    /// An index over a value that is not a record is reported as readable.
+    CallsAForeignValueReadable,
+    /// A removal deletes a record whatever place it is asked under.
+    RemovesWithoutOwnership,
 }
 
 struct Broken {
@@ -130,7 +136,17 @@ impl WorkspaceInvitationStore for Broken {
         &self,
         place: &InvitationPlace,
     ) -> Result<Option<IndexedInvitation>, AuthError> {
-        self.inner.read_index(place).await
+        let mut read = self.inner.read_index(place).await?;
+        if let Some(indexed) = read.as_mut() {
+            match self.fault {
+                Fault::CallsAGoneRecordUnreadable => {
+                    indexed.unreadable = indexed.unreadable || indexed.record.is_none();
+                }
+                Fault::CallsAForeignValueReadable => indexed.unreadable = false,
+                _ => {}
+            }
+        }
+        Ok(read)
     }
 
     async fn publish(&self, publication: Publication<'_>) -> Result<PublishOutcome, AuthError> {
@@ -175,26 +191,35 @@ impl WorkspaceInvitationStore for Broken {
         self.inner.publish(changed).await
     }
 
-    async fn remove(&self, place: &InvitationPlace, record_key: &str) -> Result<bool, AuthError> {
+    async fn remove(
+        &self,
+        place: &InvitationPlace,
+        record_key: &str,
+        removal: Removal,
+    ) -> Result<bool, AuthError> {
         match self.fault {
             Fault::RemovesAnotherRecordsIndex => {
                 let named = self.inner.read_index(place).await?;
-                let removed = self.inner.remove(place, record_key).await?;
+                let removed = self.inner.remove(place, record_key, removal).await?;
                 if let Some(named) = named
                     && !removed
                 {
-                    self.inner.remove(place, &named.record_key).await?;
+                    self.inner.remove(place, &named.record_key, removal).await?;
                 }
                 Ok(removed)
             }
+            Fault::RemovesWithoutOwnership => {
+                self.inner.delete_record(record_key).await;
+                self.inner.remove(place, record_key, removal).await
+            }
             Fault::KeepsTheRemovedRecord => {
-                let removed = self.inner.remove(place, record_key).await?;
+                let removed = self.inner.remove(place, record_key, removal).await?;
                 self.inner
                     .plant_raw_record(record_key, &record_json(), Duration::from_secs(600))
                     .await;
                 Ok(removed)
             }
-            _ => self.inner.remove(place, record_key).await,
+            _ => self.inner.remove(place, record_key, removal).await,
         }
     }
 
@@ -329,7 +354,12 @@ async fn an_unavailable_store_fails_every_call_and_recovers_when_it_is_back() {
         };
         assert!(store.publish(publication).await.is_err());
     }
-    assert!(store.remove(&place, "winv:k").await.is_err());
+    assert!(
+        store
+            .remove(&place, "winv:k", Removal::Owned)
+            .await
+            .is_err()
+    );
     assert!(store.pending(&place).await.is_err());
     assert!(store.count_inviter("rate").await.is_err());
     store.set_unavailable(false);
@@ -406,9 +436,22 @@ async fn a_scenario_written_for_a_read_removal_or_counter_fault_fails_alone_on_a
             scenarios::a_removal_spends_the_record_the_index_and_the_set_member(&*s).await;
         })
         .await,
+        alone_fails(Fault::CallsAGoneRecordUnreadable, |s| async move {
+            scenarios::a_gone_record_is_dropped_before_the_cap_is_counted(&*s).await;
+        })
+        .await,
+        alone_fails(Fault::CallsAForeignValueReadable, |s| async move {
+            scenarios::a_foreign_value_under_a_record_key_reads_as_absent(&*s).await;
+        })
+        .await,
+        alone_fails(Fault::RemovesWithoutOwnership, |s| async move {
+            scenarios::a_removal_under_a_place_that_does_not_own_the_record_deletes_nothing(&*s)
+                .await;
+        })
+        .await,
     ];
     assert_eq!(
-        cases, [true; 4],
+        cases, [true; 7],
         "a scenario that passed on its broken store"
     );
 }

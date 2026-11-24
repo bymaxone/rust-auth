@@ -18,7 +18,7 @@ use bymax_auth_types::AuthError;
 use super::lock;
 use super::workspace_invitation_scenarios::InvitationStoreProbe;
 use crate::traits::{
-    IndexedInvitation, InvitationPlace, PendingInvitation, Publication, PublishOutcome,
+    IndexedInvitation, InvitationPlace, PendingInvitation, Publication, PublishOutcome, Removal,
     WorkspaceInvitationStore,
 };
 use crate::workspace::invitation::InvitationRecord;
@@ -146,10 +146,14 @@ impl WorkspaceInvitationStore for InMemoryWorkspaceInvitations {
     ) -> Result<Option<IndexedInvitation>, AuthError> {
         let mut state = self.begin()?;
         Ok(state.index(&place.index_id).map(|record_key| {
-            let record = state
-                .record(&record_key)
-                .and_then(|raw| InvitationRecord::parse(&raw));
-            IndexedInvitation { record_key, record }
+            let raw = state.record(&record_key);
+            let record = raw.as_deref().and_then(InvitationRecord::parse);
+            let unreadable = raw.is_some() && record.is_none();
+            IndexedInvitation {
+                record_key,
+                record,
+                unreadable,
+            }
         }))
     }
 
@@ -190,8 +194,18 @@ impl WorkspaceInvitationStore for InMemoryWorkspaceInvitations {
         Ok(PublishOutcome::Published)
     }
 
-    async fn remove(&self, place: &InvitationPlace, record_key: &str) -> Result<bool, AuthError> {
+    async fn remove(
+        &self,
+        place: &InvitationPlace,
+        record_key: &str,
+        removal: Removal,
+    ) -> Result<bool, AuthError> {
         let mut state = self.begin()?;
+        let in_set = state.set(&place.set_id).contains(record_key);
+        let owned = in_set || state.index(&place.index_id).as_deref() == Some(record_key);
+        if removal == Removal::Owned && !owned {
+            return Ok(false);
+        }
         state.records.remove(record_key);
         if let Some((members, _)) = state.sets.get_mut(&place.set_id) {
             members.remove(record_key);

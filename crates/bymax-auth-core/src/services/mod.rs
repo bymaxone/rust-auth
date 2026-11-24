@@ -64,6 +64,13 @@ mod tenant_binding;
 pub mod token_manager;
 mod verifier;
 pub mod workspace;
+pub mod workspace_invitations;
+#[cfg(test)]
+mod workspace_invitations_reads_tests;
+#[cfg(test)]
+mod workspace_invitations_support_tests;
+#[cfg(test)]
+mod workspace_invitations_tests;
 pub mod workspace_lifecycle;
 #[cfg(test)]
 mod workspace_lifecycle_tests;
