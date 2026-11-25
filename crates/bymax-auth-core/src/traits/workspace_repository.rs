@@ -143,7 +143,10 @@ pub trait WorkspaceRepository: Send + Sync {
 
     /// Reads one workspace in any status: the library decides access.
     ///
-    /// Returns `None` when none matches both halves of the key.
+    /// Returns `None` when none matches both halves of the key, including a key whose tenant
+    /// or workspace id is empty or cannot name a row in the host's store: the invitation
+    /// preview looks up empty ids for a token that names nothing, and an error there answers
+    /// `auth.internal` instead of `auth.invalid_invitation_token`.
     async fn find_by_id(
         &self,
         workspace: WorkspaceRef<'_>,

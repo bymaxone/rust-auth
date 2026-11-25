@@ -2745,7 +2745,7 @@ The Axum adapter is built only on public `AuthEngine` methods, so a host that au
 | `remove_workspace_memberships_for_user(removal, ctx)` | in the removal | `RemovedMemberships`; `AccountRemovalError::Blocked` (`409 auth.last_owner`) while the account is the only active owner of an active or suspended workspace, `BumpsFailed` after a committed removal whose cache bumps did not all succeed |
 | `invalidate_membership(membership_ref)` | in the ref | `()`; drops one membership's cached access; `validation` on a blank identifier |
 | `invite_workspace_member(&member, email, role, ctx)` | member | `()`; `validation` on `role`, `insufficient_workspace_role` above the actor's ceiling, `already_member` for an address with a membership in any status, `too_many_requests` at a limit or when the address changed under the call, `workspace_not_found`; `internal` when the email provider fails or implements no workspace invitation, or when the index names a record that cannot be read |
-| `resend_workspace_invitation(&member, email, ctx)` / `revoke_workspace_invitation(&member, email, ctx)` | member | `()`; an address with no invitation, or one the actor may not act on, answers success and changes nothing; a resend inside the 60 s cooldown, past 5 resends or past the inviter's 20 an hour is `too_many_requests` |
+| `resend_workspace_invitation(&member, email, ctx)` / `revoke_workspace_invitation(&member, email, ctx)` | member | `()`; an address with no invitation, or one the actor may not act on, answers success and changes nothing; a resend inside the 60 s cooldown, past 5 resends or past the inviter's 20 an hour is `too_many_requests`, and so is a revoke of an address that kept changing under every attempt; an owner's resend of a role the hierarchy no longer knows answers success and mails nothing |
 | `list_workspace_invitations(&member, query)` | member | `Page<WorkspaceInvitationView>`, oldest first, member invitations only; `validation` on `limit` / `cursor` |
 | `preview_workspace_invitation(token)` | none | `InvitationPreview`, a union on `kind`; one `invalid_invitation_token` for every token that cannot be previewed |
 
@@ -4540,7 +4540,7 @@ impl EmailProvider for NoOpEmailProvider {
 
 ### 10.5 Implementing a real provider
 
-Most deployments should not implement this trait at all: `DefaultAuthEmailProvider` (§10.6) already covers all ten methods over a one-method `AuthEmailSink` port and carries the escaping, subject sanitization and failure policy. Implement `EmailProvider` directly only where the sink shape does not fit.
+Most deployments should not implement this trait at all: `DefaultAuthEmailProvider` (§10.6) already covers every method over a one-method `AuthEmailSink` port and carries the escaping, subject sanitization and failure policy. Implement `EmailProvider` directly only where the sink shape does not fit.
 
 A production adapter wraps an HTTP email API with `reqwest` (or an SMTP client). It renders the body for the requested `locale`, calls the provider, and maps transport failures to `EmailError::Delivery`. Pattern:
 
@@ -4576,7 +4576,7 @@ Implementation notes that mirror the contract's guarantees: escape every dynamic
 
 ### 10.6 `DefaultAuthEmailProvider`
 
-The overridable default that fills the port, so a deployment does not hand-write ten methods to send a verification code. It exists because each of those hand-written providers would otherwise have to get the same security policy right independently, and the failures are silent ones: an unescaped inviter name that renders as markup, a subject carrying a `\r\n` that a concatenating channel reads as an extra `Bcc:` header, or a delivery error that fails the user's whole request.
+The overridable default that fills the port, so a deployment does not hand-write every method to send a verification code. It exists because each of those hand-written providers would otherwise have to get the same security policy right independently, and the failures are silent ones: an unescaped inviter name that renders as markup, a subject carrying a `\r\n` that a concatenating channel reads as an extra `Bcc:` header, or a delivery error that fails the user's whole request.
 
 ```rust
 #[async_trait]
@@ -4594,8 +4594,8 @@ pub struct OutgoingEmail<'a> {
 ```
 
 - **`AuthEmailSink`** is the delivery channel — one method, so the module depends on no concrete mailer. The `tenant_id` the port carries is passed straight through, so a multi-tenant channel can attribute and route.
-- **`AuthEmailCatalogue`** is the copy: ten pure renderers, each with a secure default, so an override implements only the events whose wording it changes. Each renderer takes an `AuthEmailContext { tenant_id, email, locale }` first (`email` is the delivery address: the new address for `email_change_verification`, the previous one for `email_changed`, which also receives both addresses as its own arguments) and then its own fields. Returning `html` from a renderer is the seam for a product's real links, layout and branding — that override owns its own escaping, and everything else stays escaped. A catalogue chooses words, never behaviour.
-- **`DeliveryErrorPolicy`** defaults to `Swallow`: the failure is logged (subject only, never the body, code or address — a log line reaches a wider audience than the inbox it was going to) and the flow continues, because the engine awaits some of these sends and a channel outage must not fail the operation itself. `Rethrow` restores the error for the flows that react to one: the reset path deletes an undelivered token early rather than leaving it to its TTL, the email-change path refuses to record "verification sent", and the invitation path answers `500 auth.internal` (7.10). Under the default they degrade rather than break — the token still expires unread, the change still needs a verification nobody received, and the invitation stays stored while its inviter is not told.
+- **`AuthEmailCatalogue`** is the copy: pure renderers, each with a secure default, so an override implements only the events whose wording it changes. Each renderer takes an `AuthEmailContext { tenant_id, email, locale }` first (`email` is the delivery address: the new address for `email_change_verification`, the previous one for `email_changed`, which also receives both addresses as its own arguments) and then its own fields. Returning `html` from a renderer is the seam for a product's real links, layout and branding — that override owns its own escaping, and everything else stays escaped. A catalogue chooses words, never behaviour.
+- **`DeliveryErrorPolicy`** defaults to `Swallow`: the failure is logged (the event name and the message kind only, never the subject, body, code or address — a log line reaches a wider audience than the inbox it was going to) and the flow continues, because the engine awaits some of these sends and a channel outage must not fail the operation itself. `Rethrow` restores the error for the flows that react to one: the reset path deletes an undelivered token early rather than leaving it to its TTL, the email-change path refuses to record "verification sent", and the tenant invitation (7.10) and the workspace invite and resend answer `500 auth.internal`. Under the default they degrade rather than break — the token still expires unread, the change still needs a verification nobody received, and the invitation stays stored while its inviter is not told.
 
 Mirrors nest-auth's provider of the same name, so the two libraries send the same messages from the same events.
 

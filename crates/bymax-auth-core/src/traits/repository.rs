@@ -30,6 +30,12 @@ pub trait UserRepository: Send + Sync {
     /// Find a user by internal id. When `tenant_id` is `Some`, the row must belong to
     /// that tenant or `Ok(None)` is returned; pass `None` only for internal admin flows
     /// where cross-tenant access is intentional.
+    ///
+    /// An id that cannot name a row in the host's store (an empty string, a value that is not
+    /// a UUID where ids are UUIDs) is `Ok(None)`, never an error: the workspace invitation
+    /// preview looks up an empty inviter id for a token that names nothing and for every
+    /// bootstrap invitation, so an error there answers `auth.internal` instead of
+    /// `auth.invalid_invitation_token`.
     async fn find_by_id(
         &self,
         id: &str,

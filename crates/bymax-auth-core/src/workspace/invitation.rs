@@ -105,9 +105,8 @@ impl InvitationRecord {
     /// missing or of the wrong type, a kind other than `member` or `bootstrap`, a `member` that
     /// carries a workspace name or lacks an inviter, a `bootstrap` that carries an inviter or whose
     /// name is not in the stored form, a creation time that is not an RFC 3339 instant, an empty
-    /// tenant or workspace id, or a
-    /// resend count that is not a non-negative integer. Fields the contract does not list are
-    /// ignored.
+    /// tenant or workspace id, or a resend count that is not a non-negative integer. Fields the
+    /// contract does not list are ignored.
     #[must_use]
     pub fn parse(raw: &str) -> Option<Self> {
         let value: Value = serde_json::from_str(raw).ok()?;

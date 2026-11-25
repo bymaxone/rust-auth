@@ -4,7 +4,7 @@
 //! Layer: wording only. Delivery, escaping and the failure policy live in the parent module,
 //! which fills the context and calls the renderers.
 
-use super::super::email::{InviteData, SessionInfo};
+use super::super::email::{InviteData, SessionInfo, WorkspaceInviteData, WorkspaceInviteKind};
 use super::{AuthEmailMessage, render_utc_instant};
 
 /// How long a verification or reset code stays valid, stated in the message that carries it.
@@ -175,6 +175,50 @@ pub trait AuthEmailCatalogue: Send + Sync {
             format!(
                 "{} invited you to join {}.\n\nUse this token to accept: {}\n\nIt expires on {expires}.\n\nIf you were not expecting this invitation, ignore this message.",
                 invite.inviter_name, invite.tenant_name, invite.invite_token
+            ),
+        )
+    }
+
+    /// Invitation to a workspace: a member invitation names the inviter, the workspace and the
+    /// role; a bootstrap one offers ownership of a workspace that does not exist yet and names no
+    /// inviter when the platform sent it. An existing account is told to sign in, a new one to
+    /// create its account.
+    fn workspace_invitation(
+        &self,
+        ctx: &AuthEmailContext<'_>,
+        invite: &WorkspaceInviteData,
+    ) -> AuthEmailMessage {
+        let _ = ctx;
+        let named = !invite.inviter_name.trim().is_empty();
+        let (inviter, workspace) = (&invite.inviter_name, &invite.workspace_name);
+        let (subject, opening) = match (invite.kind, named) {
+            (WorkspaceInviteKind::Bootstrap, true) => (
+                format!("{inviter} invited you to set up {workspace}"),
+                format!("{inviter} invited you to set up the workspace {workspace} as its owner."),
+            ),
+            (WorkspaceInviteKind::Bootstrap, false) => (
+                format!("You have been invited to set up {workspace}"),
+                format!("You have been invited to set up the workspace {workspace} as its owner."),
+            ),
+            _ => (
+                format!("{inviter} invited you to {workspace}"),
+                format!(
+                    "{inviter} invited you to the workspace {workspace} as {}.",
+                    invite.role
+                ),
+            ),
+        };
+        let step = if invite.account_exists {
+            "Sign in"
+        } else {
+            "Create your account"
+        };
+        let expires = render_utc_instant(invite.expires_at);
+        AuthEmailMessage::plain(
+            subject,
+            format!(
+                "{opening}\n\n{step} and use this token to accept: {}\n\nIt expires on {expires}.\n\nIf you were not expecting this invitation, ignore this message.",
+                invite.invite_token
             ),
         )
     }

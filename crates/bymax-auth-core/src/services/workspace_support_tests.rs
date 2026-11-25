@@ -62,7 +62,12 @@ impl RecordingHooks {
     }
 
     /// The events reported so far, waiting for `count` of them, since delivery is detached.
+    /// A `count` of zero has nothing to wait for, so it waits long enough for a delivery that was
+    /// spawned by mistake to land before answering.
     pub(super) async fn events(&self, count: usize) -> Vec<WorkspaceAuditEvent> {
+        if count == 0 {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
         for _ in 0..500 {
             let seen = self.events.lock().map(|e| e.clone()).unwrap_or_default();
             if seen.len() >= count {
