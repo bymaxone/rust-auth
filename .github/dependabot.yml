@@ -14,7 +14,7 @@ updates:
     # entry when that holds.
     ignore:
       - dependency-name: "zeroize"
-        versions: ["1.9.2"]
+        versions: ["= 1.9.2"]
 
   # The example workspace has its own committed Cargo.lock, separate from the root one.
   - package-ecosystem: cargo
@@ -30,7 +30,7 @@ updates:
     # entry when that holds.
     ignore:
       - dependency-name: "zeroize"
-        versions: ["1.9.2"]
+        versions: ["= 1.9.2"]
 
   # GitHub Actions referenced by the workflows.
   - package-ecosystem: github-actions
