@@ -96,19 +96,22 @@ impl RedisStores {
         Ok(hash)
     }
 
-    /// `GETDEL invidx:{tenantId}:{hash}` — read and consume the entry in one step.
-    async fn take_invitation_index_inner(
+    /// Delete `invidx:{tenantId}:{hash}` only while it holds `expected`, in one script.
+    async fn release_invitation_index_inner(
         &self,
         tenant_id: &str,
         invitee_hash: &str,
-    ) -> Result<Option<String>, RedisStoreError> {
+        expected: &str,
+    ) -> Result<bool, RedisStoreError> {
         let key = self.invitee_key(tenant_id, invitee_hash);
         let mut conn = self.connection().await?;
-        let hash = redis::cmd("GETDEL")
-            .arg(&key)
-            .query_async::<Option<String>>(&mut conn)
+        let released: i64 = script::RELEASE_INDEX
+            .prepare()
+            .key(&key)
+            .arg(expected)
+            .invoke_async(&mut conn)
             .await?;
-        Ok(hash)
+        Ok(released == 1)
     }
 
     /// `GET inv:{token_hash}` — read an invitation without consuming it.
@@ -306,12 +309,13 @@ impl InvitationStore for RedisStores {
             .map_err(AuthError::from)
     }
 
-    async fn take_invitation_index(
+    async fn release_invitation_index(
         &self,
         tenant_id: &str,
         invitee_hash: &str,
-    ) -> Result<Option<String>, AuthError> {
-        self.take_invitation_index_inner(tenant_id, invitee_hash)
+        expected: &str,
+    ) -> Result<bool, AuthError> {
+        self.release_invitation_index_inner(tenant_id, invitee_hash, expected)
             .await
             .map_err(AuthError::from)
     }

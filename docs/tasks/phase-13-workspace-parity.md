@@ -232,6 +232,7 @@ Because every one of those lists is compared with this repository's own tables i
 An audit of the 13.6b services (findings checked against the code, each with a failing test first) is closed before the routes are mounted:
 
 - **A1** `DefaultAuthEmailProvider::send_workspace_invitation` with a catalogue entry (nest-auth's text).
+- **Invitee index.** The tenant invitation index is released by compare-and-delete (`release_invitation_index`), the tenant revoke retries three times, and a workspace revoke reads again when the index moved under the store's read.
 - **A2** `revoke` reads again and retries when the store removed nothing, answers `429` after three tries, and reports the event only for a removal.
 - **B1** the repository traits state that an unparsable id is `Ok(None)`. **B2** an owner's resend of a role the hierarchy no longer knows mails nothing. **B4** the address is validated before the hourly slot is taken. **B7** the list view's role, times and resend count are asserted, and the ordering tests no longer end silently. **B9** the misplaced doc comment. **B10** one ceiling function (`outranks`). **B11** the changelog's derived-backend note.
 - **Known limits** (changelog, not fixed here): B3 resend ignores membership, B5 a failed delivery emits no audit event, B6 the list cursor format differs from nest-auth's, B8 the Redis read windows, B12 revoke then invite resets the cooldown.

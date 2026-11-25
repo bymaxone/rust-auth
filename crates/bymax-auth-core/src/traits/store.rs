@@ -997,13 +997,20 @@ pub trait InvitationStore: Send + Sync {
         invitee_hash: &str,
     ) -> Result<Option<String>, AuthError>;
 
-    /// Atomically take (`getdel`) the invitee index entry.
+    /// Delete the invitee index entry only while it still holds `expected`; `true` when this call
+    /// deleted it.
+    ///
+    /// The comparison and the delete MUST be one atomic step. A revoke or an acceptance drops the
+    /// entry of the invitation it acted on, and a later invite can claim the index in between:
+    /// that entry is the only handle a revoke has on the newer record, so it has to stay.
     /// `invitee_hash` is the derived identifier — see [`Self::put_invitation_index`].
-    async fn take_invitation_index(
+    /// `testing::invitation_index_scenarios` checks an implementation.
+    async fn release_invitation_index(
         &self,
         tenant_id: &str,
         invitee_hash: &str,
-    ) -> Result<Option<String>, AuthError>;
+        expected: &str,
+    ) -> Result<bool, AuthError>;
 
     /// Read an invitation by its stored token **hash**, without consuming it — the revocation
     /// path, which reaches the record through the index rather than through a raw token.

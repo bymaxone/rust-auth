@@ -3061,6 +3061,12 @@ their ordering reproduces the NestJS guard pipeline.
 > whether or not anything was pending: reporting the difference would make the route an oracle
 > for which addresses have invitations, which is exactly what hashing the address in the
 > `invidx:` index avoids disclosing.
+>
+> The revoke reads the index, refuses (silently, logged) when the record outranks the caller,
+> deletes the record and releases the index only while it still names that invitation (§12.5.8).
+> When the release finds another invitation there, it starts again from the read; after three
+> attempts it answers `429 auth.too_many_requests`. A release that follows a delete which found
+> nothing deletes once more, so a record written in between does not stay redeemable.
 
 #### 8.2.9 WorkspaceController — group `workspaces` (`controllers.workspaces`)
 
@@ -5335,6 +5341,13 @@ The rank check reads the index and the claim writes it; as two round trips they 
 - **ARGV** — `[1]` the new token hash, `[2]` TTL (s), `[3]` the hash the caller approved, or `''` for "no entry" (a real hash is always 64 hex characters, so the two cannot be confused).
 - **Contract:** if `GET KEYS[1]` (absent read as `''`) differs from `ARGV[3]` return `0`; else `SET KEYS[1] ARGV[1] EX ARGV[2]` and return `1`.
 - **Rust mapping:** `bool`; `false` means the index no longer held what the caller approved.
+
+`release_invitation_index` is the matching compare-and-delete, used by a revoke and an acceptance: a later invite may hold the index by the time either releases it.
+
+- **KEYS** — `[1]` `invidx:{tenantId}:{invitee_hash}`.
+- **ARGV** — `[1]` the token hash the entry must hold.
+- **Contract:** if `GET KEYS[1]` equals `ARGV[1]` return `DEL KEYS[1]`; else return `0`. The source is the one nest-auth runs over the same keyspace.
+- **Rust mapping:** `bool`; `true` only when the entry was removed.
 
 #### 12.5.9 `mfa_challenge` and `release_lock` — the MFA anti-replay consume and the transition-lock release
 

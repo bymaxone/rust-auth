@@ -1029,12 +1029,15 @@ impl bymax_auth_core::traits::InvitationStore for FailingStores {
         }
         self.inner.read_invitation_index(tenant_id, email).await
     }
-    async fn take_invitation_index(
+    async fn release_invitation_index(
         &self,
         tenant_id: &str,
         email: &str,
-    ) -> Result<Option<String>, bymax_auth_types::AuthError> {
-        self.inner.take_invitation_index(tenant_id, email).await
+        expected: &str,
+    ) -> Result<bool, bymax_auth_types::AuthError> {
+        self.inner
+            .release_invitation_index(tenant_id, email, expected)
+            .await
     }
     async fn read_invitation_by_hash(
         &self,
