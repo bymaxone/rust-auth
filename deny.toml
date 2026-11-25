@@ -9,16 +9,18 @@ all-features = true
 
 [advisories]
 # A new RustSec advisory against the committed Cargo.lock fails CI. Vulnerability
-# and unsound advisories are always denied by cargo-deny and cannot be weakened
-# here, so only the configurable knobs are set: `unmaintained = "all"` flags every
-# unmaintained crate (not just workspace-direct ones), and yanked versions are
-# errors. `ignore` records intentional, reviewed exceptions; each carries the reason it
-# is safe and the condition for removing it.
+# advisories are always denied by cargo-deny and cannot be weakened here. `unsound` and
+# `unmaintained` default to the workspace's own crates only, so both are set to "all" to
+# flag every crate in the graph, and yanked versions are errors. `ignore` records
+# intentional, reviewed exceptions; each carries the reason it is safe and the condition for
+# removing it.
 # `cargo audit` does not read this file: keep the list identical to `.cargo/audit.toml`.
 unmaintained = "all"
+unsound = "all"
 yanked = "deny"
 ignore = [
     { id = "RUSTSEC-2026-0440", reason = "`astral-tokio-tar` is unmaintained and is reached only as a dev-dependency through `testcontainers` (the container-backed integration tests): `cargo tree -e normal -i astral-tokio-tar` prints no path, with or without `--target all`, so no published crate depends on it. No maintained replacement exists and the latest `testcontainers` still requires it. Remove this entry when `testcontainers` drops the crate." },
+    { id = "RUSTSEC-2026-0543", reason = "`chrono` is unmaintained and appears in `Cargo.lock` only: `testcontainers` (a dev-dependency of the container-backed integration tests) requires `serde_with` with its default features, and `serde_with` lists `chrono` as an optional dependency, which the lockfile records although nothing enables it. `chrono` is absent from the compiled graph (`cargo tree -i chrono` prints nothing) and no workspace crate depends on it. No release of `chrono` fixes the advisory. Remove this entry when `testcontainers` stops requesting the default features of `serde_with`, or `serde_with` drops `chrono`." },
 ]
 
 [licenses]
