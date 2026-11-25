@@ -9,6 +9,12 @@ updates:
     commit-message:
       prefix: chore
       include: scope
+    # zeroize holds secrets and is mostly unsafe code, so a release is adopted only once an
+    # imported audit set covers it. The release ignored here is held back until then; remove the
+    # entry when that holds.
+    ignore:
+      - dependency-name: "zeroize"
+        versions: ["= 1.9.2"]
 
   # The example workspace has its own committed Cargo.lock, separate from the root one.
   - package-ecosystem: cargo
@@ -19,6 +25,12 @@ updates:
     commit-message:
       prefix: chore
       include: scope
+    # zeroize holds secrets and is mostly unsafe code, so a release is adopted only once an
+    # imported audit set covers it. The release ignored here is held back until then; remove the
+    # entry when that holds.
+    ignore:
+      - dependency-name: "zeroize"
+        versions: ["= 1.9.2"]
 
   # GitHub Actions referenced by the workflows.
   - package-ecosystem: github-actions
