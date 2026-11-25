@@ -77,6 +77,17 @@ async fn a_bootstrap_invitation_offers_ownership_and_names_no_blank_inviter() {
 }
 
 #[tokio::test]
+async fn markup_in_a_name_reaches_the_html_part_escaped() {
+    let message = sent_for(&data(WorkspaceInviteKind::Member, "<b>Eve</b>", false)).await;
+    assert!(
+        message.html.contains("&lt;b&gt;Eve&lt;/b&gt;"),
+        "{}",
+        message.html
+    );
+    assert!(!message.html.contains("<b>"), "{}", message.html);
+}
+
+#[tokio::test]
 async fn the_catalogue_is_handed_the_tenant_the_address_and_the_locale() {
     struct Seen(Mutex<Vec<(String, String, Option<String>)>>);
     impl AuthEmailCatalogue for Seen {

@@ -201,6 +201,30 @@ async fn a_replacement_above_the_actor_is_not_removed_by_the_retry_of_a_lost_rev
 }
 
 #[tokio::test]
+async fn a_revoke_that_lost_the_index_twice_succeeds_on_its_third_read() {
+    let Some(inv) = racing(2, "member", "member").await else { return };
+    let revoked = inv
+        .f
+        .engine
+        .revoke_workspace_invitation(&inv.owner, "race@x.io", &ctx())
+        .await;
+    assert!(revoked.is_ok(), "{revoked:?}");
+    assert!(held(&inv).await.is_none(), "the third read removes");
+}
+
+#[tokio::test]
+async fn a_revoke_that_lost_the_index_three_times_gives_up() {
+    let Some(inv) = racing(3, "member", "member").await else { return };
+    let revoked = inv
+        .f
+        .engine
+        .revoke_workspace_invitation(&inv.owner, "race@x.io", &ctx())
+        .await;
+    assert!(is_limited(&revoked), "{revoked:?}");
+    assert!(held(&inv).await.is_some(), "the last replacement stays");
+}
+
+#[tokio::test]
 async fn an_invitation_whose_index_moved_before_the_write_answers_too_many_requests() {
     // A first invitation: the index is empty when read and held by a stranger when written.
     let Some(inv) = setup_over(config(), |s| Racing::over(s, 1, "member")).await else { return };

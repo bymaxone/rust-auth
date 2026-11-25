@@ -242,6 +242,8 @@ async fn resend_and_revoke_change_nothing_for_an_address_with_no_invitation() {
     assert!(resends_ok(&inv, &inv.owner, "none@x.io").await);
     assert!(revokes_ok(&inv, &inv.owner, "none@x.io").await);
     assert!(inv.mail.sent().is_empty());
+    let events = inv.f.hooks.events(0).await;
+    assert!(events.is_empty(), "nothing was removed: {events:?}");
 }
 
 #[tokio::test]
@@ -260,6 +262,8 @@ async fn resend_and_revoke_change_nothing_for_an_invitation_above_the_actor_and_
     assert!(revokes_ok(&inv, &inv.admin, "boss@x.io").await);
     assert!(inv.store.read_record(&key).await.ok().flatten().is_some());
     assert!(inv.mail.sent().is_empty());
+    let events = inv.f.hooks.events(0).await;
+    assert!(events.is_empty(), "nothing was removed: {events:?}");
     assert!(revokes_ok(&inv, &inv.owner, "boss@x.io").await);
     assert!(inv.store.read_record(&key).await.ok().flatten().is_none());
     let events = inv.f.hooks.events(1).await;
@@ -515,6 +519,22 @@ async fn a_member_with_a_blank_workspace_id_is_a_validation_error_naming_it() {
         matches!(&refused, Err(AuthError::Validation { details }) if details.iter().any(|d| d.field == "workspaceId")),
         "{refused:?}"
     );
+}
+
+#[tokio::test]
+async fn a_revoke_from_another_tenant_leaves_the_invitation_of_the_same_workspace_id() {
+    let Some(inv) = setup(config()).await else { return };
+    let pending = Seeded {
+        email: "a@x.io",
+        role: "member",
+        inviter: &inv.owner.user_id,
+        created_at: LONG_AGO,
+        resends: 0,
+    };
+    let key = seed(&inv, "tenant-token", &pending).await;
+    let stranger = super::workspace_support_tests::acting_member("t2", "w1", "u", "owner");
+    assert!(revokes_ok(&inv, &stranger, "a@x.io").await);
+    assert!(inv.store.read_record(&key).await.ok().flatten().is_some());
 }
 
 /// An invitation issued `age_seconds` before `now`, as a record the reissue check reads.

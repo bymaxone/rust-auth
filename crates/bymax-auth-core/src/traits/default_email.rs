@@ -254,8 +254,8 @@ pub enum DeliveryErrorPolicy {
     /// Log the failure and return it, restoring the error for the three flows that react to one:
     /// the reset path deletes an undelivered token early instead of leaving it to its TTL, the
     /// email-change path lets a failed verification send surface rather than recording "sent",
-    /// and the invitation flow reports the failed send (a `500`) while keeping the stored
-    /// invitation.
+    /// and the tenant invitation and the workspace invite and resend report the failed send (a
+    /// `500`) while keeping the stored invitation.
     ///
     /// It does NOT turn a channel outage into a failed user operation elsewhere: the MFA and
     /// password-changed notices are detached through `spawn_guarded`, so their errors are never

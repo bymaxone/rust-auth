@@ -1,5 +1,6 @@
-//! Every renderer of the catalogue is told the tenant, the delivery address and the locale, together
-//! with its own fields. `email` is the delivery address: the NEW address for the address-change
+//! Ten of the catalogue's eleven renderers are told the tenant, the delivery address and the locale,
+//! together with their own fields; the eleventh, `workspace_invitation`, is asserted in
+//! `workspace_invitation.rs`. `email` is the delivery address: the NEW address for the address-change
 //! code, the PREVIOUS one for the "your address changed" notice.
 //!
 //! Layer: unit tests of `DefaultAuthEmailProvider` with a catalogue that records what each of its
@@ -10,7 +11,7 @@ use super::*;
 /// What a renderer was handed: its name, the context, and its own fields rendered as text.
 type Seen = (String, String, String, Option<String>, String);
 
-/// A catalogue that overrides every renderer and records the context each one received.
+/// A catalogue that overrides those ten renderers and records the context each one received.
 #[derive(Default)]
 struct Recorder {
     seen: Mutex<Vec<Seen>>,
