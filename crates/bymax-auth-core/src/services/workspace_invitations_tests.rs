@@ -604,3 +604,39 @@ async fn the_fixture_engine_builds_with_the_invitation_store_so_no_test_returns_
     assert!(owner_invites(&inv, "built@x.io", "member").await.is_ok());
     assert_eq!(inv.mail.sent().len(), 1);
 }
+
+#[tokio::test]
+async fn blank_invitations_take_no_hourly_slot_from_the_inviter() {
+    let Some(inv) = setup(config()).await else { return };
+    for _ in 0..20 {
+        let refused = owner_invites(&inv, "   ", "member").await;
+        assert!(
+            matches!(refused, Err(AuthError::Validation { .. })),
+            "{refused:?}"
+        );
+    }
+    let invited = owner_invites(&inv, "ok@x.io", "member").await;
+    assert!(invited.is_ok(), "{invited:?}");
+}
+
+#[tokio::test]
+async fn an_owner_resend_of_a_role_the_hierarchy_no_longer_knows_mails_nothing_and_revoke_still_works()
+ {
+    let Some(inv) = setup(config()).await else { return };
+    let ghost = Seeded {
+        email: "ghost@x.io",
+        role: "ghost",
+        inviter: &inv.owner.user_id,
+        created_at: LONG_AGO,
+        resends: 0,
+    };
+    let key = seed(&inv, "ghost-token", &ghost).await;
+    assert!(resends_ok(&inv, &inv.owner, "ghost@x.io").await);
+    assert!(
+        inv.mail.sent().is_empty(),
+        "no mail for a role nobody can accept"
+    );
+    assert!(inv.store.read_record(&key).await.ok().flatten().is_some());
+    assert!(revokes_ok(&inv, &inv.owner, "ghost@x.io").await);
+    assert!(inv.store.read_record(&key).await.ok().flatten().is_none());
+}

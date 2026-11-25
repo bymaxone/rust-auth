@@ -2,6 +2,8 @@
 //! confirm nothing and the records that are never trusted (layer: service, tests).
 
 use bymax_auth_types::AuthError;
+use time::OffsetDateTime;
+use time::format_description::well_known::Rfc3339;
 
 use super::workspace::PageQuery;
 use super::workspace_invitations::{InvitationPreview, WorkspaceInvitationView};
@@ -25,6 +27,45 @@ async fn page(
         .await
 }
 
+/// A page that must be served: a failed listing fails the test instead of ending it silently.
+async fn listed(
+    inv: &Inv,
+    cursor: Option<&str>,
+    limit: &str,
+) -> Option<crate::workspace::domain::Page<WorkspaceInvitationView>> {
+    let served = page(inv, cursor, limit).await;
+    assert!(served.is_ok(), "{:?}", served.as_ref().err());
+    served.ok()
+}
+
+#[tokio::test]
+async fn the_list_view_carries_the_role_the_times_and_the_resend_count_of_the_record() {
+    let Some(inv) = setup(config()).await else { return };
+    let item = Seeded {
+        email: "v@x.io",
+        role: "admin",
+        inviter: &inv.owner.user_id,
+        created_at: "2026-02-03T04:05:06.007Z",
+        resends: 3,
+    };
+    seed(&inv, "v-token", &item).await;
+    let Some(listing) = listed(&inv, None, "10").await else { return };
+    let Some(view) = listing.items.first() else {
+        assert!(!listing.items.is_empty(), "the invitation is listed");
+        return;
+    };
+    assert_eq!(view.role, "admin");
+    assert_eq!(view.created_at, "2026-02-03T04:05:06.007Z");
+    assert_eq!(view.resend_count, 3);
+    assert_eq!(view.inviter_user_id, inv.owner.user_id);
+    let expires = OffsetDateTime::parse(&view.expires_at, &Rfc3339);
+    assert!(expires.is_ok(), "{}", view.expires_at);
+    let left = expires.map_or(i64::MIN, |at| {
+        (at - OffsetDateTime::now_utc()).whole_seconds()
+    });
+    assert!((590..=600).contains(&left), "the seed lives 600 s: {left}");
+}
+
 #[tokio::test]
 async fn the_list_is_oldest_first_and_in_pages() {
     let Some(inv) = setup(config()).await else { return };
@@ -44,12 +85,12 @@ async fn the_list_is_oldest_first_and_in_pages() {
         };
         seed(&inv, &format!("l-token-{n}"), &item).await;
     }
-    let Ok(first) = page(&inv, None, "2").await else { return };
+    let Some(first) = listed(&inv, None, "2").await else { return };
     let emails: Vec<_> = first.items.iter().map(|view| view.email.as_str()).collect();
     assert_eq!(emails, ["l1@x.io", "l0@x.io"], "oldest first");
     assert_eq!(first.items[0].inviter_user_id, inv.owner.user_id);
     assert!(first.next_cursor.is_some());
-    let Ok(second) = page(&inv, first.next_cursor.as_deref(), "2").await else { return };
+    let Some(second) = listed(&inv, first.next_cursor.as_deref(), "2").await else { return };
     let emails: Vec<_> = second
         .items
         .iter()
@@ -61,7 +102,7 @@ async fn the_list_is_oldest_first_and_in_pages() {
         "the page after the cursor, not the cursor's own"
     );
     assert_eq!(second.next_cursor, None);
-    let Ok(whole) = page(&inv, None, "3").await else { return };
+    let Some(whole) = listed(&inv, None, "3").await else { return };
     assert_eq!(whole.items.len(), 3);
     assert_eq!(
         whole.next_cursor, None,
@@ -250,9 +291,9 @@ async fn the_list_orders_by_the_instant_whatever_offset_and_precision_the_times_
         };
         seed(&inv, &format!("{email}-token"), &item).await;
     }
-    let Ok(first) = page(&inv, None, "1").await else { return };
+    let Some(first) = listed(&inv, None, "1").await else { return };
     assert_eq!(first.items[0].email, "early@x.io");
-    let Ok(second) = page(&inv, first.next_cursor.as_deref(), "1").await else { return };
+    let Some(second) = listed(&inv, first.next_cursor.as_deref(), "1").await else { return };
     assert_eq!(second.items[0].email, "late@x.io");
     assert_eq!(second.next_cursor, None);
 }

@@ -66,6 +66,8 @@ mod verifier;
 pub mod workspace;
 pub mod workspace_invitations;
 #[cfg(test)]
+mod workspace_invitations_race_tests;
+#[cfg(test)]
 mod workspace_invitations_reads_tests;
 #[cfg(test)]
 mod workspace_invitations_support_tests;

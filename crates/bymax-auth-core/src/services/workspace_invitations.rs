@@ -97,10 +97,10 @@ struct Standing {
     live: Option<InvitationRecord>,
 }
 
-/// The address a preview looks up when a token names nothing.
 /// The size of a token in bytes: 64 hex characters.
 const INVITE_TOKEN_BYTES: usize = 32;
 
+/// The address a preview looks up when a token names nothing.
 const STAND_IN_EMAIL: &str = "no-invitation@invalid.invalid";
 
 impl WorkspaceRuntime {
@@ -113,13 +113,6 @@ impl WorkspaceRuntime {
         })
     }
 
-    /// Whether `actor` may act on an invitation to `role`: the owner role on any, every other role
-    /// only on a role it includes and does not itself hold.
-    fn may_act_on(&self, actor: &str, role: &str) -> bool {
-        let hierarchy = &self.resolved.hierarchy;
-        actor == hierarchy.owner_role() || (actor != role && hierarchy.satisfies(actor, role))
-    }
-
     /// Refuses a role outside the hierarchy, or one above what `actor` may grant.
     fn assert_may_grant(&self, actor: &str, role: &str) -> Result<(), AuthError> {
         if !self.resolved.hierarchy.knows(role) {
@@ -128,7 +121,7 @@ impl WorkspaceRuntime {
                 "role must be a role of the workspace".to_owned(),
             ));
         }
-        if self.may_act_on(actor, role) {
+        if self.outranks(actor, role) {
             Ok(())
         } else {
             Err(AuthError::InsufficientWorkspaceRole)
@@ -190,7 +183,7 @@ impl WorkspaceRuntime {
         now: OffsetDateTime,
     ) -> Result<(), AuthError> {
         let base = record.base();
-        if !self.may_act_on(actor, &base.role) {
+        if !self.outranks(actor, &base.role) {
             return Err(AuthError::InsufficientWorkspaceRole);
         }
         let issued = OffsetDateTime::parse(&base.created_at, &Rfc3339).map_err(|_| {
@@ -210,6 +203,9 @@ impl WorkspaceRuntime {
 fn cooldown_seconds() -> i64 {
     i64::try_from(INVITATION_RESEND_COOLDOWN_SECONDS).unwrap_or(i64::MAX)
 }
+
+/// How many times a revoke reads the address again after a replacement landed under it.
+const REVOKE_ATTEMPTS: usize = 3;
 
 /// `auth.too_many_requests` with no retry hint: the limit and the lost write both answer it.
 fn too_many_requests() -> AuthError {
@@ -255,8 +251,8 @@ impl AuthEngine {
         runtime.invitation_store()?;
         runtime.assert_may_grant(&member.role, role)?;
         let email = normalize_email(email);
-        runtime.take_inviter_slot(member).await?;
         let place = runtime.place(member.workspace(), &email)?;
+        runtime.take_inviter_slot(member).await?;
         let standing = runtime.standing(&place).await?;
         if let Some(live) = &standing.live {
             runtime.assert_may_reissue(&member.role, live, OffsetDateTime::now_utc())?;
@@ -297,7 +293,10 @@ impl AuthEngine {
         let Some(live) = &standing.live else {
             return Ok(());
         };
-        if !runtime.may_act_on(&member.role, &live.base().role) {
+        // A role the hierarchy no longer knows cannot be accepted, so a mail for it would carry a
+        // token that every preview refuses. Revoke still removes it.
+        let role = &live.base().role;
+        if !runtime.resolved.hierarchy.knows(role) || !runtime.outranks(&member.role, role) {
             return Ok(());
         }
         runtime.assert_may_reissue(&member.role, live, OffsetDateTime::now_utc())?;
@@ -332,22 +331,29 @@ impl AuthEngine {
         let store = runtime.invitation_store()?;
         let email = normalize_email(email);
         let place = runtime.place(member.workspace(), &email)?;
-        let Some(indexed) = store.read_index(&place).await? else {
-            return Ok(());
-        };
-        let Some(record) = indexed.record else {
-            return Ok(());
-        };
-        let role = record.base().role.clone();
-        if !runtime.may_act_on(&member.role, &role) {
-            return Ok(());
+        for _ in 0..REVOKE_ATTEMPTS {
+            let Some(indexed) = store.read_index(&place).await? else {
+                return Ok(());
+            };
+            let Some(record) = indexed.record else {
+                return Ok(());
+            };
+            let role = record.base().role.clone();
+            if !runtime.outranks(&member.role, &role) {
+                return Ok(());
+            }
+            if store
+                .remove(&place, &indexed.record_key, Removal::Owned)
+                .await?
+            {
+                let kind = AuditKind::InvitationRevoked { email, role };
+                self.report(member, kind, ctx, &iso_instant(OffsetDateTime::now_utc()));
+                return Ok(());
+            }
+            // The index no longer names the record that was read: a replacement landed between
+            // the read and the removal. Read again, so the ceiling is applied to what is there.
         }
-        store
-            .remove(&place, &indexed.record_key, Removal::Owned)
-            .await?;
-        let kind = AuditKind::InvitationRevoked { email, role };
-        self.report(member, kind, ctx, &iso_instant(OffsetDateTime::now_utc()));
-        Ok(())
+        Err(too_many_requests())
     }
 
     /// The workspace's pending member invitations, oldest first.

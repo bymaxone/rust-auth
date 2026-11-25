@@ -70,7 +70,7 @@ Because every one of those lists is compared with this repository's own tables i
 | 13.5b | Workspace mutations: create, rename, deletion lifecycle, role, remove, leave, transfer | ✅ Done (#398) | 13.5a |
 | 13.6a | Invitation store: record, index, set, counter, and their scripts | 🔄 In review | 13.2, 13.3 |
 | 13.6b | Invitation services: invite, resend, revoke, list, preview | 🔄 In review | 13.5a, 13.6a |
-| 13.6c | Invitation routes and DTOs | 📋 ToDo | 13.6b |
+| 13.6c | Invitation routes and DTOs | 🔄 In progress (audit list first) | 13.6b |
 | 13.7 | Acceptance family and bootstrap invitations | 📋 ToDo | 13.5b, 13.6 |
 | 13.8 | OAuth invitation, invitation-only registration, the OAuth MFA branch | 📋 ToDo | 13.7 |
 | 13.9 | Realtime surfaces: verifier, sockets, job check, `access.denied` and its limiter | 📋 ToDo | 13.5a |
@@ -226,6 +226,15 @@ Because every one of those lists is compared with this repository's own tables i
 
 **Probes reused:** the indistinguishability harness of the declared-structures test (registered against unknown address: identical status and payload) extends to the invitation answers.
 
+
+### 13.6c — what lands before any invitation route mounts
+
+An audit of the 13.6b services (findings checked against the code, each with a failing test first) is closed before the routes are mounted:
+
+- **A1** `DefaultAuthEmailProvider::send_workspace_invitation` with a catalogue entry (nest-auth's text).
+- **A2** `revoke` reads again and retries when the store removed nothing, answers `429` after three tries, and reports the event only for a removal.
+- **B1** the repository traits state that an unparsable id is `Ok(None)`. **B2** an owner's resend of a role the hierarchy no longer knows mails nothing. **B4** the address is validated before the hourly slot is taken. **B7** the list view's role, times and resend count are asserted, and the ordering tests no longer end silently. **B9** the misplaced doc comment. **B10** one ceiling function (`outranks`). **B11** the changelog's derived-backend note.
+- **Known limits** (changelog, not fixed here): B3 resend ignores membership, B5 a failed delivery emits no audit event, B6 the list cursor format differs from nest-auth's, B8 the Redis read windows, B12 revoke then invite resets the cooldown.
 
 ### Design of 13.6b — the invitation services
 

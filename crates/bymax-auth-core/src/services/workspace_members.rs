@@ -77,7 +77,7 @@ pub(crate) fn transfer_outcome(outcome: TransferOutcome) -> Result<(), AuthError
 impl WorkspaceRuntime {
     /// Whether a member holding `actor` may act on `other`: the owner role on any role, every
     /// other role only on a role it includes and does not itself hold.
-    fn outranks(&self, actor: &str, other: &str) -> bool {
+    pub(super) fn outranks(&self, actor: &str, other: &str) -> bool {
         let hierarchy = &self.resolved.hierarchy;
         actor == hierarchy.owner_role() || (actor != other && hierarchy.satisfies(actor, other))
     }

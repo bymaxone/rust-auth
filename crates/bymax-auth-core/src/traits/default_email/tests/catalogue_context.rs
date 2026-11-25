@@ -10,7 +10,7 @@ use super::*;
 /// What a renderer was handed: its name, the context, and its own fields rendered as text.
 type Seen = (String, String, String, Option<String>, String);
 
-/// A catalogue that overrides all ten renderers and records the context each one received.
+/// A catalogue that overrides every renderer and records the context each one received.
 #[derive(Default)]
 struct Recorder {
     seen: Mutex<Vec<Seen>>,

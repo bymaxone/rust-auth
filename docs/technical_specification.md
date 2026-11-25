@@ -4540,7 +4540,7 @@ impl EmailProvider for NoOpEmailProvider {
 
 ### 10.5 Implementing a real provider
 
-Most deployments should not implement this trait at all: `DefaultAuthEmailProvider` (§10.6) already covers all ten methods over a one-method `AuthEmailSink` port and carries the escaping, subject sanitization and failure policy. Implement `EmailProvider` directly only where the sink shape does not fit.
+Most deployments should not implement this trait at all: `DefaultAuthEmailProvider` (§10.6) already covers every method over a one-method `AuthEmailSink` port and carries the escaping, subject sanitization and failure policy. Implement `EmailProvider` directly only where the sink shape does not fit.
 
 A production adapter wraps an HTTP email API with `reqwest` (or an SMTP client). It renders the body for the requested `locale`, calls the provider, and maps transport failures to `EmailError::Delivery`. Pattern:
 
@@ -4576,7 +4576,7 @@ Implementation notes that mirror the contract's guarantees: escape every dynamic
 
 ### 10.6 `DefaultAuthEmailProvider`
 
-The overridable default that fills the port, so a deployment does not hand-write ten methods to send a verification code. It exists because each of those hand-written providers would otherwise have to get the same security policy right independently, and the failures are silent ones: an unescaped inviter name that renders as markup, a subject carrying a `\r\n` that a concatenating channel reads as an extra `Bcc:` header, or a delivery error that fails the user's whole request.
+The overridable default that fills the port, so a deployment does not hand-write every method to send a verification code. It exists because each of those hand-written providers would otherwise have to get the same security policy right independently, and the failures are silent ones: an unescaped inviter name that renders as markup, a subject carrying a `\r\n` that a concatenating channel reads as an extra `Bcc:` header, or a delivery error that fails the user's whole request.
 
 ```rust
 #[async_trait]
@@ -4594,7 +4594,7 @@ pub struct OutgoingEmail<'a> {
 ```
 
 - **`AuthEmailSink`** is the delivery channel — one method, so the module depends on no concrete mailer. The `tenant_id` the port carries is passed straight through, so a multi-tenant channel can attribute and route.
-- **`AuthEmailCatalogue`** is the copy: ten pure renderers, each with a secure default, so an override implements only the events whose wording it changes. Each renderer takes an `AuthEmailContext { tenant_id, email, locale }` first (`email` is the delivery address: the new address for `email_change_verification`, the previous one for `email_changed`, which also receives both addresses as its own arguments) and then its own fields. Returning `html` from a renderer is the seam for a product's real links, layout and branding — that override owns its own escaping, and everything else stays escaped. A catalogue chooses words, never behaviour.
+- **`AuthEmailCatalogue`** is the copy: eleven pure renderers, each with a secure default, so an override implements only the events whose wording it changes. Each renderer takes an `AuthEmailContext { tenant_id, email, locale }` first (`email` is the delivery address: the new address for `email_change_verification`, the previous one for `email_changed`, which also receives both addresses as its own arguments) and then its own fields. Returning `html` from a renderer is the seam for a product's real links, layout and branding — that override owns its own escaping, and everything else stays escaped. A catalogue chooses words, never behaviour.
 - **`DeliveryErrorPolicy`** defaults to `Swallow`: the failure is logged (subject only, never the body, code or address — a log line reaches a wider audience than the inbox it was going to) and the flow continues, because the engine awaits some of these sends and a channel outage must not fail the operation itself. `Rethrow` restores the error for the flows that react to one: the reset path deletes an undelivered token early rather than leaving it to its TTL, the email-change path refuses to record "verification sent", and the invitation path answers `500 auth.internal` (7.10). Under the default they degrade rather than break — the token still expires unread, the change still needs a verification nobody received, and the invitation stays stored while its inviter is not told.
 
 Mirrors nest-auth's provider of the same name, so the two libraries send the same messages from the same events.

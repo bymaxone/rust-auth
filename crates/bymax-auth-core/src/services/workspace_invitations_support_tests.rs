@@ -183,7 +183,7 @@ pub(super) struct Inv {
 /// The engine over `config`, with or without an invitation store.
 fn engine(
     config: AuthConfig,
-    store: Option<Arc<InMemoryWorkspaceInvitations>>,
+    store: Option<Arc<dyn WorkspaceInvitationStore>>,
 ) -> Option<(Fixture, Arc<Mailer>)> {
     let repo = Arc::new(InMemoryWorkspaces::new());
     let cache = Arc::new(InMemoryMembershipCache::new());
@@ -215,8 +215,17 @@ fn engine(
 
 /// A fixture over `config`: `w1` of `t1` is active, with an owner, an admin and a member.
 pub(super) async fn setup(config: AuthConfig) -> Option<Inv> {
+    setup_over(config, |store| store).await
+}
+
+/// A fixture whose engine reaches the store through `wrap`, which gets the in-memory store the
+/// fixture itself reads and seeds, so a test can interpose on what the engine does with it.
+pub(super) async fn setup_over(
+    config: AuthConfig,
+    wrap: impl FnOnce(Arc<InMemoryWorkspaceInvitations>) -> Arc<dyn WorkspaceInvitationStore>,
+) -> Option<Inv> {
     let store = Arc::new(InMemoryWorkspaceInvitations::new());
-    let (f, mail) = engine(config, Some(store.clone()))?;
+    let (f, mail) = engine(config, Some(wrap(store.clone())))?;
     f.repo
         .seed_workspace(workspace("t1", "w1", WorkspaceStatus::Active, 1));
     let mut seated = Vec::new();

@@ -256,7 +256,7 @@ impl UserRepository for PgUserRepository {
 
 Email delivery is fully delegated — the library never imports a mailer SDK. It passes **structured data** (token, OTP, session info, invite data), never rendered HTML.
 
-**Most deployments should not write this trait by hand.** `DefaultAuthEmailProvider` already implements all ten methods over a one-method delivery port, with the escaping, header sanitization and failure policy described below:
+**Most deployments should not write this trait by hand.** `DefaultAuthEmailProvider` already implements every method over a one-method delivery port, with the escaping, header sanitization and failure policy described below:
 
 ```rust
 use std::sync::Arc;

@@ -31,7 +31,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use time::{OffsetDateTime, UtcOffset};
 
-use super::email::{EmailError, EmailProvider, InviteData, SessionInfo};
+use super::email::{EmailError, EmailProvider, InviteData, SessionInfo, WorkspaceInviteData};
 
 mod catalogue;
 
@@ -639,6 +639,29 @@ impl EmailProvider for DefaultAuthEmailProvider {
         )
         .await
     }
+
+    async fn send_workspace_invitation(
+        &self,
+        tenant_id: &str,
+        email: &str,
+        invite: &WorkspaceInviteData,
+        locale: Option<&str>,
+    ) -> Result<(), EmailError> {
+        self.deliver(
+            "workspace_invitation",
+            tenant_id,
+            email,
+            self.messages.workspace_invitation(
+                &AuthEmailContext {
+                    tenant_id,
+                    email,
+                    locale,
+                },
+                invite,
+            ),
+        )
+        .await
+    }
 }
 
 #[cfg(test)]
@@ -648,6 +671,7 @@ mod tests {
     use time::OffsetDateTime;
 
     mod catalogue_context;
+    mod workspace_invitation;
 
     /// One message as the sink saw it — an owned copy of [`OutgoingEmail`], since the borrowed
     /// original does not outlive the call.
@@ -708,6 +732,18 @@ mod tests {
         }
     }
 
+    fn workspace_invite() -> WorkspaceInviteData {
+        WorkspaceInviteData::new(
+            "Owner".into(),
+            "Acme".into(),
+            "member".into(),
+            "1".repeat(64),
+            OffsetDateTime::UNIX_EPOCH,
+            true,
+            crate::traits::email::WorkspaceInviteKind::Member,
+        )
+    }
+
     fn session() -> SessionInfo {
         SessionInfo {
             device: "Chrome on macOS".into(),
@@ -718,8 +754,8 @@ mod tests {
 
     #[tokio::test]
     async fn every_send_reaches_the_sink_with_the_tenant_and_recipient() {
-        // The whole point of the port carrying a tenant is that the channel receives it. All ten
-        // methods are exercised so a new one cannot be added without a recipient or an
+        // The whole point of the port carrying a tenant is that the channel receives it. Every
+        // method is exercised so a new one cannot be added without a recipient or an
         // attribution.
         let sink = Arc::new(RecordingSink::new(false));
         let provider = DefaultAuthEmailProvider::new(sink.clone());
@@ -783,9 +819,15 @@ mod tests {
                 .await
                 .is_ok()
         );
+        assert!(
+            provider
+                .send_workspace_invitation("t1", "a@x.io", &workspace_invite(), None)
+                .await
+                .is_ok()
+        );
 
         let sent = sink.sent();
-        assert_eq!(sent.len(), 10, "every method must reach the sink once");
+        assert_eq!(sent.len(), 11, "every method must reach the sink once");
         assert!(sent.iter().all(|m| m.tenant_id == "t1"));
         // The change notice goes to the address being left, not the one being moved to.
         let changed = sent.get(5).cloned().unwrap_or_default();
