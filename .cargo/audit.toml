@@ -10,4 +10,12 @@ ignore = [
     # so no published crate depends on it. No maintained replacement exists and the latest
     # `testcontainers` still requires it. Remove this entry when `testcontainers` drops the crate.
     "RUSTSEC-2026-0440",
+    # RUSTSEC-2026-0543: `chrono` is unmaintained and appears in `Cargo.lock` only:
+    # `testcontainers` (a dev-dependency of the container-backed integration tests) requires
+    # `serde_with` with its default features, and `serde_with` lists `chrono` as an optional
+    # dependency, which the lockfile records although nothing enables it. `chrono` is absent from
+    # the compiled graph (`cargo tree -i chrono` prints nothing) and no workspace crate depends on
+    # it. No release of `chrono` fixes the advisory. Remove this entry when `testcontainers`
+    # stops requesting the default features of `serde_with`, or `serde_with` drops `chrono`.
+    "RUSTSEC-2026-0543",
 ]
