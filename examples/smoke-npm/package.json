@@ -12,7 +12,7 @@
     "@bymax-one/rust-auth": "file:../../packages/rust-auth",
     "next": "^16.2.11",
     "react": "^19.0.0",
-    "react-dom": "^19.0.0"
+    "react-dom": "^19.3.1"
   },
   "devDependencies": {
     "@types/node": "^26.6.6",
