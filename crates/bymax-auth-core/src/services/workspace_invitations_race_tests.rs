@@ -16,6 +16,7 @@ use crate::services::auth::test_support::ctx;
 use crate::testing::InMemoryWorkspaceInvitations;
 use crate::traits::workspace_invitation_store::{IndexedInvitation, PendingInvitation, Removal};
 use crate::traits::{InvitationPlace, Publication, PublishOutcome, WorkspaceInvitationStore};
+use crate::workspace::audit::AuditKind;
 use crate::workspace::invitation::{InvitationBase, InvitationRecord};
 
 const LONG_AGO: &str = "2026-01-01T00:00:00.000Z";
@@ -146,7 +147,8 @@ async fn held(inv: &Inv) -> Option<IndexedInvitation> {
 #[tokio::test]
 async fn a_revoke_that_lost_the_index_once_removes_the_replacement_and_reports_what_it_removed() {
     // Seeding reads nothing, so the first read of the revoke is the racing one. Armed after.
-    let Some(inv) = racing(1, "member", "member").await else { return };
+    // The roles differ, so an event that named the invitation first read would be caught.
+    let Some(inv) = racing(1, "admin", "member").await else { return };
     let revoked = inv
         .f
         .engine
@@ -159,6 +161,10 @@ async fn a_revoke_that_lost_the_index_once_removes_the_replacement_and_reports_w
     );
     let events = inv.f.hooks.events(1).await;
     assert_eq!(events.len(), 1, "one revoke, one event: {events:?}");
+    assert!(matches!(
+        events.first().map(|event| &event.kind),
+        Some(AuditKind::InvitationRevoked { email, role }) if email == "race@x.io" && role == "admin"
+    ));
 }
 
 #[tokio::test]
