@@ -320,6 +320,7 @@ impl AuthEngine {
     ///
     /// # Errors
     ///
+    /// `auth.too_many_requests` when the address kept changing under every attempt, and
     /// `auth.internal` when the store fails.
     pub async fn revoke_workspace_invitation(
         &self,

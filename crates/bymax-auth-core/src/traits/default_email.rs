@@ -157,7 +157,8 @@ impl AuthEmailMessage {
 // Rendering helpers
 // ---------------------------------------------------------------------------
 
-/// Render an instant as a UTC ISO-8601 timestamp for display in a message body.
+/// Render an instant as a UTC ISO-8601 timestamp for display in a message body, to the
+/// millisecond: the same text `Date.toISOString()` gives the nest-auth messages.
 ///
 /// Built from the components rather than through a format description because this must not be
 /// able to fail: a formatter returns a `Result`, and the only honest thing to do with an error
@@ -166,13 +167,14 @@ impl AuthEmailMessage {
 fn render_utc_instant(at: OffsetDateTime) -> String {
     let at = at.to_offset(UtcOffset::UTC);
     format!(
-        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z",
+        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}.{:03}Z",
         at.year(),
         u8::from(at.month()),
         at.day(),
         at.hour(),
         at.minute(),
-        at.second()
+        at.second(),
+        at.millisecond()
     )
 }
 
@@ -1044,7 +1046,13 @@ mod tests {
             )
             .replace_time(time::Time::from_hms(4, 5, 6).unwrap_or(time::Time::MIDNIGHT))
             .to_offset(UtcOffset::from_hms(-3, 0, 0).unwrap_or(UtcOffset::UTC));
-        assert_eq!(render_utc_instant(at), "2026-11-03T04:05:06Z");
+        assert_eq!(render_utc_instant(at), "2026-11-03T04:05:06.000Z");
+    }
+
+    #[test]
+    fn an_instant_keeps_its_milliseconds_and_drops_finer_digits() {
+        let at = OffsetDateTime::UNIX_EPOCH + time::Duration::nanoseconds(7_999_999);
+        assert_eq!(render_utc_instant(at), "1970-01-01T00:00:00.007Z");
     }
 
     #[test]
@@ -1098,7 +1106,7 @@ mod tests {
         }
         let invitation = c.invitation(&ctx, &invite());
         assert!(invitation.text.contains(&"0".repeat(64)));
-        assert!(invitation.text.contains("1970-01-01T00:00:00Z"));
+        assert!(invitation.text.contains("1970-01-01T00:00:00.000Z"));
         assert!(invitation.subject.contains("Acme"));
         // The alert repeats the session facts the recipient needs to recognize it as theirs.
         let alert = c.new_session_alert(&ctx, &session());

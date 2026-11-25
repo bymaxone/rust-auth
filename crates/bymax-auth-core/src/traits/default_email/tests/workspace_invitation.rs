@@ -40,7 +40,7 @@ async fn a_member_invitation_names_the_inviter_the_workspace_and_the_role() {
     assert_eq!(
         message.text,
         format!(
-            "Owner invited you to the workspace Acme as admin.\n\nCreate your account and use this token to accept: {}\n\nIt expires on 1970-01-01T00:00:00Z.\n\nIf you were not expecting this invitation, ignore this message.",
+            "Owner invited you to the workspace Acme as admin.\n\nCreate your account and use this token to accept: {}\n\nIt expires on 1970-01-01T00:00:00.000Z.\n\nIf you were not expecting this invitation, ignore this message.",
             "a".repeat(64)
         )
     );
