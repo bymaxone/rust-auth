@@ -5335,7 +5335,7 @@ A grace recovery returns a record from the rotation grace pointer and must then 
 
 #### 12.5.8 `publish_invitation`, `withdraw_invitation` and `release_invitation_index` — the tenant invitation scripts
 
-The rank check reads the index and the record and the change writes them; as separate commands they can disagree about which invitation is being replaced or removed, and a failure between them can leave one entry without the other. The three sources are the ones nest-auth runs over the same keyspace.
+The rank check reads the index and the record and the change writes them; as separate commands they can disagree about which invitation is being replaced or removed, and a failure between them can leave one entry without the other. The sources are the ones nest-auth runs over the same keyspace.
 
 `publish_invitation` stores an invitation over the one the caller approved.
 

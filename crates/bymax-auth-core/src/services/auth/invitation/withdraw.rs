@@ -8,7 +8,7 @@ use crate::engine::AuthEngine;
 use crate::services::auth::invitation::{has_role, parse_record};
 use crate::traits::{InvitationStore, InvitationWithdrawal};
 
-/// How many times a revoke reads the address again after it changed under the withdrawal.
+/// How many times a revoke reads the address before giving up on one that keeps changing.
 const REVOKE_ATTEMPTS: usize = 3;
 
 impl AuthEngine {

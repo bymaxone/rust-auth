@@ -105,7 +105,7 @@ async fn withdrawal_scenarios<S: InvitationStore + ?Sized>(store: &S) {
     assert_eq!(withdraw(store, TENANT, SECOND, None).await, changed);
 }
 
-/// A record that was consumed leaves an index a withdrawal drops, and a release drops too.
+/// A record that was consumed leaves an index a withdrawal drops.
 async fn consumed_scenarios<S: InvitationStore + ?Sized>(store: &S) {
     let spent = crate::services::to_hex(&bymax_auth_crypto::mac::sha256(SPENT_TOKEN.as_bytes()));
     assert!(publish(store, TENANT, &spent, None).await);

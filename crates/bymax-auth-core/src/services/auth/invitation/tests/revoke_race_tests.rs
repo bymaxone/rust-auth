@@ -1,4 +1,4 @@
-//! A later invite, or a failing delete, landing inside a revoke or an acceptance.
+//! A later invite, a redemption or a failing withdrawal landing inside a revoke or an acceptance.
 
 use std::sync::{Mutex, OnceLock};
 

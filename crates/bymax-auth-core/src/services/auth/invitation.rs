@@ -252,10 +252,7 @@ impl AuthEngine {
             return Err(AuthError::InvalidInvitationToken);
         }
 
-        // The record is already gone; drop the index that pointed at it so a later revoke does
-        // not report success over an invitation that was accepted. Both carry the same TTL, so
-        // this is tidiness rather than correctness — but a stale pointer is exactly the kind of
-        // thing an operator reads as "still pending".
+        // The record is already gone; drop the index so it does not go on reading as pending.
         // Compared with the consumed token: a later invite may hold the index by now.
         store
             .release_invitation_index(
@@ -357,12 +354,12 @@ impl AuthEngine {
     /// the difference would tell them whether an address has a pending invitation, which is
     /// precisely what hashing the email in the index avoids disclosing.
     ///
-    /// An invitation a later invite puts in its place while the call runs is judged and withdrawn
-    /// in its turn, three times at most.
+    /// An invitation that changes while the call runs is read and judged again, a bounded number
+    /// of times.
     ///
     /// # Errors
     ///
-    /// Returns [`AuthError::TooManyRequests`] when the invitation was replaced under every one of
+    /// Returns [`AuthError::TooManyRequests`] when the invitation changed under every one of
     /// those attempts. Returns [`AuthError::TokenInvalid`] when the revoker no longer exists or does not live in
     /// `tenant_id` (the read is scoped to it), [`AuthError::InsufficientRole`] when a repository
     /// that ignored the scope handed back a row from another tenant, and the account-status

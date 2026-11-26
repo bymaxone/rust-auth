@@ -252,8 +252,8 @@ async fn an_invitation_that_appears_between_the_check_and_the_write_is_not_displ
 
 #[tokio::test]
 async fn an_index_that_keeps_moving_exhausts_the_retries_and_is_refused() {
-    // Three publications, three concurrent writes: the caller was never shown to be allowed to
-    // destroy whatever is there now, so the answer is a refusal, not an unbounded loop.
+    // The caller was never shown to be allowed to destroy whatever is there now, so the answer
+    // is a refusal, not an unbounded loop.
     let moves = (0..3)
         .map(|n| (format!("{n:064x}"), pending_record("MEMBER")))
         .collect();
