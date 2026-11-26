@@ -399,6 +399,31 @@ pub struct WsTicketSnapshot {
     /// redemption is refused when the account's current epoch is above it. Required and read
     /// as an unsigned integer, so a string, a negative number or a fraction is not a ticket.
     pub epoch: u64,
+    /// The expiry of the minting access token, in seconds since the Unix epoch. A record is not
+    /// redeemed from that instant on; a record without the field is accepted. When present it is
+    /// a whole number of at most 2^53 - 1, the range the shared writer can hold: anything else,
+    /// `null` included, is not a ticket.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "present_whole_seconds"
+    )]
+    pub exp: Option<u64>,
+}
+
+/// The largest whole number a JSON writer holding numbers as doubles stores exactly.
+const MAX_EXACT_JSON_INTEGER: u64 = (1 << 53) - 1;
+
+/// Read a field that is present: `Option`'s own reading would turn `null` into an absent field.
+fn present_whole_seconds<'de, D>(deserializer: D) -> Result<Option<u64>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let seconds = u64::deserialize(deserializer)?;
+    if seconds > MAX_EXACT_JSON_INTEGER {
+        return Err(serde::de::Error::custom("not a whole number of seconds"));
+    }
+    Ok(Some(seconds))
 }
 
 /// Refresh-session lifecycle plus access-JWT revocation. Backs the `rt`/`prt`, `rp`/`prp`,
@@ -1437,6 +1462,7 @@ mod tests {
             mfa_verified: true,
             jti: "jti-1".into(),
             epoch: 0,
+            exp: None,
         };
         let json = serde_json::to_string(&snap)?;
         assert!(json.contains("\"mfaEnabled\":true"));
@@ -1663,6 +1689,7 @@ mod tests {
             mfa_verified: true,
             jti: "jti-1".into(),
             epoch: 0,
+            exp: None,
         };
         let json: serde_json::Value = serde_json::to_value(&snapshot)?;
         for field in contract_fields("wsTicket") {

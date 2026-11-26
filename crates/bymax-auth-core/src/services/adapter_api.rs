@@ -7,7 +7,7 @@
 //! ticket) across the crate boundary without leaking the `pub(crate)` collaborators.
 
 use bymax_auth_jwt::RawRefreshToken;
-use bymax_auth_types::{AuthError, DashboardClaims, DashboardType};
+use bymax_auth_types::{AuthError, DashboardClaims};
 #[cfg(feature = "mfa")]
 use bymax_auth_types::{AuthResult, MfaContext};
 #[cfg(feature = "platform")]
@@ -21,8 +21,10 @@ use crate::engine::AuthEngine;
 #[cfg(feature = "mfa")]
 use crate::services::mfa::{LoginResultMfa, MfaSetupResult};
 use crate::services::session::SessionInfo;
-use crate::services::{is_refresh_token_shape, new_uuid_v4, now_unix, now_unix_ceil};
+use crate::services::{is_refresh_token_shape, now_unix_ceil};
 use crate::traits::WsTicketSnapshot;
+
+mod ws_ticket;
 
 /// A minted WebSocket upgrade ticket and how long it will live.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -327,6 +329,8 @@ impl AuthEngine {
         // somebody else. That also means the snapshot's tenant is now the token's tenant by
         // construction: an account moved to another tenant no longer resolves here at all, and
         // mints no ticket, which is the same answer every other request-path read gives it.
+        // A token with nothing left to bound a ticket by is refused before any account read.
+        ticket_ttl(claims.exp, now_unix_ceil()).ok_or(AuthError::TokenInvalid)?;
         let user = self
             .user_repository()
             .find_by_id(&claims.sub, Some(&claims.tenant_id))
@@ -346,101 +350,16 @@ impl AuthEngine {
             // ticket can be refused at redemption whenever that token would be.
             jti: claims.jti.clone(),
             epoch: claims.epoch,
+            // Redemption refuses the ticket from this instant on, and hands it to the socket.
+            exp: u64::try_from(claims.exp).ok(),
         };
+        // Measured again, after the account read: the store counts the lifetime from the write.
         let ttl = ticket_ttl(claims.exp, now_unix_ceil()).ok_or(AuthError::TokenInvalid)?;
         let ticket = store.mint(&snapshot, ttl).await?;
         Ok(IssuedWsTicket {
             ticket,
             expires_in: ttl,
         })
-    }
-
-    /// Redeem a single-use WebSocket upgrade ticket (§7.3.6): the store atomically `GETDEL`s
-    /// `wst:{sha256(ticket)}`, so the first redemption wins and a captured URL cannot be
-    /// replayed. On a hit the stored snapshot is reconstructed into [`DashboardClaims`] (an
-    /// authorization snapshot for the socket's lifetime — never re-signed, no REST access).
-    ///
-    /// # Errors
-    ///
-    /// Returns [`AuthError::Internal`] when no WS-ticket store is wired, [`AuthError::TokenInvalid`]
-    /// for a missing/expired/already-redeemed ticket, for one whose minting token has been
-    /// revoked (a logout or an epoch bump) and for a snapshot that names no tenant, or a store
-    /// [`AuthError`].
-    pub async fn redeem_ws_ticket(&self, ticket: &str) -> Result<DashboardClaims, AuthError> {
-        let store = self
-            .ws_ticket_store()
-            .ok_or_else(|| crate::services::internal_error("ws-ticket store not configured"))?;
-        // Shape-check before hashing, the same guard `reissue_tokens` and `logout` apply to a
-        // refresh token and `take_state` applies to an OAuth `state`. The ticket arrives in a
-        // `?ticket=` query parameter on a route the consumer mounts itself, so it inherits
-        // neither the body-size limit nor any rate-limit entry: without this the store hashes
-        // whatever the request line carried, which is SHA-256 work proportional to an
-        // attacker-chosen length on an unauthenticated path. A value outside the shape could
-        // never match a stored ticket anyway.
-        if !is_refresh_token_shape(ticket) {
-            return Err(AuthError::TokenInvalid);
-        }
-        let snapshot = store.redeem(ticket).await?.ok_or(AuthError::TokenInvalid)?;
-        // A ticket outlives the logout or the epoch bump that revoked the token it was minted
-        // from for up to its own TTL, so redemption asks the same two questions the token's
-        // verification does. A revoked ticket gets the answer of an unknown one, so a caller
-        // cannot tell the two apart.
-        let Some(tenant) = snapshot.tenant_id.clone().filter(|t| !t.is_empty()) else {
-            tracing::warn!(
-                event = "RUST_AUTH_WS_TICKET_REFUSED_NO_TENANT",
-                "ws ticket: refused, the snapshot names no tenant"
-            );
-            return Err(AuthError::TokenInvalid);
-        };
-        if self.ws_ticket_is_revoked(&snapshot, &tenant).await? {
-            tracing::warn!(
-                event = "RUST_AUTH_WS_TICKET_REFUSED_TOKEN_REVOKED",
-                "ws ticket: refused, the token it was minted from is revoked"
-            );
-            return Err(AuthError::TokenInvalid);
-        }
-        let now = now_unix();
-        Ok(DashboardClaims {
-            iss: None,
-            aud: None,
-            sub: snapshot.sub,
-            jti: new_uuid_v4(),
-            tenant_id: tenant,
-            role: snapshot.role,
-            token_type: DashboardType::Dashboard,
-            status: snapshot.status,
-            mfa_enabled: snapshot.mfa_enabled,
-            mfa_verified: snapshot.mfa_verified,
-            iat: now,
-            exp: now.saturating_add(i64::try_from(WS_TICKET_TTL_SECONDS).unwrap_or(i64::MAX)),
-            // This is a redeemed socket-authorization snapshot, never a re-verified access JWT, so
-            // the epoch is not consulted for it; it carries the inert default.
-            epoch: 0,
-        })
-    }
-
-    /// Whether the token a redeemed ticket was minted from is revoked: no identifier to read it
-    /// by, the `rv:{jti}` blacklist (logout), or an account epoch above the ticket's (a password
-    /// reset or sign-out-everywhere). `tenant` is the dashboard tenant the snapshot names, which
-    /// scopes the epoch read.
-    async fn ws_ticket_is_revoked(
-        &self,
-        snapshot: &WsTicketSnapshot,
-        tenant: &str,
-    ) -> Result<bool, AuthError> {
-        use crate::traits::SessionKind;
-        if snapshot.jti.is_empty() {
-            return Ok(true);
-        }
-        if self.session_store().is_blacklisted(&snapshot.jti).await? {
-            return Ok(true);
-        }
-        let subject = self.session_subject(SessionKind::Dashboard, Some(tenant), &snapshot.sub);
-        let current = self
-            .session_store()
-            .current_epoch(SessionKind::Dashboard, &subject)
-            .await?;
-        Ok(current > snapshot.epoch)
     }
 
     // ---- MFA adapter surface (mfa feature) --------------------------------------------
@@ -715,8 +634,11 @@ fn current_session_hash(raw_refresh: Option<&str>) -> Option<String> {
 mod tests {
     use super::*;
     use crate::services::auth::test_support::{base_config, harness};
+    use crate::services::{new_uuid_v4, now_unix};
+    use bymax_auth_types::DashboardType;
 
     mod verified_gate_tests;
+    mod ws_ticket_expiry;
     mod ws_ticket_revocation;
     mod ws_ticket_second_factor;
 
@@ -1086,17 +1008,17 @@ mod tests {
         let Ok(issued) = minted else { return };
         let ticket = issued.ticket;
 
-        let redeemed = h.engine.redeem_ws_ticket(&ticket).await;
+        let redeemed = h.engine.redeem_ws_ticket(&ticket, None).await;
         let matched = matches!(&redeemed, Ok(c) if c.sub == claims.sub && c.role == "USER");
         assert!(matched, "{redeemed:?}");
 
         // The single-use ticket is consumed: a replay and a never-minted ticket both refuse.
         assert!(matches!(
-            h.engine.redeem_ws_ticket(&ticket).await,
+            h.engine.redeem_ws_ticket(&ticket, None).await,
             Err(AuthError::TokenInvalid)
         ));
         assert!(matches!(
-            h.engine.redeem_ws_ticket(&"a1".repeat(32)).await,
+            h.engine.redeem_ws_ticket(&"a1".repeat(32), None).await,
             Err(AuthError::TokenInvalid)
         ));
     }
@@ -1166,7 +1088,7 @@ mod tests {
             "abc".to_owned(),      // too short
             String::new(),         // empty
         ] {
-            let refused = h.engine.redeem_ws_ticket(&bogus).await;
+            let refused = h.engine.redeem_ws_ticket(&bogus, None).await;
             let matched = matches!(refused, Err(AuthError::TokenInvalid));
             assert!(
                 matched,
@@ -1221,7 +1143,7 @@ mod tests {
             Err(AuthError::Internal(_))
         ));
         assert!(matches!(
-            engine.redeem_ws_ticket(&"a1".repeat(32)).await,
+            engine.redeem_ws_ticket(&"a1".repeat(32), None).await,
             Err(AuthError::Internal(_))
         ));
     }
@@ -1257,7 +1179,7 @@ mod tests {
             Err(AuthError::Internal(_))
         ));
         assert!(matches!(
-            engine.redeem_ws_ticket(&"a1".repeat(32)).await,
+            engine.redeem_ws_ticket(&"a1".repeat(32), None).await,
             Err(AuthError::Internal(_))
         ));
     }

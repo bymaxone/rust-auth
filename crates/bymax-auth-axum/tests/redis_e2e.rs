@@ -440,8 +440,8 @@ async fn full_router_against_real_redis() {
     let ticket = mint.json()["ticket"].as_str().unwrap_or("").to_owned();
     assert!(!ticket.is_empty());
     // The first GETDEL redemption wins; the second is refused (single-use).
-    assert!(engine.redeem_ws_ticket(&ticket).await.is_ok());
-    assert!(engine.redeem_ws_ticket(&ticket).await.is_err());
+    assert!(engine.redeem_ws_ticket(&ticket, None).await.is_ok());
+    assert!(engine.redeem_ws_ticket(&ticket, None).await.is_err());
 
     // ---- OAuth initiate (302) → callback completes against real Redis state ------------
     let initiate = call(

@@ -134,6 +134,36 @@ mod tests {
     }
 
     #[test]
+    fn a_record_carrying_a_whole_expiry_is_a_ticket() {
+        for exp in [0_u64, 1_900_000_000, (1 << 53) - 1] {
+            let parsed = parse_snapshot(&record(&[("exp", serde_json::json!(exp))]));
+            assert!(matches!(parsed, Some(s) if s.exp == Some(exp)), "{exp}");
+        }
+    }
+
+    #[test]
+    fn a_record_without_an_expiry_is_a_ticket_and_is_written_without_one() {
+        let parsed = parse_snapshot(&record(&[]));
+        let written = parsed.as_ref().map(serde_json::to_string);
+        assert!(matches!(&parsed, Some(s) if s.exp.is_none()));
+        assert!(matches!(written, Some(Ok(json)) if !json.contains("exp")));
+    }
+
+    #[test]
+    fn a_record_with_a_malformed_expiry_is_not_a_ticket() {
+        for bad in [
+            serde_json::Value::Null,
+            serde_json::json!("1900000000"),
+            serde_json::json!(-1),
+            serde_json::json!(1.5),
+            serde_json::json!(1_u64 << 53),
+        ] {
+            let json = record(&[("exp", bad.clone())]);
+            assert!(parse_snapshot(&json).is_none(), "accepted exp: {bad}");
+        }
+    }
+
+    #[test]
     fn a_record_that_is_not_a_whole_ticket_is_not_a_ticket() {
         // Every one of these was consumed by the GETDEL, and every one reads as an unknown
         // ticket: an old writer's record without the two identifiers, a jti that is not a

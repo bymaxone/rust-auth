@@ -2780,6 +2780,7 @@ mod tests {
             mfa_verified: false,
             jti: "jti-1".into(),
             epoch: 0,
+            exp: None,
         };
         let ticket = store.mint(&snapshot, 30).await;
         // Same shape the real store mints — 64 lower-case hex — because the engine
