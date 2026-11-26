@@ -406,23 +406,21 @@ async fn an_invite_in_flight_cannot_confirm_after_the_revoke_has_deleted() {
         written_after_delete: true,
         ..Script::default()
     };
-    let Some((r, answer)) = revoke_in_flight(script, "MEMBER").await else { return };
-    assert!(matches!(answer, Ok(false)));
+    let Some(r) = in_flight(script, "MEMBER").await else { return };
+    assert!(matches!(revoke(&r, &r.member).await, Ok(false)));
     assert_eq!(r.double.script(|s| s.confirmed), Some(Some(false)));
     assert_eq!(indexed(&r.s, EMAIL).await, None);
     assert!(!live(&r, FIRST).await);
 }
 
-/// A revoke while the invite under [`FIRST`] holds the index and has written no record.
-async fn revoke_in_flight(
-    script: Script,
-    later_role: &str,
-) -> Option<(Race, Result<bool, AuthError>)> {
+/// A [`race`] in which the invite under [`FIRST`] holds the index and has written no record.
+async fn in_flight(script: Script, later_role: &str) -> Option<Race> {
     let r = race(script, later_role).await?;
-    let pending = token_hash(FIRST);
-    r.s.stores.delete_invitation_by_hash(&pending).await.ok()?;
-    let answer = revoke(&r, &r.member).await;
-    Some((r, answer))
+    r.s.stores
+        .delete_invitation_by_hash(&token_hash(FIRST))
+        .await
+        .ok()?;
+    Some(r)
 }
 
 #[tokio::test]
@@ -431,8 +429,8 @@ async fn a_revoke_removes_the_record_an_invite_in_flight_confirmed_before_the_re
         written_before_release: true,
         ..Script::default()
     };
-    let Some((r, answer)) = revoke_in_flight(script, "MEMBER").await else { return };
-    assert!(matches!(answer, Ok(true)));
+    let Some(r) = in_flight(script, "MEMBER").await else { return };
+    assert!(matches!(revoke(&r, &r.member).await, Ok(true)));
     assert_eq!(r.double.script(|s| s.confirmed), Some(Some(true)));
     assert!(!live(&r, FIRST).await);
 }
@@ -444,11 +442,11 @@ async fn a_revoke_of_an_invite_in_flight_judges_the_invitation_that_replaced_it(
         ..Script::default()
     };
     let later = replacement(2);
-    let Some((r, answer)) = revoke_in_flight(replaced(), "MEMBER").await else { return };
-    assert!(matches!(answer, Ok(true)));
+    let Some(r) = in_flight(replaced(), "MEMBER").await else { return };
+    assert!(matches!(revoke(&r, &r.member).await, Ok(true)));
     assert!(!live(&r, &later).await);
-    let Some((r, answer)) = revoke_in_flight(replaced(), "ADMIN").await else { return };
-    assert!(matches!(answer, Ok(false)));
+    let Some(r) = in_flight(replaced(), "ADMIN").await else { return };
+    assert!(matches!(revoke(&r, &r.member).await, Ok(false)));
     assert_eq!(indexed(&r.s, EMAIL).await, Some(token_hash(&later)));
     assert!(live(&r, &later).await);
 }
