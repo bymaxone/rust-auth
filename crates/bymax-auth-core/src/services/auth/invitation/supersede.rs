@@ -10,8 +10,8 @@ use std::sync::Arc;
 use bymax_auth_types::AuthError;
 
 use crate::engine::AuthEngine;
-use crate::services::auth::invitation::has_role;
-use crate::traits::InvitationStore;
+use crate::services::auth::invitation::{has_role, parse_record};
+use crate::traits::{InvitationStore, StoredInvitation};
 
 /// How many times the approval is re-derived when the pending record moves underneath it. The
 /// contention is between legitimate inviters, so a lost race is retried rather than refused,
@@ -19,44 +19,44 @@ use crate::traits::InvitationStore;
 const SUPERSEDE_ATTEMPTS: usize = 3;
 
 impl AuthEngine {
-    /// Claim the invitee index for a new invitation and return the token hash it displaced, or
-    /// `None` when nothing was pending.
+    /// Approve the supersede and store the invitation over what was approved.
     ///
-    /// The index is claimed first and atomically, because it is the serialization point: the
-    /// record is keyed by a token nobody on the issuing side has seen, and the index is the only
-    /// handle they have. The claim is a compare-and-swap against the hash the rank check
-    /// approved, so an outranked caller cannot pass the check while the index is momentarily
-    /// empty and then displace a higher-ranked invitation created in between.
+    /// The rank check and the write are separate round trips, so the write is a compare-and-swap
+    /// against the hash the check approved: an outranked caller cannot pass the check while the
+    /// index is empty and then displace a higher-ranked invitation created in between. It stores
+    /// the record, points the index at it and deletes the superseded record in one step.
     ///
     /// # Errors
     ///
     /// [`AuthError::InsufficientRole`] when the caller is outranked by the pending invitation,
     /// or when the index kept moving for the whole retry budget (the caller has not been shown
     /// to be allowed to destroy whatever is there now); a store [`AuthError`] otherwise.
-    pub(super) async fn claim_invitation_slot(
+    pub(super) async fn publish_over_approved(
         &self,
         store: &Arc<dyn InvitationStore>,
         inviter_role: &str,
-        tenant_id: &str,
         invitee_hash: &str,
         token_hash: &str,
+        invitation: &StoredInvitation,
         ttl_secs: u64,
-    ) -> Result<Option<String>, AuthError> {
+    ) -> Result<(), AuthError> {
+        let tenant_id = &invitation.tenant_id;
         for _ in 0..SUPERSEDE_ATTEMPTS {
             let approved = self
                 .approve_supersede(store, inviter_role, tenant_id, invitee_hash)
                 .await?;
             if store
-                .claim_invitation_index(
+                .publish_invitation(
                     tenant_id,
                     invitee_hash,
                     token_hash,
+                    invitation,
                     ttl_secs,
                     approved.as_deref(),
                 )
                 .await?
             {
-                return Ok(approved);
+                return Ok(());
             }
         }
         tracing::warn!(
@@ -64,52 +64,6 @@ impl AuthEngine {
             "invitation: refused, the pending invitation kept changing under the rank check"
         );
         Err(AuthError::InsufficientRole)
-    }
-
-    /// Confirm, after the record is written, that the index still names this invitation, and renew
-    /// its TTL.
-    ///
-    /// A revoke or a later invite can move the index between the claim and the write, which
-    /// leaves the record live with nothing naming it (or beside a newer one); the index TTL also
-    /// started at the claim, so a later write would outlive the entry that names it. One
-    /// compare-and-set against this invitation's own hash answers both. Whenever the invitation
-    /// cannot be confirmed, whether the index moved or the store failed, the record is withdrawn
-    /// best-effort and the original outcome is returned: a failing delete is logged and never
-    /// replaces it.
-    ///
-    /// # Errors
-    ///
-    /// [`AuthError::InsufficientRole`] when the index no longer names this invitation, or the
-    /// store [`AuthError`] that failed the confirmation.
-    pub(super) async fn confirm_invitation_claim(
-        &self,
-        store: &Arc<dyn InvitationStore>,
-        tenant_id: &str,
-        invitee_hash: &str,
-        token_hash: &str,
-        ttl_secs: u64,
-    ) -> Result<(), AuthError> {
-        let confirmed = store
-            .claim_invitation_index(
-                tenant_id,
-                invitee_hash,
-                token_hash,
-                ttl_secs,
-                Some(token_hash),
-            )
-            .await;
-        let outcome = match confirmed {
-            Ok(true) => return Ok(()),
-            Ok(false) => AuthError::InsufficientRole,
-            Err(error) => error,
-        };
-        if store.delete_invitation_by_hash(token_hash).await.is_err() {
-            tracing::warn!(
-                event = "RUST_AUTH_INVITATION_UNCONFIRMED_WITHDRAW_FAILED",
-                "invitation: could not withdraw the record of an unconfirmed invite"
-            );
-        }
-        Err(outcome)
     }
 
     /// The token hash currently pending for the address, after checking the caller may destroy
@@ -125,7 +79,8 @@ impl AuthEngine {
         let Some(pending_hash) = store.read_invitation_index(tenant_id, invitee_hash).await? else {
             return Ok(None);
         };
-        if let Some(pending) = store.read_invitation_by_hash(&pending_hash).await?
+        let raw = store.read_invitation_record(&pending_hash).await?;
+        if let Some(pending) = raw.as_deref().and_then(parse_record)
             && !has_role(
                 inviter_role,
                 &pending.role,

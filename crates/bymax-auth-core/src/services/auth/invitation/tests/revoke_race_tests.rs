@@ -5,7 +5,7 @@ use std::sync::{Mutex, OnceLock};
 use async_trait::async_trait;
 
 use super::*;
-use crate::traits::InvitationStore;
+use crate::traits::{InvitationStore, InvitationWithdrawal};
 
 const EMAIL: &str = "bob@example.com";
 const FIRST: &str = "1111111111111111111111111111111111111111111111111111111111111111";
@@ -35,16 +35,11 @@ struct Script {
     before_release: usize,
     /// How many have landed.
     landed: usize,
-    fail_delete: bool,
-    /// The invite in flight under [`FIRST`] writes its record and confirms right after the first
-    /// delete.
-    written_after_delete: bool,
-    /// The same, right before the first release instead.
-    written_before_release: bool,
-    /// What that confirmation answered.
-    confirmed: Option<bool>,
-    /// Another revoke releases the index right before this one does.
-    released_elsewhere: bool,
+    fail_withdraw: bool,
+    /// The invitation under [`FIRST`] is redeemed right after it is read for judging.
+    spent_after_judging: bool,
+    /// The record reads as text that is not an invitation.
+    garbled: bool,
 }
 
 struct Raced {
@@ -53,6 +48,8 @@ struct Raced {
     replacement: StoredInvitation,
     invitee: OnceLock<String>,
 }
+
+const GARBLED: &str = "{";
 
 impl Raced {
     fn script<T>(&self, read: impl FnOnce(&mut Script) -> T) -> Option<T> {
@@ -64,24 +61,7 @@ impl Raced {
         self.invitee.get().cloned().unwrap_or_default()
     }
 
-    /// The rest of the invite that claimed [`FIRST`]: write, confirm, withdraw when refused.
-    async fn finish_invite(&self) -> Result<(), AuthError> {
-        let hash = token_hash(FIRST);
-        self.inner
-            .put_invitation(FIRST, &self.replacement, 600)
-            .await?;
-        let confirmed = self
-            .inner
-            .claim_invitation_index("t1", &self.invitee(), &hash, 600, Some(&hash))
-            .await?;
-        self.script(|s| s.confirmed = Some(confirmed));
-        if !confirmed {
-            self.inner.delete_invitation_by_hash(&hash).await?;
-        }
-        Ok(())
-    }
-
-    /// A later invite, in the order `invite` writes: claim, delete the superseded record, write.
+    /// A later invite for the address.
     async fn reinvite(&self, tenant: &str, invitee: &str) -> Result<(), AuthError> {
         let n = self
             .script(|s| {
@@ -89,55 +69,60 @@ impl Raced {
                 s.landed + 1
             })
             .unwrap_or_default();
-        let token = replacement(n);
         let old = self.inner.read_invitation_index(tenant, invitee).await?;
-        let new = token_hash(&token);
         self.inner
-            .claim_invitation_index(tenant, invitee, &new, 600, old.as_deref())
-            .await?;
-        if let Some(old) = old {
-            self.inner.delete_invitation_by_hash(&old).await?;
-        }
-        self.inner
-            .put_invitation(&token, &self.replacement, 600)
+            .publish_invitation(
+                tenant,
+                invitee,
+                &token_hash(&replacement(n)),
+                &self.replacement,
+                600,
+                old.as_deref(),
+            )
             .await
+            .map(|_| ())
     }
 }
 
 #[async_trait]
 impl InvitationStore for Raced {
-    async fn put_invitation(
-        &self,
-        token: &str,
-        invitation: &StoredInvitation,
-        ttl: u64,
-    ) -> Result<(), AuthError> {
-        self.inner.put_invitation(token, invitation, ttl).await
-    }
     async fn consume_invitation(&self, token: &str) -> Result<Option<StoredInvitation>, AuthError> {
         self.inner.consume_invitation(token).await
     }
-    async fn put_invitation_index(
+    async fn publish_invitation(
         &self,
         tenant: &str,
         invitee: &str,
         hash: &str,
+        invitation: &StoredInvitation,
         ttl: u64,
-    ) -> Result<(), AuthError> {
-        self.inner
-            .put_invitation_index(tenant, invitee, hash, ttl)
-            .await
-    }
-    async fn claim_invitation_index(
-        &self,
-        tenant: &str,
-        invitee: &str,
-        hash: &str,
-        ttl: u64,
-        expected: Option<&str>,
+        superseded: Option<&str>,
     ) -> Result<bool, AuthError> {
         self.inner
-            .claim_invitation_index(tenant, invitee, hash, ttl, expected)
+            .publish_invitation(tenant, invitee, hash, invitation, ttl, superseded)
+            .await
+    }
+    async fn withdraw_invitation(
+        &self,
+        tenant: &str,
+        invitee: &str,
+        hash: &str,
+        judged: Option<&str>,
+    ) -> Result<InvitationWithdrawal, AuthError> {
+        if self
+            .script(|s| std::mem::take(&mut s.fail_withdraw))
+            .unwrap_or_default()
+        {
+            return Err(crate::services::internal_error("withdraw failed"));
+        }
+        // The garbled text stands for what the store holds, so compare against that instead.
+        let held = self.inner.read_invitation_record(hash).await?;
+        let judged = match judged {
+            Some(GARBLED) => held.as_deref(),
+            other => other,
+        };
+        self.inner
+            .withdraw_invitation(tenant, invitee, hash, judged)
             .await
     }
     async fn read_invitation_index(
@@ -153,69 +138,45 @@ impl InvitationStore for Raced {
         invitee: &str,
         expected: &str,
     ) -> Result<bool, AuthError> {
-        let (land, elsewhere) = self
+        let land = self
             .script(|s| {
                 let land = s.before_release > 0;
                 s.before_release = s.before_release.saturating_sub(1);
-                (land, std::mem::take(&mut s.released_elsewhere))
+                land
             })
             .unwrap_or_default();
         if land {
             self.reinvite(tenant, invitee).await?;
         }
-        if self
-            .script(|s| std::mem::take(&mut s.written_before_release))
-            .unwrap_or_default()
-        {
-            self.finish_invite().await?;
-        }
-        if elsewhere {
-            self.inner
-                .release_invitation_index(tenant, invitee, expected)
-                .await?;
-        }
         self.inner
             .release_invitation_index(tenant, invitee, expected)
             .await
     }
-    async fn read_invitation_by_hash(
-        &self,
-        hash: &str,
-    ) -> Result<Option<StoredInvitation>, AuthError> {
-        let read = self.inner.read_invitation_by_hash(hash).await?;
-        let land = self
+    async fn read_invitation_record(&self, hash: &str) -> Result<Option<String>, AuthError> {
+        let read = self.inner.read_invitation_record(hash).await?;
+        let (land, spent, garbled) = self
             .script(|s| {
                 let land = s.after_judging > 0;
                 s.after_judging = s.after_judging.saturating_sub(1);
-                land
+                (land, std::mem::take(&mut s.spent_after_judging), s.garbled)
             })
             .unwrap_or_default();
         if land {
             let invitee = self.invitee();
             self.reinvite("t1", &invitee).await?;
         }
-        Ok(read)
-    }
-    async fn delete_invitation_by_hash(&self, hash: &str) -> Result<bool, AuthError> {
-        if self
-            .script(|s| std::mem::take(&mut s.fail_delete))
-            .unwrap_or_default()
-        {
-            return Err(crate::services::internal_error("delete failed"));
+        if spent {
+            self.inner.consume_invitation(FIRST).await?;
         }
-        let removed = self.inner.delete_invitation_by_hash(hash).await?;
-        if self
-            .script(|s| std::mem::take(&mut s.written_after_delete))
-            .unwrap_or_default()
-        {
-            self.finish_invite().await?;
-        }
-        Ok(removed)
+        Ok(if garbled {
+            Some(GARBLED.to_owned())
+        } else {
+            read
+        })
     }
 }
 
 struct Race {
-    double: Arc<Raced>,
     s: Setup,
     admin: String,
     member: String,
@@ -245,11 +206,14 @@ async fn race(script: Script, later_role: &str) -> Option<Race> {
     let id = engine.invitee_identifier(EMAIL);
     double.invitee.set(id.clone()).ok()?;
     stores
-        .put_invitation(FIRST, &record("MEMBER", &admin), 600)
-        .await
-        .ok()?;
-    stores
-        .put_invitation_index("t1", &id, &token_hash(FIRST), 600)
+        .publish_invitation(
+            "t1",
+            &id,
+            &token_hash(FIRST),
+            &record("MEMBER", &admin),
+            600,
+            None,
+        )
         .await
         .ok()?;
     let s = Setup {
@@ -257,12 +221,7 @@ async fn race(script: Script, later_role: &str) -> Option<Race> {
         users,
         stores,
     };
-    Some(Race {
-        double,
-        s,
-        admin,
-        member,
-    })
+    Some(Race { s, admin, member })
 }
 
 async fn revoke(race: &Race, who: &str) -> Result<bool, AuthError> {
@@ -271,7 +230,7 @@ async fn revoke(race: &Race, who: &str) -> Result<bool, AuthError> {
 
 async fn live(race: &Race, token: &str) -> bool {
     let hash = token_hash(token);
-    let read = race.s.stores.read_invitation_by_hash(&hash).await;
+    let read = race.s.stores.read_invitation_record(&hash).await;
     matches!(read, Ok(Some(_)))
 }
 
@@ -328,32 +287,6 @@ async fn an_outranked_revoker_leaves_a_higher_replacement_indexed() {
 }
 
 #[tokio::test]
-async fn a_revoke_keeps_the_index_a_later_invite_claimed_before_the_release() {
-    // The pending record is already deleted; the later invitation is above the revoker.
-    let script = Script {
-        before_release: 1,
-        ..Script::default()
-    };
-    let Some(r) = race(script, "ADMIN").await else { return };
-    assert!(matches!(revoke(&r, &r.member).await, Ok(true)));
-    assert_eq!(
-        indexed(&r.s, EMAIL).await,
-        Some(token_hash(&replacement(2)))
-    );
-}
-
-#[tokio::test]
-async fn a_revoke_reports_its_removal_when_another_caller_released_the_index() {
-    let script = Script {
-        released_elsewhere: true,
-        ..Script::default()
-    };
-    let Some(r) = race(script, "MEMBER").await else { return };
-    assert!(matches!(revoke(&r, &r.admin).await, Ok(true)));
-    assert!(!live(&r, FIRST).await);
-}
-
-#[tokio::test]
 async fn an_acceptance_keeps_the_index_of_a_later_invite() {
     let script = Script {
         before_release: 1,
@@ -376,7 +309,7 @@ async fn a_refused_acceptance_keeps_the_index_of_a_later_invite() {
     let Some(r) = race(script, "MEMBER").await else { return };
     // The inviter is gone, so the acceptance is refused after the token is consumed.
     let gone = record("MEMBER", "nobody");
-    assert!(r.s.stores.put_invitation(FIRST, &gone, 600).await.is_ok());
+    assert!(put_record(&r.s.stores, FIRST, &gone).await.is_ok());
     assert!(matches!(
         accept(&r, FIRST).await,
         Err(AuthError::InvalidInvitationToken)
@@ -388,65 +321,38 @@ async fn a_refused_acceptance_keeps_the_index_of_a_later_invite() {
 }
 
 #[tokio::test]
-async fn a_revoke_whose_record_delete_fails_can_be_retried() {
+async fn a_revoke_whose_withdrawal_fails_leaves_both_and_can_be_retried() {
     let script = Script {
-        fail_delete: true,
+        fail_withdraw: true,
         ..Script::default()
     };
     let Some(r) = race(script, "MEMBER").await else { return };
     assert!(revoke(&r, &r.admin).await.is_err());
     assert_eq!(indexed(&r.s, EMAIL).await, Some(token_hash(FIRST)));
+    assert!(live(&r, FIRST).await);
     assert!(matches!(revoke(&r, &r.admin).await, Ok(true)));
     assert!(!live(&r, FIRST).await);
 }
 
 #[tokio::test]
-async fn an_invite_in_flight_cannot_confirm_after_the_revoke_has_deleted() {
+async fn a_revoke_of_an_invitation_redeemed_while_it_was_judged_removes_nothing() {
     let script = Script {
-        written_after_delete: true,
+        spent_after_judging: true,
         ..Script::default()
     };
-    let Some(r) = in_flight(script, "MEMBER").await else { return };
-    assert!(matches!(revoke(&r, &r.member).await, Ok(false)));
-    assert_eq!(r.double.script(|s| s.confirmed), Some(Some(false)));
+    let Some(r) = race(script, "MEMBER").await else { return };
+    assert!(matches!(revoke(&r, &r.admin).await, Ok(false)));
+    assert_eq!(indexed(&r.s, EMAIL).await, None);
+}
+
+#[tokio::test]
+async fn a_record_that_is_not_an_invitation_is_withdrawn_without_a_rank_check() {
+    let script = Script {
+        garbled: true,
+        ..Script::default()
+    };
+    let Some(r) = race(script, "MEMBER").await else { return };
+    assert!(matches!(revoke(&r, &r.member).await, Ok(true)));
     assert_eq!(indexed(&r.s, EMAIL).await, None);
     assert!(!live(&r, FIRST).await);
-}
-
-/// A [`race`] in which the invite under [`FIRST`] holds the index and has written no record.
-async fn in_flight(script: Script, later_role: &str) -> Option<Race> {
-    let r = race(script, later_role).await?;
-    r.s.stores
-        .delete_invitation_by_hash(&token_hash(FIRST))
-        .await
-        .ok()?;
-    Some(r)
-}
-
-#[tokio::test]
-async fn a_revoke_removes_the_record_an_invite_in_flight_confirmed_before_the_release() {
-    let script = Script {
-        written_before_release: true,
-        ..Script::default()
-    };
-    let Some(r) = in_flight(script, "MEMBER").await else { return };
-    assert!(matches!(revoke(&r, &r.member).await, Ok(true)));
-    assert_eq!(r.double.script(|s| s.confirmed), Some(Some(true)));
-    assert!(!live(&r, FIRST).await);
-}
-
-#[tokio::test]
-async fn a_revoke_of_an_invite_in_flight_judges_the_invitation_that_replaced_it() {
-    let replaced = || Script {
-        before_release: 1,
-        ..Script::default()
-    };
-    let later = replacement(2);
-    let Some(r) = in_flight(replaced(), "MEMBER").await else { return };
-    assert!(matches!(revoke(&r, &r.member).await, Ok(true)));
-    assert!(!live(&r, &later).await);
-    let Some(r) = in_flight(replaced(), "ADMIN").await else { return };
-    assert!(matches!(revoke(&r, &r.member).await, Ok(false)));
-    assert_eq!(indexed(&r.s, EMAIL).await, Some(token_hash(&later)));
-    assert!(live(&r, &later).await);
 }

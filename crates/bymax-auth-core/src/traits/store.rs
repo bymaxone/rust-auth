@@ -939,58 +939,51 @@ pub trait PasswordResetStore: Send + Sync {
 /// invitation is the non-error `Ok(None)`, not an error.
 #[async_trait]
 pub trait InvitationStore: Send + Sync {
-    /// Store an invitation under `inv:{sha256(token)}` with a TTL. The raw token is never
-    /// persisted — only its hash becomes a key.
-    async fn put_invitation(
-        &self,
-        token: &str,
-        invitation: &StoredInvitation,
-        ttl_secs: u64,
-    ) -> Result<(), AuthError>;
-
     /// Atomically consume (`getdel`) an invitation. `None` when the token is unknown,
     /// expired, or already consumed.
     async fn consume_invitation(&self, token: &str) -> Result<Option<StoredInvitation>, AuthError>;
 
-    /// Point the invitee index (`invidx:{tenantId}:{invitee_hash}`) at a pending invitation's
-    /// token hash, with the invitation's own TTL so the pair expires together.
+    /// Store an invitation under `inv:{token_hash}` and point the invitee index
+    /// (`invidx:{tenantId}:{invitee_hash}`) at it, only while the index still holds exactly
+    /// `superseded` (`None` meaning "no entry"). The record of `superseded` is deleted with it.
+    /// `false` when the index held something else, and nothing was written.
     ///
-    /// The index is what makes an invitation manageable at all: the record is keyed by the
-    /// hash of a token only the invitee's mailbox ever held, so without it nobody on the
-    /// issuing side can name a pending invitation, let alone withdraw one.
+    /// The comparison, the writes and the delete MUST be one atomic step: a record with no index
+    /// is redeemable and out of reach of every revoke, and an index with no record gives a revoke
+    /// nothing to judge. Both entries carry `ttl_secs`.
     ///
-    /// `invitee_hash` arrives already derived — `hmac_sha256(email)`, hex — and goes into the
-    /// key verbatim. Implementations must NOT hash it again: the keyspace is shared
-    /// byte-for-byte with nest-auth. It is an HMAC rather than a plain digest because an
-    /// address is low-entropy, and a dump of the keyspace must not enumerate who a tenant has
-    /// been inviting.
-    async fn put_invitation_index(
+    /// The index is what makes an invitation manageable at all: the record is keyed by the hash
+    /// of a token only the invitee's mailbox ever held. `token_hash` is `sha256(token)` and
+    /// `invitee_hash` is `hmac_sha256(email)`, both hex, and both go into the keys verbatim: the
+    /// keyspace is shared byte-for-byte with nest-auth. The address is an HMAC rather than a
+    /// plain digest because it is low-entropy, and a dump of the keyspace must not enumerate who
+    /// a tenant has been inviting.
+    async fn publish_invitation(
         &self,
         tenant_id: &str,
         invitee_hash: &str,
         token_hash: &str,
+        invitation: &StoredInvitation,
         ttl_secs: u64,
-    ) -> Result<(), AuthError>;
-
-    /// Point the invitee index at `token_hash` only while it still holds exactly `expected`
-    /// (`None` meaning "no entry"), with the invitation's TTL; `true` when this call claimed it.
-    ///
-    /// A compare-and-swap, not a plain write: the caller read the index to decide whether it may
-    /// supersede what it names, and the decision only describes what was read. A claim that
-    /// proceeds regardless could displace an invitation that appeared in between, which the
-    /// caller was never shown to be allowed to destroy. `invitee_hash` is the derived
-    /// identifier — see [`Self::put_invitation_index`].
-    async fn claim_invitation_index(
-        &self,
-        tenant_id: &str,
-        invitee_hash: &str,
-        token_hash: &str,
-        ttl_secs: u64,
-        expected: Option<&str>,
+        superseded: Option<&str>,
     ) -> Result<bool, AuthError>;
 
+    /// Delete the record of `token_hash` and the invitee index together, only while the index
+    /// still holds `token_hash` and the record is still `judged` (`None` meaning "no record").
+    ///
+    /// The comparisons and the deletes MUST be one atomic step: the caller authorized the
+    /// removal of exactly what it read, and a failure must not leave one entry without the other.
+    /// `testing::invitation_index_scenarios` checks an implementation.
+    async fn withdraw_invitation(
+        &self,
+        tenant_id: &str,
+        invitee_hash: &str,
+        token_hash: &str,
+        judged: Option<&str>,
+    ) -> Result<InvitationWithdrawal, AuthError>;
+
     /// Read the token hash the invitee index points at, leaving the entry in place.
-    /// `invitee_hash` is the derived identifier — see [`Self::put_invitation_index`].
+    /// `invitee_hash` is the derived identifier — see [`Self::publish_invitation`].
     async fn read_invitation_index(
         &self,
         tenant_id: &str,
@@ -998,12 +991,11 @@ pub trait InvitationStore: Send + Sync {
     ) -> Result<Option<String>, AuthError>;
 
     /// Delete the invitee index entry only while it still holds `expected`; `true` when this call
-    /// deleted it.
+    /// deleted it. This is how an acceptance drops the entry of the record it consumed.
     ///
-    /// The comparison and the delete MUST be one atomic step. A revoke or an acceptance drops the
-    /// entry of the invitation it acted on, and a later invite can claim the index in between:
-    /// that entry is the only handle a revoke has on the newer record, so it has to stay.
-    /// `invitee_hash` is the derived identifier — see [`Self::put_invitation_index`].
+    /// The comparison and the delete MUST be one atomic step: a later invite can claim the index
+    /// in between, and that entry is the only handle a revoke has on the newer record.
+    /// `invitee_hash` is the derived identifier — see [`Self::publish_invitation`].
     /// `testing::invitation_index_scenarios` checks an implementation.
     async fn release_invitation_index(
         &self,
@@ -1012,15 +1004,20 @@ pub trait InvitationStore: Send + Sync {
         expected: &str,
     ) -> Result<bool, AuthError>;
 
-    /// Read an invitation by its stored token **hash**, without consuming it — the revocation
-    /// path, which reaches the record through the index rather than through a raw token.
-    async fn read_invitation_by_hash(
-        &self,
-        token_hash: &str,
-    ) -> Result<Option<StoredInvitation>, AuthError>;
+    /// Read the stored record of `inv:{token_hash}` without consuming it, as the exact text the
+    /// store holds: [`Self::withdraw_invitation`] compares it, so it must not be re-serialized.
+    async fn read_invitation_record(&self, token_hash: &str) -> Result<Option<String>, AuthError>;
+}
 
-    /// Delete an invitation by its stored token **hash**. `true` when a record was removed.
-    async fn delete_invitation_by_hash(&self, token_hash: &str) -> Result<bool, AuthError>;
+/// What [`InvitationStore::withdraw_invitation`] found.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum InvitationWithdrawal {
+    /// The record was deleted, and the index with it.
+    Removed,
+    /// There was no record, as the caller had read; only the index was dropped.
+    Absent,
+    /// The index or the record is no longer what the caller read, and nothing was deleted.
+    Changed,
 }
 
 /// The MFA storage seam: the AES-protected pending-setup record, the short-lived MFA

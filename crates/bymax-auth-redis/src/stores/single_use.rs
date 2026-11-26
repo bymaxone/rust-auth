@@ -6,7 +6,8 @@
 
 use async_trait::async_trait;
 use bymax_auth_core::traits::{
-    EmailChangeContext, InvitationStore, PasswordResetStore, ResetContext, StoredInvitation,
+    EmailChangeContext, InvitationStore, InvitationWithdrawal, PasswordResetStore, ResetContext,
+    StoredInvitation,
 };
 use bymax_auth_crypto::mac::sha256;
 use bymax_auth_types::AuthError;
@@ -34,51 +35,67 @@ impl RedisStores {
             .key(Prefix::Invidx, &format!("{tenant_id}:{invitee_hash}"))
     }
 
-    /// `SET invidx:{tenantId}:{hash} {token_hash} EX {ttl}`.
+    /// Store the record, point the invitee index at it and delete the superseded record, in one
+    /// script, only while the index holds exactly `superseded` (`None` for an absent entry).
     ///
     /// Split out, like every other command in this crate, so the redis failure converts through
     /// `?` rather than through a closure at the call site. A closure there is a region of its
     /// own that only a broken connection reaches, which is not something the suite can arrange.
-    async fn put_invitation_index_inner(
+    async fn publish_invitation_inner(
         &self,
         tenant_id: &str,
         invitee_hash: &str,
         token_hash: &str,
+        invitation: &StoredInvitation,
         ttl_secs: u64,
-    ) -> Result<(), RedisStoreError> {
-        let key = self.invitee_key(tenant_id, invitee_hash);
-        let mut conn = self.connection().await?;
-        redis::cmd("SET")
-            .arg(&key)
-            .arg(token_hash)
-            .arg("EX")
-            .arg(ttl_secs)
-            .query_async::<()>(&mut conn)
-            .await?;
-        Ok(())
-    }
-
-    /// Compare-and-set `invidx:{tenantId}:{hash}`: point it at `token_hash` only while it holds
-    /// exactly `expected` (`None` for an absent entry), in one script.
-    async fn claim_invitation_index_inner(
-        &self,
-        tenant_id: &str,
-        invitee_hash: &str,
-        token_hash: &str,
-        ttl_secs: u64,
-        expected: Option<&str>,
+        superseded: Option<&str>,
     ) -> Result<bool, RedisStoreError> {
-        let key = self.invitee_key(tenant_id, invitee_hash);
+        let index = self.invitee_key(tenant_id, invitee_hash);
+        let record = self.keys().key(Prefix::Inv, token_hash);
+        let replaced = self
+            .keys()
+            .key(Prefix::Inv, superseded.unwrap_or(token_hash));
+        let json = serde_json::to_string(invitation)?;
         let mut conn = self.connection().await?;
-        let claimed: i64 = script::CLAIM_INVITATION_INDEX
+        let stored: i64 = script::PUBLISH_INVITATION
             .prepare()
-            .key(&key)
+            .key(&index)
+            .key(&record)
+            .key(&replaced)
+            .arg(superseded.unwrap_or(""))
             .arg(token_hash)
+            .arg(&json)
             .arg(ttl_secs)
-            .arg(expected.unwrap_or(""))
             .invoke_async(&mut conn)
             .await?;
-        Ok(claimed == 1)
+        Ok(stored == 1)
+    }
+
+    /// Delete `inv:{token_hash}` and the invitee index, in one script, only while the index names
+    /// the hash and the record reads as `judged`.
+    async fn withdraw_invitation_inner(
+        &self,
+        tenant_id: &str,
+        invitee_hash: &str,
+        token_hash: &str,
+        judged: Option<&str>,
+    ) -> Result<InvitationWithdrawal, RedisStoreError> {
+        let index = self.invitee_key(tenant_id, invitee_hash);
+        let record = self.keys().key(Prefix::Inv, token_hash);
+        let mut conn = self.connection().await?;
+        let removed: i64 = script::WITHDRAW_INVITATION
+            .prepare()
+            .key(&index)
+            .key(&record)
+            .arg(token_hash)
+            .arg(judged.unwrap_or(""))
+            .invoke_async(&mut conn)
+            .await?;
+        Ok(match removed {
+            i64::MIN..0 => InvitationWithdrawal::Changed,
+            0 => InvitationWithdrawal::Absent,
+            _ => InvitationWithdrawal::Removed,
+        })
     }
 
     /// `GET invidx:{tenantId}:{hash}` — read the token hash, leaving the entry in place.
@@ -114,29 +131,15 @@ impl RedisStores {
         Ok(released == 1)
     }
 
-    /// `GET inv:{token_hash}` — read an invitation without consuming it.
-    ///
-    /// A record that no longer parses is answered as absent: the revocation path deletes it
-    /// either way, and it could not have been accepted either.
-    async fn read_invitation_by_hash_inner(
+    /// `GET inv:{token_hash}` — the stored text, without consuming it.
+    async fn read_invitation_record_inner(
         &self,
         token_hash: &str,
-    ) -> Result<Option<StoredInvitation>, RedisStoreError> {
+    ) -> Result<Option<String>, RedisStoreError> {
         let key = self.keys().key(Prefix::Inv, token_hash);
         let mut conn = self.connection().await?;
         let raw: Option<String> = redis::cmd("GET").arg(&key).query_async(&mut conn).await?;
-        Ok(raw.and_then(|json| serde_json::from_str(&json).ok()))
-    }
-
-    /// `DEL inv:{token_hash}` — returns whether a record was removed.
-    async fn delete_invitation_by_hash_inner(
-        &self,
-        token_hash: &str,
-    ) -> Result<bool, RedisStoreError> {
-        let key = self.keys().key(Prefix::Inv, token_hash);
-        let mut conn = self.connection().await?;
-        let removed: i64 = redis::cmd("DEL").arg(&key).query_async(&mut conn).await?;
-        Ok(removed > 0)
+        Ok(raw)
     }
 
     /// Store a JSON-serializable value under `prefix:{sha256(token)}` with a TTL.
@@ -257,44 +260,41 @@ impl PasswordResetStore for RedisStores {
 
 #[async_trait]
 impl InvitationStore for RedisStores {
-    async fn put_invitation(
-        &self,
-        token: &str,
-        invitation: &StoredInvitation,
-        ttl_secs: u64,
-    ) -> Result<(), AuthError> {
-        self.put_value(Prefix::Inv, token, invitation, ttl_secs)
-            .await
-            .map_err(AuthError::from)
-    }
-
     async fn consume_invitation(&self, token: &str) -> Result<Option<StoredInvitation>, AuthError> {
         self.consume_value(Prefix::Inv, token)
             .await
             .map_err(AuthError::from)
     }
 
-    async fn put_invitation_index(
+    async fn publish_invitation(
         &self,
         tenant_id: &str,
         invitee_hash: &str,
         token_hash: &str,
+        invitation: &StoredInvitation,
         ttl_secs: u64,
-    ) -> Result<(), AuthError> {
-        self.put_invitation_index_inner(tenant_id, invitee_hash, token_hash, ttl_secs)
-            .await
-            .map_err(AuthError::from)
+        superseded: Option<&str>,
+    ) -> Result<bool, AuthError> {
+        self.publish_invitation_inner(
+            tenant_id,
+            invitee_hash,
+            token_hash,
+            invitation,
+            ttl_secs,
+            superseded,
+        )
+        .await
+        .map_err(AuthError::from)
     }
 
-    async fn claim_invitation_index(
+    async fn withdraw_invitation(
         &self,
         tenant_id: &str,
         invitee_hash: &str,
         token_hash: &str,
-        ttl_secs: u64,
-        expected: Option<&str>,
-    ) -> Result<bool, AuthError> {
-        self.claim_invitation_index_inner(tenant_id, invitee_hash, token_hash, ttl_secs, expected)
+        judged: Option<&str>,
+    ) -> Result<InvitationWithdrawal, AuthError> {
+        self.withdraw_invitation_inner(tenant_id, invitee_hash, token_hash, judged)
             .await
             .map_err(AuthError::from)
     }
@@ -320,17 +320,8 @@ impl InvitationStore for RedisStores {
             .map_err(AuthError::from)
     }
 
-    async fn read_invitation_by_hash(
-        &self,
-        token_hash: &str,
-    ) -> Result<Option<StoredInvitation>, AuthError> {
-        self.read_invitation_by_hash_inner(token_hash)
-            .await
-            .map_err(AuthError::from)
-    }
-
-    async fn delete_invitation_by_hash(&self, token_hash: &str) -> Result<bool, AuthError> {
-        self.delete_invitation_by_hash_inner(token_hash)
+    async fn read_invitation_record(&self, token_hash: &str) -> Result<Option<String>, AuthError> {
+        self.read_invitation_record_inner(token_hash)
             .await
             .map_err(AuthError::from)
     }

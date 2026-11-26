@@ -820,7 +820,6 @@ A test (`crates/bymax-auth-core/tests/log_events.rs`) reads every crate's source
 | `RUST_AUTH_INVITATION_REVOKE_OUTRANKED` | warn | An invitation revocation was refused: the revoker is outranked |
 | `RUST_AUTH_INVITATION_SUPERSEDE_CONTENDED` | warn | A superseding invitation was refused: the pending one kept changing under the rank check |
 | `RUST_AUTH_INVITATION_SUPERSEDE_OUTRANKED` | warn | A superseding invitation was refused: it is outranked by the pending one |
-| `RUST_AUTH_INVITATION_UNCONFIRMED_WITHDRAW_FAILED` | warn | The record of an unconfirmed invitation could not be withdrawn |
 | `RUST_AUTH_INVITATION_WITHDRAWN` | info | An invitation was withdrawn |
 | `RUST_AUTH_LOGIN_ACCOUNT_LOCKED` | warn | A login was refused: the account is locked |
 | `RUST_AUTH_LOGIN_INVALID_CREDENTIALS` | warn | A login was refused: invalid credentials |

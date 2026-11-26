@@ -30,11 +30,13 @@ use bymax_auth_core::services::auth::{
 use bymax_auth_core::services::auth::{LoginInput, RegisterInput};
 use bymax_auth_core::testing::InMemoryUserRepository;
 use bymax_auth_core::traits::{
-    BruteForceStore, EmailChangeContext, InvitationStore, OtpPurpose, OtpStore, PasswordResetStore,
-    ResetContext, RotateOutcome, SessionKind, SessionRecord, SessionRotation, SessionStore,
-    StoredInvitation, UserRepository, WsTicketSnapshot, WsTicketStore,
+    BruteForceStore, EmailChangeContext, InvitationStore, InvitationWithdrawal, OtpPurpose,
+    OtpStore, PasswordResetStore, ResetContext, RotateOutcome, SessionKind, SessionRecord,
+    SessionRotation, SessionStore, StoredInvitation, UserRepository, WsTicketSnapshot,
+    WsTicketStore,
 };
 use bymax_auth_core::{AuthConfig, AuthEngine, Environment};
+use bymax_auth_redis::RedisStores;
 use bymax_auth_types::{AuthError, LoginResult};
 use secrecy::SecretString;
 use time::OffsetDateTime;
@@ -49,6 +51,22 @@ fn token_hash(token: &str) -> String {
         .iter()
         .map(|byte| format!("{byte:02x}"))
         .collect()
+}
+
+/// Store `invitation` as the record of `token`, under an index slot of its own.
+async fn publish(stores: &RedisStores, token: &str, invitation: &StoredInvitation) -> bool {
+    let hash = token_hash(token);
+    let published = stores
+        .publish_invitation(
+            &invitation.tenant_id,
+            &hash,
+            &hash,
+            invitation,
+            604_800,
+            None,
+        )
+        .await;
+    matches!(published, Ok(true))
 }
 
 /// The session-index / token-epoch key suffix a store-level test seeds an account under.
@@ -1499,22 +1517,14 @@ async fn keys_are_namespaced_no_pii_and_carry_a_ttl() {
             .await
             .is_ok()
     );
-    assert!(
-        stores
-            .put_invitation(
-                "invite-token-secret",
-                &StoredInvitation {
-                    email: "invitee@example.com".to_owned(),
-                    role: "MEMBER".to_owned(),
-                    tenant_id: "t1".to_owned(),
-                    inviter_user_id: "user-42".to_owned(),
-                    created_at: OffsetDateTime::UNIX_EPOCH,
-                },
-                604800,
-            )
-            .await
-            .is_ok()
-    );
+    let invitation = StoredInvitation {
+        email: "invitee@example.com".to_owned(),
+        role: "MEMBER".to_owned(),
+        tenant_id: "t1".to_owned(),
+        inviter_user_id: "user-42".to_owned(),
+        created_at: OffsetDateTime::UNIX_EPOCH,
+    };
+    assert!(publish(&stores, "invite-token-secret", &invitation).await);
     let minted = stores.mint(&snapshot(), 30).await;
     let Ok(ticket) = minted else { return };
 
@@ -1524,7 +1534,7 @@ async fn keys_are_namespaced_no_pii_and_carry_a_ttl() {
     // passing silently, so adding a keyspace forces a deliberate decision here.
     let allowed = [
         "rt", "rv", "ep", "pep", "rp", "cf", "fam", "sess", "sd", "lf", "otp", "resend", "wst",
-        "pw_reset", "pw_vtok", "inv", "prt", "prp", "pcf", "pfam", "psess", "psd",
+        "pw_reset", "pw_vtok", "inv", "invidx", "prt", "prp", "pcf", "pfam", "psess", "psd",
     ];
     for key in &keys {
         // Namespaced under the configured prefix, applied in exactly one place.
@@ -1594,12 +1604,7 @@ async fn password_reset_and_invitation_stores_are_single_use_via_getdel() {
         inviter_user_id: "owner".to_owned(),
         created_at: OffsetDateTime::UNIX_EPOCH,
     };
-    assert!(
-        stores
-            .put_invitation("inv-secret", &invitation, 604800)
-            .await
-            .is_ok()
-    );
+    assert!(publish(&stores, "inv-secret", &invitation).await);
     assert!(matches!(
         stores.consume_invitation("inv-secret").await,
         Ok(Some(i)) if i.role == "MEMBER"
@@ -1638,18 +1643,19 @@ async fn the_invitee_index_is_the_only_handle_on_a_pending_invitation() {
         created_at: OffsetDateTime::UNIX_EPOCH,
     };
     let hash = token_hash("inv-secret");
-    assert!(
+    assert!(matches!(
         stores
-            .put_invitation("inv-secret", &invitation, 604_800)
-            .await
-            .is_ok()
-    );
-    assert!(
-        stores
-            .put_invitation_index("t1", "invitee@example.com", &hash, 604_800)
-            .await
-            .is_ok()
-    );
+            .publish_invitation(
+                "t1",
+                "invitee@example.com",
+                &hash,
+                &invitation,
+                604_800,
+                None
+            )
+            .await,
+        Ok(true)
+    ));
 
     // The index points at the record, and the record reads back through the hash it points at
     // — the two halves of the only path a withdrawal has.
@@ -1657,9 +1663,11 @@ async fn the_invitee_index_is_the_only_handle_on_a_pending_invitation() {
         stores.read_invitation_index("t1", "invitee@example.com").await,
         Ok(Some(h)) if h == hash
     ));
+    let stored = stores.read_invitation_record(&hash).await;
     assert!(matches!(
-        stores.read_invitation_by_hash(&hash).await,
-        Ok(Some(i)) if i.role == "MEMBER" && i.email == "invitee@example.com"
+        &stored,
+        Ok(Some(json)) if json.contains(r#""role":"MEMBER""#)
+            && json.contains(r#""email":"invitee@example.com""#)
     ));
 
     // The key is derived from BOTH the tenant and the address. A key that ignored either
@@ -1682,12 +1690,6 @@ async fn the_invitee_index_is_the_only_handle_on_a_pending_invitation() {
     // holds. The shared scenarios cover the refusals.
     assert!(matches!(
         stores
-            .read_invitation_index("t1", "invitee@example.com")
-            .await,
-        Ok(Some(_))
-    ));
-    assert!(matches!(
-        stores
             .release_invitation_index("t1", "invitee@example.com", &hash)
             .await,
         Ok(true)
@@ -1698,26 +1700,10 @@ async fn the_invitee_index_is_the_only_handle_on_a_pending_invitation() {
             .await,
         Ok(false)
     ));
-
-    // Deleting by hash reports whether THIS call removed the record. The second call finds
-    // nothing: a withdrawal that reported success over an already-accepted invitation would
-    // tell an operator the link was live when it was already spent.
-    assert!(matches!(
-        stores.delete_invitation_by_hash(&hash).await,
-        Ok(true)
-    ));
-    assert!(matches!(
-        stores.delete_invitation_by_hash(&hash).await,
-        Ok(false)
-    ));
-    // …and the record is gone for the accept path too.
-    assert!(matches!(
-        stores.read_invitation_by_hash(&hash).await,
-        Ok(None)
-    ));
+    // The record is untouched by the release and still redeemable.
     assert!(matches!(
         stores.consume_invitation("inv-secret").await,
-        Ok(None)
+        Ok(Some(_))
     ));
 }
 
@@ -1773,28 +1759,33 @@ async fn a_pending_address_change_round_trips_and_is_consumed_once() {
 }
 
 #[tokio::test]
-async fn a_stored_invitation_that_no_longer_parses_reads_as_absent() {
+async fn a_stored_invitation_that_no_longer_parses_can_still_be_withdrawn() {
     // The revocation path reaches the record through the index rather than through a token, so
-    // it can meet a value the accept path never would. A corrupted record answers `None` — the
-    // withdrawal then removes it without a role check, which is the right end state: it could
-    // not have been accepted either, and leaving it indexed would be worse.
+    // it can meet a value the accept path never would. The raw text is what the withdrawal
+    // compares, so a corrupted record is removable rather than sitting there for its whole TTL.
     let Some(redis) = common::try_start().await else {
         return;
     };
     let Some(stores) = redis.stores() else {
         return;
     };
-
-    assert!(redis.set_raw("auth:inv:deadbeef", r#"{"nope":true}"#).await);
+    let raw = r#"{"nope":true}"#;
+    assert!(redis.set_raw("auth:inv:deadbeef", raw).await);
+    assert!(redis.set_raw("auth:invidx:t1:cafe", "deadbeef").await);
 
     assert!(matches!(
-        stores.read_invitation_by_hash("deadbeef").await,
-        Ok(None)
+        stores.read_invitation_record("deadbeef").await,
+        Ok(Some(read)) if read == raw
     ));
-    // …and it is still deletable, or the corrupted record would sit there for its whole TTL.
     assert!(matches!(
-        stores.delete_invitation_by_hash("deadbeef").await,
-        Ok(true)
+        stores
+            .withdraw_invitation("t1", "cafe", "deadbeef", Some(raw))
+            .await,
+        Ok(InvitationWithdrawal::Removed)
+    ));
+    assert!(matches!(
+        stores.read_invitation_record("deadbeef").await,
+        Ok(None)
     ));
 }
 
@@ -2241,22 +2232,14 @@ async fn engine_runs_invitation_accept_against_redis() {
     );
 
     // The raw token is opaque, so plant a known invitation under `inv:` and accept it.
-    assert!(
-        stores
-            .put_invitation(
-                "known-invite-token",
-                &StoredInvitation {
-                    email: "invitee@example.com".to_owned(),
-                    role: "MEMBER".to_owned(),
-                    tenant_id: "t1".to_owned(),
-                    inviter_user_id: admin.id.clone(),
-                    created_at: OffsetDateTime::UNIX_EPOCH,
-                },
-                604800,
-            )
-            .await
-            .is_ok()
-    );
+    let planted = StoredInvitation {
+        email: "invitee@example.com".to_owned(),
+        role: "MEMBER".to_owned(),
+        tenant_id: "t1".to_owned(),
+        inviter_user_id: admin.id.clone(),
+        created_at: OffsetDateTime::UNIX_EPOCH,
+    };
+    assert!(publish(&stores, "known-invite-token", &planted).await);
     let accepted = engine
         .accept_invitation(
             AcceptInvitationInput {

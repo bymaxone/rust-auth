@@ -1,12 +1,12 @@
 //! Re-inviting an address: the caller must outrank the pending invitation they would destroy,
-//! and the claim is a compare-and-swap against the invitation that rank check approved.
+//! and the publication is a compare-and-swap against the invitation that rank check approved.
 
 use std::sync::Mutex;
 
 use async_trait::async_trait;
 
 use super::*;
-use crate::traits::InvitationStore;
+use crate::traits::{InvitationStore, InvitationWithdrawal};
 
 const PENDING_EMAIL: &str = "bob@example.com";
 
@@ -22,7 +22,7 @@ async fn indexed(s: &Setup) -> Option<String> {
 /// Whether a record still exists under the hash.
 async fn record_exists(s: &Setup, hash: &str) -> bool {
     s.stores
-        .read_invitation_by_hash(hash)
+        .read_invitation_record(hash)
         .await
         .map(|found| found.is_some())
         .unwrap_or(false)
@@ -103,59 +103,84 @@ async fn an_inviter_who_outranks_the_pending_invitation_replaces_it() {
     assert_eq!(s.stores.invitation_record_count(), 1);
 }
 
-/// A store that runs `moves` against the shared index immediately before each claim, standing in
-/// for another inviter writing between the rank check and the claim.
+/// A pending invitation granting `role`.
+fn pending_record(role: &str) -> StoredInvitation {
+    StoredInvitation {
+        email: PENDING_EMAIL.to_owned(),
+        role: role.to_owned(),
+        tenant_id: "t1".to_owned(),
+        inviter_user_id: "someone".to_owned(),
+        created_at: OffsetDateTime::UNIX_EPOCH,
+    }
+}
+
+/// A store that publishes the next of `moves` over the address immediately before each of the
+/// caller's publications, standing in for another inviter writing between the rank check and the
+/// write.
 struct Racing {
     inner: Arc<InMemoryStores>,
-    tenant: String,
-    invitee: String,
-    moves: Mutex<Vec<String>>,
+    moves: Mutex<Vec<(String, StoredInvitation)>>,
+    fail_publish: bool,
 }
 
 #[async_trait]
 impl InvitationStore for Racing {
-    async fn put_invitation(
-        &self,
-        token: &str,
-        invitation: &StoredInvitation,
-        ttl_secs: u64,
-    ) -> Result<(), AuthError> {
-        self.inner.put_invitation(token, invitation, ttl_secs).await
-    }
     async fn consume_invitation(&self, token: &str) -> Result<Option<StoredInvitation>, AuthError> {
         self.inner.consume_invitation(token).await
     }
-    async fn put_invitation_index(
+    async fn publish_invitation(
         &self,
         tenant_id: &str,
         invitee_hash: &str,
         token_hash: &str,
+        invitation: &StoredInvitation,
         ttl_secs: u64,
-    ) -> Result<(), AuthError> {
-        self.inner
-            .put_invitation_index(tenant_id, invitee_hash, token_hash, ttl_secs)
-            .await
-    }
-    async fn claim_invitation_index(
-        &self,
-        tenant_id: &str,
-        invitee_hash: &str,
-        token_hash: &str,
-        ttl_secs: u64,
-        expected: Option<&str>,
+        superseded: Option<&str>,
     ) -> Result<bool, AuthError> {
+        if self.fail_publish {
+            return Err(crate::services::internal_error("publish failed"));
+        }
         let next = self
             .moves
             .lock()
             .ok()
             .and_then(|mut m| (!m.is_empty()).then(|| m.remove(0)));
-        if let Some(next) = next {
+        if let Some((hash, record)) = next {
+            let held = self
+                .inner
+                .read_invitation_index(tenant_id, invitee_hash)
+                .await?;
             self.inner
-                .put_invitation_index(&self.tenant, &self.invitee, &next, ttl_secs)
+                .publish_invitation(
+                    tenant_id,
+                    invitee_hash,
+                    &hash,
+                    &record,
+                    ttl_secs,
+                    held.as_deref(),
+                )
                 .await?;
         }
         self.inner
-            .claim_invitation_index(tenant_id, invitee_hash, token_hash, ttl_secs, expected)
+            .publish_invitation(
+                tenant_id,
+                invitee_hash,
+                token_hash,
+                invitation,
+                ttl_secs,
+                superseded,
+            )
+            .await
+    }
+    async fn withdraw_invitation(
+        &self,
+        tenant_id: &str,
+        invitee_hash: &str,
+        token_hash: &str,
+        judged: Option<&str>,
+    ) -> Result<InvitationWithdrawal, AuthError> {
+        self.inner
+            .withdraw_invitation(tenant_id, invitee_hash, token_hash, judged)
             .await
     }
     async fn read_invitation_index(
@@ -177,67 +202,44 @@ impl InvitationStore for Racing {
             .release_invitation_index(tenant_id, invitee_hash, expected)
             .await
     }
-    async fn read_invitation_by_hash(
-        &self,
-        token_hash: &str,
-    ) -> Result<Option<StoredInvitation>, AuthError> {
-        self.inner.read_invitation_by_hash(token_hash).await
-    }
-    async fn delete_invitation_by_hash(&self, token_hash: &str) -> Result<bool, AuthError> {
-        self.inner.delete_invitation_by_hash(token_hash).await
+    async fn read_invitation_record(&self, token_hash: &str) -> Result<Option<String>, AuthError> {
+        self.inner.read_invitation_record(token_hash).await
     }
 }
 
-/// An engine whose invitation store races the claim with the given index values.
-fn racing_setup(moves: Vec<String>) -> Option<(Setup, Arc<Racing>)> {
+/// An engine whose invitation store races or fails the publication.
+fn racing_setup(moves: Vec<(String, StoredInvitation)>, fail_publish: bool) -> Option<Setup> {
     let s = setup(invite_config())?;
     let racing = Arc::new(Racing {
         inner: s.stores.clone(),
-        tenant: "t1".to_owned(),
-        invitee: s.engine.invitee_identifier(PENDING_EMAIL),
         moves: Mutex::new(moves),
+        fail_publish,
     });
     let engine = AuthEngine::builder()
         .config(invite_config())
         .environment(Environment::Test)
         .user_repository(s.users.clone())
         .redis_stores(s.stores.clone())
-        .invitation_store(racing.clone())
+        .invitation_store(racing)
         .build()
         .ok()?;
-    Some((Setup { engine, ..s }, racing))
+    Some(Setup { engine, ..s })
 }
 
 #[tokio::test]
-async fn an_invitation_that_appears_between_the_check_and_the_claim_is_not_displaced_by_an_outranked_caller()
+async fn an_invitation_that_appears_between_the_check_and_the_write_is_not_displaced_by_an_outranked_caller()
  {
     // The member's first rank check sees an empty index and approves "nothing pending". An
-    // ADMIN invitation lands before the claim, so the claim must fail rather than overwrite it,
-    // and the retry must re-derive the approval against the ADMIN record and refuse.
-    let Some((s, racing)) = racing_setup(Vec::new()) else { return };
-    let (admin, member) = seed_inviters(&s).await;
-    // An ADMIN invitation for another address, whose index entry the race will copy onto the
-    // contested address.
-    assert!(
-        s.engine
-            .invite(&admin, "other@example.com", "ADMIN", "t1", None)
-            .await
-            .is_ok()
-    );
-    let admin_hash = s
-        .stores
-        .read_invitation_index("t1", &s.engine.invitee_identifier("other@example.com"))
-        .await
-        .unwrap_or_default();
-    let Some(admin_hash) = admin_hash else { return };
-    if let Ok(mut moves) = racing.moves.lock() {
-        moves.push(admin_hash.clone());
-    }
-    let member_id = member;
+    // ADMIN invitation lands before the publication, so it must be refused by the store, and the
+    // retry must re-derive the approval against the ADMIN record and refuse.
+    let admin_hash = "a".repeat(64);
+    let moves = vec![(admin_hash.clone(), pending_record("ADMIN"))];
+    let Some(s) = racing_setup(moves, false) else { return };
+    let member = seed_admin(&s.users, "member@example.com", "MEMBER").await;
 
     let refused = s
         .engine
-        .invite(&member_id, PENDING_EMAIL, "MEMBER", "t1", None)
+        .invite(&member, PENDING_EMAIL, "MEMBER", "t1", None)
         .await;
     assert!(
         matches!(refused, Err(AuthError::InsufficientRole)),
@@ -245,14 +247,17 @@ async fn an_invitation_that_appears_between_the_check_and_the_claim_is_not_displ
     );
     assert_eq!(indexed(&s).await.as_deref(), Some(admin_hash.as_str()));
     assert!(record_exists(&s, &admin_hash).await);
+    assert_eq!(s.stores.invitation_record_count(), 1);
 }
 
 #[tokio::test]
 async fn an_index_that_keeps_moving_exhausts_the_retries_and_is_refused() {
-    // Three claims, three concurrent writes: the caller was never shown to be allowed to destroy
-    // whatever is there now, so the answer is a refusal, not an unbounded loop.
-    let hashes: Vec<String> = (0..3).map(|n| format!("{n:064x}")).collect();
-    let Some((s, _racing)) = racing_setup(hashes) else { return };
+    // Three publications, three concurrent writes: the caller was never shown to be allowed to
+    // destroy whatever is there now, so the answer is a refusal, not an unbounded loop.
+    let moves = (0..3)
+        .map(|n| (format!("{n:064x}"), pending_record("MEMBER")))
+        .collect();
+    let Some(s) = racing_setup(moves, false) else { return };
     let admin = seed_admin(&s.users, "admin3@example.com", "ADMIN").await;
 
     let (events, capture) = crate::log_capture::capture_events();
@@ -266,291 +271,24 @@ async fn an_index_that_keeps_moving_exhausts_the_retries_and_is_refused() {
         "{refused:?}"
     );
     assert!(events.contains_at(tracing::Level::WARN, "kept changing under the rank check"));
-}
-
-/// Drops whatever the index names, as a revoke by another caller would.
-async fn drop_index(store: &InMemoryStores, tenant: &str, invitee: &str) -> Result<(), AuthError> {
-    if let Some(held) = store.read_invitation_index(tenant, invitee).await? {
-        store
-            .release_invitation_index(tenant, invitee, &held)
-            .await?;
-    }
-    Ok(())
-}
-
-/// A store that withdraws the index just before the record is written, standing in for a
-/// revoke that lands between the claim and the write.
-struct RevokedMidInvite {
-    inner: Arc<InMemoryStores>,
-    tenant: String,
-    invitee: String,
-}
-
-#[async_trait]
-impl InvitationStore for RevokedMidInvite {
-    async fn put_invitation(
-        &self,
-        token: &str,
-        invitation: &StoredInvitation,
-        ttl_secs: u64,
-    ) -> Result<(), AuthError> {
-        drop_index(&self.inner, &self.tenant, &self.invitee).await?;
-        self.inner.put_invitation(token, invitation, ttl_secs).await
-    }
-    async fn consume_invitation(&self, token: &str) -> Result<Option<StoredInvitation>, AuthError> {
-        self.inner.consume_invitation(token).await
-    }
-    async fn put_invitation_index(
-        &self,
-        tenant_id: &str,
-        invitee_hash: &str,
-        token_hash: &str,
-        ttl_secs: u64,
-    ) -> Result<(), AuthError> {
-        self.inner
-            .put_invitation_index(tenant_id, invitee_hash, token_hash, ttl_secs)
-            .await
-    }
-    async fn claim_invitation_index(
-        &self,
-        tenant_id: &str,
-        invitee_hash: &str,
-        token_hash: &str,
-        ttl_secs: u64,
-        expected: Option<&str>,
-    ) -> Result<bool, AuthError> {
-        self.inner
-            .claim_invitation_index(tenant_id, invitee_hash, token_hash, ttl_secs, expected)
-            .await
-    }
-    async fn read_invitation_index(
-        &self,
-        tenant_id: &str,
-        invitee_hash: &str,
-    ) -> Result<Option<String>, AuthError> {
-        self.inner
-            .read_invitation_index(tenant_id, invitee_hash)
-            .await
-    }
-    async fn release_invitation_index(
-        &self,
-        tenant_id: &str,
-        invitee_hash: &str,
-        expected: &str,
-    ) -> Result<bool, AuthError> {
-        self.inner
-            .release_invitation_index(tenant_id, invitee_hash, expected)
-            .await
-    }
-    async fn read_invitation_by_hash(
-        &self,
-        token_hash: &str,
-    ) -> Result<Option<StoredInvitation>, AuthError> {
-        self.inner.read_invitation_by_hash(token_hash).await
-    }
-    async fn delete_invitation_by_hash(&self, token_hash: &str) -> Result<bool, AuthError> {
-        self.inner.delete_invitation_by_hash(token_hash).await
-    }
+    // Only the last concurrent invitation is left.
+    assert_eq!(indexed(&s).await, Some(format!("{:064x}", 2)));
+    assert_eq!(s.stores.invitation_record_count(), 1);
 }
 
 #[tokio::test]
-async fn an_invite_whose_index_is_withdrawn_before_its_record_lands_leaves_no_live_token() {
-    // A revoke that reads the freshly claimed index, finds no record yet and removes the index
-    // would leave the record that lands next redeemable with nothing naming it: no later revoke
-    // could reach it, but accept would still honour the token. The invite checks the index again
-    // after the write and withdraws its own record when the address changed under it.
-    let Some(base) = setup(invite_config()) else { return };
-    let store = Arc::new(RevokedMidInvite {
-        inner: base.stores.clone(),
-        tenant: "t1".to_owned(),
-        invitee: base.engine.invitee_identifier(PENDING_EMAIL),
-    });
-    let built = AuthEngine::builder()
-        .config(invite_config())
-        .environment(Environment::Test)
-        .user_repository(base.users.clone())
-        .redis_stores(base.stores.clone())
-        .invitation_store(store)
-        .build();
-    assert!(built.is_ok());
-    let Ok(engine) = built else { return };
-    let admin = seed_admin(&base.users, "admin4@example.com", "ADMIN").await;
+async fn a_store_error_while_publishing_is_surfaced_and_leaves_nothing_behind() {
+    let Some(s) = racing_setup(Vec::new(), true) else { return };
+    let admin = seed_admin(&s.users, "admin5@example.com", "ADMIN").await;
 
-    let refused = engine
+    let outcome = s
+        .engine
         .invite(&admin, PENDING_EMAIL, "MEMBER", "t1", None)
         .await;
-    assert!(
-        matches!(refused, Err(AuthError::InsufficientRole)),
-        "{refused:?}"
-    );
-    // Nothing is left redeemable: the index is gone and no record survives under any hash.
-    assert!(indexed(&base).await.is_none());
-    assert_eq!(base.stores.invitation_record_count(), 0);
-}
-
-/// A store whose confirmation or cleanup can be made to fail, or whose index is withdrawn just
-/// before the record lands, to exercise the paths after the record is written.
-struct Faulty {
-    inner: Arc<InMemoryStores>,
-    tenant: String,
-    invitee: String,
-    fail_confirm: bool,
-    withdraw_index: bool,
-    fail_delete: bool,
-}
-
-fn store_down() -> AuthError {
-    AuthError::Internal(Box::new(std::io::Error::other("store unavailable")))
-}
-
-#[async_trait]
-impl InvitationStore for Faulty {
-    async fn put_invitation(
-        &self,
-        token: &str,
-        invitation: &StoredInvitation,
-        ttl_secs: u64,
-    ) -> Result<(), AuthError> {
-        if self.withdraw_index {
-            drop_index(&self.inner, &self.tenant, &self.invitee).await?;
-        }
-        self.inner.put_invitation(token, invitation, ttl_secs).await
-    }
-    async fn consume_invitation(&self, token: &str) -> Result<Option<StoredInvitation>, AuthError> {
-        self.inner.consume_invitation(token).await
-    }
-    async fn put_invitation_index(
-        &self,
-        tenant_id: &str,
-        invitee_hash: &str,
-        token_hash: &str,
-        ttl_secs: u64,
-    ) -> Result<(), AuthError> {
-        self.inner
-            .put_invitation_index(tenant_id, invitee_hash, token_hash, ttl_secs)
-            .await
-    }
-    async fn claim_invitation_index(
-        &self,
-        tenant_id: &str,
-        invitee_hash: &str,
-        token_hash: &str,
-        ttl_secs: u64,
-        expected: Option<&str>,
-    ) -> Result<bool, AuthError> {
-        if self.fail_confirm && expected == Some(token_hash) {
-            return Err(store_down());
-        }
-        self.inner
-            .claim_invitation_index(tenant_id, invitee_hash, token_hash, ttl_secs, expected)
-            .await
-    }
-    async fn read_invitation_index(
-        &self,
-        tenant_id: &str,
-        invitee_hash: &str,
-    ) -> Result<Option<String>, AuthError> {
-        self.inner
-            .read_invitation_index(tenant_id, invitee_hash)
-            .await
-    }
-    async fn release_invitation_index(
-        &self,
-        tenant_id: &str,
-        invitee_hash: &str,
-        expected: &str,
-    ) -> Result<bool, AuthError> {
-        self.inner
-            .release_invitation_index(tenant_id, invitee_hash, expected)
-            .await
-    }
-    async fn read_invitation_by_hash(
-        &self,
-        token_hash: &str,
-    ) -> Result<Option<StoredInvitation>, AuthError> {
-        self.inner.read_invitation_by_hash(token_hash).await
-    }
-    async fn delete_invitation_by_hash(&self, token_hash: &str) -> Result<bool, AuthError> {
-        if self.fail_delete {
-            return Err(store_down());
-        }
-        self.inner.delete_invitation_by_hash(token_hash).await
-    }
-}
-
-/// An invite through a [`Faulty`] store: the outcome, the events logged, and the base setup.
-async fn invite_through(
-    fail_confirm: bool,
-    withdraw_index: bool,
-    fail_delete: bool,
-) -> Option<(
-    Result<(), AuthError>,
-    crate::log_capture::CapturedEvents,
-    Setup,
-)> {
-    let base = setup(invite_config())?;
-    let store = Arc::new(Faulty {
-        inner: base.stores.clone(),
-        tenant: "t1".to_owned(),
-        invitee: base.engine.invitee_identifier(PENDING_EMAIL),
-        fail_confirm,
-        withdraw_index,
-        fail_delete,
-    });
-    let built = AuthEngine::builder()
-        .config(invite_config())
-        .environment(Environment::Test)
-        .user_repository(base.users.clone())
-        .redis_stores(base.stores.clone())
-        .invitation_store(store)
-        .build();
-    assert!(built.is_ok());
-    let engine = built.ok()?;
-    let admin = seed_admin(&base.users, "admin5@example.com", "ADMIN").await;
-    let (events, capture) = crate::log_capture::capture_events();
-    let outcome = engine
-        .invite(&admin, PENDING_EMAIL, "MEMBER", "t1", None)
-        .await;
-    drop(capture);
-    Some((outcome, events, base))
-}
-
-#[tokio::test]
-async fn a_store_error_while_confirming_the_claim_withdraws_the_record_and_surfaces_it() {
-    // The record is already written when the confirmation fails; propagating the error without
-    // removing it would leave a redeemable token that nothing names.
-    let Some((outcome, _events, base)) = invite_through(true, false, false).await else {
-        return;
-    };
     assert!(
         matches!(outcome, Err(AuthError::Internal(_))),
         "{outcome:?}"
     );
-    assert_eq!(base.stores.invitation_record_count(), 0);
-}
-
-#[tokio::test]
-async fn a_failing_cleanup_does_not_replace_the_refusal_and_is_logged() {
-    // The index moved, so the invite is refused with `InsufficientRole`; the withdrawal that
-    // follows failing must not turn that into a store error.
-    let Some((outcome, events, _base)) = invite_through(false, true, true).await else {
-        return;
-    };
-    assert!(
-        matches!(outcome, Err(AuthError::InsufficientRole)),
-        "{outcome:?}"
-    );
-    assert!(events.contains_at(tracing::Level::WARN, "could not withdraw the record"));
-}
-
-#[tokio::test]
-async fn a_failing_cleanup_does_not_replace_a_store_error_either() {
-    let Some((outcome, events, _base)) = invite_through(true, false, true).await else {
-        return;
-    };
-    assert!(
-        matches!(outcome, Err(AuthError::Internal(_))),
-        "{outcome:?}"
-    );
-    assert!(events.contains_at(tracing::Level::WARN, "could not withdraw the record"));
+    assert_eq!(indexed(&s).await, None);
+    assert_eq!(s.stores.invitation_record_count(), 0);
 }

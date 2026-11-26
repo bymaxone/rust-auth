@@ -28,19 +28,14 @@ async fn accept_with_an_otherwise_valid_inviter(
         // a different variant.
         .map_err(|_| AuthError::InsufficientRole)?;
     let token = format!("{}{slot}", "d".repeat(63));
-    s.stores
-        .put_invitation(
-            &token,
-            &StoredInvitation {
-                email: email.to_owned(),
-                role: role.to_owned(),
-                tenant_id: tenant_id.to_owned(),
-                inviter_user_id: created.id,
-                created_at: OffsetDateTime::UNIX_EPOCH,
-            },
-            600,
-        )
-        .await?;
+    let invitation = StoredInvitation {
+        email: email.to_owned(),
+        role: role.to_owned(),
+        tenant_id: tenant_id.to_owned(),
+        inviter_user_id: created.id,
+        created_at: OffsetDateTime::UNIX_EPOCH,
+    };
+    put_record(&s.stores, &token, &invitation).await?;
     s.engine
         .accept_invitation(
             AcceptInvitationInput {

@@ -2542,7 +2542,7 @@ Stored payload `StoredInvitation { email, role, tenant_id, inviter_user_id, crea
 2. If `role` is not a key in `config.roles.hierarchy`, `InsufficientRole` (403).
 3. `find_by_id(inviter_user_id, Some(tenant_id))`; `None` → `TokenInvalid`.
 4. `has_role(inviter.role, role, &hierarchy)` — the inviter must hold a role ≥ the invited role; else `InsufficientRole` (403).
-5. `raw = generate_secure_token(32)` (64 hex). Supersede any pending invitation for the address: read the invitee index, and when a pending invitation names it, require `has_role(inviter.role, pending.role, &hierarchy)` (a record that cannot be read is superseded without the check) or fail `InsufficientRole`. Then claim the index with a compare-and-set against the hash that check approved (`claim_invitation_index`); if the index moved, re-derive the approval a bounded number of times, then `InsufficientRole`. Delete the displaced record, then store `StoredInvitation` under `inv:{sha256(raw)}` with the TTL, and renew the index's TTL with a compare-and-set against this invitation's hash: if the index no longer names it (a revoke or a later invite moved it), delete the record just written and fail `InsufficientRole`, so no redeemable token is left that nothing names. The index is claimed first because it is the serialization point: a crash before the record is written leaves an index naming nothing, an invitation that is simply dead.
+5. `raw = generate_secure_token(32)` (64 hex). Supersede any pending invitation for the address: read the invitee index, and when a pending invitation names it, require `has_role(inviter.role, pending.role, &hierarchy)` (a record that cannot be read is superseded without the check) or fail `InsufficientRole`. Then publish (`publish_invitation`, §12.5.8): in one step, and only while the index still holds the hash that check approved, store `StoredInvitation` under `inv:{sha256(raw)}`, point the index at it, both with the TTL, and delete the displaced record. If the index differs, re-derive the approval a bounded number of times, then `InsufficientRole`.
 6. `email.send_invitation(email, InviteData { inviter_name, tenant_name: tenant_name.unwrap_or(tenant_id), invite_token: raw, expires_at })`. The raw token is **not** logged; the email provider builds the accept URL. A send failure is reported, not swallowed: `invite` returns `AuthError::Internal` with a fixed description (the adapter answers `500 auth.internal` with the generic body) and logs one fixed line, with nothing the mail channel wrote in the error, its source chain or the log, because a relay can quote the body it rejected and that body carries the raw token. The stored invitation stays, since the email may have been delivered despite the error; inviting the address again supersedes it (step 5). The shipped `DefaultAuthEmailProvider` applies `DeliveryErrorPolicy::Swallow` by default, so with it the provider reports success and `invite` sees no failure; the `500` appears with a custom provider or the `Rethrow` policy.
 
 `accept_invitation`:
@@ -3062,12 +3062,11 @@ their ordering reproduces the NestJS guard pipeline.
 > for which addresses have invitations, which is exactly what hashing the address in the
 > `invidx:` index avoids disclosing.
 >
-> The revoke reads the index and refuses (silently, logged) when the record outranks the caller.
-> A record that is there is deleted and the index then released; an index that names no record
-> is released first and the delete follows, so an invite about to write it cannot confirm. The
-> release removes the index only while it still names that invitation (§12.5.8). When it finds
-> the index naming something else, the revoke starts again from the read; when its attempts run
-> out it answers `429 auth.too_many_requests`.
+> The revoke reads the index and the record and refuses (silently, logged) when the record outranks
+> the caller; a record that cannot be read is withdrawn without the check. It then deletes the
+> record and the index in one step (`withdraw_invitation`, §12.5.8), only while both are still what
+> it read. When either differs, the revoke starts again from the read; when its attempts run out it
+> answers `429 auth.too_many_requests`.
 
 #### 8.2.9 WorkspaceController — group `workspaces` (`controllers.workspaces`)
 
@@ -5247,7 +5246,7 @@ preimage and the full list of keys derived from it are pinned by `conformance/wi
 | `rcu` | `auth:rcu:{hmac_sha256(hmacKey, userSubject + ":" + code)}` | `"1"` (`SET NX`) | 300 s | Single-use claim on an MFA recovery code, keyed like `tu`. Serializes two attempts at the *same* code for the span of a repository write; the durable record of consumption is the repository, so the claim is deliberately short-lived. |
 | `ra` | `auth:ra:{hmac_sha256(hmacKey, userSubject)}` | `"1"` | 300 s | Recent-authentication marker. Planted only where a credential was actually proved (login, MFA challenge, OAuth callback, registration) — never on a refresh rotation, which proves a token rather than a credential, and never on password-less issuance — and read with `EXISTS`, never consumed. Gates enrolling MFA on an account with no local password to re-prove. The plane is inside the subject, so the key carries no further segment. |
 | `ec` | `auth:ec:{sha256(token)}` | JSON `{ userId, newEmail, tenantId, passwordFingerprint }` (`newEmail` normalized; an absent `passwordFingerprint` reads as "no binding") | `email_change.token_ttl` (default 3600 s) | Pending address change. Consumed on confirm. |
-| `invidx` | `auth:invidx:{tenantId}:{invitee_hash}` | The invitation's token hash | `invitations.token_ttl` (default 172800 s) | Invitee index of a pending invitation: the only handle the issuing side has on a record keyed by a token it never saw. `invitee_hash` is the HMAC of the address, so a keyspace dump does not enumerate who a tenant has invited. Written with the compare-and-set script `claim_invitation_index` (§12.5.8). |
+| `invidx` | `auth:invidx:{tenantId}:{invitee_hash}` | The invitation's token hash | `invitations.token_ttl` (default 172800 s) | Invitee index of a pending invitation: the only handle the issuing side has on a record keyed by a token it never saw. `invitee_hash` is the HMAC of the address, so a keyspace dump does not enumerate who a tenant has invited. Written with the compare-and-set script `publish_invitation`, removed with `withdraw_invitation` or `release_invitation_index` (§12.5.8). |
 | `us` | `auth:us:{hmac_sha256(hmacKey, userSubject)}` | The account's status string | `user_status_cache_ttl` (default 60 s) | Cached account status for the `UserStatus` gate (§8.3.7). Dashboard plane only; the platform status is never cached. Pinned by `userStatusCache` in the shared contract. |
 | `uev` | `auth:uev:{hmac_sha256(hmacKey, userSubject)}` | `"1"` verified, `"0"` not | `user_status_cache_ttl` | Cached verified-address flag, written only where `email_verification.required`; invalidated together with `us`. |
 | `mfalock` | `auth:mfalock:{hmac_sha256(hmacKey, userSubject)}` | A random per-acquisition token (`SET NX`) | 10 s | Per-account MFA transition lock. Serializes the read-modify-write every MFA state change performs over the one repository record that carries `mfa_enabled`, the secret and the recovery codes together. Released only while it still holds the caller's token (`release_lock`, §12.5.9). |
@@ -5334,16 +5333,25 @@ A grace recovery returns a record from the rotation grace pointer and must then 
 - **Contract:** return `0` and write nothing when `KEYS[2]` does not exist, or when a non-empty family's `KEYS[4]` does not (a `revoke_family` in between would otherwise be undone by the `SADD`). Else `SET KEYS[1]`, `SADD`+`EXPIRE` the index, `SET KEYS[3]`, and for a family `SADD`+`EXPIRE` `KEYS[4]`; return `1`.
 - **Rust mapping:** `create_recovered_session` returns `bool`; `false` refuses the recovery.
 
-#### 12.5.8 `claim_invitation_index` — compare-and-set of the invitee index
+#### 12.5.8 `publish_invitation`, `withdraw_invitation` and `release_invitation_index` — the tenant invitation scripts
 
-The rank check reads the index and the claim writes it; as two round trips they can disagree about which invitation is being superseded.
+The rank check reads the index and the record and the change writes them; as separate commands they can disagree about which invitation is being replaced or removed, and a failure between them can leave one entry without the other. The three sources are the ones nest-auth runs over the same keyspace.
 
-- **KEYS** — `[1]` `invidx:{tenantId}:{invitee_hash}`.
-- **ARGV** — `[1]` the new token hash, `[2]` TTL (s), `[3]` the hash the caller approved, or `''` for "no entry" (a real hash is always 64 hex characters, so the two cannot be confused).
-- **Contract:** if `GET KEYS[1]` (absent read as `''`) differs from `ARGV[3]` return `0`; else `SET KEYS[1] ARGV[1] EX ARGV[2]` and return `1`.
-- **Rust mapping:** `bool`; `false` means the index no longer held what the caller approved.
+`publish_invitation` stores an invitation over the one the caller approved.
 
-`release_invitation_index` is the matching compare-and-delete, used by a revoke and an acceptance: a later invite may hold the index by the time either releases it.
+- **KEYS** — `[1]` `invidx:{tenantId}:{invitee_hash}`, `[2]` `inv:{new_hash}`, `[3]` `inv:{superseded_hash}` (the new record again when there is none).
+- **ARGV** — `[1]` the hash the caller approved, or `''` for "no entry", `[2]` the new token hash, `[3]` the record JSON, `[4]` TTL (s).
+- **Contract:** if `GET KEYS[1]` (absent read as `''`) differs from `ARGV[1]` return `0`; else, when `ARGV[1]` is not `''`, `DEL KEYS[3]`; `SET KEYS[2]` and `SET KEYS[1] ARGV[2]` with `EX ARGV[4]`; return `1`.
+- **Rust mapping:** `bool`; `false` means nothing was written.
+
+`withdraw_invitation` removes the record and the index the caller read.
+
+- **KEYS** — `[1]` `invidx:{tenantId}:{invitee_hash}`, `[2]` `inv:{token_hash}`.
+- **ARGV** — `[1]` the token hash, `[2]` the record exactly as read, or `''` for none.
+- **Contract:** return `-1` unless `GET KEYS[1]` equals `ARGV[1]` and `GET KEYS[2]` (absent read as `''`) equals `ARGV[2]`; else `DEL` both and return what the record's `DEL` removed.
+- **Rust mapping:** `InvitationWithdrawal::{ Changed, Absent, Removed }` for `-1`, `0`, `1`.
+
+`release_invitation_index` is a compare-and-delete of the index alone, used by an acceptance, which has already consumed the record: a later invite may hold the index by then.
 
 - **KEYS** — `[1]` `invidx:{tenantId}:{invitee_hash}`.
 - **ARGV** — `[1]` the token hash the entry must hold.
