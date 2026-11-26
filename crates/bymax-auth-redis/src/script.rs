@@ -63,10 +63,31 @@ pub static REVOKE_FAMILY: LazyLock<LuaScript> =
 pub static BRUTE_FORCE_INCR: LazyLock<LuaScript> =
     LazyLock::new(|| LuaScript::new(include_str!("lua/brute_force_incr.lua")));
 
-/// `claim_invitation_index` — compare-and-set of the invitee index, so a supersede only
-/// displaces the invitation its rank check approved.
-pub static CLAIM_INVITATION_INDEX: LazyLock<LuaScript> =
-    LazyLock::new(|| LuaScript::new(include_str!("lua/claim_invitation_index.lua")));
+/// The source of [`PUBLISH_INVITATION`], byte-identical with nest-auth's
+/// `PUBLISH_INVITATION_SCRIPT`.
+const PUBLISH_INVITATION_SOURCE: &str = "\nif (redis.call('GET', KEYS[1]) or '') ~= ARGV[1] then\n  return 0\nend\nif ARGV[1] ~= '' then\n  redis.call('DEL', KEYS[3])\nend\nredis.call('SET', KEYS[2], ARGV[3], 'EX', ARGV[4])\nredis.call('SET', KEYS[1], ARGV[2], 'EX', ARGV[4])\nreturn 1";
+
+/// `publish_invitation` — store an invitation, point the invitee index at it and delete the one it
+/// supersedes, only while the index still names what the caller's rank check approved.
+///
+/// `KEYS` are the index, the new record and the superseded record (the new one again when there is
+/// none); `ARGV` are the superseded hash or the empty string, the new hash, the record and the TTL.
+/// Replies `1` when stored and `0` when the index differs.
+pub static PUBLISH_INVITATION: LazyLock<LuaScript> =
+    LazyLock::new(|| LuaScript::new(PUBLISH_INVITATION_SOURCE));
+
+/// The source of [`WITHDRAW_INVITATION`], byte-identical with nest-auth's
+/// `WITHDRAW_INVITATION_SCRIPT`.
+const WITHDRAW_INVITATION_SOURCE: &str = "\nif redis.call('GET', KEYS[1]) ~= ARGV[1] then\n  return -1\nend\nif (redis.call('GET', KEYS[2]) or '') ~= ARGV[2] then\n  return -1\nend\nlocal removed = redis.call('DEL', KEYS[2])\nredis.call('DEL', KEYS[1])\nreturn removed";
+
+/// `withdraw_invitation` — delete an invitation's record and its index, only while both are what
+/// the caller read.
+///
+/// `KEYS` are the index and the record; `ARGV` are the token hash and the record as read, or the
+/// empty string for none. Replies a negative number when either changed, `0` when there was no
+/// record and a positive number when one was removed.
+pub static WITHDRAW_INVITATION: LazyLock<LuaScript> =
+    LazyLock::new(|| LuaScript::new(WITHDRAW_INVITATION_SOURCE));
 
 /// The source of [`RELEASE_INDEX`], byte-identical with nest-auth's `RELEASE_INDEX_SCRIPT`: the two
 /// libraries run it against one keyspace, so it carries no comment header and no final newline.
@@ -109,3 +130,24 @@ pub static MFA_CHALLENGE: LazyLock<LuaScript> =
 #[cfg(feature = "mfa")]
 pub static RELEASE_LOCK: LazyLock<LuaScript> =
     LazyLock::new(|| LuaScript::new(include_str!("lua/release_lock.lua")));
+
+#[cfg(test)]
+mod tests {
+    use super::{PUBLISH_INVITATION_SOURCE, WITHDRAW_INVITATION_SOURCE};
+    use crate::keys::to_hex;
+    use bymax_auth_crypto::mac::sha256;
+
+    #[test]
+    fn the_invitation_scripts_keep_their_recorded_digests() {
+        // Both libraries run these against one keyspace, so an edit here has to be made in
+        // nest-auth too. Nothing here reads nest-auth: a change made only there passes.
+        assert_eq!(
+            to_hex(&sha256(PUBLISH_INVITATION_SOURCE.as_bytes())),
+            "6570eda685cf80b5a6ec3947ed9958671573a4057d69250cac5a1f8292eeac62"
+        );
+        assert_eq!(
+            to_hex(&sha256(WITHDRAW_INVITATION_SOURCE.as_bytes())),
+            "79e032bef2663bdb42d93efc3ae62bcfa15a5e71459290f5e8e31a97217a43f3"
+        );
+    }
+}

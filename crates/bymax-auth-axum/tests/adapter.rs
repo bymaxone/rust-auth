@@ -2606,10 +2606,16 @@ async fn invitation_accept_success_creates_a_session() {
         inviter_user_id: inviter,
         created_at: time::OffsetDateTime::UNIX_EPOCH,
     };
-    let _ = h
-        .stores
-        .put_invitation(INVITE_TOKEN, &invitation, 600)
-        .await;
+    let hash: String = bymax_auth_crypto::mac::sha256(INVITE_TOKEN.as_bytes())
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    assert!(matches!(
+        h.stores
+            .publish_invitation(TENANT, "joiner", &hash, &invitation, 600, None)
+            .await,
+        Ok(true)
+    ));
 
     let accept = Req::post("/auth/invitations/accept")
         .json(serde_json::json!({

@@ -15,6 +15,9 @@ use crate::keys::NamespacedRedis;
 ///
 /// Cheap to clone semantics are provided by sharing through `Arc` at the call site
 /// (`Arc<RedisStores>`); the pool itself is the unit of connection reuse.
+///
+/// Redis Cluster is not supported: the pool holds single-node connections, and the scripts touch
+/// keys that hash to different slots.
 pub struct RedisStores {
     pool: Pool,
     namespaced: NamespacedRedis,

@@ -28,10 +28,11 @@ use time::OffsetDateTime;
 use crate::RepositoryError;
 use crate::traits::{
     BruteForceStore, EmailChangeContext, HttpClient, HttpError, HttpRequest, HttpResponse,
-    InvitationStore, LogoutOwner, OAuthProfile, OAuthProvider, OAuthProviderError, OAuthTokens,
-    OtpPurpose, OtpStore, PasswordResetStore, PlatformUserRepository, ResetContext, RotateOutcome,
-    SessionDetail, SessionKind, SessionRecord, SessionRotation, SessionStore, StoredInvitation,
-    UserRepository, WsTicketSnapshot, WsTicketStore,
+    InvitationStore, InvitationWithdrawal, LogoutOwner, OAuthProfile, OAuthProvider,
+    OAuthProviderError, OAuthTokens, OtpPurpose, OtpStore, PasswordResetStore,
+    PlatformUserRepository, ResetContext, RotateOutcome, SessionDetail, SessionKind, SessionRecord,
+    SessionRotation, SessionStore, StoredInvitation, UserRepository, WsTicketSnapshot,
+    WsTicketStore,
 };
 
 pub use crate::traits::{NoOpAuthHooks, NoOpEmailProvider};
@@ -663,7 +664,8 @@ pub struct InMemoryStores {
     ticket_counter: AtomicU64,
     reset_tokens: Mutex<HashMap<String, ResetContext>>,
     reset_verified: Mutex<HashMap<String, ResetContext>>,
-    invitations: Mutex<HashMap<String, StoredInvitation>>,
+    /// Invitation records by token hash, as the stored text.
+    invitations: Mutex<HashMap<String, String>>,
     /// The invitee index: `{tenantId}:{sha256(email)}` -> the invitation's token hash.
     invitation_index: Mutex<HashMap<String, String>>,
     /// Pending address changes (`ec:`), keyed by the token hash.
@@ -1378,7 +1380,7 @@ impl WsTicketStore for InMemoryStores {
 /// hash-then-key path the engine relies on).
 /// The invitee index key, mirroring the Redis store's `invidx:{tenantId}:{invitee_hash}`.
 /// The identifier arrives already derived, and is used verbatim — see
-/// [`crate::traits::InvitationStore::put_invitation_index`].
+/// [`crate::traits::InvitationStore::publish_invitation`].
 fn invitee_key(tenant_id: &str, invitee_hash: &str) -> String {
     format!("{tenant_id}:{invitee_hash}")
 }
@@ -1448,46 +1450,56 @@ impl PasswordResetStore for InMemoryStores {
 
 #[async_trait]
 impl InvitationStore for InMemoryStores {
-    async fn put_invitation(
+    async fn consume_invitation(&self, token: &str) -> Result<Option<StoredInvitation>, AuthError> {
+        Ok(lock(&self.invitations)
+            .remove(&token_key(token))
+            .and_then(|record| serde_json::from_str(&record).ok()))
+    }
+
+    async fn publish_invitation(
         &self,
-        token: &str,
+        tenant_id: &str,
+        email: &str,
+        token_hash: &str,
         invitation: &StoredInvitation,
         _ttl_secs: u64,
-    ) -> Result<(), AuthError> {
-        lock(&self.invitations).insert(token_key(token), invitation.clone());
-        Ok(())
-    }
-
-    async fn consume_invitation(&self, token: &str) -> Result<Option<StoredInvitation>, AuthError> {
-        Ok(lock(&self.invitations).remove(&token_key(token)))
-    }
-
-    async fn put_invitation_index(
-        &self,
-        tenant_id: &str,
-        email: &str,
-        token_hash: &str,
-        _ttl_secs: u64,
-    ) -> Result<(), AuthError> {
-        lock(&self.invitation_index).insert(invitee_key(tenant_id, email), token_hash.to_owned());
-        Ok(())
-    }
-
-    async fn claim_invitation_index(
-        &self,
-        tenant_id: &str,
-        email: &str,
-        token_hash: &str,
-        _ttl_secs: u64,
-        expected: Option<&str>,
+        superseded: Option<&str>,
     ) -> Result<bool, AuthError> {
+        let record = serde_json::to_string(invitation).unwrap_or_default();
         let mut index = lock(&self.invitation_index);
         let key = invitee_key(tenant_id, email);
-        if index.get(&key).map(String::as_str) != expected {
+        if index.get(&key).map(String::as_str) != superseded {
             return Ok(false);
         }
+        let mut records = lock(&self.invitations);
+        if let Some(previous) = superseded {
+            records.remove(previous);
+        }
+        records.insert(token_hash.to_owned(), record);
         index.insert(key, token_hash.to_owned());
         Ok(true)
+    }
+
+    async fn withdraw_invitation(
+        &self,
+        tenant_id: &str,
+        email: &str,
+        token_hash: &str,
+        judged: Option<&str>,
+    ) -> Result<InvitationWithdrawal, AuthError> {
+        let mut index = lock(&self.invitation_index);
+        let key = invitee_key(tenant_id, email);
+        let mut records = lock(&self.invitations);
+        if index.get(&key).map(String::as_str) != Some(token_hash)
+            || records.get(token_hash).map(String::as_str) != judged
+        {
+            return Ok(InvitationWithdrawal::Changed);
+        }
+        index.remove(&key);
+        Ok(match records.remove(token_hash) {
+            Some(_) => InvitationWithdrawal::Removed,
+            None => InvitationWithdrawal::Absent,
+        })
     }
 
     async fn read_invitation_index(
@@ -1515,15 +1527,8 @@ impl InvitationStore for InMemoryStores {
         Ok(true)
     }
 
-    async fn read_invitation_by_hash(
-        &self,
-        token_hash: &str,
-    ) -> Result<Option<StoredInvitation>, AuthError> {
+    async fn read_invitation_record(&self, token_hash: &str) -> Result<Option<String>, AuthError> {
         Ok(lock(&self.invitations).get(token_hash).cloned())
-    }
-
-    async fn delete_invitation_by_hash(&self, token_hash: &str) -> Result<bool, AuthError> {
-        Ok(lock(&self.invitations).remove(token_hash).is_some())
     }
 }
 
@@ -2704,23 +2709,28 @@ mod tests {
         ));
     }
 
-    #[tokio::test]
-    async fn invitation_store_consumes_invitations_single_use() {
-        // An invitation is stored and consumed exactly once.
-        let store = InMemoryStores::new();
-        let invitation = StoredInvitation {
+    /// A pending invitation granting `MEMBER` in `t1`.
+    fn pending_invitation() -> StoredInvitation {
+        StoredInvitation {
             email: "invitee@example.com".to_owned(),
             role: "MEMBER".to_owned(),
             tenant_id: "t1".to_owned(),
             inviter_user_id: "owner".to_owned(),
             created_at: OffsetDateTime::UNIX_EPOCH,
-        };
-        assert!(
+        }
+    }
+
+    #[tokio::test]
+    async fn invitation_store_consumes_invitations_single_use() {
+        // A published invitation is consumed by its raw token exactly once.
+        let store = InMemoryStores::new();
+        let hash = token_key("inv-tok");
+        assert!(matches!(
             store
-                .put_invitation("inv-tok", &invitation, 600)
-                .await
-                .is_ok()
-        );
+                .publish_invitation("t1", "invitee", &hash, &pending_invitation(), 600, None)
+                .await,
+            Ok(true)
+        ));
         assert!(matches!(
             store.consume_invitation("inv-tok").await,
             Ok(Some(i)) if i.role == "MEMBER"
@@ -2733,109 +2743,27 @@ mod tests {
 
     #[tokio::test]
     async fn invitation_index_is_keyed_by_tenant_and_address() {
-        // The double has to behave like the Redis store it stands in for, because a consumer
-        // testing their own withdrawal flow against it is relying on exactly that. An index
-        // keyed by anything less than (tenant, address) would let one tenant's withdrawal
-        // reach another's invitation, and the double would report the flow as correct.
+        // An index keyed by less than (tenant, address) would let one tenant's withdrawal reach
+        // another's invitation.
         let store = InMemoryStores::new();
-        assert!(
-            store
-                .put_invitation_index("t1", "invitee@example.com", "hash-1", 600)
-                .await
-                .is_ok()
-        );
-        assert!(
-            store
-                .put_invitation_index("t2", "invitee@example.com", "hash-2", 600)
-                .await
-                .is_ok()
-        );
-
-        // Same address, different tenants: two entries, not one overwriting the other.
+        for (tenant, hash) in [("t1", "hash-1"), ("t2", "hash-2")] {
+            assert!(matches!(
+                store
+                    .publish_invitation(tenant, "invitee", hash, &pending_invitation(), 600, None)
+                    .await,
+                Ok(true)
+            ));
+        }
         assert!(matches!(
-            store.read_invitation_index("t1", "invitee@example.com").await,
+            store.read_invitation_index("t1", "invitee").await,
             Ok(Some(h)) if h == "hash-1"
         ));
         assert!(matches!(
-            store.read_invitation_index("t2", "invitee@example.com").await,
+            store.read_invitation_index("t2", "invitee").await,
             Ok(Some(h)) if h == "hash-2"
         ));
-        // …and a different address in a tenant that has one names nothing.
         assert!(matches!(
-            store.read_invitation_index("t1", "other@example.com").await,
-            Ok(None)
-        ));
-
-        // Reading leaves the entry; a release of the hash it holds removes it, exactly once.
-        assert!(matches!(
-            store
-                .read_invitation_index("t1", "invitee@example.com")
-                .await,
-            Ok(Some(_))
-        ));
-        assert!(matches!(
-            store
-                .release_invitation_index("t1", "invitee@example.com", "hash-1")
-                .await,
-            Ok(true)
-        ));
-        assert!(matches!(
-            store
-                .release_invitation_index("t1", "invitee@example.com", "hash-1")
-                .await,
-            Ok(false)
-        ));
-        // …and releasing one tenant's entry left the other's alone.
-        assert!(matches!(
-            store
-                .read_invitation_index("t2", "invitee@example.com")
-                .await,
-            Ok(Some(_))
-        ));
-    }
-
-    #[tokio::test]
-    async fn an_invitation_is_readable_and_deletable_by_its_stored_hash() {
-        // The revocation path reaches the record through the index rather than through a raw
-        // token, so the double needs the by-hash pair the withdrawal actually calls.
-        let store = InMemoryStores::new();
-        let invitation = StoredInvitation {
-            email: "invitee@example.com".to_owned(),
-            role: "MEMBER".to_owned(),
-            tenant_id: "t1".to_owned(),
-            inviter_user_id: "owner".to_owned(),
-            created_at: OffsetDateTime::UNIX_EPOCH,
-        };
-        assert!(
-            store
-                .put_invitation("inv-tok", &invitation, 600)
-                .await
-                .is_ok()
-        );
-        let hash = token_key("inv-tok");
-
-        assert!(matches!(
-            store.read_invitation_by_hash(&hash).await,
-            Ok(Some(i)) if i.role == "MEMBER"
-        ));
-        assert!(matches!(
-            store.read_invitation_by_hash("never-stored").await,
-            Ok(None)
-        ));
-
-        // The delete reports whether THIS call removed it, so a withdrawal cannot report
-        // success over an invitation that was already accepted.
-        assert!(matches!(
-            store.delete_invitation_by_hash(&hash).await,
-            Ok(true)
-        ));
-        assert!(matches!(
-            store.delete_invitation_by_hash(&hash).await,
-            Ok(false)
-        ));
-        // …and the accept path no longer finds it either.
-        assert!(matches!(
-            store.consume_invitation("inv-tok").await,
+            store.read_invitation_index("t1", "other").await,
             Ok(None)
         ));
     }

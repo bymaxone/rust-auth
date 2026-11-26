@@ -5,26 +5,23 @@ use std::sync::Arc;
 use bymax_auth_types::AuthError;
 
 use crate::engine::AuthEngine;
-use crate::services::auth::invitation::has_role;
-use crate::traits::InvitationStore;
+use crate::services::auth::invitation::{has_role, parse_record};
+use crate::traits::{InvitationStore, InvitationWithdrawal};
 
-/// How many times a revoke reads the address again after a later invite claimed its index.
+/// How many times a revoke reads the address before giving up on one that keeps changing.
 const REVOKE_ATTEMPTS: usize = 3;
 
 impl AuthEngine {
     /// Remove the invitation the invitee index names, when `revoker_role` may withdraw it;
     /// `true` when this call removed a record.
     ///
-    /// A record that is there is deleted before its index is released, so a failed release
-    /// leaves an index a retry can still act on. An index that names no record is released
-    /// first, so that an invite about to write it cannot confirm. A release that finds the index
-    /// claimed by a later invite reads the address again and judges what replaced the
-    /// invitation.
+    /// The record and the index go in one step, and only while both are still what was read and
+    /// judged here. Anything written to the address in between is read and judged again.
     ///
     /// # Errors
     ///
-    /// [`AuthError::TooManyRequests`] when the invitation was replaced under every attempt; a
-    /// store [`AuthError`] otherwise.
+    /// [`AuthError::TooManyRequests`] when the invitation changed under every attempt; a store
+    /// [`AuthError`] otherwise.
     pub(super) async fn withdraw_pending(
         &self,
         store: &Arc<dyn InvitationStore>,
@@ -32,39 +29,31 @@ impl AuthEngine {
         tenant_id: &str,
         invitee_hash: &str,
     ) -> Result<bool, AuthError> {
-        let mut withdrew = false;
         for _ in 0..REVOKE_ATTEMPTS {
             let Some(hash) = store.read_invitation_index(tenant_id, invitee_hash).await? else {
-                return Ok(withdrew);
+                return Ok(false);
             };
-            let record = store.read_invitation_by_hash(&hash).await?;
-            if record
-                .as_ref()
+            let raw = store.read_invitation_record(&hash).await?;
+            if raw
+                .as_deref()
+                .and_then(parse_record)
                 .is_some_and(|record| self.outranks_revoker(revoker_role, &record.role))
             {
-                return Ok(withdrew);
+                return Ok(false);
             }
-            let absent = record.is_none();
-            if absent
-                && !store
-                    .release_invitation_index(tenant_id, invitee_hash, &hash)
-                    .await?
+            match store
+                .withdraw_invitation(tenant_id, invitee_hash, &hash, raw.as_deref())
+                .await?
             {
-                continue;
-            }
-            if store.delete_invitation_by_hash(&hash).await? {
-                withdrew = true;
-                tracing::info!(
-                    event = "RUST_AUTH_INVITATION_WITHDRAWN",
-                    "invitation: withdrawn"
-                );
-            }
-            if absent
-                || store
-                    .release_invitation_index(tenant_id, invitee_hash, &hash)
-                    .await?
-            {
-                return Ok(withdrew);
+                InvitationWithdrawal::Changed => {}
+                InvitationWithdrawal::Absent => return Ok(false),
+                InvitationWithdrawal::Removed => {
+                    tracing::info!(
+                        event = "RUST_AUTH_INVITATION_WITHDRAWN",
+                        "invitation: withdrawn"
+                    );
+                    return Ok(true);
+                }
             }
         }
         Err(AuthError::TooManyRequests {

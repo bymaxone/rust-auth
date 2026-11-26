@@ -28,6 +28,12 @@ mod withdraw;
 /// The bytes of entropy in an invitation token before hex-encoding (256-bit, 64 hex chars).
 const INVITE_TOKEN_BYTES: usize = 32;
 
+/// The stored record as an invitation, or `None` when it no longer parses. Such a record is
+/// removed without a role check: it can no longer be accepted either.
+fn parse_record(raw: &str) -> Option<StoredInvitation> {
+    serde_json::from_str(raw).ok()
+}
+
 /// The stored key suffix for a raw invitation token: `sha256(token)` in lowercase hex, the
 /// same form the store derives, so the index can point at a record the engine never keys.
 fn token_hash(token: &str) -> String {
@@ -59,14 +65,15 @@ impl std::fmt::Debug for AcceptInvitationInput {
 
 impl AuthEngine {
     /// Create a tenant invitation: authorize the inviter against the role hierarchy, mint a
-    /// secure single-use token, store the trusted metadata under its hash, and dispatch the
+    /// secure single-use token, publish the trusted metadata under its hash, and dispatch the
     /// invitation email. The raw token is never persisted or logged — only its hash becomes a
     /// key, and the email provider builds the accept URL from the raw value.
     ///
     /// # Errors
     ///
     /// Returns [`AuthError::InsufficientRole`] when the invited role is unknown or the inviter
-    /// does not hold a role at least as high, [`AuthError::TokenInvalid`] when the inviter no
+    /// does not hold a role at least as high, or when a pending invitation for the address
+    /// outranks them or keeps changing, [`AuthError::TokenInvalid`] when the inviter no
     /// longer exists or does not live in the tenant being invited into (the read is scoped to
     /// it), [`AuthError::InsufficientRole`] again when a repository that ignored the scope
     /// handed back a row from another tenant, a store [`AuthError`], or [`AuthError::Internal`]
@@ -131,28 +138,18 @@ impl AuthEngine {
         };
         // Re-inviting an address supersedes the previous invitation rather than adding a
         // second one: two live tokens for one invitee is two chances for an intercepted link to
-        // be redeemed, and a revoke would only ever reach the newest. The caller must outrank
-        // the pending invitation they displace; see `claim_invitation_slot`.
-        let invitee_hash = self.invitee_identifier(&email);
-        let new_hash = token_hash(&raw);
-        let superseded = self
-            .claim_invitation_slot(
-                store,
-                &inviter.role,
-                tenant_id,
-                &invitee_hash,
-                &new_hash,
-                ttl,
-            )
-            .await?;
-        if let Some(previous) = superseded {
-            store.delete_invitation_by_hash(&previous).await?;
-        }
-        // The index was claimed above and the record follows: a crash in between leaves an
-        // index naming nothing, an invitation that is simply dead.
-        store.put_invitation(&raw, &invitation, ttl).await?;
-        self.confirm_invitation_claim(store, tenant_id, &invitee_hash, &new_hash, ttl)
-            .await?;
+        // be redeemed, and a revoke would only ever reach the newest.
+        // The caller must outrank the pending invitation they displace; see
+        // `publish_over_approved`.
+        self.publish_over_approved(
+            store,
+            &inviter.role,
+            &self.invitee_identifier(&email),
+            &token_hash(&raw),
+            &invitation,
+            ttl,
+        )
+        .await?;
 
         // The email provider builds the accept URL from the raw token (never logged).
         let expires_at = OffsetDateTime::now_utc()
@@ -255,10 +252,7 @@ impl AuthEngine {
             return Err(AuthError::InvalidInvitationToken);
         }
 
-        // The record is already gone; drop the index that pointed at it so a later revoke does
-        // not report success over an invitation that was accepted. Both carry the same TTL, so
-        // this is tidiness rather than correctness — but a stale pointer is exactly the kind of
-        // thing an operator reads as "still pending".
+        // The record is already gone; drop the index so it does not go on reading as pending.
         // Compared with the consumed token: a later invite may hold the index by now.
         store
             .release_invitation_index(
@@ -360,12 +354,12 @@ impl AuthEngine {
     /// the difference would tell them whether an address has a pending invitation, which is
     /// precisely what hashing the email in the index avoids disclosing.
     ///
-    /// An invitation a later invite puts in its place while the call runs is judged and withdrawn
-    /// in its turn, three times at most.
+    /// An invitation that changes while the call runs is read and judged again, a bounded number
+    /// of times.
     ///
     /// # Errors
     ///
-    /// Returns [`AuthError::TooManyRequests`] when the invitation was replaced under every one of
+    /// Returns [`AuthError::TooManyRequests`] when the invitation changed under every one of
     /// those attempts. Returns [`AuthError::TokenInvalid`] when the revoker no longer exists or does not live in
     /// `tenant_id` (the read is scoped to it), [`AuthError::InsufficientRole`] when a repository
     /// that ignored the scope handed back a row from another tenant, and the account-status
@@ -554,20 +548,19 @@ mod tests {
         // The raw token is opaque; store a known invitation directly to drive accept.
         let token = "c".repeat(64);
         assert!(
-            s.stores
-                .put_invitation(
-                    &token,
-                    &StoredInvitation {
-                        email: "invitee@example.com".to_owned(),
-                        role: "MEMBER".to_owned(),
-                        tenant_id: "t1".to_owned(),
-                        inviter_user_id: inviter.clone(),
-                        created_at: OffsetDateTime::UNIX_EPOCH,
-                    },
-                    600
-                )
-                .await
-                .is_ok()
+            put_record(
+                &s.stores,
+                &token,
+                &StoredInvitation {
+                    email: "invitee@example.com".to_owned(),
+                    role: "MEMBER".to_owned(),
+                    tenant_id: "t1".to_owned(),
+                    inviter_user_id: inviter.clone(),
+                    created_at: OffsetDateTime::UNIX_EPOCH,
+                }
+            )
+            .await
+            .is_ok()
         );
         let accepted = s
             .engine
@@ -725,20 +718,19 @@ mod tests {
         let inviter = seed_admin(&s.users, "deposed@example.com", "ADMIN").await;
         let token = "f".repeat(64);
         assert!(
-            s.stores
-                .put_invitation(
-                    &token,
-                    &StoredInvitation {
-                        email: "newcomer@example.com".to_owned(),
-                        role: "ADMIN".to_owned(),
-                        tenant_id: "t1".to_owned(),
-                        inviter_user_id: inviter.clone(),
-                        created_at: OffsetDateTime::UNIX_EPOCH,
-                    },
-                    600
-                )
-                .await
-                .is_ok()
+            put_record(
+                &s.stores,
+                &token,
+                &StoredInvitation {
+                    email: "newcomer@example.com".to_owned(),
+                    role: "ADMIN".to_owned(),
+                    tenant_id: "t1".to_owned(),
+                    inviter_user_id: inviter.clone(),
+                    created_at: OffsetDateTime::UNIX_EPOCH,
+                }
+            )
+            .await
+            .is_ok()
         );
 
         // The inviter is banned between minting and redemption.
@@ -785,20 +777,19 @@ mod tests {
         let Some(s) = setup(invite_config()) else { return };
         let token = "e".repeat(64);
         assert!(
-            s.stores
-                .put_invitation(
-                    &token,
-                    &StoredInvitation {
-                        email: "retry@example.com".to_owned(),
-                        role: "MEMBER".to_owned(),
-                        tenant_id: "t1".to_owned(),
-                        inviter_user_id: "x".to_owned(),
-                        created_at: OffsetDateTime::UNIX_EPOCH,
-                    },
-                    600
-                )
-                .await
-                .is_ok()
+            put_record(
+                &s.stores,
+                &token,
+                &StoredInvitation {
+                    email: "retry@example.com".to_owned(),
+                    role: "MEMBER".to_owned(),
+                    tenant_id: "t1".to_owned(),
+                    inviter_user_id: "x".to_owned(),
+                    created_at: OffsetDateTime::UNIX_EPOCH,
+                }
+            )
+            .await
+            .is_ok()
         );
 
         // A password the screen refuses.
@@ -843,20 +834,19 @@ mod tests {
         // Tampered role.
         let tampered = "d".repeat(64);
         assert!(
-            s.stores
-                .put_invitation(
-                    &tampered,
-                    &StoredInvitation {
-                        email: "t@example.com".to_owned(),
-                        role: "SUPERADMIN".to_owned(),
-                        tenant_id: "t1".to_owned(),
-                        inviter_user_id: "x".to_owned(),
-                        created_at: OffsetDateTime::UNIX_EPOCH,
-                    },
-                    600
-                )
-                .await
-                .is_ok()
+            put_record(
+                &s.stores,
+                &tampered,
+                &StoredInvitation {
+                    email: "t@example.com".to_owned(),
+                    role: "SUPERADMIN".to_owned(),
+                    tenant_id: "t1".to_owned(),
+                    inviter_user_id: "x".to_owned(),
+                    created_at: OffsetDateTime::UNIX_EPOCH,
+                }
+            )
+            .await
+            .is_ok()
         );
         assert!(matches!(
             s.engine
@@ -881,20 +871,19 @@ mod tests {
         let _ = seed_admin(&s.users, "dup@example.com", "MEMBER").await;
         let dup = "e".repeat(64);
         assert!(
-            s.stores
-                .put_invitation(
-                    &dup,
-                    &StoredInvitation {
-                        email: "dup@example.com".to_owned(),
-                        role: "MEMBER".to_owned(),
-                        tenant_id: "t1".to_owned(),
-                        inviter_user_id: inviter,
-                        created_at: OffsetDateTime::UNIX_EPOCH,
-                    },
-                    600
-                )
-                .await
-                .is_ok()
+            put_record(
+                &s.stores,
+                &dup,
+                &StoredInvitation {
+                    email: "dup@example.com".to_owned(),
+                    role: "MEMBER".to_owned(),
+                    tenant_id: "t1".to_owned(),
+                    inviter_user_id: inviter,
+                    created_at: OffsetDateTime::UNIX_EPOCH,
+                }
+            )
+            .await
+            .is_ok()
         );
         assert!(matches!(
             s.engine
@@ -944,7 +933,7 @@ mod tests {
         ];
         for (index, (label, invitation)) in cases.into_iter().enumerate() {
             let token = format!("{}{index}", "a".repeat(63));
-            let stored = s.stores.put_invitation(&token, &invitation, 600).await;
+            let stored = put_record(&s.stores, &token, &invitation).await;
             assert!(stored.is_ok(), "{label} could not be stored");
             let outcome = s
                 .engine
@@ -1241,6 +1230,19 @@ mod tests {
         );
     }
 
+    /// Store `invitation` as the record of `token`, under an index slot of its own.
+    async fn put_record(
+        stores: &InMemoryStores,
+        token: &str,
+        invitation: &StoredInvitation,
+    ) -> Result<(), AuthError> {
+        let hash = token_hash(token);
+        stores
+            .publish_invitation(&invitation.tenant_id, &hash, &hash, invitation, 600, None)
+            .await
+            .map(|_| ())
+    }
+
     /// Read the token the invitee index points at, so a test can assert over the record.
     async fn indexed(s: &Setup, email: &str) -> Option<String> {
         // Through the engine's own derivation: the index is keyed by an HMAC of the address,
@@ -1285,7 +1287,7 @@ mod tests {
         // operator as "still pending".
         assert!(indexed(&s, "invitee@example.com").await.is_none());
         assert!(matches!(
-            s.stores.read_invitation_by_hash(&hash).await,
+            s.stores.read_invitation_record(&hash).await,
             Ok(None)
         ));
     }
@@ -1502,7 +1504,7 @@ mod tests {
 
         assert_ne!(first, second, "the re-invite reused the first token");
         assert!(
-            matches!(s.stores.read_invitation_by_hash(&first).await, Ok(None)),
+            matches!(s.stores.read_invitation_record(&first).await, Ok(None)),
             "the superseded invitation is still redeemable"
         );
     }
@@ -1519,37 +1521,30 @@ mod tests {
                 .await
                 .is_ok()
         );
-        // The raw token is opaque, so plant a known one and point the index at it — exactly
-        // the pair `invite` writes.
+        // The raw token is opaque, so publish a known one over the one just minted.
+        let Some(minted) = indexed(&s, "invitee@example.com").await else { return };
         let token = "d".repeat(64);
-        let hash = token_hash(&token);
-        assert!(
+        let invitation = StoredInvitation {
+            email: "invitee@example.com".to_owned(),
+            role: "MEMBER".to_owned(),
+            tenant_id: "t1".to_owned(),
+            inviter_user_id: inviter.clone(),
+            created_at: OffsetDateTime::UNIX_EPOCH,
+        };
+        let invitee = s.engine.invitee_identifier("invitee@example.com");
+        assert!(matches!(
             s.stores
-                .put_invitation(
-                    &token,
-                    &StoredInvitation {
-                        email: "invitee@example.com".to_owned(),
-                        role: "MEMBER".to_owned(),
-                        tenant_id: "t1".to_owned(),
-                        inviter_user_id: inviter.clone(),
-                        created_at: OffsetDateTime::UNIX_EPOCH,
-                    },
-                    600
-                )
-                .await
-                .is_ok()
-        );
-        assert!(
-            s.stores
-                .put_invitation_index(
+                .publish_invitation(
                     "t1",
-                    &s.engine.invitee_identifier("invitee@example.com"),
-                    &hash,
-                    600
+                    &invitee,
+                    &token_hash(&token),
+                    &invitation,
+                    600,
+                    Some(&minted),
                 )
-                .await
-                .is_ok()
-        );
+                .await,
+            Ok(true)
+        ));
         let accepted = s
             .engine
             .accept_invitation(
