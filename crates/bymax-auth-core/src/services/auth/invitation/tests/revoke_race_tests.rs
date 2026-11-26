@@ -36,8 +36,13 @@ struct Script {
     /// How many have landed.
     landed: usize,
     fail_delete: bool,
-    /// The record under [`FIRST`] is written, and confirmed, right after the first delete.
+    /// The invite in flight under [`FIRST`] writes its record and confirms right after the first
+    /// delete.
     written_after_delete: bool,
+    /// The same, right before the first release instead.
+    written_before_release: bool,
+    /// What that confirmation answered.
+    confirmed: Option<bool>,
     /// Another revoke releases the index right before this one does.
     released_elsewhere: bool,
 }
@@ -57,6 +62,23 @@ impl Raced {
     /// The derived invitee identifier, known once the engine is built.
     fn invitee(&self) -> String {
         self.invitee.get().cloned().unwrap_or_default()
+    }
+
+    /// The rest of the invite that claimed [`FIRST`]: write, confirm, withdraw when refused.
+    async fn finish_invite(&self) -> Result<(), AuthError> {
+        let hash = token_hash(FIRST);
+        self.inner
+            .put_invitation(FIRST, &self.replacement, 600)
+            .await?;
+        let confirmed = self
+            .inner
+            .claim_invitation_index("t1", &self.invitee(), &hash, 600, Some(&hash))
+            .await?;
+        self.script(|s| s.confirmed = Some(confirmed));
+        if !confirmed {
+            self.inner.delete_invitation_by_hash(&hash).await?;
+        }
+        Ok(())
     }
 
     /// A later invite, in the order `invite` writes: claim, delete the superseded record, write.
@@ -141,6 +163,12 @@ impl InvitationStore for Raced {
         if land {
             self.reinvite(tenant, invitee).await?;
         }
+        if self
+            .script(|s| std::mem::take(&mut s.written_before_release))
+            .unwrap_or_default()
+        {
+            self.finish_invite().await?;
+        }
         if elsewhere {
             self.inner
                 .release_invitation_index(tenant, invitee, expected)
@@ -180,15 +208,14 @@ impl InvitationStore for Raced {
             .script(|s| std::mem::take(&mut s.written_after_delete))
             .unwrap_or_default()
         {
-            self.inner
-                .put_invitation(FIRST, &self.replacement, 600)
-                .await?;
+            self.finish_invite().await?;
         }
         Ok(removed)
     }
 }
 
 struct Race {
+    double: Arc<Raced>,
     s: Setup,
     admin: String,
     member: String,
@@ -230,7 +257,12 @@ async fn race(script: Script, later_role: &str) -> Option<Race> {
         users,
         stores,
     };
-    Some(Race { s, admin, member })
+    Some(Race {
+        double,
+        s,
+        admin,
+        member,
+    })
 }
 
 async fn revoke(race: &Race, who: &str) -> Result<bool, AuthError> {
@@ -369,16 +401,51 @@ async fn a_revoke_whose_record_delete_fails_can_be_retried() {
 }
 
 #[tokio::test]
-async fn a_record_written_between_the_delete_and_the_release_does_not_survive_the_revoke() {
+async fn an_invite_in_flight_cannot_confirm_after_the_revoke_has_deleted() {
     let script = Script {
         written_after_delete: true,
         ..Script::default()
     };
-    let Some(r) = race(script, "MEMBER").await else { return };
-    // An invite in flight: the index is claimed and the record is not written yet.
-    let pending = token_hash(FIRST);
-    assert!(r.s.stores.delete_invitation_by_hash(&pending).await.is_ok());
-    assert!(matches!(revoke(&r, &r.admin).await, Ok(true)));
+    let Some((r, answer)) = revoke_in_flight(script, "MEMBER").await else { return };
+    assert!(!answer);
+    assert_eq!(r.double.script(|s| s.confirmed), Some(Some(false)));
     assert_eq!(indexed(&r.s, EMAIL).await, None);
     assert!(!live(&r, FIRST).await);
+}
+
+/// A revoke while the invite under [`FIRST`] holds the index and has written no record.
+async fn revoke_in_flight(script: Script, later_role: &str) -> Option<(Race, bool)> {
+    let r = race(script, later_role).await?;
+    let pending = token_hash(FIRST);
+    r.s.stores.delete_invitation_by_hash(&pending).await.ok()?;
+    let answer = revoke(&r, &r.member).await.ok()?;
+    Some((r, answer))
+}
+
+#[tokio::test]
+async fn a_revoke_removes_the_record_an_invite_in_flight_confirmed_before_the_release() {
+    let script = Script {
+        written_before_release: true,
+        ..Script::default()
+    };
+    let Some((r, answer)) = revoke_in_flight(script, "MEMBER").await else { return };
+    assert!(answer);
+    assert_eq!(r.double.script(|s| s.confirmed), Some(Some(true)));
+    assert!(!live(&r, FIRST).await);
+}
+
+#[tokio::test]
+async fn a_revoke_of_an_invite_in_flight_judges_the_invitation_that_replaced_it() {
+    let replaced = || Script {
+        before_release: 1,
+        ..Script::default()
+    };
+    let later = replacement(2);
+    let Some((r, answer)) = revoke_in_flight(replaced(), "MEMBER").await else { return };
+    assert!(answer);
+    assert!(!live(&r, &later).await);
+    let Some((r, answer)) = revoke_in_flight(replaced(), "ADMIN").await else { return };
+    assert!(!answer);
+    assert_eq!(indexed(&r.s, EMAIL).await, Some(token_hash(&later)));
+    assert!(live(&r, &later).await);
 }

@@ -3062,12 +3062,12 @@ their ordering reproduces the NestJS guard pipeline.
 > for which addresses have invitations, which is exactly what hashing the address in the
 > `invidx:` index avoids disclosing.
 >
-> The revoke reads the index, refuses (silently, logged) when the record outranks the caller,
-> deletes the record and releases the index only while it still names that invitation (§12.5.8).
-> When the index no longer names it at the release, the revoke starts again from the read; when
-> its attempts run out it answers `429 auth.too_many_requests`. A release that succeeds after a
-> delete which found nothing is followed by one more delete, so a record written in between does
-> not stay redeemable.
+> The revoke reads the index and refuses (silently, logged) when the record outranks the caller.
+> A record that is there is deleted and the index then released; an index that names no record
+> is released first and the delete follows, so an invite about to write it cannot confirm. The
+> release removes the index only while it still names that invitation (§12.5.8). When it finds
+> the index naming something else, the revoke starts again from the read; when its attempts run
+> out it answers `429 auth.too_many_requests`.
 
 #### 8.2.9 WorkspaceController — group `workspaces` (`controllers.workspaces`)
 
