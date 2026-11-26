@@ -47,4 +47,3 @@ model. The library's checks are not a security boundary against such code: code 
 the process can also read the keys, call the repositories and stores, and replace the trait
 implementations the engine is built with. An attack that needs code already running in the
 process is out of scope for a security report.
-
