@@ -335,7 +335,7 @@ async fn a_revoke_whose_withdrawal_fails_leaves_both_and_can_be_retried() {
 }
 
 #[tokio::test]
-async fn a_revoke_of_an_invitation_redeemed_while_it_was_judged_removes_nothing() {
+async fn a_revoke_of_an_invitation_redeemed_while_judged_answers_false_and_drops_the_index() {
     let script = Script {
         spent_after_judging: true,
         ..Script::default()
