@@ -38,10 +38,11 @@ impl AuthEngine {
                 return Ok(withdrew);
             };
             let record = store.read_invitation_by_hash(&hash).await?;
-            if let Some(record) = &record {
-                if self.outranks_revoker(revoker_role, &record.role) {
-                    return Ok(withdrew);
-                }
+            if record
+                .as_ref()
+                .is_some_and(|record| self.outranks_revoker(revoker_role, &record.role))
+            {
+                return Ok(withdrew);
             }
             let absent = record.is_none();
             if absent
