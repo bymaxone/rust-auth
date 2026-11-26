@@ -767,6 +767,9 @@ Because a configured resolver makes the body's value dead weight, `tenantId` is 
 
 Every read→decide→write on contended state — refresh rotation + grace, ownership-checked revoke, brute-force increment, OTP verify+consume, single-use WebSocket ticket — runs as a single **atomic Lua script**, closing the concurrency races those flows would otherwise expose.
 
+> [!NOTE]
+> Redis Cluster is not supported, because the scripts that write a session touch keys that hash to different slots.
+
 ### Security Checklist
 
 When integrating `bymax-auth` in production, verify each of the following:

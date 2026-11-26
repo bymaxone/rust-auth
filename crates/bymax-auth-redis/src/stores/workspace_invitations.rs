@@ -8,8 +8,8 @@
 //! is the fixed-window counter the brute-force store uses: its lifetime starts at the first
 //! increment and a later one never extends it.
 //!
-//! The scripts touch several keys, and the dead-member prune names the keys it reads in `ARGV`, so
-//! a cluster deployment needs a namespace whose hash tag puts them all in one slot.
+//! The scripts touch several keys, and the dead-member prune names the keys it reads in `ARGV`.
+//! Redis Cluster is not supported (specification §12.5).
 
 use async_trait::async_trait;
 use bymax_auth_core::traits::{
