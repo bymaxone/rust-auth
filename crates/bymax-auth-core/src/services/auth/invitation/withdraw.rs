@@ -17,8 +17,8 @@ impl AuthEngine {
     ///
     /// The index is released only while it still names the invitation that was judged. When a
     /// later invite has claimed it meanwhile, the address is read again and what replaced it is
-    /// judged anew. The record goes first: a failure between the two steps then leaves an index a
-    /// retry can still act on, never a redeemable record that nothing names.
+    /// judged anew. The record goes first, so a failed release leaves an index a retry can still
+    /// act on.
     ///
     /// # Errors
     ///
