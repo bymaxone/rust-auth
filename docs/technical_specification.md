@@ -3064,9 +3064,10 @@ their ordering reproduces the NestJS guard pipeline.
 >
 > The revoke reads the index, refuses (silently, logged) when the record outranks the caller,
 > deletes the record and releases the index only while it still names that invitation (§12.5.8).
-> When the release finds another invitation there, it starts again from the read; after three
-> attempts it answers `429 auth.too_many_requests`. A release that follows a delete which found
-> nothing deletes once more, so a record written in between does not stay redeemable.
+> When the index no longer names it at the release, the revoke starts again from the read; when
+> its attempts run out it answers `429 auth.too_many_requests`. A release that succeeds after a
+> delete which found nothing is followed by one more delete, so a record written in between does
+> not stay redeemable.
 
 #### 8.2.9 WorkspaceController — group `workspaces` (`controllers.workspaces`)
 
