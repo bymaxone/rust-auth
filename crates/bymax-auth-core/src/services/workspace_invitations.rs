@@ -337,6 +337,16 @@ impl AuthEngine {
                 return Ok(());
             };
             let Some(record) = indexed.record else {
+                // A store reads the index and then the record, and a resend between the two
+                // retires the record it was about to read. An index that moved is read again.
+                let replaced = !indexed.unreadable
+                    && store
+                        .read_index(&place)
+                        .await?
+                        .is_some_and(|now| now.record_key != indexed.record_key);
+                if replaced {
+                    continue;
+                }
                 return Ok(());
             };
             let role = record.base().role.clone();

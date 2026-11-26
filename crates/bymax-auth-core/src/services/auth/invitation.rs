@@ -23,6 +23,7 @@ use crate::services::auth::{map_repository_error, spawn_guarded};
 use crate::traits::{HookContext, HookPlane, InviteData, StoredInvitation};
 
 mod supersede;
+mod withdraw;
 
 /// The bytes of entropy in an invitation token before hex-encoding (256-bit, 64 hex chars).
 const INVITE_TOKEN_BYTES: usize = 32;
@@ -258,10 +259,12 @@ impl AuthEngine {
         // not report success over an invitation that was accepted. Both carry the same TTL, so
         // this is tidiness rather than correctness — but a stale pointer is exactly the kind of
         // thing an operator reads as "still pending".
+        // Compared with the consumed token: a later invite may hold the index by now.
         store
-            .take_invitation_index(
+            .release_invitation_index(
                 &invitation.tenant_id,
                 &self.invitee_identifier(&invitation.email),
+                &token_hash(&input.token),
             )
             .await?;
 
@@ -357,9 +360,13 @@ impl AuthEngine {
     /// the difference would tell them whether an address has a pending invitation, which is
     /// precisely what hashing the email in the index avoids disclosing.
     ///
+    /// An invitation a later invite puts in its place while the call runs is judged and withdrawn
+    /// in its turn, three times at most.
+    ///
     /// # Errors
     ///
-    /// Returns [`AuthError::TokenInvalid`] when the revoker no longer exists or does not live in
+    /// Returns [`AuthError::TooManyRequests`] when the invitation was replaced under every one of
+    /// those attempts. Returns [`AuthError::TokenInvalid`] when the revoker no longer exists or does not live in
     /// `tenant_id` (the read is scoped to it), [`AuthError::InsufficientRole`] when a repository
     /// that ignored the scope handed back a row from another tenant, and the account-status
     /// error when the revoker is not in good standing — all facts about the caller alone — or a
@@ -391,48 +398,13 @@ impl AuthEngine {
         // answered the opposite way.
         self.assert_user_not_blocked(&revoker.status)?;
 
-        let Some(hash) = store
-            .read_invitation_index(tenant_id, &self.invitee_identifier(&email))
-            .await?
-        else {
-            return Ok(false);
-        };
-
-        // The role check reads the invitation itself rather than the request: the caller names
-        // an address, not a role, so the only way to know what authority is being withdrawn is
-        // to look. A record that no longer parses reads as absent and is withdrawn without a
-        // role check — it can no longer be accepted either, and leaving it would be worse.
-        //
-        // An outranked revoker is answered exactly as one who asked about an address with
-        // nothing pending. `InsufficientRole` here was an oracle: the caller names an address
-        // and nothing else, so the refusal said "there is a pending invitation for this
-        // address, at a role above yours" while `Ok(false)` said "there is none" — letting any
-        // member enumerate a tenant's pending invitations, and roughly at what authority. That
-        // is precisely the disclosure hashing the address into the index exists to prevent.
-        // The refusal is recorded, where an operator can see it and the prober cannot.
-        if let Some(invitation) = store.read_invitation_by_hash(&hash).await?
-            && !has_role(
-                &revoker.role,
-                &invitation.role,
-                &self.config().config().roles.hierarchy,
-            )
-        {
-            tracing::warn!(
-                event = "RUST_AUTH_INVITATION_REVOKE_OUTRANKED",
-                "invitation: revoke refused — outranked by the invitation"
-            );
-            return Ok(false);
-        }
-
-        store
-            .take_invitation_index(tenant_id, &self.invitee_identifier(&email))
-            .await?;
-        let removed = store.delete_invitation_by_hash(&hash).await?;
-        tracing::info!(
-            event = "RUST_AUTH_INVITATION_WITHDRAWN",
-            "invitation: withdrawn"
-        );
-        Ok(removed)
+        self.withdraw_pending(
+            store,
+            &revoker.role,
+            tenant_id,
+            &self.invitee_identifier(&email),
+        )
+        .await
     }
 
     /// Re-check, at redemption time, everything that was true of the inviter when the link was
@@ -492,6 +464,7 @@ pub(super) fn has_role(
 #[cfg(test)]
 mod tests {
     use super::*;
+    mod revoke_race_tests;
     mod send_failure_tests;
     mod structural_guard_tests;
     mod supersede_tests;

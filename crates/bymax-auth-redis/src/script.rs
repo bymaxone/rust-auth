@@ -68,6 +68,14 @@ pub static BRUTE_FORCE_INCR: LazyLock<LuaScript> =
 pub static CLAIM_INVITATION_INDEX: LazyLock<LuaScript> =
     LazyLock::new(|| LuaScript::new(include_str!("lua/claim_invitation_index.lua")));
 
+/// The source of [`RELEASE_INDEX`], byte-identical with nest-auth's `RELEASE_INDEX_SCRIPT`: the two
+/// libraries run it against one keyspace, so it carries no comment header and no final newline.
+const RELEASE_INDEX_SOURCE: &str = "\nif redis.call('GET', KEYS[1]) == ARGV[1] then\n  return redis.call('DEL', KEYS[1])\nend\nreturn 0";
+
+/// `release_index` — delete an invitee index only while it holds the value the caller read.
+pub static RELEASE_INDEX: LazyLock<LuaScript> =
+    LazyLock::new(|| LuaScript::new(RELEASE_INDEX_SOURCE));
+
 /// `membership_cache_fill` — write a cached workspace membership only while both version counters
 /// hold the versions read, extending every counter that exists to the retention (section 12.5.6).
 pub static MEMBERSHIP_CACHE_FILL: LazyLock<LuaScript> =

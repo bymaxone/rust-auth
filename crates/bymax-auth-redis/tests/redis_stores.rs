@@ -1678,9 +1678,8 @@ async fn the_invitee_index_is_the_only_handle_on_a_pending_invitation() {
         Ok(None)
     ));
 
-    // Reading leaves the entry in place; TAKING removes it. `invite` supersedes through the
-    // taking form, and a read that consumed would drop the index on every revoke that then
-    // refuses on the role check.
+    // Reading leaves the entry in place; a release removes it, once, and only for the hash it
+    // holds. The shared scenarios cover the refusals.
     assert!(matches!(
         stores
             .read_invitation_index("t1", "invitee@example.com")
@@ -1688,14 +1687,16 @@ async fn the_invitee_index_is_the_only_handle_on_a_pending_invitation() {
         Ok(Some(_))
     ));
     assert!(matches!(
-        stores.take_invitation_index("t1", "invitee@example.com").await,
-        Ok(Some(h)) if h == hash
+        stores
+            .release_invitation_index("t1", "invitee@example.com", &hash)
+            .await,
+        Ok(true)
     ));
     assert!(matches!(
         stores
-            .take_invitation_index("t1", "invitee@example.com")
+            .release_invitation_index("t1", "invitee@example.com", &hash)
             .await,
-        Ok(None)
+        Ok(false)
     ));
 
     // Deleting by hash reports whether THIS call removed the record. The second call finds

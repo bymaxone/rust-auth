@@ -167,13 +167,14 @@ impl InvitationStore for Racing {
             .read_invitation_index(tenant_id, invitee_hash)
             .await
     }
-    async fn take_invitation_index(
+    async fn release_invitation_index(
         &self,
         tenant_id: &str,
         invitee_hash: &str,
-    ) -> Result<Option<String>, AuthError> {
+        expected: &str,
+    ) -> Result<bool, AuthError> {
         self.inner
-            .take_invitation_index(tenant_id, invitee_hash)
+            .release_invitation_index(tenant_id, invitee_hash, expected)
             .await
     }
     async fn read_invitation_by_hash(
@@ -267,6 +268,16 @@ async fn an_index_that_keeps_moving_exhausts_the_retries_and_is_refused() {
     assert!(events.contains_at(tracing::Level::WARN, "kept changing under the rank check"));
 }
 
+/// Drops whatever the index names, as a revoke by another caller would.
+async fn drop_index(store: &InMemoryStores, tenant: &str, invitee: &str) -> Result<(), AuthError> {
+    if let Some(held) = store.read_invitation_index(tenant, invitee).await? {
+        store
+            .release_invitation_index(tenant, invitee, &held)
+            .await?;
+    }
+    Ok(())
+}
+
 /// A store that withdraws the index just before the record is written, standing in for a
 /// revoke that lands between the claim and the write.
 struct RevokedMidInvite {
@@ -283,9 +294,7 @@ impl InvitationStore for RevokedMidInvite {
         invitation: &StoredInvitation,
         ttl_secs: u64,
     ) -> Result<(), AuthError> {
-        self.inner
-            .take_invitation_index(&self.tenant, &self.invitee)
-            .await?;
+        drop_index(&self.inner, &self.tenant, &self.invitee).await?;
         self.inner.put_invitation(token, invitation, ttl_secs).await
     }
     async fn consume_invitation(&self, token: &str) -> Result<Option<StoredInvitation>, AuthError> {
@@ -323,13 +332,14 @@ impl InvitationStore for RevokedMidInvite {
             .read_invitation_index(tenant_id, invitee_hash)
             .await
     }
-    async fn take_invitation_index(
+    async fn release_invitation_index(
         &self,
         tenant_id: &str,
         invitee_hash: &str,
-    ) -> Result<Option<String>, AuthError> {
+        expected: &str,
+    ) -> Result<bool, AuthError> {
         self.inner
-            .take_invitation_index(tenant_id, invitee_hash)
+            .release_invitation_index(tenant_id, invitee_hash, expected)
             .await
     }
     async fn read_invitation_by_hash(
@@ -402,9 +412,7 @@ impl InvitationStore for Faulty {
         ttl_secs: u64,
     ) -> Result<(), AuthError> {
         if self.withdraw_index {
-            self.inner
-                .take_invitation_index(&self.tenant, &self.invitee)
-                .await?;
+            drop_index(&self.inner, &self.tenant, &self.invitee).await?;
         }
         self.inner.put_invitation(token, invitation, ttl_secs).await
     }
@@ -446,13 +454,14 @@ impl InvitationStore for Faulty {
             .read_invitation_index(tenant_id, invitee_hash)
             .await
     }
-    async fn take_invitation_index(
+    async fn release_invitation_index(
         &self,
         tenant_id: &str,
         invitee_hash: &str,
-    ) -> Result<Option<String>, AuthError> {
+        expected: &str,
+    ) -> Result<bool, AuthError> {
         self.inner
-            .take_invitation_index(tenant_id, invitee_hash)
+            .release_invitation_index(tenant_id, invitee_hash, expected)
             .await
     }
     async fn read_invitation_by_hash(

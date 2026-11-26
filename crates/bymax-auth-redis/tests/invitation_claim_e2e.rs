@@ -1,5 +1,5 @@
-//! Testcontainers coverage of the Redis invitee-index compare-and-set: a claim proceeds only
-//! while the index still holds exactly what the caller approved, with the invitation's TTL.
+//! Testcontainers coverage of the Redis invitee-index compare-and-set and compare-and-delete: a
+//! claim or a release proceeds only while the index holds exactly what the caller names.
 //!
 //! When Docker is unavailable every case returns early, so a no-Docker `cargo test` still passes.
 
@@ -8,6 +8,7 @@ mod docker_gate;
 #[path = "common/redis_ready.rs"]
 mod redis_ready;
 
+use bymax_auth_core::testing::invitation_index_scenarios::run_invitation_index_scenarios;
 use bymax_auth_core::traits::InvitationStore;
 use bymax_auth_redis::RedisStores;
 use testcontainers_modules::redis::{REDIS_PORT, Redis};
@@ -128,4 +129,11 @@ async fn tenants_do_not_share_an_index() {
         stores.read_invitation_index("t2", "cafe").await,
         Ok(None)
     ));
+}
+
+#[tokio::test]
+async fn a_release_deletes_the_index_only_while_it_holds_the_named_hash() {
+    let Some(redis) = try_start().await else { return };
+    let Some(stores) = redis.stores() else { return };
+    run_invitation_index_scenarios(&stores).await;
 }

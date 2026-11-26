@@ -236,3 +236,90 @@ async fn an_invitation_whose_index_moved_before_the_write_answers_too_many_reque
     assert!(is_limited(&invited), "{invited:?}");
     assert!(inv.mail.sent().is_empty(), "a lost write mails nothing");
 }
+
+/// A store whose first index read is torn: a resend lands between its read of the index and its
+/// read of the record, so the key it returns has no record any more.
+struct Torn {
+    racing: Racing,
+}
+
+#[async_trait]
+impl WorkspaceInvitationStore for Torn {
+    async fn read_record(&self, record_key: &str) -> Result<Option<InvitationRecord>, AuthError> {
+        self.racing.inner.read_record(record_key).await
+    }
+
+    async fn read_index(
+        &self,
+        place: &InvitationPlace,
+    ) -> Result<Option<IndexedInvitation>, AuthError> {
+        let read = self.racing.inner.read_index(place).await?;
+        if self.racing.rounds.swap(0, Ordering::SeqCst) == 0 {
+            return Ok(read);
+        }
+        let Some(indexed) = read else { return Ok(None) };
+        self.racing
+            .replace(place, Some(&indexed.record_key), "race@x.io")
+            .await;
+        let record = self.racing.inner.read_record(&indexed.record_key).await?;
+        Ok(Some(IndexedInvitation {
+            record_key: indexed.record_key,
+            record,
+            unreadable: false,
+        }))
+    }
+
+    async fn publish(&self, publication: Publication<'_>) -> Result<PublishOutcome, AuthError> {
+        self.racing.inner.publish(publication).await
+    }
+
+    async fn remove(
+        &self,
+        place: &InvitationPlace,
+        record_key: &str,
+        removal: Removal,
+    ) -> Result<bool, AuthError> {
+        self.racing.inner.remove(place, record_key, removal).await
+    }
+
+    async fn pending(&self, place: &InvitationPlace) -> Result<Vec<PendingInvitation>, AuthError> {
+        self.racing.inner.pending(place).await
+    }
+
+    async fn count_inviter(&self, rate_id: &str) -> Result<u64, AuthError> {
+        self.racing.inner.count_inviter(rate_id).await
+    }
+}
+
+#[tokio::test]
+async fn a_revoke_whose_read_straddles_a_resend_removes_the_replacement() {
+    let Some(inv) = setup_over(config(), |store| {
+        Arc::new(Torn {
+            racing: Racing {
+                inner: store,
+                rounds: AtomicUsize::new(1),
+                role: "member",
+            },
+        }) as Arc<dyn WorkspaceInvitationStore>
+    })
+    .await
+    else {
+        return;
+    };
+    let first = Seeded {
+        email: "race@x.io",
+        role: "member",
+        inviter: &inv.owner.user_id,
+        created_at: LONG_AGO,
+        resends: 0,
+    };
+    seed(&inv, "first-token", &first).await;
+    let revoked = inv
+        .f
+        .engine
+        .revoke_workspace_invitation(&inv.owner, "race@x.io", &ctx())
+        .await;
+    assert!(revoked.is_ok(), "{revoked:?}");
+    assert!(held(&inv).await.is_none());
+    assert_eq!(inv.f.hooks.events(1).await.len(), 1);
+}

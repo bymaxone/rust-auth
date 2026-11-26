@@ -3061,6 +3061,13 @@ their ordering reproduces the NestJS guard pipeline.
 > whether or not anything was pending: reporting the difference would make the route an oracle
 > for which addresses have invitations, which is exactly what hashing the address in the
 > `invidx:` index avoids disclosing.
+>
+> The revoke reads the index and refuses (silently, logged) when the record outranks the caller.
+> A record that is there is deleted and the index then released; an index that names no record
+> is released first and the delete follows, so an invite about to write it cannot confirm. The
+> release removes the index only while it still names that invitation (§12.5.8). When it finds
+> the index naming something else, the revoke starts again from the read; when its attempts run
+> out it answers `429 auth.too_many_requests`.
 
 #### 8.2.9 WorkspaceController — group `workspaces` (`controllers.workspaces`)
 
@@ -5335,6 +5342,13 @@ The rank check reads the index and the claim writes it; as two round trips they 
 - **ARGV** — `[1]` the new token hash, `[2]` TTL (s), `[3]` the hash the caller approved, or `''` for "no entry" (a real hash is always 64 hex characters, so the two cannot be confused).
 - **Contract:** if `GET KEYS[1]` (absent read as `''`) differs from `ARGV[3]` return `0`; else `SET KEYS[1] ARGV[1] EX ARGV[2]` and return `1`.
 - **Rust mapping:** `bool`; `false` means the index no longer held what the caller approved.
+
+`release_invitation_index` is the matching compare-and-delete, used by a revoke and an acceptance: a later invite may hold the index by the time either releases it.
+
+- **KEYS** — `[1]` `invidx:{tenantId}:{invitee_hash}`.
+- **ARGV** — `[1]` the token hash the entry must hold.
+- **Contract:** if `GET KEYS[1]` equals `ARGV[1]` return `DEL KEYS[1]`; else return `0`. The source is the one nest-auth runs over the same keyspace.
+- **Rust mapping:** `bool`; `true` only when the entry was removed.
 
 #### 12.5.9 `mfa_challenge` and `release_lock` — the MFA anti-replay consume and the transition-lock release
 

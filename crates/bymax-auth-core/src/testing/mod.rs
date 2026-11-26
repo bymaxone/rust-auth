@@ -1500,12 +1500,19 @@ impl InvitationStore for InMemoryStores {
             .cloned())
     }
 
-    async fn take_invitation_index(
+    async fn release_invitation_index(
         &self,
         tenant_id: &str,
         email: &str,
-    ) -> Result<Option<String>, AuthError> {
-        Ok(lock(&self.invitation_index).remove(&invitee_key(tenant_id, email)))
+        expected: &str,
+    ) -> Result<bool, AuthError> {
+        let mut index = lock(&self.invitation_index);
+        let key = invitee_key(tenant_id, email);
+        if index.get(&key).map(String::as_str) != Some(expected) {
+            return Ok(false);
+        }
+        index.remove(&key);
+        Ok(true)
     }
 
     async fn read_invitation_by_hash(
@@ -1766,6 +1773,9 @@ impl OAuthProvider for MockOAuthProvider {
 mod api_key;
 #[cfg(all(test, feature = "api-keys"))]
 mod api_key_tests;
+pub mod invitation_index_scenarios;
+#[cfg(test)]
+mod invitation_index_scenarios_tests;
 mod logout_pending;
 mod membership_cache;
 pub mod membership_cache_scenarios;
@@ -2756,7 +2766,7 @@ mod tests {
             Ok(None)
         ));
 
-        // Reading leaves the entry; taking removes it, exactly once.
+        // Reading leaves the entry; a release of the hash it holds removes it, exactly once.
         assert!(matches!(
             store
                 .read_invitation_index("t1", "invitee@example.com")
@@ -2764,16 +2774,18 @@ mod tests {
             Ok(Some(_))
         ));
         assert!(matches!(
-            store.take_invitation_index("t1", "invitee@example.com").await,
-            Ok(Some(h)) if h == "hash-1"
+            store
+                .release_invitation_index("t1", "invitee@example.com", "hash-1")
+                .await,
+            Ok(true)
         ));
         assert!(matches!(
             store
-                .take_invitation_index("t1", "invitee@example.com")
+                .release_invitation_index("t1", "invitee@example.com", "hash-1")
                 .await,
-            Ok(None)
+            Ok(false)
         ));
-        // …and taking one tenant's entry left the other's alone.
+        // …and releasing one tenant's entry left the other's alone.
         assert!(matches!(
             store
                 .read_invitation_index("t2", "invitee@example.com")
