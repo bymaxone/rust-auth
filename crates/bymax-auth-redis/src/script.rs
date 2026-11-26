@@ -138,8 +138,9 @@ mod tests {
     use bymax_auth_crypto::mac::sha256;
 
     #[test]
-    fn the_invitation_scripts_hash_to_the_sources_nest_auth_runs() {
-        // Both libraries run these against one keyspace, so an edit here has to be made there too.
+    fn the_invitation_scripts_keep_their_recorded_digests() {
+        // Both libraries run these against one keyspace, so an edit here has to be made in
+        // nest-auth too. Nothing here reads nest-auth: a change made only there passes.
         assert_eq!(
             to_hex(&sha256(PUBLISH_INVITATION_SOURCE.as_bytes())),
             "6570eda685cf80b5a6ec3947ed9958671573a4057d69250cac5a1f8292eeac62"
