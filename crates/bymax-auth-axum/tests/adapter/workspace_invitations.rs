@@ -179,19 +179,22 @@ async fn the_list_is_paged_by_its_query() {
 }
 
 #[tokio::test]
-async fn invite_resend_and_revoke_answer_the_same_with_or_without_an_account() {
+async fn invite_and_a_resend_or_revoke_with_nothing_pending_answer_the_same_with_or_without_an_account()
+ {
     let Some(team) = team().await else { return };
     seed_user(&team.h, "known@e.com", PASSWORD, "USER").await;
-    for email in ["known@e.com", "unknown@e.com"] {
+    let addresses = ["known@e.com", "unknown@e.com"];
+    for email in addresses {
+        for path in [RESEND, REVOKE] {
+            let absent = team
+                .post(&team.owner, path, json!({ "email": email }))
+                .await;
+            assert!(answered_nothing(&absent), "{path} {email}");
+        }
+    }
+    for email in addresses {
         let invited = team.invite(email, "member").await;
         assert!(answered_nothing(&invited), "{email}");
-    }
-    // An address with no pending invitation is answered as one that has one would be.
-    for path in [RESEND, REVOKE] {
-        let absent = team
-            .post(&team.owner, path, json!({ "email": "nobody@e.com" }))
-            .await;
-        assert!(answered_nothing(&absent), "{path}");
     }
     let revoked = team
         .post(&team.owner, REVOKE, json!({ "email": "KNOWN@E.com" }))
