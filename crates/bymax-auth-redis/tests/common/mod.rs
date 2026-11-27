@@ -101,6 +101,34 @@ impl TestRedis {
             .is_ok()
     }
 
+    /// Overwrite one field of a hash out-of-band, to plant a record no store method writes.
+    /// Returns whether the command succeeded.
+    pub async fn hset_raw(&self, key: &str, field: &str, value: &str) -> bool {
+        let Some(mut conn) = self.raw().await else {
+            return false;
+        };
+        redis::cmd("HSET")
+            .arg(key)
+            .arg(field)
+            .arg(value)
+            .query_async::<()>(&mut conn)
+            .await
+            .is_ok()
+    }
+
+    /// Delete one field of a hash out-of-band. Returns whether the command succeeded.
+    pub async fn hdel_raw(&self, key: &str, field: &str) -> bool {
+        let Some(mut conn) = self.raw().await else {
+            return false;
+        };
+        redis::cmd("HDEL")
+            .arg(key)
+            .arg(field)
+            .query_async::<()>(&mut conn)
+            .await
+            .is_ok()
+    }
+
     /// The members of a SET, sorted for a stable comparison. Used to assert the exact wire
     /// format of the `sess:`/`psess:` session-index members, which must be full key suffixes
     /// (`rt:{hash}`, `rp:{oldHash}`, …) byte-identical to what nest-auth writes.

@@ -5312,16 +5312,15 @@ Guarantees the lockout window starts at the **first** failure and never slides f
 
 #### 12.5.5 `otp_verify` — verify + attempts + consume
 
-Makes "compare code, bump attempts, consume on success, lock on max" a single atomic step so concurrent guesses cannot race past the attempt ceiling.
+Makes "check the ceiling, compare the code, bump attempts, consume on success" a single atomic step so concurrent guesses cannot race past the attempt ceiling. The record is a HASH of `code` and `attempts`.
 
 - **KEYS** — `[1]` `otp:{purpose}:{hmac(tenant:email)}`.
 - **ARGV** — `[1]` submitted code, `[2]` `max_attempts` (5).
-- **Contract:**
-  1. `GET KEYS[1]`. If `nil` → **return `"EXPIRED"`** ⇒ `AuthError::OtpExpired`.
-  2. Parse `{ code, attempts }`. If `attempts >= ARGV[2]` → `DEL KEYS[1]`; **return `"MAX"`** ⇒ `AuthError::OtpMaxAttempts` (429).
-  3. Constant-time compare submitted vs stored (the script does a plain compare; **the authoritative constant-time check is re-done in Rust via `subtle`** — see §17 — the Lua compare is only to decide the attempts bump). If mismatch → re-`SET` with `attempts + 1` preserving the residual TTL (`PTTL`/`SET … PX`); **return `"INVALID"`** ⇒ `AuthError::OtpInvalid`.
-  4. On match → `DEL KEYS[1]`; **return `"OK"`**.
-- **Rust mapping:** an enum over the four string results. Preserving residual TTL on the attempt bump is mandatory so an attacker cannot extend the OTP lifetime by guessing.
+- **Contract:** returns `{ tag, storedCode }`.
+  1. `HGET KEYS[1] code`. If absent → **return `{"EXPIRED", ""}`** ⇒ `AuthError::OtpExpired`.
+  2. `HGET KEYS[1] attempts`. An absent field counts as `0`. A present one counts as its value only when it is `0` or spells a positive integer of at most 18 characters with no sign and no leading zero; anything else, a negative value included, counts as `max_attempts`. If the count is `>= ARGV[2]` → `DEL KEYS[1]`; **return `{"MAX", ""}`** ⇒ `AuthError::OtpMaxAttempts`.
+  3. Plain compare of submitted against stored: on a match `DEL KEYS[1]`, otherwise `HINCRBY KEYS[1] attempts 1`, which leaves the TTL as it was. **Return `{"PRESENT", storedCode}`**.
+- **Rust mapping:** on `PRESENT` the authoritative comparison is re-done in Rust in constant time via `subtle` (§17) ⇒ success or `AuthError::OtpInvalid`. A bump never extends the OTP lifetime, so guessing cannot buy time.
 
 #### 12.5.6 `membership_cache_fill` and `membership_cache_bump` — the workspace-membership cache
 

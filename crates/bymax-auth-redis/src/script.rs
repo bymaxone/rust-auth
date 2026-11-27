@@ -117,7 +117,21 @@ pub static WORKSPACE_INVITATION_PUBLISH: LazyLock<LuaScript> =
 pub static WORKSPACE_INVITATION_REMOVE: LazyLock<LuaScript> =
     LazyLock::new(|| LuaScript::new(include_str!("lua/workspace_invitation_remove.lua")));
 
-/// `otp_verify` — attempt-bounded verify + consume (section 12.5.4).
+/// `otp_verify` — attempt-bounded verify + consume (section 12.5.5), as one atomic step so
+/// concurrent guesses cannot pass the ceiling.
+///
+/// `KEYS[1]` is the `otp:` record, a HASH of `code` and `attempts`; `ARGV` is the submitted code
+/// and the ceiling. The reply is `(tag, storedCode)`: `EXPIRED` for no record or no `code` field,
+/// `MAX` (record consumed) at the ceiling, otherwise `PRESENT`, where a plain match consumes the
+/// record and a mismatch bumps `attempts` in place, leaving the TTL. The caller repeats the
+/// comparison in constant time, which is the authoritative one.
+///
+/// An absent `attempts` counts as 0. A present one counts only as `0` or a positive integer of at
+/// most 18 characters, and anything else counts as the ceiling: a negative value buys guesses, and
+/// no wrong guess is counted against a value `HINCRBY` cannot bump. `tonumber` alone is not the
+/// test, since a NaN is below every ceiling.
+///
+/// The source is shared byte for byte with nest-auth, so it carries no comments of its own.
 pub static OTP_VERIFY: LazyLock<LuaScript> =
     LazyLock::new(|| LuaScript::new(include_str!("lua/otp_verify.lua")));
 
@@ -136,6 +150,15 @@ mod tests {
     use super::{PUBLISH_INVITATION_SOURCE, WITHDRAW_INVITATION_SOURCE};
     use crate::keys::to_hex;
     use bymax_auth_crypto::mac::sha256;
+
+    #[test]
+    fn the_otp_verify_script_keeps_its_recorded_digest() {
+        // The same cross-repository limit as the invitation digests below.
+        assert_eq!(
+            to_hex(&sha256(include_str!("lua/otp_verify.lua").as_bytes())),
+            "3040819a4b8ce00a8936b5b3005f26908d6dbed4aad1b7afa37b7f222cefe480"
+        );
+    }
 
     #[test]
     fn the_invitation_scripts_keep_their_recorded_digests() {
