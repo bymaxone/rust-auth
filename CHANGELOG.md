@@ -13,6 +13,10 @@ marked BREAKING, never signalled by the number.
 
 > **Release rule.** The first breaking change below is on `main`, so the next release is the breaking batch: there is no interim release from `main`. A security fix needed before that batch ships from a release branch cut from the last tag.
 
+### Added: the `access.denied` workspace event
+
+- **A refused workspace access is reported to the workspace event hook.** When the access check refuses a dashboard account, `on_workspace_event` receives `AuditKind::AccessDenied` with the surface, the code answered, the reason decided and `suppressed_count`. The report runs detached and never changes the answer; the event is not persisted. One account raises at most `workspaces.access_denied_events.max` events (default 10) per `window_seconds` (default 60), and the next event carries the number left out. A counter store that cannot answer emits nothing. **Apply:** an exhaustive `match` on `AuditKind` needs the new arm; a custom `MembershipCacheStore` must also implement `AccessDeniedStore`; the two counters are the `wad:` and `wads:` keys, so a Redis ACL has to allow them.
+
 ### Added: OAuth workspace invitations and invitation-only registration
 
 - **An OAuth sign-in can accept a workspace invitation.** `GET /auth/oauth/{provider}` takes `workspaceInvitation`, the 64-character token, and its redirect then carries `Referrer-Policy: no-referrer`; `AuthEngine::oauth_initiate_with_invitation` is the same start for a host that mounts no route. The state record holds the SHA-256 of the token. The callback checks the invitation against the provider's profile before `on_oauth_login` runs, and writes the membership after the MFA branch, so an account with a second factor gets the challenge and the invitation stays unspent. **Apply:** the callback can now answer `auth.invalid_invitation_token`, `auth.invitation_email_mismatch` and `auth.email_not_verified` for such a flow, and the refusals of accepting the invitation (a bootstrap one is under the owner cap and `before_workspace_create`).

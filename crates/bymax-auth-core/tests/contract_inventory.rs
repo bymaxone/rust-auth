@@ -296,20 +296,19 @@ fn every_workspace_realtime_statement_is_read_or_pending() {
     inventory(
         "workspaceRealtime",
         section,
-        (&["rules"], &[], &[("accessDeniedVectors", "13.9")]),
+        (&["rules", "accessDeniedVectors"], &[], &[]),
     );
     inventory(
         "workspaceRealtime.rules",
         &section["rules"],
         (
-            &["accessDecision", "workspaceIdField"],
+            &["accessDecision", "workspaceIdField", "accessDeniedEvents"],
             // The rule points at the `workspaceScopedName` section, which is read in full.
             &["workspaceScopedName"],
             &[
                 ("verifierWorkspace", "13.9"),
                 ("socketMessage", "13.9"),
                 ("jobAuthorization", "13.9"),
-                ("accessDeniedEvents", "13.9"),
             ],
         ),
     );

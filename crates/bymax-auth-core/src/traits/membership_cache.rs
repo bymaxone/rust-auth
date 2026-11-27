@@ -10,6 +10,7 @@ use std::num::NonZeroU64;
 use async_trait::async_trait;
 use bymax_auth_types::AuthError;
 
+use crate::traits::AccessDeniedStore;
 use crate::workspace::membership_cache::{MembershipCacheIds, MembershipVersions, entry_role};
 
 /// What one read found: the two versions and the entry they name.
@@ -58,7 +59,7 @@ pub enum FillOutcome {
 /// caller, which answers from the repositories; a failed bump is not, because a change must never
 /// be reported as invalidated when it was not.
 #[async_trait]
-pub trait MembershipCacheStore: Send + Sync {
+pub trait MembershipCacheStore: AccessDeniedStore {
     /// Reads the workspace counter, then the membership counter, then the entry those two values
     /// name, as separate single-key reads in that order (pipelined or not). An absent counter
     /// reads `0`, and a read never creates a counter.

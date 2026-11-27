@@ -15,7 +15,7 @@ use serde_json::Value;
 
 use super::InMemoryMembershipCache;
 use super::membership_cache_scenarios::{MembershipCacheProbe, run_membership_cache_scenarios};
-use crate::traits::{FillOutcome, MembershipCacheRead, MembershipCacheStore};
+use crate::traits::{AccessDeniedStore, FillOutcome, MembershipCacheRead, MembershipCacheStore};
 use crate::workspace::membership_cache::{
     MembershipCacheIds, MembershipVersions, VersionCounter, entry_value,
 };
@@ -81,6 +81,21 @@ impl Broken {
                     .seed_counter(counter, id, 0, Duration::from_secs(60));
             }
         }
+    }
+}
+
+#[async_trait]
+impl AccessDeniedStore for Broken {
+    async fn count_denial(&self, digest: &str, window_seconds: u64) -> Result<u64, AuthError> {
+        self.inner.count_denial(digest, window_seconds).await
+    }
+
+    async fn count_suppressed(&self, digest: &str, ttl_seconds: u64) -> Result<(), AuthError> {
+        self.inner.count_suppressed(digest, ttl_seconds).await
+    }
+
+    async fn take_suppressed(&self, digest: &str) -> Result<Option<String>, AuthError> {
+        self.inner.take_suppressed(digest).await
     }
 }
 

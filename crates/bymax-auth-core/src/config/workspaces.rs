@@ -60,6 +60,43 @@ pub struct WorkspacesConfig {
     /// The most pending invitations one workspace may hold: 1 to 10 000, default 100. A resend
     /// replaces a live invitation and does not count again.
     pub max_pending_invitations_per_workspace: u32,
+    /// How many `access.denied` events one account can cause.
+    pub access_denied_events: AccessDeniedEventsConfig,
+}
+
+/// The budget of `access.denied` events per account, tenant and user together
+/// (`workspaces.accessDeniedEvents`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct AccessDeniedEventsConfig {
+    /// The most events one window emits: 1 to 10 000, default 10.
+    pub max: u32,
+    /// The length of the window in seconds: 1 to 3600, default 60.
+    pub window_seconds: u32,
+}
+
+impl Default for AccessDeniedEventsConfig {
+    fn default() -> Self {
+        Self {
+            max: 10,
+            window_seconds: 60,
+        }
+    }
+}
+
+impl AccessDeniedEventsConfig {
+    /// Both values checked against their bounds.
+    fn checked(self) -> Result<Self, ConfigError> {
+        for (option, value, max) in [
+            ("max", self.max, 10_000),
+            ("windowSeconds", self.window_seconds, 3_600),
+        ] {
+            if !(1..=max).contains(&value) {
+                return Err(ConfigError::WorkspaceAccessDeniedEventsOption { option, max });
+            }
+        }
+        Ok(self)
+    }
 }
 
 impl Default for WorkspacesConfig {
@@ -74,6 +111,7 @@ impl Default for WorkspacesConfig {
             deletion_grace_days: DELETION_GRACE_DAYS_DEFAULT,
             invitation_ttl_seconds: INVITATION_TTL_DEFAULT_SECONDS,
             max_pending_invitations_per_workspace: MAX_PENDING_INVITATIONS_DEFAULT,
+            access_denied_events: AccessDeniedEventsConfig::default(),
         }
     }
 }
@@ -172,6 +210,8 @@ pub(crate) struct ResolvedWorkspaces {
     pub(crate) deletion_grace_days: u32,
     /// How long an invitation stays valid, in seconds.
     pub(crate) invitation_ttl_seconds: u64,
+    /// The budget of `access.denied` events per account.
+    pub(crate) access_denied_events: AccessDeniedEventsConfig,
     /// The pending-invitation cap of one workspace.
     pub(crate) max_pending_invitations_per_workspace: u32,
 }
@@ -251,7 +291,8 @@ impl WorkspacesConfig {
     /// [`ConfigError::WorkspacePermissionUnknownRole`] for a permission naming a role outside it,
     /// [`ConfigError::WorkspaceMembershipCacheTtl`] for a lifetime over the maximum, and
     /// [`ConfigError::WorkspaceOptionOutOfRange`] for an owner cap or a grace period over its
-    /// bound.
+    /// bound, and [`ConfigError::WorkspaceAccessDeniedEventsOption`] for an event budget outside
+    /// its bounds.
     pub(crate) fn resolve(&self) -> Result<Option<ResolvedWorkspaces>, ConfigError> {
         if !self.enabled {
             return Ok(None);
@@ -286,6 +327,7 @@ impl WorkspacesConfig {
             1,
             u64::from(MAX_PENDING_INVITATIONS_LIMIT),
         )?;
+        let access_denied_events = self.access_denied_events.checked()?;
         Ok(Some(ResolvedWorkspaces {
             hierarchy,
             ttl,
@@ -294,6 +336,7 @@ impl WorkspacesConfig {
             max_workspaces_per_user,
             deletion_grace_days,
             invitation_ttl_seconds,
+            access_denied_events,
             max_pending_invitations_per_workspace: u32::try_from(
                 max_pending_invitations_per_workspace,
             )

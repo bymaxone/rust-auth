@@ -126,7 +126,10 @@ async fn accepting_writes_the_membership_spends_the_token_and_reports_it() {
     assert!(after.is_ok(), "the new member is authorized: {after:?}");
     let operations = inv.f.cache.operations();
     assert!(operations.contains(&"bump_membership"), "{operations:?}");
-    let events = inv.f.hooks.events(1).await;
+    // The refusal before the acceptance is reported too, so the acceptance is picked by kind.
+    let mut events = inv.f.hooks.events(2).await;
+    events.retain(|e| !matches!(e.kind, AuditKind::AccessDenied { .. }));
+    assert_eq!(events.len(), 1, "{events:?}");
     let expected = AuditKind::InvitationAccepted {
         email: JOE.to_owned(),
         role: "member".to_owned(),
