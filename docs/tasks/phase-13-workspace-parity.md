@@ -233,13 +233,13 @@ An audit of the 13.6b services (findings checked against the code, each with a f
 
 - **A1** `DefaultAuthEmailProvider::send_workspace_invitation` with a catalogue entry (nest-auth's text).
 - **Invitee index.** An acceptance releases the tenant invitation index by compare-and-delete (`release_invitation_index`), the tenant revoke retries, and a workspace revoke reads again when the index moved under the store's read.
-- **A2** `revoke` reads again and retries when the removal answers that the index no longer named the record, answers `429` after three tries, and reports the event only for a removal.
+- **A2** `revoke` reads again and retries when the removal answers that the index no longer named the record, answers `429` once `REVOKE_ATTEMPTS` is spent, and reports the event only for a removal.
 - **B1** the repository traits state that an unparsable id is `Ok(None)`. **B2** an owner's resend of a role the hierarchy no longer knows mails nothing. **B4** the address is validated before the hourly slot is taken. **B7** the list view's role, times and resend count are asserted, and the ordering tests no longer end silently. **B9** the misplaced doc comment. **B10** one ceiling function (`outranks`). **B11** the changelog's derived-backend note.
 - **Known limits** (changelog, not fixed here): B3 resend ignores membership, B5 a failed delivery emits no audit event, B6 the list cursor format differs from nest-auth's, B8 the Redis read windows, B12 revoke then invite resets the cooldown.
 
 ### Design of 13.6b — the invitation services
 
-**Surface.** Methods on `AuthEngine`: `invite_workspace_member(email, role)`, `resend_workspace_invitation(email)`, `revoke_workspace_invitation(email)`, `list_workspace_invitations(PageQuery)` and `preview_workspace_invitation(token)`. Bootstrap invitations are 13.7.
+**Surface.** Methods on `AuthEngine`, in `crates/bymax-auth-core/src/services/workspace_invitations.rs`. Bootstrap invitations are 13.7.
 
 **What this slice adds.**
 
@@ -252,7 +252,7 @@ An audit of the 13.6b services (findings checked against the code, each with a f
 
 **A time that cannot be trusted is refused, never due.** `InvitationRecord::parse` already refuses a creation time that is not an RFC 3339 instant. An index that names a key holding such a value is an internal error on invite and resend, never "no cooldown"; revoke and preview treat it as nothing to act on. A creation time in the future counts as inside the cooldown.
 
-**Resend and revoke** answer success and change nothing for an address with no live invitation or one the actor may not act on, so neither confirms anything. **Preview** runs the same three reads (workspace, inviter, account) for every token, with a stand-in lookup where the token names nothing, and answers one `auth.invalid_invitation_token` for every token that cannot be previewed.
+**Resend and revoke** answer success and change nothing for an address with no live invitation or one the actor may not act on, so neither confirms anything. **Preview** runs the same repository reads for every token, with a stand-in lookup where the token names nothing, and answers one `auth.invalid_invitation_token` for every token that cannot be previewed.
 
 **Delivery.** A failure is logged under a closed `RUST_AUTH_` code with no address, token or hash and answered as an internal error without the provider's text; the record stays published.
 
