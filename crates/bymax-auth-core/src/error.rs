@@ -472,6 +472,20 @@ pub enum ConfigError {
     /// password floors have passed validation, but reported rather than panicked.
     #[error("failed to compute the password sentinel hash from the configured parameters")]
     SentinelHashFailed,
+    /// A numeric option is outside the range it is accepted in. A value the store cannot represent
+    /// is refused on every request (an expiry whose milliseconds overflow 64 bits), and one that
+    /// is merely huge turns a security window into a permanent one.
+    #[error("{field} must be within {min}..={max} (got {got})")]
+    OutOfRange {
+        /// The option, by its path.
+        field: &'static str,
+        /// The value that was refused.
+        got: u64,
+        /// The smallest accepted value.
+        min: u64,
+        /// The largest accepted value.
+        max: u64,
+    },
 }
 
 /// A failure crossing the storage seam. The host maps its concrete datastore errors

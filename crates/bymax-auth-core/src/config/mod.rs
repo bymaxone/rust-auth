@@ -14,6 +14,9 @@ mod api_keys;
 mod api_keys_tests;
 #[cfg(test)]
 mod blocklist_tests;
+mod bounds;
+#[cfg(test)]
+mod bounds_tests;
 mod cookie_prefix;
 #[cfg(test)]
 mod cookie_prefix_tests;
