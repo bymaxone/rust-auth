@@ -1069,6 +1069,11 @@ Route groups mount only when their feature **and** runtime toggle are enabled, s
 | DELETE | `/auth/workspaces/:workspaceId/members/:userId` | `RequireWorkspace` (`workspaces.permissions.manage_members`) | Remove a member |
 | POST   | `/auth/workspaces/:workspaceId/leave` | `RequireWorkspace<AnyWorkspaceMember>` | Leave the workspace                         |
 | POST   | `/auth/workspaces/:workspaceId/transfer-ownership` | `RequireWorkspace<AnyWorkspaceMember>` (the engine requires the owner) | Hand ownership to another member |
+| GET    | `/auth/workspaces/:workspaceId/invitations` | `RequireWorkspace` (`workspaces.permissions.manage_members`) | List the pending invitations (cursor-paged) |
+| POST   | `/auth/workspaces/:workspaceId/invitations` | `RequireWorkspace` (`workspaces.permissions.manage_members`) | Invite an address with a role |
+| POST   | `/auth/workspaces/:workspaceId/invitations/resend` | `RequireWorkspace` (`workspaces.permissions.manage_members`) | Send a pending invitation again |
+| POST   | `/auth/workspaces/:workspaceId/invitations/revoke` | `RequireWorkspace` (`workspaces.permissions.manage_members`) | Withdraw a pending invitation |
+| POST   | `/auth/workspaces/invitations/preview` | Public | Say what an invitation token is for |
 
 > `GET /auth/oauth/:provider` plants an HttpOnly `oauth_state` cookie carrying the flow's
 > `state`, and the callback refuses any request that does not send it back — the binding

@@ -70,7 +70,7 @@ Because every one of those lists is compared with this repository's own tables i
 | 13.5b | Workspace mutations: create, rename, deletion lifecycle, role, remove, leave, transfer | ✅ Done (#398) | 13.5a |
 | 13.6a | Invitation store: record, index, set, counter, and their scripts | 🔄 In review | 13.2, 13.3 |
 | 13.6b | Invitation services: invite, resend, revoke, list, preview | 🔄 In review | 13.5a, 13.6a |
-| 13.6c | Invitation routes and DTOs | 🔄 In progress (audit list first) | 13.6b |
+| 13.6c | Invitation routes and DTOs | 🔄 In review | 13.6b |
 | 13.7 | Acceptance family and bootstrap invitations | 📋 ToDo | 13.5b, 13.6 |
 | 13.8 | OAuth invitation, invitation-only registration, the OAuth MFA branch | 📋 ToDo | 13.7 |
 | 13.9 | Realtime surfaces: verifier, sockets, job check, `access.denied` and its limiter | 📋 ToDo | 13.5a |

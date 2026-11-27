@@ -78,8 +78,9 @@ pub use dto::{
     VerifyOtpDto,
 };
 pub use dto::{
-    ChangeMemberRoleDto, CreateWorkspaceDto, MemberRouteParamsDto, RenameWorkspaceDto,
-    ScheduleWorkspaceDeletionDto, TransferOwnershipDto, WorkspacePageQueryDto,
+    ChangeMemberRoleDto, CreateWorkspaceDto, InviteToWorkspaceDto, MemberRouteParamsDto,
+    PreviewWorkspaceInvitationDto, RenameWorkspaceDto, ScheduleWorkspaceDeletionDto,
+    TransferOwnershipDto, WorkspaceInvitationEmailDto, WorkspacePageQueryDto,
 };
 pub use extractors::{
     AdminRole, AnyWorkspaceMember, AuthUser, CurrentUser, MfaSatisfied, OptionalAuthUser,

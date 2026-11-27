@@ -124,3 +124,14 @@ async fn the_catalogue_is_handed_the_tenant_the_address_and_the_locale() {
         )]
     );
 }
+
+#[tokio::test]
+async fn a_blank_inviter_is_what_the_shared_whitespace_rule_calls_blank() {
+    // U+FEFF is whitespace to JavaScript and U+0085 is not, so the same name picks the same
+    // sentence as the nest-auth message.
+    let blank = sent_for(&data(WorkspaceInviteKind::Bootstrap, "\u{feff}", false)).await;
+    assert_eq!(blank.subject, "You have been invited to set up Acme");
+
+    let next_line = sent_for(&data(WorkspaceInviteKind::Bootstrap, "\u{85}", false)).await;
+    assert_eq!(next_line.subject, "\u{85} invited you to set up Acme");
+}

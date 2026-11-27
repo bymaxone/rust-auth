@@ -10,11 +10,12 @@ use serde_json::{Map, Value, json};
 use crate::dto::{
     AcceptInvitationDto, ChangeEmailDto, ChangeMemberRoleDto, ChangePasswordDto,
     ConfirmEmailChangeDto, CreateInvitationDto, CreateWorkspaceDto, DECLARED, ForgotPasswordDto,
-    LoginDto, MemberRouteParamsDto, MfaChallengeDto, MfaDisableDto, MfaRegenerateRecoveryCodesDto,
-    MfaSetupDto, MfaVerifyDto, OAuthCallbackQuery, OAuthInitiateQuery, PlatformLoginDto,
-    RefreshDto, RegisterDto, RenameWorkspaceDto, ResendOtpDto, ResendVerificationDto,
-    ResetPasswordDto, RevokeInvitationDto, ScheduleWorkspaceDeletionDto, TransferOwnershipDto,
-    VerifyEmailDto, VerifyOtpDto, WorkspacePageQueryDto,
+    InviteToWorkspaceDto, LoginDto, MemberRouteParamsDto, MfaChallengeDto, MfaDisableDto,
+    MfaRegenerateRecoveryCodesDto, MfaSetupDto, MfaVerifyDto, OAuthCallbackQuery,
+    OAuthInitiateQuery, PlatformLoginDto, PreviewWorkspaceInvitationDto, RefreshDto, RegisterDto,
+    RenameWorkspaceDto, ResendOtpDto, ResendVerificationDto, ResetPasswordDto, RevokeInvitationDto,
+    ScheduleWorkspaceDeletionDto, TransferOwnershipDto, VerifyEmailDto, VerifyOtpDto,
+    WorkspaceInvitationEmailDto, WorkspacePageQueryDto,
 };
 use crate::request_schemas::schema;
 use crate::structure::{declared_named, details_for};
@@ -51,7 +52,7 @@ macro_rules! dto {
 }
 
 /// Every DTO, by the name of its schema.
-const DTOS: [(&str, Details, Refuses); 30] = [
+const DTOS: [(&str, Details, Refuses); 33] = [
     dto!(AcceptInvitationDto, "AcceptInvitationDto"),
     dto!(ChangeEmailDto, "ChangeEmailDto"),
     dto!(ChangeMemberRoleDto, "ChangeMemberRoleDto"),
@@ -60,6 +61,7 @@ const DTOS: [(&str, Details, Refuses); 30] = [
     dto!(CreateInvitationDto, "CreateInvitationDto"),
     dto!(CreateWorkspaceDto, "CreateWorkspaceDto"),
     dto!(ForgotPasswordDto, "ForgotPasswordDto"),
+    dto!(InviteToWorkspaceDto, "InviteToWorkspaceDto"),
     dto!(LoginDto, "LoginDto"),
     dto!(MemberRouteParamsDto, "MemberRouteParamsDto"),
     dto!(MfaChallengeDto, "MfaChallengeDto"),
@@ -73,6 +75,10 @@ const DTOS: [(&str, Details, Refuses); 30] = [
     dto!(OAuthCallbackQuery, "OAuthCallbackQueryDto"),
     dto!(OAuthInitiateQuery, "OAuthInitiateQueryDto"),
     dto!(PlatformLoginDto, "PlatformLoginDto"),
+    dto!(
+        PreviewWorkspaceInvitationDto,
+        "PreviewWorkspaceInvitationDto"
+    ),
     dto!(RefreshDto, "RefreshTokenBodyDto"),
     dto!(RegisterDto, "RegisterDto"),
     dto!(RenameWorkspaceDto, "RenameWorkspaceDto"),
@@ -84,6 +90,7 @@ const DTOS: [(&str, Details, Refuses); 30] = [
     dto!(TransferOwnershipDto, "TransferOwnershipDto"),
     dto!(VerifyEmailDto, "VerifyEmailDto"),
     dto!(VerifyOtpDto, "VerifyOtpDto"),
+    dto!(WorkspaceInvitationEmailDto, "WorkspaceInvitationEmailDto"),
     dto!(WorkspacePageQueryDto, "WorkspacePageQueryDto"),
 ];
 

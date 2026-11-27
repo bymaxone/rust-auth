@@ -1,6 +1,6 @@
 //! The request DTOs of the workspace routes: the page query of the two lists, the path parameters
-//! of a member route, and the bodies of the create, rename, schedule-deletion, role-change and
-//! ownership hand-over routes (layer: HTTP adapter, DTO).
+//! of a member route, and the bodies of the create, rename, schedule-deletion, role-change,
+//! ownership hand-over and invitation routes (layer: HTTP adapter, DTO).
 //!
 //! Each rule is the core's bound from `bymax_auth_core::workspace::bounds` or the shared
 //! contract's `requestFieldBounds`, so the DTO and the service that receives the value refuse the
@@ -133,4 +133,39 @@ pub struct TransferOwnershipDto {
     /// The giver's current password, 1 to 128 characters; absent for an account with no password.
     #[garde(inner(length(chars, min = 1, max = 128)))]
     pub password: Option<String>,
+}
+
+/// `POST /auth/workspaces/{workspaceId}/invitations` body: the address to invite and the role the
+/// invitation grants.
+#[derive(Debug, Deserialize, Validate)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct InviteToWorkspaceDto {
+    /// The invitee, trimmed and lowercased before the checks, so it matches the address the
+    /// invitation is indexed under. At most 255 characters.
+    #[garde(email, length(chars, max = 255))]
+    #[serde(deserialize_with = "super::text_rules::normalized_email")]
+    pub email: String,
+    /// The workspace role, 1 to 64 characters with no control character.
+    #[garde(length(chars, min = 1, max = 64), custom(no_control_characters))]
+    pub role: String,
+}
+
+/// The body of the resend and revoke routes under
+/// `/auth/workspaces/{workspaceId}/invitations`: the invitee whose pending invitation is meant.
+#[derive(Debug, Deserialize, Validate)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct WorkspaceInvitationEmailDto {
+    /// The invitee, under the rules of the address it was invited at.
+    #[garde(email, length(chars, max = 255))]
+    #[serde(deserialize_with = "super::text_rules::normalized_email")]
+    pub email: String,
+}
+
+/// `POST /auth/workspaces/invitations/preview` body: the token of the invitation message.
+#[derive(Debug, Deserialize, Validate)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PreviewWorkspaceInvitationDto {
+    /// The raw token, exactly 64 characters.
+    #[garde(length(chars, min = 64, max = 64))]
+    pub token: String,
 }

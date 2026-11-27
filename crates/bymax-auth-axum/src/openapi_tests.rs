@@ -146,6 +146,9 @@ fn nest_schemas(group: RouteGroup) -> Vec<&'static str> {
             "ScheduleWorkspaceDeletionDto",
             "ChangeMemberRoleDto",
             "TransferOwnershipDto",
+            "InviteToWorkspaceDto",
+            "WorkspaceInvitationEmailDto",
+            "PreviewWorkspaceInvitationDto",
         ],
         RouteGroup::Sessions | RouteGroup::OAuth => Vec::new(),
     };

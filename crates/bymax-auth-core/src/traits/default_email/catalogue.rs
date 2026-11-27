@@ -5,7 +5,9 @@
 //! which fills the context and calls the renderers.
 
 use super::super::email::{InviteData, SessionInfo, WorkspaceInviteData, WorkspaceInviteKind};
-use super::{AuthEmailMessage, render_utc_instant};
+use super::AuthEmailMessage;
+use crate::workspace::audit::iso_instant;
+use crate::workspace::bounds::is_blank;
 
 /// How long a verification or reset code stays valid, stated in the message that carries it.
 const CODE_VALIDITY_TEXT: &str = "It expires shortly, so use it soon.";
@@ -166,7 +168,7 @@ pub trait AuthEmailCatalogue: Send + Sync {
     /// Invitation to join a tenant.
     fn invitation(&self, ctx: &AuthEmailContext<'_>, invite: &InviteData) -> AuthEmailMessage {
         let _ = ctx;
-        let expires = render_utc_instant(invite.expires_at);
+        let expires = iso_instant(invite.expires_at);
         AuthEmailMessage::plain(
             format!(
                 "{} invited you to {}",
@@ -189,7 +191,7 @@ pub trait AuthEmailCatalogue: Send + Sync {
         invite: &WorkspaceInviteData,
     ) -> AuthEmailMessage {
         let _ = ctx;
-        let named = !invite.inviter_name.trim().is_empty();
+        let named = !is_blank(&invite.inviter_name);
         let (inviter, workspace) = (&invite.inviter_name, &invite.workspace_name);
         let (subject, opening) = match (invite.kind, named) {
             (WorkspaceInviteKind::Bootstrap, true) => (
@@ -213,7 +215,7 @@ pub trait AuthEmailCatalogue: Send + Sync {
         } else {
             "Create your account"
         };
-        let expires = render_utc_instant(invite.expires_at);
+        let expires = iso_instant(invite.expires_at);
         AuthEmailMessage::plain(
             subject,
             format!(

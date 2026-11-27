@@ -3,10 +3,13 @@
 //! support).
 
 use std::collections::BTreeMap;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicI64, Ordering};
+use std::sync::{Arc, Mutex};
 
-use bymax_auth_core::testing::{InMemoryMembershipCache, InMemoryWorkspaces};
+use bymax_auth_core::testing::{
+    InMemoryMembershipCache, InMemoryWorkspaceInvitations, InMemoryWorkspaces,
+};
+use bymax_auth_core::traits::{EmailError, EmailProvider, InviteData, WorkspaceInviteData};
 use bymax_auth_core::workspace::domain::{
     Membership, MembershipStatus, Workspace, WorkspaceStatus,
 };
@@ -15,6 +18,107 @@ use time::{Duration, OffsetDateTime};
 
 use super::TENANT;
 
+/// The workspace invitation messages the engine sent. Every other message is accepted and
+/// dropped.
+#[derive(Default)]
+pub struct InvitationMails {
+    sent: Mutex<Vec<(String, String)>>,
+}
+
+impl InvitationMails {
+    /// The recipient and the raw token of every invitation sent, oldest first.
+    pub fn sent(&self) -> Vec<(String, String)> {
+        self.sent
+            .lock()
+            .map(|sent| sent.clone())
+            .unwrap_or_default()
+    }
+}
+
+#[async_trait::async_trait]
+impl EmailProvider for InvitationMails {
+    async fn send_workspace_invitation(
+        &self,
+        _tenant_id: &str,
+        email: &str,
+        invite: &WorkspaceInviteData,
+        _locale: Option<&str>,
+    ) -> Result<(), EmailError> {
+        if let Ok(mut sent) = self.sent.lock() {
+            sent.push((email.to_owned(), invite.invite_token.clone()));
+        }
+        Ok(())
+    }
+
+    async fn send_password_reset_token(
+        &self,
+        _tenant_id: &str,
+        _email: &str,
+        _token: &str,
+        _locale: Option<&str>,
+    ) -> Result<(), EmailError> {
+        Ok(())
+    }
+
+    async fn send_password_reset_otp(
+        &self,
+        _tenant_id: &str,
+        _email: &str,
+        _otp: &str,
+        _locale: Option<&str>,
+    ) -> Result<(), EmailError> {
+        Ok(())
+    }
+
+    async fn send_email_verification_otp(
+        &self,
+        _tenant_id: &str,
+        _email: &str,
+        _otp: &str,
+        _locale: Option<&str>,
+    ) -> Result<(), EmailError> {
+        Ok(())
+    }
+
+    async fn send_email_change_verification(
+        &self,
+        _tenant_id: &str,
+        _new_email: &str,
+        _token: &str,
+        _locale: Option<&str>,
+    ) -> Result<(), EmailError> {
+        Ok(())
+    }
+
+    async fn send_mfa_enabled(
+        &self,
+        _tenant_id: &str,
+        _email: &str,
+        _locale: Option<&str>,
+    ) -> Result<(), EmailError> {
+        Ok(())
+    }
+
+    async fn send_mfa_disabled(
+        &self,
+        _tenant_id: &str,
+        _email: &str,
+        _locale: Option<&str>,
+    ) -> Result<(), EmailError> {
+        Ok(())
+    }
+
+    async fn send_invitation(
+        &self,
+        _tenant_id: &str,
+        _email: &str,
+        _invite: &InviteData,
+        _locale: Option<&str>,
+    ) -> Result<(), EmailError> {
+        Ok(())
+    }
+}
+
 /// The repositories and the cache of the workspace layer, shared with the engine.
 #[derive(Default)]
 pub struct WorkspaceDoubles {
@@ -22,6 +126,11 @@ pub struct WorkspaceDoubles {
     pub repo: Arc<InMemoryWorkspaces>,
     /// The membership cache.
     pub cache: Arc<InMemoryMembershipCache>,
+    /// The invitation store.
+    pub invitations: Arc<InMemoryWorkspaceInvitations>,
+    /// The invitation messages sent. This provider replaces the harness's mailbox on an engine
+    /// with the workspace layer on.
+    pub mails: Arc<InvitationMails>,
     tick: AtomicI64,
 }
 
@@ -46,6 +155,8 @@ impl WorkspaceDoubles {
         builder
             .workspace_repositories(self.repo.clone(), self.repo.clone())
             .membership_cache_store(self.cache.clone())
+            .workspace_invitation_store(self.invitations.clone())
+            .email_provider(self.mails.clone())
     }
 
     /// The next creation instant, so seeded rows sort in the order they were seeded.

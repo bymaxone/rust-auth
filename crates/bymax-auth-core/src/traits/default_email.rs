@@ -29,7 +29,6 @@ use std::borrow::Cow;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use time::{OffsetDateTime, UtcOffset};
 
 use super::email::{EmailError, EmailProvider, InviteData, SessionInfo, WorkspaceInviteData};
 
@@ -156,27 +155,6 @@ impl AuthEmailMessage {
 // ---------------------------------------------------------------------------
 // Rendering helpers
 // ---------------------------------------------------------------------------
-
-/// Render an instant as a UTC ISO-8601 timestamp for display in a message body, to the
-/// millisecond: the same text `Date.toISOString()` gives the nest-auth messages.
-///
-/// Built from the components rather than through a format description because this must not be
-/// able to fail: a formatter returns a `Result`, and the only honest thing to do with an error
-/// on this path would be to invent a date or drop the line — in a message whose whole job is to
-/// tell the invitee when their link stops working.
-fn render_utc_instant(at: OffsetDateTime) -> String {
-    let at = at.to_offset(UtcOffset::UTC);
-    format!(
-        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}.{:03}Z",
-        at.year(),
-        u8::from(at.month()),
-        at.day(),
-        at.hour(),
-        at.minute(),
-        at.second(),
-        at.millisecond()
-    )
-}
 
 /// Escape the five characters that can change the structure of an HTML document.
 ///
@@ -669,8 +647,9 @@ impl EmailProvider for DefaultAuthEmailProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::workspace::audit::iso_instant;
     use std::sync::Mutex;
-    use time::OffsetDateTime;
+    use time::{OffsetDateTime, UtcOffset};
 
     mod catalogue_context;
     mod workspace_invitation;
@@ -1046,13 +1025,13 @@ mod tests {
             )
             .replace_time(time::Time::from_hms(4, 5, 6).unwrap_or(time::Time::MIDNIGHT))
             .to_offset(UtcOffset::from_hms(-3, 0, 0).unwrap_or(UtcOffset::UTC));
-        assert_eq!(render_utc_instant(at), "2026-11-03T04:05:06.000Z");
+        assert_eq!(iso_instant(at), "2026-11-03T04:05:06.000Z");
     }
 
     #[test]
     fn an_instant_keeps_its_milliseconds_and_drops_finer_digits() {
         let at = OffsetDateTime::UNIX_EPOCH + time::Duration::nanoseconds(7_999_999);
-        assert_eq!(render_utc_instant(at), "1970-01-01T00:00:00.007Z");
+        assert_eq!(iso_instant(at), "1970-01-01T00:00:00.007Z");
     }
 
     #[test]
