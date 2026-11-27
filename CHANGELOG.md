@@ -15,7 +15,7 @@ marked BREAKING, never signalled by the number.
 
 ### Added: the `access.denied` workspace event
 
-- **A refused workspace access is reported to the workspace event hook.** When the access check refuses a dashboard account, `on_workspace_event` receives `AuditKind::AccessDenied` with the surface, the code answered, the reason decided and `suppressed_count`. The report runs detached and never changes the answer; the event is not persisted. One account raises at most `workspaces.access_denied_events.max` events (default 10) per `window_seconds` (default 60), and the next event carries the number left out. A counter store that cannot answer emits nothing. **Apply:** an exhaustive `match` on `AuditKind` needs the new arm; a custom `MembershipCacheStore` must also implement `AccessDeniedStore`; the two counters are the `wad:` and `wads:` keys, so a Redis ACL has to allow them.
+- **A refused workspace access is reported to the workspace event hook.** When the access check refuses a dashboard account, `on_workspace_event` receives `AuditKind::AccessDenied` with the surface, the code answered, the reason decided and `suppressed_count`. The report runs detached and never changes the answer; the event is not persisted. One account raises at most `workspaces.access_denied_events.max` events (default 10) per `window_seconds` (default 60), and the next event carries the number left out. A counter store that cannot answer emits nothing. **Apply:** an exhaustive `match` on `AuditKind` needs the new arm; a custom `MembershipCacheStore` must also implement `AccessDeniedStore`; the counters are the `wad:` and `wads:` keys, so a Redis ACL has to allow them.
 
 ### Added: OAuth workspace invitations and invitation-only registration
 
