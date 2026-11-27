@@ -303,7 +303,7 @@ Both routes belong to the `workspaces` group, in `crates/bymax-auth-axum/src/rou
 
 **Withdraw.** Removes a bootstrap invitation only and reports `invitation.revoked` with no actor.
 
-**Acceptance.** The record's role must be the owner role. A workspace already under the record's id must be active and held by the caller as its active owner; anything else is `auth.invalid_invitation_token` with the token unspent. Otherwise the create path of self-serve creation runs: the owner cap, `before_workspace_create`, then the workspace and the owner membership in one repository call.
+**Acceptance.** The record's role must be the owner role. A workspace already under the record's id must be active and held by the caller as its active owner; anything else is `auth.invalid_invitation_token` with the token unspent. With none, the create path of self-serve creation runs: the owner cap, `before_workspace_create`, then the workspace and the owner membership in one repository call.
 
 ---
 
