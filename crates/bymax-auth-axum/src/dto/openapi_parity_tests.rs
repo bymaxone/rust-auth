@@ -20,12 +20,13 @@ use crate::pending::{PENDING_PROPERTIES, PENDING_SCHEMAS};
 
 use super::{
     AcceptInvitationDto, ChangeEmailDto, ChangeMemberRoleDto, ChangePasswordDto,
-    ConfirmEmailChangeDto, CreateInvitationDto, CreateWorkspaceDto, ForgotPasswordDto, LoginDto,
-    MemberRouteParamsDto, MfaChallengeDto, MfaDisableDto, MfaRegenerateRecoveryCodesDto,
-    MfaSetupDto, MfaVerifyDto, OAuthCallbackQuery, OAuthInitiateQuery, PlatformLoginDto,
-    RefreshDto, RegisterDto, RenameWorkspaceDto, ResendOtpDto, ResendVerificationDto,
-    ResetPasswordDto, RevokeInvitationDto, ScheduleWorkspaceDeletionDto, TransferOwnershipDto,
-    VerifyEmailDto, VerifyOtpDto, WorkspacePageQueryDto,
+    ConfirmEmailChangeDto, CreateInvitationDto, CreateWorkspaceDto, ForgotPasswordDto,
+    InviteToWorkspaceDto, LoginDto, MemberRouteParamsDto, MfaChallengeDto, MfaDisableDto,
+    MfaRegenerateRecoveryCodesDto, MfaSetupDto, MfaVerifyDto, OAuthCallbackQuery,
+    OAuthInitiateQuery, PlatformLoginDto, PreviewWorkspaceInvitationDto, RefreshDto, RegisterDto,
+    RenameWorkspaceDto, ResendOtpDto, ResendVerificationDto, ResetPasswordDto, RevokeInvitationDto,
+    ScheduleWorkspaceDeletionDto, TransferOwnershipDto, VerifyEmailDto, VerifyOtpDto,
+    WorkspaceInvitationEmailDto, WorkspacePageQueryDto,
 };
 
 const ARTEFACT: &str = include_str!("../../../../conformance/openapi-request-schemas.json");
@@ -43,7 +44,7 @@ fn accepts<T: DeserializeOwned + Validate<Context = ()>>(body: &Value) -> bool {
 
 /// Every schema in the artefact and the DTO that answers it. The names differ for the two OAuth
 /// query types and for `RefreshDto`, which answers `RefreshTokenBodyDto`.
-pub(super) const DTOS: [(&str, Accepts); 30] = [
+pub(super) const DTOS: [(&str, Accepts); 33] = [
     ("AcceptInvitationDto", accepts::<AcceptInvitationDto>),
     ("ChangeEmailDto", accepts::<ChangeEmailDto>),
     ("ChangeMemberRoleDto", accepts::<ChangeMemberRoleDto>),
@@ -52,6 +53,7 @@ pub(super) const DTOS: [(&str, Accepts); 30] = [
     ("CreateInvitationDto", accepts::<CreateInvitationDto>),
     ("CreateWorkspaceDto", accepts::<CreateWorkspaceDto>),
     ("ForgotPasswordDto", accepts::<ForgotPasswordDto>),
+    ("InviteToWorkspaceDto", accepts::<InviteToWorkspaceDto>),
     ("LoginDto", accepts::<LoginDto>),
     ("MemberRouteParamsDto", accepts::<MemberRouteParamsDto>),
     ("MfaChallengeDto", accepts::<MfaChallengeDto>),
@@ -65,6 +67,10 @@ pub(super) const DTOS: [(&str, Accepts); 30] = [
     ("OAuthCallbackQueryDto", accepts::<OAuthCallbackQuery>),
     ("OAuthInitiateQueryDto", accepts::<OAuthInitiateQuery>),
     ("PlatformLoginDto", accepts::<PlatformLoginDto>),
+    (
+        "PreviewWorkspaceInvitationDto",
+        accepts::<PreviewWorkspaceInvitationDto>,
+    ),
     ("RefreshTokenBodyDto", accepts::<RefreshDto>),
     ("RegisterDto", accepts::<RegisterDto>),
     ("RenameWorkspaceDto", accepts::<RenameWorkspaceDto>),
@@ -79,6 +85,10 @@ pub(super) const DTOS: [(&str, Accepts); 30] = [
     ("TransferOwnershipDto", accepts::<TransferOwnershipDto>),
     ("VerifyEmailDto", accepts::<VerifyEmailDto>),
     ("VerifyOtpDto", accepts::<VerifyOtpDto>),
+    (
+        "WorkspaceInvitationEmailDto",
+        accepts::<WorkspaceInvitationEmailDto>,
+    ),
     ("WorkspacePageQueryDto", accepts::<WorkspacePageQueryDto>),
 ];
 

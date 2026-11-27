@@ -44,8 +44,9 @@ mod text_rules;
 mod workspace;
 
 pub use workspace::{
-    ChangeMemberRoleDto, CreateWorkspaceDto, MemberRouteParamsDto, RenameWorkspaceDto,
-    ScheduleWorkspaceDeletionDto, TransferOwnershipDto, WorkspacePageQueryDto,
+    ChangeMemberRoleDto, CreateWorkspaceDto, InviteToWorkspaceDto, MemberRouteParamsDto,
+    PreviewWorkspaceInvitationDto, RenameWorkspaceDto, ScheduleWorkspaceDeletionDto,
+    TransferOwnershipDto, WorkspaceInvitationEmailDto, WorkspacePageQueryDto,
 };
 
 /// Declares which schema of the shared request schemas describes each DTO, and whether the DTO
@@ -74,6 +75,7 @@ declared! {
     CreateInvitationDto => "CreateInvitationDto", true;
     CreateWorkspaceDto in workspace => "CreateWorkspaceDto", true;
     ForgotPasswordDto => "ForgotPasswordDto", true;
+    InviteToWorkspaceDto in workspace => "InviteToWorkspaceDto", true;
     LoginDto => "LoginDto", true;
     MemberRouteParamsDto in workspace => "MemberRouteParamsDto", true;
     MfaChallengeDto => "MfaChallengeDto", true;
@@ -84,6 +86,7 @@ declared! {
     OAuthCallbackQuery => "OAuthCallbackQueryDto", false;
     OAuthInitiateQuery => "OAuthInitiateQueryDto", true;
     PlatformLoginDto => "PlatformLoginDto", true;
+    PreviewWorkspaceInvitationDto in workspace => "PreviewWorkspaceInvitationDto", true;
     RefreshDto => "RefreshTokenBodyDto", false;
     RegisterDto => "RegisterDto", true;
     RenameWorkspaceDto in workspace => "RenameWorkspaceDto", true;
@@ -95,6 +98,7 @@ declared! {
     TransferOwnershipDto in workspace => "TransferOwnershipDto", true;
     VerifyEmailDto => "VerifyEmailDto", true;
     VerifyOtpDto => "VerifyOtpDto", true;
+    WorkspaceInvitationEmailDto in workspace => "WorkspaceInvitationEmailDto", true;
     WorkspacePageQueryDto in workspace => "WorkspacePageQueryDto", true;
 }
 

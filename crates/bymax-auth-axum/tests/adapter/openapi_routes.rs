@@ -23,7 +23,7 @@ use serde_json::{Value, json};
 use super::*;
 
 /// The route files, by the name they are listed under.
-const ROUTE_SOURCES: [(&str, &str); 11] = [
+const ROUTE_SOURCES: [(&str, &str); 12] = [
     ("auth", include_str!("../../src/routes/auth.rs")),
     (
         "email_change",
@@ -46,6 +46,10 @@ const ROUTE_SOURCES: [(&str, &str); 11] = [
     ),
     ("sessions", include_str!("../../src/routes/sessions.rs")),
     ("workspaces", include_str!("../../src/routes/workspaces.rs")),
+    (
+        "workspace_invitations",
+        include_str!("../../src/routes/workspace_invitations.rs"),
+    ),
     (
         "workspace_mutations",
         include_str!("../../src/routes/workspace_mutations.rs"),
@@ -97,7 +101,7 @@ const BYTES_BODIES: [(&str, Option<&str>, &str); 7] = [
 ];
 
 /// Mounted routes that read no body, so no schema describes them.
-const NO_BODY_ROUTES: [(&str, &str); 15] = [
+const NO_BODY_ROUTES: [(&str, &str); 16] = [
     ("GET", "/me"),
     ("POST", "/ws-ticket"),
     ("GET", "/sessions"),
@@ -109,6 +113,7 @@ const NO_BODY_ROUTES: [(&str, &str); 15] = [
     ("GET", "/workspaces"),
     ("GET", "/workspaces/{workspaceId}/access"),
     ("GET", "/workspaces/{workspaceId}/members"),
+    ("GET", "/workspaces/{workspaceId}/invitations"),
     // A body is accepted and never read: the route records a switch, nothing more.
     ("POST", "/workspaces/{workspaceId}/switch"),
     // The two others the contract lists as `whenBody`: a body is accepted and never read.
@@ -119,7 +124,8 @@ const NO_BODY_ROUTES: [(&str, &str); 15] = [
 
 /// Rows reachable without a session. Every other row is probed with a session, a platform one
 /// for the platform MFA routes and a dashboard one for the rest.
-const PUBLIC_ROWS: [&str; 12] = [
+const PUBLIC_ROWS: [&str; 13] = [
+    "/workspaces/invitations/preview",
     "/register",
     "/login",
     "/verify-email",

@@ -1,7 +1,8 @@
 //! The workspace guard against a **real Redis** (via `testcontainers`): the membership a route
 //! admits is resolved through the versioned cache `RedisStores` holds, an unbumped change is still
-//! answered from it, and the bump the writer makes after its change takes the entry out (layer:
-//! HTTP adapter, end-to-end tests).
+//! answered from it, and the bump the writer makes after its change takes the entry out. The
+//! invitation routes run against the invitation scripts of the same store (layer: HTTP adapter,
+//! end-to-end tests).
 //!
 //! The single legitimate skip is Docker being unavailable; once a container runs, every step
 //! asserts a real outcome.
@@ -13,7 +14,7 @@ mod redis_ready;
 
 use std::collections::{BTreeMap, HashMap};
 use std::net::SocketAddr;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use axum::Router;
 use axum::body::Body;
@@ -21,7 +22,9 @@ use axum::extract::ConnectInfo;
 use bymax_auth_axum::{AuthRouter, AxumAuthConfig, ClientIpSource};
 use bymax_auth_core::services::membership_cache::bump_membership;
 use bymax_auth_core::testing::{InMemoryUserRepository, InMemoryWorkspaces};
-use bymax_auth_core::traits::UserRepository;
+use bymax_auth_core::traits::{
+    AuthEmailSink, DefaultAuthEmailProvider, EmailError, OutgoingEmail, UserRepository,
+};
 use bymax_auth_core::workspace::domain::{
     Membership, MembershipRef, MembershipStatus, Workspace, WorkspaceStatus,
 };
@@ -55,19 +58,48 @@ async fn try_start() -> Option<(ContainerAsync<Redis>, String)> {
     Some((container, url))
 }
 
+/// The text body of every message the default email provider sent.
+#[derive(Default)]
+struct Outbox(Mutex<Vec<String>>);
+
+impl Outbox {
+    /// The token of the one invitation message sent: its only run of 64 hex digits.
+    fn only_token(&self) -> Option<String> {
+        let texts = self.0.lock().ok()?;
+        assert_eq!(texts.len(), 1);
+        texts
+            .first()?
+            .split(|c: char| !c.is_ascii_hexdigit())
+            .find(|run| run.len() == 64)
+            .map(str::to_owned)
+    }
+}
+
+#[async_trait::async_trait]
+impl AuthEmailSink for Outbox {
+    async fn send(&self, message: OutgoingEmail<'_>) -> Result<(), EmailError> {
+        if let Ok(mut texts) = self.0.lock() {
+            texts.push(message.text.to_owned());
+        }
+        Ok(())
+    }
+}
+
 /// What the test holds of the engine it built.
 struct Built {
     engine: Arc<AuthEngine>,
     users: Arc<InMemoryUserRepository>,
     stores: Arc<RedisStores>,
     repo: Arc<InMemoryWorkspaces>,
+    outbox: Arc<Outbox>,
 }
 
-/// An engine with the workspace layer on, its membership cache in the real Redis.
+/// An engine with the workspace layer on, its membership cache and invitations in the real Redis.
 fn build(url: &str) -> Option<Built> {
     let stores = Arc::new(RedisStores::connect(url, "auth").ok()?);
     let users = Arc::new(InMemoryUserRepository::new());
     let repo = Arc::new(InMemoryWorkspaces::new());
+    let outbox = Arc::new(Outbox::default());
     let mut config = AuthConfig::default();
     config.jwt.secret = SecretString::from("0123456789abcdef0123456789abcdef".to_owned());
     config.roles.hierarchy = HashMap::from([("USER".to_owned(), Vec::new())]);
@@ -82,6 +114,8 @@ fn build(url: &str) -> Option<Built> {
         .redis_stores(stores.clone())
         .workspace_repositories(repo.clone(), repo.clone())
         .membership_cache_store(stores.clone())
+        .workspace_invitation_store(stores.clone())
+        .email_provider(Arc::new(DefaultAuthEmailProvider::new(outbox.clone())))
         .build()
         .ok()?;
     Some(Built {
@@ -89,6 +123,7 @@ fn build(url: &str) -> Option<Built> {
         users,
         stores,
         repo,
+        outbox,
     })
 }
 
@@ -266,4 +301,48 @@ async fn a_removal_through_the_route_ends_the_members_cached_access_in_real_redi
     let events = b.repo.audit_events();
     assert_eq!(events.len(), 1);
     assert_eq!(events[0].kind.type_name(), "member.removed");
+}
+
+#[tokio::test]
+async fn an_invitation_is_listed_previewed_and_revoked_through_the_routes_in_real_redis() {
+    let Some((_container, url)) = try_start().await else { return };
+    let built = build(&url);
+    assert!(
+        built.is_some(),
+        "setup must succeed once the container runs"
+    );
+    let Some(b) = built else { return };
+    let router = AuthRouter::from_engine(
+        b.engine.clone(),
+        AxumAuthConfig::new(ClientIpSource::PeerAddr),
+    );
+    let Ok(app) = router.map(AuthRouter::into_router) else { return };
+    let owner = seed_user(&b.users).await;
+    seed_seat(&b.repo, &owner, MembershipStatus::Active);
+    let access = sign_in(&app, "w@e.com").await;
+    let path = "/auth/workspaces/w1/invitations";
+    let invite = json!({ "email": "New@E.com", "role": "owner" });
+    let (status, body, _) = send(&app, (Method::POST, path), Some(invite), &access).await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+
+    let (status, listed, _) = send(&app, (Method::GET, path), None, &access).await;
+    assert_eq!(status, StatusCode::OK, "{listed}");
+    assert_eq!(listed["items"][0]["email"], "new@e.com");
+
+    let token = b.outbox.only_token().unwrap_or_default();
+    let preview = (Method::POST, "/auth/workspaces/invitations/preview");
+    let asked = json!({ "token": token });
+    let (status, body, _) = send(&app, preview.clone(), Some(asked.clone()), "").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["workspaceName"], "One");
+
+    let revoke = (Method::POST, "/auth/workspaces/w1/invitations/revoke");
+    let who = json!({ "email": "new@e.com" });
+    let (status, body, _) = send(&app, revoke, Some(who), &access).await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+    let (_, listed, _) = send(&app, (Method::GET, path), None, &access).await;
+    assert_eq!(listed["items"], json!([]));
+    let (status, body, _) = send(&app, preview, Some(asked), "").await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["error"]["code"], "auth.invalid_invitation_token");
 }

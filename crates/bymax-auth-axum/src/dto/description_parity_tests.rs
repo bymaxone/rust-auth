@@ -21,16 +21,17 @@ use crate::pending::PENDING_SCHEMAS;
 
 use super::openapi_parity_tests::{DTOS, Findings, artefact, base_body, props_of};
 use super::{
-    ChangeEmailDto, CreateInvitationDto, ForgotPasswordDto, LoginDto, PlatformLoginDto,
-    RegisterDto, ResendOtpDto, ResendVerificationDto, ResetPasswordDto, RevokeInvitationDto,
-    VerifyEmailDto, VerifyOtpDto,
+    ChangeEmailDto, CreateInvitationDto, ForgotPasswordDto, InviteToWorkspaceDto, LoginDto,
+    PlatformLoginDto, RegisterDto, ResendOtpDto, ResendVerificationDto, ResetPasswordDto,
+    RevokeInvitationDto, VerifyEmailDto, VerifyOtpDto, WorkspaceInvitationEmailDto,
 };
 
 const DESCRIPTIONS: &str =
     include_str!("../../../../conformance/openapi-request-descriptions.json");
 
-/// The source of the DTOs, read for the inventory of transformed properties.
-const DTO_SOURCE: &str = include_str!("../dto.rs");
+/// The sources of the DTOs that transform a value, read for the inventory of transformed
+/// properties.
+const DTO_SOURCE: &str = concat!(include_str!("../dto.rs"), include_str!("workspace.rs"));
 
 /// The text of the one transform this crate applies to a request value.
 const NORMALIZER: &str = "text_rules::normalized_email";
@@ -55,10 +56,11 @@ macro_rules! row {
 }
 
 /// Every property the server transforms, with the DTO that carries it.
-const DESCRIBED: [Row; 12] = [
+const DESCRIBED: [Row; 14] = [
     row!(ChangeEmailDto, "newEmail", new_email),
     row!(CreateInvitationDto, "email", email),
     row!(ForgotPasswordDto, "email", email),
+    row!(InviteToWorkspaceDto, "email", email),
     row!(LoginDto, "email", email),
     row!(PlatformLoginDto, "email", email),
     row!(RegisterDto, "email", email),
@@ -68,6 +70,7 @@ const DESCRIBED: [Row; 12] = [
     row!(RevokeInvitationDto, "email", email),
     row!(VerifyEmailDto, "email", email),
     row!(VerifyOtpDto, "email", email),
+    row!(WorkspaceInvitationEmailDto, "email", email),
 ];
 
 fn descriptions() -> Value {
@@ -106,7 +109,7 @@ fn every_entry_of_the_artefact_has_a_property_here_and_the_reverse() {
     assert_eq!(rows, built);
 }
 
-/// Each `(DTO, Rust field)` the source marks with the normaliser, found by reading `dto.rs`: the
+/// Each `(DTO, Rust field)` the source marks with the normaliser, found by reading `DTO_SOURCE`: the
 /// field is the one declared after the attribute.
 fn transformed_in_source() -> BTreeSet<(String, String)> {
     let mut found = BTreeSet::new();

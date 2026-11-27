@@ -10,24 +10,16 @@
 
 /// Request schemas the artefact carries that no `dto::DECLARED` row maps to yet. None of them has
 /// a DTO at all.
-pub(crate) const PENDING_SCHEMAS: [&str; 5] = [
+pub(crate) const PENDING_SCHEMAS: [&str; 2] = [
     "AcceptWorkspaceInvitationDto",
     "AcceptWorkspaceInvitationSignupDto",
-    "InviteToWorkspaceDto",
-    "PreviewWorkspaceInvitationDto",
-    "WorkspaceInvitationEmailDto",
 ];
 
 /// Operations the artefact carries that have no row in the operation table yet, as the
 /// artefact's `METHOD /path` keys.
-pub(crate) const PENDING_OPERATIONS: [&str; 7] = [
-    "GET /workspaces/:workspaceId/invitations",
-    "POST /workspaces/:workspaceId/invitations",
-    "POST /workspaces/:workspaceId/invitations/resend",
-    "POST /workspaces/:workspaceId/invitations/revoke",
+pub(crate) const PENDING_OPERATIONS: [&str; 2] = [
     "POST /workspaces/invitations/accept",
     "POST /workspaces/invitations/accept-signup",
-    "POST /workspaces/invitations/preview",
 ];
 
 /// Properties of a schema that exists here, which the artefact gives and the DTO lacks, as

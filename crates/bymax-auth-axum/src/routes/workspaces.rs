@@ -1,9 +1,10 @@
 //! The `workspaces` route group: the workspaces a signed-in identity belongs to, its role in one,
 //! the members of one it may see, and the record of the one it last switched to, with the writes
-//! of [`super::workspace_mutations`] merged in (layer: HTTP adapter, routes).
+//! of [`super::workspace_mutations`] and the invitations of [`super::workspace_invitations`]
+//! merged in (layer: HTTP adapter, routes).
 //!
-//! Every route needs a verified dashboard access token and an account in good standing. A route
-//! under `{workspaceId}` is also behind [`RequireWorkspace`], so the workspace a request acts in is
+//! Every route but the invitation preview needs a verified dashboard access token and an account
+//! in good standing. A route under `{workspaceId}` is also behind [`RequireWorkspace`], so the workspace a request acts in is
 //! always the path segment. The two lists answer only the caller's own data: its memberships, or
 //! the members of a workspace the guard admitted it to, so neither enumerates.
 //!
@@ -54,10 +55,11 @@ pub(crate) fn routes(config: &AxumAuthConfig, ip_source: &Throttle) -> Router<Au
             crate::router::throttled(post(switch), limits.workspace_switch, ip_source),
         )
         .merge(super::workspace_mutations::routes(config, ip_source))
+        .merge(super::workspace_invitations::routes(config, ip_source))
 }
 
 /// The page a validated query asks for.
-fn page_of(query: &WorkspacePageQueryDto) -> PageQuery<'_> {
+pub(crate) fn page_of(query: &WorkspacePageQueryDto) -> PageQuery<'_> {
     PageQuery {
         cursor: query.cursor.as_deref(),
         limit: query.limit.as_deref(),
