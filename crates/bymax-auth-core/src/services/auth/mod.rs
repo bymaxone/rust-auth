@@ -731,7 +731,7 @@ pub(crate) mod test_support {
     }
 
     /// Build a harness from `cfg` and optional hooks. Returns `None` if the (always valid)
-    /// fixture config somehow fails to assemble, so `None` is a test failure and never a skip.
+    /// fixture config somehow fails to assemble.
     pub(crate) fn harness(cfg: AuthConfig, hooks: Option<Arc<dyn AuthHooks>>) -> Option<Harness> {
         let users = Arc::new(InMemoryUserRepository::new());
         let stores = Arc::new(InMemoryStores::new());

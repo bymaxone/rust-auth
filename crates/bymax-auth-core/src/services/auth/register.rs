@@ -182,8 +182,7 @@ mod tests {
         cfg
     }
 
-    /// Build an engine from `cfg`; the fixtures always validate, so an error is a test failure
-    /// and never a skip.
+    /// Build an engine from `cfg`. The fixtures always validate.
     fn engine(cfg: AuthConfig) -> Result<AuthEngine, crate::ConfigError> {
         AuthEngine::builder()
             .config(cfg)

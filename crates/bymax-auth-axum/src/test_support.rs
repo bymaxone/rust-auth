@@ -36,7 +36,7 @@ pub(crate) struct Scaffold {
 
 /// Build a [`Scaffold`] over in-memory stores with the platform domain + MFA configured, so
 /// the platform/MFA/role extractor tests can run. Returns `None` only if the engine fails to
-/// build (it does not, for this config), so `None` is a test failure and never a skip.
+/// build (it does not, for this config).
 pub(crate) fn scaffold(delivery: TokenDelivery) -> Option<Scaffold> {
     scaffold_with(delivery, |_| {})
 }
