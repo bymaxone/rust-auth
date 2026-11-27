@@ -175,7 +175,9 @@ fn reached_the_lookup(response: &Captured) -> bool {
 
 #[tokio::test]
 async fn a_body_string_within_the_bound_is_the_token() {
-    let Some((_h, app, _, refresh)) = signed_in(TokenDelivery::Bearer).await else { return };
+    let Some((_h, app, _, refresh)) = signed_in(TokenDelivery::Bearer).await else {
+        unreachable!()
+    };
     let (min, max) = bound();
     for len in [min, max] {
         let answer =
@@ -188,7 +190,7 @@ async fn a_body_string_within_the_bound_is_the_token() {
 
 #[tokio::test]
 async fn a_missing_or_null_body_token_is_no_token() {
-    let Some((_h, app, ..)) = signed_in(TokenDelivery::Bearer).await else { return };
+    let Some((_h, app, ..)) = signed_in(TokenDelivery::Bearer).await else { unreachable!() };
     for body in [
         serde_json::json!({}),
         serde_json::json!({ "refreshToken": null }),
@@ -200,7 +202,9 @@ async fn a_missing_or_null_body_token_is_no_token() {
 
 #[tokio::test]
 async fn any_other_present_body_value_is_refused_naming_the_field() {
-    let Some((_h, app, _, refresh)) = signed_in(TokenDelivery::Bearer).await else { return };
+    let Some((_h, app, _, refresh)) = signed_in(TokenDelivery::Bearer).await else {
+        unreachable!()
+    };
     let (_, max) = bound();
     for value in [
         Value::String(String::new()),
@@ -220,7 +224,9 @@ async fn any_other_present_body_value_is_refused_naming_the_field() {
 
 #[tokio::test]
 async fn an_oversize_cookie_is_refused_except_on_logout() {
-    let Some((_h, app, access, refresh)) = signed_in(TokenDelivery::Cookie).await else { return };
+    let Some((_h, app, access, refresh)) = signed_in(TokenDelivery::Cookie).await else {
+        unreachable!()
+    };
     let (_, max) = bound();
     let oversize = "x".repeat(max + 1);
     let refused = Req::post("/auth/refresh")
@@ -256,7 +262,7 @@ async fn an_oversize_cookie_is_refused_except_on_logout() {
 
 #[tokio::test]
 async fn an_empty_cookie_is_no_token() {
-    let Some((_h, app, ..)) = signed_in(TokenDelivery::Cookie).await else { return };
+    let Some((_h, app, ..)) = signed_in(TokenDelivery::Cookie).await else { unreachable!() };
     let answer = Req::post("/auth/refresh")
         .cookie("refresh_token", "")
         .send(&app)
@@ -266,7 +272,9 @@ async fn an_empty_cookie_is_no_token() {
 
 #[tokio::test]
 async fn under_both_an_oversize_logout_cookie_leaves_the_body_token() {
-    let Some((_h, app, access, refresh)) = signed_in(TokenDelivery::Both).await else { return };
+    let Some((_h, app, access, refresh)) = signed_in(TokenDelivery::Both).await else {
+        unreachable!()
+    };
     let (_, max) = bound();
     let logout = Req::post("/auth/logout")
         .bearer(&access)

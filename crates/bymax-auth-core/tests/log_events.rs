@@ -79,7 +79,7 @@ fn workspace_root() -> PathBuf {
 
 /// Every `.rs` file below `dir`, recursively.
 fn rust_files(dir: &Path, out: &mut Vec<PathBuf>) {
-    let Ok(entries) = fs::read_dir(dir) else { return };
+    let Ok(entries) = fs::read_dir(dir) else { unreachable!() };
     for entry in entries.flatten() {
         let path = entry.path();
         if path.is_dir() {
@@ -95,7 +95,7 @@ fn production_sources() -> Vec<PathBuf> {
     let root = workspace_root();
     let mut files = Vec::new();
     for group in ["crates", "bindings"] {
-        let Ok(members) = fs::read_dir(root.join(group)) else { continue };
+        let Ok(members) = fs::read_dir(root.join(group)) else { unreachable!() };
         for member in members.flatten() {
             rust_files(&member.path().join("src"), &mut files);
         }
@@ -200,7 +200,7 @@ fn all_calls() -> Vec<Call> {
     let root = workspace_root();
     let mut calls = Vec::new();
     for path in production_sources() {
-        let Ok(source) = fs::read_to_string(&path) else { continue };
+        let Ok(source) = fs::read_to_string(&path) else { unreachable!() };
         let name = path
             .strip_prefix(&root)
             .unwrap_or(&path)
@@ -344,7 +344,7 @@ fn a_cause_is_bound_from_a_closed_classification() {
     let root = workspace_root();
     let mut unbound = Vec::new();
     for path in production_sources() {
-        let Ok(source) = fs::read_to_string(&path) else { continue };
+        let Ok(source) = fs::read_to_string(&path) else { unreachable!() };
         let text = production_part(&source);
         for (at, _) in text.match_indices("let cause = ") {
             let rhs = text[at + "let cause = ".len()..]

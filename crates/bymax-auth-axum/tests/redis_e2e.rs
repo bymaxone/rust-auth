@@ -84,8 +84,8 @@ async fn try_start() -> Option<TestRedis> {
         Ok(container) => container,
         Err(error) => return docker_gate::docker_unavailable("redis:8", error),
     };
-    let host = container.get_host().await.ok()?;
-    let port = container.get_host_port_ipv4(REDIS_PORT).await.ok()?;
+    let Ok(host) = container.get_host().await else { unreachable!() };
+    let Ok(port) = container.get_host_port_ipv4(REDIS_PORT).await else { unreachable!() };
     let url = redis_ready::redis_url(&host.to_string(), port);
     redis_ready::wait_until_ready(&url).await;
     Some(TestRedis { container, url })
@@ -336,12 +336,12 @@ async fn full_router_against_real_redis() {
         built.is_some(),
         "engine/router setup must succeed once the Redis container is running"
     );
-    let Some((engine, users, admins)) = built else { return };
+    let Some((engine, users, admins)) = built else { unreachable!() };
     let Ok(assembled) = AuthRouter::from_engine(
         engine.clone(),
         AxumAuthConfig::new(ClientIpSource::PeerAddr),
     ) else {
-        return;
+        unreachable!()
     };
     let app = assembled.into_router();
 

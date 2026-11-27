@@ -32,7 +32,7 @@ async fn listing_leaves_out_a_damaged_detail_and_prunes_only_a_dead_member() {
     let Some(redis) = common::try_start().await else {
         return;
     };
-    let Some(stores) = redis.stores() else { return };
+    let Some(stores) = redis.stores() else { unreachable!() };
     let kind = SessionKind::Dashboard;
     seed_damaged_and_dead_sessions(&redis, &stores).await;
 
@@ -80,7 +80,7 @@ async fn a_failed_detail_read_fails_the_listing_and_prunes_nothing() {
     let Some(redis) = common::try_start().await else {
         return;
     };
-    let Some(stores) = redis.stores() else { return };
+    let Some(stores) = redis.stores() else { unreachable!() };
     let kind = SessionKind::Dashboard;
     for hash in ["h1", "h2"] {
         let created = stores

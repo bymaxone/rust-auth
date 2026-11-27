@@ -37,7 +37,7 @@ fn last_token(inv: &Inv) -> String {
 
 #[tokio::test]
 async fn an_owner_invites_an_address_and_the_mail_carries_the_token_of_the_stored_record() {
-    let Some(inv) = setup(config()).await else { return };
+    let Some(inv) = setup(config()).await else { unreachable!() };
     let invited = owner_invites(&inv, "  New@X.io ", "member").await;
     assert!(invited.is_ok(), "{invited:?}");
     let sent = inv.mail.sent();
@@ -74,7 +74,7 @@ impl InvitationRecordExt for crate::workspace::invitation::InvitationRecord {
 
 #[tokio::test]
 async fn the_role_ceiling_decides_who_may_invite_to_which_role() {
-    let Some(inv) = setup(config()).await else { return };
+    let Some(inv) = setup(config()).await else { unreachable!() };
     let ask = |who: &'static str, email: &'static str, role: &'static str| {
         let member = match who {
             "owner" => inv.owner.clone(),
@@ -112,7 +112,7 @@ async fn the_role_ceiling_decides_who_may_invite_to_which_role() {
 
 #[tokio::test]
 async fn an_address_with_a_membership_in_any_status_is_already_a_member() {
-    let Some(inv) = setup(config()).await else { return };
+    let Some(inv) = setup(config()).await else { unreachable!() };
     for (email, status) in [
         ("active@x.io", MembershipStatus::Active),
         ("suspended@x.io", MembershipStatus::Suspended),
@@ -136,7 +136,7 @@ async fn an_address_with_a_membership_in_any_status_is_already_a_member() {
 
 #[tokio::test]
 async fn an_account_of_another_tenant_is_neither_a_member_nor_an_account() {
-    let Some(inv) = setup(config()).await else { return };
+    let Some(inv) = setup(config()).await else { unreachable!() };
     seed_account(&inv.f, "t2", "elsewhere@x.io", false).await;
     assert!(
         owner_invites(&inv, "elsewhere@x.io", "member")
@@ -148,7 +148,7 @@ async fn an_account_of_another_tenant_is_neither_a_member_nor_an_account() {
 
 #[tokio::test]
 async fn inviting_an_invited_address_again_is_held_to_the_cooldown_and_the_resend_limit() {
-    let Some(inv) = setup(config()).await else { return };
+    let Some(inv) = setup(config()).await else { unreachable!() };
     assert!(owner_invites(&inv, "again@x.io", "member").await.is_ok());
     let at_once = owner_invites(&inv, "Again@x.io", "member").await;
     assert!(is_limited(&at_once), "inside the cooldown: {at_once:?}");
@@ -190,7 +190,7 @@ async fn inviting_an_invited_address_again_is_held_to_the_cooldown_and_the_resen
 
 #[tokio::test]
 async fn an_inviter_has_twenty_invitations_an_hour() {
-    let Some(inv) = setup(config()).await else { return };
+    let Some(inv) = setup(config()).await else { unreachable!() };
     for n in 0..20 {
         let sent = owner_invites(&inv, &format!("p{n}@x.io"), "member").await;
         assert!(sent.is_ok(), "{n}: {sent:?}");
@@ -204,7 +204,7 @@ async fn an_inviter_has_twenty_invitations_an_hour() {
 async fn the_pending_cap_refuses_a_first_invitation_and_lets_a_replacement_through() {
     let mut capped = config();
     capped.workspaces.max_pending_invitations_per_workspace = 1;
-    let Some(inv) = setup(capped).await else { return };
+    let Some(inv) = setup(capped).await else { unreachable!() };
     let old = Seeded {
         email: "a@x.io",
         role: "member",
@@ -238,7 +238,7 @@ async fn revokes_ok(inv: &Inv, who: &WorkspaceMember, email: &str) -> bool {
 
 #[tokio::test]
 async fn resend_and_revoke_change_nothing_for_an_address_with_no_invitation() {
-    let Some(inv) = setup(config()).await else { return };
+    let Some(inv) = setup(config()).await else { unreachable!() };
     assert!(resends_ok(&inv, &inv.owner, "none@x.io").await);
     assert!(revokes_ok(&inv, &inv.owner, "none@x.io").await);
     assert!(inv.mail.sent().is_empty());
@@ -249,7 +249,7 @@ async fn resend_and_revoke_change_nothing_for_an_address_with_no_invitation() {
 #[tokio::test]
 async fn resend_and_revoke_change_nothing_for_an_invitation_above_the_actor_and_the_owner_revokes_it()
  {
-    let Some(inv) = setup(config()).await else { return };
+    let Some(inv) = setup(config()).await else { unreachable!() };
     let above = Seeded {
         email: "boss@x.io",
         role: "admin",
@@ -275,7 +275,7 @@ async fn resend_and_revoke_change_nothing_for_an_invitation_above_the_actor_and_
 
 #[tokio::test]
 async fn a_resend_mints_a_new_token_and_reports_a_resend() {
-    let Some(inv) = setup(config()).await else { return };
+    let Some(inv) = setup(config()).await else { unreachable!() };
     let old = Seeded {
         email: "r@x.io",
         role: "member",
@@ -311,7 +311,7 @@ async fn a_resend_mints_a_new_token_and_reports_a_resend() {
 #[tokio::test]
 async fn an_index_over_a_value_that_is_not_a_record_is_an_internal_error_never_a_cooldown_that_ended()
  {
-    let Some(inv) = setup(config()).await else { return };
+    let Some(inv) = setup(config()).await else { unreachable!() };
     let engine = &inv.f.engine;
     let garbage = [
         ("not json", "not a record".to_owned()),
@@ -355,7 +355,7 @@ async fn an_index_over_a_value_that_is_not_a_record_is_an_internal_error_never_a
 
 #[tokio::test]
 async fn a_creation_time_in_the_future_counts_as_inside_the_cooldown() {
-    let Some(inv) = setup(config()).await else { return };
+    let Some(inv) = setup(config()).await else { unreachable!() };
     let future = Seeded {
         email: "f@x.io",
         role: "member",
@@ -374,7 +374,7 @@ async fn a_creation_time_in_the_future_counts_as_inside_the_cooldown() {
 
 #[tokio::test]
 async fn a_delivery_failure_carries_no_text_of_the_provider_and_leaves_the_record_published() {
-    let Some(inv) = setup(config()).await else { return };
+    let Some(inv) = setup(config()).await else { unreachable!() };
     inv.mail.act(Mode::RelayQuotesTheToken);
     let failed = owner_invites(&inv, "d@x.io", "member").await;
     let shown = format!("{failed:?}");
@@ -408,7 +408,7 @@ fn indexed_token_in(text: &str) -> bool {
 
 #[tokio::test]
 async fn a_provider_without_workspace_invitations_surfaces_as_an_error_not_a_success() {
-    let Some(inv) = setup(config()).await else { return };
+    let Some(inv) = setup(config()).await else { unreachable!() };
     inv.mail.act(Mode::Unsupported);
     let result = owner_invites(&inv, "u@x.io", "member").await;
     assert!(matches!(result, Err(AuthError::Internal(_))), "{result:?}");
@@ -417,7 +417,7 @@ async fn a_provider_without_workspace_invitations_surfaces_as_an_error_not_a_suc
 
 #[tokio::test]
 async fn the_invitation_methods_answer_an_internal_error_when_no_store_was_configured() {
-    let Some(f) = without_a_store(config()) else { return };
+    let Some(f) = without_a_store(config()) else { unreachable!() };
     let member = super::workspace_support_tests::acting_member("t1", "w1", "u", "owner");
     let invited = f
         .engine
@@ -435,7 +435,7 @@ async fn the_invitation_methods_answer_an_internal_error_when_no_store_was_confi
 
 #[tokio::test]
 async fn an_invitation_over_a_live_one_to_a_role_above_the_actor_is_refused() {
-    let Some(inv) = setup(config()).await else { return };
+    let Some(inv) = setup(config()).await else { unreachable!() };
     let above = Seeded {
         email: "up@x.io",
         role: "admin",
@@ -457,7 +457,7 @@ async fn an_invitation_over_a_live_one_to_a_role_above_the_actor_is_refused() {
 
 #[tokio::test]
 async fn a_blank_address_is_a_validation_error_naming_email() {
-    let Some(inv) = setup(config()).await else { return };
+    let Some(inv) = setup(config()).await else { unreachable!() };
     let refused = owner_invites(&inv, "   ", "member").await;
     assert!(
         matches!(&refused, Err(AuthError::Validation { details }) if details.iter().any(|d| d.field == "email")),
@@ -467,7 +467,7 @@ async fn a_blank_address_is_a_validation_error_naming_email() {
 
 #[tokio::test]
 async fn an_invitation_to_a_workspace_that_is_not_active_is_not_found() {
-    let Some(inv) = setup(config()).await else { return };
+    let Some(inv) = setup(config()).await else { unreachable!() };
     inv.f
         .repo
         .seed_workspace(super::workspace_support_tests::workspace(
@@ -486,8 +486,8 @@ async fn an_invitation_to_a_workspace_that_is_not_active_is_not_found() {
 
 #[tokio::test]
 async fn a_stored_record_with_no_valid_creation_time_is_never_trusted_for_a_cooldown() {
-    let Some(inv) = setup(config()).await else { return };
-    let Some(runtime) = inv.f.engine.workspaces() else { return };
+    let Some(inv) = setup(config()).await else { unreachable!() };
+    let Some(runtime) = inv.f.engine.workspaces() else { unreachable!() };
     let record = crate::workspace::invitation::InvitationRecord::Member {
         base: crate::workspace::invitation::InvitationBase {
             email: "t@x.io".to_owned(),
@@ -508,7 +508,7 @@ async fn a_stored_record_with_no_valid_creation_time_is_never_trusted_for_a_cool
 
 #[tokio::test]
 async fn a_member_with_a_blank_workspace_id_is_a_validation_error_naming_it() {
-    let Some(inv) = setup(config()).await else { return };
+    let Some(inv) = setup(config()).await else { unreachable!() };
     let blank = super::workspace_support_tests::acting_member("t1", "", "u", "owner");
     let refused = inv
         .f
@@ -523,7 +523,7 @@ async fn a_member_with_a_blank_workspace_id_is_a_validation_error_naming_it() {
 
 #[tokio::test]
 async fn a_revoke_from_another_tenant_leaves_the_invitation_of_the_same_workspace_id() {
-    let Some(inv) = setup(config()).await else { return };
+    let Some(inv) = setup(config()).await else { unreachable!() };
     let pending = Seeded {
         email: "a@x.io",
         role: "member",
@@ -558,8 +558,8 @@ fn issued_ago(
 
 #[tokio::test]
 async fn the_cooldown_is_sixty_seconds_and_ends_on_the_sixtieth() {
-    let Some(inv) = setup(config()).await else { return };
-    let Some(runtime) = inv.f.engine.workspaces() else { return };
+    let Some(inv) = setup(config()).await else { unreachable!() };
+    let Some(runtime) = inv.f.engine.workspaces() else { unreachable!() };
     let now = time::OffsetDateTime::now_utc()
         .replace_nanosecond(0)
         .unwrap_or(time::OffsetDateTime::now_utc());
@@ -575,7 +575,7 @@ async fn the_cooldown_is_sixty_seconds_and_ends_on_the_sixtieth() {
 
 #[tokio::test]
 async fn a_resend_tells_the_provider_whether_the_address_has_an_account() {
-    let Some(inv) = setup(config()).await else { return };
+    let Some(inv) = setup(config()).await else { unreachable!() };
     seed_account(&inv.f, "t1", "has@x.io", false).await;
     for email in ["has@x.io", "hasnt@x.io"] {
         let old = Seeded {
@@ -600,11 +600,11 @@ async fn a_resend_tells_the_provider_whether_the_address_has_an_account() {
 async fn an_invitation_expires_the_configured_lifetime_after_it_was_issued() {
     let mut configured = config();
     configured.workspaces.invitation_ttl_seconds = 3_600;
-    let Some(inv) = setup(configured).await else { return };
+    let Some(inv) = setup(configured).await else { unreachable!() };
     let before = time::OffsetDateTime::now_utc();
     assert!(owner_invites(&inv, "ttl@x.io", "member").await.is_ok());
     let sent = inv.mail.sent();
-    let Some((_, _, data)) = sent.first() else { return };
+    let Some((_, _, data)) = sent.first() else { unreachable!() };
     let lifetime = data.expires_at - before;
     assert!(
         lifetime >= time::Duration::seconds(3_599) && lifetime <= time::Duration::seconds(3_601),
@@ -620,14 +620,14 @@ async fn the_fixture_engine_builds_with_the_invitation_store_so_no_test_returns_
         inv.is_some(),
         "the engine did not build with the store the builder was given"
     );
-    let Some(inv) = inv else { return };
+    let Some(inv) = inv else { unreachable!() };
     assert!(owner_invites(&inv, "built@x.io", "member").await.is_ok());
     assert_eq!(inv.mail.sent().len(), 1);
 }
 
 #[tokio::test]
 async fn blank_invitations_take_no_hourly_slot_from_the_inviter() {
-    let Some(inv) = setup(config()).await else { return };
+    let Some(inv) = setup(config()).await else { unreachable!() };
     for _ in 0..20 {
         let refused = owner_invites(&inv, "   ", "member").await;
         assert!(
@@ -642,7 +642,7 @@ async fn blank_invitations_take_no_hourly_slot_from_the_inviter() {
 #[tokio::test]
 async fn an_owner_resend_of_a_role_the_hierarchy_no_longer_knows_mails_nothing_and_revoke_still_works()
  {
-    let Some(inv) = setup(config()).await else { return };
+    let Some(inv) = setup(config()).await else { unreachable!() };
     let ghost = Seeded {
         email: "ghost@x.io",
         role: "ghost",

@@ -49,7 +49,7 @@ async fn app_in(mode: TokenDelivery, email: &str) -> Option<(Harness, axum::Rout
 
 #[tokio::test]
 async fn cookie_mode_takes_the_cookie_and_refuses_a_token_in_the_body() {
-    let Some((_h, app)) = app_in(TokenDelivery::Cookie, "c@e.com").await else { return };
+    let Some((_h, app)) = app_in(TokenDelivery::Cookie, "c@e.com").await else { unreachable!() };
     let token = issued_refresh(&app, "c@e.com", false).await;
     assert!(!token.is_empty());
     // The body is not this mode's channel: a token only there is no refresh at all.
@@ -65,7 +65,7 @@ async fn cookie_mode_takes_the_cookie_and_refuses_a_token_in_the_body() {
 
 #[tokio::test]
 async fn bearer_mode_takes_the_body_and_refuses_a_stray_cookie() {
-    let Some((_h, app)) = app_in(TokenDelivery::Bearer, "b@e.com").await else { return };
+    let Some((_h, app)) = app_in(TokenDelivery::Bearer, "b@e.com").await else { unreachable!() };
     let token = issued_refresh(&app, "b@e.com", true).await;
     assert!(!token.is_empty());
     assert_eq!(
@@ -80,7 +80,7 @@ async fn bearer_mode_takes_the_body_and_refuses_a_stray_cookie() {
 
 #[tokio::test]
 async fn both_mode_takes_either_channel_and_the_cookie_first() {
-    let Some((_h, app)) = app_in(TokenDelivery::Both, "o@e.com").await else { return };
+    let Some((_h, app)) = app_in(TokenDelivery::Both, "o@e.com").await else { unreachable!() };
     let token = issued_refresh(&app, "o@e.com", false).await;
     assert!(!token.is_empty());
     assert_eq!(
@@ -103,7 +103,7 @@ async fn both_mode_takes_either_channel_and_the_cookie_first() {
 
 #[tokio::test]
 async fn a_logout_revokes_only_what_its_mode_reads() {
-    let Some((_h, app)) = app_in(TokenDelivery::Cookie, "l@e.com").await else { return };
+    let Some((_h, app)) = app_in(TokenDelivery::Cookie, "l@e.com").await else { unreachable!() };
     let token = issued_refresh(&app, "l@e.com", false).await;
     // A cookie-mode logout that is handed the token only in the body does not read it, so the
     // refresh session stays redeemable; the cookie channel is what ends it.

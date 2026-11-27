@@ -362,7 +362,7 @@ fn readme_routes() -> BTreeSet<(String, String)> {
 /// not mounted.
 #[tokio::test]
 async fn the_readme_endpoint_table_lists_exactly_the_mounted_routes() {
-    let Some((_, app)) = every_group() else { return };
+    let Some((_, app)) = every_group() else { unreachable!() };
     let mounted: BTreeSet<(String, String)> = mounted_routes(&app)
         .into_iter()
         .map(|(verb, path)| (verb, shape(&path)))
@@ -382,7 +382,7 @@ async fn the_readme_endpoint_table_lists_exactly_the_mounted_routes() {
 
 #[tokio::test]
 async fn the_mounted_set_is_the_rows_the_named_lists_and_nothing_else() {
-    let Some((_, app)) = every_group() else { return };
+    let Some((_, app)) = every_group() else { unreachable!() };
     let mounted = mounted_routes(&app);
     assert!(
         mounted.contains(&("POST".to_owned(), format!("{PREFIX}/login"))),
@@ -525,7 +525,7 @@ async fn probe_property(
 
 #[tokio::test]
 async fn every_body_route_refuses_a_body_that_breaks_its_own_schema() {
-    let Some((h, app)) = every_group() else { return };
+    let Some((h, app)) = every_group() else { unreachable!() };
     let prober = seed_user(&h, "probe@e.com", "glidingwalnut42", "ADMIN").await;
     seed_admin(&h, "padmin@e.com", "SUPER_ADMIN").await;
     let active = bymax_auth_core::workspace::domain::MembershipStatus::Active;

@@ -316,7 +316,7 @@ async fn every_operation_admits_and_refuses_what_its_kind_says_in_every_delivery
             cookie_names: Some((ACCESS_NAME, REFRESH_NAME)),
             ..EngineSpec::default()
         }) else {
-            return;
+            unreachable!()
         };
         let mut config =
             bymax_auth_axum::AxumAuthConfig::new(bymax_auth_axum::ClientIpSource::PeerAddr);

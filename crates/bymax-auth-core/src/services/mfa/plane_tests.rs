@@ -17,11 +17,11 @@ fn rig() -> Option<Harness> {
 
 #[tokio::test]
 async fn the_platform_challenge_refuses_a_dashboard_token_and_spends_nothing() {
-    let Some(h) = rig() else { return };
-    let Some(uid) = register(&h.engine, "d@example.com").await else { return };
-    let Some(secret) = enrol_user(&h, &uid).await else { return };
-    let Some(temp) = login_temp_token(&h.engine, "d@example.com").await else { return };
-    let Some(mfa) = h.engine.mfa() else { return };
+    let Some(h) = rig() else { unreachable!() };
+    let Some(uid) = register(&h.engine, "d@example.com").await else { unreachable!() };
+    let Some(secret) = enrol_user(&h, &uid).await else { unreachable!() };
+    let Some(temp) = login_temp_token(&h.engine, "d@example.com").await else { unreachable!() };
+    let Some(mfa) = h.engine.mfa() else { unreachable!() };
     let before = h
         .users
         .find_by_id(&uid, Some("t1"))
@@ -59,17 +59,17 @@ async fn the_platform_challenge_refuses_a_dashboard_token_and_spends_nothing() {
 
 #[tokio::test]
 async fn the_platform_challenge_serves_a_platform_token() {
-    let Some(h) = rig() else { return };
+    let Some(h) = rig() else { unreachable!() };
     seed_admin(&h);
-    let Some(secret) = enrol_admin(&h).await else { return };
-    let Some(mfa) = h.engine.mfa() else { return };
+    let Some(secret) = enrol_admin(&h).await else { unreachable!() };
+    let Some(mfa) = h.engine.mfa() else { unreachable!() };
     let Ok(temp) = h
         .engine
         .tokens()
         .issue_mfa_temp_token("p1", MfaContext::Platform, None)
         .await
     else {
-        return;
+        unreachable!()
     };
 
     let served = mfa
@@ -94,17 +94,17 @@ async fn the_platform_challenge_serves_a_platform_token() {
 
 #[tokio::test]
 async fn the_plane_agnostic_challenge_serves_a_platform_token() {
-    let Some(h) = rig() else { return };
+    let Some(h) = rig() else { unreachable!() };
     seed_admin(&h);
-    let Some(secret) = enrol_admin(&h).await else { return };
-    let Some(mfa) = h.engine.mfa() else { return };
+    let Some(secret) = enrol_admin(&h).await else { unreachable!() };
+    let Some(mfa) = h.engine.mfa() else { unreachable!() };
     let Ok(temp) = h
         .engine
         .tokens()
         .issue_mfa_temp_token("p1", MfaContext::Platform, None)
         .await
     else {
-        return;
+        unreachable!()
     };
 
     let served = mfa

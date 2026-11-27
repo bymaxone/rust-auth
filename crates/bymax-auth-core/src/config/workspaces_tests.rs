@@ -40,7 +40,7 @@ fn the_group_is_off_by_default_with_the_contracts_cache_lifetime_and_any_member_
 fn an_enabled_group_resolves_to_its_hierarchy_lifetime_and_permission() {
     let resolved = enabled().resolve();
     assert!(matches!(resolved, Ok(Some(_))));
-    let Ok(Some(resolved)) = resolved else { return };
+    let Ok(Some(resolved)) = resolved else { unreachable!() };
     assert_eq!(resolved.hierarchy.owner_role(), "owner");
     assert_eq!(resolved.ttl.seconds(), 60);
     assert_eq!(resolved.permissions.view_members, AcceptedRoles::AnyMember);
@@ -90,7 +90,7 @@ fn the_write_options_default_to_the_owner_role_an_open_switch_no_cap_and_fourtee
     assert_eq!(config.max_workspaces_per_user, 0);
     assert_eq!(config.deletion_grace_days, 14);
     let resolved = enabled().resolve();
-    let Ok(Some(resolved)) = resolved else { return };
+    let Ok(Some(resolved)) = resolved else { unreachable!() };
     let owner = AcceptedRoles::roles(["owner"]);
     for permission in [
         WorkspacePermission::ManageWorkspace,
@@ -122,7 +122,7 @@ fn a_named_permission_is_kept_and_a_role_outside_the_hierarchy_is_refused_by_its
     let mut named = enabled();
     named.permissions.manage_members = Some(vec!["member".to_owned()]);
     named.permissions.manage_workspace = Some(Vec::new());
-    let Ok(Some(resolved)) = named.resolve() else { return };
+    let Ok(Some(resolved)) = named.resolve() else { unreachable!() };
     let roles = |p| resolved.permissions.roles(p).clone();
     assert_eq!(
         roles(WorkspacePermission::ManageMembers),
@@ -192,7 +192,7 @@ fn the_invitation_options_default_to_a_week_and_a_hundred_pending() {
     let config = WorkspacesConfig::default();
     assert_eq!(config.invitation_ttl_seconds, 604_800);
     assert_eq!(config.max_pending_invitations_per_workspace, 100);
-    let Ok(Some(resolved)) = enabled().resolve() else { return };
+    let Ok(Some(resolved)) = enabled().resolve() else { unreachable!() };
     assert_eq!(
         (
             resolved.invitation_ttl_seconds,

@@ -111,7 +111,7 @@ async fn open_record(h: &common::Harness, app: &axum::Router, route: Route, emai
 
 #[tokio::test]
 async fn an_absent_record_is_refused_with_the_one_answer() {
-    let Some((_h, app)) = app_with_limits_raised() else { return };
+    let Some((_h, app)) = app_with_limits_raised() else { unreachable!() };
     for route in ROUTES {
         let response = request(route, "nobody@e.com", "123456").send(&app).await;
         assert_eq!(answer(&response), the_answer(), "{route:?}");
@@ -120,7 +120,7 @@ async fn an_absent_record_is_refused_with_the_one_answer() {
 
 #[tokio::test]
 async fn a_wrong_code_against_a_live_record_is_refused_with_the_same_answer() {
-    let Some((h, app)) = app_with_limits_raised() else { return };
+    let Some((h, app)) = app_with_limits_raised() else { unreachable!() };
     for (index, route) in ROUTES.into_iter().enumerate() {
         let email = format!("wrong{index}@e.com");
         let code = open_record(&h, &app, route, &email).await;
@@ -141,7 +141,7 @@ async fn a_wrong_code_against_a_live_record_is_refused_with_the_same_answer() {
 
 #[tokio::test]
 async fn past_the_attempts_ceiling_the_answer_is_the_same_and_the_record_is_spent() {
-    let Some((h, app)) = app_with_limits_raised() else { return };
+    let Some((h, app)) = app_with_limits_raised() else { unreachable!() };
     for (index, route) in ROUTES.into_iter().enumerate() {
         let email = format!("ceiling{index}@e.com");
         let code = open_record(&h, &app, route, &email).await;

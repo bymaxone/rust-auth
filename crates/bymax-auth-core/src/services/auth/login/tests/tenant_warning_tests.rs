@@ -10,7 +10,7 @@ async fn only_a_cross_tenant_answer_is_reported_as_a_misconfigured_repository() 
     // same-tenant login and for a plain wrong password, or it would cry wolf on every request.
     let mut cfg = base_config();
     cfg.email_verification.required = false;
-    let Some(h) = harness(cfg, None) else { return };
+    let Some(h) = harness(cfg, None) else { unreachable!() };
     let _ = h
         .seed(SeedUser::active("warn@example.com", "s3cret-pass"))
         .await;

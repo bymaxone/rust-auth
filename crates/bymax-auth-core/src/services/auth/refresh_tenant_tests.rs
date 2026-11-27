@@ -56,9 +56,7 @@ fn record(user_id: &str, tenant: Option<String>) -> SessionRecord {
 
 #[tokio::test]
 async fn a_session_record_with_no_tenant_is_refused_before_it_rotates() {
-    let Some((engine, stores, user_id)) = fixture().await else {
-        return;
-    };
+    let Some((engine, stores, user_id)) = fixture().await else { unreachable!() };
     for tenant in [None, Some(String::new())] {
         let raw = if tenant.is_none() {
             "c".repeat(64)
@@ -155,9 +153,7 @@ async fn seed_a_legacy_tenantless_session(
 
 #[tokio::test]
 async fn a_recovered_session_with_no_tenant_is_refused_and_writes_nothing() {
-    let Some((engine, stores, user_id)) = fixture().await else {
-        return;
-    };
+    let Some((engine, stores, user_id)) = fixture().await else { unreachable!() };
     let raw = "a".repeat(64);
     rotated_into_a_tenantless_successor(&engine, &stores, &user_id, &raw).await;
     let tenantless = seed_a_legacy_tenantless_session(&engine, &stores, &user_id).await;

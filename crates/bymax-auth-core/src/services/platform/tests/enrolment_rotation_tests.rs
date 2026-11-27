@@ -27,23 +27,23 @@ async fn enrolling_a_second_factor_alone_reaches_the_very_next_rotation() {
     // and the MFA flag is the only thing standing between the stale `prt:` record and the
     // token. A rotation that compared only the role, or compared the flag wrongly, would keep
     // minting the pre-enrolment claim for the refresh token's whole lifetime.
-    let Some(h) = harness(platform_config()) else { return };
+    let Some(h) = harness(platform_config()) else { unreachable!() };
     h.admins.insert(enrolling_admin(false));
-    let Some(svc) = h.engine.platform_auth() else { return };
+    let Some(svc) = h.engine.platform_auth() else { unreachable!() };
     let signed_in = svc.login("enrolling@admin.io", "pw", "1.2.3.4", "a").await;
-    let Ok(PlatformLoginResult::Success(auth)) = signed_in else { return };
+    let Ok(PlatformLoginResult::Success(auth)) = signed_in else { unreachable!() };
 
     // Nothing changed: the rotated token still carries the account's role and no MFA.
     let unchanged = svc.refresh(&auth.refresh_token, "1.2.3.4", "a").await;
     assert!(unchanged.is_ok(), "rotation must succeed: {unchanged:?}");
-    let Ok(unchanged) = unchanged else { return };
+    let Ok(unchanged) = unchanged else { unreachable!() };
     let claims = h
         .engine
         .tokens()
         .verify_platform_access(&unchanged.access_token)
         .await;
     assert!(claims.is_ok(), "the token must verify: {claims:?}");
-    let Ok(claims) = claims else { return };
+    let Ok(claims) = claims else { unreachable!() };
     assert_eq!(claims.role, "SUPPORT");
     assert!(!claims.mfa_enabled);
 
@@ -51,14 +51,14 @@ async fn enrolling_a_second_factor_alone_reaches_the_very_next_rotation() {
     h.admins.insert(enrolling_admin(true));
     let enrolled = svc.refresh(&unchanged.refresh_token, "1.2.3.4", "a").await;
     assert!(enrolled.is_ok(), "rotation must succeed: {enrolled:?}");
-    let Ok(enrolled) = enrolled else { return };
+    let Ok(enrolled) = enrolled else { unreachable!() };
     let claims = h
         .engine
         .tokens()
         .verify_platform_access(&enrolled.access_token)
         .await;
     assert!(claims.is_ok(), "the token must verify: {claims:?}");
-    let Ok(claims) = claims else { return };
+    let Ok(claims) = claims else { unreachable!() };
     assert_eq!(claims.role, "SUPPORT");
     assert!(claims.mfa_enabled, "the MFA flag never reached the token");
 }

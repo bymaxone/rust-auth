@@ -60,7 +60,7 @@ async fn recorded_address(app: &axum::Router, email: &str, forwarded: &str) -> S
 
 #[tokio::test]
 async fn trusting_the_forwarded_header_without_a_predicate_refuses_to_build() {
-    let Some(h) = build(EngineSpec::default()) else { return };
+    let Some(h) = build(EngineSpec::default()) else { unreachable!() };
     let refused = AuthRouter::from_engine(
         h.engine.clone(),
         AxumAuthConfig::new(ClientIpSource::TrustedForwardedFor),
@@ -91,7 +91,7 @@ async fn behind_a_trusted_proxy_the_session_records_the_forwarded_client() {
         sessions: true,
         ..EngineSpec::default()
     }) else {
-        return;
+        unreachable!()
     };
     seed_user(&h, "fwd@e.com", "glidingwalnut42", "USER").await;
     let app = router_with(&h, behind_the_proxy());
@@ -107,7 +107,7 @@ async fn a_peer_nobody_vouches_for_cannot_choose_the_address_the_session_records
         sessions: true,
         ..EngineSpec::default()
     }) else {
-        return;
+        unreachable!()
     };
     seed_user(&h, "forged@e.com", "glidingwalnut42", "USER").await;
     let app = router_with(&h, trusting_no_peer());
@@ -123,7 +123,7 @@ async fn the_direct_posture_records_the_peer_whatever_the_header_says() {
         sessions: true,
         ..EngineSpec::default()
     }) else {
-        return;
+        unreachable!()
     };
     seed_user(&h, "direct@e.com", "glidingwalnut42", "USER").await;
     let app = router(&h);
@@ -147,7 +147,7 @@ async fn failed_login_status(app: &axum::Router, email: &str, forwarded: &str) -
 
 #[tokio::test]
 async fn rotating_the_header_from_an_untrusted_peer_does_not_buy_a_fresh_limit() {
-    let Some(h) = build(EngineSpec::default()) else { return };
+    let Some(h) = build(EngineSpec::default()) else { unreachable!() };
     let app = router_with(&h, trusting_no_peer());
     let mut last = StatusCode::OK;
     for attempt in 0..8 {
@@ -163,7 +163,7 @@ async fn rotating_the_header_from_an_untrusted_peer_does_not_buy_a_fresh_limit()
 
 #[tokio::test]
 async fn behind_a_trusted_proxy_each_forwarded_client_has_its_own_limit() {
-    let Some(h) = build(EngineSpec::default()) else { return };
+    let Some(h) = build(EngineSpec::default()) else { unreachable!() };
     let app = router_with(&h, behind_the_proxy());
     let mut last = StatusCode::OK;
     for _ in 0..8 {

@@ -134,7 +134,7 @@ async fn redeemed(engine: &AuthEngine, token: &str) -> bool {
 
 #[tokio::test]
 async fn a_failed_send_is_a_fixed_internal_error_that_quotes_nothing_the_channel_wrote() {
-    let Some((engine, mailer, admin)) = down().await else { return };
+    let Some((engine, mailer, admin)) = down().await else { unreachable!() };
 
     let (events, capture) = crate::log_capture::capture_events();
     let outcome = engine.invite(&admin, INVITEE, "MEMBER", "t1", None).await;
@@ -180,7 +180,7 @@ async fn a_failed_send_is_a_fixed_internal_error_that_quotes_nothing_the_channel
 
 #[tokio::test]
 async fn the_invitation_survives_a_failed_send_and_a_retry_supersedes_it() {
-    let Some((engine, mailer, admin)) = down().await else { return };
+    let Some((engine, mailer, admin)) = down().await else { unreachable!() };
 
     let first = engine.invite(&admin, INVITEE, "MEMBER", "t1", None).await;
     let second = engine.invite(&admin, INVITEE, "MEMBER", "t1", None).await;

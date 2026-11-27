@@ -86,11 +86,11 @@ async fn the_stored_record_omits_the_flag_until_the_challenge_and_carries_it_aft
                 CredentialProof::Proved,
             )
             .await;
-        let Ok(issued) = issued else { return };
+        let Ok(issued) = issued else { unreachable!() };
         let rotated = svc
             .reissue_tokens(&issued.refresh_token, "10.0.0.1", "agent/1.0")
             .await;
-        let Ok(rotated) = rotated else { return };
+        let Ok(rotated) = rotated else { unreachable!() };
         let hash = RawRefreshToken::from_raw(rotated.refresh_token).redis_hash();
         let stored = store.find_session(SessionKind::Dashboard, &hash).await;
         assert!(matches!(&stored, Ok(Some(r)) if r.mfa_verified == expected));
@@ -124,7 +124,7 @@ async fn a_grace_window_recovery_carries_the_second_factor_claim() {
             CredentialProof::Proved,
         )
         .await;
-    let Ok(issued) = issued else { return };
+    let Ok(issued) = issued else { unreachable!() };
     assert!(
         svc.reissue_tokens(&issued.refresh_token, "10.0.0.1", "agent/1.0")
             .await
@@ -134,7 +134,7 @@ async fn a_grace_window_recovery_carries_the_second_factor_claim() {
     let recovered = svc
         .reissue_tokens(&issued.refresh_token, "10.0.0.1", "agent/1.0")
         .await;
-    let Ok(recovered) = recovered else { return };
+    let Ok(recovered) = recovered else { unreachable!() };
     let claims = svc.verify_access(&recovered.access_token).await;
     assert!(matches!(&claims, Ok(c) if c.mfa_enabled && c.mfa_verified));
 }
@@ -150,14 +150,14 @@ async fn a_platform_session_keeps_the_second_factor_claim_only_if_it_cleared_it(
         let issued = svc
             .issue_platform_tokens(&enrolled, "10.0.0.1", "agent/1.0", cleared)
             .await;
-        let Ok(issued) = issued else { return };
+        let Ok(issued) = issued else { unreachable!() };
         let mut refresh = issued.refresh_token;
         let mut access = issued.access_token;
         for _ in 0..2 {
             let rotated = svc
                 .reissue_platform_tokens(&refresh, "10.0.0.1", "agent/1.0")
                 .await;
-            let Ok(rotated) = rotated else { return };
+            let Ok(rotated) = rotated else { unreachable!() };
             refresh = rotated.refresh_token;
             access = rotated.access_token;
         }
@@ -176,7 +176,7 @@ async fn a_platform_grace_window_recovery_carries_the_second_factor_claim() {
     let issued = svc
         .issue_platform_tokens(&enrolled, "10.0.0.1", "agent/1.0", true)
         .await;
-    let Ok(issued) = issued else { return };
+    let Ok(issued) = issued else { unreachable!() };
     assert!(
         svc.reissue_platform_tokens(&issued.refresh_token, "10.0.0.1", "agent/1.0")
             .await
@@ -185,7 +185,7 @@ async fn a_platform_grace_window_recovery_carries_the_second_factor_claim() {
     let recovered = svc
         .reissue_platform_tokens(&issued.refresh_token, "10.0.0.1", "agent/1.0")
         .await;
-    let Ok(recovered) = recovered else { return };
+    let Ok(recovered) = recovered else { unreachable!() };
     let claims = svc.verify_platform_access(&recovered.access_token).await;
     assert!(matches!(&claims, Ok(c) if c.mfa_verified));
 }

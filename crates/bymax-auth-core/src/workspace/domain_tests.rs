@@ -220,7 +220,7 @@ fn a_hierarchy_with_the_owner_on_top_is_accepted_and_answers_inclusion() {
         "owner",
     );
     assert!(roles.is_ok());
-    let Ok(roles) = roles else { return };
+    let Ok(roles) = roles else { unreachable!() };
     assert_eq!(roles.owner_role(), "owner");
     assert!(roles.knows("admin"));
     assert!(!roles.knows("guest"));

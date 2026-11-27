@@ -256,7 +256,7 @@ fn judged(times: usize) -> Script {
 #[tokio::test]
 async fn a_revoke_removes_the_invitation_that_replaced_the_one_it_judged() {
     for times in [1, 2] {
-        let Some(r) = race(judged(times), "MEMBER").await else { return };
+        let Some(r) = race(judged(times), "MEMBER").await else { unreachable!() };
         assert!(matches!(revoke(&r, &r.admin).await, Ok(true)), "{times}");
         assert_eq!(indexed(&r.s, EMAIL).await, None, "{times}");
         assert!(!live(&r, &replacement(times + 1)).await, "{times}");
@@ -265,7 +265,7 @@ async fn a_revoke_removes_the_invitation_that_replaced_the_one_it_judged() {
 
 #[tokio::test]
 async fn a_revoke_replaced_under_all_three_attempts_leaves_the_last_invitation_revocable() {
-    let Some(r) = race(judged(3), "MEMBER").await else { return };
+    let Some(r) = race(judged(3), "MEMBER").await else { unreachable!() };
     assert!(matches!(
         revoke(&r, &r.admin).await,
         Err(AuthError::TooManyRequests { .. })
@@ -279,7 +279,7 @@ async fn a_revoke_replaced_under_all_three_attempts_leaves_the_last_invitation_r
 
 #[tokio::test]
 async fn an_outranked_revoker_leaves_a_higher_replacement_indexed() {
-    let Some(r) = race(judged(1), "ADMIN").await else { return };
+    let Some(r) = race(judged(1), "ADMIN").await else { unreachable!() };
     assert!(matches!(revoke(&r, &r.member).await, Ok(false)));
     let later = replacement(2);
     assert_eq!(indexed(&r.s, EMAIL).await, Some(token_hash(&later)));
@@ -292,7 +292,7 @@ async fn an_acceptance_keeps_the_index_of_a_later_invite() {
         before_release: 1,
         ..Script::default()
     };
-    let Some(r) = race(script, "MEMBER").await else { return };
+    let Some(r) = race(script, "MEMBER").await else { unreachable!() };
     assert!(accept(&r, FIRST).await.is_ok());
     assert_eq!(
         indexed(&r.s, EMAIL).await,
@@ -306,7 +306,7 @@ async fn a_refused_acceptance_keeps_the_index_of_a_later_invite() {
         before_release: 1,
         ..Script::default()
     };
-    let Some(r) = race(script, "MEMBER").await else { return };
+    let Some(r) = race(script, "MEMBER").await else { unreachable!() };
     // The inviter is gone, so the acceptance is refused after the token is consumed.
     let gone = record("MEMBER", "nobody");
     assert!(put_record(&r.s.stores, FIRST, &gone).await.is_ok());
@@ -326,7 +326,7 @@ async fn a_revoke_whose_withdrawal_fails_leaves_both_and_can_be_retried() {
         fail_withdraw: true,
         ..Script::default()
     };
-    let Some(r) = race(script, "MEMBER").await else { return };
+    let Some(r) = race(script, "MEMBER").await else { unreachable!() };
     assert!(revoke(&r, &r.admin).await.is_err());
     assert_eq!(indexed(&r.s, EMAIL).await, Some(token_hash(FIRST)));
     assert!(live(&r, FIRST).await);
@@ -340,7 +340,7 @@ async fn a_revoke_of_an_invitation_redeemed_while_judged_answers_false_and_drops
         spent_after_judging: true,
         ..Script::default()
     };
-    let Some(r) = race(script, "MEMBER").await else { return };
+    let Some(r) = race(script, "MEMBER").await else { unreachable!() };
     assert!(matches!(revoke(&r, &r.admin).await, Ok(false)));
     assert_eq!(indexed(&r.s, EMAIL).await, None);
 }
@@ -351,7 +351,7 @@ async fn a_record_that_is_not_an_invitation_is_withdrawn_without_a_rank_check() 
         garbled: true,
         ..Script::default()
     };
-    let Some(r) = race(script, "MEMBER").await else { return };
+    let Some(r) = race(script, "MEMBER").await else { unreachable!() };
     assert!(matches!(revoke(&r, &r.member).await, Ok(true)));
     assert_eq!(indexed(&r.s, EMAIL).await, None);
     assert!(!live(&r, FIRST).await);

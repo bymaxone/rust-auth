@@ -9,7 +9,7 @@ async fn a_failed_invitation_send_answers_500_auth_internal_with_the_generic_bod
         invitations: true,
         ..EngineSpec::default()
     }) else {
-        return;
+        unreachable!()
     };
     let app = router(&h);
     seed_user(&h, "inviter@e.com", "glidingwalnut42", "ADMIN").await;

@@ -51,8 +51,8 @@ async fn try_start() -> Option<(ContainerAsync<Redis>, String)> {
         Ok(container) => container,
         Err(error) => return docker_gate::docker_unavailable("redis:8", error),
     };
-    let host = container.get_host().await.ok()?;
-    let port = container.get_host_port_ipv4(REDIS_PORT).await.ok()?;
+    let Ok(host) = container.get_host().await else { unreachable!() };
+    let Ok(port) = container.get_host_port_ipv4(REDIS_PORT).await else { unreachable!() };
     let url = redis_ready::redis_url(&host.to_string(), port);
     redis_ready::wait_until_ready(&url).await;
     Some((container, url))
@@ -218,12 +218,12 @@ async fn the_workspace_guard_resolves_through_the_cache_in_real_redis() {
         built.is_some(),
         "setup must succeed once the container runs"
     );
-    let Some(b) = built else { return };
+    let Some(b) = built else { unreachable!() };
     let router = AuthRouter::from_engine(
         b.engine.clone(),
         AxumAuthConfig::new(ClientIpSource::PeerAddr),
     );
-    let Ok(app) = router.map(AuthRouter::into_router) else { return };
+    let Ok(app) = router.map(AuthRouter::into_router) else { unreachable!() };
     let user = seed_user(&b.users).await;
     let credentials = json!({ "email": "w@e.com", "password": PASSWORD, "tenantId": TENANT });
     let (_, _, access) = send(&app, (Method::POST, "/auth/login"), Some(credentials), "").await;
@@ -265,12 +265,12 @@ async fn a_removal_through_the_route_ends_the_members_cached_access_in_real_redi
         built.is_some(),
         "setup must succeed once the container runs"
     );
-    let Some(b) = built else { return };
+    let Some(b) = built else { unreachable!() };
     let router = AuthRouter::from_engine(
         b.engine.clone(),
         AxumAuthConfig::new(ClientIpSource::PeerAddr),
     );
-    let Ok(app) = router.map(AuthRouter::into_router) else { return };
+    let Ok(app) = router.map(AuthRouter::into_router) else { unreachable!() };
     let owner = seed_user(&b.users).await;
     let member = seed_account(&b.users, "m@e.com").await;
     seed_seat(&b.repo, &owner, MembershipStatus::Active);
@@ -311,12 +311,12 @@ async fn an_invitation_is_listed_previewed_and_revoked_through_the_routes_in_rea
         built.is_some(),
         "setup must succeed once the container runs"
     );
-    let Some(b) = built else { return };
+    let Some(b) = built else { unreachable!() };
     let router = AuthRouter::from_engine(
         b.engine.clone(),
         AxumAuthConfig::new(ClientIpSource::PeerAddr),
     );
-    let Ok(app) = router.map(AuthRouter::into_router) else { return };
+    let Ok(app) = router.map(AuthRouter::into_router) else { unreachable!() };
     let owner = seed_user(&b.users).await;
     seed_seat(&b.repo, &owner, MembershipStatus::Active);
     let access = sign_in(&app, "w@e.com").await;

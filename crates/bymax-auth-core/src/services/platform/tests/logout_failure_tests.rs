@@ -19,8 +19,8 @@ async fn signed_in() -> Option<(PlatformHarness, bymax_auth_types::PlatformAuthR
 
 #[tokio::test]
 async fn a_refused_blacklist_write_fails_the_logout_and_a_retry_finishes_it() {
-    let Some((h, auth)) = signed_in().await else { return };
-    let Some(svc) = h.engine.platform_auth() else { return };
+    let Some((h, auth)) = signed_in().await else { unreachable!() };
+    let Some(svc) = h.engine.platform_auth() else { unreachable!() };
 
     h.stores.fail_next_blacklist_writes(1);
     let outcome = svc.logout(&auth.access_token, &auth.refresh_token).await;
@@ -52,8 +52,8 @@ async fn a_refused_blacklist_write_fails_the_logout_and_a_retry_finishes_it() {
 
 #[tokio::test]
 async fn refused_cleanup_writes_fail_the_logout_yet_the_access_token_is_revoked() {
-    let Some((h, auth)) = signed_in().await else { return };
-    let Some(svc) = h.engine.platform_auth() else { return };
+    let Some((h, auth)) = signed_in().await else { unreachable!() };
+    let Some(svc) = h.engine.platform_auth() else { unreachable!() };
 
     h.stores.fail_next_cleanup_writes(2);
     let (events, capture) = crate::log_capture::capture_events();
@@ -84,8 +84,8 @@ async fn refused_cleanup_writes_fail_the_logout_yet_the_access_token_is_revoked(
 
 #[tokio::test]
 async fn a_session_lookup_that_fails_ends_the_logout_before_any_write() {
-    let Some((h, auth)) = signed_in().await else { return };
-    let Some(svc) = h.engine.platform_auth() else { return };
+    let Some((h, auth)) = signed_in().await else { unreachable!() };
+    let Some(svc) = h.engine.platform_auth() else { unreachable!() };
 
     h.stores.fail_next_session_lookups(1);
     let outcome = svc.logout(&auth.access_token, &auth.refresh_token).await;
@@ -115,8 +115,8 @@ async fn a_session_lookup_that_fails_ends_the_logout_before_any_write() {
 async fn a_refused_session_delete_keeps_the_session_indexed_for_a_later_revoke_all() {
     // As on the dashboard plane: a refused delete leaves the credential in the admin's index, so
     // a healthy sign-out-everywhere still kills it.
-    let Some((h, auth)) = signed_in().await else { return };
-    let Some(svc) = h.engine.platform_auth() else { return };
+    let Some((h, auth)) = signed_in().await else { unreachable!() };
+    let Some(svc) = h.engine.platform_auth() else { unreachable!() };
 
     h.stores.fail_next_cleanup_writes(1);
     let outcome = svc.logout(&auth.access_token, &auth.refresh_token).await;

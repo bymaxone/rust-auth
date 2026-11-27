@@ -34,7 +34,7 @@ async fn a_dashboard_setup_without_a_body_answers_like_an_empty_object() {
         mfa: true,
         ..EngineSpec::default()
     }) else {
-        return;
+        unreachable!()
     };
     let app = router(&h);
     let reg = Req::post("/auth/register")
@@ -63,7 +63,7 @@ async fn an_oauth_only_account_can_enrol_with_or_without_a_body() {
         allow_oauth: true,
         ..EngineSpec::default()
     }) else {
-        return;
+        unreachable!()
     };
     let app = router(&h);
     let initiate = Req::get("/auth/oauth/google?tenantId=t1").send(&app).await;
@@ -106,7 +106,7 @@ async fn a_platform_setup_without_a_body_answers_like_an_empty_object() {
         mfa: true,
         ..EngineSpec::default()
     }) else {
-        return;
+        unreachable!()
     };
     let app = router(&h);
     seed_admin(&h, "padmin@e.com", "SUPER_ADMIN").await;

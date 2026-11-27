@@ -22,7 +22,7 @@ fn cookie_logout(access: &str, refresh: &str) -> Req {
 
 #[tokio::test]
 async fn a_failed_dashboard_logout_is_an_error_that_keeps_the_cookies_and_a_retry_finishes_it() {
-    let Some(h) = build(EngineSpec::default()) else { return };
+    let Some(h) = build(EngineSpec::default()) else { unreachable!() };
     let app = router(&h);
     seed_user(&h, "out@e.com", "glidingwalnut42", "USER").await;
     let session = login(&app, "out@e.com", "glidingwalnut42").await;
@@ -58,7 +58,7 @@ async fn a_failed_platform_logout_is_an_error_and_a_retry_finishes_it() {
         platform: true,
         ..EngineSpec::default()
     }) else {
-        return;
+        unreachable!()
     };
     let app = router(&h);
     seed_admin(&h, "pl-out@e.com", "SUPER_ADMIN").await;

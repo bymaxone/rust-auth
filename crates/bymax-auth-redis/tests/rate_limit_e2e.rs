@@ -64,8 +64,8 @@ async fn try_start() -> Option<TestRedis> {
         Ok(container) => container,
         Err(error) => return docker_gate::docker_unavailable("redis:8", error),
     };
-    let host = container.get_host().await.ok()?;
-    let port = container.get_host_port_ipv4(REDIS_PORT).await.ok()?;
+    let Ok(host) = container.get_host().await else { unreachable!() };
+    let Ok(port) = container.get_host_port_ipv4(REDIS_PORT).await else { unreachable!() };
     let url = redis_ready::redis_url(&host.to_string(), port);
     redis_ready::wait_until_ready(&url).await;
     Some(TestRedis { container, url })
@@ -74,9 +74,7 @@ async fn try_start() -> Option<TestRedis> {
 #[tokio::test]
 async fn two_instances_on_one_redis_share_one_budget() {
     let Some(redis) = try_start().await else { return };
-    let (Some(first), Some(second)) = (redis.stores(), redis.stores()) else {
-        return;
-    };
+    let (Some(first), Some(second)) = (redis.stores(), redis.stores()) else { unreachable!() };
 
     // Requests alternate between the two handles, as a load balancer would spread them.
     assert!(matches!(first.hit("login", "bucket-a", 60).await, Ok(1)));
@@ -93,7 +91,7 @@ async fn two_instances_on_one_redis_share_one_budget() {
 #[tokio::test]
 async fn the_window_is_set_once_and_the_key_carries_a_hash() {
     let Some(redis) = try_start().await else { return };
-    let Some(stores) = redis.stores() else { return };
+    let Some(stores) = redis.stores() else { unreachable!() };
 
     assert!(matches!(stores.hit("login", "deadbeef", 60).await, Ok(1)));
     let key = "auth:rl:login:deadbeef";

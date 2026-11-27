@@ -32,8 +32,8 @@ async fn logout_notifies_the_hook_only_when_the_session_named_a_user() {
     let hooks: Arc<dyn crate::traits::AuthHooks> = spy.clone();
     let mut cfg = base_config();
     cfg.email_verification.required = false;
-    let Some(h) = harness(cfg, Some(hooks)) else { return };
-    let Some((id, auth)) = logged_in(&h, "hook@example.com", "pw").await else { return };
+    let Some(h) = harness(cfg, Some(hooks)) else { unreachable!() };
+    let Some((id, auth)) = logged_in(&h, "hook@example.com", "pw").await else { unreachable!() };
 
     // A refresh token that matches no session names nobody.
     assert!(h.engine.logout("", &"0".repeat(64)).await.is_ok());

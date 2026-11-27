@@ -211,7 +211,7 @@ fn fields(body: &Value) -> Vec<String> {
 
 #[tokio::test]
 async fn a_policy_naming_roles_judges_them_through_the_hierarchy() {
-    let Some((app, _, token)) = app().await else { return };
+    let Some((app, _, token)) = app().await else { unreachable!() };
     let (status, _, text) = get_as(&app, "/admins/w-admin", &token).await;
     assert_eq!((status, text.as_str()), (StatusCode::OK, "admin"));
     let (status, body, _) = get_as(&app, "/admins/w-member", &token).await;
@@ -224,7 +224,7 @@ async fn a_policy_naming_roles_judges_them_through_the_hierarchy() {
 
 #[tokio::test]
 async fn only_a_policy_admitting_pending_workspaces_admits_their_owner() {
-    let Some((app, _, token)) = app().await else { return };
+    let Some((app, _, token)) = app().await else { unreachable!() };
     let (status, _, text) = get_as(&app, "/restore/w-pending", &token).await;
     assert_eq!((status, text.as_str()), (StatusCode::OK, "owner"));
     let (status, body, _) = get_as(&app, "/admins/w-pending", &token).await;
@@ -234,7 +234,7 @@ async fn only_a_policy_admitting_pending_workspaces_admits_their_owner() {
 
 #[tokio::test]
 async fn a_policy_declaring_nothing_is_refused_before_the_workspace_id_is_read() {
-    let Some((app, _, token)) = app().await else { return };
+    let Some((app, _, token)) = app().await else { unreachable!() };
     for path in ["/nobody/w-member", "/nobody/%20"] {
         let (status, body, _) = get_as(&app, path, &token).await;
         assert_eq!(status, StatusCode::FORBIDDEN, "{path}");
@@ -244,7 +244,7 @@ async fn a_policy_declaring_nothing_is_refused_before_the_workspace_id_is_read()
 
 #[tokio::test]
 async fn the_workspace_id_is_reported_before_any_other_parameter() {
-    let Some((app, _, token)) = app().await else { return };
+    let Some((app, _, token)) = app().await else { unreachable!() };
     // Both malformed: only the workspace id, which the guard reads first, is named.
     let (status, body, _) = get_as(&app, "/w/%20/m/%20", &token).await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
@@ -259,7 +259,7 @@ async fn the_workspace_id_is_reported_before_any_other_parameter() {
 
 #[tokio::test]
 async fn the_member_route_guard_judges_the_policy_and_names_the_user_id_it_refuses() {
-    let Some((app, _, token)) = app().await else { return };
+    let Some((app, _, token)) = app().await else { unreachable!() };
     let (status, _, text) = get_as(&app, "/mm/w-admin/m/u9", &token).await;
     assert_eq!((status, text.as_str()), (StatusCode::OK, "w-admin:u9"));
     // A role below the policy is refused, whoever the route names.
@@ -281,7 +281,7 @@ async fn the_member_route_guard_judges_the_policy_and_names_the_user_id_it_refus
 
 #[tokio::test]
 async fn a_route_that_cannot_name_a_workspace_is_refused_as_requiring_one() {
-    let Some((app, _, token)) = app().await else { return };
+    let Some((app, _, token)) = app().await else { unreachable!() };
     for path in ["/plain", "/other/w-member"] {
         let (status, body, _) = get_as(&app, path, &token).await;
         assert_eq!(status, StatusCode::BAD_REQUEST, "{path}");
@@ -298,7 +298,7 @@ async fn a_route_that_cannot_name_a_workspace_is_refused_as_requiring_one() {
 async fn a_capture_the_router_never_recorded_is_a_route_requiring_a_workspace() {
     // Parts that no router matched carry no captures at all, which axum reports as its own fault
     // (a 500, not a client error), unlike a capture that is not UTF-8 (a 400).
-    let Some((_, state, token)) = app().await else { return };
+    let Some((_, state, token)) = app().await else { unreachable!() };
     let (mut parts, ()) = Request::builder()
         .uri("/w/w-member")
         .header(http::header::AUTHORIZATION, format!("Bearer {token}"))
@@ -308,7 +308,7 @@ async fn a_capture_the_router_never_recorded_is_a_route_requiring_a_workspace() 
     let refused =
         RequireWorkspace::<AnyWorkspaceMember>::from_request_parts(&mut parts, &state).await;
     let response = refused.map(|_| ()).map_err(IntoResponse::into_response);
-    let Err(response) = response else { return };
+    let Err(response) = response else { unreachable!() };
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     let bytes = response
         .into_body()
@@ -322,10 +322,12 @@ async fn a_capture_the_router_never_recorded_is_a_route_requiring_a_workspace() 
 
 #[tokio::test]
 async fn the_members_permission_is_the_configured_roles_and_every_member_by_default() {
-    let Some((app, _, token)) = app().await else { return };
+    let Some((app, _, token)) = app().await else { unreachable!() };
     let (status, _, text) = get_as(&app, "/members/w-member", &token).await;
     assert_eq!((status, text.as_str()), (StatusCode::OK, "member"));
-    let Some((app, _, token)) = app_with(AcceptedRoles::roles(["admin"])).await else { return };
+    let Some((app, _, token)) = app_with(AcceptedRoles::roles(["admin"])).await else {
+        unreachable!()
+    };
     let (status, _, text) = get_as(&app, "/members/w-admin", &token).await;
     assert_eq!((status, text.as_str()), (StatusCode::OK, "admin"));
     let (status, body, _) = get_as(&app, "/members/w-member", &token).await;

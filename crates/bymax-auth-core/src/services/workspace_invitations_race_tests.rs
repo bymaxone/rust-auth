@@ -148,7 +148,7 @@ async fn held(inv: &Inv) -> Option<IndexedInvitation> {
 async fn a_revoke_that_lost_the_index_once_removes_the_replacement_and_reports_what_it_removed() {
     // Seeding reads nothing, so the first read of the revoke is the racing one. Armed after.
     // The roles differ, so an event that named the invitation first read would be caught.
-    let Some(inv) = racing(1, "admin", "member").await else { return };
+    let Some(inv) = racing(1, "admin", "member").await else { unreachable!() };
     let revoked = inv
         .f
         .engine
@@ -169,7 +169,7 @@ async fn a_revoke_that_lost_the_index_once_removes_the_replacement_and_reports_w
 
 #[tokio::test]
 async fn a_revoke_that_keeps_losing_the_index_answers_too_many_requests_and_reports_nothing() {
-    let Some(inv) = racing(10, "member", "member").await else { return };
+    let Some(inv) = racing(10, "member", "member").await else { unreachable!() };
     let revoked = inv
         .f
         .engine
@@ -184,7 +184,7 @@ async fn a_revoke_that_keeps_losing_the_index_answers_too_many_requests_and_repo
 async fn a_replacement_above_the_actor_is_not_removed_by_the_retry_of_a_lost_revoke() {
     // The admin may revoke a member invitation; the one that replaced it is an admin's, which the
     // admin may not act on, so it reads as absent and survives.
-    let Some(inv) = racing(1, "admin", "member").await else { return };
+    let Some(inv) = racing(1, "admin", "member").await else { unreachable!() };
     let revoked = inv
         .f
         .engine
@@ -202,7 +202,7 @@ async fn a_replacement_above_the_actor_is_not_removed_by_the_retry_of_a_lost_rev
 
 #[tokio::test]
 async fn a_revoke_that_lost_the_index_twice_succeeds_on_its_third_read() {
-    let Some(inv) = racing(2, "member", "member").await else { return };
+    let Some(inv) = racing(2, "member", "member").await else { unreachable!() };
     let revoked = inv
         .f
         .engine
@@ -214,7 +214,7 @@ async fn a_revoke_that_lost_the_index_twice_succeeds_on_its_third_read() {
 
 #[tokio::test]
 async fn a_revoke_that_lost_the_index_three_times_gives_up() {
-    let Some(inv) = racing(3, "member", "member").await else { return };
+    let Some(inv) = racing(3, "member", "member").await else { unreachable!() };
     let revoked = inv
         .f
         .engine
@@ -227,7 +227,9 @@ async fn a_revoke_that_lost_the_index_three_times_gives_up() {
 #[tokio::test]
 async fn an_invitation_whose_index_moved_before_the_write_answers_too_many_requests() {
     // A first invitation: the index is empty when read and held by a stranger when written.
-    let Some(inv) = setup_over(config(), |s| Racing::over(s, 1, "member")).await else { return };
+    let Some(inv) = setup_over(config(), |s| Racing::over(s, 1, "member")).await else {
+        unreachable!()
+    };
     let invited = inv
         .f
         .engine
@@ -304,7 +306,7 @@ async fn a_revoke_whose_read_straddles_a_resend_removes_the_replacement() {
     })
     .await
     else {
-        return;
+        unreachable!()
     };
     let first = Seeded {
         email: "race@x.io",

@@ -31,7 +31,7 @@ async fn ban(h: &Harness, id: &str) {
 
 #[tokio::test]
 async fn a_cached_status_answers_until_the_account_is_invalidated() {
-    let Some(h) = harness(base_config(), None) else { return };
+    let Some(h) = harness(base_config(), None) else { unreachable!() };
     let id = seeded(&h).await;
     assert!(h.engine.assert_user_active(&id, TENANT).await.is_ok());
 
@@ -56,7 +56,7 @@ async fn a_cached_status_answers_until_the_account_is_invalidated() {
 async fn a_zero_ttl_turns_the_cache_off() {
     let mut cfg = base_config();
     cfg.user_status_cache_ttl = Duration::ZERO;
-    let Some(h) = harness(cfg, None) else { return };
+    let Some(h) = harness(cfg, None) else { unreachable!() };
     let id = seeded(&h).await;
     assert!(h.engine.assert_user_active(&id, TENANT).await.is_ok());
     ban(&h, &id).await;
@@ -69,7 +69,7 @@ async fn a_zero_ttl_turns_the_cache_off() {
 
 #[tokio::test]
 async fn an_account_that_is_gone_is_token_invalid_and_is_not_cached() {
-    let Some(h) = harness(base_config(), None) else { return };
+    let Some(h) = harness(base_config(), None) else { unreachable!() };
     let id = seeded(&h).await;
     assert!(h.users.remove(&id));
     let gone = h.engine.assert_user_active(&id, TENANT).await;
@@ -80,7 +80,7 @@ async fn an_account_that_is_gone_is_token_invalid_and_is_not_cached() {
 
 #[tokio::test]
 async fn two_accounts_that_share_an_id_across_tenants_never_share_an_entry() {
-    let Some(h) = harness(base_config(), None) else { return };
+    let Some(h) = harness(base_config(), None) else { unreachable!() };
     // The same user id in two tenants, and the two splits of one string that percent-encoding
     // keeps apart: each pair names its own subject, so one entry cannot answer for another.
     let pairs = [("t1", "u1"), ("t2", "u1"), ("a:b", "c"), ("a", "b:c")];
@@ -106,7 +106,7 @@ async fn two_accounts_that_share_an_id_across_tenants_never_share_an_entry() {
 
 #[tokio::test]
 async fn an_entry_stops_answering_when_its_ttl_has_run_out() {
-    let Some(h) = harness(base_config(), None) else { return };
+    let Some(h) = harness(base_config(), None) else { unreachable!() };
     assert!(
         h.stores
             .put_status(&subject(&h, TENANT, "u1"), "ACTIVE", 0)
@@ -127,7 +127,7 @@ fn verification_required() -> AuthConfig {
 async fn the_verified_flag_is_cached_only_where_verification_is_required() {
     let mut not_required = base_config();
     not_required.email_verification.required = false;
-    let Some(h) = harness(not_required, None) else { return };
+    let Some(h) = harness(not_required, None) else { unreachable!() };
     let id = seeded(&h).await;
     assert!(
         h.engine
@@ -138,7 +138,7 @@ async fn the_verified_flag_is_cached_only_where_verification_is_required() {
     let flag = h.stores.get_verified(&subject(&h, TENANT, &id)).await;
     assert!(matches!(flag, Ok(None)), "{flag:?}");
 
-    let Some(h) = harness(verification_required(), None) else { return };
+    let Some(h) = harness(verification_required(), None) else { unreachable!() };
     let id = seeded(&h).await;
     assert!(
         h.engine
@@ -152,7 +152,7 @@ async fn the_verified_flag_is_cached_only_where_verification_is_required() {
 
 #[tokio::test]
 async fn a_cached_unverified_flag_refuses_until_the_account_is_invalidated() {
-    let Some(h) = harness(verification_required(), None) else { return };
+    let Some(h) = harness(verification_required(), None) else { unreachable!() };
     let id = h
         .seed(SeedUser {
             email_verified: false,
@@ -194,7 +194,7 @@ async fn a_cached_unverified_flag_refuses_until_the_account_is_invalidated() {
 #[tokio::test]
 async fn a_blocked_status_is_reported_before_an_unverified_address() {
     // Both facts refuse this account; the status is the one the caller is told.
-    let Some(h) = harness(verification_required(), None) else { return };
+    let Some(h) = harness(verification_required(), None) else { unreachable!() };
     let id = h
         .seed(SeedUser {
             status: "BANNED".to_owned(),
@@ -217,7 +217,7 @@ async fn a_blocked_status_is_reported_before_an_unverified_address() {
 
 #[tokio::test]
 async fn the_status_only_gate_does_not_ask_for_the_verified_flag() {
-    let Some(h) = harness(verification_required(), None) else { return };
+    let Some(h) = harness(verification_required(), None) else { unreachable!() };
     let id = h
         .seed(SeedUser {
             email_verified: false,
@@ -229,7 +229,7 @@ async fn the_status_only_gate_does_not_ask_for_the_verified_flag() {
 
 #[tokio::test]
 async fn an_empty_id_has_nothing_to_invalidate() {
-    let Some(h) = harness(base_config(), None) else { return };
+    let Some(h) = harness(base_config(), None) else { unreachable!() };
     assert!(
         h.stores
             .put_status(&subject(&h, TENANT, ""), "BANNED", 60)
@@ -297,9 +297,9 @@ fn engine_with_down_cache(h: &Harness, cfg: AuthConfig) -> Option<AuthEngine> {
 
 #[tokio::test]
 async fn a_failing_cache_is_reported_by_the_gate_and_logged_by_a_best_effort_drop() {
-    let Some(h) = harness(base_config(), None) else { return };
+    let Some(h) = harness(base_config(), None) else { unreachable!() };
     let id = seeded(&h).await;
-    let Some(engine) = engine_with_down_cache(&h, base_config()) else { return };
+    let Some(engine) = engine_with_down_cache(&h, base_config()) else { unreachable!() };
 
     // The gate does not wave a request through because the cache is down.
     let gate = engine.assert_user_active(&id, TENANT).await;
@@ -323,7 +323,7 @@ async fn a_failing_cache_is_reported_by_the_gate_and_logged_by_a_best_effort_dro
 
 #[tokio::test]
 async fn verifying_the_address_drops_the_cached_flag_so_the_next_request_passes() {
-    let Some(h) = harness(verification_required(), None) else { return };
+    let Some(h) = harness(verification_required(), None) else { unreachable!() };
     let id = h
         .seed(SeedUser {
             email_verified: false,
@@ -343,7 +343,7 @@ async fn verifying_the_address_drops_the_cached_flag_so_the_next_request_passes(
             .is_ok()
     );
     let mailed = crate::services::auth::test_support::await_verification_code(&h).await;
-    let Some(code) = mailed else { return };
+    let Some(code) = mailed else { unreachable!() };
     let ctx = crate::services::auth::test_support::ctx();
     assert!(
         h.engine
@@ -363,9 +363,9 @@ async fn a_zero_ttl_never_reaches_the_cache_at_all() {
     // repository and `invalidate` has nothing to do.
     let mut cfg = base_config();
     cfg.user_status_cache_ttl = Duration::ZERO;
-    let Some(h) = harness(cfg.clone(), None) else { return };
+    let Some(h) = harness(cfg.clone(), None) else { unreachable!() };
     let id = seeded(&h).await;
-    let Some(engine) = engine_with_down_cache(&h, cfg) else { return };
+    let Some(engine) = engine_with_down_cache(&h, cfg) else { unreachable!() };
     assert!(engine.assert_user_active(&id, TENANT).await.is_ok());
     assert!(engine.invalidate_account_status(&id, TENANT).await.is_ok());
 }

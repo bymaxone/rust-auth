@@ -73,8 +73,8 @@ async fn try_start() -> Option<TestRedis> {
         Ok(container) => container,
         Err(error) => return docker_gate::docker_unavailable("redis:8", error),
     };
-    let host = container.get_host().await.ok()?;
-    let port = container.get_host_port_ipv4(REDIS_PORT).await.ok()?;
+    let Ok(host) = container.get_host().await else { unreachable!() };
+    let Ok(port) = container.get_host_port_ipv4(REDIS_PORT).await else { unreachable!() };
     let url = redis_ready::redis_url(&host.to_string(), port);
     redis_ready::wait_until_ready(&url).await;
     Some(TestRedis { container, url })
@@ -261,7 +261,7 @@ async fn the_contract_scenarios_pass_against_a_real_redis() {
 #[tokio::test]
 async fn the_keys_and_the_entry_are_the_ones_the_contract_pins() {
     let Some(redis) = try_start().await else { return };
-    let (Some(probe), Some(ids)) = (redis.connected("auth").await, ids()) else { return };
+    let (Some(probe), Some(ids)) = (redis.connected("auth").await, ids()) else { unreachable!() };
     // A read of a fresh keyspace reads 0:0 and creates nothing.
     let read = probe.read(&ids).await;
     assert!(matches!(&read, Ok(read) if read.versions == MembershipVersions::default()));
@@ -309,13 +309,13 @@ async fn every_full_key_vector_names_the_keys_the_store_writes() {
         .unwrap_or_default();
     assert!(!vectors.is_empty());
     for (index, vector) in vectors.iter().enumerate() {
-        let Some(probe) = redis.connected(&format!("vec{index}")).await else { return };
+        let Some(probe) = redis.connected(&format!("vec{index}")).await else { unreachable!() };
         let member = MembershipRef {
             tenant_id: vector["tenantId"].as_str().unwrap_or_default(),
             workspace_id: vector["workspaceId"].as_str().unwrap_or_default(),
             user_id: vector["userId"].as_str().unwrap_or_default(),
         };
-        let Ok(ids) = MembershipCacheIds::derive(&identifier_key(), member) else { return };
+        let Ok(ids) = MembershipCacheIds::derive(&identifier_key(), member) else { unreachable!() };
         let versions = MembershipVersions {
             workspace: version_of(vector, "workspaceVersion"),
             membership: version_of(vector, "membershipVersion"),
@@ -355,7 +355,7 @@ async fn every_full_key_vector_names_the_keys_the_store_writes() {
 #[tokio::test]
 async fn every_bump_restores_the_retention() {
     let Some(redis) = try_start().await else { return };
-    let (Some(probe), Some(ids)) = (redis.connected("auth").await, ids()) else { return };
+    let (Some(probe), Some(ids)) = (redis.connected("auth").await, ids()) else { unreachable!() };
     let key = probe.counter_key(VersionCounter::Membership, &ids.membership);
     assert!(probe.set(&key, "7", 30).await);
     assert!(matches!(
@@ -373,7 +373,7 @@ async fn every_bump_restores_the_retention() {
 #[tokio::test]
 async fn a_fill_extends_existing_counters_and_never_creates_one() {
     let Some(redis) = try_start().await else { return };
-    let (Some(probe), Some(ids)) = (redis.connected("auth").await, ids()) else { return };
+    let (Some(probe), Some(ids)) = (redis.connected("auth").await, ids()) else { unreachable!() };
     let workspace_key = probe.counter_key(VersionCounter::Workspace, &ids.workspace);
     let membership_key = probe.counter_key(VersionCounter::Membership, &ids.membership);
     assert!(probe.set(&workspace_key, "3", 30).await);
@@ -394,7 +394,7 @@ async fn a_fill_extends_existing_counters_and_never_creates_one() {
 #[tokio::test]
 async fn a_fill_that_finds_a_counter_moved_writes_and_refreshes_nothing() {
     let Some(redis) = try_start().await else { return };
-    let (Some(probe), Some(ids)) = (redis.connected("auth").await, ids()) else { return };
+    let (Some(probe), Some(ids)) = (redis.connected("auth").await, ids()) else { unreachable!() };
     let membership_key = probe.counter_key(VersionCounter::Membership, &ids.membership);
     assert!(probe.set(&membership_key, "2", 30).await);
     let stale = MembershipVersions {
@@ -410,7 +410,7 @@ async fn a_fill_that_finds_a_counter_moved_writes_and_refreshes_nothing() {
 #[tokio::test]
 async fn a_counter_that_expired_after_the_read_no_longer_matches() {
     let Some(redis) = try_start().await else { return };
-    let (Some(probe), Some(ids)) = (redis.connected("auth").await, ids()) else { return };
+    let (Some(probe), Some(ids)) = (redis.connected("auth").await, ids()) else { unreachable!() };
     let workspace_key = probe.counter_key(VersionCounter::Workspace, &ids.workspace);
     assert!(probe.set(&workspace_key, "1", 30).await);
     let read = probe.read(&ids).await.map(|read| read.versions);
@@ -430,7 +430,7 @@ async fn a_counter_that_expired_after_the_read_no_longer_matches() {
 #[tokio::test]
 async fn an_entry_another_writer_spelled_differently_is_read_by_parsing() {
     let Some(redis) = try_start().await else { return };
-    let (Some(probe), Some(ids)) = (redis.connected("auth").await, ids()) else { return };
+    let (Some(probe), Some(ids)) = (redis.connected("auth").await, ids()) else { unreachable!() };
     let entry = ids.entry(MembershipVersions::default());
     probe
         .seed_entry(&entry, "{\"status\":\"active\", \"role\":\"viewer\"}")
@@ -447,7 +447,7 @@ async fn an_entry_another_writer_spelled_differently_is_read_by_parsing() {
 #[tokio::test]
 async fn a_counter_that_is_not_a_number_fails_the_read() {
     let Some(redis) = try_start().await else { return };
-    let (Some(probe), Some(ids)) = (redis.connected("auth").await, ids()) else { return };
+    let (Some(probe), Some(ids)) = (redis.connected("auth").await, ids()) else { unreachable!() };
     assert!(
         probe
             .set(
@@ -488,7 +488,7 @@ fn seeded_repositories() -> InMemoryWorkspaces {
 #[tokio::test]
 async fn an_unreachable_redis_answers_from_the_repositories() {
     // Nothing listens on port 1; the pool fails at the first command.
-    let Ok(stores) = RedisStores::connect("redis://127.0.0.1:1", "auth") else { return };
+    let Ok(stores) = RedisStores::connect("redis://127.0.0.1:1", "auth") else { unreachable!() };
     let repositories = seeded_repositories();
     let rows = Repositories {
         workspaces: &repositories,

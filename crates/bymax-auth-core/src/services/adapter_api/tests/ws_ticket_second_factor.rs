@@ -11,7 +11,7 @@ use super::*;
 async fn only_an_enrolled_session_that_skipped_its_challenge_mints_nothing() {
     // The four combinations of the two claims: only "enrolled and not verified" is refused, and
     // it is refused as `MfaRequired`, not as an invalid token.
-    let Some(h) = harness(base_config(), None) else { return };
+    let Some(h) = harness(base_config(), None) else { unreachable!() };
     let seeded = seeded_claims(&h).await;
     for (enabled, verified, allowed) in [
         (false, false, true),
@@ -37,7 +37,7 @@ async fn only_an_enrolled_session_that_skipped_its_challenge_mints_nothing() {
 async fn the_second_factor_is_judged_before_the_account_is_read() {
     // The claims name an account that does not exist. A read first would answer `TokenInvalid`;
     // the answer is `MfaRequired`, so nothing was looked up before the gate.
-    let Some(h) = harness(base_config(), None) else { return };
+    let Some(h) = harness(base_config(), None) else { unreachable!() };
     let claims = DashboardClaims {
         sub: "no-such-account".to_owned(),
         mfa_enabled: true,

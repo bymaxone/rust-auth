@@ -73,8 +73,8 @@ async fn try_start() -> Option<TestRedis> {
         Ok(container) => container,
         Err(error) => return docker_gate::docker_unavailable("redis:8", error),
     };
-    let host = container.get_host().await.ok()?;
-    let port = container.get_host_port_ipv4(REDIS_PORT).await.ok()?;
+    let Ok(host) = container.get_host().await else { unreachable!() };
+    let Ok(port) = container.get_host_port_ipv4(REDIS_PORT).await else { unreachable!() };
     let url = redis_ready::redis_url(&host.to_string(), port);
     redis_ready::wait_until_ready(&url).await;
     Some(TestRedis { container, url })
@@ -83,7 +83,7 @@ async fn try_start() -> Option<TestRedis> {
 #[tokio::test]
 async fn state_record_is_set_then_getdel_consumed_exactly_once() {
     let Some(redis) = try_start().await else { return };
-    let Some(stores) = redis.stores("oauthstate") else { return };
+    let Some(stores) = redis.stores("oauthstate") else { unreachable!() };
 
     // The engine passes the hex sha256(state) as the key id; this opaque value stands in for it.
     let state_hash = "a".repeat(64);
@@ -100,7 +100,7 @@ async fn state_record_is_set_then_getdel_consumed_exactly_once() {
     // The TTL is applied (allow a one-second clock slack below 600).
     let keys = redis.all_keys().await;
     assert_eq!(keys.len(), 1, "exactly one os: record exists");
-    let Some(key) = keys.first() else { return };
+    let Some(key) = keys.first() else { unreachable!() };
     assert_eq!(*key, format!("oauthstate:os:{state_hash}"));
     let ttl = redis.ttl(key).await;
     assert!(
@@ -120,7 +120,7 @@ async fn state_record_is_set_then_getdel_consumed_exactly_once() {
 #[tokio::test]
 async fn absent_state_reads_as_none() {
     let Some(redis) = try_start().await else { return };
-    let Some(stores) = redis.stores("oauthabsent") else { return };
+    let Some(stores) = redis.stores("oauthabsent") else { unreachable!() };
 
     // A never-issued state hash is unknown to the store — Ok(None), not an error.
     assert!(matches!(stores.take_state(&"f".repeat(64)).await, Ok(None)));
@@ -129,7 +129,7 @@ async fn absent_state_reads_as_none() {
 #[tokio::test]
 async fn the_key_is_namespaced_and_carries_no_pii() {
     let Some(redis) = try_start().await else { return };
-    let Some(stores) = redis.stores("oauthns") else { return };
+    let Some(stores) = redis.stores("oauthns") else { unreachable!() };
 
     let state_hash = "b".repeat(64);
     assert!(

@@ -19,7 +19,7 @@ async fn a_present_attempts_value_that_is_no_count_refuses_the_right_code_and_co
     let Some(redis) = common::try_start().await else {
         return;
     };
-    let Some(stores) = redis.stores() else { return };
+    let Some(stores) = redis.stores() else { unreachable!() };
 
     // Negative values and ones `HINCRBY` cannot bump. `tonumber` reads some of them as a number
     // below the ceiling.
@@ -65,7 +65,7 @@ async fn an_absent_or_counting_attempts_value_is_counted_against_the_ceiling() {
     let Some(redis) = common::try_start().await else {
         return;
     };
-    let Some(stores) = redis.stores() else { return };
+    let Some(stores) = redis.stores() else { unreachable!() };
 
     let absent = seed(&stores, "absent").await;
     assert!(redis.hdel_raw(&absent, "attempts").await);

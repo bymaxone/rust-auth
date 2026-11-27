@@ -248,7 +248,7 @@ mod scrypt_vectors {
     fn primitive_scrypt_matches_rfc_7914() {
         let params = scrypt::Params::new(14, 8, 1, 64);
         assert!(params.is_ok());
-        let Ok(params) = params else { return };
+        let Ok(params) = params else { unreachable!() };
         let mut out = [0u8; 64];
         let written = scrypt::scrypt(b"pleaseletmein", b"SodiumChloride", &params, &mut out);
         assert!(written.is_ok());
@@ -285,10 +285,10 @@ mod argon2_vectors {
             .output_len(32)
             .build();
         assert!(params.is_ok());
-        let Ok(params) = params else { return };
+        let Ok(params) = params else { unreachable!() };
         let argon = Argon2::new_with_secret(&[3u8; 8], Algorithm::Argon2id, Version::V0x13, params);
         assert!(argon.is_ok());
-        let Ok(argon) = argon else { return };
+        let Ok(argon) = argon else { unreachable!() };
         let mut tag = [0u8; 32];
         let written = argon.hash_password_into(&[1u8; 32], &[2u8; 16], &mut tag);
         assert!(written.is_ok());

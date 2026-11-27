@@ -27,7 +27,7 @@ async fn announced(spy: &LogoutSpy) -> usize {
 
 #[tokio::test]
 async fn a_failed_attempt_leaves_the_owner_for_the_access_lifetime() {
-    let Some((h, auth)) = signed_in(None).await else { return };
+    let Some((h, auth)) = signed_in(None).await else { unreachable!() };
     h.stores.fail_next_blacklist_writes(1);
     let attempt = h
         .engine
@@ -50,7 +50,7 @@ async fn a_short_access_lifetime_still_keeps_the_marker_five_minutes() {
     let tune = |cfg: &mut crate::config::AuthConfig| {
         cfg.jwt.access_expires_in = std::time::Duration::from_secs(60);
     };
-    let Some((h, auth)) = signed_in_with(None, tune).await else { return };
+    let Some((h, auth)) = signed_in_with(None, tune).await else { unreachable!() };
     h.stores.fail_next_blacklist_writes(1);
     let attempt = h
         .engine
@@ -65,7 +65,7 @@ async fn a_short_access_lifetime_still_keeps_the_marker_five_minutes() {
 
 #[tokio::test]
 async fn a_retry_that_fails_again_leaves_the_first_marker_as_it_was() {
-    let Some((h, auth)) = signed_in(None).await else { return };
+    let Some((h, auth)) = signed_in(None).await else { unreachable!() };
     let hash = marker_hash(&auth);
     h.stores.fail_next_blacklist_writes(1);
     assert!(
@@ -99,7 +99,7 @@ async fn a_retry_that_fails_again_leaves_the_first_marker_as_it_was() {
 
 #[tokio::test]
 async fn a_completed_logout_with_a_live_session_clears_a_stale_marker_and_announces() {
-    let Some((h, auth, spy)) = watched().await else { return };
+    let Some((h, auth, spy)) = watched().await else { unreachable!() };
     let hash = marker_hash(&auth);
     let owner = LogoutOwner {
         user_id: auth.user.id.clone(),
@@ -127,7 +127,7 @@ async fn a_completed_logout_with_a_live_session_clears_a_stale_marker_and_announ
 
 #[tokio::test]
 async fn an_unreadable_marker_ends_the_retry_before_any_write() {
-    let Some((h, auth, spy)) = watched().await else { return };
+    let Some((h, auth, spy)) = watched().await else { unreachable!() };
     h.stores.fail_next_blacklist_writes(1);
     assert!(
         h.engine
@@ -161,7 +161,7 @@ async fn an_unreadable_marker_ends_the_retry_before_any_write() {
 
 #[tokio::test]
 async fn an_unclaimable_marker_fails_the_retry_and_announces_only_once_it_can() {
-    let Some((h, auth, spy)) = watched().await else { return };
+    let Some((h, auth, spy)) = watched().await else { unreachable!() };
     h.stores.fail_next_blacklist_writes(1);
     assert!(
         h.engine
@@ -189,7 +189,7 @@ async fn an_unclaimable_marker_fails_the_retry_and_announces_only_once_it_can() 
 
 #[tokio::test]
 async fn a_stale_marker_that_survives_a_completed_logout_is_announced_by_the_retry_alone() {
-    let Some((h, auth, spy)) = watched().await else { return };
+    let Some((h, auth, spy)) = watched().await else { unreachable!() };
     h.stores.fail_next_cleanup_writes(1);
     assert!(
         h.engine
@@ -224,7 +224,7 @@ async fn a_stale_marker_that_survives_a_completed_logout_is_announced_by_the_ret
 
 #[tokio::test]
 async fn an_unconfirmable_removal_keeps_the_owner_for_the_retry_to_announce() {
-    let Some((h, auth, spy)) = watched().await else { return };
+    let Some((h, auth, spy)) = watched().await else { unreachable!() };
     // No marker exists. The delete succeeds, then the marker removal and its confirming read fail.
     h.stores.fail_logout_pending_ops(0, 2);
     assert!(

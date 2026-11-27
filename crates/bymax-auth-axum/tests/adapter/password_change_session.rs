@@ -29,7 +29,7 @@ async fn the_refresh_cookie_of_the_caller_keeps_their_session_through_a_password
         sessions: true,
         ..EngineSpec::default()
     }) else {
-        return;
+        unreachable!()
     };
     let app = router(&h);
     let _ = seed_user(&h, "keeper@e.com", "oldsecret777777", "USER").await;

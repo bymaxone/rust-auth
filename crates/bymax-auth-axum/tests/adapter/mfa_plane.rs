@@ -152,7 +152,7 @@ async fn spent(h: &common::Harness, hooks: &LoginHooks, user_id: &str) -> Spent 
 #[tokio::test]
 async fn a_dashboard_temp_token_at_the_platform_route_is_refused_with_nothing_spent() {
     let hooks = Arc::new(LoginHooks::default());
-    let Some(h) = build(both_planes(&hooks)) else { return };
+    let Some(h) = build(both_planes(&hooks)) else { unreachable!() };
     let app = router(&h);
     let (user_id, secret) = enrolled_user(&h, &app, "plane-d@e.com").await;
     let temp = dashboard_temp_token(&app, "plane-d@e.com").await;
@@ -193,7 +193,7 @@ async fn a_dashboard_temp_token_at_the_platform_route_is_refused_with_nothing_sp
 #[tokio::test]
 async fn a_platform_temp_token_at_the_dashboard_route_returns_the_platform_session() {
     let hooks = Arc::new(LoginHooks::default());
-    let Some(h) = build(both_planes(&hooks)) else { return };
+    let Some(h) = build(both_planes(&hooks)) else { unreachable!() };
     let app = router(&h);
     let (secret, temp) = enrolled_admin(&h, &app, "plane-p@e.com").await;
     let base = common::now_unix();

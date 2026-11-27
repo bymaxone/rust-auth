@@ -59,7 +59,7 @@ async fn each_structural_operand_alone_refuses_an_invitation_a_valid_inviter_vou
     // an empty tenant and an undeclared role are each refused by the structural guard
     // alone — and a well-formed record is accepted, so the guard refuses the defect
     // rather than the flow.
-    let Some(s) = setup(invite_config()) else { return };
+    let Some(s) = setup(invite_config()) else { unreachable!() };
     s.users.ignore_tenant_on_id();
 
     let valid = accept_with_an_otherwise_valid_inviter(&s, 0, "ok@example.com", "t1", "ADMIN");

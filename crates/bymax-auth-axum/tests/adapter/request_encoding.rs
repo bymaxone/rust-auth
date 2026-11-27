@@ -89,9 +89,7 @@ fn gzip_request(route: &str, body: &[u8], credentials: &Credentials) -> Req {
 
 #[tokio::test]
 async fn a_strict_route_refuses_a_declared_encoding() {
-    let Some((app, credentials)) = every_surface().await else {
-        return;
-    };
+    let Some((app, credentials)) = every_surface().await else { unreachable!() };
     let strict = routes("strict");
     assert!(!strict.is_empty(), "the contract lists no strict routes");
     for route in &strict {
@@ -106,9 +104,7 @@ async fn a_strict_route_refuses_a_declared_encoding() {
 
 #[tokio::test]
 async fn an_unchecked_route_does_not_refuse_a_declared_encoding() {
-    let Some((app, credentials)) = every_surface().await else {
-        return;
-    };
+    let Some((app, credentials)) = every_surface().await else { unreachable!() };
     let unchecked = routes("unchecked");
     assert!(
         !unchecked.is_empty(),
@@ -131,9 +127,7 @@ async fn an_unchecked_route_does_not_refuse_a_declared_encoding() {
 
 #[tokio::test]
 async fn a_when_body_route_refuses_only_a_request_that_carries_a_body() {
-    let Some((app, credentials)) = every_surface().await else {
-        return;
-    };
+    let Some((app, credentials)) = every_surface().await else { unreachable!() };
     let when_body = routes("whenBody");
     assert!(
         !when_body.is_empty(),
@@ -153,9 +147,7 @@ async fn a_when_body_route_refuses_only_a_request_that_carries_a_body() {
 
 #[tokio::test]
 async fn a_method_the_contract_never_checks_is_not_refused() {
-    let Some((app, credentials)) = every_surface().await else {
-        return;
-    };
+    let Some((app, credentials)) = every_surface().await else { unreachable!() };
     let methods = section()["methodsNeverChecked"]
         .as_array()
         .cloned()
@@ -174,9 +166,7 @@ async fn a_method_the_contract_never_checks_is_not_refused() {
 
 #[tokio::test]
 async fn a_refused_encoding_is_answered_before_authentication() {
-    let Some((app, _credentials)) = every_surface().await else {
-        return;
-    };
+    let Some((app, _credentials)) = every_surface().await else { unreachable!() };
     // Every route that checks the encoding, with no credentials at all: a route behind
     // authentication must still answer the encoding refusal, not the authentication one.
     let checked: BTreeSet<String> = routes("strict")
@@ -201,9 +191,7 @@ async fn a_refused_encoding_is_answered_before_authentication() {
 
 #[tokio::test]
 async fn a_refused_encoding_spends_no_rate_limit_budget() {
-    let Some(h) = build(EngineSpec::default()) else {
-        return;
-    };
+    let Some(h) = build(EngineSpec::default()) else { unreachable!() };
     let config = bymax_auth_axum::AxumAuthConfig {
         rate_limits: common::slow_refill_rate_limits(),
         ..bymax_auth_axum::AxumAuthConfig::new(bymax_auth_axum::ClientIpSource::PeerAddr)
@@ -233,9 +221,7 @@ async fn a_refused_encoding_spends_no_rate_limit_budget() {
 
 #[tokio::test]
 async fn a_refused_encoding_is_answered_whatever_the_declared_length() {
-    let Some(h) = build(EngineSpec::default()) else {
-        return;
-    };
+    let Some(h) = build(EngineSpec::default()) else { unreachable!() };
     let config = bymax_auth_axum::AxumAuthConfig {
         max_body_bytes: 1024,
         ..bymax_auth_axum::AxumAuthConfig::new(bymax_auth_axum::ClientIpSource::PeerAddr)
@@ -252,9 +238,7 @@ async fn a_refused_encoding_is_answered_whatever_the_declared_length() {
 
 #[tokio::test]
 async fn the_policy_follows_a_custom_route_prefix() {
-    let Some(h) = build(EngineSpec::default()) else {
-        return;
-    };
+    let Some(h) = build(EngineSpec::default()) else { unreachable!() };
     let config = bymax_auth_axum::AxumAuthConfig {
         route_prefix: "/api/v1/auth/".to_owned(),
         ..bymax_auth_axum::AxumAuthConfig::new(bymax_auth_axum::ClientIpSource::PeerAddr)

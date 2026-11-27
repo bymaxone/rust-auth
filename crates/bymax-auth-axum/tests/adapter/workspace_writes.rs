@@ -148,7 +148,7 @@ use http::Method;
 
 #[tokio::test]
 async fn a_workspace_is_created_with_201_and_a_hook_refusal_is_403_with_its_reason() {
-    let Some(o) = owner().await else { return };
+    let Some(o) = owner().await else { unreachable!() };
     let created = o
         .send(
             Method::POST,
@@ -185,7 +185,7 @@ async fn a_workspace_is_created_with_201_and_a_hook_refusal_is_403_with_its_reas
 
 #[tokio::test]
 async fn a_hook_that_fails_without_refusing_is_a_generic_500_and_creates_nothing() {
-    let Some(o) = owner().await else { return };
+    let Some(o) = owner().await else { unreachable!() };
     let before = o.send(Method::GET, "/auth/workspaces", None).await.json();
     let cache_before = o.h.workspaces.cache.operations();
     let failed = o
@@ -213,7 +213,7 @@ async fn a_hook_that_fails_without_refusing_is_a_generic_500_and_creates_nothing
 
 #[tokio::test]
 async fn a_name_is_bounded_as_submitted_and_refused_blank_after_trimming() {
-    let Some(o) = owner().await else { return };
+    let Some(o) = owner().await else { unreachable!() };
     let long = "a".repeat(121);
     for name in [long.as_str(), "\tAcme", "   ", ""] {
         for (method, path) in [
@@ -239,7 +239,7 @@ async fn a_name_is_bounded_as_submitted_and_refused_blank_after_trimming() {
 
 #[tokio::test]
 async fn each_write_route_admits_only_the_roles_its_permission_names() {
-    let Some(o) = owner().await else { return };
+    let Some(o) = owner().await else { unreachable!() };
     let member_id = seed_user(&o.h, "member@e.com", PASSWORD, "USER").await;
     let member_access = login_access_cookie(&o.app, "member@e.com", PASSWORD).await;
     o.h.workspaces
@@ -282,7 +282,7 @@ async fn each_write_route_admits_only_the_roles_its_permission_names() {
 
 #[tokio::test]
 async fn a_member_routes_user_id_is_checked_after_the_workspace_id_and_before_authorization() {
-    let Some(o) = owner().await else { return };
+    let Some(o) = owner().await else { unreachable!() };
     for (method, body) in [
         (Method::PATCH, Some(json!({ "role": "admin" }))),
         (Method::DELETE, None),
@@ -318,7 +318,7 @@ async fn a_member_routes_user_id_is_checked_after_the_workspace_id_and_before_au
 
 #[tokio::test]
 async fn a_role_change_answers_the_membership_and_a_removal_204() {
-    let Some(o) = owner().await else { return };
+    let Some(o) = owner().await else { unreachable!() };
     let changed = o
         .send(
             Method::PATCH,
@@ -351,7 +351,7 @@ async fn a_role_change_answers_the_membership_and_a_removal_204() {
 
 #[tokio::test]
 async fn the_last_owner_cannot_leave_and_a_hand_over_needs_an_active_receiver_first() {
-    let Some(o) = owner().await else { return };
+    let Some(o) = owner().await else { unreachable!() };
     let leave = o
         .send(Method::POST, "/auth/workspaces/w1/leave", None)
         .await;
@@ -395,7 +395,7 @@ async fn the_last_owner_cannot_leave_and_a_hand_over_needs_an_active_receiver_fi
 
 #[tokio::test]
 async fn a_scheduled_deletion_is_restored_only_by_the_owner_on_the_restore_route() {
-    let Some(o) = owner().await else { return };
+    let Some(o) = owner().await else { unreachable!() };
     let wrong = o
         .send(
             Method::POST,
@@ -445,7 +445,7 @@ async fn a_scheduled_deletion_is_restored_only_by_the_owner_on_the_restore_route
 
 #[tokio::test]
 async fn a_switch_is_reported_to_the_workspace_event_hook() {
-    let Some(o) = owner().await else { return };
+    let Some(o) = owner().await else { unreachable!() };
     let switched = o
         .send(Method::POST, "/auth/workspaces/w1/switch", None)
         .await;
@@ -506,7 +506,7 @@ async fn each_write_route_is_served_under_the_limit_it_declares() {
             workspaces: true,
             ..EngineSpec::default()
         };
-        let Some(h) = build(spec) else { return };
+        let Some(h) = build(spec) else { unreachable!() };
         let app = router_with_one_narrow_limit(&h, narrow);
         assert!(
             trips_on_second_call(&app, || anonymous(method, path)).await,

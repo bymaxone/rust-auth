@@ -10,6 +10,9 @@
 //! assembled from path dependencies) before a release, exactly as the release
 //! pre-publish step would run it against a `cargo package`d build.
 
+#[path = "../../../crates/bymax-auth-redis/tests/common/docker_gate.rs"]
+mod docker_gate;
+
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -38,10 +41,14 @@ struct TestRedis {
 }
 
 /// Start a `redis:8` container, returning `None` when Docker is unavailable so the smoke skips.
+/// `BYMAX_REQUIRE_DOCKER=1` turns that skip into a failure.
 async fn try_start() -> Option<TestRedis> {
-    let container = Redis::default().with_tag("8").start().await.ok()?;
-    let host = container.get_host().await.ok()?;
-    let port = container.get_host_port_ipv4(REDIS_PORT).await.ok()?;
+    let container = match Redis::default().with_tag("8").start().await {
+        Ok(container) => container,
+        Err(error) => return docker_gate::docker_unavailable("redis:8", error),
+    };
+    let Ok(host) = container.get_host().await else { unreachable!() };
+    let Ok(port) = container.get_host_port_ipv4(REDIS_PORT).await else { unreachable!() };
     let url = format!("redis://{host}:{port}");
     Some(TestRedis { container, url })
 }
@@ -96,14 +103,14 @@ async fn happy_path_register_login_me_refresh_logout() {
 
     let engine = build_engine(&redis);
     assert!(engine.is_some(), "engine build failed after Redis came up");
-    let Some(engine) = engine else { return };
+    let Some(engine) = engine else { unreachable!() };
 
     let served = serve(engine).await;
     assert!(
         served.is_some(),
         "router failed to bind after Redis came up"
     );
-    let Some((base, server)) = served else { return };
+    let Some((base, server)) = served else { unreachable!() };
 
     // register → a full bearer-mode authentication; the client retains the session.
     let client = AuthClient::new(base.clone());

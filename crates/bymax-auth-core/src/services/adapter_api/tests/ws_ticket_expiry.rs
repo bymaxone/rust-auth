@@ -42,7 +42,7 @@ fn now_seconds() -> u64 {
 
 #[tokio::test]
 async fn a_redeemed_ticket_carries_the_expiry_of_the_token_that_minted_it() {
-    let Some(h) = harness(base_config(), None) else { return };
+    let Some(h) = harness(base_config(), None) else { unreachable!() };
     let claims = seeded_claims(&h).await;
     let ticket = minted(&h, &claims).await;
 
@@ -52,7 +52,7 @@ async fn a_redeemed_ticket_carries_the_expiry_of_the_token_that_minted_it() {
 
 #[tokio::test]
 async fn a_record_is_not_redeemed_from_its_expiry_on() {
-    let Some(h) = harness(base_config(), None) else { return };
+    let Some(h) = harness(base_config(), None) else { unreachable!() };
     let claims = seeded_claims(&h).await;
     for exp in [now_seconds(), now_seconds().saturating_sub(60), 0] {
         let ticket = stored(&h, &claims, Some(exp)).await;
@@ -66,7 +66,7 @@ async fn a_record_is_not_redeemed_from_its_expiry_on() {
 
 #[tokio::test]
 async fn a_record_without_an_expiry_is_accepted_for_the_ticket_lifetime() {
-    let Some(h) = harness(base_config(), None) else { return };
+    let Some(h) = harness(base_config(), None) else { unreachable!() };
     let claims = seeded_claims(&h).await;
     let ticket = stored(&h, &claims, None).await;
 
@@ -79,7 +79,7 @@ async fn a_record_without_an_expiry_is_accepted_for_the_ticket_lifetime() {
 
 #[tokio::test]
 async fn a_ticket_of_the_expected_tenant_is_redeemed() {
-    let Some(h) = harness(base_config(), None) else { return };
+    let Some(h) = harness(base_config(), None) else { unreachable!() };
     let claims = seeded_claims(&h).await;
     let ticket = minted(&h, &claims).await;
 
@@ -92,7 +92,7 @@ async fn a_ticket_of_the_expected_tenant_is_redeemed() {
 
 #[tokio::test]
 async fn a_ticket_of_another_tenant_is_refused_and_consumed() {
-    let Some(h) = harness(base_config(), None) else { return };
+    let Some(h) = harness(base_config(), None) else { unreachable!() };
     let claims = seeded_claims(&h).await;
     for expected in ["other", ""] {
         let ticket = minted(&h, &claims).await;
@@ -106,7 +106,7 @@ async fn a_ticket_of_another_tenant_is_refused_and_consumed() {
 
 #[tokio::test]
 async fn a_ticket_whose_account_is_gone_is_refused() {
-    let Some(h) = harness(base_config(), None) else { return };
+    let Some(h) = harness(base_config(), None) else { unreachable!() };
     let claims = DashboardClaims {
         sub: "nobody".to_owned(),
         ..sample_claims()
@@ -119,7 +119,7 @@ async fn a_ticket_whose_account_is_gone_is_refused() {
 
 #[tokio::test]
 async fn a_ticket_whose_account_was_blocked_after_the_mint_answers_the_status() {
-    let Some(h) = harness(base_config(), None) else { return };
+    let Some(h) = harness(base_config(), None) else { unreachable!() };
     let claims = seeded_claims(&h).await;
     let ticket = minted(&h, &claims).await;
     assert!(
@@ -136,7 +136,7 @@ async fn a_ticket_whose_account_was_blocked_after_the_mint_answers_the_status() 
 #[tokio::test]
 async fn a_token_with_no_lifetime_left_is_refused_before_the_account_is_read() {
     // The account is blocked, so an answer that read it would name the status.
-    let Some(h) = harness(base_config(), None) else { return };
+    let Some(h) = harness(base_config(), None) else { unreachable!() };
     let claims = seeded_claims(&h).await;
     assert!(
         h.users
@@ -155,7 +155,7 @@ async fn a_token_with_no_lifetime_left_is_refused_before_the_account_is_read() {
 
 #[tokio::test]
 async fn a_failed_account_read_fails_the_redemption_and_consumes_the_ticket() {
-    let Some(h) = harness(base_config(), None) else { return };
+    let Some(h) = harness(base_config(), None) else { unreachable!() };
     let claims = seeded_claims(&h).await;
     let ticket = minted(&h, &claims).await;
     h.users.fail_next_reads(1);

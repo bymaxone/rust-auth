@@ -152,7 +152,7 @@ async fn sign_in(h: &Harness, email: &str) -> Option<AuthResult> {
 
 #[tokio::test]
 async fn a_blocked_failure_hook_does_not_delay_the_refusal() {
-    let Some((h, spy)) = rig(false) else { return };
+    let Some((h, spy)) = rig(false) else { unreachable!() };
     let _ = h.seed(SeedUser::active("a@example.com", "right")).await;
     let refused = within(h.engine.login(input("a@example.com", "wrong"), &ctx())).await;
     assert!(
@@ -170,7 +170,7 @@ async fn a_blocked_failure_hook_does_not_delay_the_refusal() {
 
 #[tokio::test]
 async fn a_blocked_lockout_hook_does_not_delay_the_attempt_that_locks() {
-    let Some((h, spy)) = rig(false) else { return };
+    let Some((h, spy)) = rig(false) else { unreachable!() };
     let _ = h.seed(SeedUser::active("l@example.com", "right")).await;
     for _ in 0..5 {
         let refused = within(h.engine.login(input("l@example.com", "wrong"), &ctx())).await;
@@ -190,9 +190,9 @@ async fn a_blocked_lockout_hook_does_not_delay_the_attempt_that_locks() {
 
 #[tokio::test]
 async fn blocked_session_hooks_do_not_delay_a_login_and_the_eviction_names_the_stored_hash() {
-    let Some((h, spy)) = rig(true) else { return };
+    let Some((h, spy)) = rig(true) else { unreachable!() };
     let _ = h.seed(SeedUser::active("s@example.com", "right")).await;
-    let Some(first) = first_sign_in(&h, "s@example.com").await else { return };
+    let Some(first) = first_sign_in(&h, "s@example.com").await else { unreachable!() };
     // The cap is one, so this second login evicts the first session.
     assert!(
         sign_in(&h, "s@example.com").await.is_some(),
@@ -209,9 +209,9 @@ async fn blocked_session_hooks_do_not_delay_a_login_and_the_eviction_names_the_s
 
 #[tokio::test]
 async fn a_blocked_reuse_hook_does_not_delay_the_refusal() {
-    let Some((h, spy)) = rig(false) else { return };
+    let Some((h, spy)) = rig(false) else { unreachable!() };
     let uid = h.seed(SeedUser::active("r@example.com", "right")).await;
-    let Some(auth) = first_sign_in(&h, "r@example.com").await else { return };
+    let Some(auth) = first_sign_in(&h, "r@example.com").await else { unreachable!() };
     let rotated = h
         .engine
         .refresh(&auth.refresh_token, "1.2.3.4", "agent")
@@ -239,9 +239,9 @@ async fn a_blocked_reuse_hook_does_not_delay_the_refusal() {
 
 #[tokio::test]
 async fn the_logout_hook_names_the_tenant_of_the_session_that_ended() {
-    let Some((h, spy)) = rig(false) else { return };
+    let Some((h, spy)) = rig(false) else { unreachable!() };
     let _ = h.seed(SeedUser::active("o@example.com", "right")).await;
-    let Some(auth) = first_sign_in(&h, "o@example.com").await else { return };
+    let Some(auth) = first_sign_in(&h, "o@example.com").await else { unreachable!() };
     assert!(
         h.engine
             .logout(&auth.access_token, &auth.refresh_token)

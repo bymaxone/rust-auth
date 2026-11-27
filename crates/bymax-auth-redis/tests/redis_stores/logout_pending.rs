@@ -19,7 +19,7 @@ async fn the_marker_is_written_under_the_plane_s_prefix_with_the_ttl_and_the_con
     let Some(redis) = common::try_start().await else {
         return;
     };
-    let Some(stores) = redis.stores() else { return };
+    let Some(stores) = redis.stores() else { unreachable!() };
     let put = stores
         .put_logout_pending(SessionKind::Dashboard, "dh", &owner(Some("t1")), 900)
         .await;
@@ -48,7 +48,7 @@ async fn reading_leaves_the_marker_and_claiming_removes_it_for_exactly_one_calle
     let Some(redis) = common::try_start().await else {
         return;
     };
-    let Some(stores) = redis.stores() else { return };
+    let Some(stores) = redis.stores() else { unreachable!() };
     let kind = SessionKind::Dashboard;
     assert!(
         stores
@@ -76,7 +76,7 @@ async fn an_unreadable_value_names_nobody() {
     let Some(redis) = common::try_start().await else {
         return;
     };
-    let Some(stores) = redis.stores() else { return };
+    let Some(stores) = redis.stores() else { unreachable!() };
     assert!(redis.set_raw("auth:lp:bad", "{not json").await);
     let read = stores
         .read_logout_pending(SessionKind::Dashboard, "bad")

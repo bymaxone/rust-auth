@@ -233,7 +233,7 @@ async fn landed(failed: &AtomicUsize, count: usize) -> bool {
 async fn a_cooldown_store_that_cannot_answer_answers_503_after_the_floor() {
     for entry in ENTRIES {
         let Some(rig) = rig(ResetMethod::Otp, Arc::new(DownMailer::failing()), false).await else {
-            return;
+            unreachable!()
         };
         rig.stores.fail_next_resend_gates(1);
 
@@ -255,7 +255,7 @@ async fn a_cooldown_store_that_cannot_answer_answers_503_after_the_floor() {
 async fn a_failing_account_lookup_answers_500_after_the_floor_and_releases_the_cooldown() {
     for entry in ENTRIES {
         let Some(rig) = rig(ResetMethod::Otp, Arc::new(DownMailer::failing()), true).await else {
-            return;
+            unreachable!()
         };
 
         let (outcome, took) = request(&rig, entry, REGISTERED).await;
@@ -276,7 +276,7 @@ async fn a_failing_account_lookup_answers_500_after_the_floor_and_releases_the_c
 async fn a_code_that_could_not_be_stored_keeps_the_200_logs_it_and_releases_the_cooldown() {
     for entry in ENTRIES {
         let Some(rig) = rig(ResetMethod::Otp, Arc::new(DownMailer::failing()), false).await else {
-            return;
+            unreachable!()
         };
         rig.stores.fail_next_otp_puts(1);
 
@@ -308,7 +308,9 @@ async fn a_code_that_could_not_be_sent_keeps_the_200_and_the_cooldown() {
     for entry in ENTRIES {
         let mailer = DownMailer::failing();
         let failed = mailer.failed.clone();
-        let Some(rig) = rig(ResetMethod::Otp, Arc::new(mailer), false).await else { return };
+        let Some(rig) = rig(ResetMethod::Otp, Arc::new(mailer), false).await else {
+            unreachable!()
+        };
 
         let (outcome, took) = request(&rig, entry, REGISTERED).await;
 
@@ -330,7 +332,9 @@ async fn a_late_send_failure_never_deletes_the_cooldown_of_a_later_request() {
         let gate = Arc::new(Semaphore::new(0));
         let mailer = DownMailer::gated(gate.clone());
         let failed = mailer.failed.clone();
-        let Some(rig) = rig(ResetMethod::Otp, Arc::new(mailer), false).await else { return };
+        let Some(rig) = rig(ResetMethod::Otp, Arc::new(mailer), false).await else {
+            unreachable!()
+        };
 
         // Request A takes the cooldown and its send waits; the window then ends and request B
         // takes a fresh cooldown; only then do both sends fail.
@@ -363,7 +367,7 @@ async fn a_late_send_failure_never_deletes_the_cooldown_of_a_later_request() {
 #[tokio::test]
 async fn a_reset_link_that_could_not_be_sent_keeps_the_200_and_releases_the_cooldown() {
     let Some(rig) = rig(ResetMethod::Token, Arc::new(DownMailer::failing()), false).await else {
-        return;
+        unreachable!()
     };
 
     let (outcome, took) = request(&rig, Entry::Initiate, REGISTERED).await;
@@ -380,7 +384,7 @@ async fn a_reset_link_that_could_not_be_sent_keeps_the_200_and_releases_the_cool
 async fn a_request_that_fails_nothing_keeps_its_cooldown_and_a_hit_waits_the_floor() {
     for entry in ENTRIES {
         let healthy = Arc::new(crate::services::auth::test_support::CapturingEmails::default());
-        let Some(rig) = rig(ResetMethod::Otp, healthy, false).await else { return };
+        let Some(rig) = rig(ResetMethod::Otp, healthy, false).await else { unreachable!() };
 
         let (first, _) = request(&rig, entry, REGISTERED).await;
         let (absent, _) = request(&rig, entry, "absent@example.com").await;
@@ -406,7 +410,7 @@ async fn a_request_that_fails_nothing_keeps_its_cooldown_and_a_hit_waits_the_flo
 async fn a_cooldown_that_cannot_be_released_is_logged_and_the_original_error_stands() {
     for entry in ENTRIES {
         let Some(rig) = rig(ResetMethod::Otp, Arc::new(DownMailer::failing()), true).await else {
-            return;
+            unreachable!()
         };
         rig.stores.fail_next_resend_releases(1);
 
@@ -438,7 +442,7 @@ async fn a_cooldown_that_cannot_be_released_is_logged_and_the_original_error_sta
 #[tokio::test]
 async fn a_send_that_never_returns_leaves_the_cooldown_when_the_ceiling_abandons_it() {
     let Some(rig) = rig(ResetMethod::Otp, Arc::new(DownMailer::hanging()), false).await else {
-        return;
+        unreachable!()
     };
 
     let (outcome, took) = request(&rig, Entry::Initiate, REGISTERED).await;
@@ -455,7 +459,7 @@ async fn a_send_that_never_returns_leaves_the_cooldown_when_the_ceiling_abandons
 #[tokio::test]
 async fn a_reset_link_send_that_never_returns_is_bounded_and_releases_the_cooldown() {
     let Some(rig) = rig(ResetMethod::Token, Arc::new(DownMailer::hanging()), false).await else {
-        return;
+        unreachable!()
     };
 
     let (outcome, took) = request(&rig, Entry::Initiate, REGISTERED).await;

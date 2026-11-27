@@ -36,7 +36,7 @@ async fn login_with(app: &axum::Router, body: &str) -> Captured {
 
 #[tokio::test]
 async fn an_empty_body_names_every_required_property() {
-    let Some(h) = build(EngineSpec::default()) else { return };
+    let Some(h) = build(EngineSpec::default()) else { unreachable!() };
     let app = router(&h);
     assert_eq!(
         named(&login_with(&app, "{}").await),
@@ -49,7 +49,7 @@ async fn an_empty_body_names_every_required_property() {
 
 #[tokio::test]
 async fn a_value_of_the_wrong_type_names_its_property() {
-    let Some(h) = build(EngineSpec::default()) else { return };
+    let Some(h) = build(EngineSpec::default()) else { unreachable!() };
     let app = router(&h);
     let response = login_with(&app, r#"{"email":5,"password":"x"}"#).await;
     assert_eq!(named(&response), set(&["email"]));
@@ -57,7 +57,7 @@ async fn a_value_of_the_wrong_type_names_its_property() {
 
 #[tokio::test]
 async fn a_request_that_fails_by_shape_and_by_bound_names_both() {
-    let Some(h) = build(EngineSpec::default()) else { return };
+    let Some(h) = build(EngineSpec::default()) else { unreachable!() };
     let app = router(&h);
     let response = login_with(&app, r#"{"email":"not-an-email","password":5}"#).await;
     assert_eq!(named(&response), set(&["email", "password"]));
@@ -65,7 +65,7 @@ async fn a_request_that_fails_by_shape_and_by_bound_names_both() {
 
 #[tokio::test]
 async fn an_unknown_property_is_named_and_its_value_is_not_echoed() {
-    let Some(h) = build(EngineSpec::default()) else { return };
+    let Some(h) = build(EngineSpec::default()) else { unreachable!() };
     let app = router(&h);
     let body = r#"{"email":"a@e.com","password":"p","extra":"VALUE-NEVER-ECHOED"}"#;
     let response = login_with(&app, body).await;
@@ -81,7 +81,7 @@ async fn a_query_that_does_not_fit_names_its_property() {
         allow_oauth: true,
         ..EngineSpec::default()
     }) else {
-        return;
+        unreachable!()
     };
     let app = router(&h);
     let callback = Req::get("/auth/oauth/google/callback?code=abc")
@@ -94,7 +94,7 @@ async fn a_query_that_does_not_fit_names_its_property() {
 
 #[tokio::test]
 async fn an_unknown_property_with_an_empty_name_is_reported_under_body() {
-    let Some(h) = build(EngineSpec::default()) else { return };
+    let Some(h) = build(EngineSpec::default()) else { unreachable!() };
     let app = router(&h);
     let response = login_with(&app, r#"{"email":"a@e.com","password":"p","":1}"#).await;
     assert_eq!(named(&response), set(&["body"]));

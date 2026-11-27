@@ -37,8 +37,8 @@ async fn announced(spy: &LogoutSpy) -> usize {
 
 #[tokio::test]
 async fn a_failed_attempt_leaves_the_admin_with_no_tenant_for_the_access_lifetime() {
-    let Some((h, auth, _spy)) = watched().await else { return };
-    let Some(svc) = h.engine.platform_auth() else { return };
+    let Some((h, auth, _spy)) = watched().await else { unreachable!() };
+    let Some(svc) = h.engine.platform_auth() else { unreachable!() };
     h.stores.fail_next_blacklist_writes(1);
     assert!(
         svc.logout(&auth.access_token, &auth.refresh_token)
@@ -57,8 +57,8 @@ async fn a_failed_attempt_leaves_the_admin_with_no_tenant_for_the_access_lifetim
 
 #[tokio::test]
 async fn the_retry_that_completes_a_failed_logout_announces_it_once() {
-    let Some((h, auth, spy)) = watched().await else { return };
-    let Some(svc) = h.engine.platform_auth() else { return };
+    let Some((h, auth, spy)) = watched().await else { unreachable!() };
+    let Some(svc) = h.engine.platform_auth() else { unreachable!() };
     h.stores.fail_next_blacklist_writes(1);
     assert!(
         svc.logout(&auth.access_token, &auth.refresh_token)
@@ -85,8 +85,8 @@ async fn the_retry_that_completes_a_failed_logout_announces_it_once() {
 
 #[tokio::test]
 async fn an_unclaimable_marker_fails_the_platform_retry_and_announces_nothing_yet() {
-    let Some((h, auth, spy)) = watched().await else { return };
-    let Some(svc) = h.engine.platform_auth() else { return };
+    let Some((h, auth, spy)) = watched().await else { unreachable!() };
+    let Some(svc) = h.engine.platform_auth() else { unreachable!() };
     h.stores.fail_next_blacklist_writes(1);
     assert!(
         svc.logout(&auth.access_token, &auth.refresh_token)
@@ -110,8 +110,8 @@ async fn an_unclaimable_marker_fails_the_platform_retry_and_announces_nothing_ye
 
 #[tokio::test]
 async fn an_unreadable_marker_ends_the_platform_retry_before_any_write() {
-    let Some((h, auth, _spy)) = watched().await else { return };
-    let Some(svc) = h.engine.platform_auth() else { return };
+    let Some((h, auth, _spy)) = watched().await else { unreachable!() };
+    let Some(svc) = h.engine.platform_auth() else { unreachable!() };
     h.stores.fail_next_blacklist_writes(1);
     assert!(
         svc.logout(&auth.access_token, &auth.refresh_token)
@@ -136,8 +136,8 @@ async fn an_unreadable_marker_ends_the_platform_retry_before_any_write() {
 #[tokio::test]
 async fn a_stale_marker_that_survives_a_completed_platform_logout_is_announced_by_the_retry_alone()
 {
-    let Some((h, auth, spy)) = watched().await else { return };
-    let Some(svc) = h.engine.platform_auth() else { return };
+    let Some((h, auth, spy)) = watched().await else { unreachable!() };
+    let Some(svc) = h.engine.platform_auth() else { unreachable!() };
     h.stores.fail_next_cleanup_writes(1);
     assert!(
         svc.logout(&auth.access_token, &auth.refresh_token)
@@ -168,8 +168,8 @@ async fn a_stale_marker_that_survives_a_completed_platform_logout_is_announced_b
 
 #[tokio::test]
 async fn an_unconfirmable_removal_keeps_the_admin_for_the_retry_to_announce() {
-    let Some((h, auth, spy)) = watched().await else { return };
-    let Some(svc) = h.engine.platform_auth() else { return };
+    let Some((h, auth, spy)) = watched().await else { unreachable!() };
+    let Some(svc) = h.engine.platform_auth() else { unreachable!() };
     // No marker exists. The delete succeeds, then the marker removal and its confirming read fail.
     h.stores.fail_logout_pending_ops(0, 2);
     assert!(
