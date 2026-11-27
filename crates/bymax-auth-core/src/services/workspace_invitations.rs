@@ -42,6 +42,9 @@ use crate::workspace::limits::{
 };
 use crate::workspace::roles::RoleHierarchy;
 
+mod accept;
+pub use accept::{AcceptedWorkspaceInvitation, WorkspaceSignup, WorkspaceSignupInput};
+
 /// The token a holder previews: what it is for, without signing in.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum InvitationPreview {

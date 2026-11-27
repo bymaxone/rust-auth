@@ -11,7 +11,7 @@ use super::workspace_support_tests::{
     Fixture, RecordingHooks, acting_member, active, membership, seed_account, workspace,
 };
 use crate::config::{AuthConfig, Environment};
-use crate::engine::AuthEngine;
+use crate::engine::{AuthEngine, AuthEngineBuilder};
 use crate::testing::{
     InMemoryMembershipCache, InMemoryStores, InMemoryUserRepository, InMemoryWorkspaceInvitations,
     InMemoryWorkspaces,
@@ -184,6 +184,7 @@ pub(super) struct Inv {
 fn engine(
     config: AuthConfig,
     store: Option<Arc<dyn WorkspaceInvitationStore>>,
+    customize: impl FnOnce(AuthEngineBuilder) -> AuthEngineBuilder,
 ) -> Option<(Fixture, Arc<Mailer>)> {
     let repo = Arc::new(InMemoryWorkspaces::new());
     let cache = Arc::new(InMemoryMembershipCache::new());
@@ -202,7 +203,7 @@ fn engine(
     if let Some(store) = store {
         builder = builder.workspace_invitation_store(store);
     }
-    let engine = builder.build().ok()?;
+    let engine = customize(builder).build().ok()?;
     let fixture = Fixture {
         engine,
         repo,
@@ -224,8 +225,18 @@ pub(super) async fn setup_over(
     config: AuthConfig,
     wrap: impl FnOnce(Arc<InMemoryWorkspaceInvitations>) -> Arc<dyn WorkspaceInvitationStore>,
 ) -> Option<Inv> {
+    setup_customized(config, wrap, |builder| builder).await
+}
+
+/// [`setup_over`] with `customize` applied to the engine's builder last, so a test can replace a
+/// collaborator the fixture wired.
+pub(super) async fn setup_customized(
+    config: AuthConfig,
+    wrap: impl FnOnce(Arc<InMemoryWorkspaceInvitations>) -> Arc<dyn WorkspaceInvitationStore>,
+    customize: impl FnOnce(AuthEngineBuilder) -> AuthEngineBuilder,
+) -> Option<Inv> {
     let store = Arc::new(InMemoryWorkspaceInvitations::new());
-    let (f, mail) = engine(config, Some(wrap(store.clone())))?;
+    let (f, mail) = engine(config, Some(wrap(store.clone())), customize)?;
     f.repo
         .seed_workspace(workspace("t1", "w1", WorkspaceStatus::Active, 1));
     let mut seated = Vec::new();
@@ -253,7 +264,7 @@ pub(super) async fn setup_over(
 
 /// A fixture whose engine was given no invitation store.
 pub(super) fn without_a_store(config: AuthConfig) -> Option<Fixture> {
-    engine(config, None).map(|(fixture, _)| fixture)
+    engine(config, None, |builder| builder).map(|(fixture, _)| fixture)
 }
 
 /// The place of `email`'s invitation in `t1`'s `w1`.
