@@ -544,6 +544,11 @@ async fn a_signup_creates_a_verified_account_that_joins_and_is_signed_in() {
         assert!(!printed.contains(secret.as_str()), "{printed}");
     }
     assert!(!printed.contains(JOE), "{printed}");
+    let shown = format!(
+        "WorkspaceSignup {{ result: \"[REDACTED]\", accepted: {:?} }}",
+        done.accepted
+    );
+    assert_eq!(printed, shown);
     let user = done.result.user;
     assert_eq!(done.accepted, accepted_as("member"));
     assert_eq!((user.email.as_str(), user.name.as_str()), (JOE, "Joe Doe"));
