@@ -69,7 +69,7 @@ async fn a_session_that_cleared_the_mfa_challenge_keeps_clearing_the_gate_after_
         mfa: true,
         ..EngineSpec::default()
     }) else {
-        return;
+        unreachable!()
     };
     let app = router(&h);
 

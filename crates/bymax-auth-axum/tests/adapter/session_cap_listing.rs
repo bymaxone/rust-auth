@@ -19,7 +19,7 @@ async fn a_password_login_survives_a_failed_session_cap_listing() {
         sessions: true,
         ..EngineSpec::default()
     }) else {
-        return;
+        unreachable!()
     };
     let app = router(&h);
     seed_user(&h, "capfail@e.com", "glidingwalnut42", "USER").await;
@@ -48,7 +48,7 @@ async fn an_oauth_login_survives_a_failed_session_cap_listing() {
         sessions: true,
         ..EngineSpec::default()
     }) else {
-        return;
+        unreachable!()
     };
     let app = router(&h);
     let initiate = Req::get("/auth/oauth/google?tenantId=t1").send(&app).await;

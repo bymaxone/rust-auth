@@ -136,7 +136,7 @@ fn every_vector_is_reproduced_byte_for_byte() {
     let key_vector = &contract["hmacKeyDerivation"]["vectors"][0];
     let mut cfg = base_config();
     cfg.jwt.secret = secrecy::SecretString::from(text(key_vector, "secret").to_owned());
-    let Some(h) = harness(cfg, None) else { return };
+    let Some(h) = harness(cfg, None) else { unreachable!() };
     assert_eq!(
         h.engine.config().hmac_key().as_slice(),
         text(key_vector, "derivedKeyHex").as_bytes(),
@@ -198,7 +198,7 @@ async fn failures_in_one_tenant_do_not_lock_the_same_id_in_another() {
     let stores = Arc::new(InMemoryStores::new());
     let (Some((a, users_a)), Some((b, users_b))) = (engine_over(&stores), engine_over(&stores))
     else {
-        return;
+        unreachable!()
     };
     let id_a = seed(&users_a, "tenant-a", "a@example.com").await;
     let id_b = seed(&users_b, "tenant-b", "b@example.com").await;

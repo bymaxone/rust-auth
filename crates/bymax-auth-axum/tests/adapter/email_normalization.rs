@@ -5,7 +5,7 @@ use super::*;
 
 #[tokio::test]
 async fn a_padded_upper_case_address_logs_in_to_the_same_account() {
-    let Some(h) = build(EngineSpec::default()) else { return };
+    let Some(h) = build(EngineSpec::default()) else { unreachable!() };
     let app = router(&h);
     seed_user(&h, "case@e.com", "glidingwalnut42", "USER").await;
 
@@ -22,7 +22,7 @@ async fn a_padded_upper_case_address_logs_in_to_the_same_account() {
 
 #[tokio::test]
 async fn a_malformed_address_is_still_a_validation_error_after_normalizing() {
-    let Some(h) = build(EngineSpec::default()) else { return };
+    let Some(h) = build(EngineSpec::default()) else { unreachable!() };
     let app = router(&h);
     for bad in ["   ", "not-an-email", "  no-at-sign  ", "\u{0085}a@e.com"] {
         let refused = Req::post("/auth/login")
@@ -41,7 +41,7 @@ async fn a_whitespace_only_platform_password_is_a_validation_error() {
         platform: true,
         ..EngineSpec::default()
     }) else {
-        return;
+        unreachable!()
     };
     let app = router(&h);
     let blank = Req::post("/auth/platform/login")

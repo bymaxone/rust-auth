@@ -287,7 +287,7 @@ mod tests {
     #[test]
     fn auth_state_accessors_and_from_ref() {
         // The state exposes the engine + config, and `FromRef` hands back the engine.
-        let Some(s) = scaffold(TokenDelivery::Cookie) else { return };
+        let Some(s) = scaffold(TokenDelivery::Cookie) else { unreachable!() };
         assert_eq!(s.state.config().route_prefix, "auth");
         let engine: Arc<AuthEngine> = Arc::<AuthEngine>::from_ref(&s.state);
         assert!(Arc::ptr_eq(&engine, s.state.engine()));

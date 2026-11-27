@@ -139,7 +139,7 @@ impl World {
 
 #[tokio::test]
 async fn a_refresh_body_is_the_token_no_token_or_a_refusal() {
-    let Some((_h, w)) = world().await else { return };
+    let Some((_h, w)) = world().await else { unreachable!() };
     for b in no_token() {
         let answer = w.post("/auth/refresh", "", &b).await;
         assert_eq!(answer.status, StatusCode::UNAUTHORIZED, "{}", b.label);
@@ -165,7 +165,7 @@ async fn a_refresh_body_is_the_token_no_token_or_a_refusal() {
 
 #[tokio::test]
 async fn a_refused_logout_body_revokes_nothing() {
-    let Some((_h, w)) = world().await else { return };
+    let Some((_h, w)) = world().await else { unreachable!() };
     for b in bad_token().into_iter().chain(not_an_object()) {
         let answer = w.post("/auth/logout", &w.access, &b).await;
         assert_eq!(answer.status, StatusCode::BAD_REQUEST, "{}", b.label);
@@ -186,7 +186,7 @@ async fn a_refused_logout_body_revokes_nothing() {
 
 #[tokio::test]
 async fn a_logout_with_no_token_still_ends_the_access_token() {
-    let Some((_h, w)) = world().await else { return };
+    let Some((_h, w)) = world().await else { unreachable!() };
     let answer = w
         .post("/auth/logout", &w.access, &body("empty object", "{}"))
         .await;
@@ -197,7 +197,7 @@ async fn a_logout_with_no_token_still_ends_the_access_token() {
 
 #[tokio::test]
 async fn a_refused_revoke_all_body_ends_no_session() {
-    let Some((_h, w)) = world().await else { return };
+    let Some((_h, w)) = world().await else { unreachable!() };
     for b in bad_token().into_iter().chain(not_an_object()) {
         let answer = w.post("/auth/sessions/revoke-all", &w.access, &b).await;
         assert_eq!(answer.status, StatusCode::BAD_REQUEST, "{}", b.label);
@@ -220,7 +220,7 @@ async fn a_refused_revoke_all_body_ends_no_session() {
 
 #[tokio::test]
 async fn the_platform_routes_hold_the_same_rule() {
-    let Some((_h, w)) = world().await else { return };
+    let Some((_h, w)) = world().await else { unreachable!() };
     for b in bad_token() {
         assert_refused(
             &w.post("/auth/platform/refresh", "", &b).await,
@@ -251,7 +251,7 @@ async fn the_platform_routes_hold_the_same_rule() {
 
 #[tokio::test]
 async fn cookie_delivery_ignores_a_token_value_in_the_body_but_not_a_broken_body() {
-    let Some(h) = build(EngineSpec::default()) else { return };
+    let Some(h) = build(EngineSpec::default()) else { unreachable!() };
     seed_user(&h, "cookie-matrix@e.com", "glidingwalnut42", "USER").await;
     let app = unlimited_router(&h);
     let first = login(&app, "cookie-matrix@e.com", "glidingwalnut42").await;
@@ -284,7 +284,7 @@ fn change_body(token: &str) -> serde_json::Value {
 
 #[tokio::test]
 async fn a_password_change_naming_no_live_session_is_refused_and_changes_nothing() {
-    let Some((_h, w)) = world().await else { return };
+    let Some((_h, w)) = world().await else { unreachable!() };
     let answer = Req::post("/auth/password/change")
         .bearer(&w.access)
         .json(change_body(&"f".repeat(64)))
@@ -300,7 +300,7 @@ async fn a_password_change_naming_no_live_session_is_refused_and_changes_nothing
 
 #[tokio::test]
 async fn a_token_that_just_rotated_still_stands_for_its_session() {
-    let Some((_h, w)) = world().await else { return };
+    let Some((_h, w)) = world().await else { unreachable!() };
     let refreshed = w
         .post(
             "/auth/refresh",

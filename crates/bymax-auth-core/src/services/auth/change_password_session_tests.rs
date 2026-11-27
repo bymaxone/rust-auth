@@ -177,7 +177,7 @@ impl Fixture {
 
 #[tokio::test]
 async fn a_session_that_rotates_while_the_password_is_screened_is_the_one_kept() {
-    let Some(f) = fixture().await else { return };
+    let Some(f) = fixture().await else { unreachable!() };
     let successor = "b".repeat(64);
     f.plan(Move::Rotate {
         old: hash_of(&f.mine),
@@ -197,7 +197,7 @@ async fn a_session_that_rotates_while_the_password_is_screened_is_the_one_kept()
 
 #[tokio::test]
 async fn a_session_that_cannot_be_resolved_after_the_write_ends_every_session() {
-    let Some(f) = fixture().await else { return };
+    let Some(f) = fixture().await else { unreachable!() };
     let before = f.stored_password().await;
     f.plan(Move::Revoke {
         hash: hash_of(&f.mine),
@@ -214,7 +214,7 @@ async fn a_session_that_cannot_be_resolved_after_the_write_ends_every_session() 
 
 #[tokio::test]
 async fn a_token_naming_no_live_session_changes_nothing() {
-    let Some(f) = fixture().await else { return };
+    let Some(f) = fixture().await else { unreachable!() };
     let before = f.stored_password().await;
     for presented in ["f".repeat(64), "not-a-token".to_owned()] {
         let outcome = f.change(Some(&presented)).await;

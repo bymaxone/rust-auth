@@ -446,7 +446,7 @@ mod tests {
         // nowhere to put the token and nowhere to read it back, so both ends refuse rather than
         // half-completing — a request that appeared to succeed would mail a link to a token
         // that was never written.
-        let Some((engine, users)) = engine_without_the_store() else { return };
+        let Some((engine, users)) = engine_without_the_store() else { unreachable!() };
         let created = users
             .create(bymax_auth_types::CreateUserData {
                 email: "nostore@example.com".to_owned(),
@@ -458,7 +458,7 @@ mod tests {
                 email_verified: Some(true),
             })
             .await;
-        let Ok(user) = created else { return };
+        let Ok(user) = created else { unreachable!() };
 
         let requested = engine
             .request_email_change("t1", &user.id, "new@example.com", "right")
@@ -475,7 +475,7 @@ mod tests {
         // exactly what a re-prove protects. It answers as a wrong password does, so the caller
         // cannot tell the two apart — an account that exists but has no local password is not
         // something a stranger should learn.
-        let Some(h) = setup() else { return };
+        let Some(h) = setup() else { unreachable!() };
         let created = h
             .users
             .create(bymax_auth_types::CreateUserData {
@@ -488,7 +488,7 @@ mod tests {
                 email_verified: Some(true),
             })
             .await;
-        let Ok(user) = created else { return };
+        let Ok(user) = created else { unreachable!() };
 
         let refused = h
             .engine
@@ -503,7 +503,7 @@ mod tests {
         // caller in `t2` naming an id that lives in `t1` had the password checked, the lockout
         // counted and the verification mail built against `t1`'s account. The tenant comes from
         // the verified token, so the read has to be scoped by it.
-        let Some(h) = setup() else { return };
+        let Some(h) = setup() else { unreachable!() };
         let id = h.seed(SeedUser::active("owner@example.com", "right")).await;
 
         let crossed = h
@@ -528,7 +528,7 @@ mod tests {
         // account recovers through, which is persistence rather than a single theft. The per-IP
         // limiter is not that control: in this crate it is in-process and per-instance, so a
         // distributed caller sidesteps it, and it is not keyed to the account under attack.
-        let Some(h) = setup() else { return };
+        let Some(h) = setup() else { unreachable!() };
         let id = h
             .seed(SeedUser::active("guessed@example.com", "right"))
             .await;
@@ -560,7 +560,7 @@ mod tests {
         // compromised account bought nothing against an attacker still holding an unexpired
         // access token and the password: they could redirect the account's recovery credential
         // to an address of their own. nest-auth gates the matching route with `UserStatusGuard`.
-        let Some(h) = setup() else { return };
+        let Some(h) = setup() else { unreachable!() };
         let id = h
             .seed(SeedUser::active("blocked@example.com", "right"))
             .await;
@@ -582,7 +582,7 @@ mod tests {
         // The opposite of the notification below, and deliberately so: the verification IS the
         // flow. Answering Ok would leave the user waiting on a message that is never coming,
         // with a token they cannot reach sitting in the store until it expires.
-        let Some(h) = setup_with_failing_email() else { return };
+        let Some(h) = setup_with_failing_email() else { unreachable!() };
         let id = h.seed(SeedUser::active("old@example.com", "right")).await;
 
         let refused = h
@@ -598,10 +598,10 @@ mod tests {
         // its failure is logged — but the change itself was asked for and proved, and rolling
         // it back because a mail server was down would punish the user for the operator's
         // outage. Fire-and-forget, and the address moves.
-        let Some(h) = setup_with_failing_email() else { return };
+        let Some(h) = setup_with_failing_email() else { unreachable!() };
         let id = h.seed(SeedUser::active("old@example.com", "right")).await;
         let token = "d".repeat(64);
-        let Some(store) = h.engine.password_reset_store() else { return };
+        let Some(store) = h.engine.password_reset_store() else { unreachable!() };
         let stored = store
             .put_email_change(
                 &token,
@@ -630,11 +630,11 @@ mod tests {
         // token the flow itself mints carries the fingerprint of the password in force when it
         // was minted, and the overwhelming majority are confirmed without a password change in
         // between.
-        let Some(h) = setup() else { return };
+        let Some(h) = setup() else { unreachable!() };
         let id = h.seed(SeedUser::active("bound@example.com", "right")).await;
-        let Ok(Some(user)) = h.users.find_by_id(&id, None).await else { return };
+        let Ok(Some(user)) = h.users.find_by_id(&id, None).await else { unreachable!() };
         let token = "f".repeat(64);
-        let Some(store) = h.engine.password_reset_store() else { return };
+        let Some(store) = h.engine.password_reset_store() else { unreachable!() };
         let stored = store
             .put_email_change(
                 &token,
@@ -725,10 +725,10 @@ mod tests {
         // sibling implementation that has not taken this change writes, and refusing it would
         // break every change in flight across a rolling deploy — a window this narrow is not
         // worth an outage. The binding still holds whenever the field is present.
-        let Some(h) = setup() else { return };
+        let Some(h) = setup() else { unreachable!() };
         let id = h.seed(SeedUser::active("old@example.com", "right")).await;
         let token = "e".repeat(64);
-        let Some(store) = h.engine.password_reset_store() else { return };
+        let Some(store) = h.engine.password_reset_store() else { unreachable!() };
         let stored = store
             .put_email_change(
                 &token,
@@ -754,7 +754,7 @@ mod tests {
     async fn a_change_is_not_applied_until_the_new_address_proves_itself() {
         // The whole point of the two steps. A flow that wrote the address at request time and
         // verified afterwards would hand an attacker the account for the length of the TTL.
-        let Some(h) = setup() else { return };
+        let Some(h) = setup() else { unreachable!() };
         let id = h.seed(SeedUser::active("old@example.com", "right")).await;
 
         assert!(
@@ -774,7 +774,7 @@ mod tests {
     async fn the_wrong_current_password_mints_nothing() {
         // The re-prove is the gate that stops a stolen access token from moving the recovery
         // address. Without it, a thief with a token takes the account outright.
-        let Some(h) = setup() else { return };
+        let Some(h) = setup() else { unreachable!() };
         let id = h.seed(SeedUser::active("old@example.com", "right")).await;
 
         assert!(matches!(
@@ -793,7 +793,7 @@ mod tests {
     async fn an_account_that_cannot_prove_a_password_is_refused() {
         // A subject that no longer exists answers exactly as one with no local password: the
         // caller learns nothing either way.
-        let Some(h) = setup() else { return };
+        let Some(h) = setup() else { unreachable!() };
 
         assert!(matches!(
             h.engine
@@ -808,7 +808,7 @@ mod tests {
         // Moving onto an address someone else holds would put two accounts on one recovery
         // credential; moving onto the account's own is a change that changes nothing and would
         // send a verification for a move that is not happening.
-        let Some(h) = setup() else { return };
+        let Some(h) = setup() else { unreachable!() };
         let id = h.seed(SeedUser::active("old@example.com", "right")).await;
         let _ = h.seed(SeedUser::active("taken@example.com", "right")).await;
 
@@ -830,7 +830,7 @@ mod tests {
     async fn a_confirmed_change_moves_the_address_exactly_once() {
         // The link is single-use: the read and the delete are one operation, so clicking twice
         // — or racing — applies once.
-        let Some(h) = setup() else { return };
+        let Some(h) = setup() else { unreachable!() };
         let id = h.seed(SeedUser::active("old@example.com", "right")).await;
 
         // The raw token is opaque, so plant a known one — the pair `request` writes.
@@ -865,7 +865,7 @@ mod tests {
     async fn a_token_no_longer_bound_to_the_password_is_refused() {
         // An attacker who plants a change request and waits loses it the moment the victim
         // changes their password — which is the first thing a victim does.
-        let Some(h) = setup() else { return };
+        let Some(h) = setup() else { unreachable!() };
         let id = h.seed(SeedUser::active("old@example.com", "right")).await;
 
         let token = "e".repeat(64);
@@ -895,7 +895,7 @@ mod tests {
 
     #[tokio::test]
     async fn an_unknown_token_and_a_vanished_account_are_both_refused() {
-        let Some(h) = setup() else { return };
+        let Some(h) = setup() else { unreachable!() };
 
         assert!(matches!(
             h.engine.confirm_email_change(&"0".repeat(64)).await,
@@ -926,7 +926,7 @@ mod tests {
     async fn an_address_taken_between_the_request_and_the_confirmation_is_refused() {
         // The two are separated by the whole TTL, and whoever registered the address in
         // between would otherwise lose it to a change requested before they existed.
-        let Some(h) = setup() else { return };
+        let Some(h) = setup() else { unreachable!() };
         let id = h.seed(SeedUser::active("old@example.com", "right")).await;
 
         let token = "2".repeat(64);
@@ -964,7 +964,7 @@ mod tests {
     /// be unable to change, since changing it is how a suspension gets undone from outside.
     #[tokio::test]
     async fn a_confirmation_is_refused_once_the_account_is_blocked() {
-        let Some(h) = setup() else { return };
+        let Some(h) = setup() else { unreachable!() };
         let id = h
             .seed(SeedUser::active("blocked@example.com", "right"))
             .await;

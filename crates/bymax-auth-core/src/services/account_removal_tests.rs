@@ -131,7 +131,7 @@ async fn every_blocking_vector_of_the_contract_decides_the_removal() {
         let blocks = vector["blocks"].as_bool().unwrap_or(false);
         let mut held = place("w1", status, "owner");
         held.co_owner = !sole;
-        let Some(f) = seeded(&[held]) else { return };
+        let Some(f) = seeded(&[held]) else { unreachable!() };
         let outcome = remove(&f, RemovalAuthority::Account).await;
         let refused = matches!(outcome, Err(AccountRemovalError::Blocked { .. }));
         assert_eq!(refused, blocks, "{vector}: {outcome:?}");
@@ -153,7 +153,7 @@ async fn a_refusal_names_the_blockers_as_a_409_and_writes_nothing() {
         place("w3", WorkspaceStatus::Suspended, "owner"),
         place("w4", WorkspaceStatus::PendingDeletion, "owner"),
     ];
-    let Some(f) = seeded(&places) else { return };
+    let Some(f) = seeded(&places) else { unreachable!() };
     let outcome = remove(&f, RemovalAuthority::Account).await;
     let Err(error) = outcome else {
         assert!(outcome.is_err(), "removed despite the blockers");
@@ -190,7 +190,7 @@ async fn a_workspace_pending_deletion_or_deleted_never_blocks_and_every_membersh
         suspended_seat,
         hidden,
     ];
-    let Some(f) = seeded(&places) else { return };
+    let Some(f) = seeded(&places) else { unreachable!() };
     let done = remove(&f, RemovalAuthority::Account).await;
     let expected = [
         removed("w1", "owner"),
@@ -222,7 +222,7 @@ async fn one_instant_and_one_event_per_removal_carry_the_authority_to_the_store_
             place("w1", WorkspaceStatus::PendingDeletion, "owner"),
             place("w2", WorkspaceStatus::Active, "member"),
         ];
-        let Some(f) = seeded(&places) else { return };
+        let Some(f) = seeded(&places) else { unreachable!() };
         let done = remove(&f, authority).await;
         let at = done.map(|d| d.at).unwrap_or_default();
         assert_eq!(at.len(), 24, "{at}");
@@ -266,7 +266,7 @@ async fn a_workspace_that_became_solely_owned_after_the_read_refuses_with_its_id
         place("w1", WorkspaceStatus::Active, "owner"),
         place("w2", WorkspaceStatus::Active, "member"),
     ];
-    let Some(f) = seeded(&places) else { return };
+    let Some(f) = seeded(&places) else { unreachable!() };
     // The read before the write saw nothing: the repository decides again with the write.
     f.repo.set_sole_owned_reads_stale(true);
     let outcome = remove(&f, RemovalAuthority::Account).await;
@@ -292,7 +292,7 @@ async fn a_repository_that_fails_during_the_removal_leaves_everything_in_place()
         place("w1", WorkspaceStatus::Active, "member"),
         place("w2", WorkspaceStatus::PendingDeletion, "owner"),
     ];
-    let Some(f) = seeded(&places) else { return };
+    let Some(f) = seeded(&places) else { unreachable!() };
     f.repo.set_account_removals_failing(true);
     let outcome = remove(&f, RemovalAuthority::Account).await;
     assert!(matches!(
@@ -318,7 +318,7 @@ async fn a_refusal_names_at_most_the_number_of_workspaces_the_contract_allows() 
     let places: Vec<Place> = (0..=BLOCKING_WORKSPACES_MAX)
         .map(|n| place(&format!("w{n:03}"), WorkspaceStatus::Active, "owner"))
         .collect();
-    let Some(f) = seeded(&places) else { return };
+    let Some(f) = seeded(&places) else { unreachable!() };
     let outcome = remove(&f, RemovalAuthority::Account).await;
     let named: Vec<BlockingWorkspace> = match outcome {
         Err(AccountRemovalError::Blocked { workspaces }) => workspaces,
@@ -382,9 +382,7 @@ async fn a_blocker_on_a_later_page_is_named_after_pages_that_hold_none() {
         })
         .collect();
     places.push(place("w-late", WorkspaceStatus::Active, "owner"));
-    let Some((ids, reads)) = refusal_and_reads(&places).await else {
-        return;
-    };
+    let Some((ids, reads)) = refusal_and_reads(&places).await else { unreachable!() };
     assert_eq!(ids, vec!["w-late".to_owned()]);
     assert_eq!(reads, 2);
 }
@@ -392,9 +390,7 @@ async fn a_blocker_on_a_later_page_is_named_after_pages_that_hold_none() {
 #[tokio::test]
 async fn a_single_page_of_workspaces_is_read_once() {
     let places = [place("w1", WorkspaceStatus::Active, "owner")];
-    let Some((ids, reads)) = refusal_and_reads(&places).await else {
-        return;
-    };
+    let Some((ids, reads)) = refusal_and_reads(&places).await else { unreachable!() };
     assert_eq!(ids, vec!["w1".to_owned()]);
     assert_eq!(reads, 1);
 }
@@ -404,9 +400,7 @@ async fn the_read_stops_paging_once_it_holds_the_cap_of_blockers() {
     let places: Vec<Place> = (0..BLOCKING_WORKSPACES_MAX * 2 + 50)
         .map(|n| place(&format!("w{n:03}"), WorkspaceStatus::Active, "owner"))
         .collect();
-    let Some((ids, reads)) = refusal_and_reads(&places).await else {
-        return;
-    };
+    let Some((ids, reads)) = refusal_and_reads(&places).await else { unreachable!() };
     assert_eq!(ids.len(), BLOCKING_WORKSPACES_MAX);
     assert_eq!(reads, 1);
 }
@@ -418,7 +412,7 @@ async fn every_bump_is_attempted_and_the_failure_carries_what_was_removed_and_wh
         place("w2", WorkspaceStatus::Active, "admin"),
         place("w3", WorkspaceStatus::PendingDeletion, "owner"),
     ];
-    let Some(f) = seeded(&places) else { return };
+    let Some(f) = seeded(&places) else { unreachable!() };
     // The second bump the store receives is w2's.
     f.cache.fail_membership_bump(2);
     let outcome = remove(&f, RemovalAuthority::Account).await;
@@ -452,7 +446,7 @@ async fn every_bump_is_attempted_and_the_failure_carries_what_was_removed_and_wh
 #[tokio::test]
 async fn a_failing_hook_changes_nothing_about_the_result() {
     let places = [place("w1", WorkspaceStatus::Active, "member")];
-    let Some(f) = seeded(&places) else { return };
+    let Some(f) = seeded(&places) else { unreachable!() };
     f.hooks.fail_events();
     let done = remove(&f, RemovalAuthority::Account).await;
     assert_eq!(
@@ -466,7 +460,7 @@ async fn a_failing_hook_changes_nothing_about_the_result() {
 
 #[tokio::test]
 async fn a_blank_identifier_is_refused_before_anything_is_read() {
-    let Some(f) = seeded(&[place("w1", WorkspaceStatus::Active, "member")]) else { return };
+    let Some(f) = seeded(&[place("w1", WorkspaceStatus::Active, "member")]) else { unreachable!() };
     let cases = [
         ("tenantId", " ", "u", RemovalAuthority::Account),
         ("userId", "t1", "", RemovalAuthority::Account),
@@ -501,7 +495,7 @@ async fn a_blank_identifier_is_refused_before_anything_is_read() {
 
 #[tokio::test]
 async fn a_membership_is_invalidated_by_hand_and_a_blank_identifier_is_refused() {
-    let Some(f) = seeded(&[place("w1", WorkspaceStatus::Active, "member")]) else { return };
+    let Some(f) = seeded(&[place("w1", WorkspaceStatus::Active, "member")]) else { unreachable!() };
     let key = |tenant_id, workspace_id, user_id| MembershipRef {
         tenant_id,
         workspace_id,

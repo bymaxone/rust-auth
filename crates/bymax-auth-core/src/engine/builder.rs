@@ -795,7 +795,7 @@ mod tests {
             .user_repository(user_repo())
             .redis_stores(stores())
             .build();
-        let Ok(engine) = built else { return };
+        let Ok(engine) = built else { unreachable!() };
 
         // A token minted under the retired secret verifies through the assembled engine.
         let minted = TokenManagerService::new(
@@ -832,7 +832,7 @@ mod tests {
                 crate::services::token_manager::CredentialProof::Proved,
             )
             .await;
-        let Ok(issued) = issued else { return };
+        let Ok(issued) = issued else { unreachable!() };
 
         assert!(matches!(
             engine.tokens().verify_access(&issued.access_token).await,
@@ -854,7 +854,7 @@ mod tests {
             .user_repository(user_repo())
             .redis_stores(stores.clone())
             .build();
-        let Ok(engine) = built else { return };
+        let Ok(engine) = built else { unreachable!() };
 
         let old_hash = "a".repeat(64);
         let new_hash = "b".repeat(64);
@@ -907,7 +907,7 @@ mod tests {
             .redis_stores(stores())
             .build();
         assert!(result.is_ok(), "valid config must assemble");
-        let Ok(engine) = result else { return };
+        let Ok(engine) = result else { unreachable!() };
         // Development resolves secure_cookies to false.
         assert!(!engine.config().secure_cookies());
         assert_eq!(engine.config().environment(), Environment::Development);
@@ -953,7 +953,7 @@ mod tests {
             .oauth_provider(Arc::new(MockOAuthProvider::new("google")))
             .build();
         assert!(result.is_ok(), "explicit collaborators must assemble");
-        let Ok(engine) = result else { return };
+        let Ok(engine) = result else { unreachable!() };
         assert!(engine.ws_ticket_store().is_some());
         assert!(engine.password_reset_store().is_some());
         assert!(engine.invitation_store().is_some());
@@ -1026,7 +1026,7 @@ mod tests {
         }
         let result = builder.build();
         assert!(result.is_ok(), "registry wiring must assemble");
-        let Ok(engine) = result else { return };
+        let Ok(engine) = result else { unreachable!() };
         assert!(engine.oauth_providers().contains_key("google"));
         assert!(engine.oauth_providers().contains_key("github"));
     }
@@ -1046,7 +1046,7 @@ mod tests {
             .redis_stores(stores())
             .build();
         assert!(result.is_ok(), "platform wiring must assemble");
-        let Ok(engine) = result else { return };
+        let Ok(engine) = result else { unreachable!() };
         let toggles = engine.config().config().controllers;
         assert!(toggles.sessions);
         assert!(toggles.platform);
@@ -1166,7 +1166,7 @@ mod tests {
             .redis_stores(s)
             .build();
         assert!(engine.is_ok(), "an empty binding must still build");
-        let Ok(engine) = engine else { return };
+        let Ok(engine) = engine else { unreachable!() };
 
         let issued = engine
             .tokens()
@@ -1179,11 +1179,11 @@ mod tests {
             )
             .await;
         assert!(issued.is_ok(), "an empty binding must still mint");
-        let Ok(issued) = issued else { return };
+        let Ok(issued) = issued else { unreachable!() };
         let claims = engine.tokens().verify_access(&issued.access_token).await;
         assert!(claims.is_ok(), "an empty binding rejected its own token");
         // …and nothing was stamped, so a peer that configured neither still accepts it.
-        let Ok(claims) = claims else { return };
+        let Ok(claims) = claims else { unreachable!() };
         assert_eq!(claims.iss, None);
         assert_eq!(claims.aud, None);
     }
@@ -1203,7 +1203,7 @@ mod tests {
             .redis_stores(s)
             .build();
         assert!(engine.is_ok(), "a configured binding must build");
-        let Ok(engine) = engine else { return };
+        let Ok(engine) = engine else { unreachable!() };
 
         let issued = engine
             .tokens()
@@ -1216,13 +1216,13 @@ mod tests {
             )
             .await;
         assert!(issued.is_ok(), "a configured binding must mint");
-        let Ok(issued) = issued else { return };
+        let Ok(issued) = issued else { unreachable!() };
         let claims = engine.tokens().verify_access(&issued.access_token).await;
         assert!(
             claims.is_ok(),
             "a configured binding rejected its own token"
         );
-        let Ok(claims) = claims else { return };
+        let Ok(claims) = claims else { unreachable!() };
         assert_eq!(claims.iss.as_deref(), Some("bymax"));
         assert_eq!(claims.aud.as_deref(), Some("dashboard"));
     }

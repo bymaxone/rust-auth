@@ -23,7 +23,7 @@ async fn an_oauth_query_names_its_fields_as_the_wire_does() {
         allow_oauth: true,
         ..EngineSpec::default()
     }) else {
-        return;
+        unreachable!()
     };
     let app = router(&h);
     let long_tenant = "t".repeat(129);

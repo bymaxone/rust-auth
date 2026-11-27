@@ -234,7 +234,7 @@ mod tests {
     #[tokio::test]
     async fn verify_email_consumes_the_otp_and_marks_verified() {
         // A correct OTP marks the account verified; the OTP is single-use afterwards.
-        let Some(h) = harness_with_verification() else { return };
+        let Some(h) = harness_with_verification() else { unreachable!() };
         let id = h
             .seed(SeedUser {
                 email: "v@example.com".to_owned(),
@@ -265,7 +265,7 @@ mod tests {
             mailed.is_some(),
             "the verification mail never carried a code"
         );
-        let Some(code) = mailed else { return };
+        let Some(code) = mailed else { unreachable!() };
         // Captured so the event's fields are actually rendered: with no subscriber installed the
         // call never runs, which would leave the absence of an account field unfalsifiable.
         let (events, capture) = crate::log_capture::capture_events();
@@ -303,7 +303,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_failed_code_write_on_resend_keeps_the_uniform_answer_and_is_logged() {
-        let Some(h) = harness_with_verification() else { return };
+        let Some(h) = harness_with_verification() else { unreachable!() };
         let _ = h
             .seed(SeedUser {
                 email: "resend-unsent@example.com".to_owned(),
@@ -330,7 +330,7 @@ mod tests {
     async fn verify_email_rejects_a_wrong_code_and_an_unknown_account() {
         // A wrong OTP is OtpInvalid; a valid OTP for a vanished account collapses to
         // OtpInvalid (no post-OTP enumeration).
-        let Some(h) = harness_with_verification() else { return };
+        let Some(h) = harness_with_verification() else { unreachable!() };
         let _ = h
             .seed(SeedUser {
                 email: "w@example.com".to_owned(),
@@ -380,7 +380,7 @@ mod tests {
             mailed.is_some(),
             "no verification code was mailed for the ghost"
         );
-        let Some(code) = mailed else { return };
+        let Some(code) = mailed else { unreachable!() };
         assert!(matches!(
             h.engine
                 .verify_email(Some("t1"), "ghost@example.com", &code, &ctx())
@@ -394,7 +394,7 @@ mod tests {
         // The first resend is allowed; a second within the window is a silent success; both
         // an existing-unverified, an existing-verified, and an absent account return Ok with
         // the timing floor honored.
-        let Some(h) = harness_with_verification() else { return };
+        let Some(h) = harness_with_verification() else { unreachable!() };
         let _ = h
             .seed(SeedUser {
                 email: "r@example.com".to_owned(),

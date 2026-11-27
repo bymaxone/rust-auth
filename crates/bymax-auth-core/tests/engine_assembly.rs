@@ -36,7 +36,7 @@ fn assembles_a_full_engine_from_the_builder() {
         .redis_stores(Arc::new(InMemoryStores::new()))
         .build();
     assert!(result.is_ok(), "valid wiring must assemble");
-    let Ok(engine) = result else { return };
+    let Ok(engine) = result else { unreachable!() };
     // Production resolves secure cookies on, and the derived HMAC key is present.
     assert!(engine.config().secure_cookies());
     assert_eq!(engine.config().hmac_key().len(), 64);
@@ -77,7 +77,7 @@ fn assembles_with_platform_domain_enabled() {
         .redis_stores(Arc::new(InMemoryStores::new()))
         .build();
     assert!(result.is_ok(), "platform wiring must assemble");
-    let Ok(engine) = result else { return };
+    let Ok(engine) = result else { unreachable!() };
     assert!(engine.platform_user_repository().is_some());
     assert!(engine.config().config().controllers.platform);
 }
@@ -109,7 +109,7 @@ async fn a_wired_breach_checker_refuses_a_compromised_password_at_registration()
         .breach_checker(Arc::new(RejectsOnePassword("glidingwalnut42")))
         .build();
     assert!(engine.is_ok(), "valid wiring must assemble");
-    let Ok(engine) = engine else { return };
+    let Ok(engine) = engine else { unreachable!() };
     let ctx = bymax_auth_core::context::RequestContext::new(
         "203.0.113.4",
         "tests",

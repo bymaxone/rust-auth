@@ -61,7 +61,7 @@ fn run_probe(require: bool) -> Option<std::process::Output> {
 fn with_the_switch_on_a_real_container_start_that_cannot_reach_a_daemon_fails() {
     let output = run_probe(true);
     assert!(output.is_some(), "the probe could not be spawned");
-    let Some(output) = output else { return };
+    let Some(output) = output else { unreachable!() };
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(!output.status.success(), "the probe passed:\n{stderr}");
     assert!(stderr.contains("BYMAX_REQUIRE_DOCKER=1"), "{stderr}");
@@ -71,7 +71,7 @@ fn with_the_switch_on_a_real_container_start_that_cannot_reach_a_daemon_fails() 
 fn with_the_switch_off_the_same_start_skips_loudly_and_passes() {
     let output = run_probe(false);
     assert!(output.is_some(), "the probe could not be spawned");
-    let Some(output) = output else { return };
+    let Some(output) = output else { unreachable!() };
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(output.status.success(), "the probe failed:\n{stderr}");
     assert!(stderr.contains("skipped: no Docker (redis:8)"), "{stderr}");

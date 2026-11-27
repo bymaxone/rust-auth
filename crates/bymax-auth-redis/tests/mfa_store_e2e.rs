@@ -10,6 +10,8 @@
 
 #[path = "common/docker_gate.rs"]
 mod docker_gate;
+#[path = "common/published_address.rs"]
+mod published_address;
 #[path = "common/redis_ready.rs"]
 mod redis_ready;
 
@@ -56,9 +58,8 @@ async fn try_start() -> Option<TestRedis> {
         Ok(container) => container,
         Err(error) => return docker_gate::docker_unavailable("redis:8", error),
     };
-    let host = container.get_host().await.ok()?;
-    let port = container.get_host_port_ipv4(REDIS_PORT).await.ok()?;
-    let url = redis_ready::redis_url(&host.to_string(), port);
+    let (host, port) = published_address::host_and_port(&container, REDIS_PORT).await;
+    let url = redis_ready::redis_url(&host, port);
     redis_ready::wait_until_ready(&url).await;
     Some(TestRedis { container, url })
 }
@@ -66,7 +67,7 @@ async fn try_start() -> Option<TestRedis> {
 #[tokio::test]
 async fn setup_record_is_nx_then_get_then_getdel() {
     let Some(redis) = try_start().await else { return };
-    let Some(stores) = redis.stores("mfastore") else { return };
+    let Some(stores) = redis.stores("mfastore") else { unreachable!() };
 
     // `SET NX` wins once; a second NX for the same user loses.
     assert!(matches!(
@@ -95,7 +96,7 @@ async fn setup_record_is_nx_then_get_then_getdel() {
 #[tokio::test]
 async fn temp_token_marker_is_put_get_nonconsuming_then_deleted() {
     let Some(redis) = try_start().await else { return };
-    let Some(stores) = redis.stores("mfatemp") else { return };
+    let Some(stores) = redis.stores("mfatemp") else { unreachable!() };
 
     assert!(stores.put_temp("jtihash", "user-1", 300).await.is_ok());
     // GET (never GETDEL): two reads both succeed, so a mistyped code stays retryable.
@@ -111,7 +112,7 @@ async fn temp_token_marker_is_put_get_nonconsuming_then_deleted() {
 #[tokio::test]
 async fn mfa_lock_is_exclusive_and_released_only_by_its_holder() {
     let Some(redis) = try_start().await else { return };
-    let Some(stores) = redis.stores("mfalock") else { return };
+    let Some(stores) = redis.stores("mfalock") else { unreachable!() };
 
     assert!(matches!(
         stores.acquire_mfa_lock("u1", "tok-a", 30).await,
@@ -144,7 +145,7 @@ async fn mfa_lock_is_exclusive_and_released_only_by_its_holder() {
 #[tokio::test]
 async fn standalone_replay_marker_rejects_a_second_use() {
     let Some(redis) = try_start().await else { return };
-    let Some(stores) = redis.stores("mfareplay") else { return };
+    let Some(stores) = redis.stores("mfareplay") else { unreachable!() };
 
     // First mark is new; a second mark of the same id is a replay.
     assert!(matches!(
@@ -178,7 +179,7 @@ async fn standalone_replay_marker_rejects_a_second_use() {
 #[tokio::test]
 async fn fused_challenge_consumes_the_temp_token_exactly_once() {
     let Some(redis) = try_start().await else { return };
-    let Some(stores) = redis.stores("mfafused") else { return };
+    let Some(stores) = redis.stores("mfafused") else { unreachable!() };
 
     // Plant the temp-token marker, then fuse the replay-mark + consume.
     assert!(stores.put_temp("jti-1", "user-1", 300).await.is_ok());
@@ -198,7 +199,7 @@ async fn fused_challenge_consumes_the_temp_token_exactly_once() {
 #[tokio::test]
 async fn fused_challenge_gates_distinct_codes_on_the_temp_token() {
     let Some(redis) = try_start().await else { return };
-    let Some(stores) = redis.stores("mfagate") else { return };
+    let Some(stores) = redis.stores("mfagate") else { unreachable!() };
 
     // One temp token, two DIFFERENT still-valid codes (distinct `tu:` markers): each `SET NX`
     // succeeds, but the temp-token deletion is the single-consume gate. The first call wins and
@@ -234,7 +235,7 @@ async fn fused_challenge_gates_distinct_codes_on_the_temp_token() {
 #[tokio::test]
 async fn fused_challenge_admits_one_winner_under_concurrency() {
     let Some(redis) = try_start().await else { return };
-    let Some(stores) = redis.stores("mfaconc") else { return };
+    let Some(stores) = redis.stores("mfaconc") else { unreachable!() };
     let stores = Arc::new(stores);
 
     // One temp token, eight concurrent submissions of the SAME correct code: exactly one wins

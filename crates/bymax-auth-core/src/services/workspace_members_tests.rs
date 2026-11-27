@@ -65,7 +65,9 @@ const ACTIVE: MembershipStatus = MembershipStatus::Active;
 
 #[tokio::test]
 async fn a_role_change_is_written_with_its_event_bumps_that_membership_and_answers_it() {
-    let Some(f) = seeded(&[("o", "owner", ACTIVE), ("m", "member", ACTIVE)]) else { return };
+    let Some(f) = seeded(&[("o", "owner", ACTIVE), ("m", "member", ACTIVE)]) else {
+        unreachable!()
+    };
     let owner = acting_member("t1", "w1", "o", "owner");
     let changed = f
         .engine
@@ -104,7 +106,7 @@ async fn a_role_change_is_refused_in_the_order_the_ceiling_and_the_status_rule_g
         ("m", "member", ACTIVE),
         ("s", "member", MembershipStatus::Suspended),
     ];
-    let Some(f) = seeded(&members) else { return };
+    let Some(f) = seeded(&members) else { unreachable!() };
     let admin = acting_member("t1", "w1", "a", "admin");
     let owner = acting_member("t1", "w1", "o", "owner");
     let cases: [RoleCase<'_>; 8] = [
@@ -156,7 +158,9 @@ use crate::workspace::access::WorkspaceMember;
 
 #[tokio::test]
 async fn the_last_owner_is_never_demoted_removed_or_let_go_and_a_second_owner_is() {
-    let Some(f) = seeded(&[("o", "owner", ACTIVE), ("m", "member", ACTIVE)]) else { return };
+    let Some(f) = seeded(&[("o", "owner", ACTIVE), ("m", "member", ACTIVE)]) else {
+        unreachable!()
+    };
     let owner = acting_member("t1", "w1", "o", "owner");
     let demote = f
         .engine
@@ -195,7 +199,7 @@ async fn a_change_judged_on_a_stale_role_is_refused_with_the_contracts_codes() {
         ("a", "admin", ACTIVE),
         ("m", "member", ACTIVE),
     ]) else {
-        return;
+        unreachable!()
     };
     // The guard read the actor as owner; the repository now holds admin.
     let stale = acting_member("t1", "w1", "a", "owner");
@@ -211,7 +215,7 @@ async fn a_change_judged_on_a_stale_role_is_refused_with_the_contracts_codes() {
 
 #[tokio::test]
 async fn a_target_already_holding_the_role_is_not_written_and_its_cached_access_still_ends() {
-    let Some(f) = seeded(&[("o", "owner", ACTIVE), ("m", "admin", ACTIVE)]) else { return };
+    let Some(f) = seeded(&[("o", "owner", ACTIVE), ("m", "admin", ACTIVE)]) else { unreachable!() };
     let owner = acting_member("t1", "w1", "o", "owner");
     let same = f
         .engine
@@ -230,7 +234,7 @@ async fn a_removal_acts_only_on_an_active_member_below_the_actor() {
         ("m", "member", ACTIVE),
         ("s", "member", MembershipStatus::Suspended),
     ];
-    let Some(f) = seeded(&members) else { return };
+    let Some(f) = seeded(&members) else { unreachable!() };
     let admin = acting_member("t1", "w1", "a", "admin");
     for (target, refused) in [
         ("s", AuthError::WorkspaceNotFound),
@@ -273,7 +277,9 @@ async fn a_removal_acts_only_on_an_active_member_below_the_actor() {
 
 #[tokio::test]
 async fn leaving_removes_the_callers_own_membership_with_its_event() {
-    let Some(f) = seeded(&[("o", "owner", ACTIVE), ("m", "member", ACTIVE)]) else { return };
+    let Some(f) = seeded(&[("o", "owner", ACTIVE), ("m", "member", ACTIVE)]) else {
+        unreachable!()
+    };
     let member = acting_member("t1", "w1", "m", "member");
     assert!(f.engine.leave_workspace(&member, &ctx()).await.is_ok());
     assert!(stored(&f, "t1", "m").is_none());
@@ -322,7 +328,7 @@ fn to<'a>(to: &'a str, keeps: Option<&'a str>, password: Option<&'a str>) -> Own
 
 #[tokio::test]
 async fn a_hand_over_is_refused_before_the_password_is_looked_at() {
-    let Some((f, owner)) = hand_over_fixture().await else { return };
+    let Some((f, owner)) = hand_over_fixture().await else { unreachable!() };
     let wrong = Some("not-the-password");
     let admin = acting_member("t1", "w1", "a", "admin");
     let not_owner = f
@@ -363,7 +369,7 @@ async fn a_hand_over_is_refused_before_the_password_is_looked_at() {
 
 #[tokio::test]
 async fn a_hand_over_promotes_the_receiver_demotes_the_giver_and_bumps_both() {
-    let Some((f, owner)) = hand_over_fixture().await else { return };
+    let Some((f, owner)) = hand_over_fixture().await else { unreachable!() };
     let done = f
         .engine
         .transfer_workspace_ownership(&owner, to("m", Some("admin"), Some(PASSWORD)), &ctx())
@@ -412,7 +418,7 @@ fn membership_bumped(f: &Fixture, user: &str) -> bool {
 
 #[tokio::test]
 async fn a_hand_over_ends_the_cached_access_of_the_giver_and_of_the_receiver_alone() {
-    let Some((f, owner)) = hand_over_fixture().await else { return };
+    let Some((f, owner)) = hand_over_fixture().await else { unreachable!() };
     let done = f
         .engine
         .transfer_workspace_ownership(&owner, to("m", None, Some(PASSWORD)), &ctx())
@@ -426,7 +432,7 @@ async fn a_hand_over_ends_the_cached_access_of_the_giver_and_of_the_receiver_alo
 
 #[tokio::test]
 async fn a_failed_first_bump_of_a_hand_over_does_not_skip_the_second() {
-    let Some((f, owner)) = hand_over_fixture().await else { return };
+    let Some((f, owner)) = hand_over_fixture().await else { unreachable!() };
     // The giver's bump is the first call the store receives, the receiver's the second.
     f.cache.fail_membership_bump(1);
     let done = f
@@ -447,7 +453,7 @@ async fn a_failed_first_bump_of_a_hand_over_does_not_skip_the_second() {
 
 #[tokio::test]
 async fn a_hand_over_without_a_demotion_keeps_both_owners() {
-    let Some((f, owner)) = hand_over_fixture().await else { return };
+    let Some((f, owner)) = hand_over_fixture().await else { unreachable!() };
     let done = f
         .engine
         .transfer_workspace_ownership(&owner, to("m", None, Some(PASSWORD)), &ctx())
@@ -465,7 +471,9 @@ async fn a_hand_over_without_a_demotion_keeps_both_owners() {
 
 #[tokio::test]
 async fn a_member_change_whose_bump_fails_is_an_error_after_the_write() {
-    let Some(f) = seeded(&[("o", "owner", ACTIVE), ("m", "member", ACTIVE)]) else { return };
+    let Some(f) = seeded(&[("o", "owner", ACTIVE), ("m", "member", ACTIVE)]) else {
+        unreachable!()
+    };
     f.cache.set_unavailable(true);
     let owner = acting_member("t1", "w1", "o", "owner");
     let failed = f
@@ -486,7 +494,7 @@ async fn a_member_change_whose_bump_fails_is_an_error_after_the_write() {
 
 #[tokio::test]
 async fn a_switch_reports_workspace_switched_to_the_hook_only() {
-    let Some(f) = seeded(&[("m", "member", ACTIVE)]) else { return };
+    let Some(f) = seeded(&[("m", "member", ACTIVE)]) else { unreachable!() };
     let member = acting_member("t1", "w1", "m", "member");
     assert!(f.engine.switch_workspace(&member, &ctx()).await.is_ok());
     let reported = f.hooks.events(1).await;
@@ -517,7 +525,7 @@ async fn a_failing_workspace_event_hook_is_named_by_the_event_type_alone() {
             role: "member".into(),
         },
     };
-    let Some(f) = build(config()) else { return };
+    let Some(f) = build(config()) else { unreachable!() };
     f.hooks.fail_events();
     let hooks: Arc<dyn AuthHooks> = f.hooks.clone();
     let ctx = HookContext::detached(HookPlane::Dashboard, "u", "", "");
@@ -634,7 +642,7 @@ async fn the_membership_status_rule_is_what_the_services_answer() {
     );
     assert!(rule.contains("checked before the giver's password is looked at"));
     assert!(suspended.is_some() && receiver.is_some(), "{rule}");
-    let Some((f, owner)) = hand_over_fixture().await else { return };
+    let Some((f, owner)) = hand_over_fixture().await else { unreachable!() };
     let changed = f
         .engine
         .change_member_role(&owner, "s", "admin", &ctx())
@@ -666,7 +674,9 @@ async fn only_workspace_wide_events_bump_the_workspace_counter() {
         assert!(rule.contains(clause), "{clause}: {rule}");
     }
     // Scheduling bumps the workspace; a membership change bumps that membership alone.
-    let Some(f) = seeded(&[("o", "owner", ACTIVE), ("m", "member", ACTIVE)]) else { return };
+    let Some(f) = seeded(&[("o", "owner", ACTIVE), ("m", "member", ACTIVE)]) else {
+        unreachable!()
+    };
     let owner = acting_member("t1", "w1", "o", "owner");
     assert!(
         f.engine
@@ -740,10 +750,12 @@ async fn a_finalize_that_loses_its_write_answers_from_what_the_workspace_is_now(
         tenant_id: "t1",
         workspace_id: "w1",
     };
-    let Some((engine, _)) = scripted(UpdateStatusOutcome::NotFound) else { return };
+    let Some((engine, _)) = scripted(UpdateStatusOutcome::NotFound) else { unreachable!() };
     let gone = engine.finalize_workspace_deletion(key).await;
     assert!(matches!(gone, Ok(FinalizeOutcome::NotFound)));
-    let Some((engine, repo)) = scripted(UpdateStatusOutcome::StatusConflict) else { return };
+    let Some((engine, repo)) = scripted(UpdateStatusOutcome::StatusConflict) else {
+        unreachable!()
+    };
     // Still due as read again: left for the next run.
     let due = engine.finalize_workspace_deletion(key).await;
     assert!(matches!(due, Ok(FinalizeOutcome::NotDue)));
@@ -751,7 +763,7 @@ async fn a_finalize_that_loses_its_write_answers_from_what_the_workspace_is_now(
     let lost = engine.finalize_workspace_deletion(key).await;
     assert!(matches!(lost, Ok(FinalizeOutcome::NotPending)));
     // Gone when read again.
-    let Some(runtime) = engine.workspace_runtime().ok() else { return };
+    let Some(runtime) = engine.workspace_runtime().ok() else { unreachable!() };
     let missing = WorkspaceRef {
         tenant_id: "t1",
         workspace_id: "w-none",

@@ -473,7 +473,7 @@ mod tests {
     #[tokio::test]
     async fn successful_login_issues_a_session() {
         // A correct password for an active, verified user returns a full session.
-        let Some(h) = active_harness(false).await else { return };
+        let Some(h) = active_harness(false).await else { unreachable!() };
         let _ = h
             .seed(SeedUser::active("ok@example.com", "s3cret-pass"))
             .await;
@@ -490,7 +490,7 @@ mod tests {
         assert!(events.contains("RUST_AUTH_LOGIN_SUCCEEDED"));
         assert!(!events.contains("tenant_id"));
         assert!(!events.contains("ok@example.com"));
-        let Ok(LoginResult::Success(auth)) = result else { return };
+        let Ok(LoginResult::Success(auth)) = result else { unreachable!() };
         assert_eq!(auth.user.email, "ok@example.com");
         assert!(!auth.access_token.is_empty());
         // The refresh session is stored with the configured lifetime, in seconds. The double
@@ -509,14 +509,14 @@ mod tests {
         cfg.email_verification.required = false;
         cfg.sessions.enabled = true;
         cfg.sessions.default_max_sessions = 1;
-        let Some(h) = harness(cfg, None) else { return };
+        let Some(h) = harness(cfg, None) else { unreachable!() };
         let id = h.seed(SeedUser::active("cap@example.com", "pw")).await;
 
         let first = h
             .engine
             .login(login_input("cap@example.com", "pw"), &ctx())
             .await;
-        let Ok(LoginResult::Success(first)) = first else { return };
+        let Ok(LoginResult::Success(first)) = first else { unreachable!() };
         let first_hash =
             bymax_auth_jwt::RawRefreshToken::from_raw(first.refresh_token.clone()).redis_hash();
 
@@ -524,7 +524,7 @@ mod tests {
             .engine
             .login(login_input("cap@example.com", "pw"), &ctx())
             .await;
-        let Ok(LoginResult::Success(second)) = second else { return };
+        let Ok(LoginResult::Success(second)) = second else { unreachable!() };
         let second_hash =
             bymax_auth_jwt::RawRefreshToken::from_raw(second.refresh_token.clone()).redis_hash();
 
@@ -535,7 +535,7 @@ mod tests {
             .list_sessions(&second.user.tenant_id, &id, Some(&second_hash))
             .await;
         assert!(matches!(&listed, Ok(v) if v.len() == 1));
-        let Ok(listed) = listed else { return };
+        let Ok(listed) = listed else { unreachable!() };
         assert_eq!(listed[0].session_hash, second_hash);
         assert_ne!(listed[0].session_hash, first_hash);
         assert!(listed[0].is_current);
@@ -545,7 +545,7 @@ mod tests {
     async fn unknown_email_and_wrong_password_are_indistinguishable() {
         // Both failure paths return InvalidCredentials and both honor the timing floor, so
         // neither status/body nor latency leaks whether the account exists.
-        let Some(h) = active_harness(false).await else { return };
+        let Some(h) = active_harness(false).await else { unreachable!() };
         let _ = h
             .seed(SeedUser::active("real@example.com", "right-pass"))
             .await;
@@ -574,7 +574,7 @@ mod tests {
     async fn oauth_only_account_without_a_hash_is_a_generic_failure() {
         // A user with no local password hash takes the same sentinel path as an unknown
         // email (no distinct "use OAuth" oracle).
-        let Some(h) = active_harness(false).await else { return };
+        let Some(h) = active_harness(false).await else { unreachable!() };
         // Seed a user, then clear its hash by creating it directly without a password.
         let created = h
             .users
@@ -600,7 +600,7 @@ mod tests {
     async fn lockout_triggers_after_max_attempts() {
         // The default cap is five failures; the sixth attempt is rejected as AccountLocked
         // with a retry hint, before any credential check.
-        let Some(h) = active_harness(false).await else { return };
+        let Some(h) = active_harness(false).await else { unreachable!() };
         let _ = h.seed(SeedUser::active("lock@example.com", "right")).await;
         // Captured so both refusals actually render their fields. The address must reach the log
         // masked and the tenant sanitized — the redaction is a security property with no other
@@ -640,7 +640,7 @@ mod tests {
         // same account — an attacker cycles the spelling and the lockout never fires. Spend the
         // five-failure budget across five DIFFERENT casings; the sixth attempt must already be
         // locked, proving all five landed in one bucket.
-        let Some(h) = active_harness(false).await else { return };
+        let Some(h) = active_harness(false).await else { unreachable!() };
         let _ = h.seed(SeedUser::active("case@example.com", "right")).await;
 
         for spelling in [
@@ -671,7 +671,7 @@ mod tests {
         // The other half of canonicalization: the repository lookup uses the same canonical
         // value, so an account seeded lowercase authenticates when the caller types it
         // uppercase. Without this the fix would close the bypass by breaking real logins.
-        let Some(h) = active_harness(false).await else { return };
+        let Some(h) = active_harness(false).await else { unreachable!() };
         let _ = h
             .seed(SeedUser::active("mixed@example.com", "s3cret-pass"))
             .await;
@@ -696,7 +696,7 @@ mod tests {
             "PENDING_APPROVAL".to_owned(),
             "FROZEN".to_owned(),
         ];
-        let Some(h) = harness(cfg, None) else { return };
+        let Some(h) = harness(cfg, None) else { unreachable!() };
         let cases = [
             ("banned@x.io", "BANNED", AuthError::AccountBanned),
             ("inactive@x.io", "INACTIVE", AuthError::AccountInactive),
@@ -763,7 +763,7 @@ mod tests {
         // covering that arm of the status mapping.
         let mut cfg = base_config();
         cfg.blocked_statuses = vec!["pending".to_owned()];
-        let Some(h) = harness(cfg, None) else { return };
+        let Some(h) = harness(cfg, None) else { unreachable!() };
         assert!(matches!(
             h.engine.assert_user_not_blocked("pending"),
             Err(AuthError::PendingApproval)
@@ -774,7 +774,7 @@ mod tests {
     #[tokio::test]
     async fn unverified_email_is_rejected_when_verification_is_required() {
         // With verification required, a correct password for an unverified account is gated.
-        let Some(h) = active_harness(true).await else { return };
+        let Some(h) = active_harness(true).await else { unreachable!() };
         let _ = h
             .seed(SeedUser {
                 email: "unverified@example.com".to_owned(),
@@ -808,10 +808,10 @@ mod tests {
         // The helper the two rehash tests rely on has to report a deadline it never met, or a
         // rehash that silently stopped happening would hang the suite instead of failing it.
         // Exercised with a one-poll deadline against a hash nothing is going to change.
-        let Some(h) = active_harness(false).await else { return };
+        let Some(h) = active_harness(false).await else { unreachable!() };
         let id = h.seed(SeedUser::active("nochange@example.com", "pw")).await;
         let stored = h.users.find_by_id(&id, Some("t1")).await;
-        let Ok(Some(stored)) = stored else { return };
+        let Ok(Some(stored)) = stored else { unreachable!() };
         let current = stored.password_hash.unwrap_or_default();
 
         assert!(
@@ -825,10 +825,10 @@ mod tests {
         // The upgrade needs the toggle *and* a genuinely stale hash. Either alone must not
         // rewrite a current one: a rehash on every login is a write on the hot path for no
         // gain, and it would leave the toggle disabling nothing.
-        let Some(h) = active_harness(false).await else { return };
+        let Some(h) = active_harness(false).await else { unreachable!() };
         let id = h.seed(SeedUser::active("fresh@example.com", "pw")).await;
         let before = h.users.find_by_id(&id, Some("t1")).await;
-        let Ok(Some(before)) = before else { return };
+        let Ok(Some(before)) = before else { unreachable!() };
         assert!(matches!(
             h.engine
                 .login(login_input("fresh@example.com", "pw"), &ctx())
@@ -849,14 +849,14 @@ mod tests {
         // notice a rehash spawned for some reason other than staleness.
         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
         let after = h.users.find_by_id(&id, Some("t1")).await;
-        let Ok(Some(after)) = after else { return };
+        let Ok(Some(after)) = after else { unreachable!() };
         assert_eq!(before.password_hash, after.password_hash);
     }
 
     #[tokio::test]
     async fn mfa_enabled_account_returns_a_challenge() {
         // A correct password for an MFA-enabled account returns the challenge, not tokens.
-        let Some(h) = active_harness(false).await else { return };
+        let Some(h) = active_harness(false).await else { unreachable!() };
         let _ = h
             .seed(SeedUser {
                 email: "mfa@example.com".to_owned(),
@@ -895,7 +895,7 @@ mod tests {
             let mut cfg = base_config();
             cfg.email_verification.required = false;
             // The active params are the default (cost 2^15); seed a weaker (2^14) hash.
-            let Some(h) = harness(cfg, None) else { return };
+            let Some(h) = harness(cfg, None) else { unreachable!() };
             let weak_params = bymax_auth_crypto::password::PasswordParams {
                 active: bymax_auth_crypto::password::PasswordAlgorithm::Scrypt,
                 scrypt: bymax_auth_crypto::password::ScryptParams {
@@ -920,7 +920,7 @@ mod tests {
                     email_verified: Some(true),
                 })
                 .await;
-            let Ok(user) = created else { return };
+            let Ok(user) = created else { unreachable!() };
             let result = h
                 .engine
                 .login(login_input("weak@example.com", "pw"), &ctx())
@@ -1023,7 +1023,7 @@ mod tests {
         // five unauthenticated dashboard logins locked an operator out of the console — and a
         // successful one cleared their lockout mid-attack. `tenant_id` comes from the request
         // body whenever no resolver is configured, which is the default.
-        let Some(h) = harness(base_config(), None) else { return };
+        let Some(h) = harness(base_config(), None) else { unreachable!() };
 
         let dashboard = h.engine.lockout_identifier("platform", "admin@example.com");
         // The platform plane's own preimage, reproduced here rather than called, because the
@@ -1047,7 +1047,7 @@ mod tests {
         // bounded by the lockout rather than only by the per-IP limit.
         let mut cfg = base_config();
         cfg.email_verification.required = true;
-        let Some(h) = harness(cfg, None) else { return };
+        let Some(h) = harness(cfg, None) else { unreachable!() };
         let _ = h
             .seed(SeedUser::active("active@example.com", "right"))
             .await;
@@ -1084,7 +1084,7 @@ mod tests {
         // their address is unverified or their account suspended.
         let mut cfg = base_config();
         cfg.email_verification.required = true;
-        let Some(h) = harness(cfg, None) else { return };
+        let Some(h) = harness(cfg, None) else { unreachable!() };
         let _ = h
             .seed(SeedUser {
                 email_verified: false,
@@ -1121,7 +1121,7 @@ mod tests {
         let spy = Arc::new(FailureSpy::default());
         let mut cfg = base_config();
         cfg.email_verification.required = true;
-        let Some(h) = harness(cfg, Some(spy.clone())) else { return };
+        let Some(h) = harness(cfg, Some(spy.clone())) else { unreachable!() };
         let known = h.seed(SeedUser::active("known@example.com", "right")).await;
         let blocked = h
             .seed(SeedUser {
@@ -1167,7 +1167,7 @@ mod tests {
         let spy = Arc::new(FailureSpy::default());
         let mut cfg = base_config();
         cfg.email_verification.required = false;
-        let Some(h) = harness(cfg, Some(spy.clone())) else { return };
+        let Some(h) = harness(cfg, Some(spy.clone())) else { unreachable!() };
         let _ = h.seed(SeedUser::active("blind@example.com", "right")).await;
 
         // One attempt performs two of these reads. The gate at the top must keep working —
@@ -1219,7 +1219,7 @@ mod tests {
         let mut cfg = base_config();
         cfg.email_verification.required = false;
         let window = cfg.brute_force.window.as_secs();
-        let Some(h) = harness(cfg, Some(spy.clone())) else { return };
+        let Some(h) = harness(cfg, Some(spy.clone())) else { unreachable!() };
         let _ = h.seed(SeedUser::active("ttl@example.com", "right")).await;
 
         for _ in 0..4 {
@@ -1259,7 +1259,7 @@ mod tests {
         let spy = Arc::new(FailureSpy::default());
         let mut cfg = base_config();
         cfg.email_verification.required = false;
-        let Some(h) = harness(cfg, Some(spy.clone())) else { return };
+        let Some(h) = harness(cfg, Some(spy.clone())) else { unreachable!() };
         let _ = h.seed(SeedUser::active("down@example.com", "right")).await;
 
         h.stores.fail_lockout_reads(0, 1);
@@ -1287,7 +1287,7 @@ mod tests {
         let spy = Arc::new(FailureSpy::default());
         let mut cfg = base_config();
         cfg.email_verification.required = false;
-        let Some(h) = harness(cfg, Some(spy.clone())) else { return };
+        let Some(h) = harness(cfg, Some(spy.clone())) else { unreachable!() };
         let _ = h.seed(SeedUser::active("lock@example.com", "right")).await;
 
         for _ in 0..5 {
@@ -1336,7 +1336,7 @@ mod tests {
         let mut cfg = base_config();
         cfg.email_verification.required = false;
         let broken = Arc::new(BrokenFailureHooks::default());
-        let Some(h) = harness(cfg, Some(broken.clone())) else { return };
+        let Some(h) = harness(cfg, Some(broken.clone())) else { unreachable!() };
         let _ = h
             .seed(SeedUser::active("broken@example.com", "right"))
             .await;
@@ -1367,7 +1367,7 @@ mod tests {
         // could only be waited out — and it is also the lever an attacker pulls to deny
         // service to one account, which makes undoing it part of the defence. It grants no
         // access: the correct password is still required after the unlock.
-        let Some(h) = active_harness(false).await else { return };
+        let Some(h) = active_harness(false).await else { unreachable!() };
         let _ = h
             .seed(SeedUser::active("locked@example.com", "right"))
             .await;
@@ -1428,7 +1428,7 @@ mod tests {
     async fn a_repository_that_ignores_its_tenant_argument_is_refused() {
         let mut cfg = base_config();
         cfg.email_verification.required = false;
-        let Some(h) = harness(cfg, None) else { return };
+        let Some(h) = harness(cfg, None) else { unreachable!() };
         let _ = h
             .seed(SeedUser::active("cross@example.com", "s3cret-pass"))
             .await;

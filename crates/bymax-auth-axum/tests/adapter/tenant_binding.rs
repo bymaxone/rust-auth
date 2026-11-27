@@ -22,7 +22,7 @@ async fn a_token_minted_for_one_tenant_is_refused_under_another_tenants_host() {
         enforce_tenant_binding: true,
         ..EngineSpec::default()
     }) else {
-        return;
+        unreachable!()
     };
     let app = router(&h);
     // `seed_user` creates the account in tenant `t1`, which is also the host that names it.
@@ -51,7 +51,7 @@ async fn a_token_minted_for_one_tenant_is_refused_under_another_tenants_host() {
 
 #[tokio::test]
 async fn without_the_flag_a_token_is_not_compared_with_the_host() {
-    let Some(h) = build(EngineSpec::default()) else { return };
+    let Some(h) = build(EngineSpec::default()) else { unreachable!() };
     let app = router(&h);
     let _ = seed_user(&h, "free@e.com", "glidingwalnut42", "USER").await;
     let login = Req::post("/auth/login")

@@ -42,9 +42,9 @@ async fn a_stale_hash_is_left_alone_while_the_toggle_is_off() {
     let mut cfg = base_config();
     cfg.email_verification.required = false;
     cfg.password.rehash_on_verify = false;
-    let Some(h) = harness(cfg, None) else { return };
+    let Some(h) = harness(cfg, None) else { unreachable!() };
     let Some((id, stale)) = seed_stale_account(&h, "off@example.com", "pw").await else {
-        return;
+        unreachable!()
     };
     assert!(bymax_auth_crypto::password::needs_rehash(
         &stale,

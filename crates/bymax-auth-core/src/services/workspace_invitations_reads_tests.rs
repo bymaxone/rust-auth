@@ -40,7 +40,7 @@ async fn listed(
 
 #[tokio::test]
 async fn the_list_view_carries_the_role_the_times_and_the_resend_count_of_the_record() {
-    let Some(inv) = setup(config()).await else { return };
+    let Some(inv) = setup(config()).await else { unreachable!() };
     let item = Seeded {
         email: "v@x.io",
         role: "admin",
@@ -49,7 +49,7 @@ async fn the_list_view_carries_the_role_the_times_and_the_resend_count_of_the_re
         resends: 3,
     };
     seed(&inv, "v-token", &item).await;
-    let Some(listing) = listed(&inv, None, "10").await else { return };
+    let Some(listing) = listed(&inv, None, "10").await else { unreachable!() };
     let Some(view) = listing.items.first() else {
         assert!(!listing.items.is_empty(), "the invitation is listed");
         return;
@@ -68,7 +68,7 @@ async fn the_list_view_carries_the_role_the_times_and_the_resend_count_of_the_re
 
 #[tokio::test]
 async fn the_list_is_oldest_first_and_in_pages() {
-    let Some(inv) = setup(config()).await else { return };
+    let Some(inv) = setup(config()).await else { unreachable!() };
     let dates = [
         "2026-02-01T00:00:00.000Z",
         "2026-01-01T00:00:00.000Z",
@@ -85,12 +85,14 @@ async fn the_list_is_oldest_first_and_in_pages() {
         };
         seed(&inv, &format!("l-token-{n}"), &item).await;
     }
-    let Some(first) = listed(&inv, None, "2").await else { return };
+    let Some(first) = listed(&inv, None, "2").await else { unreachable!() };
     let emails: Vec<_> = first.items.iter().map(|view| view.email.as_str()).collect();
     assert_eq!(emails, ["l1@x.io", "l0@x.io"], "oldest first");
     assert_eq!(first.items[0].inviter_user_id, inv.owner.user_id);
     assert!(first.next_cursor.is_some());
-    let Some(second) = listed(&inv, first.next_cursor.as_deref(), "2").await else { return };
+    let Some(second) = listed(&inv, first.next_cursor.as_deref(), "2").await else {
+        unreachable!()
+    };
     let emails: Vec<_> = second
         .items
         .iter()
@@ -102,7 +104,7 @@ async fn the_list_is_oldest_first_and_in_pages() {
         "the page after the cursor, not the cursor's own"
     );
     assert_eq!(second.next_cursor, None);
-    let Some(whole) = listed(&inv, None, "3").await else { return };
+    let Some(whole) = listed(&inv, None, "3").await else { unreachable!() };
     assert_eq!(whole.items.len(), 3);
     assert_eq!(
         whole.next_cursor, None,
@@ -112,7 +114,7 @@ async fn the_list_is_oldest_first_and_in_pages() {
 
 #[tokio::test]
 async fn a_page_size_outside_its_bounds_is_refused() {
-    let Some(inv) = setup(config()).await else { return };
+    let Some(inv) = setup(config()).await else { unreachable!() };
     for limit in ["0", "101", "ten"] {
         let bad = page(&inv, None, limit).await;
         assert!(matches!(bad, Err(AuthError::Validation { .. })), "{limit}");
@@ -125,7 +127,7 @@ async fn previewed(inv: &Inv, token: &str) -> Result<InvitationPreview, AuthErro
 
 #[tokio::test]
 async fn a_preview_names_a_member_invitation() {
-    let Some(inv) = setup(config()).await else { return };
+    let Some(inv) = setup(config()).await else { unreachable!() };
     seed_account(&inv.f, "t1", "known@x.io", false).await;
     let item = Seeded {
         email: "known@x.io",
@@ -149,7 +151,7 @@ async fn a_preview_names_a_member_invitation() {
 
 #[tokio::test]
 async fn every_token_that_cannot_be_previewed_is_the_same_error() {
-    let Some(inv) = setup(config()).await else { return };
+    let Some(inv) = setup(config()).await else { unreachable!() };
     let item = Seeded {
         email: "x@x.io",
         role: "member",
@@ -193,7 +195,7 @@ async fn every_token_that_cannot_be_previewed_is_the_same_error() {
 #[tokio::test]
 async fn a_bootstrap_token_previews_while_its_workspace_does_not_exist_and_not_once_it_is_not_active()
  {
-    let Some(inv) = setup(config()).await else { return };
+    let Some(inv) = setup(config()).await else { unreachable!() };
     seed_bootstrap(&inv, "boot-token", ("owner-to-be@x.io", "wb", "owner")).await;
     let previewed = inv
         .f
@@ -230,7 +232,7 @@ async fn a_bootstrap_token_previews_while_its_workspace_does_not_exist_and_not_o
 
 #[tokio::test]
 async fn the_list_leaves_bootstrap_invitations_out() {
-    let Some(inv) = setup(config()).await else { return };
+    let Some(inv) = setup(config()).await else { unreachable!() };
     let member = Seeded {
         email: "m@x.io",
         role: "member",
@@ -254,7 +256,7 @@ async fn the_list_leaves_bootstrap_invitations_out() {
 #[tokio::test]
 async fn a_token_whose_role_the_hierarchy_does_not_know_or_a_bootstrap_that_is_not_the_owner_is_invalid()
  {
-    let Some(inv) = setup(config()).await else { return };
+    let Some(inv) = setup(config()).await else { unreachable!() };
     let ghost = Seeded {
         email: "g@x.io",
         role: "ghost",
@@ -276,7 +278,7 @@ async fn a_token_whose_role_the_hierarchy_does_not_know_or_a_bootstrap_that_is_n
 
 #[tokio::test]
 async fn the_list_orders_by_the_instant_whatever_offset_and_precision_the_times_use() {
-    let Some(inv) = setup(config()).await else { return };
+    let Some(inv) = setup(config()).await else { unreachable!() };
     // 10:00:00.000Z, and 08:00:00.123456Z written with an offset: the second is the older.
     for (email, at) in [
         ("late@x.io", "2026-11-20T10:00:00.000Z"),
@@ -291,9 +293,11 @@ async fn the_list_orders_by_the_instant_whatever_offset_and_precision_the_times_
         };
         seed(&inv, &format!("{email}-token"), &item).await;
     }
-    let Some(first) = listed(&inv, None, "1").await else { return };
+    let Some(first) = listed(&inv, None, "1").await else { unreachable!() };
     assert_eq!(first.items[0].email, "early@x.io");
-    let Some(second) = listed(&inv, first.next_cursor.as_deref(), "1").await else { return };
+    let Some(second) = listed(&inv, first.next_cursor.as_deref(), "1").await else {
+        unreachable!()
+    };
     assert_eq!(second.items[0].email, "late@x.io");
     assert_eq!(second.next_cursor, None);
 }

@@ -16,7 +16,7 @@ async fn linking_an_identity_is_restricted_to_the_named_tenant() {
             email_verified: Some(true),
         })
         .await;
-    let Ok(user) = created else { return };
+    let Ok(user) = created else { unreachable!() };
 
     // Another tenant naming this id changes nothing; its own tenant does.
     assert!(

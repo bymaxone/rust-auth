@@ -24,7 +24,7 @@ async fn a_lower_ranked_caller_cannot_replace_a_pending_higher_ranked_invitation
         invitations: true,
         ..EngineSpec::default()
     }) else {
-        return;
+        unreachable!()
     };
     let app = router(&h);
     let _ = seed_user(&h, "boss@e.com", "glidingwalnut42", "ADMIN").await;

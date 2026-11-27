@@ -62,7 +62,7 @@ fn seeded() -> Option<Fixture> {
 
 #[tokio::test]
 async fn every_caller_who_may_not_see_a_workspace_gets_the_identical_404() {
-    let Some(f) = seeded() else { return };
+    let Some(f) = seeded() else { unreachable!() };
     for (label, user, workspace) in [
         ("a stranger", "u3", "w-active"),
         ("a suspended member", "u2", "w-active"),
@@ -91,7 +91,7 @@ async fn every_caller_who_may_not_see_a_workspace_gets_the_identical_404() {
 
 #[tokio::test]
 async fn the_owner_of_a_workspace_pending_deletion_is_told_unless_the_surface_admits_it() {
-    let Some(f) = seeded() else { return };
+    let Some(f) = seeded() else { unreachable!() };
     let refused = authorize(&f, ("t1", "u1", "w-pending"), &ANY, false).await;
     assert!(matches!(refused, Err(AuthError::WorkspacePendingDeletion)));
     let admitted = authorize(&f, ("t1", "u1", "w-pending"), &ANY, true).await;
@@ -100,7 +100,7 @@ async fn the_owner_of_a_workspace_pending_deletion_is_told_unless_the_surface_ad
 
 #[tokio::test]
 async fn the_role_is_judged_through_the_hierarchy_after_the_membership() {
-    let Some(f) = seeded() else { return };
+    let Some(f) = seeded() else { unreachable!() };
     f.repo
         .seed_membership(membership(&active("t1", "w-active", "u4", "member"), 11));
     f.repo
@@ -111,7 +111,7 @@ async fn the_role_is_judged_through_the_hierarchy_after_the_membership() {
     assert!(matches!(below, Err(AuthError::InsufficientWorkspaceRole)));
     let included = authorize(&f, ("t1", "u5", "w-active"), &members, false).await;
     assert!(matches!(&included, Ok(member) if member.role == "admin"));
-    let Ok(member) = included else { return };
+    let Ok(member) = included else { unreachable!() };
     assert_eq!(
         (
             member.tenant_id.as_str(),
@@ -124,7 +124,7 @@ async fn the_role_is_judged_through_the_hierarchy_after_the_membership() {
 
 #[tokio::test]
 async fn a_surface_declaring_no_role_and_a_blank_credential_are_refused_before_any_lookup() {
-    let Some(f) = seeded() else { return };
+    let Some(f) = seeded() else { unreachable!() };
     let nothing = AcceptedRoles::Roles(Vec::new());
     let forbidden = authorize(&f, ("t1", "u1", "\u{0}"), &nothing, false).await;
     assert!(matches!(forbidden, Err(AuthError::Forbidden)));
@@ -181,7 +181,7 @@ fn workspace_id_bound() -> usize {
 
 #[tokio::test]
 async fn a_malformed_workspace_id_is_refused_naming_it_ahead_of_any_lookup() {
-    let Some(f) = seeded() else { return };
+    let Some(f) = seeded() else { unreachable!() };
     let max = workspace_id_bound();
     assert!(max > 0);
     let over = "a".repeat(max + 1);
@@ -201,7 +201,7 @@ async fn a_malformed_workspace_id_is_refused_naming_it_ahead_of_any_lookup() {
 
 #[tokio::test]
 async fn a_well_formed_workspace_id_that_names_nothing_is_the_identical_404() {
-    let Some(f) = seeded() else { return };
+    let Some(f) = seeded() else { unreachable!() };
     let max = workspace_id_bound();
     // At the bound, counted in code points, and with characters JS does not count as blank.
     let at = "a".repeat(max);
@@ -222,7 +222,7 @@ async fn a_well_formed_workspace_id_that_names_nothing_is_the_identical_404() {
 
 #[tokio::test]
 async fn a_workspace_or_a_member_of_another_tenant_is_not_reachable_by_a_homonym() {
-    let Some(f) = seeded() else { return };
+    let Some(f) = seeded() else { unreachable!() };
     f.repo
         .seed_workspace(workspace("t2", "w-active", WorkspaceStatus::Active, 20));
     f.repo
@@ -238,7 +238,7 @@ async fn a_workspace_or_a_member_of_another_tenant_is_not_reachable_by_a_homonym
 
 #[tokio::test]
 async fn only_an_active_membership_of_an_active_workspace_is_cached_and_read_back() {
-    let Some(f) = seeded() else { return };
+    let Some(f) = seeded() else { unreachable!() };
     let admitted = authorize(&f, ("t1", "u1", "w-active"), &ANY, false).await;
     assert!(admitted.is_ok());
     assert_eq!(f.cache.operations(), ["read", "fill"]);
@@ -278,7 +278,7 @@ async fn only_an_active_membership_of_an_active_workspace_is_cached_and_read_bac
 async fn a_disabled_cache_reads_the_repositories_every_time_and_touches_no_store() {
     let mut cfg = config();
     cfg.workspaces.membership_cache_ttl_seconds = 0;
-    let Some(f) = build(cfg) else { return };
+    let Some(f) = build(cfg) else { unreachable!() };
     f.repo
         .seed_workspace(workspace("t1", "w1", WorkspaceStatus::Active, 1));
     f.repo
@@ -352,14 +352,14 @@ fn a_half_configured_layer_fails_at_startup() {
 
 #[test]
 fn the_members_permission_is_the_configured_one_and_any_member_by_default() {
-    let Some(default) = build(config()) else { return };
+    let Some(default) = build(config()) else { unreachable!() };
     assert_eq!(
         default.engine.workspace_view_members_roles(),
         Some(&AcceptedRoles::AnyMember)
     );
     let mut cfg = config();
     cfg.workspaces.permissions.view_members = AcceptedRoles::roles(["admin"]);
-    let Some(configured) = build(cfg) else { return };
+    let Some(configured) = build(cfg) else { unreachable!() };
     assert_eq!(
         configured.engine.workspace_view_members_roles(),
         Some(&AcceptedRoles::roles(["admin"]))

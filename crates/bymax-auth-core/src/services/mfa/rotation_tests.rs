@@ -23,17 +23,13 @@ async fn a_platform_totp_challenge_rewrites_a_secret_stored_under_a_retired_key(
     // The platform plane keeps its secrets under the same key as the dashboard, so a rotation
     // drains there too: otherwise every platform administrator's secret stays under the retired
     // key and that key has to stay configured forever.
-    let Some((h, retired_bytes)) = retired_platform_harness() else {
-        return;
-    };
+    let Some((h, retired_bytes)) = retired_platform_harness() else { unreachable!() };
     let Some((raw_secret, _codes, admin)) = retired_key_admin(&h, "p-rot", retired_bytes) else {
-        return;
+        unreachable!()
     };
     let stored_under_retired = admin.mfa_secret.clone().unwrap_or_default();
-    let Some(temp) = platform_temp_token(&h, "p-rot").await else {
-        return;
-    };
-    let Some(mfa) = h.engine.mfa() else { return };
+    let Some(temp) = platform_temp_token(&h, "p-rot").await else { unreachable!() };
+    let Some(mfa) = h.engine.mfa() else { unreachable!() };
     let code = raw_code(&raw_secret, now_secs());
     assert!(matches!(
         mfa.challenge(&temp, &code, "1.2.3.4", "ua").await,
@@ -41,9 +37,7 @@ async fn a_platform_totp_challenge_rewrites_a_secret_stored_under_a_retired_key(
     ));
 
     // The stored record was rewritten: a service holding ONLY the current key now opens it.
-    let Ok(Some(after)) = h.platform.find_by_id("p-rot").await else {
-        return;
-    };
+    let Ok(Some(after)) = h.platform.find_by_id("p-rot").await else { unreachable!() };
     let rewritten = after.mfa_secret.unwrap_or_default();
     assert_ne!(rewritten, stored_under_retired);
     let strict = service_over(Arc::new(InMemoryStores::new()), h.users.clone());
@@ -57,27 +51,21 @@ async fn a_platform_totp_challenge_rewrites_a_secret_stored_under_a_retired_key(
 async fn a_platform_recovery_challenge_rewrites_a_secret_stored_under_a_retired_key() {
     // The recovery-code path splices the spent digest out of the stored set; the write carries
     // the secret too, and it must carry the one under the current key.
-    let Some((h, retired_bytes)) = retired_platform_harness() else {
-        return;
-    };
+    let Some((h, retired_bytes)) = retired_platform_harness() else { unreachable!() };
     let Some((raw_secret, codes, admin)) = retired_key_admin(&h, "p-rec", retired_bytes) else {
-        return;
+        unreachable!()
     };
     let before = admin.mfa_recovery_codes.as_ref().map(Vec::len);
     let stored_under_retired = admin.mfa_secret.clone().unwrap_or_default();
-    let Some(temp) = platform_temp_token(&h, "p-rec").await else {
-        return;
-    };
-    let Some(mfa) = h.engine.mfa() else { return };
-    let Some(code) = codes.first() else { return };
+    let Some(temp) = platform_temp_token(&h, "p-rec").await else { unreachable!() };
+    let Some(mfa) = h.engine.mfa() else { unreachable!() };
+    let Some(code) = codes.first() else { unreachable!() };
     assert!(matches!(
         mfa.challenge(&temp, code, "1.2.3.4", "ua").await,
         Ok(LoginResultMfa::Platform(_))
     ));
 
-    let Ok(Some(after)) = h.platform.find_by_id("p-rec").await else {
-        return;
-    };
+    let Ok(Some(after)) = h.platform.find_by_id("p-rec").await else { unreachable!() };
     // The spent code is gone and the secret is under the current key.
     assert_eq!(
         after.mfa_recovery_codes.map(|c| c.len()),
@@ -156,24 +144,22 @@ async fn a_platform_rewrite_never_puts_back_a_secret_the_holder_replaced_meanwhi
         None,
         vec![SecretString::from(retired_b64)],
     ) else {
-        return;
+        unreachable!()
     };
     let Some((raw_secret, _codes, admin)) = retired_key_admin(&h, "p-race", retired_bytes) else {
-        return;
+        unreachable!()
     };
-    let Some(mfa) = h.engine.mfa() else { return };
+    let Some(mfa) = h.engine.mfa() else { unreachable!() };
     let Ok(temp) = h
         .engine
         .tokens()
         .issue_mfa_temp_token("p-race", MfaContext::Platform, None)
         .await
     else {
-        return;
+        unreachable!()
     };
     // Re-enrolment lands when the transition lock is granted: a fresh secret, current key.
-    let Ok((_new_raw, _codes, fresh)) = mfa.generate_setup_material() else {
-        return;
-    };
+    let Ok((_new_raw, _codes, fresh)) = mfa.generate_setup_material() else { unreachable!() };
     let replacement = fresh.encrypted_secret.clone();
     let platform = h.platform.clone();
     h.stores.run_on_next_mfa_lock(move || {
@@ -187,9 +173,7 @@ async fn a_platform_rewrite_never_puts_back_a_secret_the_holder_replaced_meanwhi
         mfa.challenge(&temp, &code, "1.2.3.4", "ua").await,
         Ok(LoginResultMfa::Platform(_))
     ));
-    let Ok(Some(after)) = h.platform.find_by_id("p-race").await else {
-        return;
-    };
+    let Ok(Some(after)) = h.platform.find_by_id("p-race").await else { unreachable!() };
     assert_eq!(after.mfa_secret.as_deref(), Some(replacement.as_str()));
 }
 
@@ -206,23 +190,21 @@ async fn a_platform_recovery_splice_never_puts_back_a_secret_the_holder_replaced
         None,
         vec![SecretString::from(retired_b64)],
     ) else {
-        return;
+        unreachable!()
     };
     let Some((_raw, codes, admin)) = retired_key_admin(&h, "p-rec-race", retired_bytes) else {
-        return;
+        unreachable!()
     };
-    let Some(mfa) = h.engine.mfa() else { return };
+    let Some(mfa) = h.engine.mfa() else { unreachable!() };
     let Ok(temp) = h
         .engine
         .tokens()
         .issue_mfa_temp_token("p-rec-race", MfaContext::Platform, None)
         .await
     else {
-        return;
+        unreachable!()
     };
-    let Ok((_new_raw, _new_codes, fresh)) = mfa.generate_setup_material() else {
-        return;
-    };
+    let Ok((_new_raw, _new_codes, fresh)) = mfa.generate_setup_material() else { unreachable!() };
     let replacement = fresh.encrypted_secret.clone();
     let platform = h.platform.clone();
     h.stores.run_on_next_mfa_lock(move || {
@@ -231,14 +213,12 @@ async fn a_platform_recovery_splice_never_puts_back_a_secret_the_holder_replaced
             ..admin
         });
     });
-    let Some(code) = codes.first() else { return };
+    let Some(code) = codes.first() else { unreachable!() };
     assert!(matches!(
         mfa.challenge(&temp, code, "1.2.3.4", "ua").await,
         Ok(LoginResultMfa::Platform(_))
     ));
-    let Ok(Some(after)) = h.platform.find_by_id("p-rec-race").await else {
-        return;
-    };
+    let Ok(Some(after)) = h.platform.find_by_id("p-rec-race").await else { unreachable!() };
     assert_eq!(after.mfa_secret.as_deref(), Some(replacement.as_str()));
 }
 
@@ -306,20 +286,14 @@ async fn a_sibling_rewrite_of_the_same_secret_does_not_stop_a_platform_splice() 
     // changes the ciphertext and not the enrolled factor; the second is a recovery-code
     // challenge and must still remove its spent digest, or the code comes back once its
     // five-minute claim expires.
-    let Some((h, retired_bytes)) = retired_platform_harness() else {
-        return;
-    };
+    let Some((h, retired_bytes)) = retired_platform_harness() else { unreachable!() };
     let Some((raw_secret, codes, admin)) = retired_key_admin(&h, "p-sib", retired_bytes) else {
-        return;
+        unreachable!()
     };
     let before = admin.mfa_recovery_codes.as_ref().map(Vec::len);
-    let Some(mfa) = h.engine.mfa() else { return };
-    let Ok(rewritten) = mfa.reencrypt_secret(&raw_secret) else {
-        return;
-    };
-    let Some(temp) = platform_temp_token(&h, "p-sib").await else {
-        return;
-    };
+    let Some(mfa) = h.engine.mfa() else { unreachable!() };
+    let Ok(rewritten) = mfa.reencrypt_secret(&raw_secret) else { unreachable!() };
+    let Some(temp) = platform_temp_token(&h, "p-sib").await else { unreachable!() };
     let platform = h.platform.clone();
     h.stores.run_on_next_mfa_lock(move || {
         platform.insert(AuthPlatformUser {
@@ -327,14 +301,12 @@ async fn a_sibling_rewrite_of_the_same_secret_does_not_stop_a_platform_splice() 
             ..admin
         });
     });
-    let Some(code) = codes.first() else { return };
+    let Some(code) = codes.first() else { unreachable!() };
     assert!(matches!(
         mfa.challenge(&temp, code, "1.2.3.4", "ua").await,
         Ok(LoginResultMfa::Platform(_))
     ));
-    let Ok(Some(after)) = h.platform.find_by_id("p-sib").await else {
-        return;
-    };
+    let Ok(Some(after)) = h.platform.find_by_id("p-sib").await else { unreachable!() };
     assert_eq!(
         after.mfa_recovery_codes.map(|c| c.len()),
         before.map(|n| n - 1)
@@ -345,36 +317,28 @@ async fn a_sibling_rewrite_of_the_same_secret_does_not_stop_a_platform_splice() 
 async fn a_sibling_rewrite_of_the_same_secret_does_not_stop_a_dashboard_splice() {
     let retired_bytes = [3u8; 32];
     let retired_b64 = base64::engine::general_purpose::STANDARD.encode(retired_bytes);
-    let Some(h) = build_rotating(retired_b64) else {
-        return;
-    };
+    let Some(h) = build_rotating(retired_b64) else { unreachable!() };
     let Some((raw_secret, codes, uid)) =
         retired_key_user(&h, "dash-sib@example.com", retired_bytes).await
     else {
-        return;
+        unreachable!()
     };
-    let Some(mfa) = h.engine.mfa() else { return };
-    let Ok(rewritten) = mfa.reencrypt_secret(&raw_secret) else {
-        return;
-    };
+    let Some(mfa) = h.engine.mfa() else { unreachable!() };
+    let Ok(rewritten) = mfa.reencrypt_secret(&raw_secret) else { unreachable!() };
     let Some(temp) = login_temp_token(&h.engine, "dash-sib@example.com").await else {
-        return;
+        unreachable!()
     };
-    let Ok(Some(before)) = h.users.find_by_id(&uid, None).await else {
-        return;
-    };
+    let Ok(Some(before)) = h.users.find_by_id(&uid, None).await else { unreachable!() };
     let count = before.mfa_recovery_codes.map(|c| c.len());
     let (users, user_id) = (h.users.clone(), uid.clone());
     h.stores
         .run_on_next_mfa_lock(move || users.replace_mfa_secret(&user_id, &rewritten));
-    let Some(code) = codes.first() else { return };
+    let Some(code) = codes.first() else { unreachable!() };
     assert!(matches!(
         mfa.challenge(&temp, code, "1.2.3.4", "ua").await,
         Ok(LoginResultMfa::Dashboard(_))
     ));
-    let Ok(Some(after)) = h.users.find_by_id(&uid, None).await else {
-        return;
-    };
+    let Ok(Some(after)) = h.users.find_by_id(&uid, None).await else { unreachable!() };
     assert_eq!(
         after.mfa_recovery_codes.map(|c| c.len()),
         count.map(|n| n - 1)
@@ -384,7 +348,7 @@ async fn a_sibling_rewrite_of_the_same_secret_does_not_stop_a_dashboard_splice()
 #[tokio::test]
 async fn a_dashboard_totp_rewrite_never_puts_back_a_replaced_secret() {
     let Some((stored, replacement)) = dashboard_challenge_across_a_re_enrolment(false).await else {
-        return;
+        unreachable!()
     };
     assert_eq!(stored, replacement);
 }
@@ -392,7 +356,7 @@ async fn a_dashboard_totp_rewrite_never_puts_back_a_replaced_secret() {
 #[tokio::test]
 async fn a_dashboard_recovery_splice_never_puts_back_a_replaced_secret() {
     let Some((stored, replacement)) = dashboard_challenge_across_a_re_enrolment(true).await else {
-        return;
+        unreachable!()
     };
     assert_eq!(stored, replacement);
 }
@@ -419,17 +383,17 @@ async fn a_failed_rewrite_does_not_fail_a_dashboard_totp_challenge_that_already_
     // store that cannot answer the rewrite costs the migration and nothing else.
     let retired_bytes = [3u8; 32];
     let retired_b64 = base64::engine::general_purpose::STANDARD.encode(retired_bytes);
-    let Some(h) = build_rotating(retired_b64) else { return };
+    let Some(h) = build_rotating(retired_b64) else { unreachable!() };
     let email = "dash-rewrite-fails@example.com";
     let Some((raw_secret, _codes, uid)) = retired_key_user(&h, email, retired_bytes).await else {
-        return;
+        unreachable!()
     };
     let before = stored_dashboard_secret(&h, &uid).await;
-    let Some(temp) = login_temp_token(&h.engine, email).await else { return };
+    let Some(temp) = login_temp_token(&h.engine, email).await else { unreachable!() };
     let users = h.users.clone();
     h.stores
         .run_on_next_mfa_lock(move || users.fail_next_reads(1));
-    let Some(mfa) = h.engine.mfa() else { return };
+    let Some(mfa) = h.engine.mfa() else { unreachable!() };
     let code = raw_code(&raw_secret, now_secs());
     let answered = mfa.challenge(&temp, &code, "1.2.3.4", "ua").await;
     assert!(
@@ -445,18 +409,18 @@ async fn a_failed_rewrite_does_not_fail_a_dashboard_totp_challenge_that_already_
 
 #[tokio::test]
 async fn a_failed_rewrite_does_not_fail_a_platform_totp_challenge_that_already_succeeded() {
-    let Some((h, retired_bytes)) = retired_platform_harness() else { return };
+    let Some((h, retired_bytes)) = retired_platform_harness() else { unreachable!() };
     let Some((raw_secret, _codes, _admin)) =
         retired_key_admin(&h, "p-rewrite-fails", retired_bytes)
     else {
-        return;
+        unreachable!()
     };
     let before = stored_platform_secret(&h, "p-rewrite-fails").await;
-    let Some(temp) = platform_temp_token(&h, "p-rewrite-fails").await else { return };
+    let Some(temp) = platform_temp_token(&h, "p-rewrite-fails").await else { unreachable!() };
     let admins = h.platform.clone();
     h.stores
         .run_on_next_mfa_lock(move || admins.fail_next_reads(1));
-    let Some(mfa) = h.engine.mfa() else { return };
+    let Some(mfa) = h.engine.mfa() else { unreachable!() };
     let code = raw_code(&raw_secret, now_secs());
     let answered = mfa.challenge(&temp, &code, "1.2.3.4", "ua").await;
     assert!(
@@ -471,16 +435,16 @@ async fn a_failed_rewrite_does_not_fail_a_platform_totp_challenge_that_already_s
 async fn the_failed_rewrite_log_carries_a_closed_cause_and_nothing_the_error_or_account_holds() {
     let retired_bytes = [3u8; 32];
     let retired_b64 = base64::engine::general_purpose::STANDARD.encode(retired_bytes);
-    let Some(h) = build_rotating(retired_b64) else { return };
+    let Some(h) = build_rotating(retired_b64) else { unreachable!() };
     let email = "dash-log-fields@example.com";
     let Some((raw_secret, _codes, uid)) = retired_key_user(&h, email, retired_bytes).await else {
-        return;
+        unreachable!()
     };
-    let Some(temp) = login_temp_token(&h.engine, email).await else { return };
+    let Some(temp) = login_temp_token(&h.engine, email).await else { unreachable!() };
     let users = h.users.clone();
     h.stores
         .run_on_next_mfa_lock(move || users.fail_next_reads(1));
-    let Some(mfa) = h.engine.mfa() else { return };
+    let Some(mfa) = h.engine.mfa() else { unreachable!() };
     let code = raw_code(&raw_secret, now_secs());
     let (events, capture) = crate::log_capture::capture_events();
     let answered = mfa.challenge(&temp, &code, "1.2.3.4", "ua").await;

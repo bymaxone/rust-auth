@@ -87,7 +87,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_token_from_another_tenant_is_refused_and_its_own_tenant_is_accepted() {
-        let Some(h) = harness(enforcing_config(), None) else { return };
+        let Some(h) = harness(enforcing_config(), None) else { unreachable!() };
 
         let own = h
             .engine
@@ -107,7 +107,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_resolver_that_cannot_name_a_tenant_refuses_instead_of_waving_the_token_through() {
-        let Some(h) = harness(enforcing_config(), None) else { return };
+        let Some(h) = harness(enforcing_config(), None) else { unreachable!() };
         let ctx = RequestContext::new("203.0.113.9", "agent/1.0", BTreeMap::new());
         let refused = h.engine.assert_tenant_binding("acme", &ctx).await;
         assert!(matches!(refused, Err(AuthError::Forbidden)), "{refused:?}");
@@ -117,7 +117,7 @@ mod tests {
     async fn binding_is_off_by_default_even_with_a_resolver() {
         let mut config = base_config();
         config.tenant_id_resolver = Some(Arc::new(HostResolver));
-        let Some(h) = harness(config, None) else { return };
+        let Some(h) = harness(config, None) else { unreachable!() };
         let answer = h
             .engine
             .assert_tenant_binding("globex", &ctx_for_host("acme"))

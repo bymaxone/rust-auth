@@ -85,12 +85,12 @@ async fn the_declared_schemes_match_what_each_delivery_mode_does() {
             cookie_names: Some((ACCESS_NAME, REFRESH_NAME)),
             ..EngineSpec::default()
         }) else {
-            return;
+            unreachable!()
         };
         let config =
             bymax_auth_axum::AxumAuthConfig::new(bymax_auth_axum::ClientIpSource::PeerAddr);
         let Ok(router) = bymax_auth_axum::AuthRouter::from_engine(h.engine.clone(), config) else {
-            return;
+            unreachable!()
         };
         let schemes = security_schemes(&h.engine, router.groups());
         let app = router.into_router();

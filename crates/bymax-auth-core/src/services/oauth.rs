@@ -881,12 +881,13 @@ mod tests {
         // Initiate mints state + PKCE, persists the os: record, and returns a Google authorize
         // URL carrying the state and an S256 challenge.
         let hooks: Arc<dyn AuthHooks> = Arc::new(DecisionHook(OAuthLoginResult::Create));
-        let Some(h) = harness(hooks, Arc::new(RoutingHttpClient::new()), false) else { return };
+        let h = harness(hooks, Arc::new(RoutingHttpClient::new()), false);
+        let Some(h) = h else { unreachable!() };
         let url = h.engine.oauth_initiate("google", Some("t1"), &ctx()).await;
         assert!(
             matches!(&url, Ok(r) if r.authorize_url.starts_with("https://accounts.google.com/"))
         );
-        let Ok(url) = url.map(|r| r.authorize_url) else { return };
+        let Ok(url) = url.map(|r| r.authorize_url) else { unreachable!() };
         assert!(url.contains("code_challenge_method=S256"));
         let state = extract_query_param(&url, "state").unwrap_or_default();
         assert_eq!(state.len(), 64, "state is 64 hex chars");
@@ -908,7 +909,8 @@ mod tests {
     async fn initiate_rejects_unknown_and_malformed_provider_without_storing_state() {
         // An unknown or malformed provider fails as OauthFailed and writes no state.
         let hooks: Arc<dyn AuthHooks> = Arc::new(DecisionHook(OAuthLoginResult::Create));
-        let Some(h) = harness(hooks, Arc::new(RoutingHttpClient::new()), false) else { return };
+        let h = harness(hooks, Arc::new(RoutingHttpClient::new()), false);
+        let Some(h) = h else { unreachable!() };
         assert!(matches!(
             h.engine.oauth_initiate("github", Some("t1"), &ctx()).await,
             Err(AuthError::OauthFailed)
@@ -926,17 +928,18 @@ mod tests {
         // With no existing identity and a Create decision, the callback provisions the account
         // from the profile and returns a full session.
         let hooks: Arc<dyn AuthHooks> = Arc::new(DecisionHook(OAuthLoginResult::Create));
-        let Some(h) = harness(hooks, Arc::new(RoutingHttpClient::new()), false) else { return };
+        let h = harness(hooks, Arc::new(RoutingHttpClient::new()), false);
+        let Some(h) = h else { unreachable!() };
         let outcome = run_flow(&h).await;
         assert!(matches!(&outcome, Ok(OAuthOutcome::Authenticated(_))));
-        let Ok(OAuthOutcome::Authenticated(result)) = outcome else { return };
+        let Ok(OAuthOutcome::Authenticated(result)) = outcome else { unreachable!() };
         assert_eq!(result.user.email, "new@example.com");
         assert_eq!(result.user.oauth_provider.as_deref(), Some("google"));
         assert!(!result.access_token.is_empty());
         // The PKCE verifier was forwarded on exchange and matches the issued challenge.
         let body = h.engine.oauth_initiate("google", Some("t1"), &ctx()).await;
         assert!(body.is_ok());
-        let Some(exchange) = h.http.exchange_body() else { return };
+        let Some(exchange) = h.http.exchange_body() else { unreachable!() };
         assert!(exchange.contains("code_verifier="));
         assert!(exchange.contains("grant_type=authorization_code"));
     }
@@ -946,9 +949,10 @@ mod tests {
         // End-to-end PKCE proof: the verifier forwarded on exchange hashes (S256) to the
         // challenge that left in the authorize URL.
         let hooks: Arc<dyn AuthHooks> = Arc::new(DecisionHook(OAuthLoginResult::Create));
-        let Some(h) = harness(hooks, Arc::new(RoutingHttpClient::new()), false) else { return };
+        let h = harness(hooks, Arc::new(RoutingHttpClient::new()), false);
+        let Some(h) = h else { unreachable!() };
         let url = h.engine.oauth_initiate("google", Some("t1"), &ctx()).await;
-        let Ok(url) = url.map(|r| r.authorize_url) else { return };
+        let Ok(url) = url.map(|r| r.authorize_url) else { unreachable!() };
         let state = extract_query_param(&url, "state").unwrap_or_default();
         let challenge = extract_query_param(&url, "code_challenge").unwrap_or_default();
         let done = h
@@ -956,7 +960,7 @@ mod tests {
             .oauth_callback("google", "auth-code", &state, Some(&state), &ctx())
             .await;
         assert!(done.is_ok());
-        let Some(exchange) = h.http.exchange_body() else { return };
+        let Some(exchange) = h.http.exchange_body() else { unreachable!() };
         let verifier = exchange
             .split('&')
             .find_map(|pair| pair.strip_prefix("code_verifier="))
@@ -972,12 +976,13 @@ mod tests {
     async fn callback_link_path_relinks_an_existing_user_and_authenticates() {
         // A Link decision with an existing identity re-links and returns a session.
         let hooks: Arc<dyn AuthHooks> = Arc::new(DecisionHook(OAuthLoginResult::Link));
-        let Some(h) = harness(hooks, Arc::new(RoutingHttpClient::new()), false) else { return };
+        let h = harness(hooks, Arc::new(RoutingHttpClient::new()), false);
+        let Some(h) = h else { unreachable!() };
         let id = seed_linked_user(&h.users, false).await;
         assert!(!id.is_empty());
         let outcome = run_flow(&h).await;
         assert!(matches!(&outcome, Ok(OAuthOutcome::Authenticated(_))));
-        let Ok(OAuthOutcome::Authenticated(result)) = outcome else { return };
+        let Ok(OAuthOutcome::Authenticated(result)) = outcome else { unreachable!() };
         assert_eq!(result.user.id, id);
         // The write names the tenant the identity was resolved in, so a repository that numbers
         // users per tenant cannot land it on another tenant's account.
@@ -988,7 +993,8 @@ mod tests {
     async fn callback_link_without_existing_user_fails() {
         // A Link decision with no account bound to the identity is OauthFailed.
         let hooks: Arc<dyn AuthHooks> = Arc::new(DecisionHook(OAuthLoginResult::Link));
-        let Some(h) = harness(hooks, Arc::new(RoutingHttpClient::new()), false) else { return };
+        let h = harness(hooks, Arc::new(RoutingHttpClient::new()), false);
+        let Some(h) = h else { unreachable!() };
         assert!(matches!(run_flow(&h).await, Err(AuthError::OauthFailed)));
     }
 
@@ -1026,10 +1032,10 @@ mod tests {
         let hooks: Arc<dyn AuthHooks> = Arc::new(DecisionHook(OAuthLoginResult::Link));
 
         // The client is bound first so each `let-else` fits one line: rustfmt splits a longer
-        // one, and a `return` on its own line is a line no run reaches — which the 100% line
-        // gate then reports as uncovered.
+        // one, and an `unreachable!()` on its own line is a line no run reaches — which the 100%
+        // line gate then reports as uncovered.
         let http = Arc::new(RoutingHttpClient::new());
-        let Some(mismatched) = harness(hooks.clone(), http, false) else { return };
+        let Some(mismatched) = harness(hooks.clone(), http, false) else { unreachable!() };
         // 64 hex characters, because `oauth_callback` rejects any other SHAPE before it reads
         // the store at all — a readable-looking string like "state-for-somebody-else" is refused
         // three checks earlier and never reaches the comparison this test is about.
@@ -1050,7 +1056,7 @@ mod tests {
         assert!(lock(&mismatched.http.requests).is_empty());
 
         let http = Arc::new(RoutingHttpClient::new());
-        let Some(matched) = harness(hooks, http, false) else { return };
+        let Some(matched) = harness(hooks, http, false) else { unreachable!() };
         let stored = matched
             .stores
             .put_state(&state_key(state), &planted("google"), OAUTH_STATE_TTL_SECS)
@@ -1073,7 +1079,8 @@ mod tests {
         let hooks: Arc<dyn AuthHooks> = Arc::new(DecisionHook(OAuthLoginResult::Reject {
             reason: Some("blocked".to_owned()),
         }));
-        let Some(h) = harness(hooks, Arc::new(RoutingHttpClient::new()), false) else { return };
+        let h = harness(hooks, Arc::new(RoutingHttpClient::new()), false);
+        let Some(h) = h else { unreachable!() };
         assert!(matches!(run_flow(&h).await, Err(AuthError::OauthFailed)));
     }
 
@@ -1081,7 +1088,8 @@ mod tests {
     async fn callback_mfa_enabled_user_returns_a_challenge() {
         // A Link to an MFA-enabled user returns the MFA challenge, not a session.
         let hooks: Arc<dyn AuthHooks> = Arc::new(DecisionHook(OAuthLoginResult::Link));
-        let Some(h) = harness(hooks, Arc::new(RoutingHttpClient::new()), false) else { return };
+        let h = harness(hooks, Arc::new(RoutingHttpClient::new()), false);
+        let Some(h) = h else { unreachable!() };
         let _ = seed_linked_user(&h.users, true).await;
         let outcome = run_flow(&h).await;
         assert!(matches!(
@@ -1097,10 +1105,11 @@ mod tests {
     async fn callback_with_session_tracking_creates_a_tracked_session() {
         // With session tracking on, the Authenticated path records a session for the user.
         let hooks: Arc<dyn AuthHooks> = Arc::new(DecisionHook(OAuthLoginResult::Create));
-        let Some(h) = harness(hooks, Arc::new(RoutingHttpClient::new()), true) else { return };
+        let h = harness(hooks, Arc::new(RoutingHttpClient::new()), true);
+        let Some(h) = h else { unreachable!() };
         let outcome = run_flow(&h).await;
         assert!(matches!(&outcome, Ok(OAuthOutcome::Authenticated(_))));
-        let Ok(OAuthOutcome::Authenticated(result)) = outcome else { return };
+        let Ok(OAuthOutcome::Authenticated(result)) = outcome else { unreachable!() };
         let listed = h
             .engine
             .sessions()
@@ -1113,7 +1122,8 @@ mod tests {
     async fn callback_default_noop_hook_disables_oauth_signin() {
         // The NoOp hook default returns Reject, so OAuth sign-in is disabled by default.
         let hooks: Arc<dyn AuthHooks> = Arc::new(crate::traits::NoOpAuthHooks);
-        let Some(h) = harness(hooks, Arc::new(RoutingHttpClient::new()), false) else { return };
+        let h = harness(hooks, Arc::new(RoutingHttpClient::new()), false);
+        let Some(h) = h else { unreachable!() };
         assert!(matches!(run_flow(&h).await, Err(AuthError::OauthFailed)));
     }
 
@@ -1121,7 +1131,8 @@ mod tests {
     async fn callback_hook_error_maps_to_oauth_failed() {
         // A hook that errors is treated as a reject (OauthFailed), never a 500.
         let hooks: Arc<dyn AuthHooks> = Arc::new(ErrHook);
-        let Some(h) = harness(hooks, Arc::new(RoutingHttpClient::new()), false) else { return };
+        let h = harness(hooks, Arc::new(RoutingHttpClient::new()), false);
+        let Some(h) = h else { unreachable!() };
         assert!(matches!(run_flow(&h).await, Err(AuthError::OauthFailed)));
     }
 
@@ -1129,7 +1140,8 @@ mod tests {
     async fn callback_rejects_missing_forged_and_replayed_state() {
         // A never-issued state is OauthFailed; a consumed state cannot be replayed.
         let hooks: Arc<dyn AuthHooks> = Arc::new(DecisionHook(OAuthLoginResult::Create));
-        let Some(h) = harness(hooks, Arc::new(RoutingHttpClient::new()), false) else { return };
+        let h = harness(hooks, Arc::new(RoutingHttpClient::new()), false);
+        let Some(h) = h else { unreachable!() };
         // Forged / missing state.
         assert!(matches!(
             h.engine
@@ -1145,7 +1157,7 @@ mod tests {
         ));
         // Issue a real state, consume it once, then replay it.
         let url = h.engine.oauth_initiate("google", Some("t1"), &ctx()).await;
-        let Ok(url) = url.map(|r| r.authorize_url) else { return };
+        let Ok(url) = url.map(|r| r.authorize_url) else { unreachable!() };
         let state = extract_query_param(&url, "state").unwrap_or_default();
         assert!(
             h.engine
@@ -1170,9 +1182,10 @@ mod tests {
         // attacker's account. The cookie is what tells the two apart, so a missing one and a
         // mismatched one are both fatal.
         let hooks: Arc<dyn AuthHooks> = Arc::new(DecisionHook(OAuthLoginResult::Create));
-        let Some(h) = harness(hooks, Arc::new(RoutingHttpClient::new()), false) else { return };
+        let h = harness(hooks, Arc::new(RoutingHttpClient::new()), false);
+        let Some(h) = h else { unreachable!() };
         let url = h.engine.oauth_initiate("google", Some("t1"), &ctx()).await;
-        let Ok(url) = url.map(|r| r.authorize_url) else { return };
+        let Ok(url) = url.map(|r| r.authorize_url) else { unreachable!() };
         let state = extract_query_param(&url, "state").unwrap_or_default();
 
         // No cookie at all — the lured-victim request.
@@ -1210,11 +1223,12 @@ mod tests {
         // are the same value. A struct that returned a *fresh* state would leave every
         // callback unsatisfiable, and no other test would notice.
         let hooks: Arc<dyn AuthHooks> = Arc::new(DecisionHook(OAuthLoginResult::Create));
-        let Some(h) = harness(hooks, Arc::new(RoutingHttpClient::new()), false) else { return };
+        let h = harness(hooks, Arc::new(RoutingHttpClient::new()), false);
+        let Some(h) = h else { unreachable!() };
         // Bound first so the `else` fits on one line — see the note in `services::auth`: a
-        // wrapped `else { return; }` leaves the `return` on a line no run reaches.
+        // wrapped one leaves its body on a line no run reaches.
         let initiated = h.engine.oauth_initiate("google", Some("t1"), &ctx()).await;
-        let Ok(redirect) = initiated else { return };
+        let Ok(redirect) = initiated else { unreachable!() };
         assert_eq!(
             extract_query_param(&redirect.authorize_url, "state").as_deref(),
             Some(redirect.state.as_str())
@@ -1241,7 +1255,7 @@ mod tests {
             .oauth_provider(Arc::new(google))
             .oauth_state_store(counting.clone())
             .build();
-        let Ok(engine) = engine else { return };
+        let Ok(engine) = engine else { unreachable!() };
         // An oversized value (well beyond 64 chars), a wrong length, an upper-case hex digit,
         // and a non-hex character are each rejected on the same path.
         for bad in [
@@ -1288,7 +1302,7 @@ mod tests {
         for (value, readable) in cases {
             let hooks: Arc<dyn AuthHooks> = Arc::new(DecisionHook(OAuthLoginResult::Link));
             let http = Arc::new(RoutingHttpClient::new());
-            let Some(h) = harness(hooks, http, false) else { return };
+            let Some(h) = harness(hooks, http, false) else { unreachable!() };
             let record = serde_json::json!({
                 "provider": "google",
                 "tenantId": "t1",
@@ -1330,7 +1344,8 @@ mod tests {
     async fn callback_rejects_a_malformed_stored_state_payload() {
         // A stored payload that is not valid JSON collapses to OauthFailed, not an internal error.
         let hooks: Arc<dyn AuthHooks> = Arc::new(DecisionHook(OAuthLoginResult::Create));
-        let Some(h) = harness(hooks, Arc::new(RoutingHttpClient::new()), false) else { return };
+        let h = harness(hooks, Arc::new(RoutingHttpClient::new()), false);
+        let Some(h) = h else { unreachable!() };
         let state = "a".repeat(64);
         assert!(
             h.stores
@@ -1350,7 +1365,8 @@ mod tests {
     async fn callback_unknown_provider_fails_before_consuming_state() {
         // An unknown provider on callback fails without touching any state.
         let hooks: Arc<dyn AuthHooks> = Arc::new(DecisionHook(OAuthLoginResult::Create));
-        let Some(h) = harness(hooks, Arc::new(RoutingHttpClient::new()), false) else { return };
+        let h = harness(hooks, Arc::new(RoutingHttpClient::new()), false);
+        let Some(h) = h else { unreachable!() };
         assert!(matches!(
             h.engine
                 .oauth_callback(
@@ -1371,7 +1387,7 @@ mod tests {
         let http = Arc::new(RoutingHttpClient::new());
         *lock(&http.token) = (400, b"{\"error\":\"invalid_grant\"}".to_vec());
         let hooks: Arc<dyn AuthHooks> = Arc::new(DecisionHook(OAuthLoginResult::Create));
-        let Some(h) = harness(hooks, http, false) else { return };
+        let Some(h) = harness(hooks, http, false) else { unreachable!() };
         assert!(matches!(run_flow(&h).await, Err(AuthError::OauthFailed)));
     }
 
@@ -1381,7 +1397,7 @@ mod tests {
         let http = Arc::new(RoutingHttpClient::new());
         *lock(&http.userinfo) = (200, userinfo_body(false, "new@example.com"));
         let hooks: Arc<dyn AuthHooks> = Arc::new(DecisionHook(OAuthLoginResult::Create));
-        let Some(h) = harness(hooks, http, false) else { return };
+        let Some(h) = harness(hooks, http, false) else { unreachable!() };
         assert!(matches!(run_flow(&h).await, Err(AuthError::OauthFailed)));
     }
 
@@ -1389,7 +1405,8 @@ mod tests {
     async fn callback_create_collision_maps_to_email_mismatch() {
         // A Create whose email collides with an existing account is OauthEmailMismatch (409).
         let hooks: Arc<dyn AuthHooks> = Arc::new(DecisionHook(OAuthLoginResult::Create));
-        let Some(h) = harness(hooks, Arc::new(RoutingHttpClient::new()), false) else { return };
+        let h = harness(hooks, Arc::new(RoutingHttpClient::new()), false);
+        let Some(h) = h else { unreachable!() };
         // Seed a local account with the same email but no OAuth identity, so find_by_oauth_id
         // misses (Create is chosen) and create_with_oauth then conflicts on the email.
         let seeded = h
@@ -1422,10 +1439,10 @@ mod tests {
                 .to_vec(),
         );
         let hooks: Arc<dyn AuthHooks> = Arc::new(DecisionHook(OAuthLoginResult::Create));
-        let Some(h) = harness(hooks, http, false) else { return };
+        let Some(h) = harness(hooks, http, false) else { unreachable!() };
         let outcome = run_flow(&h).await;
         assert!(matches!(&outcome, Ok(OAuthOutcome::Authenticated(_))));
-        let Ok(OAuthOutcome::Authenticated(result)) = outcome else { return };
+        let Ok(OAuthOutcome::Authenticated(result)) = outcome else { unreachable!() };
         assert_eq!(result.user.name, "alice");
     }
 
@@ -1446,7 +1463,7 @@ mod tests {
             .user_repository(users)
             .redis_stores(stores)
             .build();
-        let Ok(engine) = engine else { return };
+        let Ok(engine) = engine else { unreachable!() };
         assert_eq!(
             engine.oauth_success_redirect_url(),
             Some("https://app.example.com/done")
@@ -1474,7 +1491,7 @@ mod tests {
             .user_repository(users)
             .redis_stores(stores)
             .build();
-        let Ok(engine) = engine else { return };
+        let Ok(engine) = engine else { unreachable!() };
         assert_eq!(engine.oauth_error_redirect_url("oauth_failed"), None);
     }
 
@@ -1503,7 +1520,7 @@ mod tests {
             .redis_stores(stores)
             .oauth_provider(Arc::new(google))
             .build();
-        let Ok(engine) = engine else { return };
+        let Ok(engine) = engine else { unreachable!() };
         assert!(matches!(
             engine.oauth_initiate("google", Some("t1"), &ctx()).await,
             Err(AuthError::Internal(_))
@@ -1618,10 +1635,10 @@ mod tests {
             )))
             .oauth_state_store(stores.clone())
             .build();
-        let Ok(engine) = engine else { return };
+        let Ok(engine) = engine else { unreachable!() };
 
         let url = engine.oauth_initiate("google", Some("t1"), &ctx()).await;
-        let Ok(url) = url.map(|r| r.authorize_url) else { return };
+        let Ok(url) = url.map(|r| r.authorize_url) else { unreachable!() };
         let state = extract_query_param(&url, "state").unwrap_or_default();
         let outcome = engine
             .oauth_callback("google", "auth-code", &state, Some(&state), &ctx())
@@ -1658,10 +1675,10 @@ mod tests {
             )))
             .oauth_state_store(stores.clone())
             .build();
-        let Ok(engine) = engine else { return };
+        let Ok(engine) = engine else { unreachable!() };
 
         let url = engine.oauth_initiate("google", Some("t1"), &ctx()).await;
-        let Ok(url) = url.map(|r| r.authorize_url) else { return };
+        let Ok(url) = url.map(|r| r.authorize_url) else { unreachable!() };
         let state = extract_query_param(&url, "state").unwrap_or_default();
         let outcome = engine
             .oauth_callback("google", "auth-code", &state, Some(&state), &ctx())
@@ -1692,11 +1709,11 @@ mod tests {
             .oauth_provider(Arc::new(crate::testing::MockOAuthProvider::new("google")))
             .oauth_state_store(stores.clone())
             .build();
-        let Ok(engine) = engine else { return };
+        let Ok(engine) = engine else { unreachable!() };
 
         // First sign-in creates the account and succeeds.
         let url = engine.oauth_initiate("google", Some("t1"), &ctx()).await;
-        let Ok(url) = url.map(|r| r.authorize_url) else { return };
+        let Ok(url) = url.map(|r| r.authorize_url) else { unreachable!() };
         let state = extract_query_param(&url, "state").unwrap_or_default();
         assert!(matches!(
             engine
@@ -1707,7 +1724,7 @@ mod tests {
 
         // Ban the account, then sign in again through the same provider identity.
         let found = users.find_by_email("mock@example.com", "t1").await;
-        let Ok(Some(user)) = found else { return };
+        let Ok(Some(user)) = found else { unreachable!() };
         assert!(
             crate::traits::UserRepository::update_status(users.as_ref(), &user.id, "t1", "BANNED")
                 .await
@@ -1725,10 +1742,10 @@ mod tests {
             .oauth_provider(Arc::new(crate::testing::MockOAuthProvider::new("google")))
             .oauth_state_store(stores.clone())
             .build();
-        let Ok(linking) = linking else { return };
+        let Ok(linking) = linking else { unreachable!() };
 
         let url = linking.oauth_initiate("google", Some("t1"), &ctx()).await;
-        let Ok(url) = url.map(|r| r.authorize_url) else { return };
+        let Ok(url) = url.map(|r| r.authorize_url) else { unreachable!() };
         let state = extract_query_param(&url, "state").unwrap_or_default();
         let banned = linking
             .oauth_callback("google", "auth-code", &state, Some(&state), &ctx())
@@ -1818,7 +1835,7 @@ mod tests {
             .build();
         // Bound on one line so the never-taken divergent arm stays a region rather than
         // becoming an uncovered LINE, which is what the 100% gate measures.
-        let Ok(engine) = built else { return };
+        let Ok(engine) = built else { unreachable!() };
 
         // A query naming a tenant is refused outright: this deployment decides the tenant, and
         // the initiate is the door that decides which one an account gets provisioned into.
@@ -1853,7 +1870,7 @@ mod tests {
         // the failure has to come from the assertion rather than from an `else` arm.
         let minted = engine.oauth_initiate("google", None, &resolved_ctx).await;
         assert!(minted.is_ok(), "a resolvable request must mint a redirect");
-        let Ok(redirect) = minted else { return };
+        let Ok(redirect) = minted else { unreachable!() };
         let stored = OAuthStateStore::take_state(stores.as_ref(), &state_key(&redirect.state))
             .await
             .ok()

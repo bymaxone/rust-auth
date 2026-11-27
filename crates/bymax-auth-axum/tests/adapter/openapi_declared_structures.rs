@@ -295,7 +295,7 @@ async fn the_reset_structure_agrees_with_its_evaluator_and_with_the_server() {
     let entry = structure_entry("ResetPasswordDto");
     let enforcement = &entry["enforcement"];
     assert_eq!(enforcement["kind"], "http");
-    let Some((_h, app)) = serve(&enforcement["deployment"]) else { return };
+    let Some((_h, app)) = serve(&enforcement["deployment"]) else { unreachable!() };
     let path = route(enforcement);
     let mut failures = Vec::new();
     for (index, probe) in entry["probes"].as_array().into_iter().flatten().enumerate() {
@@ -339,7 +339,7 @@ async fn the_narrowing_pairs_are_what_their_role_says() {
         for outcome in pair["outcomes"].as_array().into_iter().flatten() {
             let Some(answer) = answer_under(&outcome["deployment"], &path, &pair["body"]).await
             else {
-                return;
+                unreachable!()
             };
             let code = answer.1["error"]["code"].as_str().map(str::to_owned);
             assert_eq!(
@@ -375,7 +375,7 @@ async fn the_policy_floor_and_the_order_of_the_checks_are_what_the_probes_say() 
     let path = route(&entry);
     let mut failures = Vec::new();
     for (index, probe) in entry["probes"].as_array().into_iter().flatten().enumerate() {
-        let Some((_h, app)) = serve(&probe["deployment"]) else { return };
+        let Some((_h, app)) = serve(&probe["deployment"]) else { unreachable!() };
         let response = post(&app, &path, &probe["body"]).await;
         let key = "PasswordResetController.resetPassword#passwordFloor";
         judge(
@@ -412,7 +412,7 @@ async fn a_callback_without_a_code_is_the_handlers_refusal_and_not_the_pipes() {
     let entry = semantics_entry("OAuthController.callback#codelessCallback");
     assert_eq!(entry["kind"], "handlerRefusal");
     assert_eq!(entry["method"], "get");
-    let Some((_h, app)) = serve(&entry["deployment"]) else { return };
+    let Some((_h, app)) = serve(&entry["deployment"]) else { unreachable!() };
     let mut failures = Vec::new();
     for (index, probe) in entry["probes"].as_array().into_iter().flatten().enumerate() {
         let url = format!("{}?{}", route(&entry), query_string(&probe["query"]));
@@ -453,7 +453,7 @@ async fn the_responses_the_artefact_calls_indistinguishable_are_identical() {
         if entry["kind"] != "indistinguishable" {
             continue;
         }
-        let Some((h, app)) = serve(&entry["deployment"]) else { return };
+        let Some((h, app)) = serve(&entry["deployment"]) else { unreachable!() };
         create_registered_account(&h, &app, &entry).await;
         let path = route(&entry);
         let registered = post(&app, &path, &entry["registeredBody"]).await;

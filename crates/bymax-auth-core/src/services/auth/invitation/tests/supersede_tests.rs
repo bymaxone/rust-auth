@@ -40,7 +40,7 @@ async fn a_member_cannot_replace_a_pending_admin_invitation() {
     // `invite` authorises the role being REQUESTED. Without a check on the pending record, a
     // member could post a MEMBER invitation for an address and destroy a pending ADMIN one — a
     // withdrawal the revoke route refuses them.
-    let Some(s) = setup(invite_config()) else { return };
+    let Some(s) = setup(invite_config()) else { unreachable!() };
     let (admin, member) = seed_inviters(&s).await;
     assert!(
         s.engine
@@ -50,7 +50,7 @@ async fn a_member_cannot_replace_a_pending_admin_invitation() {
     );
     let pending = indexed(&s).await;
     assert!(pending.is_some());
-    let Some(pending) = pending else { return };
+    let Some(pending) = pending else { unreachable!() };
 
     let (events, capture) = crate::log_capture::capture_events();
     let refused = s
@@ -72,7 +72,7 @@ async fn a_member_cannot_replace_a_pending_admin_invitation() {
 
 #[tokio::test]
 async fn an_inviter_who_outranks_the_pending_invitation_replaces_it() {
-    let Some(s) = setup(invite_config()) else { return };
+    let Some(s) = setup(invite_config()) else { unreachable!() };
     let (admin, member) = seed_inviters(&s).await;
     assert!(
         s.engine
@@ -81,7 +81,7 @@ async fn an_inviter_who_outranks_the_pending_invitation_replaces_it() {
             .is_ok()
     );
     let first = indexed(&s).await;
-    let Some(first) = first else { return };
+    let Some(first) = first else { unreachable!() };
 
     // An ADMIN re-inviting the address supersedes the member's invitation.
     assert!(
@@ -96,7 +96,7 @@ async fn an_inviter_who_outranks_the_pending_invitation_replaces_it() {
         !record_exists(&s, &first).await,
         "the superseded record must be gone"
     );
-    let Some(second) = second else { return };
+    let Some(second) = second else { unreachable!() };
     assert!(record_exists(&s, &second).await);
     // Exactly one live record: the member's was replaced, not joined. This also shows the count
     // helper counts, so the "none left" assertion in the mid-invite test is not vacuous.
@@ -234,7 +234,7 @@ async fn an_invitation_that_appears_between_the_check_and_the_write_is_not_displ
     // retry must re-derive the approval against the ADMIN record and refuse.
     let admin_hash = "a".repeat(64);
     let moves = vec![(admin_hash.clone(), pending_record("ADMIN"))];
-    let Some(s) = racing_setup(moves, false) else { return };
+    let Some(s) = racing_setup(moves, false) else { unreachable!() };
     let member = seed_admin(&s.users, "member@example.com", "MEMBER").await;
 
     let refused = s
@@ -257,7 +257,7 @@ async fn an_index_that_keeps_moving_exhausts_the_retries_and_is_refused() {
     let moves = (0..3)
         .map(|n| (format!("{n:064x}"), pending_record("MEMBER")))
         .collect();
-    let Some(s) = racing_setup(moves, false) else { return };
+    let Some(s) = racing_setup(moves, false) else { unreachable!() };
     let admin = seed_admin(&s.users, "admin3@example.com", "ADMIN").await;
 
     let (events, capture) = crate::log_capture::capture_events();
@@ -278,7 +278,7 @@ async fn an_index_that_keeps_moving_exhausts_the_retries_and_is_refused() {
 
 #[tokio::test]
 async fn a_store_error_while_publishing_is_surfaced_and_leaves_nothing_behind() {
-    let Some(s) = racing_setup(Vec::new(), true) else { return };
+    let Some(s) = racing_setup(Vec::new(), true) else { unreachable!() };
     let admin = seed_admin(&s.users, "admin5@example.com", "ADMIN").await;
 
     let outcome = s

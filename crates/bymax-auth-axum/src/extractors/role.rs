@@ -60,7 +60,7 @@ mod tests {
     #[tokio::test]
     async fn admin_role_satisfies_and_user_role_is_insufficient() {
         // An ADMIN token satisfies `RequireRole<Admin>`; a USER token is rejected 403.
-        let Some(s) = scaffold(TokenDelivery::Cookie) else { return };
+        let Some(s) = scaffold(TokenDelivery::Cookie) else { unreachable!() };
         let admin_id = seed(&s.users, "admin@e.com", "ADMIN").await;
         let admin_token = dashboard_token(&s, &admin_id).await;
         let mut parts = parts_with_cookie(&admin_token);
@@ -80,7 +80,7 @@ mod tests {
     #[tokio::test]
     async fn require_role_rejects_an_unauthenticated_request() {
         // Without a token the underlying `AuthUser` resolution fails first.
-        let Some(s) = scaffold(TokenDelivery::Cookie) else { return };
+        let Some(s) = scaffold(TokenDelivery::Cookie) else { unreachable!() };
         let mut parts = parts_with_cookie("");
         let denied = RequireRole::<Admin>::from_request_parts(&mut parts, &s.state).await;
         assert!(matches!(

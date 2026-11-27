@@ -5,6 +5,8 @@
 
 #[path = "common/docker_gate.rs"]
 mod docker_gate;
+#[path = "common/published_address.rs"]
+mod published_address;
 #[path = "common/redis_ready.rs"]
 mod redis_ready;
 
@@ -50,9 +52,8 @@ async fn try_start() -> Option<TestRedis> {
         Ok(container) => container,
         Err(error) => return docker_gate::docker_unavailable("redis:8", error),
     };
-    let host = container.get_host().await.ok()?;
-    let port = container.get_host_port_ipv4(REDIS_PORT).await.ok()?;
-    let url = redis_ready::redis_url(&host.to_string(), port);
+    let (host, port) = published_address::host_and_port(&container, REDIS_PORT).await;
+    let url = redis_ready::redis_url(&host, port);
     redis_ready::wait_until_ready(&url).await;
     Some(TestRedis { container, url })
 }
@@ -82,7 +83,7 @@ async fn publish(stores: &RedisStores, hash: &str, ttl: u64, superseded: Option<
 #[tokio::test]
 async fn a_publication_gives_the_record_and_the_index_the_ttl() {
     let Some(redis) = try_start().await else { return };
-    let Some(stores) = redis.stores() else { return };
+    let Some(stores) = redis.stores() else { unreachable!() };
     assert!(publish(&stores, OLD, 600, None).await);
     for key in [INDEX.to_owned(), format!("auth:inv:{OLD}")] {
         let ttl = redis.ttl(&key).await;
@@ -99,7 +100,7 @@ async fn a_publication_gives_the_record_and_the_index_the_ttl() {
 #[tokio::test]
 async fn a_withdrawal_removes_both_keys() {
     let Some(redis) = try_start().await else { return };
-    let Some(stores) = redis.stores() else { return };
+    let Some(stores) = redis.stores() else { unreachable!() };
     assert!(publish(&stores, OLD, 600, None).await);
     let judged = stores.read_invitation_record(OLD).await.unwrap_or_default();
     assert!(matches!(
@@ -115,6 +116,6 @@ async fn a_withdrawal_removes_both_keys() {
 #[tokio::test]
 async fn the_redis_store_keeps_the_invitation_index_rules() {
     let Some(redis) = try_start().await else { return };
-    let Some(stores) = redis.stores() else { return };
+    let Some(stores) = redis.stores() else { unreachable!() };
     run_invitation_index_scenarios(&stores).await;
 }

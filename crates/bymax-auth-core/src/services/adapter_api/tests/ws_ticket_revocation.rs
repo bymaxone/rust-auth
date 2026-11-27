@@ -30,7 +30,7 @@ fn dashboard_subject(
 
 #[tokio::test]
 async fn a_live_session_redeems_its_ticket() {
-    let Some(h) = harness(base_config(), None) else { return };
+    let Some(h) = harness(base_config(), None) else { unreachable!() };
     let claims = seeded_claims(&h).await;
     let ticket = minted(&h, &claims).await;
     assert!(!ticket.is_empty());
@@ -42,7 +42,7 @@ async fn a_live_session_redeems_its_ticket() {
 #[tokio::test]
 async fn a_ticket_minted_before_logout_is_refused() {
     // Logout blacklists the jti of the token it was handed; the ticket carries that jti.
-    let Some(h) = harness(base_config(), None) else { return };
+    let Some(h) = harness(base_config(), None) else { unreachable!() };
     let claims = seeded_claims(&h).await;
     let ticket = minted(&h, &claims).await;
     assert!(
@@ -60,7 +60,7 @@ async fn a_ticket_minted_before_logout_is_refused() {
 #[tokio::test]
 async fn a_ticket_minted_before_an_epoch_bump_is_refused() {
     // A password reset or sign-out-everywhere bumps the account's epoch.
-    let Some(h) = harness(base_config(), None) else { return };
+    let Some(h) = harness(base_config(), None) else { unreachable!() };
     let claims = seeded_claims(&h).await;
     let ticket = minted(&h, &claims).await;
     assert!(
@@ -79,7 +79,7 @@ async fn a_ticket_minted_before_an_epoch_bump_is_refused() {
 async fn a_ticket_minted_after_an_epoch_bump_from_a_current_token_is_accepted() {
     // The comparison is "current epoch above the ticket's": a token stamped with the bumped
     // epoch mints a ticket that redeems.
-    let Some(h) = harness(base_config(), None) else { return };
+    let Some(h) = harness(base_config(), None) else { unreachable!() };
     let claims = seeded_claims(&h).await;
     let bumped = h
         .engine
@@ -123,7 +123,7 @@ fn snapshot(tenant_id: Option<&str>, jti: &str, epoch: u64) -> WsTicketSnapshot 
 
 #[tokio::test]
 async fn a_ticket_without_an_identifier_to_check_is_refused() {
-    let Some(h) = harness(base_config(), None) else { return };
+    let Some(h) = harness(base_config(), None) else { unreachable!() };
     let ticket = stored(&h, &snapshot(Some("t1"), "", 0)).await;
 
     let redeemed = h.engine.redeem_ws_ticket(&ticket, None).await;
@@ -136,7 +136,7 @@ async fn a_ticket_that_names_no_usable_tenant_is_refused() {
     // one, was not written by it. Redemption would otherwise hand the socket dashboard claims
     // whose tenant is the empty string. Every other field is live, and the answer is the one an
     // unknown ticket gets.
-    let Some(h) = harness(base_config(), None) else { return };
+    let Some(h) = harness(base_config(), None) else { unreachable!() };
     for tenant in [None, Some("")] {
         let ticket = stored(&h, &snapshot(tenant, "jti-live", 0)).await;
         let redeemed = h.engine.redeem_ws_ticket(&ticket, None).await;
@@ -150,7 +150,7 @@ async fn a_ticket_that_names_no_usable_tenant_is_refused() {
 #[tokio::test]
 async fn a_revoked_ticket_gets_the_answer_of_an_unknown_one() {
     // No oracle: a revoked ticket and a ticket that never existed are the same refusal.
-    let Some(h) = harness(base_config(), None) else { return };
+    let Some(h) = harness(base_config(), None) else { unreachable!() };
     let claims = seeded_claims(&h).await;
     let ticket = minted(&h, &claims).await;
     assert!(

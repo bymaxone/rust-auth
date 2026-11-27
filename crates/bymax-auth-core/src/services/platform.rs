@@ -678,8 +678,7 @@ mod tests {
         stores: Arc<InMemoryStores>,
     }
 
-    /// Build a platform harness from `cfg`. Returns `None` if assembly somehow fails, so callers
-    /// stay panic-free with `let-else`.
+    /// Build a platform harness from `cfg`. Returns `None` if assembly somehow fails.
     fn harness(cfg: AuthConfig) -> Option<PlatformHarness> {
         harness_with_hooks(cfg, None)
     }
@@ -749,8 +748,8 @@ mod tests {
         // locked that operator out of the console — and a successful one cleared the lockout
         // mid-attack. nest-auth writes the same counter into the same Redis, so the preimage is
         // read from the shared contract rather than repeated here.
-        let Some(h) = harness(platform_config()) else { return };
-        let Some(service) = h.engine.platform_auth() else { return };
+        let Some(h) = harness(platform_config()) else { unreachable!() };
+        let Some(service) = h.engine.platform_auth() else { unreachable!() };
 
         let template = crate::services::contract_preimage("platform")
             .replace("{email}", "operator@example.com");
@@ -791,9 +790,8 @@ mod tests {
 
     #[test]
     fn engine_exposes_the_platform_service_when_the_domain_is_enabled() {
-        // The inverse, built the same way so nothing can skip: every platform test below
-        // recovers the service with `let Some(..) else { return }`, so an engine that stopped
-        // handing it back would quietly skip the whole platform tier rather than fail it.
+        // The inverse: every platform test below recovers the service through the harness, so an
+        // engine that stopped handing it back is named here rather than by each of them.
         let admins = Arc::new(InMemoryPlatformUserRepository::new());
         let stores = Arc::new(InMemoryStores::new());
         let built = AuthEngine::builder()
@@ -814,11 +812,11 @@ mod tests {
         // changes in that window is not random: it is a rotation BECAUSE the old one was
         // compromised, where the attacker's own login is what scheduled this task. An
         // unconditional write re-installs the compromised credential over the new one.
-        let Some(h) = harness(platform_config()) else { return };
+        let Some(h) = harness(platform_config()) else { unreachable!() };
         let id = seed_admin(&h.admins, "rotate@admin.io", "oldsecret77");
-        // Read as one expression rather than a `let ... else { return }`: the else arm of a
-        // binding that cannot fail is a branch no test can take, and this crate's coverage gate
-        // is 100% of lines.
+        // Read as one expression rather than a `let ... else`: the else arm of a binding that
+        // cannot fail is a branch no test can take, and this crate's coverage gate is 100% of
+        // lines.
         let original = h
             .admins
             .find_by_id(&id)
@@ -867,14 +865,14 @@ mod tests {
     async fn login_issues_a_platform_session_with_no_tenant() {
         // A correct password for an active admin returns a full platform session; me/refresh
         // then work against the platform keyspace.
-        let Some(h) = harness(platform_config()) else { return };
+        let Some(h) = harness(platform_config()) else { unreachable!() };
         let _ = seed_admin(&h.admins, "ok@admin.io", "s3cret-pass");
-        let Some(svc) = h.engine.platform_auth() else { return };
+        let Some(svc) = h.engine.platform_auth() else { unreachable!() };
         let result = svc
             .login("ok@admin.io", "s3cret-pass", "1.2.3.4", "agent")
             .await;
         assert!(matches!(&result, Ok(PlatformLoginResult::Success(_))));
-        let Ok(PlatformLoginResult::Success(auth)) = result else { return };
+        let Ok(PlatformLoginResult::Success(auth)) = result else { unreachable!() };
         assert_eq!(auth.admin.email, "ok@admin.io");
         assert!(!auth.access_token.is_empty());
 
@@ -897,9 +895,9 @@ mod tests {
     async fn unknown_admin_and_wrong_password_are_indistinguishable() {
         // Both failure paths return InvalidCredentials and both honor the timing floor, so
         // neither status/body nor latency leaks whether the admin exists.
-        let Some(h) = harness(platform_config()) else { return };
+        let Some(h) = harness(platform_config()) else { unreachable!() };
         let _ = seed_admin(&h.admins, "real@admin.io", "right-pass");
-        let Some(svc) = h.engine.platform_auth() else { return };
+        let Some(svc) = h.engine.platform_auth() else { unreachable!() };
 
         let unknown_started = Instant::now();
         let unknown = svc.login("ghost@admin.io", "any", "1.2.3.4", "agent").await;
@@ -921,9 +919,9 @@ mod tests {
     async fn lockout_triggers_after_max_attempts() {
         // The default cap is five failures; the sixth attempt is AccountLocked with a retry
         // hint, before any credential check — keyed by the platform brute-force identifier.
-        let Some(h) = harness(platform_config()) else { return };
+        let Some(h) = harness(platform_config()) else { unreachable!() };
         let _ = seed_admin(&h.admins, "lock@admin.io", "right");
-        let Some(svc) = h.engine.platform_auth() else { return };
+        let Some(svc) = h.engine.platform_auth() else { unreachable!() };
         for _ in 0..5 {
             let attempt = svc
                 .login("lock@admin.io", "wrong", "1.2.3.4", "agent")
@@ -957,18 +955,18 @@ mod tests {
         // whole lifetime. The refusal is compensated, not merely returned: the rotation above
         // already minted a live pair, and leaving it would hand back exactly the access this
         // gate exists to end.
-        let Some(h) = harness(platform_config()) else { return };
+        let Some(h) = harness(platform_config()) else { unreachable!() };
         let id = seed_admin(&h.admins, "ghost@admin.io", "glidingwalnut42");
         let signed_in = h
             .engine
             .platform_auth()
             .map(|svc| svc.login("ghost@admin.io", "glidingwalnut42", "1.2.3.4", "a"));
-        let Some(login) = signed_in else { return };
-        let Ok(PlatformLoginResult::Success(auth)) = login.await else { return };
+        let Some(login) = signed_in else { unreachable!() };
+        let Ok(PlatformLoginResult::Success(auth)) = login.await else { unreachable!() };
 
         assert!(h.admins.remove(&id));
 
-        let Some(svc) = h.engine.platform_auth() else { return };
+        let Some(svc) = h.engine.platform_auth() else { unreachable!() };
         let refused = svc.refresh(&auth.refresh_token, "1.2.3.4", "a").await;
         assert!(matches!(refused, Err(AuthError::RefreshTokenInvalid)));
 
@@ -983,7 +981,7 @@ mod tests {
         // Rotation works entirely from the stored `prt:` record, so without this backstop a
         // SUSPENDED or BANNED operator kept renewing access every fifteen minutes for the
         // refresh token's whole lifetime — on the highest-privilege identity in the system.
-        let Some(h) = harness(platform_config()) else { return };
+        let Some(h) = harness(platform_config()) else { unreachable!() };
         h.admins.insert(AuthPlatformUser {
             id: "admin-live".to_owned(),
             email: "live@admin.io".to_owned(),
@@ -999,14 +997,14 @@ mod tests {
             updated_at: OffsetDateTime::UNIX_EPOCH,
             created_at: OffsetDateTime::UNIX_EPOCH,
         });
-        let Some(svc) = h.engine.platform_auth() else { return };
+        let Some(svc) = h.engine.platform_auth() else { unreachable!() };
         let signed_in = svc.login("live@admin.io", "pw", "1.2.3.4", "a").await;
-        let Ok(PlatformLoginResult::Success(auth)) = signed_in else { return };
+        let Ok(PlatformLoginResult::Success(auth)) = signed_in else { unreachable!() };
 
         // While active, the rotation works.
         let rotated = svc.refresh(&auth.refresh_token, "1.2.3.4", "a").await;
         assert!(rotated.is_ok(), "an active admin must rotate: {rotated:?}");
-        let Ok(rotated) = rotated else { return };
+        let Ok(rotated) = rotated else { unreachable!() };
 
         // Suspended through the host's admin surface — the record in Redis is untouched.
         h.admins.insert(AuthPlatformUser {
@@ -1044,7 +1042,7 @@ mod tests {
         // record written at login, so a demotion from SUPER_ADMIN to SUPPORT had no effect on
         // a live console session: it kept minting SUPER_ADMIN-roled tokens for the refresh
         // token's whole lifetime, and every role check reads that claim.
-        let Some(h) = harness(platform_config()) else { return };
+        let Some(h) = harness(platform_config()) else { unreachable!() };
         let make = |role: &str, mfa: bool| AuthPlatformUser {
             id: "admin-demoted".to_owned(),
             email: "demoted@admin.io".to_owned(),
@@ -1061,9 +1059,9 @@ mod tests {
             created_at: OffsetDateTime::UNIX_EPOCH,
         };
         h.admins.insert(make("SUPER_ADMIN", false));
-        let Some(svc) = h.engine.platform_auth() else { return };
+        let Some(svc) = h.engine.platform_auth() else { unreachable!() };
         let signed_in = svc.login("demoted@admin.io", "pw", "1.2.3.4", "a").await;
-        let Ok(PlatformLoginResult::Success(auth)) = signed_in else { return };
+        let Ok(PlatformLoginResult::Success(auth)) = signed_in else { unreachable!() };
 
         // One rotation to put SUPER_ADMIN into this lineage, then the demotion.
         let promoted = svc.refresh(&auth.refresh_token, "1.2.3.4", "a").await;
@@ -1071,14 +1069,14 @@ mod tests {
             promoted.is_ok(),
             "the first rotation must succeed: {promoted:?}"
         );
-        let Ok(promoted) = promoted else { return };
+        let Ok(promoted) = promoted else { unreachable!() };
         let before = h
             .engine
             .tokens()
             .verify_platform_access(&promoted.access_token)
             .await;
         assert!(before.is_ok(), "the rotated token must verify: {before:?}");
-        let Ok(before) = before else { return };
+        let Ok(before) = before else { unreachable!() };
         assert_eq!(before.role, "SUPER_ADMIN");
 
         h.admins.insert(make("SUPPORT", false));
@@ -1087,14 +1085,14 @@ mod tests {
             rotated.is_ok(),
             "the demoting rotation must succeed: {rotated:?}"
         );
-        let Ok(rotated) = rotated else { return };
+        let Ok(rotated) = rotated else { unreachable!() };
         let after = h
             .engine
             .tokens()
             .verify_platform_access(&rotated.access_token)
             .await;
         assert!(after.is_ok(), "the demoted token must verify: {after:?}");
-        let Ok(after) = after else { return };
+        let Ok(after) = after else { unreachable!() };
         assert_eq!(
             after.role, "SUPPORT",
             "the demotion never reached the token"
@@ -1109,7 +1107,7 @@ mod tests {
             with_mfa.is_ok(),
             "the MFA rotation must succeed: {with_mfa:?}"
         );
-        let Ok(with_mfa) = with_mfa else { return };
+        let Ok(with_mfa) = with_mfa else { unreachable!() };
         let claims = h
             .engine
             .tokens()
@@ -1119,7 +1117,7 @@ mod tests {
             claims.is_ok(),
             "the MFA-stamped token must verify: {claims:?}"
         );
-        let Ok(claims) = claims else { return };
+        let Ok(claims) = claims else { unreachable!() };
         assert!(claims.mfa_enabled, "the MFA flag never reached the token");
     }
 
@@ -1128,7 +1126,7 @@ mod tests {
         // Every blocked status maps to its own 403 — for the holder of the password. The gate
         // runs AFTER the KDF now: answering before it enumerated operator accounts and read
         // their moderation state, so each call here proves the password first.
-        let Some(h) = harness(platform_config()) else { return };
+        let Some(h) = harness(platform_config()) else { unreachable!() };
         for (email, status) in [
             ("banned@admin.io", "BANNED"),
             ("inactive@admin.io", "INACTIVE"),
@@ -1151,7 +1149,7 @@ mod tests {
                 created_at: OffsetDateTime::UNIX_EPOCH,
             });
         }
-        let Some(svc) = h.engine.platform_auth() else { return };
+        let Some(svc) = h.engine.platform_auth() else { unreachable!() };
         assert!(matches!(
             svc.login("banned@admin.io", "pw", "1.2.3.4", "a").await,
             Err(AuthError::AccountBanned)
@@ -1178,8 +1176,8 @@ mod tests {
         // specific arm falls back to AccountInactive.
         let mut cfg = platform_config();
         cfg.blocked_statuses = vec!["pending".to_owned(), "FROZEN".to_owned()];
-        let Some(h) = harness(cfg) else { return };
-        let Some(svc) = h.engine.platform_auth() else { return };
+        let Some(h) = harness(cfg) else { unreachable!() };
+        let Some(svc) = h.engine.platform_auth() else { unreachable!() };
         assert!(matches!(
             svc.assert_not_blocked("pending"),
             Err(AuthError::PendingApproval)
@@ -1193,8 +1191,8 @@ mod tests {
     #[tokio::test]
     async fn me_returns_token_invalid_for_an_unknown_admin() {
         // `me` projects the stored admin; an unknown subject is TokenInvalid.
-        let Some(h) = harness(platform_config()) else { return };
-        let Some(svc) = h.engine.platform_auth() else { return };
+        let Some(h) = harness(platform_config()) else { unreachable!() };
+        let Some(svc) = h.engine.platform_auth() else { unreachable!() };
         assert!(matches!(
             svc.me("missing").await,
             Err(AuthError::TokenInvalid)
@@ -1264,11 +1262,11 @@ mod tests {
             .redis_stores(stores)
             .hooks(hooks)
             .build();
-        let Ok(engine) = built else { return };
+        let Ok(engine) = built else { unreachable!() };
         let id = seed_admin(&admins, "hooked@admin.io", "pw");
-        let Some(svc) = engine.platform_auth() else { return };
+        let Some(svc) = engine.platform_auth() else { unreachable!() };
         let logged = svc.login("hooked@admin.io", "pw", "1.2.3.4", "agent").await;
-        let Ok(PlatformLoginResult::Success(auth)) = logged else { return };
+        let Ok(PlatformLoginResult::Success(auth)) = logged else { unreachable!() };
         assert!(
             svc.logout(&auth.access_token, &auth.refresh_token)
                 .await
@@ -1292,11 +1290,11 @@ mod tests {
         // refresh session of the highest-privilege identity in the system stayed live on a
         // console they believed they had left. The refresh token is what authorizes this; the
         // stored record names its owner.
-        let Some(h) = harness(platform_config()) else { return };
+        let Some(h) = harness(platform_config()) else { unreachable!() };
         let id = seed_admin(&h.admins, "away@admin.io", "pw");
-        let Some(svc) = h.engine.platform_auth() else { return };
+        let Some(svc) = h.engine.platform_auth() else { unreachable!() };
         let logged = svc.login("away@admin.io", "pw", "1.2.3.4", "agent").await;
-        let Ok(PlatformLoginResult::Success(auth)) = logged else { return };
+        let Ok(PlatformLoginResult::Success(auth)) = logged else { unreachable!() };
 
         // No access token at all — the shape a client sends once its bearer token has expired
         // and it has nothing live to present.
@@ -1315,11 +1313,11 @@ mod tests {
     async fn logout_blacklists_the_jti_and_revokes_the_session() {
         // After logout the platform access jti is blacklisted (verify rejects it) and the
         // refresh session is gone, so the refresh token no longer rotates.
-        let Some(h) = harness(platform_config()) else { return };
+        let Some(h) = harness(platform_config()) else { unreachable!() };
         let _id = seed_admin(&h.admins, "out@admin.io", "pw");
-        let Some(svc) = h.engine.platform_auth() else { return };
+        let Some(svc) = h.engine.platform_auth() else { unreachable!() };
         let logged = svc.login("out@admin.io", "pw", "1.2.3.4", "agent").await;
-        let Ok(PlatformLoginResult::Success(auth)) = logged else { return };
+        let Ok(PlatformLoginResult::Success(auth)) = logged else { unreachable!() };
         assert!(
             svc.logout(&auth.access_token, &auth.refresh_token)
                 .await
@@ -1349,14 +1347,14 @@ mod tests {
         // grace window. The consumed-family marker outlives the grace pointer, so that follow-up
         // is now caught as a REUSE of a consumed token — the signature of a stolen token — and
         // revokes the whole family, taking the live rotated token down with it.
-        let Some(h) = harness(platform_config()) else { return };
+        let Some(h) = harness(platform_config()) else { unreachable!() };
         let _id = seed_admin(&h.admins, "grace@admin.io", "pw");
-        let Some(svc) = h.engine.platform_auth() else { return };
+        let Some(svc) = h.engine.platform_auth() else { unreachable!() };
         let logged = svc.login("grace@admin.io", "pw", "1.2.3.4", "agent").await;
-        let Ok(PlatformLoginResult::Success(auth)) = logged else { return };
+        let Ok(PlatformLoginResult::Success(auth)) = logged else { unreachable!() };
         // Rotate: the old refresh token is consumed and a grace pointer is planted for it.
         let rotation = svc.refresh(&auth.refresh_token, "1.2.3.4", "agent").await;
-        let Ok(rotated) = rotation else { return };
+        let Ok(rotated) = rotation else { unreachable!() };
         // Logging out the OLD token cleans its grace pointer.
         assert!(
             svc.logout(&auth.access_token, &auth.refresh_token)
@@ -1381,13 +1379,13 @@ mod tests {
     #[tokio::test]
     async fn revoke_all_invalidates_every_platform_session() {
         // Two logins for the same admin, then revoke-all leaves neither refresh token usable.
-        let Some(h) = harness(platform_config()) else { return };
+        let Some(h) = harness(platform_config()) else { unreachable!() };
         let id = seed_admin(&h.admins, "all@admin.io", "pw");
-        let Some(svc) = h.engine.platform_auth() else { return };
+        let Some(svc) = h.engine.platform_auth() else { unreachable!() };
         let first_login = svc.login("all@admin.io", "pw", "1.2.3.4", "agent").await;
-        let Ok(PlatformLoginResult::Success(first)) = first_login else { return };
+        let Ok(PlatformLoginResult::Success(first)) = first_login else { unreachable!() };
         let second_login = svc.login("all@admin.io", "pw", "5.6.7.8", "agent").await;
-        let Ok(PlatformLoginResult::Success(second)) = second_login else { return };
+        let Ok(PlatformLoginResult::Success(second)) = second_login else { unreachable!() };
         // Before the revoke, the first login's ACCESS token verifies.
         assert!(
             h.engine
@@ -1427,7 +1425,7 @@ mod tests {
     #[tokio::test]
     async fn mfa_enabled_admin_gets_a_platform_challenge() {
         // A correct password for an MFA-enabled admin returns the challenge, not tokens.
-        let Some(h) = harness(platform_config()) else { return };
+        let Some(h) = harness(platform_config()) else { unreachable!() };
         let id = seed_admin(&h.admins, "mfa@admin.io", "pw");
         let _ = h
             .admins
@@ -1440,7 +1438,7 @@ mod tests {
                 },
             )
             .await;
-        let Some(svc) = h.engine.platform_auth() else { return };
+        let Some(svc) = h.engine.platform_auth() else { unreachable!() };
         let result = svc.login("mfa@admin.io", "pw", "1.2.3.4", "agent").await;
         assert!(matches!(
             result,
@@ -1455,7 +1453,7 @@ mod tests {
     async fn no_dashboard_path_is_reachable_for_a_platform_admin() {
         // A platform admin is not a dashboard user: the dashboard login cannot find them (they
         // live in a separate repository), so the dashboard surface is unreachable for them.
-        let Some(h) = harness(platform_config()) else { return };
+        let Some(h) = harness(platform_config()) else { unreachable!() };
         let _ = seed_admin(&h.admins, "iso@admin.io", "pw");
         let dashboard = h
             .engine
@@ -1482,7 +1480,7 @@ mod tests {
         // rather than being handed a session that skips the second factor.
         let mut cfg = platform_config();
         cfg.mfa = None; // no MFA surface in this build
-        let Some(h) = harness(cfg) else { return };
+        let Some(h) = harness(cfg) else { unreachable!() };
         let id = seed_admin(&h.admins, "nomfa@admin.io", "pw");
         let _ = h
             .admins
@@ -1495,7 +1493,7 @@ mod tests {
                 },
             )
             .await;
-        let Some(svc) = h.engine.platform_auth() else { return };
+        let Some(svc) = h.engine.platform_auth() else { unreachable!() };
         let result = svc.login("nomfa@admin.io", "pw", "1.2.3.4", "agent").await;
         assert!(matches!(result, Err(AuthError::InvalidCredentials)));
     }
@@ -1530,11 +1528,11 @@ mod tests {
         // The upgrade needs *both* the toggle and a genuinely stale hash. Either one alone
         // must not rewrite a current one: a rehash on every login is a write on the hot path
         // for no gain, and it would leave the toggle disabling nothing.
-        let Some(h) = harness(platform_config()) else { return };
+        let Some(h) = harness(platform_config()) else { unreachable!() };
         let id = seed_admin(&h.admins, "fresh@admin.io", "s3cret-pass");
         let before = h.admins.find_by_id(&id).await;
-        let Ok(Some(before)) = before else { return };
-        let Some(svc) = h.engine.platform_auth() else { return };
+        let Ok(Some(before)) = before else { unreachable!() };
+        let Some(svc) = h.engine.platform_auth() else { unreachable!() };
         assert!(matches!(
             svc.login("fresh@admin.io", "s3cret-pass", "1.2.3.4", "agent")
                 .await,
@@ -1543,7 +1541,7 @@ mod tests {
         // Long enough for a spawned rehash to have landed if one had been spawned.
         tokio::time::sleep(Duration::from_millis(500)).await;
         let after = h.admins.find_by_id(&id).await;
-        let Ok(Some(after)) = after else { return };
+        let Ok(Some(after)) = after else { unreachable!() };
         assert_eq!(before.password_hash, after.password_hash);
     }
 
@@ -1553,7 +1551,7 @@ mod tests {
         // detached task replaces the stored hash with a stronger one.
         #[cfg(feature = "scrypt")]
         {
-            let Some(h) = harness(platform_config()) else { return };
+            let Some(h) = harness(platform_config()) else { unreachable!() };
             let weak_params = bymax_auth_crypto::password::PasswordParams {
                 active: bymax_auth_crypto::password::PasswordAlgorithm::Scrypt,
                 scrypt: bymax_auth_crypto::password::ScryptParams {
@@ -1582,7 +1580,7 @@ mod tests {
                 updated_at: OffsetDateTime::UNIX_EPOCH,
                 created_at: OffsetDateTime::UNIX_EPOCH,
             });
-            let Some(svc) = h.engine.platform_auth() else { return };
+            let Some(svc) = h.engine.platform_auth() else { unreachable!() };
             let result = svc.login("weak@admin.io", "pw", "1.2.3.4", "agent").await;
             assert!(matches!(result, Ok(PlatformLoginResult::Success(_))));
             // Poll rather than sleep a fixed span: the rehash is one derivation at the
@@ -1601,7 +1599,7 @@ mod tests {
             // Asserted before the destructure so a rehash that never landed fails loudly here;
             // the `let-else` below then cannot swallow it into a silent pass.
             assert!(stored.is_some(), "the stored hash was never upgraded");
-            let Some(stored) = stored else { return };
+            let Some(stored) = stored else { unreachable!() };
             assert_ne!(stored.password_hash, weak_hash);
             // The other fire-and-forget task on this path: the successful login is stamped.
             assert!(stored.last_login_at.is_some());

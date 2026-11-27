@@ -128,7 +128,7 @@ mod tests {
 
     #[tokio::test]
     async fn admits_self_or_admin_and_forbids_others() {
-        let Some(s) = scaffold(TokenDelivery::Cookie) else { return };
+        let Some(s) = scaffold(TokenDelivery::Cookie) else { unreachable!() };
         // A USER hitting their own id is admitted (self).
         let user_id = seed(&s.users, "self@e.com", "USER").await;
         let user_token = dashboard_token(&s, &user_id).await;
@@ -151,7 +151,7 @@ mod tests {
         // Mounted on a route without a `{user_id}` capture, the `Path<String>` extraction fails
         // and the guard refuses as a role failure (403) rather than silently admitting — the
         // absent-path-segment arm.
-        let Some(s) = scaffold(TokenDelivery::Cookie) else { return };
+        let Some(s) = scaffold(TokenDelivery::Cookie) else { unreachable!() };
         let user_id = seed(&s.users, "noseg@e.com", "USER").await;
         let token = dashboard_token(&s, &user_id).await;
 

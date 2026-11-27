@@ -182,7 +182,7 @@ async fn the_address_built_for_localhost_reaches_the_ipv4_listener_not_the_one_o
 
     let pair = dual_stack_pair().await;
     assert!(pair.is_ok(), "{pair:?}");
-    let Ok(Some((v6, v4, port))) = pair else { return };
+    let Ok(Some((v6, v4, port))) = pair else { unreachable!() };
     tokio::spawn(async move {
         while let Ok((mut socket, _)) = v6.accept().await {
             let _ = socket.write_all(b"HTTP/1.1 400 Bad Request\r\n\r\n").await;
@@ -273,7 +273,7 @@ async fn a_connection_closed_before_the_reply_is_not_ready() {
 async fn a_listener_that_accepts_and_never_answers_fails_the_attempt_after_the_timeout() {
     let listener = TcpListener::bind("127.0.0.1:0").await;
     assert!(listener.is_ok(), "no loopback listener: {listener:?}");
-    let Ok(listener) = listener else { return };
+    let Ok(listener) = listener else { unreachable!() };
     let address = listener.local_addr().map(|address| address.to_string());
     assert!(address.is_ok(), "no local address: {address:?}");
     tokio::spawn(async move {

@@ -45,7 +45,7 @@ fn names_refresh_token(response: &Captured) -> bool {
 
 #[tokio::test]
 async fn an_oversize_refresh_cookie_is_refused_where_the_token_would_be_used() {
-    let Some((_h, app)) = app_in(TokenDelivery::Cookie).await else { return };
+    let Some((_h, app)) = app_in(TokenDelivery::Cookie).await else { unreachable!() };
     let (access, refresh) = cookie_login(&app).await;
     let oversize = "x".repeat(LIMIT + 1);
     let refused = [
@@ -78,7 +78,7 @@ async fn an_oversize_refresh_cookie_is_refused_where_the_token_would_be_used() {
 
 #[tokio::test]
 async fn the_bound_is_inclusive_and_an_empty_cookie_is_no_token() {
-    let Some((_h, app)) = app_in(TokenDelivery::Cookie).await else { return };
+    let Some((_h, app)) = app_in(TokenDelivery::Cookie).await else { unreachable!() };
     for value in ["x".repeat(LIMIT), String::new()] {
         let response = Req::post("/auth/refresh")
             .cookie("refresh_token", &value)
@@ -92,7 +92,7 @@ async fn the_bound_is_inclusive_and_an_empty_cookie_is_no_token() {
 
 #[tokio::test]
 async fn logout_treats_an_oversize_refresh_cookie_as_no_token() {
-    let Some((_h, app)) = app_in(TokenDelivery::Cookie).await else { return };
+    let Some((_h, app)) = app_in(TokenDelivery::Cookie).await else { unreachable!() };
     let (access, refresh) = cookie_login(&app).await;
     let logout = Req::post("/auth/logout")
         .cookie("access_token", &access)
@@ -121,7 +121,7 @@ async fn logout_treats_an_oversize_refresh_cookie_as_no_token() {
 
 #[tokio::test]
 async fn logout_still_refuses_a_body_value_past_the_bound() {
-    let Some((_h, app)) = app_in(TokenDelivery::Bearer).await else { return };
+    let Some((_h, app)) = app_in(TokenDelivery::Bearer).await else { unreachable!() };
     let login = login(&app, "u@e.com", "glidingwalnut42").await;
     let access = login.json()["accessToken"]
         .as_str()
@@ -137,7 +137,7 @@ async fn logout_still_refuses_a_body_value_past_the_bound() {
 
 #[tokio::test]
 async fn under_both_an_oversize_cookie_on_logout_leaves_the_body_token_in_charge() {
-    let Some((_h, app)) = app_in(TokenDelivery::Both).await else { return };
+    let Some((_h, app)) = app_in(TokenDelivery::Both).await else { unreachable!() };
     let login = login(&app, "u@e.com", "glidingwalnut42").await;
     let body = login.json();
     let access = body["accessToken"].as_str().unwrap_or_default().to_owned();

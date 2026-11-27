@@ -38,7 +38,7 @@ pub(super) async fn signed_in_with(
 
 #[tokio::test]
 async fn a_refused_blacklist_write_fails_the_logout_and_a_retry_finishes_it() {
-    let Some((h, auth)) = signed_in(None).await else { return };
+    let Some((h, auth)) = signed_in(None).await else { unreachable!() };
 
     h.stores.fail_next_blacklist_writes(1);
     let outcome = h
@@ -77,7 +77,7 @@ async fn refused_cleanup_writes_fail_the_logout_yet_the_access_token_is_revoked(
     // The session delete and the grace-pointer delete both refuse. The blacklist write is
     // attempted regardless and lands; the logout reports the failure and the retry clears the
     // session. Both refusals are logged: the log is the operator's only view of which step failed.
-    let Some((h, auth)) = signed_in(None).await else { return };
+    let Some((h, auth)) = signed_in(None).await else { unreachable!() };
 
     h.stores.fail_next_cleanup_writes(2);
     let (events, capture) = crate::log_capture::capture_events();
@@ -111,7 +111,7 @@ async fn the_hook_fires_once_the_logout_has_actually_succeeded() {
     // A failed logout signed nobody out, so it notifies nobody; the retry that completes it does.
     let spy = Arc::new(LogoutSpy::default());
     let hooks: Arc<dyn crate::traits::AuthHooks> = spy.clone();
-    let Some((h, auth)) = signed_in(Some(hooks)).await else { return };
+    let Some((h, auth)) = signed_in(Some(hooks)).await else { unreachable!() };
 
     h.stores.fail_next_cleanup_writes(1);
     assert!(h.engine.logout("", &auth.refresh_token).await.is_err());
@@ -127,7 +127,7 @@ async fn the_hook_fires_once_the_logout_has_actually_succeeded() {
 async fn a_session_lookup_that_fails_ends_the_logout_before_any_write() {
     // The owner is read first and fails closed: nothing is blacklisted and nothing is deleted,
     // so the retry starts from the same state the first attempt found.
-    let Some((h, auth)) = signed_in(None).await else { return };
+    let Some((h, auth)) = signed_in(None).await else { unreachable!() };
 
     h.stores.fail_next_session_lookups(1);
     let outcome = h
@@ -161,7 +161,7 @@ async fn a_refused_session_delete_keeps_the_session_indexed_for_a_later_revoke_a
     // The credential and its index entry go together or not at all: a delete that was refused
     // leaves the session in the account's index, so the next sign-out-everywhere, which only
     // reaches indexed credentials, still kills it once the store is healthy again.
-    let Some((h, auth)) = signed_in(None).await else { return };
+    let Some((h, auth)) = signed_in(None).await else { unreachable!() };
 
     h.stores.fail_next_cleanup_writes(1);
     let outcome = h
@@ -195,7 +195,7 @@ async fn a_retry_after_a_failed_attempt_names_the_owner_and_announces_once() {
     // announces it, and a further logout of the same token announces nothing more.
     let spy = Arc::new(LogoutSpy::default());
     let hooks: Arc<dyn crate::traits::AuthHooks> = spy.clone();
-    let Some((h, auth)) = signed_in(Some(hooks)).await else { return };
+    let Some((h, auth)) = signed_in(Some(hooks)).await else { unreachable!() };
 
     h.stores.fail_next_blacklist_writes(1);
     let first = h

@@ -136,7 +136,7 @@ fn answered_nothing(answer: &Captured) -> bool {
 
 #[tokio::test]
 async fn an_invitation_is_listed_under_the_canonical_address_without_its_token() {
-    let Some(team) = team().await else { return };
+    let Some(team) = team().await else { unreachable!() };
     let invited = team.invite("  New@E.com ", "member").await;
     assert!(answered_nothing(&invited), "{}", invited.json());
     let listed = team.pending("").await;
@@ -170,7 +170,7 @@ async fn an_invitation_is_listed_under_the_canonical_address_without_its_token()
 
 #[tokio::test]
 async fn the_list_is_paged_by_its_query() {
-    let Some(team) = team().await else { return };
+    let Some(team) = team().await else { unreachable!() };
     for email in ["a@e.com", "b@e.com"] {
         assert!(answered_nothing(&team.invite(email, "member").await));
     }
@@ -192,7 +192,7 @@ async fn the_list_is_paged_by_its_query() {
 #[tokio::test]
 async fn invite_and_a_resend_or_revoke_with_nothing_pending_answer_the_same_with_or_without_an_account()
  {
-    let Some(team) = team().await else { return };
+    let Some(team) = team().await else { unreachable!() };
     seed_user(&team.h, "known@e.com", PASSWORD, "USER").await;
     let addresses = ["known@e.com", "unknown@e.com"];
     for email in addresses {
@@ -218,7 +218,7 @@ async fn invite_and_a_resend_or_revoke_with_nothing_pending_answer_the_same_with
 
 #[tokio::test]
 async fn a_resend_inside_the_cooldown_is_a_limit() {
-    let Some(team) = team().await else { return };
+    let Some(team) = team().await else { unreachable!() };
     assert!(answered_nothing(&team.invite("a@e.com", "member").await));
     let again = team
         .post(&team.owner, RESEND, json!({ "email": "a@e.com" }))
@@ -229,7 +229,7 @@ async fn a_resend_inside_the_cooldown_is_a_limit() {
 
 #[tokio::test]
 async fn a_preview_says_what_the_token_is_for_and_nothing_once_revoked() {
-    let Some(team) = team().await else { return };
+    let Some(team) = team().await else { unreachable!() };
     assert!(answered_nothing(&team.invite("new@e.com", "member").await));
     let token = team.last_token();
     let preview = team.preview(&token).await;
@@ -257,9 +257,7 @@ async fn a_preview_says_what_the_token_is_for_and_nothing_once_revoked() {
 
 #[tokio::test]
 async fn the_role_ceiling_and_an_existing_membership_are_refused() {
-    let Some(team) = team_with_a_managing_admin().await else {
-        return;
-    };
+    let Some(team) = team_with_a_managing_admin().await else { unreachable!() };
     let below = json!({ "email": "y@e.com", "role": "member" });
     let allowed = team.post(&team.admin, INVITATIONS, below).await;
     assert!(answered_nothing(&allowed), "{}", allowed.json());
@@ -279,7 +277,7 @@ async fn the_role_ceiling_and_an_existing_membership_are_refused() {
 
 #[tokio::test]
 async fn managing_invitations_needs_a_credential_and_the_permission() {
-    let Some(team) = team().await else { return };
+    let Some(team) = team().await else { unreachable!() };
     let calls = [
         (Method::GET, INVITATIONS, None),
         (
@@ -327,9 +325,7 @@ async fn standing(team: &Team) -> Value {
 
 #[tokio::test]
 async fn an_admin_resend_or_revoke_of_an_owner_invitation_changes_nothing() {
-    let Some(team) = team_with_a_managing_admin().await else {
-        return;
-    };
+    let Some(team) = team_with_a_managing_admin().await else { unreachable!() };
     assert!(answered_nothing(&team.invite("o@e.com", "owner").await));
     let before = standing(&team).await;
     for path in [RESEND, REVOKE] {
@@ -361,7 +357,7 @@ async fn manager_of_w2(team: &Team) -> String {
 
 #[tokio::test]
 async fn a_manager_of_another_workspace_neither_sees_nor_changes_an_invitation() {
-    let Some(team) = team().await else { return };
+    let Some(team) = team().await else { unreachable!() };
     assert!(answered_nothing(&team.invite("a@e.com", "member").await));
     let before = standing(&team).await;
     let outsider = manager_of_w2(&team).await;
@@ -424,7 +420,7 @@ async fn seed_bootstrap(team: &Team, token: &str) -> bool {
 
 #[tokio::test]
 async fn a_bootstrap_preview_names_no_inviter() {
-    let Some(team) = team().await else { return };
+    let Some(team) = team().await else { unreachable!() };
     let token = "b".repeat(64);
     assert!(seed_bootstrap(&team, &token).await);
     let previewed = team.preview(&token).await;
@@ -472,7 +468,7 @@ fn refused_bodies() -> Vec<(&'static str, Value, &'static str)> {
 
 #[tokio::test]
 async fn a_body_outside_the_shared_rules_is_refused_by_field() {
-    let Some(team) = team().await else { return };
+    let Some(team) = team().await else { unreachable!() };
     for (path, body, field) in refused_bodies() {
         let refused = team.post(&team.owner, path, body.clone()).await;
         assert_eq!(refused.status, StatusCode::BAD_REQUEST, "{path} {body}");
@@ -498,7 +494,7 @@ async fn each_invitation_route_is_served_under_the_limit_it_declares() {
             workspaces: true,
             ..EngineSpec::default()
         }) else {
-            return;
+            unreachable!()
         };
         let app = router_with_one_narrow_limit(&h, *narrow);
         let anonymous =

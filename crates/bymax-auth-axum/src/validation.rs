@@ -579,12 +579,13 @@ mod tests {
     #[test]
     fn run_garde_collects_per_field_failures() {
         // An invalid DTO yields per-field validation details; a valid one passes.
-        let Ok(bad) = deserialize_query::<OAuthInitiateQuery>("tenantId=") else { return };
+        let Ok(bad) = deserialize_query::<OAuthInitiateQuery>("tenantId=") else { unreachable!() };
         assert!(matches!(
             run_garde(&bad),
             Err(AuthRejection(AuthError::Validation { details })) if !details.is_empty()
         ));
-        let Ok(good) = deserialize_query::<OAuthInitiateQuery>("tenantId=t1") else { return };
+        let good = deserialize_query::<OAuthInitiateQuery>("tenantId=t1");
+        let Ok(good) = good else { unreachable!() };
         assert!(run_garde(&good).is_ok());
     }
 

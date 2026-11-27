@@ -23,6 +23,9 @@ use super::*;
 /// The login limit in the contract: 5 requests per 60 seconds.
 const LOGIN_LIMIT: usize = 5;
 
+/// The address of `common::PEER`, which stands in for the deployment's own proxy.
+const PROXY: &str = "203.0.113.4";
+
 /// A counter that always fails, standing in for an unreachable Redis.
 struct DownCounter;
 
@@ -49,7 +52,9 @@ fn engine_with_source(
     counter: Option<Arc<dyn RateLimitStore>>,
     source: ClientIpSource,
 ) -> Option<Router> {
-    let mut adapter = AxumAuthConfig::new(source);
+    // The router refuses to trust the forwarded header without a predicate; `PeerAddr` ignores it.
+    let mut adapter =
+        AxumAuthConfig::new(source).is_trusted_proxy(|peer| peer.to_string() == PROXY);
     // Without a shared counter the in-process limiter answers, on the real clock: give it the
     // slow refill so a slow run cannot hand the sixth request a restored cell.
     if counter.is_none() {
@@ -110,7 +115,7 @@ async fn two_routers_over_one_store_share_one_budget() {
         engine(&stores, Some(counter.clone())),
         engine(&stores, Some(counter)),
     ) else {
-        return;
+        unreachable!()
     };
 
     // The budget is spent across both instances, as a load balancer would spread the requests.
@@ -141,7 +146,7 @@ async fn two_routers_over_one_store_share_one_budget() {
 #[tokio::test]
 async fn a_failing_counter_is_reported_not_waved_through() {
     let stores = Arc::new(InMemoryStores::new());
-    let Some(app) = engine(&stores, Some(Arc::new(DownCounter))) else { return };
+    let Some(app) = engine(&stores, Some(Arc::new(DownCounter))) else { unreachable!() };
     assert_eq!(
         login_attempt(&app, 0).await.status,
         StatusCode::INTERNAL_SERVER_ERROR
@@ -152,7 +157,7 @@ async fn a_failing_counter_is_reported_not_waved_through() {
 async fn requests_with_no_readable_address_share_one_bucket() {
     let stores = Arc::new(InMemoryStores::new());
     let counter: Arc<dyn RateLimitStore> = stores.clone();
-    let Some(app) = engine(&stores, Some(counter)) else { return };
+    let Some(app) = engine(&stores, Some(counter)) else { unreachable!() };
     let bare = |attempt: usize| {
         let body =
             format!(r#"{{"email":"nobody{attempt}@e.com","password":"wrong","tenantId":"t1"}}"#);
@@ -181,7 +186,7 @@ async fn requests_with_no_readable_address_share_one_bucket() {
 #[tokio::test]
 async fn without_a_shared_counter_the_in_process_limiter_still_applies() {
     let stores = Arc::new(InMemoryStores::new());
-    let Some(app) = engine(&stores, None) else { return };
+    let Some(app) = engine(&stores, None) else { unreachable!() };
     for attempt in 0..LOGIN_LIMIT {
         assert_eq!(
             login_attempt(&app, attempt).await.status,
@@ -197,7 +202,7 @@ async fn without_a_shared_counter_the_in_process_limiter_still_applies() {
 async fn the_in_process_fallback_keys_on_the_forwarded_address_when_it_is_trusted() {
     let stores = Arc::new(InMemoryStores::new());
     let Some(app) = engine_with_source(&stores, None, ClientIpSource::TrustedForwardedFor) else {
-        return;
+        unreachable!()
     };
     // A different email each time, so the account lockout (also a 429) never answers for the
     // limiter: only the per-address window can produce `auth.too_many_requests` here.
@@ -226,7 +231,7 @@ async fn the_shared_counter_charges_each_forwarded_address_its_own_budget() {
     let counter: Arc<dyn RateLimitStore> = stores.clone();
     let Some(app) = engine_with_source(&stores, Some(counter), ClientIpSource::TrustedForwardedFor)
     else {
-        return;
+        unreachable!()
     };
     let from = |address: &'static str, attempt: usize| {
         Req::post("/auth/login")
@@ -257,7 +262,7 @@ async fn a_route_whose_limit_is_disabled_is_not_limited_without_a_shared_counter
         },
         ..AxumAuthConfig::new(ClientIpSource::PeerAddr)
     };
-    let Some(app) = engine_with_config(&stores, None, adapter) else { return };
+    let Some(app) = engine_with_config(&stores, None, adapter) else { unreachable!() };
     // Well past the default window of 5: nothing counts these.
     for attempt in 0..(LOGIN_LIMIT * 2) {
         assert_eq!(

@@ -35,7 +35,7 @@ async fn malformed_challenge_codes_do_not_lock_the_account() {
         mfa: true,
         ..EngineSpec::default()
     }) else {
-        return;
+        unreachable!()
     };
     // The route's own edge limit (5 per minute) would answer 429 before the account lockout (5
     // failed attempts) could be observed, so it is switched off for this test.

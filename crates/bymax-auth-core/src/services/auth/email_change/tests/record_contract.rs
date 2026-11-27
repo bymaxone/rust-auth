@@ -68,7 +68,7 @@ fn the_record_carries_exactly_the_fields_the_contract_names() {
 
 #[tokio::test]
 async fn a_requested_change_stores_the_normalized_address_and_the_password_fingerprint() {
-    let Some(h) = setup() else { return };
+    let Some(h) = setup() else { unreachable!() };
     let id = h.seed(SeedUser::active("old@example.com", "right")).await;
     let requested = h
         .engine
@@ -114,7 +114,7 @@ async fn an_account_without_a_password_fingerprints_as_the_empty_string() {
         rule.ends_with("or the empty string when the account had none."),
         "{rule}"
     );
-    let Some(h) = setup() else { return };
+    let Some(h) = setup() else { unreachable!() };
     let created = h
         .users
         .create(bymax_auth_types::CreateUserData {
@@ -135,7 +135,7 @@ async fn a_record_without_the_fingerprint_reads_as_unbound_and_confirms() {
     // The contract: an ABSENT `passwordFingerprint` is read as no binding and accepted, so a
     // record written by a build that does not bind still confirms.
     assert!(contract_fields().contains("passwordFingerprint"));
-    let Some(h) = setup() else { return };
+    let Some(h) = setup() else { unreachable!() };
     let id = h.seed(SeedUser::active("old@example.com", "right")).await;
     let mut record = serde_json::to_value(context(&id, "moved@example.com")).unwrap_or_default();
     if let Some(map) = record.as_object_mut() {
@@ -144,7 +144,7 @@ async fn a_record_without_the_fingerprint_reads_as_unbound_and_confirms() {
     let parsed = serde_json::from_value::<EmailChangeContext>(record).ok();
     assert!(matches!(parsed, Some(ref c) if c.password_fingerprint.is_empty()));
     let token = "a".repeat(64);
-    let Some(parsed) = parsed else { return };
+    let Some(parsed) = parsed else { unreachable!() };
     let stored = h.stores.put_email_change(&token, &parsed, 600).await;
     assert!(stored.is_ok());
     assert!(h.engine.confirm_email_change(&token).await.is_ok());

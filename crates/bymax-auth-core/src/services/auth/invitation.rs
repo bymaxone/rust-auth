@@ -531,7 +531,7 @@ mod tests {
     async fn accept_creates_a_verified_user_and_a_full_session() {
         // A valid invitation token creates a verified MEMBER and issues a session persisted in
         // the store; the token is single-use.
-        let Some(s) = setup(invite_config()) else { return };
+        let Some(s) = setup(invite_config()) else { unreachable!() };
         let inviter = seed_admin(&s.users, "admin@example.com", "ADMIN").await;
         assert!(
             s.engine
@@ -576,7 +576,7 @@ mod tests {
             )
             .await;
         assert!(matches!(&accepted, Ok(a) if a.user.email == "invitee@example.com"));
-        let Ok(result) = accepted else { return };
+        let Ok(result) = accepted else { unreachable!() };
         assert!(result.user.email_verified);
         assert_eq!(result.user.role, "MEMBER");
         assert!(!result.access_token.is_empty());
@@ -614,7 +614,7 @@ mod tests {
         // provisions an ADMIN account inside t2 — a tenant they have no relationship with.
         // The shipped axum adapter sources `tenant_id` from the caller's own claims, which
         // hides it, but this is a library whose core API hosts call directly.
-        let Some(s) = setup(invite_config()) else { return };
+        let Some(s) = setup(invite_config()) else { unreachable!() };
         let admin = seed_admin(&s.users, "t1admin@example.com", "ADMIN").await;
 
         // The inviter is read scoped to the tenant being invited into, so a repository that
@@ -645,7 +645,7 @@ mod tests {
         // Before the read was scoped the row was found and a later tenant comparison refused it
         // with `InsufficientRole`; that comparison stays as the second lock (the two tests that
         // run against a repository ignoring the scope).
-        let Some(s) = setup(invite_config()) else { return };
+        let Some(s) = setup(invite_config()) else { unreachable!() };
         let admin = seed_admin(&s.users, "t1admin2@example.com", "ADMIN").await;
 
         assert!(matches!(
@@ -666,7 +666,7 @@ mod tests {
     async fn invite_rejects_unknown_role_and_insufficient_inviter() {
         // An undeclared invited role and an inviter who does not outrank the invited role both
         // fail with InsufficientRole; an unknown inviter is TokenInvalid.
-        let Some(s) = setup(invite_config()) else { return };
+        let Some(s) = setup(invite_config()) else { unreachable!() };
         let member = seed_admin(&s.users, "member@example.com", "MEMBER").await;
         // An undeclared role.
         assert!(matches!(
@@ -714,7 +714,7 @@ mod tests {
         // and the invitee would still arrive as an admin of that tenant with a live session —
         // a clean way to keep a foothold across the account kill switch, which makes the switch
         // advisory.
-        let Some(s) = setup(invite_config()) else { return };
+        let Some(s) = setup(invite_config()) else { unreachable!() };
         let inviter = seed_admin(&s.users, "deposed@example.com", "ADMIN").await;
         let token = "f".repeat(64);
         assert!(
@@ -774,7 +774,7 @@ mod tests {
         // after the consume told them their password was unacceptable and, in the same breath,
         // that the only credential they had to fix it was gone. `reset_password` was refactored
         // away from exactly this shape; the reasoning had not reached here.
-        let Some(s) = setup(invite_config()) else { return };
+        let Some(s) = setup(invite_config()) else { unreachable!() };
         let token = "e".repeat(64);
         assert!(
             put_record(
@@ -830,7 +830,7 @@ mod tests {
     async fn accept_rejects_a_tampered_role_and_a_duplicate_email() {
         // A stored invitation whose role is not a declared role (tamper) is rejected; an
         // invitee who already has an account is EmailAlreadyExists.
-        let Some(s) = setup(invite_config()) else { return };
+        let Some(s) = setup(invite_config()) else { unreachable!() };
         // Tampered role.
         let tampered = "d".repeat(64);
         assert!(
@@ -908,7 +908,7 @@ mod tests {
         // only one of them — so an `||` that became an `&&` (accept unless *every* field is
         // wrong) read the same. Each field is broken alone here: an invitation with no
         // recipient, one with no tenant, and one whose role was never declared.
-        let Some(s) = setup(invite_config()) else { return };
+        let Some(s) = setup(invite_config()) else { unreachable!() };
         let cases = [
             (
                 "no-email",
@@ -956,7 +956,7 @@ mod tests {
     #[tokio::test]
     async fn accept_rejects_an_unknown_token() {
         // A token with no stored invitation is invalid.
-        let Some(s) = setup(invite_config()) else { return };
+        let Some(s) = setup(invite_config()) else { unreachable!() };
         assert!(matches!(
             s.engine
                 .accept_invitation(
@@ -991,7 +991,7 @@ mod tests {
             .otp_store(stores.clone())
             .brute_force_store(stores.clone())
             .build();
-        let Ok(engine) = built else { return };
+        let Ok(engine) = built else { unreachable!() };
         let admin = seed_admin(&users, "noinv@example.com", "ADMIN").await;
         assert!(matches!(
             engine
@@ -1135,7 +1135,7 @@ mod tests {
         // error. So the record stays, and the failure is reported to the caller, who can invite
         // the address again to supersede it. The content of the report and of the log is pinned
         // in `send_failure_tests`.
-        let Some(s) = setup(invite_config()) else { return };
+        let Some(s) = setup(invite_config()) else { unreachable!() };
         let users = Arc::new(InMemoryUserRepository::new());
         let stores = Arc::new(InMemoryStores::new());
         let built = AuthEngine::builder()
@@ -1145,7 +1145,7 @@ mod tests {
             .redis_stores(stores.clone())
             .email_provider(Arc::new(FailingInviteEmail))
             .build();
-        let Ok(engine) = built else { return };
+        let Ok(engine) = built else { unreachable!() };
         let admin = seed_admin(&users, "sender@example.com", "ADMIN").await;
         drop(s);
 
@@ -1241,7 +1241,7 @@ mod tests {
     async fn revoking_withdraws_the_invitation_and_its_index() {
         // The capability the library documented and never had: an invitation provisions an
         // account at a role, and it was unwithdrawable for its whole TTL.
-        let Some(s) = setup(invite_config()) else { return };
+        let Some(s) = setup(invite_config()) else { unreachable!() };
         let inviter = seed_admin(&s.users, "admin@example.com", "ADMIN").await;
         // Captured across both halves: a `tracing` field expression is not evaluated without a
         // subscriber, so `log_safe` on the tenant — the second lock against a forged record —
@@ -1253,7 +1253,7 @@ mod tests {
                 .await
                 .is_ok()
         );
-        let Some(hash) = indexed(&s, "invitee@example.com").await else { return };
+        let Some(hash) = indexed(&s, "invitee@example.com").await else { unreachable!() };
 
         assert!(matches!(
             s.engine
@@ -1279,7 +1279,7 @@ mod tests {
     async fn revoking_nothing_is_not_an_error() {
         // Idempotent, and deliberately silent about which case it was: answering differently
         // would turn the endpoint into an oracle for "does this address have an invitation".
-        let Some(s) = setup(invite_config()) else { return };
+        let Some(s) = setup(invite_config()) else { unreachable!() };
         let inviter = seed_admin(&s.users, "admin@example.com", "ADMIN").await;
 
         assert!(matches!(
@@ -1294,7 +1294,7 @@ mod tests {
     async fn a_member_cannot_withdraw_an_admins_invitation() {
         // The revoker is held to the same bar as the issuer, or a member could cancel the
         // invitations of someone who out-ranks them.
-        let Some(s) = setup(invite_config()) else { return };
+        let Some(s) = setup(invite_config()) else { unreachable!() };
         let admin = seed_admin(&s.users, "admin@example.com", "ADMIN").await;
         let member = seed_admin(&s.users, "member@example.com", "MEMBER").await;
         assert!(
@@ -1338,7 +1338,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_revoker_from_another_tenant_is_refused_before_any_lookup() {
-        let Some(s) = setup(invite_config()) else { return };
+        let Some(s) = setup(invite_config()) else { unreachable!() };
         let inviter = seed_admin(&s.users, "admin@example.com", "ADMIN").await;
         // Against a repository that ignores the scope, so the tenant comparison is what refuses.
         s.users.ignore_tenant_on_id();
@@ -1356,7 +1356,7 @@ mod tests {
         // The opposite side of the line from the rank check above: standing is a fact about
         // the CALLER, so refusing out loud describes nobody else — and refusing before the
         // lookup means a suspended account cannot use this door to ask questions at all.
-        let Some(s) = setup(invite_config()) else { return };
+        let Some(s) = setup(invite_config()) else { unreachable!() };
         let admin = seed_admin(&s.users, "admin@example.com", "ADMIN").await;
         let suspended = seed_admin(&s.users, "gone@example.com", "ADMIN").await;
         assert!(
@@ -1387,7 +1387,7 @@ mod tests {
         // used to key on a bare `sha256(email)`, reversible by dictionary, and it is the one
         // handle anyone reading a keyspace dump has on who a tenant has been inviting. The
         // preimage is pinned here because nest-auth writes the same keys into the same Redis.
-        let Some(s) = setup(invite_config()) else { return };
+        let Some(s) = setup(invite_config()) else { unreachable!() };
         let inviter = seed_admin(&s.users, "admin@example.com", "ADMIN").await;
         assert!(
             s.engine
@@ -1441,7 +1441,7 @@ mod tests {
             .brute_force_store(stores)
             .build();
         assert!(built.is_ok(), "the engine refused to build");
-        let Ok(engine) = built else { return };
+        let Ok(engine) = built else { unreachable!() };
         let revoker = seed_admin(&users, "noinv@example.com", "ADMIN").await;
 
         let refused = engine
@@ -1452,7 +1452,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_revoker_who_no_longer_exists_is_refused() {
-        let Some(s) = setup(invite_config()) else { return };
+        let Some(s) = setup(invite_config()) else { unreachable!() };
 
         assert!(matches!(
             s.engine
@@ -1467,7 +1467,7 @@ mod tests {
         // Two live tokens for one invitee is two chances for an intercepted link to be
         // redeemed, and a revoke would only ever reach the newest — the older would sit valid
         // and unreferenced for the rest of its TTL.
-        let Some(s) = setup(invite_config()) else { return };
+        let Some(s) = setup(invite_config()) else { unreachable!() };
         let inviter = seed_admin(&s.users, "admin@example.com", "ADMIN").await;
         assert!(
             s.engine
@@ -1475,7 +1475,7 @@ mod tests {
                 .await
                 .is_ok()
         );
-        let Some(first) = indexed(&s, "invitee@example.com").await else { return };
+        let Some(first) = indexed(&s, "invitee@example.com").await else { unreachable!() };
 
         assert!(
             s.engine
@@ -1483,7 +1483,7 @@ mod tests {
                 .await
                 .is_ok()
         );
-        let Some(second) = indexed(&s, "invitee@example.com").await else { return };
+        let Some(second) = indexed(&s, "invitee@example.com").await else { unreachable!() };
 
         assert_ne!(first, second, "the re-invite reused the first token");
         assert!(
@@ -1496,7 +1496,7 @@ mod tests {
     async fn accepting_clears_the_invitee_index() {
         // A pointer left behind after an acceptance reads to an operator as still pending, and
         // a later revoke would report success over an invitation that was already redeemed.
-        let Some(s) = setup(invite_config()) else { return };
+        let Some(s) = setup(invite_config()) else { unreachable!() };
         let inviter = seed_admin(&s.users, "admin@example.com", "ADMIN").await;
         assert!(
             s.engine
@@ -1505,7 +1505,7 @@ mod tests {
                 .is_ok()
         );
         // The raw token is opaque, so publish a known one over the one just minted.
-        let Some(minted) = indexed(&s, "invitee@example.com").await else { return };
+        let Some(minted) = indexed(&s, "invitee@example.com").await else { unreachable!() };
         let token = "d".repeat(64);
         let invitation = StoredInvitation {
             email: "invitee@example.com".to_owned(),

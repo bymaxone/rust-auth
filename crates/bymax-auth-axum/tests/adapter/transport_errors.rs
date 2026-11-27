@@ -50,7 +50,7 @@ fn assert_transport(response: &Captured, status: StatusCode, message: &str, forb
 
 #[tokio::test]
 async fn a_body_that_is_not_json_answers_malformed_request_and_echoes_nothing() {
-    let Some(h) = build(EngineSpec::default()) else { return };
+    let Some(h) = build(EngineSpec::default()) else { unreachable!() };
     let app = small_body_router(&h);
     let bodies: Vec<(&str, String)> = vec![
         ("not json", "{not json".to_owned()),
@@ -81,7 +81,7 @@ async fn a_body_that_is_not_json_answers_malformed_request_and_echoes_nothing() 
 
 #[tokio::test]
 async fn json_of_the_wrong_shape_names_the_failing_property_and_echoes_no_value() {
-    let Some(h) = build(EngineSpec::default()) else { return };
+    let Some(h) = build(EngineSpec::default()) else { unreachable!() };
     let app = small_body_router(&h);
     // (body, the properties it fails, what must not appear in the answer). The client's own key
     // is the property name for an unknown key and may appear; a value never does. The second
@@ -128,7 +128,7 @@ async fn json_of_the_wrong_shape_names_the_failing_property_and_echoes_no_value(
 
 #[tokio::test]
 async fn a_rule_message_never_repeats_the_value_that_failed_it() {
-    let Some(h) = build(EngineSpec::default()) else { return };
+    let Some(h) = build(EngineSpec::default()) else { unreachable!() };
     let app = small_body_router(&h);
     // Well-formed JSON of the right shape whose email fails its rule: the detail names the field
     // and the rule, not the address.
@@ -143,7 +143,7 @@ async fn a_rule_message_never_repeats_the_value_that_failed_it() {
 
 #[tokio::test]
 async fn a_body_over_the_limit_answers_413_whether_or_not_it_declares_its_length() {
-    let Some(h) = build(EngineSpec::default()) else { return };
+    let Some(h) = build(EngineSpec::default()) else { unreachable!() };
     let app = small_body_router(&h);
     let big = vec![b'a'; 4096];
     // No Content-Length: the limit trips while the body is being read.
@@ -178,7 +178,7 @@ async fn a_body_over_the_limit_answers_413_whether_or_not_it_declares_its_length
 
 #[tokio::test]
 async fn a_charset_or_encoding_the_adapter_cannot_read_answers_415() {
-    let Some(h) = build(EngineSpec::default()) else { return };
+    let Some(h) = build(EngineSpec::default()) else { unreachable!() };
     let app = small_body_router(&h);
     let body = br#"{"email":"nobody@e.com","password":"wrongwrong1","tenantId":"t1"}"#.to_vec();
     for content_type in [
@@ -209,7 +209,7 @@ async fn a_charset_or_encoding_the_adapter_cannot_read_answers_415() {
 
 #[tokio::test]
 async fn utf8_in_any_spelling_and_the_identity_encoding_are_still_read() {
-    let Some(h) = build(EngineSpec::default()) else { return };
+    let Some(h) = build(EngineSpec::default()) else { unreachable!() };
     let app = small_body_router(&h);
     for content_type in [
         "application/json",
@@ -240,7 +240,7 @@ async fn utf8_in_any_spelling_and_the_identity_encoding_are_still_read() {
 
 #[tokio::test]
 async fn a_missing_or_wrong_content_type_stays_a_validation_error_naming_the_field() {
-    let Some(h) = build(EngineSpec::default()) else { return };
+    let Some(h) = build(EngineSpec::default()) else { unreachable!() };
     let app = small_body_router(&h);
     let body = br#"{"email":"nobody@e.com","password":"wrongwrong1","tenantId":"t1"}"#.to_vec();
     let plain = login_request(body.clone(), "text/plain").send(&app).await;
@@ -261,7 +261,7 @@ async fn the_refresh_body_never_echoes_what_it_could_not_read() {
         delivery: bymax_auth_core::config::TokenDelivery::Bearer,
         ..EngineSpec::default()
     }) else {
-        return;
+        unreachable!()
     };
     let app = small_body_router(&h);
     // Valid JSON whose token is not a string: the shape error, with a fixed message.
@@ -311,7 +311,7 @@ async fn a_query_string_that_does_not_fit_names_the_property_and_echoes_no_value
         allow_oauth: true,
         ..EngineSpec::default()
     }) else {
-        return;
+        unreachable!()
     };
     let app = small_body_router(&h);
     let answer = Req::get(&format!(
@@ -332,7 +332,7 @@ async fn an_undecodable_path_parameter_answers_malformed_request() {
         allow_oauth: true,
         ..EngineSpec::default()
     }) else {
-        return;
+        unreachable!()
     };
     let app = small_body_router(&h);
     // Invalid UTF-8 after percent-decoding: refused as a malformed request, not axum's plain text.
@@ -368,7 +368,7 @@ async fn an_mfa_setup_body_that_does_not_parse_never_echoes_what_it_held() {
         mfa: true,
         ..EngineSpec::default()
     }) else {
-        return;
+        unreachable!()
     };
     let (app, access) = mfa_setup_session(&h).await;
     // Not JSON: the transport envelope.
@@ -403,7 +403,7 @@ async fn an_mfa_setup_body_in_an_unreadable_form_or_too_large_is_refused() {
         mfa: true,
         ..EngineSpec::default()
     }) else {
-        return;
+        unreachable!()
     };
     let (app, access) = mfa_setup_session(&h).await;
     // A charset the adapter cannot read.

@@ -40,7 +40,7 @@ async fn the_listed_routes_answer_the_contract_body_for_a_known_and_an_unknown_a
     );
     let status = entry["status"].as_u64().unwrap_or(0);
 
-    let Some(h) = build(EngineSpec::default()) else { return };
+    let Some(h) = build(EngineSpec::default()) else { unreachable!() };
     let app = router(&h);
     seed_user(&h, "known@e.com", "glidingwalnut42", "USER").await;
 
@@ -72,7 +72,7 @@ async fn a_cooldown_store_that_cannot_answer_is_the_same_503_for_a_known_and_an_
         std::time::Duration::from_millis(entry["failures"]["floorMs"].as_u64().unwrap_or(0));
     assert!(!floor.is_zero(), "the contract floor was not read");
 
-    let Some(h) = build(EngineSpec::default()) else { return };
+    let Some(h) = build(EngineSpec::default()) else { unreachable!() };
     let app = router(&h);
     seed_user(&h, "known@e.com", "glidingwalnut42", "USER").await;
 
@@ -142,7 +142,7 @@ async fn every_exit_of_both_routes_waits_the_contract_floor_a_cooldown_hit_inclu
     let entry = contract_entry();
     let floor =
         std::time::Duration::from_millis(entry["failures"]["floorMs"].as_u64().unwrap_or(0));
-    let Some(h) = build(EngineSpec::default()) else { return };
+    let Some(h) = build(EngineSpec::default()) else { unreachable!() };
     let app = router(&h);
     seed_user(&h, "known@e.com", "glidingwalnut42", "USER").await;
 

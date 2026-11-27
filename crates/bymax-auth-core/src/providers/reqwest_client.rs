@@ -163,7 +163,7 @@ mod tests {
     /// handler is a plain async fn whose normal return the get-request test awaits, exercising
     /// every arm to completion.
     async fn serve_once(listener: TcpListener, behavior: Behavior) {
-        let Ok((mut socket, _)) = listener.accept().await else { return };
+        let Ok((mut socket, _)) = listener.accept().await else { unreachable!() };
         let mut buf = [0u8; 1024];
         // Drain one read so the client finishes sending before we respond.
         let _ = socket.read(&mut buf).await;
@@ -198,8 +198,8 @@ mod tests {
     async fn get_request_maps_status_headers_and_body() {
         // A GET over plain HTTP round-trips: status, a response header, and the body are mapped.
         let started = spawn_server(Behavior::Respond(ok_response("hello"))).await;
-        let Some((addr, handle)) = started else { return };
-        let Ok(client) = ReqwestHttpClient::new() else { return };
+        let Some((addr, handle)) = started else { unreachable!() };
+        let Ok(client) = ReqwestHttpClient::new() else { unreachable!() };
         let res = client
             .send(HttpRequest {
                 method: HttpMethod::Get,
@@ -209,7 +209,7 @@ mod tests {
             })
             .await;
         assert!(matches!(&res, Ok(r) if r.status == 200 && r.body == b"hello"));
-        let Ok(res) = res else { return };
+        let Ok(res) = res else { unreachable!() };
         assert!(
             res.headers
                 .iter()
@@ -223,8 +223,8 @@ mod tests {
     async fn post_request_sends_headers_and_body() {
         // A POST with headers and a body is accepted; the response maps back to the core type.
         let started = spawn_server(Behavior::Respond(ok_response("{}"))).await;
-        let Some((addr, _handle)) = started else { return };
-        let Ok(client) = ReqwestHttpClient::new() else { return };
+        let Some((addr, _handle)) = started else { unreachable!() };
+        let Ok(client) = ReqwestHttpClient::new() else { unreachable!() };
         let res = client
             .send(HttpRequest {
                 method: HttpMethod::Post,
@@ -243,13 +243,13 @@ mod tests {
     async fn connect_failure_maps_to_connect_error() {
         // Connecting to a port with no listener is a connect error.
         let started = spawn_server(Behavior::Respond(Vec::new())).await;
-        let Some((addr, _handle)) = started else { return };
+        let Some((addr, _handle)) = started else { unreachable!() };
         // Bind then drop a fresh listener to obtain a definitely-closed port.
-        let Ok(dead) = TcpListener::bind("127.0.0.1:0").await else { return };
-        let Ok(dead_addr) = dead.local_addr() else { return };
+        let Ok(dead) = TcpListener::bind("127.0.0.1:0").await else { unreachable!() };
+        let Ok(dead_addr) = dead.local_addr() else { unreachable!() };
         drop(dead);
         let _ = addr;
-        let Ok(client) = ReqwestHttpClient::new() else { return };
+        let Ok(client) = ReqwestHttpClient::new() else { unreachable!() };
         let res = client
             .send(HttpRequest {
                 method: HttpMethod::Get,
@@ -265,8 +265,8 @@ mod tests {
     async fn dropped_connection_maps_to_transport_error() {
         // A server that closes the connection without responding is a (non-connect, non-timeout)
         // transport error.
-        let Some((addr, _handle)) = spawn_server(Behavior::Drop).await else { return };
-        let Ok(client) = ReqwestHttpClient::new() else { return };
+        let Some((addr, _handle)) = spawn_server(Behavior::Drop).await else { unreachable!() };
+        let Ok(client) = ReqwestHttpClient::new() else { unreachable!() };
         let res = client
             .send(HttpRequest {
                 method: HttpMethod::Get,
@@ -281,11 +281,11 @@ mod tests {
     #[tokio::test]
     async fn slow_origin_maps_to_timeout_error() {
         // A hanging origin trips the (short) per-request timeout, mapped to HttpError::Timeout.
-        let Some((addr, _handle)) = spawn_server(Behavior::Hang).await else { return };
+        let Some((addr, _handle)) = spawn_server(Behavior::Hang).await else { unreachable!() };
         let built = reqwest::Client::builder()
             .timeout(Duration::from_millis(300))
             .build();
-        let Ok(inner) = built else { return };
+        let Ok(inner) = built else { unreachable!() };
         let client = ReqwestHttpClient::with_client(inner);
         let res = client
             .send(HttpRequest {
@@ -329,8 +329,8 @@ mod tests {
     #[tokio::test]
     async fn a_response_declaring_more_than_the_cap_is_refused() {
         let started = spawn_server(Behavior::Respond(oversized_length_response())).await;
-        let Some((addr, _handle)) = started else { return };
-        let Ok(client) = ReqwestHttpClient::new() else { return };
+        let Some((addr, _handle)) = started else { unreachable!() };
+        let Ok(client) = ReqwestHttpClient::new() else { unreachable!() };
 
         let res = client
             .send(HttpRequest {
@@ -352,8 +352,8 @@ mod tests {
     #[tokio::test]
     async fn a_chunked_response_that_exceeds_the_cap_is_refused() {
         let started = spawn_server(Behavior::Respond(oversized_chunked_response())).await;
-        let Some((addr, _handle)) = started else { return };
-        let Ok(client) = ReqwestHttpClient::new() else { return };
+        let Some((addr, _handle)) = started else { unreachable!() };
+        let Ok(client) = ReqwestHttpClient::new() else { unreachable!() };
 
         let res = client
             .send(HttpRequest {

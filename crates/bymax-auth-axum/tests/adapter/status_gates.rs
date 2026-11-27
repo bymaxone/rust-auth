@@ -53,7 +53,7 @@ async fn a_blocked_account_cannot_move_its_address_or_touch_invitations() {
         invitations: true,
         ..EngineSpec::default()
     }) else {
-        return;
+        unreachable!()
     };
     let app = router(&h);
     let id = seed_user(&h, "gate@e.com", "glidingwalnut42", "ADMIN").await;
@@ -91,7 +91,7 @@ async fn an_unverified_address_cannot_move_itself_or_touch_invitations_when_veri
         verification_required: true,
         ..EngineSpec::default()
     }) else {
-        return;
+        unreachable!()
     };
     let app = router(&h);
     let id = seed_user(&h, "unproven@e.com", "glidingwalnut42", "ADMIN").await;
@@ -115,7 +115,7 @@ async fn an_unverified_address_cannot_move_itself_or_touch_invitations_when_veri
 async fn a_store_failure_while_revoking_is_reported_after_the_account_gate_passes() {
     // The account gate runs first and passes for a good account; what the handler then answers
     // is the store's failure, not a silent 204.
-    let Some(h) = build_failing_invitation_index() else { return };
+    let Some(h) = build_failing_invitation_index() else { unreachable!() };
     let app = router(&h);
     let reg = Req::post("/auth/register")
         .json(serde_json::json!({

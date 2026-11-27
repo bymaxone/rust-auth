@@ -182,8 +182,7 @@ mod tests {
         cfg
     }
 
-    /// Build an engine from `cfg`; the fixtures always validate, so callers use `let-else`
-    /// on the `Result` to stay panic-free under the workspace lints.
+    /// Build an engine from `cfg`. The fixtures always validate.
     fn engine(cfg: AuthConfig) -> Result<AuthEngine, crate::ConfigError> {
         AuthEngine::builder()
             .config(cfg)
@@ -215,10 +214,10 @@ mod tests {
         // With verification off, registration creates the user and returns a full session.
         let mut cfg = base_config();
         cfg.email_verification.required = false;
-        let Ok(engine) = engine(cfg) else { return };
+        let Ok(engine) = engine(cfg) else { unreachable!() };
         let result = engine.register(input("new@example.com"), &ctx()).await;
         assert!(matches!(&result, Ok(LoginResult::Success(_))));
-        let Ok(LoginResult::Success(auth)) = result else { return };
+        let Ok(LoginResult::Success(auth)) = result else { unreachable!() };
         assert_eq!(auth.user.email, "new@example.com");
         assert!(!auth.access_token.is_empty());
         assert!(!auth.refresh_token.is_empty());
@@ -229,9 +228,9 @@ mod tests {
         // With verification required the new account is unverified but still authenticated.
         let mut cfg = base_config();
         cfg.email_verification.required = true;
-        let Ok(engine) = engine(cfg) else { return };
+        let Ok(engine) = engine(cfg) else { unreachable!() };
         let result = engine.register(input("verify@example.com"), &ctx()).await;
-        let Ok(LoginResult::Success(auth)) = result else { return };
+        let Ok(LoginResult::Success(auth)) = result else { unreachable!() };
         assert!(!auth.user.email_verified);
     }
 
@@ -248,7 +247,7 @@ mod tests {
             .user_repository(Arc::new(InMemoryUserRepository::new()))
             .redis_stores(stores.clone())
             .build();
-        let Ok(engine) = built else { return };
+        let Ok(engine) = built else { unreachable!() };
         stores.fail_next_otp_puts(1);
         let (events, capture) = crate::log_capture::capture_events();
         let result = engine.register(input("unsent@example.com"), &ctx()).await;
@@ -257,7 +256,7 @@ mod tests {
             matches!(&result, Ok(LoginResult::Success(_))),
             "got {result:?}"
         );
-        let Ok(LoginResult::Success(auth)) = result else { return };
+        let Ok(LoginResult::Success(auth)) = result else { unreachable!() };
         assert!(!auth.user.email_verified);
         let ours: Vec<String> = events
             .iter()
@@ -278,7 +277,7 @@ mod tests {
         // A second registration of the same email in the same tenant conflicts.
         let mut cfg = base_config();
         cfg.email_verification.required = false;
-        let Ok(engine) = engine(cfg) else { return };
+        let Ok(engine) = engine(cfg) else { unreachable!() };
         let _ = engine.register(input("dup@example.com"), &ctx()).await;
         let again = engine.register(input("dup@example.com"), &ctx()).await;
         assert!(matches!(again, Err(AuthError::EmailAlreadyExists)));
@@ -293,7 +292,7 @@ mod tests {
 
         let fresh = engine.register(input("MiXeD@Example.COM"), &ctx()).await;
         assert!(matches!(&fresh, Ok(LoginResult::Success(_))));
-        let Ok(LoginResult::Success(auth)) = fresh else { return };
+        let Ok(LoginResult::Success(auth)) = fresh else { unreachable!() };
         assert_eq!(auth.user.email, "mixed@example.com");
     }
 
@@ -342,16 +341,16 @@ mod tests {
     #[tokio::test]
     async fn before_register_reject_and_error_both_forbid() {
         // A hook that returns Reject, and one that errors, both surface as Forbidden.
-        let Ok(reject_engine) = engine_with_hooks(Arc::new(RejectingHooks)) else { return };
+        let Ok(reject_engine) = engine_with_hooks(Arc::new(RejectingHooks)) else { unreachable!() };
         let rejected = reject_engine.register(input("x@example.com"), &ctx()).await;
         assert!(matches!(rejected, Err(AuthError::Forbidden)));
 
-        let Ok(fail_engine) = engine_with_hooks(Arc::new(FailingHooks)) else { return };
+        let Ok(fail_engine) = engine_with_hooks(Arc::new(FailingHooks)) else { unreachable!() };
         let errored = fail_engine.register(input("y@example.com"), &ctx()).await;
         assert!(matches!(errored, Err(AuthError::Forbidden)));
 
         // The NoOp hooks allow registration (covers the Allow arm explicitly).
-        let Ok(allow_engine) = engine_with_hooks(Arc::new(NoOpAuthHooks)) else { return };
+        let Ok(allow_engine) = engine_with_hooks(Arc::new(NoOpAuthHooks)) else { unreachable!() };
         let allowed = allow_engine.register(input("z@example.com"), &ctx()).await;
         assert!(matches!(allowed, Ok(LoginResult::Success(_))));
     }

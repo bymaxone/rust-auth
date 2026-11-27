@@ -56,14 +56,14 @@ fn name_bounds() -> (usize, usize) {
 
 #[tokio::test]
 async fn a_created_workspace_is_owned_by_the_caller_with_its_audit_event_and_hook_event() {
-    let Some(f) = fixture() else { return };
+    let Some(f) = fixture() else { unreachable!() };
     let owner = seed_account(&f, "t1", "o@e.com", true).await;
     let created = f
         .engine
         .create_workspace("t1", &owner, "  Acme  ", &ctx())
         .await;
     assert!(created.is_ok(), "create refused: {created:?}");
-    let Ok(created) = created else { return };
+    let Ok(created) = created else { unreachable!() };
     assert_eq!(created.name, "Acme");
     assert_eq!(created.status, WorkspaceStatus::Active);
     assert_eq!(created.id.len(), 36);
@@ -97,7 +97,7 @@ async fn a_created_workspace_is_owned_by_the_caller_with_its_audit_event_and_hoo
 
 #[tokio::test]
 async fn the_name_bound_applies_as_submitted_and_the_stored_name_is_trimmed() {
-    let Some(f) = fixture() else { return };
+    let Some(f) = fixture() else { unreachable!() };
     let owner = seed_account(&f, "t1", "o@e.com", true).await;
     let (min, max) = name_bounds();
     assert_eq!(min, 1);
@@ -134,7 +134,7 @@ async fn the_name_bound_applies_as_submitted_and_the_stored_name_is_trimmed() {
 async fn creation_refuses_a_caller_whose_account_is_gone_and_a_closed_self_serve_switch() {
     let mut closed = config();
     closed.workspaces.allow_create = false;
-    let Some(f) = build(closed) else { return };
+    let Some(f) = build(closed) else { unreachable!() };
     let gone = f
         .engine
         .create_workspace("t1", "nobody", "Acme", &ctx())
@@ -164,7 +164,7 @@ async fn capped(cap: u32) -> Option<(Fixture, String)> {
 
 #[tokio::test]
 async fn the_owner_cap_counts_owned_workspaces_including_one_pending_deletion() {
-    let Some((f, owner)) = capped(1).await else { return };
+    let Some((f, owner)) = capped(1).await else { unreachable!() };
     // Owning a deleted workspace, or being a non-owner member, does not count.
     f.repo
         .seed_workspace(workspace("t1", "gone", WorkspaceStatus::Deleted, 1));
@@ -185,7 +185,7 @@ async fn the_owner_cap_counts_owned_workspaces_including_one_pending_deletion() 
             .await
             .is_ok()
     );
-    let Some((f, owner)) = capped(1).await else { return };
+    let Some((f, owner)) = capped(1).await else { unreachable!() };
     f.repo.seed_workspace(workspace(
         "t1",
         "w-pending",
@@ -217,7 +217,7 @@ async fn a_host_refusal_is_forbidden_naming_the_name_with_its_reason_or_the_cont
         rule.contains(&format!("'{WORKSPACE_CREATE_REFUSED}'")),
         "{rule}"
     );
-    let Some(f) = fixture() else { return };
+    let Some(f) = fixture() else { unreachable!() };
     let owner = seed_account(&f, "t1", "o@e.com", true).await;
     let cases = [
         (
@@ -239,7 +239,7 @@ async fn a_host_refusal_is_forbidden_naming_the_name_with_its_reason_or_the_cont
             .create_workspace("t1", &owner, "Acme", &ctx())
             .await;
         assert!(refused.is_err(), "created despite the hook");
-        let Err(error) = refused else { return };
+        let Err(error) = refused else { unreachable!() };
         assert_eq!(error.http_status(), 403);
         let details = error.to_envelope().error.details.unwrap_or_default();
         assert_eq!(
@@ -259,7 +259,7 @@ async fn a_host_refusal_is_forbidden_naming_the_name_with_its_reason_or_the_cont
 #[tokio::test]
 async fn a_hook_that_fails_without_refusing_creates_nothing_and_leaks_nothing() {
     const SECRET: &str = "internal:db password=hunter2 at pg-primary.internal";
-    let Some(f) = fixture() else { return };
+    let Some(f) = fixture() else { unreachable!() };
     let owner = seed_account(&f, "t1", "o@e.com", true).await;
     f.hooks.decide(Err(SECRET));
     let failed = f
@@ -267,7 +267,7 @@ async fn a_hook_that_fails_without_refusing_creates_nothing_and_leaks_nothing() 
         .create_workspace("t1", &owner, "Acme", &ctx())
         .await;
     assert!(matches!(failed, Err(AuthError::Internal(_))), "{failed:?}");
-    let Err(error) = failed else { return };
+    let Err(error) = failed else { unreachable!() };
     // The wire answer is the generic 500: neither the hook's text nor a type name is in it.
     assert_eq!(error.http_status(), 500);
     let body = serde_json::to_string(&error.to_envelope()).unwrap_or_default();
@@ -301,10 +301,10 @@ async fn the_bootstrap_create_path_applies_the_cap_and_the_hook_but_never_the_sw
     let mut closed = config();
     closed.workspaces.allow_create = false;
     closed.workspaces.max_workspaces_per_user = 1;
-    let Some(f) = build(closed) else { return };
+    let Some(f) = build(closed) else { unreachable!() };
     let owner_id = seed_account(&f, "t1", "o@e.com", true).await;
     let owner = f.engine.workspace_caller("t1", &owner_id).await;
-    let Ok(owner) = owner else { return };
+    let Ok(owner) = owner else { unreachable!() };
     let hook_ctx = HookContext::detached(HookPlane::Dashboard, &owner_id, "", "");
     let request = |id: &'static str| OwnedWorkspace {
         workspace: WorkspaceRef {
@@ -330,7 +330,7 @@ async fn the_bootstrap_create_path_applies_the_cap_and_the_hook_but_never_the_sw
 
 #[tokio::test]
 async fn a_rename_is_written_with_its_event_read_back_and_bumps_nothing() {
-    let Some(f) = fixture() else { return };
+    let Some(f) = fixture() else { unreachable!() };
     f.repo
         .seed_workspace(workspace("t1", "w1", WorkspaceStatus::Active, 1));
     f.repo
@@ -349,7 +349,7 @@ async fn a_rename_is_written_with_its_event_read_back_and_bumps_nothing() {
         .workspace_runtime()
         .ok()
         .map(|r| r.workspaces.clone());
-    let Some(other) = other else { return };
+    let Some(other) = other else { unreachable!() };
     let homonym = other
         .find_by_id(WorkspaceRef {
             tenant_id: "t2",
@@ -398,7 +398,7 @@ async fn stored(f: &Fixture) -> Option<crate::workspace::domain::Workspace> {
 
 #[tokio::test]
 async fn scheduling_a_deletion_reproves_the_caller_then_writes_bumps_and_reports() {
-    let Some((f, member)) = owned(14).await else { return };
+    let Some((f, member)) = owned(14).await else { unreachable!() };
     let wrong = f
         .engine
         .schedule_workspace_deletion(&member, Some("not-the-password"), &ctx())
@@ -416,7 +416,7 @@ async fn scheduling_a_deletion_reproves_the_caller_then_writes_bumps_and_reports
         .schedule_workspace_deletion(&member, Some(PASSWORD), &ctx())
         .await;
     assert!(scheduled.is_ok(), "{scheduled:?}");
-    let Ok(scheduled) = scheduled else { return };
+    let Ok(scheduled) = scheduled else { unreachable!() };
     assert_eq!(scheduled.status, WorkspaceStatus::PendingDeletion);
     let due = scheduled.deletion_scheduled_at.unwrap_or(before);
     assert!(
@@ -445,7 +445,7 @@ async fn scheduling_a_deletion_reproves_the_caller_then_writes_bumps_and_reports
 
 #[tokio::test]
 async fn a_grace_period_of_zero_deletes_at_once_and_a_lost_write_is_answered_from_what_it_is_now() {
-    let Some((f, member)) = owned(0).await else { return };
+    let Some((f, member)) = owned(0).await else { unreachable!() };
     let deleted = f
         .engine
         .schedule_workspace_deletion(&member, Some(PASSWORD), &ctx())
@@ -460,7 +460,7 @@ async fn a_grace_period_of_zero_deletes_at_once_and_a_lost_write_is_answered_fro
         .schedule_workspace_deletion(&member, Some(PASSWORD), &ctx())
         .await;
     assert!(matches!(again, Err(AuthError::WorkspaceNotFound)));
-    let Some((f, member)) = owned(14).await else { return };
+    let Some((f, member)) = owned(14).await else { unreachable!() };
     let stale = acting_member("t1", "w1", &member.user_id, "admin");
     let refused = f
         .engine
@@ -472,7 +472,7 @@ async fn a_grace_period_of_zero_deletes_at_once_and_a_lost_write_is_answered_fro
 
 #[tokio::test]
 async fn a_passwordless_account_proves_a_recent_sign_in_instead() {
-    let Some(f) = fixture() else { return };
+    let Some(f) = fixture() else { unreachable!() };
     let owner = seed_account(&f, "t1", "oauth@e.com", false).await;
     f.repo
         .seed_workspace(workspace("t1", "w1", WorkspaceStatus::Active, 1));
@@ -494,7 +494,7 @@ async fn a_passwordless_account_proves_a_recent_sign_in_instead() {
 
 #[tokio::test]
 async fn a_locked_account_is_refused_before_the_password_is_checked_and_nothing_is_written() {
-    let Some((f, member)) = owned(14).await else { return };
+    let Some((f, member)) = owned(14).await else { unreachable!() };
     for _ in 0..5 {
         let wrong = f
             .engine
@@ -526,7 +526,7 @@ async fn a_locked_account_is_refused_before_the_password_is_checked_and_nothing_
 
 #[tokio::test]
 async fn a_rename_of_a_workspace_no_longer_active_is_answered_as_not_found() {
-    let Some(f) = fixture() else { return };
+    let Some(f) = fixture() else { unreachable!() };
     f.repo
         .seed_workspace(workspace("t1", "w1", WorkspaceStatus::PendingDeletion, 1));
     f.repo
@@ -541,7 +541,7 @@ async fn a_rename_of_a_workspace_no_longer_active_is_answered_as_not_found() {
 
 #[tokio::test]
 async fn a_failed_bump_is_an_error_and_the_committed_change_stays() {
-    let Some((f, member)) = owned(14).await else { return };
+    let Some((f, member)) = owned(14).await else { unreachable!() };
     f.cache.set_unavailable(true);
     let failed = f
         .engine
@@ -565,7 +565,7 @@ fn pending(f: &Fixture, due_in: Duration) {
 
 #[tokio::test]
 async fn a_restore_within_the_grace_period_reactivates_bumps_and_reports() {
-    let Some((f, member)) = owned(14).await else { return };
+    let Some((f, member)) = owned(14).await else { unreachable!() };
     pending(&f, Duration::days(3));
     let restored = f.engine.restore_workspace(&member, &ctx()).await;
     assert!(restored.is_ok(), "{restored:?}");
@@ -584,7 +584,7 @@ async fn a_restore_within_the_grace_period_reactivates_bumps_and_reports() {
 
 #[tokio::test]
 async fn a_restore_past_the_grace_period_or_by_a_changed_actor_changes_nothing() {
-    let Some((f, member)) = owned(14).await else { return };
+    let Some((f, member)) = owned(14).await else { unreachable!() };
     pending(&f, Duration::seconds(-1));
     let late = f.engine.restore_workspace(&member, &ctx()).await;
     assert!(matches!(late, Err(AuthError::WorkspaceNotFound)));
@@ -600,7 +600,7 @@ async fn a_restore_past_the_grace_period_or_by_a_changed_actor_changes_nothing()
 
 #[tokio::test]
 async fn finalizing_deletes_only_a_due_pending_workspace_with_no_actor() {
-    let Some(f) = fixture() else { return };
+    let Some(f) = fixture() else { unreachable!() };
     let key = WorkspaceRef {
         tenant_id: "t1",
         workspace_id: "w1",

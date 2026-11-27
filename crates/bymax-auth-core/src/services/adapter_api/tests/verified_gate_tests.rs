@@ -12,7 +12,7 @@ async fn the_verified_gate_depends_on_the_deployment_requirement_and_the_account
     for required in [true, false] {
         let mut cfg = base_config();
         cfg.email_verification.required = required;
-        let Some(h) = harness(cfg, None) else { return };
+        let Some(h) = harness(cfg, None) else { unreachable!() };
         let unverified = h
             .seed(SeedUser {
                 email_verified: false,

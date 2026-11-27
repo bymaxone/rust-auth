@@ -15,7 +15,7 @@ async fn a_rotated_token_names_its_successor_and_the_pointer_is_left_as_it_was()
     let Some(redis) = common::try_start().await else {
         return;
     };
-    let Some(stores) = redis.stores() else { return };
+    let Some(stores) = redis.stores() else { unreachable!() };
     let kind = SessionKind::Dashboard;
     let (old, new) = (hash_of('a'), hash_of('b'));
     let created = stores
@@ -46,7 +46,7 @@ async fn a_hash_with_no_pointer_and_a_malformed_pointer_name_nothing() {
     let Some(redis) = common::try_start().await else {
         return;
     };
-    let Some(stores) = redis.stores() else { return };
+    let Some(stores) = redis.stores() else { unreachable!() };
     let kind = SessionKind::Dashboard;
     assert!(matches!(
         stores.grace_successor(kind, &hash_of('c')).await,

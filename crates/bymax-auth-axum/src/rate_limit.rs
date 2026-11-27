@@ -592,7 +592,7 @@ mod tests {
             .burst_size(1)
             .key_extractor(ClientIpBucketKeyExtractor)
             .finish();
-        let Some(config) = built else { return };
+        let Some(config) = built else { unreachable!() };
         let config = Arc::new(config);
 
         spawn_key_gc(Arc::clone(&config));
@@ -619,7 +619,7 @@ mod tests {
             .burst_size(1)
             .key_extractor(ClientIpBucketKeyExtractor)
             .finish();
-        let Some(config) = built else { return };
+        let Some(config) = built else { unreachable!() };
         let config = Arc::new(config);
 
         let client = IpAddr::from([198, 51, 100, 9]);
@@ -653,7 +653,7 @@ mod tests {
             .burst_size(1)
             .key_extractor(ClientIpBucketKeyExtractor)
             .finish();
-        let Some(config) = built else { return };
+        let Some(config) = built else { unreachable!() };
 
         // No `#[tokio::test]`: there is deliberately no runtime here. Returning at all is the
         // assertion — the alternative this guards against is an unwrap on `Handle::current`.

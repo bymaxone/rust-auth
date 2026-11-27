@@ -605,6 +605,9 @@ jobs:
       # the happy path end to end.
       - name: Crate smoke (Axum + real Redis)
         working-directory: examples
+        # A smoke that skipped for want of Docker would pass while proving nothing.
+        env:
+          BYMAX_REQUIRE_DOCKER: '1'
         run: cargo test -p smoke-crate --test smoke --locked -- --nocapture
       # npm smoke — build the package, then verify edge HS256 parity against the wasm.
       - name: Build the npm package (dist + wasm)

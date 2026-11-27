@@ -7,6 +7,8 @@
 
 #[path = "common/docker_gate.rs"]
 mod docker_gate;
+#[path = "common/published_address.rs"]
+mod published_address;
 #[path = "common/redis_ready.rs"]
 mod redis_ready;
 
@@ -77,9 +79,8 @@ async fn try_start() -> Option<TestRedis> {
         Ok(container) => container,
         Err(error) => return docker_gate::docker_unavailable("redis:8", error),
     };
-    let host = container.get_host().await.ok()?;
-    let port = container.get_host_port_ipv4(REDIS_PORT).await.ok()?;
-    let url = redis_ready::redis_url(&host.to_string(), port);
+    let (host, port) = published_address::host_and_port(&container, REDIS_PORT).await;
+    let url = redis_ready::redis_url(&host, port);
     redis_ready::wait_until_ready(&url).await;
     Some(TestRedis { container, url })
 }
@@ -92,7 +93,7 @@ const OTHER: &str = "ee454d898fc64c5c6021212945ac239004538d927c35f7b32f544aa0b68
 #[tokio::test]
 async fn the_entries_are_the_keys_and_values_the_contract_pins() {
     let Some(redis) = try_start().await else { return };
-    let Some(stores) = redis.stores() else { return };
+    let Some(stores) = redis.stores() else { unreachable!() };
 
     assert!(stores.put_status(SUBJECT, "ACTIVE", 60).await.is_ok());
     assert!(stores.put_verified(SUBJECT, false, 60).await.is_ok());
@@ -116,8 +117,8 @@ async fn the_entries_are_the_keys_and_values_the_contract_pins() {
 #[tokio::test]
 async fn a_value_written_by_another_implementation_other_than_zero_reads_as_verified() {
     let Some(redis) = try_start().await else { return };
-    let Some(stores) = redis.stores() else { return };
-    let Some(mut conn) = redis.connection().await else { return };
+    let Some(stores) = redis.stores() else { unreachable!() };
+    let Some(mut conn) = redis.connection().await else { unreachable!() };
     let _: () = redis::cmd("SET")
         .arg(format!("auth:uev:{SUBJECT}"))
         .arg("yes")
@@ -131,7 +132,7 @@ async fn a_value_written_by_another_implementation_other_than_zero_reads_as_veri
 #[tokio::test]
 async fn every_entry_expires_and_two_accounts_never_meet() {
     let Some(redis) = try_start().await else { return };
-    let Some(stores) = redis.stores() else { return };
+    let Some(stores) = redis.stores() else { unreachable!() };
 
     assert!(stores.put_status(SUBJECT, "BANNED", 30).await.is_ok());
     assert!(stores.put_verified(SUBJECT, true, 30).await.is_ok());
@@ -146,9 +147,7 @@ async fn every_entry_expires_and_two_accounts_never_meet() {
 #[tokio::test]
 async fn invalidate_drops_both_facts_for_every_handle_on_that_redis() {
     let Some(redis) = try_start().await else { return };
-    let (Some(first), Some(second)) = (redis.stores(), redis.stores()) else {
-        return;
-    };
+    let (Some(first), Some(second)) = (redis.stores(), redis.stores()) else { unreachable!() };
     assert!(first.put_status(SUBJECT, "ACTIVE", 60).await.is_ok());
     assert!(first.put_verified(SUBJECT, true, 60).await.is_ok());
     // A different account's entry survives.

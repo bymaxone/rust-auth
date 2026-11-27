@@ -72,7 +72,7 @@ fn seed_hidden_states(h: &common::Harness, user: &str) {
 
 #[tokio::test]
 async fn every_hidden_state_is_the_same_404_byte_for_byte_on_every_route() {
-    let Some((h, app, user, access)) = signed_in().await else { return };
+    let Some((h, app, user, access)) = signed_in().await else { unreachable!() };
     seed_hidden_states(&h, &user);
     let reference = every_guarded_route(&app, "w-missing", &access).await;
     for answer in &reference {
@@ -96,7 +96,7 @@ async fn every_hidden_state_is_the_same_404_byte_for_byte_on_every_route() {
 
 #[tokio::test]
 async fn the_owner_of_a_pending_workspace_is_answered_409_on_every_read_route() {
-    let Some((h, app, user, access)) = signed_in().await else { return };
+    let Some((h, app, user, access)) = signed_in().await else { unreachable!() };
     h.workspaces
         .seed_workspace("w-pending", WorkspaceStatus::PendingDeletion);
     h.workspaces
@@ -122,7 +122,7 @@ fn named(answer: &Captured) -> Vec<String> {
 #[tokio::test]
 async fn a_malformed_workspace_id_is_refused_naming_it_after_the_credential_and_before_any_lookup()
 {
-    let Some((_, app, _, access)) = signed_in().await else { return };
+    let Some((_, app, _, access)) = signed_in().await else { unreachable!() };
     let long = "a".repeat(129);
     for id in [
         "%20",
@@ -160,7 +160,7 @@ fn workspace_keys(workspace: &Value) -> Vec<String> {
 
 #[tokio::test]
 async fn the_access_route_answers_the_workspace_and_the_callers_role() {
-    let Some((h, app, user, access)) = signed_in().await else { return };
+    let Some((h, app, user, access)) = signed_in().await else { unreachable!() };
     h.workspaces.seed_workspace("w1", WorkspaceStatus::Active);
     h.workspaces
         .seed_member("w1", &user, "admin", MembershipStatus::Active);
@@ -184,7 +184,7 @@ async fn the_access_route_answers_the_workspace_and_the_callers_role() {
 
 #[tokio::test]
 async fn the_access_route_answers_404_when_the_workspace_left_active_after_the_guard_admitted() {
-    let Some((h, app, user, access)) = signed_in().await else { return };
+    let Some((h, app, user, access)) = signed_in().await else { unreachable!() };
     h.workspaces.seed_workspace("w1", WorkspaceStatus::Active);
     h.workspaces
         .seed_member("w1", &user, "admin", MembershipStatus::Active);
@@ -224,7 +224,7 @@ fn listed_ids(answer: &Captured) -> Vec<String> {
 
 #[tokio::test]
 async fn the_list_holds_the_callers_own_workspaces_in_pages_and_its_last_switch() {
-    let Some((h, app, user, access)) = signed_in().await else { return };
+    let Some((h, app, user, access)) = signed_in().await else { unreachable!() };
     seed_lists(&h, &user);
     let all = get(&app, "/auth/workspaces", &access).await;
     assert_eq!(all.status, StatusCode::OK);
@@ -256,7 +256,7 @@ async fn the_list_holds_the_callers_own_workspaces_in_pages_and_its_last_switch(
 
 #[tokio::test]
 async fn a_query_cannot_name_the_tenant_or_the_workspace_of_a_list() {
-    let Some((h, app, user, access)) = signed_in().await else { return };
+    let Some((h, app, user, access)) = signed_in().await else { unreachable!() };
     seed_lists(&h, &user);
     for (query, field) in [
         ("tenantId=t2", "tenantId"),
@@ -273,7 +273,7 @@ async fn a_query_cannot_name_the_tenant_or_the_workspace_of_a_list() {
 
 #[tokio::test]
 async fn the_page_query_is_read_as_text_and_refused_without_clamping() {
-    let Some((h, app, user, access)) = signed_in().await else { return };
+    let Some((h, app, user, access)) = signed_in().await else { unreachable!() };
     seed_lists(&h, &user);
     for path in ["/auth/workspaces", "/auth/workspaces/w1/members"] {
         for (query, field) in [
@@ -300,7 +300,7 @@ async fn the_page_query_is_read_as_text_and_refused_without_clamping() {
 
 #[tokio::test]
 async fn the_members_route_lists_every_status_of_the_guarded_workspace() {
-    let Some((h, app, user, access)) = signed_in().await else { return };
+    let Some((h, app, user, access)) = signed_in().await else { unreachable!() };
     seed_lists(&h, &user);
     h.workspaces
         .seed_member_in(("t2", "w1"), "homonym", "owner", MembershipStatus::Active);
@@ -366,7 +366,7 @@ async fn each_workspace_route_is_served_under_the_limit_it_declares() {
         }
     };
     for (narrow, path) in routes {
-        let Some(h) = build(spec()) else { return };
+        let Some(h) = build(spec()) else { unreachable!() };
         let app = router_with_one_narrow_limit(&h, narrow);
         assert!(trips_on_second_call(&app, || request(path)).await, "{path}");
         // Every other workspace route keeps its own budget.

@@ -30,7 +30,7 @@ async fn the_mint_response_has_exactly_the_keys_the_shared_contract_lists() {
         mfa: true,
         ..EngineSpec::default()
     }) else {
-        return;
+        unreachable!()
     };
     let app = router(&h);
     let reg = Req::post("/auth/register")

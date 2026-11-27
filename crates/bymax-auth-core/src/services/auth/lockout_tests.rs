@@ -29,7 +29,7 @@ async fn lockout(h: &Harness, tenant: &str, email: &str) -> Result<LoginLockout,
 
 #[tokio::test]
 async fn an_untouched_account_is_not_locked() -> Result<(), AuthError> {
-    let Some(h) = harness(base_config(), None) else { return Ok(()) };
+    let Some(h) = harness(base_config(), None) else { unreachable!() };
     let _ = h.seed(SeedUser::active("free@example.com", "right")).await;
 
     let state = lockout(&h, "t1", "free@example.com").await?;
@@ -42,7 +42,7 @@ async fn an_untouched_account_is_not_locked() -> Result<(), AuthError> {
 #[tokio::test]
 async fn failed_logins_lock_the_account_at_the_cap_and_report_the_window() -> Result<(), AuthError>
 {
-    let Some(h) = harness(base_config(), None) else { return Ok(()) };
+    let Some(h) = harness(base_config(), None) else { unreachable!() };
     let _ = h.seed(SeedUser::active("lock@example.com", "right")).await;
     let cap = base_config().brute_force.max_attempts;
 
@@ -62,7 +62,7 @@ async fn failed_logins_lock_the_account_at_the_cap_and_report_the_window() -> Re
 
 #[tokio::test]
 async fn the_address_is_read_the_way_login_reads_it() -> Result<(), AuthError> {
-    let Some(h) = harness(base_config(), None) else { return Ok(()) };
+    let Some(h) = harness(base_config(), None) else { unreachable!() };
     let _ = h.seed(SeedUser::active("case@example.com", "right")).await;
     for _ in 0..base_config().brute_force.max_attempts {
         assert!(fail_once(&h, "case@example.com", "t1").await);
@@ -74,7 +74,7 @@ async fn the_address_is_read_the_way_login_reads_it() -> Result<(), AuthError> {
 
 #[tokio::test]
 async fn another_tenant_and_another_address_are_not_locked() -> Result<(), AuthError> {
-    let Some(h) = harness(base_config(), None) else { return Ok(()) };
+    let Some(h) = harness(base_config(), None) else { unreachable!() };
     let _ = h.seed(SeedUser::active("a@example.com", "right")).await;
     for _ in 0..base_config().brute_force.max_attempts {
         assert!(fail_once(&h, "a@example.com", "t1").await);
@@ -87,7 +87,7 @@ async fn another_tenant_and_another_address_are_not_locked() -> Result<(), AuthE
 
 #[tokio::test]
 async fn an_unknown_address_answers_exactly_as_a_known_one_does() -> Result<(), AuthError> {
-    let Some(h) = harness(base_config(), None) else { return Ok(()) };
+    let Some(h) = harness(base_config(), None) else { unreachable!() };
     let _ = h.seed(SeedUser::active("known@example.com", "right")).await;
     let cap = base_config().brute_force.max_attempts;
     for _ in 0..cap {
@@ -104,7 +104,7 @@ async fn an_unknown_address_answers_exactly_as_a_known_one_does() -> Result<(), 
 
 #[tokio::test]
 async fn reading_the_state_never_moves_it() -> Result<(), AuthError> {
-    let Some(h) = harness(base_config(), None) else { return Ok(()) };
+    let Some(h) = harness(base_config(), None) else { unreachable!() };
     let _ = h.seed(SeedUser::active("ro@example.com", "right")).await;
     let cap = base_config().brute_force.max_attempts;
     for _ in 0..cap - 1 {
@@ -123,7 +123,7 @@ async fn reading_the_state_never_moves_it() -> Result<(), AuthError> {
 
 #[tokio::test]
 async fn an_unlock_is_visible() -> Result<(), AuthError> {
-    let Some(h) = harness(base_config(), None) else { return Ok(()) };
+    let Some(h) = harness(base_config(), None) else { unreachable!() };
     let _ = h.seed(SeedUser::active("un@example.com", "right")).await;
     for _ in 0..base_config().brute_force.max_attempts {
         assert!(fail_once(&h, "un@example.com", "t1").await);

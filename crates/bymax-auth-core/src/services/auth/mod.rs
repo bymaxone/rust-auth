@@ -650,8 +650,6 @@ pub(crate) mod test_support {
         }
     }
 
-    /// Build a harness from `cfg` and optional hooks. Returns `None` if the (always valid)
-    /// fixture config somehow fails to assemble, so callers stay panic-free with `let-else`.
     /// Wait for a detached rehash to land, polling until the stored hash differs from
     /// `previous` or the deadline passes.
     ///
@@ -691,8 +689,7 @@ pub(crate) mod test_support {
     /// Wait for the detached email send to deliver the verification code, up to a deadline.
     ///
     /// The send is fire-and-forget (`spawn_guarded`), so reading the mailbox the instant the
-    /// flow returns is a race the test loses on a quiet machine — and loses SILENTLY, because
-    /// the caller's `let Some(code) = .. else { return }` turns a lost race into a pass. Polling
+    /// flow returns is a race the test loses on a quiet machine. Polling
     /// rather than sleeping a fixed span for the reason `await_rehash_within` does: a wait tuned
     /// here becomes a flake on a slower runner.
     /// Polls to a deadline of `attempts` × 25 ms. Callers pass a generous count; the give-up
@@ -733,6 +730,8 @@ pub(crate) mod test_support {
         await_password_reset_code_within(harness, 40).await
     }
 
+    /// Build a harness from `cfg` and optional hooks. Returns `None` if the (always valid)
+    /// fixture config somehow fails to assemble.
     pub(crate) fn harness(cfg: AuthConfig, hooks: Option<Arc<dyn AuthHooks>>) -> Option<Harness> {
         let users = Arc::new(InMemoryUserRepository::new());
         let stores = Arc::new(InMemoryStores::new());
@@ -784,7 +783,8 @@ mod tests {
         // invitee index is an HMAC rather than a plain digest because an address carries far
         // too little entropy for SHA-256 to hide it. Any of them drifting on one side alone
         // splits a keyspace the two implementations are supposed to share.
-        let Some(h) = test_support::harness(test_support::base_config(), None) else { return };
+        let h = test_support::harness(test_support::base_config(), None);
+        let Some(h) = h else { unreachable!() };
         let key = h.engine.config().hmac_key();
         let expect_preimage = |name: &str, actual: &str| {
             let template = crate::services::contract_preimage(name)
@@ -887,7 +887,7 @@ mod tests {
         // nest-auth's `resolveTenantId` refuses as of its 1.4.2.
         let mut cfg = test_support::base_config();
         cfg.tenant_id_resolver = Some(Arc::new(HostTenantResolver));
-        let Some(h) = test_support::harness(cfg, None) else { return };
+        let Some(h) = test_support::harness(cfg, None) else { unreachable!() };
         let mut headers = BTreeMap::new();
         headers.insert("host".to_owned(), "resolved-tenant".to_owned());
         let ctx = RequestContext::new("1.2.3.4", "ua", headers);
@@ -933,7 +933,7 @@ mod tests {
         // blocking a CI run forever, and it is only reachable — and only testable — through the
         // parameterized form, exactly as `await_rehash_within` is.
         let cfg = test_support::base_config();
-        let Some(h) = test_support::harness(cfg, None) else { return };
+        let Some(h) = test_support::harness(cfg, None) else { unreachable!() };
         assert!(
             test_support::await_verification_code_within(&h, 1)
                 .await
@@ -951,7 +951,7 @@ mod tests {
         // The harness's double keeps the two codes a flow has to submit back, and no-ops the
         // other sends. Exercised end to end here so the object-safe impl is covered and so the
         // recording halves are asserted rather than assumed: a double that quietly kept nothing
-        // would make every test that reads a code from it skip its own assertions.
+        // would fail every test that reads a code from it, far from the cause.
         let mailer = test_support::CapturingEmails::default();
         assert!(mailer.verification_code().is_none());
         assert!(mailer.password_reset_code().is_none());
@@ -1018,10 +1018,10 @@ mod tests {
         // and that scope keys the user lookup, the Redis records and the HMAC identifiers. A
         // default would silently gather into one scope every account a misconfigured deployment
         // created — so the request is refused, naming the field the deployment has to fix.
-        // Bound first so the `else` fits on one line: a wrapped `else { return; }` isolates the
-        // `return` on its own line, which no run reaches and the 100% line gate then refuses.
+        // Bound first so the `else` fits on one line: a wrapped one isolates its body on a line
+        // no run reaches, which the 100% line gate then refuses.
         let cfg = test_support::base_config();
-        let Some(h) = test_support::harness(cfg, None) else { return };
+        let Some(h) = test_support::harness(cfg, None) else { unreachable!() };
         let ctx = RequestContext::new("1.2.3.4", "ua", BTreeMap::new());
         let refused = h.engine.resolve_tenant(None, &ctx).await;
         assert!(
@@ -1058,7 +1058,7 @@ mod tests {
         // value, which is the divergence the refusal exists to close.
         let mut cfg = test_support::base_config();
         cfg.tenant_id_resolver = Some(Arc::new(HostTenantResolver));
-        let Some(h) = test_support::harness(cfg, None) else { return };
+        let Some(h) = test_support::harness(cfg, None) else { unreachable!() };
         let empty = RequestContext::new("1.2.3.4", "ua", BTreeMap::new());
         let refused = |outcome: Result<(), AuthError>| {
             matches!(outcome, Err(AuthError::Validation { details })
@@ -1206,7 +1206,7 @@ mod tests {
         // returns an empty id (the repository conflict path).
         let hooks: Arc<dyn crate::traits::AuthHooks> = Arc::new(NoOpAuthHooks);
         let built = test_support::harness(test_support::base_config(), Some(hooks));
-        let Some(h) = built else { return };
+        let Some(h) = built else { unreachable!() };
         let first = h
             .seed(test_support::SeedUser::active("dup@x.io", "pw"))
             .await;
@@ -1275,7 +1275,8 @@ mod tests {
     /// out together — or a guess against one flow would escape the other flow's counter.
     #[tokio::test]
     async fn the_reproof_identifier_is_stable_and_scoped_to_flow_and_user() {
-        let Some(h) = test_support::harness(test_support::base_config(), None) else { return };
+        let h = test_support::harness(test_support::base_config(), None);
+        let Some(h) = h else { unreachable!() };
         let id = h
             .engine
             .reproof_identifier("change-password", "t1", "user-1");

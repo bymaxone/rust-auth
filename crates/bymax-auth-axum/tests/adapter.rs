@@ -177,7 +177,7 @@ fn platform_refresh(resp: &Captured) -> String {
 async fn always_on_groups_are_mounted_and_optional_groups_are_absent_by_default() {
     // A bare engine mounts auth + password_reset only; an unconfigured optional group
     // contributes ZERO routes (sessions toggle off → 404, not 401/405).
-    let Some(h) = build(EngineSpec::default()) else { return };
+    let Some(h) = build(EngineSpec::default()) else { unreachable!() };
     let app = router(&h);
 
     // The always-on `me` route exists (401 without a token, not 404).
@@ -193,7 +193,7 @@ async fn always_on_groups_are_mounted_and_optional_groups_are_absent_by_default(
         h.engine.clone(),
         bymax_auth_axum::AxumAuthConfig::new(bymax_auth_axum::ClientIpSource::PeerAddr),
     ) else {
-        return;
+        unreachable!()
     };
     let derived = assembled.groups();
     assert!(derived.auth && derived.password_reset);
@@ -207,7 +207,7 @@ async fn the_set_cookie_header_is_marked_sensitive_so_tracing_cannot_print_the_t
     // the header sensitive is what stops a deployment whose tracing records response headers —
     // a reasonable thing to switch on while debugging — from writing live session tokens into
     // its logs, where they outlive the session and are read by people it was never issued to.
-    let Some(h) = build(EngineSpec::default()) else { return };
+    let Some(h) = build(EngineSpec::default()) else { unreachable!() };
     let app = router(&h);
 
     let reg = Req::post("/auth/register")
@@ -235,7 +235,7 @@ async fn password_change_requires_a_session_and_the_current_password() {
         delivery: bymax_auth_core::config::TokenDelivery::Bearer,
         ..EngineSpec::default()
     }) else {
-        return;
+        unreachable!()
     };
     let app = router(&h);
 
@@ -298,7 +298,7 @@ async fn register_refuses_a_common_password_by_default() {
     // everything, so a deployment on defaults accepted this — and the brute-force machinery
     // never fired, because spraying one password across ten thousand accounts never crosses any
     // single account's threshold.
-    let Some(h) = build(EngineSpec::default()) else { return };
+    let Some(h) = build(EngineSpec::default()) else { unreachable!() };
     let app = router(&h);
 
     for weak in [
@@ -335,7 +335,7 @@ async fn revoke_all_sessions_works_in_bearer_mode_and_never_reports_a_silent_suc
         sessions: true,
         ..EngineSpec::default()
     }) else {
-        return;
+        unreachable!()
     };
     let app = router(&h);
 
@@ -390,7 +390,7 @@ async fn session_cookies_are_host_only_unless_a_domain_resolver_is_configured() 
     // sent to every subdomain of that name (RFC 6265 §5.2.3), so deriving it from the request
     // host would hand the session to a marketing site, a user-content host, or a stale DNS
     // record someone else now answers for. Host-only is the safe default; sharing is opted in.
-    let Some(h) = build(EngineSpec::default()) else { return };
+    let Some(h) = build(EngineSpec::default()) else { unreachable!() };
     let app = router(&h);
     let reg = Req::post("/auth/register")
         .json(serde_json::json!({
@@ -422,7 +422,7 @@ async fn a_configured_domain_resolver_stamps_every_session_cookie_and_the_logout
         cookie_domains: &[".example.com", ".api.example.com"],
         ..EngineSpec::default()
     }) else {
-        return;
+        unreachable!()
     };
     let app = router(&h);
 
@@ -504,7 +504,7 @@ async fn a_default_production_config_marks_the_session_and_its_clear_secure() {
         environment: bymax_auth_core::Environment::Production,
         ..EngineSpec::default()
     }) else {
-        return;
+        unreachable!()
     };
     let app = router(&h);
     let reg = Req::post("/auth/register")
@@ -545,7 +545,7 @@ async fn a_default_production_config_marks_the_session_and_its_clear_secure() {
 #[tokio::test]
 async fn an_unknown_route_is_404() {
     // A path outside the mounted table is a clean 404.
-    let Some(h) = build(EngineSpec::default()) else { return };
+    let Some(h) = build(EngineSpec::default()) else { unreachable!() };
     let app = router(&h);
     let resp = Req::get("/auth/does-not-exist").send(&app).await;
     assert_eq!(resp.status, StatusCode::NOT_FOUND);
@@ -559,7 +559,7 @@ async fn every_response_is_stamped_uncacheable() {
     // cannot forget it; this test pins success, auth-failure, and 404 responses alike,
     // because a cached 401 wedges a client just as a cached login leaks one. `nest-auth`
     // stamps the identical headers via a controller interceptor.
-    let Some(h) = build(EngineSpec::default()) else { return };
+    let Some(h) = build(EngineSpec::default()) else { unreachable!() };
     let app = router(&h);
 
     for path in ["/auth/me", "/auth/does-not-exist"] {
@@ -588,7 +588,7 @@ async fn every_response_is_stamped_uncacheable() {
 #[tokio::test]
 async fn register_login_me_logout_cookie_mode() {
     // The full cookie-mode lifecycle, asserting the secure cookie attributes at each step.
-    let Some(h) = build(EngineSpec::default()) else { return };
+    let Some(h) = build(EngineSpec::default()) else { unreachable!() };
     let app = router(&h);
 
     let reg = Req::post("/auth/register")
@@ -675,7 +675,7 @@ async fn login_bearer_mode_returns_tokens_in_body_and_no_cookies() {
         delivery: bymax_auth_core::config::TokenDelivery::Bearer,
         ..EngineSpec::default()
     };
-    let Some(h) = build(spec) else { return };
+    let Some(h) = build(spec) else { unreachable!() };
     let app = router(&h);
     seed_user(&h, "b@e.com", "glidingwalnut42", "USER").await;
 
@@ -705,7 +705,7 @@ async fn login_both_mode_sets_cookies_and_body_tokens() {
         delivery: bymax_auth_core::config::TokenDelivery::Both,
         ..EngineSpec::default()
     };
-    let Some(h) = build(spec) else { return };
+    let Some(h) = build(spec) else { unreachable!() };
     let app = router(&h);
     seed_user(&h, "c@e.com", "glidingwalnut42", "USER").await;
 
@@ -730,7 +730,7 @@ async fn login_both_mode_sets_cookies_and_body_tokens() {
 async fn refresh_rotates_in_cookie_and_bearer_modes() {
     // Cookie-mode refresh reads the refresh cookie and sets a new pair; bearer-mode refresh
     // reads the body refreshToken and returns the new pair.
-    let Some(h) = build(EngineSpec::default()) else { return };
+    let Some(h) = build(EngineSpec::default()) else { unreachable!() };
     let app = router(&h);
     let reg = Req::post("/auth/register")
         .json(serde_json::json!({
@@ -757,7 +757,7 @@ async fn refresh_rotates_in_cookie_and_bearer_modes() {
         delivery: bymax_auth_core::config::TokenDelivery::Bearer,
         ..EngineSpec::default()
     };
-    let Some(hb) = build(spec) else { return };
+    let Some(hb) = build(spec) else { unreachable!() };
     let appb = router(&hb);
     seed_user(&hb, "rb@e.com", "glidingwalnut42", "USER").await;
     let login = login(&appb, "rb@e.com", "glidingwalnut42").await;
@@ -799,7 +799,7 @@ async fn bearer_mode_logout_revokes_the_refresh_session_from_the_body() {
         delivery: bymax_auth_core::config::TokenDelivery::Bearer,
         ..EngineSpec::default()
     };
-    let Some(h) = build(spec) else { return };
+    let Some(h) = build(spec) else { unreachable!() };
     let app = router(&h);
     seed_user(&h, "blo@e.com", "glidingwalnut42", "USER").await;
     let session = login(&app, "blo@e.com", "glidingwalnut42").await;
@@ -837,7 +837,7 @@ async fn logout_without_any_refresh_token_still_succeeds() {
         delivery: bymax_auth_core::config::TokenDelivery::Bearer,
         ..EngineSpec::default()
     };
-    let Some(h) = build(spec) else { return };
+    let Some(h) = build(spec) else { unreachable!() };
     let app = router(&h);
     seed_user(&h, "nolo@e.com", "glidingwalnut42", "USER").await;
 
@@ -878,7 +878,7 @@ async fn platform_logout_revokes_the_refresh_session_from_the_body() {
         platform: true,
         ..EngineSpec::default()
     }) else {
-        return;
+        unreachable!()
     };
     let app = router(&h);
     seed_admin(&h, "plo@e.com", "SUPER_ADMIN").await;
@@ -904,7 +904,7 @@ async fn platform_logout_revokes_the_refresh_session_from_the_body() {
 async fn invalid_credentials_and_unknown_email_are_indistinguishable() {
     // Anti-enumeration: a wrong password and an unknown email both return the same generic
     // 401 invalid-credentials.
-    let Some(h) = build(EngineSpec::default()) else { return };
+    let Some(h) = build(EngineSpec::default()) else { unreachable!() };
     let app = router(&h);
     seed_user(&h, "known@e.com", "glidingwalnut42", "USER").await;
 
@@ -923,7 +923,7 @@ async fn invalid_credentials_and_unknown_email_are_indistinguishable() {
 
 #[tokio::test]
 async fn validation_rejects_unknown_fields_and_bad_fields() {
-    let Some(h) = build(EngineSpec::default()) else { return };
+    let Some(h) = build(EngineSpec::default()) else { unreachable!() };
     let app = router(&h);
 
     // An unknown field 400s with `auth.validation` and per-field details.
@@ -969,7 +969,7 @@ async fn validation_rejects_unknown_fields_and_bad_fields() {
 
 #[tokio::test]
 async fn auth_user_rejects_missing_invalid_and_revoked_tokens() {
-    let Some(h) = build(EngineSpec::default()) else { return };
+    let Some(h) = build(EngineSpec::default()) else { unreachable!() };
     let app = router(&h);
     seed_user(&h, "tok@e.com", "glidingwalnut42", "USER").await;
 
@@ -1029,7 +1029,7 @@ async fn auth_user_rejects_missing_invalid_and_revoked_tokens() {
 
 #[tokio::test]
 async fn password_reset_endpoints_are_anti_enumerating() {
-    let Some(h) = build(EngineSpec::default()) else { return };
+    let Some(h) = build(EngineSpec::default()) else { unreachable!() };
     let app = router(&h);
 
     // forgot-password returns 200 for an unknown email (anti-enum).
@@ -1080,7 +1080,7 @@ async fn verify_and_resend_verification_are_uniform() {
         verification_required: true,
         ..EngineSpec::default()
     }) else {
-        return;
+        unreachable!()
     };
     let app = router(&h);
 
@@ -1112,7 +1112,7 @@ async fn sessions_list_revoke_one_and_revoke_all() {
         sessions: true,
         ..EngineSpec::default()
     }) else {
-        return;
+        unreachable!()
     };
     let app = router(&h);
     let reg = Req::post("/auth/register")
@@ -1265,7 +1265,7 @@ async fn mfa_setup_verify_enable_and_challenge_error_arms() {
         mfa: true,
         ..EngineSpec::default()
     }) else {
-        return;
+        unreachable!()
     };
     let app = router(&h);
     let reg = Req::post("/auth/register")
@@ -1355,7 +1355,7 @@ async fn login_with_mfa_returns_a_challenge_body() {
         mfa: true,
         ..EngineSpec::default()
     }) else {
-        return;
+        unreachable!()
     };
     let app = router(&h);
     let id = seed_user(&h, "mfauser@e.com", "glidingwalnut42", "USER").await;
@@ -1384,7 +1384,7 @@ async fn platform_login_me_logout_and_dashboard_token_is_rejected() {
         mfa: true,
         ..EngineSpec::default()
     }) else {
-        return;
+        unreachable!()
     };
     let app = router(&h);
     seed_admin(&h, "boss@e.com", "SUPER_ADMIN").await;
@@ -1459,7 +1459,7 @@ async fn platform_mfa_setup_requires_platform_auth() {
         mfa: true,
         ..EngineSpec::default()
     }) else {
-        return;
+        unreachable!()
     };
     let app = router(&h);
     // Without a platform token the platform MFA setup is rejected.
@@ -1502,7 +1502,7 @@ async fn invitation_create_and_accept() {
         invitations: true,
         ..EngineSpec::default()
     }) else {
-        return;
+        unreachable!()
     };
     let app = router(&h);
     // An authenticated ADMIN can create an invitation (204); tenant comes from the claims.
@@ -1577,7 +1577,7 @@ async fn oauth_initiate_redirects_and_callback_completes() {
         allow_oauth: true,
         ..EngineSpec::default()
     }) else {
-        return;
+        unreachable!()
     };
     let app = router(&h);
 
@@ -1651,7 +1651,7 @@ async fn oauth_initiate_redirects_and_callback_completes() {
 
 #[tokio::test]
 async fn ws_ticket_mint_and_single_use_redeem() {
-    let Some(h) = build(EngineSpec::default()) else { return };
+    let Some(h) = build(EngineSpec::default()) else { unreachable!() };
     let app = router(&h);
     let reg = Req::post("/auth/register")
         .json(serde_json::json!({
@@ -1690,7 +1690,7 @@ async fn ws_ticket_mint_and_single_use_redeem() {
 #[tokio::test]
 async fn exceeding_the_login_limit_returns_a_429_envelope_with_retry_after() {
     // The default login limit is 5/60s; the 6th rapid attempt from the same IP is throttled.
-    let Some(h) = build(EngineSpec::default()) else { return };
+    let Some(h) = build(EngineSpec::default()) else { unreachable!() };
     let app = router(&h);
     seed_user(&h, "rl@e.com", "glidingwalnut42", "USER").await;
 
@@ -1707,10 +1707,7 @@ async fn exceeding_the_login_limit_returns_a_429_envelope_with_retry_after() {
             break;
         }
     }
-    let Some(resp) = throttled else {
-        // If the limiter did not trip in this environment, skip the strict assertions.
-        return;
-    };
+    let Some(resp) = throttled else { unreachable!() };
     assert_eq!(resp.status, StatusCode::TOO_MANY_REQUESTS);
     assert_eq!(resp.json()["error"]["code"], "auth.too_many_requests");
     assert!(resp.retry_after().is_some());
@@ -1733,7 +1730,7 @@ async fn a_custom_rate_limit_override_changes_the_threshold() {
     use bymax_auth_axum::{AxumAuthConfig, RateLimit, RateLimitConfig};
     // Override the login limit to 1/60s and a per-route disable for register, proving the
     // config knobs flow through.
-    let Some(h) = build(EngineSpec::default()) else { return };
+    let Some(h) = build(EngineSpec::default()) else { unreachable!() };
     seed_user(&h, "ov@e.com", "glidingwalnut42", "USER").await;
     let limits = RateLimitConfig {
         login: Some(RateLimit::new(1, 60)),
@@ -1769,7 +1766,7 @@ async fn a_custom_rate_limit_override_changes_the_threshold() {
 #[tokio::test]
 async fn custom_config_with_forwarded_for_cors_and_prefix() {
     use bymax_auth_axum::{AxumAuthConfig, ClientIpSource};
-    let Some(h) = build(EngineSpec::default()) else { return };
+    let Some(h) = build(EngineSpec::default()) else { unreachable!() };
     let config = AxumAuthConfig {
         route_prefix: "api/auth".to_owned(),
         client_ip_source: ClientIpSource::TrustedForwardedFor,
@@ -1811,7 +1808,7 @@ async fn platform_refresh_revoke_all_and_mfa_challenge_arms() {
         mfa: true,
         ..EngineSpec::default()
     }) else {
-        return;
+        unreachable!()
     };
     let app = router(&h);
     seed_admin(&h, "ops@e.com", "SUPER_ADMIN").await;
@@ -1878,7 +1875,7 @@ async fn platform_mfa_full_lifecycle() {
         mfa: true,
         ..EngineSpec::default()
     }) else {
-        return;
+        unreachable!()
     };
     let app = router(&h);
     seed_admin(&h, "padmin2@e.com", "SUPER_ADMIN").await;
@@ -1968,7 +1965,7 @@ async fn mfa_dashboard_challenge_success_issues_a_session() {
         mfa: true,
         ..EngineSpec::default()
     }) else {
-        return;
+        unreachable!()
     };
     let app = router(&h);
     // Enrol MFA for a fresh user via setup + verify-enable.
@@ -2032,7 +2029,7 @@ async fn mfa_challenge_falls_back_to_the_oauth_temp_cookie_and_clears_it() {
         allow_oauth: true,
         ..EngineSpec::default()
     }) else {
-        return;
+        unreachable!()
     };
     // The mock provider resolves to this account; enabling MFA makes the callback yield a
     // challenge rather than a session.
@@ -2108,7 +2105,7 @@ async fn mfa_challenge_temp_token_sourcing_precedence_and_clearing_policy() {
         mfa: true,
         ..EngineSpec::default()
     }) else {
-        return;
+        unreachable!()
     };
     let app = router(&h);
 
@@ -2183,7 +2180,7 @@ async fn mfa_challenge_body_token_wins_over_a_stale_cookie() {
         mfa: true,
         ..EngineSpec::default()
     }) else {
-        return;
+        unreachable!()
     };
     let app = router(&h);
     let reg = Req::post("/auth/register")
@@ -2240,7 +2237,7 @@ async fn oauth_query_validation_rejects_a_missing_tenant_id() {
         allow_oauth: true,
         ..EngineSpec::default()
     }) else {
-        return;
+        unreachable!()
     };
     let app = router(&h);
     // initiate without the required `tenantId` query is a validation 400.
@@ -2268,7 +2265,7 @@ async fn a_provider_error_callback_is_an_oauth_failure_not_a_validation_error() 
         allow_oauth: true,
         ..EngineSpec::default()
     }) else {
-        return;
+        unreachable!()
     };
     let app = router(&h);
 
@@ -2295,7 +2292,7 @@ async fn a_store_outage_on_the_callback_is_delivered_as_every_other_callback_fai
     // `serviceUnavailable.appliesTo`: the OAuth callback is delivered as every other callback
     // failure is, so an outage that clears reaches the browser as the error redirect carrying
     // its own code, `?error=service_unavailable`, and the user is told to try again.
-    let Some(h) = build_oauth_with_failing_state_store() else { return };
+    let Some(h) = build_oauth_with_failing_state_store() else { unreachable!() };
     let app = router(&h);
 
     // A well-formed 64-hex state: a malformed one is refused on shape before the store is
@@ -2321,7 +2318,7 @@ async fn a_store_outage_on_the_callback_is_delivered_as_every_other_callback_fai
 async fn a_defect_on_the_callback_is_not_dressed_up_as_an_error_redirect() {
     // The error redirect explains a refusal, or an outage that clears, to a user. A defect is
     // neither: it stays a 500 that monitoring sees, with no redirect.
-    let Some(h) = build_oauth_with_defective_state_store() else { return };
+    let Some(h) = build_oauth_with_defective_state_store() else { unreachable!() };
     let app = router(&h);
 
     let state = "a".repeat(64);
@@ -2340,7 +2337,7 @@ async fn a_defect_on_the_callback_is_not_dressed_up_as_an_error_redirect() {
 async fn oauth_callback_redirect_branches() {
     use bymax_auth_core::config::TokenDelivery;
     // Build an engine with the three redirect URLs configured.
-    let Some(h) = build_oauth_with_redirects() else { return };
+    let Some(h) = build_oauth_with_redirects() else { unreachable!() };
     let _ = TokenDelivery::Cookie;
     let app = router(&h);
 
@@ -2391,7 +2388,7 @@ async fn a_refusal_other_than_oauth_failed_redirects_with_its_own_code() {
     use bymax_auth_types::CreateUserData;
     // nest-auth redirects ANY refusal it names to the error URL with that refusal's code, so a
     // browser told only `oauth_failed` for an email collision would be told something false.
-    let Some(h) = build_oauth_with_redirects() else { return };
+    let Some(h) = build_oauth_with_redirects() else { unreachable!() };
     let seeded = h
         .users
         .create(CreateUserData {
@@ -2445,7 +2442,7 @@ async fn a_refusal_other_than_oauth_failed_redirects_with_its_own_code() {
 #[tokio::test]
 async fn register_duplicate_email_hits_the_error_arm() {
     // A duplicate registration triggers the engine error arm of `register` (409).
-    let Some(h) = build(EngineSpec::default()) else { return };
+    let Some(h) = build(EngineSpec::default()) else { unreachable!() };
     let app = router(&h);
     seed_user(&h, "dup@e.com", "glidingwalnut42", "USER").await;
     let resp = Req::post("/auth/register")
@@ -2465,7 +2462,7 @@ async fn session_revoke_with_a_malformed_hash_hits_the_error_arm() {
         sessions: true,
         ..EngineSpec::default()
     }) else {
-        return;
+        unreachable!()
     };
     let app = router(&h);
     let reg = Req::post("/auth/register")
@@ -2490,7 +2487,7 @@ async fn invitation_create_with_an_unknown_role_hits_the_error_arm() {
         invitations: true,
         ..EngineSpec::default()
     }) else {
-        return;
+        unreachable!()
     };
     let app = router(&h);
     seed_user(&h, "inv2@e.com", "glidingwalnut42", "ADMIN").await;
@@ -2514,7 +2511,7 @@ async fn invitation_create_with_an_unknown_role_hits_the_error_arm() {
 async fn password_reset_otp_two_step_success_flow() {
     // forgot-password mints an OTP; verify-otp exchanges it for a verified token (success arm);
     // reset-password with that token succeeds (204). Uses the in-memory OTP peek.
-    let Some(h) = build(EngineSpec::default()) else { return };
+    let Some(h) = build(EngineSpec::default()) else { unreachable!() };
     let app = router(&h);
     seed_user(&h, "pw@e.com", "glidingwalnut42", "USER").await;
 
@@ -2567,7 +2564,7 @@ async fn an_oversized_body_is_rejected_as_payload_too_large() {
     // status the shared contract's `transportErrors` pins for it (413, not the 400 of an
     // ordinary validation failure).
     use bymax_auth_axum::AxumAuthConfig;
-    let Some(h) = build(EngineSpec::default()) else { return };
+    let Some(h) = build(EngineSpec::default()) else { unreachable!() };
     let config = AxumAuthConfig {
         max_body_bytes: 16,
         ..AxumAuthConfig::new(bymax_auth_axum::ClientIpSource::PeerAddr)
@@ -2598,7 +2595,7 @@ async fn invitation_accept_success_creates_a_session() {
         invitations: true,
         ..EngineSpec::default()
     }) else {
-        return;
+        unreachable!()
     };
     let app = router(&h);
     let inviter = seed_user(&h, "host@e.com", "glidingwalnut42", "ADMIN").await;
@@ -2639,7 +2636,7 @@ async fn platform_login_mfa_challenge_success() {
         mfa: true,
         ..EngineSpec::default()
     }) else {
-        return;
+        unreachable!()
     };
     let app = router(&h);
     let admin_id = seed_admin(&h, "mfaboss@e.com", "SUPER_ADMIN").await;
@@ -2688,7 +2685,7 @@ async fn platform_login_mfa_challenge_success() {
 async fn oauth_callback_with_mfa_user_takes_the_mfa_redirect_branch() {
     // An OAuth user with MFA enabled yields an MfaChallenge outcome; with the mfa_redirect_url
     // configured the callback 302-redirects and plants the mfa_temp cookie (the MFA branch).
-    let Some(h) = build_oauth_with_redirects() else { return };
+    let Some(h) = build_oauth_with_redirects() else { unreachable!() };
     // Pre-create the OAuth user with MFA enabled so the callback resolves to a challenge.
     let id = seed_user(&h, "mock@example.com", "glidingwalnut42", "USER").await;
     enable_mfa_flag(&h, &id).await;
@@ -2729,19 +2726,19 @@ async fn oauth_callback_with_mfa_user_takes_the_mfa_redirect_branch() {
 async fn auth_router_free_function_builds_a_working_router() {
     // The top-level `auth_router(engine, config)` convenience function (the alternative to
     // `AuthRouter::from_engine(..).into_router()`) yields a working router.
-    let Some(h) = build(EngineSpec::default()) else { return };
+    let Some(h) = build(EngineSpec::default()) else { unreachable!() };
     // Move a fresh engine into the free function (it takes ownership of the engine).
-    let Some(h2) = build(EngineSpec::default()) else { return };
+    let Some(h2) = build(EngineSpec::default()) else { unreachable!() };
     let _ = h;
     let engine = match std::sync::Arc::try_unwrap(h2.engine) {
         Ok(engine) => engine,
-        Err(_) => return,
+        Err(_) => unreachable!(),
     };
     let Ok(app) = bymax_auth_axum::auth_router(
         engine,
         bymax_auth_axum::AxumAuthConfig::new(bymax_auth_axum::ClientIpSource::PeerAddr),
     ) else {
-        return;
+        unreachable!()
     };
     let me = Req::get("/auth/me").send(&app).await;
     assert_eq!(me.status, StatusCode::UNAUTHORIZED);
@@ -2759,7 +2756,7 @@ async fn me_and_sessions_error_arms_with_a_ghost_subject() {
         sessions: true,
         ..EngineSpec::default()
     }) else {
-        return;
+        unreachable!()
     };
     let app = router(&h);
     let ghost = common::mint_dashboard_token("ghost-user", "USER", "ACTIVE");
@@ -2788,7 +2785,7 @@ async fn platform_me_and_revoke_error_arms_with_a_ghost_admin() {
         mfa: true,
         ..EngineSpec::default()
     }) else {
-        return;
+        unreachable!()
     };
     let app = router(&h);
     let ghost = common::mint_platform_token("ghost-admin", "SUPER_ADMIN");
@@ -2834,7 +2831,7 @@ async fn mfa_setup_after_enrolment_is_refused_with_the_stale_pre_enable_token() 
         mfa: true,
         ..EngineSpec::default()
     }) else {
-        return;
+        unreachable!()
     };
     let app = router(&h);
     let reg = Req::post("/auth/register")
@@ -2884,7 +2881,7 @@ async fn mfa_verify_enable_error_arm_with_a_wrong_code() {
         mfa: true,
         ..EngineSpec::default()
     }) else {
-        return;
+        unreachable!()
     };
     let app = router(&h);
     let reg = Req::post("/auth/register")
@@ -2915,7 +2912,7 @@ async fn platform_login_error_arm_with_bad_credentials() {
         platform: true,
         ..EngineSpec::default()
     }) else {
-        return;
+        unreachable!()
     };
     let app = router(&h);
     seed_admin(&h, "pl@e.com", "SUPER_ADMIN").await;
@@ -2936,7 +2933,7 @@ async fn oauth_callback_mfa_branch_without_redirect_returns_json() {
         allow_oauth: true,
         ..EngineSpec::default()
     }) else {
-        return;
+        unreachable!()
     };
     let id = seed_user(&h, "mock@example.com", "glidingwalnut42", "USER").await;
     enable_mfa_flag(&h, &id).await;
@@ -2978,7 +2975,7 @@ async fn verify_email_success_with_a_live_otp() {
         verification_required: true,
         ..EngineSpec::default()
     }) else {
-        return;
+        unreachable!()
     };
     let app = router(&h);
     // Register so the user exists and a verification OTP is dispatched.
@@ -2993,7 +2990,7 @@ async fn verify_email_success_with_a_live_otp() {
     // that skips itself and reports success.
     let mailed = h.emails.await_verification_code().await;
     assert!(mailed.is_some(), "register mailed no verification code");
-    let Some(otp) = mailed else { return };
+    let Some(otp) = mailed else { unreachable!() };
     let verify = Req::post("/auth/verify-email")
         .json(serde_json::json!({ "email": "vfy@e.com", "otp": otp, "tenantId": TENANT }))
         .send(&app)
@@ -3008,7 +3005,7 @@ async fn dashboard_mfa_disable_and_recovery_success() {
         mfa: true,
         ..EngineSpec::default()
     }) else {
-        return;
+        unreachable!()
     };
     let app = router(&h);
     let reg = Req::post("/auth/register")
@@ -3094,7 +3091,7 @@ async fn a_ghost_subject_is_turned_away_before_any_mfa_handler_runs() {
         mfa: true,
         ..EngineSpec::default()
     }) else {
-        return;
+        unreachable!()
     };
     let app = router(&h);
     let ghost = common::mint_dashboard_token("ghost-mfa", "USER", "ACTIVE");
@@ -3146,7 +3143,7 @@ async fn platform_mfa_handler_error_arms_with_a_ghost_admin() {
         mfa: true,
         ..EngineSpec::default()
     }) else {
-        return;
+        unreachable!()
     };
     let app = router(&h);
     let ghost = common::mint_platform_token("ghost-padmin", "SUPER_ADMIN");
@@ -3187,9 +3184,7 @@ async fn platform_mfa_handler_error_arms_with_a_ghost_admin() {
 
 #[tokio::test]
 async fn sessions_list_and_revoke_all_store_failure_arms() {
-    let Some(h) = common::build_failing() else {
-        return;
-    };
+    let Some(h) = common::build_failing() else { unreachable!() };
     let app = router(&h);
     // Register against the delegating store (writes succeed) to obtain a valid session.
     let reg = Req::post("/auth/register")
@@ -3220,9 +3215,7 @@ async fn sessions_list_and_revoke_all_store_failure_arms() {
 
 #[tokio::test]
 async fn ws_ticket_mint_store_failure_arm() {
-    let Some(h) = common::build_failing() else {
-        return;
-    };
+    let Some(h) = common::build_failing() else { unreachable!() };
     let app = router(&h);
     let reg = Req::post("/auth/register")
         .json(serde_json::json!({
@@ -3241,9 +3234,7 @@ async fn ws_ticket_mint_store_failure_arm() {
 
 #[tokio::test]
 async fn platform_revoke_all_store_failure_arm() {
-    let Some(h) = common::build_failing() else {
-        return;
-    };
+    let Some(h) = common::build_failing() else { unreachable!() };
     let app = router(&h);
     // A minted platform token passes the extractor (blacklist delegates), then revoke-all's
     // store op fails → the platform revoke-all error arm renders a 503.
@@ -3263,9 +3254,7 @@ async fn refresh_surfaces_a_failure_to_re_read_the_account_after_rotation() {
     // fails, and the request MUST surface the infrastructure error as a 500 — reporting a
     // rotation whose body could not be built as a success would hand the client a body it
     // cannot use.
-    let Some(h) = common::build_failing_blacklist() else {
-        return;
-    };
+    let Some(h) = common::build_failing_blacklist() else { unreachable!() };
     let app = router(&h);
     let reg = Req::post("/auth/register")
         .json(serde_json::json!({
@@ -3289,9 +3278,7 @@ async fn platform_refresh_surfaces_a_failure_to_re_read_the_admin_after_rotation
     // The platform twin of the above: the admin echo needs the freshly-minted platform token
     // verified, so a failing revocation check turns the rotation into a 500 rather than a
     // success with no `admin` in it.
-    let Some(h) = common::build_failing_blacklist() else {
-        return;
-    };
+    let Some(h) = common::build_failing_blacklist() else { unreachable!() };
     let app = router(&h);
     seed_admin(&h, "rrp@e.com", "SUPER_ADMIN").await;
     let session = platform_login(&app, "rrp@e.com").await;
@@ -3311,9 +3298,7 @@ async fn platform_extractor_propagates_internal_errors_but_masks_token_failures(
     // With the `rv:{jti}` revocation check failing (Redis down), a *well-formed* platform token
     // reaches that check inside the `PlatformUser` extractor. The internal failure MUST surface
     // as a 500 — masking it as a 401 would hide an outage behind an auth error.
-    let Some(h) = common::build_failing_blacklist() else {
-        return;
-    };
+    let Some(h) = common::build_failing_blacklist() else { unreachable!() };
     let app = router(&h);
 
     let token = common::mint_platform_token("padmin", "SUPER_ADMIN");
@@ -3349,7 +3334,7 @@ async fn a_cookie_authenticated_write_from_an_untrusted_origin_is_refused() {
         trusted_origins: &["https://app.example.com"],
         ..EngineSpec::default()
     }) else {
-        return;
+        unreachable!()
     };
     let app = router(&h);
     seed_user(&h, "csrf@e.com", "glidingwalnut42", "USER").await;
@@ -3406,7 +3391,7 @@ async fn the_cross_site_check_admits_what_it_should() {
         trusted_origins: &["https://app.example.com"],
         ..EngineSpec::default()
     }) else {
-        return;
+        unreachable!()
     };
     let app = router(&h);
     seed_user(&h, "origin@e.com", "glidingwalnut42", "USER").await;
@@ -3475,7 +3460,7 @@ async fn a_cross_site_fetch_with_no_origin_header_is_refused() {
         trusted_origins: &["https://app.example.com"],
         ..EngineSpec::default()
     }) else {
-        return;
+        unreachable!()
     };
     let app = router(&h);
     seed_user(&h, "nohdr@e.com", "glidingwalnut42", "USER").await;
@@ -3503,9 +3488,7 @@ async fn the_default_posture_refuses_a_cross_site_login_with_nothing_allowlisted
     // navigation the browser stores it first-party. The victim then works inside the attacker's
     // account. `Sec-Fetch-Site` states plainly that the request came from elsewhere and no page
     // can forge it, so an empty list no longer excuses it.
-    let Some(h) = build(EngineSpec::default()) else {
-        return;
-    };
+    let Some(h) = build(EngineSpec::default()) else { unreachable!() };
     let app = router(&h);
     seed_user(&h, "defcsrf@e.com", "glidingwalnut42", "USER").await;
 
@@ -3574,9 +3557,7 @@ async fn a_body_that_does_not_declare_json_is_refused() {
     //
     // It is also a wire divergence: nest-auth runs behind `express.json()`, which parses only
     // `application/json`, so the same request 400s there and succeeded here.
-    let Some(h) = build(EngineSpec::default()) else {
-        return;
-    };
+    let Some(h) = build(EngineSpec::default()) else { unreachable!() };
     let app = router(&h);
     seed_user(&h, "ctype@e.com", "glidingwalnut42", "USER").await;
 
@@ -3611,7 +3592,7 @@ async fn the_address_change_routes_move_an_account_only_after_the_new_address_pr
         email_change: true,
         ..EngineSpec::default()
     }) else {
-        return;
+        unreachable!()
     };
     let app = router(&h);
     let user_id = seed_user(&h, "old@e.com", "glidingwalnut42", "USER").await;
@@ -3840,7 +3821,7 @@ async fn each_route_is_served_under_the_limit_it_declares() {
         sessions: true,
         ..EngineSpec::default()
     }) else {
-        return;
+        unreachable!()
     };
 
     // Public platform logout, wired to `logout`.
@@ -3893,7 +3874,7 @@ async fn mfa_management_error_arms_with_a_real_account() {
         mfa: true,
         ..EngineSpec::default()
     }) else {
-        return;
+        unreachable!()
     };
     let app = router(&h);
     let reg = Req::post("/auth/register")
@@ -3952,8 +3933,8 @@ async fn the_capturing_mailer_records_the_codes_and_ignores_the_rest() {
     // The harness's double keeps the two codes a flow has to submit back — the OTP record holds
     // a keyed fingerprint, so the mailbox is the only place the plaintext exists — and no-ops
     // the rest. Driven end to end so the object-safe impl is covered, and so the recording
-    // halves are asserted rather than assumed: a double that quietly kept nothing would make
-    // every test reading a code from it skip its own assertions and still pass.
+    // halves are asserted rather than assumed: a double that quietly kept nothing would fail
+    // every test reading a code from it, far from the cause.
     use bymax_auth_core::traits::EmailProvider;
 
     let mailer = common::CapturingEmails::default();
@@ -4031,7 +4012,7 @@ async fn reset_password_counts_the_proofs_the_way_nest_auth_does() {
     // omitted key both deserialize to `None`. The two agree — but by two different mechanisms
     // that could drift apart without either suite noticing, which is what this test is for.
     // Measured against nest-auth's answers on an OTP-method deployment, body for body.
-    let Some(h) = build(EngineSpec::default()) else { return };
+    let Some(h) = build(EngineSpec::default()) else { unreachable!() };
     let app = router(&h);
     seed_user(&h, "arity@e.com", "glidingwalnut42", "USER").await;
 
@@ -4088,7 +4069,7 @@ async fn a_structurally_valid_proof_the_configured_method_does_not_accept_is_ref
     // Its own test rather than a fourth request on the arity one: the route's rate limiter
     // spends its window in three, so a fourth request measures the limiter instead of the
     // dispatch.
-    let Some(h) = build(EngineSpec::default()) else { return };
+    let Some(h) = build(EngineSpec::default()) else { unreachable!() };
     let app = router(&h);
     seed_user(&h, "mismatch@e.com", "glidingwalnut42", "USER").await;
 

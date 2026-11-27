@@ -12,6 +12,8 @@
 
 #[path = "common/docker_gate.rs"]
 mod docker_gate;
+#[path = "common/published_address.rs"]
+mod published_address;
 #[path = "common/redis_ready.rs"]
 mod redis_ready;
 
@@ -71,9 +73,8 @@ async fn try_start() -> Option<TestRedis> {
         Ok(container) => container,
         Err(error) => return docker_gate::docker_unavailable("redis:8", error),
     };
-    let host = container.get_host().await.ok()?;
-    let port = container.get_host_port_ipv4(REDIS_PORT).await.ok()?;
-    let url = redis_ready::redis_url(&host.to_string(), port);
+    let (host, port) = published_address::host_and_port(&container, REDIS_PORT).await;
+    let url = redis_ready::redis_url(&host, port);
     redis_ready::wait_until_ready(&url).await;
     Some(TestRedis { container, url })
 }
@@ -254,7 +255,7 @@ impl InvitationStoreProbe for RedisProbe {
 #[tokio::test]
 async fn the_scenarios_pass_against_a_real_redis() {
     let Some(redis) = try_start().await else { return };
-    let Some(probe) = redis.probe("scenarios").await else { return };
+    let Some(probe) = redis.probe("scenarios").await else { unreachable!() };
     run_invitation_store_scenarios(&probe).await;
 }
 
@@ -263,7 +264,7 @@ async fn the_scenarios_pass_against_a_real_redis() {
 #[tokio::test]
 async fn a_record_with_no_lifetime_reads_as_unreadable_and_is_not_listed() {
     let Some(redis) = try_start().await else { return };
-    let Some(probe) = redis.probe("nolifetime").await else { return };
+    let Some(probe) = redis.probe("nolifetime").await else { unreachable!() };
     let place = InvitationPlace {
         index_id: "no-lifetime-index".to_owned(),
         set_id: "no-lifetime-set".to_owned(),
@@ -380,7 +381,7 @@ async fn the_keys_and_values_written_are_the_ones_the_contract_vectors_name() {
     assert!(!vectors.is_empty(), "the contract lists no key vectors");
     for (n, vector) in vectors.iter().enumerate() {
         let namespace = format!("vector{n}");
-        let Some(probe) = redis.probe(&namespace).await else { return };
+        let Some(probe) = redis.probe(&namespace).await else { unreachable!() };
         publish_and_compare(&probe, &namespace, n, vector).await;
     }
 }
@@ -393,7 +394,7 @@ async fn the_inviter_counter_is_written_under_the_contract_key() {
     assert!(!vectors.is_empty(), "the contract lists no inviter vectors");
     for (n, vector) in vectors.iter().enumerate() {
         let namespace = format!("rate{n}");
-        let Some(probe) = redis.probe(&namespace).await else { return };
+        let Some(probe) = redis.probe(&namespace).await else { unreachable!() };
         let id = inviter_rate_id(
             &identifier_key(),
             &text(vector, "tenantId"),

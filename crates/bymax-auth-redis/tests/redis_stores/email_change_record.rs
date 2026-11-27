@@ -48,7 +48,7 @@ async fn the_record_is_written_under_the_contract_key_with_the_contract_fields()
     let Some(redis) = common::try_start().await else {
         return;
     };
-    let Some(stores) = redis.stores() else { return };
+    let Some(stores) = redis.stores() else { unreachable!() };
     let context = EmailChangeContext {
         user_id: "user-42".to_owned(),
         new_email: "new@example.com".to_owned(),
@@ -83,7 +83,7 @@ async fn a_record_without_the_fingerprint_is_read_as_unbound_and_consumed_once()
     let Some(redis) = common::try_start().await else {
         return;
     };
-    let Some(stores) = redis.stores() else { return };
+    let Some(stores) = redis.stores() else { unreachable!() };
     // The record as the contract names it, less the field it says may be absent.
     let record: serde_json::Map<String, serde_json::Value> = contract_fields()
         .into_iter()

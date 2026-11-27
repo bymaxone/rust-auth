@@ -565,7 +565,7 @@ mod tests {
         let addr = listener.local_addr().ok()?;
         let handle = tokio::spawn(async move {
             for reply in responses {
-                let Ok((mut socket, _)) = listener.accept().await else { return };
+                let Ok((mut socket, _)) = listener.accept().await else { unreachable!() };
                 let mut buf = [0u8; 4096];
                 let _ = socket.read(&mut buf).await;
                 if let Some(bytes) = reply {
@@ -578,14 +578,14 @@ mod tests {
     }
 
     /// Wire a client to a mock server serving `responses`, run `body` against it, then await
-    /// the server task. The one bind-skip lives here on a single line (covered), so the
-    /// individual tests never carry their own multi-line skip guard.
+    /// the server task. The bind check lives here on a single line (covered), so the
+    /// individual tests carry none of their own.
     async fn with_server<F, Fut>(responses: Vec<Option<Vec<u8>>>, body: F)
     where
         F: FnOnce(AuthClient) -> Fut,
         Fut: Future<Output = ()>,
     {
-        let Some((url, handle)) = serve(responses).await else { return };
+        let Some((url, handle)) = serve(responses).await else { unreachable!() };
         body(AuthClient::new(url)).await;
         let _ = handle.await;
     }
@@ -647,7 +647,7 @@ mod tests {
         Fut: Future<Output = ()>,
     {
         let (tx, rx) = tokio::sync::oneshot::channel::<()>();
-        let Some((url, handle)) = serve_concurrent(refresh_count, rx).await else { return };
+        let Some((url, handle)) = serve_concurrent(refresh_count, rx).await else { unreachable!() };
         body(AuthClient::new(url)).await;
         let _ = tx.send(());
         let _ = handle.await;
