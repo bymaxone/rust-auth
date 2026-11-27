@@ -233,8 +233,8 @@ mod tests {
         // an exhausted record cannot be probed further.
         let source = include_str!("../lua/otp_verify.lua");
         assert!(source.contains("redis.call('HINCRBY', KEYS[1], 'attempts', 1)"));
-        // No `cjson` in the executable body — the comment block explains why it left, and the
-        // in-memory Redis the nest-auth end-to-end tier runs against does not provide it.
+        // No `cjson` in the executable body: the in-memory Redis the nest-auth end-to-end tier
+        // runs against does not provide it.
         let body: String = source
             .lines()
             .filter(|line| !line.trim_start().starts_with("--"))
