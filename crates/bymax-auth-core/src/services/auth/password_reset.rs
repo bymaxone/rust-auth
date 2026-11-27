@@ -2405,8 +2405,8 @@ mod tests {
     }
 
     /// Log in and return the session, or `None` — so a caller's `let-else` fits on one line.
-    /// (Coverage is per line: a `return` on its own line inside a multi-line `let-else` is
-    /// never executed, and reads as a gap rather than as the panic-free idiom it is.)
+    /// (Coverage is per line: an `unreachable!()` on its own line inside a multi-line `let-else`
+    /// is never executed, and reads as a gap.)
     async fn login_ok(h: &Harness, email: &str, password: &str) -> Option<AuthResult> {
         let input = LoginInput {
             email: email.to_owned(),

@@ -651,7 +651,7 @@ pub(crate) mod test_support {
     }
 
     /// Build a harness from `cfg` and optional hooks. Returns `None` if the (always valid)
-    /// fixture config somehow fails to assemble, so callers stay panic-free with `let-else`.
+    /// fixture config somehow fails to assemble; callers fail the test with `unreachable!()` then.
     /// Wait for a detached rehash to land, polling until the stored hash differs from
     /// `previous` or the deadline passes.
     ///

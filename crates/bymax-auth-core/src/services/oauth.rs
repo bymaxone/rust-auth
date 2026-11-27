@@ -1032,8 +1032,8 @@ mod tests {
         let hooks: Arc<dyn AuthHooks> = Arc::new(DecisionHook(OAuthLoginResult::Link));
 
         // The client is bound first so each `let-else` fits one line: rustfmt splits a longer
-        // one, and a `return` on its own line is a line no run reaches — which the 100% line
-        // gate then reports as uncovered.
+        // one, and an `unreachable!()` on its own line is a line no run reaches — which the 100%
+        // line gate then reports as uncovered.
         let http = Arc::new(RoutingHttpClient::new());
         let Some(mismatched) = harness(hooks.clone(), http, false) else { unreachable!() };
         // 64 hex characters, because `oauth_callback` rejects any other SHAPE before it reads

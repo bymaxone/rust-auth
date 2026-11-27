@@ -380,8 +380,8 @@ mod tests {
     }
 
     /// Build the service for a valid fixture config. Returns `None` only if construction
-    /// somehow failed (unreachable for the fixture), so callers stay panic-free with
-    /// `let-else`.
+    /// somehow failed (unreachable for the fixture); callers fail the test with
+    /// `unreachable!()` then.
     fn service() -> Option<PasswordService> {
         PasswordService::new(&config(), Arc::new(AllowAllBreachChecker)).ok()
     }
