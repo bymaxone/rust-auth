@@ -1088,6 +1088,8 @@ Route groups mount only when their feature **and** runtime toggle are enabled, s
 | POST   | `/auth/workspaces/:workspaceId/invitations/resend` | `RequireWorkspace` (`workspaces.permissions.manage_members`) | Send a pending invitation again |
 | POST   | `/auth/workspaces/:workspaceId/invitations/revoke` | `RequireWorkspace` (`workspaces.permissions.manage_members`) | Withdraw a pending invitation |
 | POST   | `/auth/workspaces/invitations/preview` | Public | Say what an invitation token is for |
+| POST   | `/auth/workspaces/invitations/accept` | `AuthUser` + `UserStatus` | Join the workspace an invitation names |
+| POST   | `/auth/workspaces/invitations/accept-signup` | Public | Create the invited account, join it and sign it in (201) |
 
 > `GET /auth/oauth/:provider` plants an HttpOnly `oauth_state` cookie carrying the flow's
 > `state`, and the callback refuses any request that does not send it back — the binding

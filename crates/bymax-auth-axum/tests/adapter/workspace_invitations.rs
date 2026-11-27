@@ -15,7 +15,12 @@ const PASSWORD: &str = "glidingwalnut42";
 const INVITATIONS: &str = "/auth/workspaces/w1/invitations";
 const RESEND: &str = "/auth/workspaces/w1/invitations/resend";
 const REVOKE: &str = "/auth/workspaces/w1/invitations/revoke";
+const SIGNUP: &str = "/auth/workspaces/invitations/accept-signup";
 const PREVIEW: &str = "/auth/workspaces/invitations/preview";
+const ACCEPT: &str = "/auth/workspaces/invitations/accept";
+
+#[path = "workspace_invitation_accept.rs"]
+mod accept;
 
 /// The workspace `w1` with a signed-in owner, a signed-in admin and a signed-in plain member.
 struct Team {
@@ -452,6 +457,13 @@ fn refused_bodies() -> Vec<(&'static str, Value, &'static str)> {
     let address = |email: &str| json!({ "email": email });
     let token = |length: usize| json!({ "token": "t".repeat(length) });
     let extra = json!({ "email": "a@e.com", "workspaceId": "w2" });
+    let signup = |length: usize, name: usize, password: usize| {
+        json!({
+            "token": "t".repeat(length),
+            "name": "n".repeat(name),
+            "password": "p".repeat(password),
+        })
+    };
     vec![
         (INVITATIONS, invite(injected, "member"), "email"),
         (INVITATIONS, invite(&long, "member"), "email"),
@@ -463,6 +475,14 @@ fn refused_bodies() -> Vec<(&'static str, Value, &'static str)> {
         (PREVIEW, token(63), "token"),
         (PREVIEW, token(65), "token"),
         (RESEND, extra, "workspaceId"),
+        (ACCEPT, token(63), "token"),
+        (ACCEPT, token(65), "token"),
+        (SIGNUP, signup(63, 2, 8), "token"),
+        (SIGNUP, signup(65, 2, 8), "token"),
+        (SIGNUP, signup(64, 1, 8), "name"),
+        (SIGNUP, signup(64, 101, 8), "name"),
+        (SIGNUP, signup(64, 2, 7), "password"),
+        (SIGNUP, signup(64, 2, 129), "password"),
     ]
 }
 
@@ -485,6 +505,12 @@ const ROUTES: &[(LimitSetter, &str, &str)] = &[
     (|c, v| c.workspace_invitation_resend = v, "POST", RESEND),
     (|c, v| c.workspace_invitation_revoke = v, "POST", REVOKE),
     (|c, v| c.workspace_invitation_preview = v, "POST", PREVIEW),
+    (|c, v| c.workspace_invitation_accept = v, "POST", ACCEPT),
+    (
+        |c, v| c.workspace_invitation_accept_signup = v,
+        "POST",
+        SIGNUP,
+    ),
 ];
 
 #[tokio::test]

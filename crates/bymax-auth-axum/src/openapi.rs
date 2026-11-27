@@ -155,7 +155,7 @@ macro_rules! row {
 ///
 /// A route that reads no body, or a body no schema describes (the refresh token, which is read
 /// from the cookie or the body and has no shared schema), is not here.
-static REQUEST_BODY_ROUTES: [RequestBodyRoute; 34] = [
+static REQUEST_BODY_ROUTES: [RequestBodyRoute; 36] = [
     row!(RouteGroup::Auth, "/register", "RegisterDto"),
     row!(RouteGroup::Auth, "/login", "LoginDto"),
     row!(RouteGroup::Auth, "/verify-email", "VerifyEmailDto"),
@@ -285,6 +285,16 @@ static REQUEST_BODY_ROUTES: [RequestBodyRoute; 34] = [
         RouteGroup::Workspaces,
         "/workspaces/invitations/preview",
         "PreviewWorkspaceInvitationDto",
+    ),
+    row!(
+        RouteGroup::Workspaces,
+        "/workspaces/invitations/accept",
+        "AcceptWorkspaceInvitationDto",
+    ),
+    row!(
+        RouteGroup::Workspaces,
+        "/workspaces/invitations/accept-signup",
+        "AcceptWorkspaceInvitationSignupDto",
     ),
 ];
 

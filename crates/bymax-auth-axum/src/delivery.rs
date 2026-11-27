@@ -772,6 +772,8 @@ mod tests {
     }
 }
 
+mod joined;
+
 #[cfg(test)]
 mod domain_tests;
 

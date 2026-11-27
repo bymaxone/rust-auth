@@ -1,8 +1,8 @@
 //! The workspace guard against a **real Redis** (via `testcontainers`): the membership a route
 //! admits is resolved through the versioned cache `RedisStores` holds, an unbumped change is still
 //! answered from it, and the bump the writer makes after its change takes the entry out. The
-//! invitation routes run against the invitation scripts of the same store (layer: HTTP adapter,
-//! end-to-end tests).
+//! invitation routes, acceptance included, run against the invitation scripts of the same store
+//! (layer: HTTP adapter, end-to-end tests).
 //!
 //! The single legitimate skip is Docker being unavailable; once a container runs, every step
 //! asserts a real outcome.
@@ -346,4 +346,64 @@ async fn an_invitation_is_listed_previewed_and_revoked_through_the_routes_in_rea
     let (status, body, _) = send(&app, preview, Some(asked), "").await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert_eq!(body["error"]["code"], "auth.invalid_invitation_token");
+}
+
+/// Invites `email` as an owner of `w1` through the route and answers the token that was mailed.
+async fn invite(app: &Router, access: &str, outbox: &Outbox, email: &str) -> String {
+    let path = "/auth/workspaces/w1/invitations";
+    let body = json!({ "email": email, "role": "owner" });
+    let (status, answer, _) = send(app, (Method::POST, path), Some(body), access).await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{answer}");
+    let token = outbox.only_token().unwrap_or_default();
+    if let Ok(mut texts) = outbox.0.lock() {
+        texts.clear();
+    }
+    token
+}
+
+#[tokio::test]
+async fn an_invitation_is_accepted_once_signed_in_and_by_signup_in_real_redis() {
+    let Some((_container, url)) = try_start().await else { return };
+    let built = build(&url);
+    assert!(
+        built.is_some(),
+        "setup must succeed once the container runs"
+    );
+    let Some(b) = built else { unreachable!() };
+    let router = AuthRouter::from_engine(
+        b.engine.clone(),
+        AxumAuthConfig::new(ClientIpSource::PeerAddr),
+    );
+    let Ok(app) = router.map(AuthRouter::into_router) else { unreachable!() };
+    let owner = seed_user(&b.users).await;
+    seed_account(&b.users, "a@e.com").await;
+    seed_seat(&b.repo, &owner, MembershipStatus::Active);
+    let access = sign_in(&app, "w@e.com").await;
+    let joined = json!({ "workspaceId": "w1", "role": "owner" });
+
+    let token = invite(&app, &access, &b.outbox, "a@e.com").await;
+    let invited = sign_in(&app, "a@e.com").await;
+    let accept = (Method::POST, "/auth/workspaces/invitations/accept");
+    let asked = json!({ "token": token });
+    let (status, body, _) = send(&app, accept.clone(), Some(asked.clone()), &invited).await;
+    assert_eq!((status, &body), (StatusCode::OK, &joined));
+    let (status, body, _) = send(&app, accept, Some(asked), &invited).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["error"]["code"], "auth.invalid_invitation_token");
+
+    let token = invite(&app, &access, &b.outbox, "new@e.com").await;
+    let signup = (Method::POST, "/auth/workspaces/invitations/accept-signup");
+    let asked = json!({ "token": token, "name": "Jo Doe", "password": PASSWORD });
+    let (status, body, session) = send(&app, signup.clone(), Some(asked.clone()), "").await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    assert_eq!(body["workspaceId"], "w1");
+    let read = (Method::GET, "/auth/workspaces/w1/access");
+    let (status, body, _) = send(&app, read, None, &session).await;
+    assert_eq!((status, &body["role"]), (StatusCode::OK, &json!("owner")));
+    let (status, body, _) = send(&app, signup, Some(asked), "").await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["error"]["code"], "auth.invalid_invitation_token");
+    let listed = (Method::GET, "/auth/workspaces/w1/invitations");
+    let (_, body, _) = send(&app, listed, None, &access).await;
+    assert_eq!(body["items"], json!([]));
 }

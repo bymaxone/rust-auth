@@ -71,8 +71,8 @@ Because every one of those lists is compared with this repository's own tables i
 | 13.6a | Invitation store: record, index, set, counter, and their scripts | ✅ Done (#438) | 13.2, 13.3 |
 | 13.6b | Invitation services: invite, resend, revoke, list, preview | ✅ Done (#443) | 13.5a, 13.6a |
 | 13.6c | Invitation routes and DTOs | ✅ Done (#474) | 13.6b |
-| 13.7a | Acceptance services: accept and accept-signup of a member invitation | 👀 In review | 13.5b, 13.6b |
-| 13.7b | Acceptance routes, DTOs and limits | 📋 ToDo | 13.7a |
+| 13.7a | Acceptance services: accept and accept-signup of a member invitation | ✅ Done (#477) | 13.5b, 13.6b |
+| 13.7b | Acceptance routes, DTOs and limits | 👀 In review | 13.7a |
 | 13.7c | Bootstrap invitations: mint, withdraw, accept, and their hooks | 📋 ToDo | 13.7a |
 | 13.8 | OAuth invitation, invitation-only registration, the OAuth MFA branch | 📋 ToDo | 13.7a, 13.7c |
 | 13.9 | Realtime surfaces: verifier, sockets, job check, `access.denied` and its limiter | 📋 ToDo | 13.5a |
@@ -282,6 +282,20 @@ An audit of the 13.6b services (findings checked against the code, each with a f
 **Bootstrap records** answer `auth.invalid_invitation_token` and stay unspent until 13.7c, which adds their mint, withdrawal and acceptance together.
 
 **Failure points.** A caller whose account no longer exists is `auth.token_invalid`. An existing active member keeps the role they hold and the token is spent; a membership that is not active is not reinstated. A creation that fails while the address has an account by then answers `auth.email_already_exists`.
+
+### Design of 13.7b — the acceptance routes
+
+Both routes belong to the `workspaces` group, in `crates/bymax-auth-axum/src/routes/workspace_invitations.rs`. Each is compared with `workspace-invitation.controller.ts` of nest-auth.
+
+| | `accept` | `accept-signup` |
+| --- | --- | --- |
+| Path under the prefix | `POST workspaces/invitations/accept` | `POST workspaces/invitations/accept-signup` |
+| Credential (both libraries) | access token and a status in good standing | none |
+| Success (both libraries) | `200 {workspaceId, role}` | `201`, the sign-in body of the delivery mode plus `workspaceId` and `role` |
+| Body bounds (both libraries) | `token` 64 characters | `token` 64, `name` 2 to 100, `password` 8 to 128 |
+| Unknown property | refused | refused |
+| Limit per IP (both libraries) | 10 per minute | 5 per minute |
+| Tenant | the caller's claims | the invitation record |
 
 ---
 

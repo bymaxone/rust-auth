@@ -124,8 +124,9 @@ const NO_BODY_ROUTES: [(&str, &str); 16] = [
 
 /// Rows reachable without a session. Every other row is probed with a session, a platform one
 /// for the platform MFA routes and a dashboard one for the rest.
-const PUBLIC_ROWS: [&str; 13] = [
+const PUBLIC_ROWS: [&str; 14] = [
     "/workspaces/invitations/preview",
+    "/workspaces/invitations/accept-signup",
     "/register",
     "/login",
     "/verify-email",

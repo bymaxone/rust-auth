@@ -11,7 +11,6 @@ use crate::openapi::{
     ACCESS_BEARER_SCHEME, ACCESS_COOKIE_SCHEME, OperationKind, PLATFORM_BEARER_SCHEME,
     REFRESH_COOKIE_SCHEME, describe_operation, operation_security,
 };
-use crate::pending::PENDING_OPERATIONS;
 
 /// The shared copy, as it sits in the repository.
 const CONFORMANCE_COPY: &str = include_str!("../../../conformance/openapi-operation-security.json");
@@ -75,29 +74,7 @@ fn the_table_and_the_artefact_hold_the_same_operations_with_the_same_kinds() {
         .collect();
     assert_eq!(operation_security().len(), table.len(), "a duplicated row");
     assert!(!expected.is_empty());
-    let built: BTreeMap<String, String> = expected
-        .iter()
-        .filter(|(key, _)| !PENDING_OPERATIONS.contains(&key.as_str()))
-        .map(|(key, kind)| (key.clone(), kind.clone()))
-        .collect();
-    assert_eq!(table, built);
-}
-
-#[test]
-fn every_pending_operation_is_in_the_artefact_and_has_no_row() {
-    let shared = artefact();
-    for key in PENDING_OPERATIONS {
-        assert!(
-            shared["operations"].get(key).is_some(),
-            "{key} is pending but the artefact does not carry it"
-        );
-        assert!(
-            operation_security()
-                .iter()
-                .all(|row| artefact_key(row.method, row.path) != key),
-            "{key} has a row; remove it from PENDING_OPERATIONS"
-        );
-    }
+    assert_eq!(table, expected);
 }
 
 #[test]

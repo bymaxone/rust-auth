@@ -1,6 +1,6 @@
 //! The request DTOs of the workspace routes: the page query of the two lists, the path parameters
 //! of a member route, and the bodies of the create, rename, schedule-deletion, role-change,
-//! ownership hand-over and invitation routes (layer: HTTP adapter, DTO).
+//! ownership hand-over, invitation and invitation acceptance routes (layer: HTTP adapter, DTO).
 //!
 //! Each rule is the core's bound from `bymax_auth_core::workspace::bounds` or the shared
 //! contract's `requestFieldBounds`, so the DTO and the service that receives the value refuse the
@@ -168,4 +168,28 @@ pub struct PreviewWorkspaceInvitationDto {
     /// The raw token, exactly 64 characters.
     #[garde(length(chars, min = 64, max = 64))]
     pub token: String,
+}
+
+/// `POST /auth/workspaces/invitations/accept` body: the token of the invitation message.
+#[derive(Debug, Deserialize, Validate)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AcceptWorkspaceInvitationDto {
+    /// The raw token, exactly 64 characters.
+    #[garde(length(chars, min = 64, max = 64))]
+    pub token: String,
+}
+
+/// `POST /auth/workspaces/invitations/accept-signup` body (public).
+#[derive(Debug, Deserialize, Validate)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AcceptWorkspaceInvitationSignupDto {
+    /// The raw token, exactly 64 characters.
+    #[garde(length(chars, min = 64, max = 64))]
+    pub token: String,
+    /// The new account's display name, 2 to 100 characters.
+    #[garde(length(chars, min = 2, max = 100))]
+    pub name: String,
+    /// The new account's password, 8 to 128 characters.
+    #[garde(length(chars, min = 8, max = 128))]
+    pub password: String,
 }

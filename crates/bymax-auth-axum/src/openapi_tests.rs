@@ -102,6 +102,20 @@ const ALL_GROUPS: [RouteGroup; 8] = [
     RouteGroup::Workspaces,
 ];
 
+/// The body schemas the `workspaces` family takes.
+const WORKSPACE_SCHEMAS: [&str; 10] = [
+    "CreateWorkspaceDto",
+    "RenameWorkspaceDto",
+    "ScheduleWorkspaceDeletionDto",
+    "ChangeMemberRoleDto",
+    "TransferOwnershipDto",
+    "InviteToWorkspaceDto",
+    "WorkspaceInvitationEmailDto",
+    "PreviewWorkspaceInvitationDto",
+    "AcceptWorkspaceInvitationDto",
+    "AcceptWorkspaceInvitationSignupDto",
+];
+
 /// The schemas nest-auth contributes per controller family (`REQUEST_SCHEMAS_BY_CONTROLLER` in
 /// `src/server/openapi/request-schema-mounts.ts`; the `workspaces` family as of v1.5.1), for the
 /// families rust mounts as groups. Sessions and OAuth take no body schema there.
@@ -140,16 +154,7 @@ fn nest_schemas(group: RouteGroup) -> Vec<&'static str> {
             "AcceptInvitationDto",
         ],
         RouteGroup::EmailChange => vec!["ChangeEmailDto", "ConfirmEmailChangeDto"],
-        RouteGroup::Workspaces => vec![
-            "CreateWorkspaceDto",
-            "RenameWorkspaceDto",
-            "ScheduleWorkspaceDeletionDto",
-            "ChangeMemberRoleDto",
-            "TransferOwnershipDto",
-            "InviteToWorkspaceDto",
-            "WorkspaceInvitationEmailDto",
-            "PreviewWorkspaceInvitationDto",
-        ],
+        RouteGroup::Workspaces => WORKSPACE_SCHEMAS.to_vec(),
         RouteGroup::Sessions | RouteGroup::OAuth => Vec::new(),
     };
     names.sort_unstable();
@@ -192,9 +197,8 @@ fn a_group_left_off_contributes_nothing_and_the_groups_add_up() {
     assert_eq!(all, expected);
     // The artefact is complete: every schema is served by a group, except the query and path
     // schemas (the two OAuth queries, the workspace page query and the member route parameters),
-    // which are not request bodies; the refresh body, which nest-auth declares for its bound and
-    // mounts on no controller family, because its routes read the raw body; and the schemas still
-    // pending.
+    // which are not request bodies; and the refresh body, which nest-auth declares for its bound and
+    // mounts on no controller family, because its routes read the raw body.
     let mut unserved: Vec<String> = request_schemas()
         .into_keys()
         .filter(|name| !all.contains_key(name))
@@ -208,7 +212,6 @@ fn a_group_left_off_contributes_nothing_and_the_groups_add_up() {
         "WorkspacePageQueryDto",
     ]
     .into_iter()
-    .chain(crate::pending::PENDING_SCHEMAS)
     .collect();
     expected.sort_unstable();
     assert_eq!(unserved, expected);
