@@ -13,6 +13,10 @@ marked BREAKING, never signalled by the number.
 
 > **Release rule.** The first breaking change below is on `main`, so the next release is the breaking batch: there is no interim release from `main`. A security fix needed before that batch ships from a release branch cut from the last tag.
 
+### Added: workspace invitation acceptance
+
+- **`AuthEngine` accepts a member invitation.** `accept_workspace_invitation(tenant_id, user_id, token, ctx)` joins the signed-in account that was invited and answers the role it holds in the workspace; `accept_workspace_invitation_signup(input, ip, user_agent, headers)` creates the account for an invited address that has none, verified, joins it and signs it in. The membership is written before the token is spent, so a signed-in acceptance that fails between the two is completed by retrying. A bootstrap invitation is not accepted. No route is mounted for either.
+
 ### Added: workspace invitation routes
 
 - **The `workspaces` group mounts the invitation routes.** `GET` and `POST /auth/workspaces/{workspaceId}/invitations`, `POST .../invitations/resend`, `POST .../invitations/revoke` and the public `POST /auth/workspaces/invitations/preview`, each under its own rate limit. The management routes need `manage_members`; invite, resend and revoke answer `204` with no body, and an account that is not a member changes nothing about that answer; every token the body accepts but that cannot be previewed gets one answer. The bodies are `InviteToWorkspaceDto`, `WorkspaceInvitationEmailDto` and `PreviewWorkspaceInvitationDto`, in the shared request schemas and the OpenAPI tables. The built-in workspace invitation message now calls an inviter name blank by the shared whitespace rule, so a name of `U+FEFF` alone is treated as unnamed and one of `U+0085` as named, as nest-auth does. **Apply:** with the `workspaces` group on, the host gets these routes; an `EmailProvider` that does not implement `send_workspace_invitation` makes an invite, and a resend that has a message to send, answer `500`.
