@@ -678,8 +678,8 @@ mod tests {
         stores: Arc<InMemoryStores>,
     }
 
-    /// Build a platform harness from `cfg`. Returns `None` if assembly somehow fails; callers
-    /// fail the test with `unreachable!()` then.
+    /// Build a platform harness from `cfg`. Returns `None` if assembly somehow fails, so `None`
+    /// is a test failure and never a skip.
     fn harness(cfg: AuthConfig) -> Option<PlatformHarness> {
         harness_with_hooks(cfg, None)
     }

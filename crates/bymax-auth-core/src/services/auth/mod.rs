@@ -650,8 +650,6 @@ pub(crate) mod test_support {
         }
     }
 
-    /// Build a harness from `cfg` and optional hooks. Returns `None` if the (always valid)
-    /// fixture config somehow fails to assemble; callers fail the test with `unreachable!()` then.
     /// Wait for a detached rehash to land, polling until the stored hash differs from
     /// `previous` or the deadline passes.
     ///
@@ -732,6 +730,8 @@ pub(crate) mod test_support {
         await_password_reset_code_within(harness, 40).await
     }
 
+    /// Build a harness from `cfg` and optional hooks. Returns `None` if the (always valid)
+    /// fixture config somehow fails to assemble, so `None` is a test failure and never a skip.
     pub(crate) fn harness(cfg: AuthConfig, hooks: Option<Arc<dyn AuthHooks>>) -> Option<Harness> {
         let users = Arc::new(InMemoryUserRepository::new());
         let stores = Arc::new(InMemoryStores::new());
