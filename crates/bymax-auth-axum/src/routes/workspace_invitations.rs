@@ -3,8 +3,9 @@
 //! adapter, routes).
 //!
 //! The four management routes pass the guard under `manage_members`. Invite, resend and revoke
-//! answer 204 with no body whether or not the address has an account. The preview needs no
-//! credential, and every token that cannot be previewed is answered with the same error.
+//! answer 204 with no body, and an account that is not a member changes nothing about that
+//! answer. The preview needs no credential, and every token the body accepts but that cannot be
+//! previewed is answered with the same error.
 
 use axum::Json;
 use axum::Router;

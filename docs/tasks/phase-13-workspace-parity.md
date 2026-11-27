@@ -237,8 +237,6 @@ An audit of the 13.6b services (findings checked against the code, each with a f
 - **B1** the repository traits state that an unparsable id is `Ok(None)`. **B2** an owner's resend of a role the hierarchy no longer knows mails nothing. **B4** the address is validated before the hourly slot is taken. **B7** the list view's role, times and resend count are asserted, and the ordering tests no longer end silently. **B9** the misplaced doc comment. **B10** one ceiling function (`outranks`). **B11** the changelog's derived-backend note.
 - **Known limits** (changelog, not fixed here): B3 resend ignores membership, B5 a failed delivery emits no audit event, B6 the list cursor format differs from nest-auth's, B8 the Redis read windows, B12 revoke then invite resets the cooldown.
 
-**Routes.** The `workspaces` group mounts `GET` and `POST /workspaces/{workspaceId}/invitations`, `POST .../invitations/resend`, `POST .../invitations/revoke` and the public `POST /workspaces/invitations/preview`, each under its own limit. The bodies check the address (normalised, well formed, at most 255 characters), the role (1 to 64, no control character) and the token (exactly 64) before the service runs.
-
 ### Design of 13.6b — the invitation services
 
 **Surface.** Five methods on `AuthEngine`, each `(&self, member: &WorkspaceMember, …, ctx: &RequestContext)` like the member services: `invite_workspace_member(email, role)`, `resend_workspace_invitation(email)`, `revoke_workspace_invitation(email)`, `list_workspace_invitations(PageQuery)` and `preview_workspace_invitation(token)`. Bootstrap invitations are 13.7.
