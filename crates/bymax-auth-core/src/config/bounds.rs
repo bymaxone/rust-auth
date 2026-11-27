@@ -39,8 +39,7 @@ fn within(field: &'static str, got: u64, max: u64) -> Result<(), ConfigError> {
 }
 
 impl AuthConfig {
-    /// The ranges of the options that name a lifetime, a window, a cap or a lane count. A refusal
-    /// with its own error runs before this one.
+    /// The ranges of the options that name a lifetime, a window, a cap or a lane count.
     pub(super) fn validate_ceilings(&self) -> Result<(), ConfigError> {
         self.validate_session_ceilings()?;
         self.validate_lifetime_ceilings()?;

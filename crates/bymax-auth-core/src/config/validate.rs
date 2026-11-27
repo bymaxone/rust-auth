@@ -431,7 +431,7 @@ impl AuthConfig {
         // Rule 15-18: OAuth provider fields and redirect safety.
         self.validate_oauth(environment)?;
 
-        // Rule 18a: the ceilings, after every rule that names its own refusal.
+        // Rule 18a: the ceilings. A value an earlier rule refuses keeps that rule's error.
         self.validate_ceilings()?;
 
         // Rule 19: SameSite=None requires resolved secure cookies.
