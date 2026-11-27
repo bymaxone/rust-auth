@@ -11,8 +11,6 @@ use super::{Loaded, load_record};
 use crate::config::RegistrationMode;
 use crate::engine::AuthEngine;
 use crate::normalize::normalize_email;
-use crate::services::auth::detached::run_after_invitation_accepted;
-use crate::services::auth::spawn_guarded;
 use crate::services::workspace::WorkspaceRuntime;
 use crate::traits::{HookContext, OAuthLoginResult, OAuthProfile};
 use crate::workspace::keys::invitation_record_id;
@@ -86,8 +84,10 @@ impl AuthEngine {
 
     /// Writes the membership the flow's invitation, if it has one, names for the account being
     /// signed in, and spends it. The record, the inviter's standing and the workspace are judged
-    /// again, since the host's hook and the account write ran since the first judgement. The
-    /// after-acceptance hook runs when the flow created the account.
+    /// again, since the host's hook and the account write ran since the first judgement.
+    ///
+    /// Returns the context the after-acceptance hook is owed when the flow created the account.
+    /// The caller runs that hook once the session exists.
     ///
     /// # Errors
     ///
@@ -99,9 +99,9 @@ impl AuthEngine {
         flow: &FlowInvitation,
         user: &SafeAuthUser,
         hook_ctx: &HookContext,
-    ) -> Result<(), AuthError> {
+    ) -> Result<Option<HookContext>, AuthError> {
         let Some(id) = flow.id.as_deref() else {
-            return Ok(());
+            return Ok(None);
         };
         let runtime = self.oauth_workspaces()?;
         let loaded = load_record(runtime, id).await?;
@@ -111,14 +111,7 @@ impl AuthEngine {
         hook_ctx.user_id = Some(user.id.clone());
         self.finish_acceptance(runtime, &loaded, user, hook_ctx.clone())
             .await?;
-        if flow.creates {
-            spawn_guarded(run_after_invitation_accepted(
-                self.hooks().clone(),
-                user.clone(),
-                hook_ctx,
-            ));
-        }
-        Ok(())
+        Ok(flow.creates.then_some(hook_ctx))
     }
 
     /// The workspace layer, whose absence makes every invitation one that cannot be honoured.

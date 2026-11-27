@@ -27,7 +27,9 @@ use bymax_auth_crypto::compare::constant_time_eq;
 use crate::RepositoryError;
 use crate::context::{RequestContext, to_safe_user};
 use crate::engine::AuthEngine;
-use crate::services::auth::detached::{run_after_login, run_update_last_login};
+use crate::services::auth::detached::{
+    run_after_invitation_accepted, run_after_login, run_update_last_login,
+};
 use crate::services::auth::{map_repository_error, spawn_guarded};
 use crate::services::workspace_invitations::accept::oauth::FlowInvitation;
 use crate::services::{internal_error, to_hex};
@@ -508,9 +510,27 @@ impl AuthEngine {
             }));
         }
 
-        let safe = SafeAuthUser::from(user);
+        self.open_oauth_session(SafeAuthUser::from(user), flow, ctx, hook_ctx)
+            .await
+    }
+
+    /// Writes the flow's invitation, opens the session and runs the hooks that are owed once
+    /// it exists.
+    ///
+    /// # Errors
+    ///
+    /// Returns the invitation's refusal, or a store/signing [`AuthError`] if the session cannot
+    /// be issued. A membership already written stays.
+    async fn open_oauth_session(
+        &self,
+        safe: SafeAuthUser,
+        flow: FlowInvitation,
+        ctx: &RequestContext,
+        hook_ctx: HookContext,
+    ) -> Result<OAuthOutcome, AuthError> {
         // The membership is written once nothing but the session is left to refuse.
-        self.complete_oauth_invitation(&flow, &safe, &hook_ctx)
+        let accepted = self
+            .complete_oauth_invitation(&flow, &safe, &hook_ctx)
             .await?;
         let result = self
             .tokens()
@@ -526,6 +546,13 @@ impl AuthEngine {
         // session tracking is disabled) before the fire-and-forget bookkeeping.
         self.enforce_sessions_after_issue(&result, &ctx.ip, &ctx.user_agent, &hook_ctx)
             .await?;
+        if let Some(accepted_ctx) = accepted {
+            spawn_guarded(run_after_invitation_accepted(
+                self.hooks().clone(),
+                safe.clone(),
+                accepted_ctx,
+            ));
+        }
         spawn_guarded(run_update_last_login(
             self.user_repository().clone(),
             safe.tenant_id.clone(),

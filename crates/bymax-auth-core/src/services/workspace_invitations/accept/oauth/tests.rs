@@ -9,7 +9,7 @@ use async_trait::async_trait;
 use bymax_auth_types::{AuthError, CreateWithOAuthData, SafeAuthUser, UpdateMfaData};
 
 use crate::config::{AuthConfig, Environment, RegistrationMode};
-use crate::engine::AuthEngine;
+use crate::engine::{AuthEngine, AuthEngineBuilder};
 use crate::services::auth::RegisterInput;
 use crate::services::auth::test_support::{base_config, ctx};
 use crate::services::oauth::OAuthOutcome;
@@ -24,6 +24,8 @@ use crate::traits::{
 };
 use crate::workspace::domain::{MembershipRef, WorkspaceStatus};
 use crate::workspace::keys::invitation_record_id;
+
+mod closed_sessions;
 
 const TOKEN: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 const INVITEE: &str = "joe@x.io";
@@ -134,6 +136,15 @@ struct Rig {
 }
 
 async fn rig_with(config: AuthConfig, decision: OAuthLoginResult) -> Option<Rig> {
+    rig_over(config, decision, |builder| builder).await
+}
+
+/// As [`rig_with`], with `wire` applied to the builder after the fixture's own doubles.
+async fn rig_over(
+    config: AuthConfig,
+    decision: OAuthLoginResult,
+    wire: impl FnOnce(AuthEngineBuilder) -> AuthEngineBuilder,
+) -> Option<Rig> {
     let hooks = Arc::new(Hooks {
         decision: Mutex::new(decision),
         asked: AtomicUsize::new(0),
@@ -148,7 +159,7 @@ async fn rig_with(config: AuthConfig, decision: OAuthLoginResult) -> Option<Rig>
     let inv = setup_customized(
         config,
         |store| store as Arc<dyn WorkspaceInvitationStore>,
-        move |builder| builder.hooks(h).oauth_provider(p).oauth_state_store(s),
+        move |builder| wire(builder.hooks(h).oauth_provider(p).oauth_state_store(s)),
     )
     .await?;
     Some(Rig {
@@ -175,6 +186,12 @@ fn closed_config() -> AuthConfig {
 /// A rig whose member invitation to [`INVITEE`] is published under [`TOKEN`].
 async fn invited(config: AuthConfig, decision: OAuthLoginResult) -> Option<Rig> {
     let rig = rig_with(config, decision).await?;
+    seed_member(&rig).await;
+    Some(rig)
+}
+
+/// Publishes a member invitation to [`INVITEE`] under [`TOKEN`].
+async fn seed_member(rig: &Rig) {
     let member = Seeded {
         email: INVITEE,
         role: "member",
@@ -183,7 +200,6 @@ async fn invited(config: AuthConfig, decision: OAuthLoginResult) -> Option<Rig> 
         resends: 0,
     };
     seed(&rig.inv, TOKEN, &member).await;
-    Some(rig)
 }
 
 /// Starts a flow with `invitation` and completes its callback.
@@ -292,6 +308,22 @@ async fn a_new_account_joins_the_workspace_and_is_signed_in() {
     assert_eq!(member_of(&rig, "w1", &joe).as_deref(), Some("member"));
     assert!(!unspent(&rig).await);
     assert_eq!(accepted_calls(&rig).await, 1);
+}
+
+#[tokio::test]
+async fn a_session_that_cannot_be_written_keeps_the_membership_and_runs_no_hook() {
+    let store = Arc::new(closed_sessions::ClosedSessions::default());
+    let wired = rig_over(oauth_config(), OAuthLoginResult::Create, move |builder| {
+        builder.session_store(store)
+    });
+    let Some(rig) = wired.await else { unreachable!() };
+    seed_member(&rig).await;
+    let outcome = flow(&rig, Some(TOKEN)).await;
+    assert!(matches!(outcome, Err(AuthError::ServiceUnavailable(_))));
+    let Some(joe) = account(&rig, INVITEE).await else { unreachable!() };
+    assert_eq!(member_of(&rig, "w1", &joe).as_deref(), Some("member"));
+    assert!(!unspent(&rig).await);
+    assert_eq!(accepted_calls(&rig).await, 0);
 }
 
 #[tokio::test]
