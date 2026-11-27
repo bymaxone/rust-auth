@@ -580,7 +580,7 @@ Everything is configured through `AuthConfig`. Two ready-made profiles bundle se
 | **tenancy**        | `tenant_id_resolver`, `enforce_tenant_binding` (refuses a token minted for another tenant than the resolver names; requires a resolver, else `TenantBindingWithoutResolver`) | none, `false`              |
 | **account status** | `blocked_statuses`, `user_status_cache_ttl` (how long a status change takes to reach a live token) | `BANNED`, `INACTIVE`, `SUSPENDED`; 60 s |
 
-**Numeric bounds.** `build()` refuses a numeric option outside the range below, because a value the store cannot represent fails on every request that uses it.
+**Numeric bounds.** `build()` refuses a numeric option outside the range below.
 
 | Option | Accepted |
 | ------ | -------- |
@@ -592,7 +592,7 @@ Everything is configured through `AuthConfig`. Two ready-made profiles bundle se
 | `password_reset.token_ttl`, `password_reset.otp_ttl`, `email_verification.otp_ttl`, `email_change.token_ttl`, `invitations.token_ttl` | 1 to 315 360 000 s (ten years) |
 | scrypt `parallelization`, Argon2id `parallelism` | 1 to 16 |
 
-`user_status_cache_ttl = 0` means "no cache" here (every request reads the account), where nest-auth refuses `0`. The access cookie lifetime is a `Duration`, so its ceiling reads 315 360 000 s where nest-auth's option is in milliseconds (315 360 000 000 ms); the limit is the same ten years. A sub-second `Duration` counts as `0`.
+`user_status_cache_ttl = 0` means "no cache" here, where nest-auth refuses `0`. The access cookie lifetime is a `Duration`, so its ceiling reads 315 360 000 s where nest-auth's option is in milliseconds (315 360 000 000 ms); the limit is the same ten years. A sub-second `Duration` counts as `0`.
 
 > [!NOTE]
 > `build()` validates every cross-field invariant (secret length/entropy, role referential integrity, parameter floors, `SameSite=None ⇒ Secure`, `trusted_origins` reachable under the cookie posture, OAuth redirect allow-listing, required stores) and rejects an invalid config with a precise `ConfigError`.
