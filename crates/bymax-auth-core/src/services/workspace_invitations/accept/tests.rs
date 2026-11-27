@@ -124,7 +124,9 @@ async fn accepting_writes_the_membership_spends_the_token_and_reports_it() {
     );
     assert!(spent(&inv, JOE).await);
     let after = authorize(&inv.f, ("t1", &joe, "w1"), &any, false).await;
-    assert!(after.is_ok(), "the cached refusal is ended: {after:?}");
+    assert!(after.is_ok(), "the new member is authorized: {after:?}");
+    let operations = inv.f.cache.operations();
+    assert!(operations.contains(&"bump_membership"), "{operations:?}");
     let events = inv.f.hooks.events(1).await;
     let expected = AuditKind::InvitationAccepted {
         email: JOE.to_owned(),
@@ -191,14 +193,9 @@ async fn a_caller_that_is_not_the_invited_verified_account_is_refused_with_the_t
 #[tokio::test]
 async fn the_address_is_judged_before_verification_and_both_before_the_inviter() {
     let (inv, joe) = invited(config()).await;
-    inv.f
-        .repo
-        .seed_workspace(crate::services::workspace_support_tests::workspace(
-            "t1",
-            "w1",
-            WorkspaceStatus::PendingDeletion,
-            1,
-        ));
+    let owner = &inv.owner.user_id;
+    let blocked = inv.f.users.update_status(owner, "t1", "BANNED").await;
+    assert!(blocked.is_ok());
     let ann = seed_account(&inv.f, "t1", "ann@x.io", false).await;
     assert!(
         inv.f
@@ -218,6 +215,15 @@ async fn the_address_is_judged_before_verification_and_both_before_the_inviter()
     );
     let unverified = accept(&inv, &joe).await;
     assert!(matches!(unverified, Err(AuthError::EmailNotVerified)));
+    assert!(
+        inv.f
+            .users
+            .update_email_verified(&joe, "t1", true)
+            .await
+            .is_ok()
+    );
+    let unbacked = accept(&inv, &joe).await;
+    assert!(matches!(unbacked, Err(AuthError::InvalidInvitationToken)));
 }
 
 /// What can stop standing behind a member invitation.
@@ -351,6 +357,8 @@ async fn a_suspended_member_is_not_reinstated_and_the_token_is_unspent() {
     inv.f.repo.seed_membership(seat);
     let refused = accept(&inv, &joe).await;
     assert!(matches!(refused, Err(AuthError::InvalidInvitationToken)));
+    let kept = inv.f.repo.membership(in_w1(&joe)).map(|m| m.status);
+    assert_eq!(kept, Some(MembershipStatus::Suspended));
     assert!(unspent(&inv, JOE).await);
 }
 
@@ -531,6 +539,11 @@ async fn a_signup_creates_a_verified_account_that_joins_and_is_signed_in() {
         unreachable!("the signup is accepted");
     };
 
+    let printed = format!("{done:?}");
+    for secret in [&done.result.refresh_token, &done.result.access_token] {
+        assert!(!printed.contains(secret.as_str()), "{printed}");
+    }
+    assert!(!printed.contains(JOE), "{printed}");
     let user = done.result.user;
     assert_eq!(done.accepted, accepted_as("member"));
     assert_eq!((user.email.as_str(), user.name.as_str()), (JOE, "Joe Doe"));
@@ -547,7 +560,7 @@ async fn a_signup_creates_a_verified_account_that_joins_and_is_signed_in() {
 }
 
 #[tokio::test]
-async fn a_signed_in_acceptance_creates_no_account_and_fires_no_after_hook() {
+async fn a_signed_in_acceptance_fires_no_after_hook() {
     let hooks = Arc::new(Accepted::default());
     let inv = awaiting_signup(hooks.clone()).await;
     let joe = seed_account(&inv.f, "t1", JOE, false).await;

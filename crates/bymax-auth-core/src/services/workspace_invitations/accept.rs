@@ -62,13 +62,23 @@ impl std::fmt::Debug for WorkspaceSignupInput {
     }
 }
 
-/// What a signup acceptance answers: the new account's session and where it now belongs.
-#[derive(Debug, Clone)]
+/// What a signup acceptance answers: the new account's session and where it now belongs. The
+/// `Debug` impl redacts the session, which carries both tokens and the address.
+#[derive(Clone)]
 pub struct WorkspaceSignup {
     /// The session, issued as a sign-in would.
     pub result: AuthResult,
     /// The workspace joined and the role held there.
     pub accepted: AcceptedWorkspaceInvitation,
+}
+
+impl std::fmt::Debug for WorkspaceSignup {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("WorkspaceSignup")
+            .field("result", &"[REDACTED]")
+            .field("accepted", &self.accepted)
+            .finish()
+    }
 }
 
 /// A member invitation read by its token, with the key it is stored under.

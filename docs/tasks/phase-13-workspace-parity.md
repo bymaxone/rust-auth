@@ -71,12 +71,12 @@ Because every one of those lists is compared with this repository's own tables i
 | 13.6a | Invitation store: record, index, set, counter, and their scripts | ✅ Done (#438) | 13.2, 13.3 |
 | 13.6b | Invitation services: invite, resend, revoke, list, preview | ✅ Done (#443) | 13.5a, 13.6a |
 | 13.6c | Invitation routes and DTOs | ✅ Done (#474) | 13.6b |
-| 13.7a | Acceptance services: accept and accept-signup of a member invitation | 👀 In review | 13.5b, 13.6 |
+| 13.7a | Acceptance services: accept and accept-signup of a member invitation | 👀 In review | 13.5b, 13.6b |
 | 13.7b | Acceptance routes, DTOs and limits | 📋 ToDo | 13.7a |
 | 13.7c | Bootstrap invitations: mint, withdraw, accept, and their hooks | 📋 ToDo | 13.7a |
-| 13.8 | OAuth invitation, invitation-only registration, the OAuth MFA branch | 📋 ToDo | 13.7 |
+| 13.8 | OAuth invitation, invitation-only registration, the OAuth MFA branch | 📋 ToDo | 13.7a, 13.7c |
 | 13.9 | Realtime surfaces: verifier, sockets, job check, `access.denied` and its limiter | 📋 ToDo | 13.5a |
-| 13.10 | OpenAPI surface, client, npm types and documentation | 📋 ToDo | 13.5b, 13.7, 13.8, 13.9 |
+| 13.10 | OpenAPI surface, client, npm types and documentation | 📋 ToDo | 13.5b, 13.7b, 13.7c, 13.8, 13.9 |
 
 ---
 
