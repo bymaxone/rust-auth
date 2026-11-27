@@ -102,6 +102,20 @@ const ALL_GROUPS: [RouteGroup; 8] = [
     RouteGroup::Workspaces,
 ];
 
+/// The body schemas the `workspaces` family takes.
+const WORKSPACE_SCHEMAS: [&str; 10] = [
+    "CreateWorkspaceDto",
+    "RenameWorkspaceDto",
+    "ScheduleWorkspaceDeletionDto",
+    "ChangeMemberRoleDto",
+    "TransferOwnershipDto",
+    "InviteToWorkspaceDto",
+    "WorkspaceInvitationEmailDto",
+    "PreviewWorkspaceInvitationDto",
+    "AcceptWorkspaceInvitationDto",
+    "AcceptWorkspaceInvitationSignupDto",
+];
+
 /// The schemas nest-auth contributes per controller family (`REQUEST_SCHEMAS_BY_CONTROLLER` in
 /// `src/server/openapi/request-schema-mounts.ts`; the `workspaces` family as of v1.5.1), for the
 /// families rust mounts as groups. Sessions and OAuth take no body schema there.
@@ -140,18 +154,7 @@ fn nest_schemas(group: RouteGroup) -> Vec<&'static str> {
             "AcceptInvitationDto",
         ],
         RouteGroup::EmailChange => vec!["ChangeEmailDto", "ConfirmEmailChangeDto"],
-        RouteGroup::Workspaces => vec![
-            "CreateWorkspaceDto",
-            "RenameWorkspaceDto",
-            "ScheduleWorkspaceDeletionDto",
-            "ChangeMemberRoleDto",
-            "TransferOwnershipDto",
-            "InviteToWorkspaceDto",
-            "WorkspaceInvitationEmailDto",
-            "PreviewWorkspaceInvitationDto",
-            "AcceptWorkspaceInvitationDto",
-            "AcceptWorkspaceInvitationSignupDto",
-        ],
+        RouteGroup::Workspaces => WORKSPACE_SCHEMAS.to_vec(),
         RouteGroup::Sessions | RouteGroup::OAuth => Vec::new(),
     };
     names.sort_unstable();
