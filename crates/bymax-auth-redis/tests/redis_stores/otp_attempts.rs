@@ -1,6 +1,7 @@
 //! The `attempts` field of a stored OTP record, as the verify script reads it: an absent one
-//! counts as zero and a present one that spells no integer counts as the ceiling. A child module
-//! of the combined store suite, so it reuses that suite's container harness.
+//! counts as zero and a present one that is not a count (zero or a positive integer the script
+//! accepts) counts as the ceiling. A child module of the combined store suite, so it reuses that
+//! suite's container harness.
 
 use super::*;
 
@@ -14,14 +15,14 @@ async fn seed(stores: &RedisStores, id: &str) -> String {
 }
 
 #[tokio::test]
-async fn a_present_attempts_value_that_is_no_integer_refuses_the_right_code_and_consumes() {
+async fn a_present_attempts_value_that_is_no_count_refuses_the_right_code_and_consumes() {
     let Some(redis) = common::try_start().await else {
         return;
     };
     let Some(stores) = redis.stores() else { return };
 
-    // Each is refused by `HINCRBY` too, so a wrong guess against it would never be counted.
-    // `tonumber` reads some of them as a number below the ceiling and the rest as nil.
+    // Negative values and ones `HINCRBY` cannot bump. `tonumber` reads some of them as a number
+    // below the ceiling.
     let values = [
         "",
         "x",
@@ -36,7 +37,10 @@ async fn a_present_attempts_value_that_is_no_integer_refuses_the_right_code_and_
         "+1",
         "007",
         "-0",
+        "-1",
+        "-1000000",
         "-99999999999999999999",
+        "9999999999999999999",
     ];
     for (index, value) in values.iter().enumerate() {
         let id = format!("bad-{index}");
@@ -57,7 +61,7 @@ async fn a_present_attempts_value_that_is_no_integer_refuses_the_right_code_and_
 }
 
 #[tokio::test]
-async fn an_absent_or_integer_attempts_value_is_counted_against_the_ceiling() {
+async fn an_absent_or_counting_attempts_value_is_counted_against_the_ceiling() {
     let Some(redis) = common::try_start().await else {
         return;
     };
@@ -72,7 +76,7 @@ async fn an_absent_or_integer_attempts_value_is_counted_against_the_ceiling() {
             .is_ok()
     );
 
-    for value in ["0", "4", "-1"] {
+    for value in ["0", "4"] {
         let id = format!("under-{value}");
         let key = seed(&stores, &id).await;
         assert!(redis.hset_raw(&key, "attempts", value).await);

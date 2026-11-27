@@ -29,14 +29,15 @@ local code = redis.call('HGET', KEYS[1], 'code')
 if not code then
     return { 'EXPIRED', '' }
 end
--- An absent field counts as 0. A present one that `HINCRBY` could not bump counts as the
--- ceiling: no wrong guess would ever be counted against it. `tonumber` alone is not the test,
--- since it reads some such values as numbers (a NaN is below every ceiling). The length bound
--- keeps an accepted value within the integers `HINCRBY` holds.
+-- An absent field counts as 0. A present one counts only as `0` or a positive integer of at most
+-- 18 characters, and anything else counts as the ceiling: the counter only ever rises from 0, a
+-- negative one buys guesses, and no wrong guess is counted against a value `HINCRBY` cannot bump.
+-- `tonumber` alone is not the test: it reads some of those as numbers (a NaN is below every
+-- ceiling). The length bound keeps an accepted value within the integers `HINCRBY` holds.
 local raw = redis.call('HGET', KEYS[1], 'attempts')
 local attempts = 0
 if raw then
-    if raw == '0' or (#raw <= 18 and string.match(raw, '^%-?[1-9]%d*$')) then
+    if raw == '0' or (#raw <= 18 and string.match(raw, '^[1-9]%d*$')) then
         attempts = tonumber(raw)
     else
         attempts = tonumber(ARGV[2])

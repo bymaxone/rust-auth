@@ -5318,7 +5318,7 @@ Makes "check the ceiling, compare the code, bump attempts, consume on success" a
 - **ARGV** — `[1]` submitted code, `[2]` `max_attempts` (5).
 - **Contract:** returns `{ tag, storedCode }`.
   1. `HGET KEYS[1] code`. If absent → **return `{"EXPIRED", ""}`** ⇒ `AuthError::OtpExpired`.
-  2. `HGET KEYS[1] attempts`. An absent field counts as `0`. A present one counts as its value only when it is `0` or spells a non-zero integer of at most 18 characters, with an optional `-` and no leading zero; anything else counts as `max_attempts`. If the count is `>= ARGV[2]` → `DEL KEYS[1]`; **return `{"MAX", ""}`** ⇒ `AuthError::OtpMaxAttempts`.
+  2. `HGET KEYS[1] attempts`. An absent field counts as `0`. A present one counts as its value only when it is `0` or spells a positive integer of at most 18 characters with no sign and no leading zero; anything else, a negative value included, counts as `max_attempts`. If the count is `>= ARGV[2]` → `DEL KEYS[1]`; **return `{"MAX", ""}`** ⇒ `AuthError::OtpMaxAttempts`.
   3. Plain compare of submitted against stored: on a match `DEL KEYS[1]`, otherwise `HINCRBY KEYS[1] attempts 1`, which leaves the TTL as it was. **Return `{"PRESENT", storedCode}`**.
 - **Rust mapping:** on `PRESENT` the authoritative comparison is re-done in Rust in constant time via `subtle` (§17) ⇒ success or `AuthError::OtpInvalid`. A bump never extends the OTP lifetime, so guessing cannot buy time.
 
