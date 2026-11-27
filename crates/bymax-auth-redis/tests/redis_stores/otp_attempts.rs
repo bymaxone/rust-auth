@@ -69,12 +69,7 @@ async fn an_absent_or_counting_attempts_value_is_counted_against_the_ceiling() {
 
     let absent = seed(&stores, "absent").await;
     assert!(redis.hdel_raw(&absent, "attempts").await);
-    assert!(
-        stores
-            .verify(PURPOSE, "absent", "123456", CEILING)
-            .await
-            .is_ok()
-    );
+    assert!(stores.verify(PURPOSE, "absent", "123456", 1).await.is_ok());
 
     for value in ["0", "4"] {
         let id = format!("under-{value}");
