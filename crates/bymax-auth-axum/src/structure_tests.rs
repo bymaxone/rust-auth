@@ -8,14 +8,15 @@ use bymax_auth_types::FieldError;
 use serde_json::{Map, Value, json};
 
 use crate::dto::{
-    AcceptInvitationDto, ChangeEmailDto, ChangeMemberRoleDto, ChangePasswordDto,
-    ConfirmEmailChangeDto, CreateInvitationDto, CreateWorkspaceDto, DECLARED, ForgotPasswordDto,
-    InviteToWorkspaceDto, LoginDto, MemberRouteParamsDto, MfaChallengeDto, MfaDisableDto,
-    MfaRegenerateRecoveryCodesDto, MfaSetupDto, MfaVerifyDto, OAuthCallbackQuery,
-    OAuthInitiateQuery, PlatformLoginDto, PreviewWorkspaceInvitationDto, RefreshDto, RegisterDto,
-    RenameWorkspaceDto, ResendOtpDto, ResendVerificationDto, ResetPasswordDto, RevokeInvitationDto,
-    ScheduleWorkspaceDeletionDto, TransferOwnershipDto, VerifyEmailDto, VerifyOtpDto,
-    WorkspaceInvitationEmailDto, WorkspacePageQueryDto,
+    AcceptInvitationDto, AcceptWorkspaceInvitationDto, AcceptWorkspaceInvitationSignupDto,
+    ChangeEmailDto, ChangeMemberRoleDto, ChangePasswordDto, ConfirmEmailChangeDto,
+    CreateInvitationDto, CreateWorkspaceDto, DECLARED, ForgotPasswordDto, InviteToWorkspaceDto,
+    LoginDto, MemberRouteParamsDto, MfaChallengeDto, MfaDisableDto, MfaRegenerateRecoveryCodesDto,
+    MfaSetupDto, MfaVerifyDto, OAuthCallbackQuery, OAuthInitiateQuery, PlatformLoginDto,
+    PreviewWorkspaceInvitationDto, RefreshDto, RegisterDto, RenameWorkspaceDto, ResendOtpDto,
+    ResendVerificationDto, ResetPasswordDto, RevokeInvitationDto, ScheduleWorkspaceDeletionDto,
+    TransferOwnershipDto, VerifyEmailDto, VerifyOtpDto, WorkspaceInvitationEmailDto,
+    WorkspacePageQueryDto,
 };
 use crate::request_schemas::schema;
 use crate::structure::{declared_named, details_for};
@@ -52,8 +53,13 @@ macro_rules! dto {
 }
 
 /// Every DTO, by the name of its schema.
-const DTOS: [(&str, Details, Refuses); 33] = [
+const DTOS: [(&str, Details, Refuses); 35] = [
     dto!(AcceptInvitationDto, "AcceptInvitationDto"),
+    dto!(AcceptWorkspaceInvitationDto, "AcceptWorkspaceInvitationDto"),
+    dto!(
+        AcceptWorkspaceInvitationSignupDto,
+        "AcceptWorkspaceInvitationSignupDto"
+    ),
     dto!(ChangeEmailDto, "ChangeEmailDto"),
     dto!(ChangeMemberRoleDto, "ChangeMemberRoleDto"),
     dto!(ChangePasswordDto, "ChangePasswordDto"),
@@ -139,13 +145,7 @@ fn the_declared_table_is_the_artefacts_schemas_and_each_dto_is_found_by_its_type
     let artefact: BTreeSet<String> = serde_json::from_str::<Value>(crate::request_schemas::JSON)
         .ok()
         .and_then(|root| root["schemas"].as_object().cloned())
-        .map(|schemas| {
-            schemas
-                .keys()
-                .filter(|name| !crate::pending::PENDING_SCHEMAS.contains(&name.as_str()))
-                .cloned()
-                .collect()
-        })
+        .map(|schemas| schemas.keys().cloned().collect())
         .unwrap_or_default();
     assert!(!artefact.is_empty());
     assert_eq!(

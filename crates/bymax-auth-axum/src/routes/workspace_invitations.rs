@@ -1,11 +1,15 @@
 //! The invitation routes of the `workspaces` group: invite an address, list the pending
-//! invitations, resend one, revoke one, and tell a token holder what a token is for (layer: HTTP
-//! adapter, routes).
+//! invitations, resend one, revoke one, tell a token holder what a token is for, and accept one,
+//! signed in or by creating the account (layer: HTTP adapter, routes).
 //!
 //! The four management routes pass the guard under `manage_members`. Invite, resend and revoke
 //! answer 204 with no body, and an account that is not a member changes nothing about that
 //! answer. The preview needs no credential, and every token the body accepts but that cannot be
 //! previewed is answered with the same error.
+//!
+//! Accepting while signed in takes an access token of an account in good standing. Accepting by
+//! signup takes the token alone and answers with a new session. Both take the tenant from what
+//! the service trusts: the caller's claims, or the invitation record.
 
 use axum::Json;
 use axum::Router;
@@ -13,19 +17,22 @@ use axum::extract::State;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use bymax_auth_core::services::workspace_invitations::{
-    InvitationPreview, WorkspaceInvitationView,
+    InvitationPreview, WorkspaceInvitationView, WorkspaceSignupInput,
 };
 use bymax_auth_core::workspace::domain::Page;
 use http::StatusCode;
 use serde_json::{Value, json};
+use tower_cookies::Cookies;
 
+use crate::delivery::TokenDelivery;
 use crate::dto::{
-    InviteToWorkspaceDto, PreviewWorkspaceInvitationDto, WorkspaceInvitationEmailDto,
-    WorkspacePageQueryDto,
+    AcceptWorkspaceInvitationDto, AcceptWorkspaceInvitationSignupDto, InviteToWorkspaceDto,
+    PreviewWorkspaceInvitationDto, WorkspaceInvitationEmailDto, WorkspacePageQueryDto,
 };
 use crate::extractors::workspace::{ManageMembers, RequireWorkspace};
-use crate::routes::RequestMeta;
+use crate::extractors::{AuthUser, UserStatus};
 use crate::routes::workspaces::{answer, page_of};
+use crate::routes::{CookieDomains, RequestMeta};
 use crate::shared_limit::Throttle;
 use crate::state::{AuthState, AxumAuthConfig};
 use crate::validation::{ValidatedJson, ValidatedQuery};
@@ -55,6 +62,25 @@ pub(crate) fn routes(config: &AxumAuthConfig, ip_source: &Throttle) -> Router<Au
             crate::router::throttled(
                 post(preview),
                 limits.workspace_invitation_preview,
+                ip_source,
+            ),
+        )
+        .merge(acceptance_routes(config, ip_source))
+}
+
+/// The two routes that spend an invitation, with their per-route limits.
+fn acceptance_routes(config: &AxumAuthConfig, ip_source: &Throttle) -> Router<AuthState> {
+    let limits = &config.rate_limits;
+    Router::new()
+        .route(
+            "/workspaces/invitations/accept",
+            crate::router::throttled(post(accept), limits.workspace_invitation_accept, ip_source),
+        )
+        .route(
+            "/workspaces/invitations/accept-signup",
+            crate::router::throttled(
+                post(accept_signup),
+                limits.workspace_invitation_accept_signup,
                 ip_source,
             ),
         )
@@ -133,6 +159,57 @@ async fn preview(
         .await;
     answer(previewed, |preview| {
         (StatusCode::OK, Json(preview_body(&preview))).into_response()
+    })
+}
+
+/// `POST /auth/workspaces/invitations/accept` (200): the caller joins the workspace the token
+/// names. The tenant and the account are the caller's claims.
+async fn accept(
+    State(state): State<AuthState>,
+    user: AuthUser,
+    _status: UserStatus,
+    RequestMeta(ctx): RequestMeta,
+    ValidatedJson(body): ValidatedJson<AcceptWorkspaceInvitationDto>,
+) -> Response {
+    let accepted = state
+        .engine()
+        .accept_workspace_invitation(&user.0.tenant_id, &user.0.sub, &body.token, &ctx)
+        .await;
+    answer(accepted, |joined| {
+        let body = json!({ "workspaceId": joined.workspace_id, "role": joined.role });
+        (StatusCode::OK, Json(body)).into_response()
+    })
+}
+
+/// `POST /auth/workspaces/invitations/accept-signup` (201): creates the invited account, joins
+/// it to the workspace and signs it in. No credential is read.
+async fn accept_signup(
+    State(state): State<AuthState>,
+    cookies: Cookies,
+    CookieDomains(domains): CookieDomains,
+    RequestMeta(ctx): RequestMeta,
+    ValidatedJson(body): ValidatedJson<AcceptWorkspaceInvitationSignupDto>,
+) -> Response {
+    let input = WorkspaceSignupInput {
+        token: body.token,
+        name: body.name,
+        password: body.password,
+    };
+    let signed_up = state
+        .engine()
+        .accept_workspace_invitation_signup(
+            input,
+            &ctx.ip,
+            &ctx.user_agent,
+            ctx.sanitized_headers.clone(),
+        )
+        .await;
+    answer(signed_up, |signup| {
+        TokenDelivery::with_domains(state.config(), &domains).deliver_joined(
+            &cookies,
+            &signup.result,
+            &signup.accepted,
+        )
     })
 }
 

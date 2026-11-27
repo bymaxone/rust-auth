@@ -15,7 +15,11 @@ marked BREAKING, never signalled by the number.
 
 ### Added: workspace invitation acceptance
 
-- **`AuthEngine` accepts a member invitation.** `accept_workspace_invitation(tenant_id, user_id, token, ctx)` joins the signed-in account that was invited and answers the role it holds in the workspace; `accept_workspace_invitation_signup(input, ip, user_agent, headers)` creates the account for an invited address that has none, verified, joins it and signs it in. The membership is written before the token is spent, so a signed-in acceptance that fails between the two is completed by retrying. A bootstrap invitation is not accepted. No route is mounted for either.
+- **`AuthEngine` accepts a member invitation.** `accept_workspace_invitation(tenant_id, user_id, token, ctx)` joins the signed-in account that was invited and answers the role it holds in the workspace; `accept_workspace_invitation_signup(input, ip, user_agent, headers)` creates the account for an invited address that has none, verified, joins it and signs it in. The membership is written before the token is spent, so a signed-in acceptance that fails between the two is completed by retrying. A bootstrap invitation is not accepted.
+
+### Added: workspace invitation acceptance routes
+
+- **The `workspaces` group mounts the two acceptance routes.** `POST /auth/workspaces/invitations/accept` takes an access token of an account in good standing and answers `200 {workspaceId, role}`, limited to 10 requests per minute per IP. `POST /auth/workspaces/invitations/accept-signup` is public, answers `201` with the sign-in body of the configured delivery mode plus `workspaceId` and `role`, and is limited to 5. The bodies are `AcceptWorkspaceInvitationDto` and `AcceptWorkspaceInvitationSignupDto`, in the shared request schemas and the OpenAPI tables. **Apply:** with the `workspaces` group on, the host gets both routes, including the public one that creates an account for an invited address; their limits are `workspace_invitation_accept` and `workspace_invitation_accept_signup` in the adapter's rate-limit configuration.
 
 ### Added: workspace invitation routes
 

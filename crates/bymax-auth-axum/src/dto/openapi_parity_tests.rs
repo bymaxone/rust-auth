@@ -16,17 +16,18 @@ use garde::Validate;
 use serde::de::DeserializeOwned;
 use serde_json::{Map, Value};
 
-use crate::pending::{PENDING_PROPERTIES, PENDING_SCHEMAS};
+use crate::pending::PENDING_PROPERTIES;
 
 use super::{
-    AcceptInvitationDto, ChangeEmailDto, ChangeMemberRoleDto, ChangePasswordDto,
-    ConfirmEmailChangeDto, CreateInvitationDto, CreateWorkspaceDto, ForgotPasswordDto,
-    InviteToWorkspaceDto, LoginDto, MemberRouteParamsDto, MfaChallengeDto, MfaDisableDto,
-    MfaRegenerateRecoveryCodesDto, MfaSetupDto, MfaVerifyDto, OAuthCallbackQuery,
-    OAuthInitiateQuery, PlatformLoginDto, PreviewWorkspaceInvitationDto, RefreshDto, RegisterDto,
-    RenameWorkspaceDto, ResendOtpDto, ResendVerificationDto, ResetPasswordDto, RevokeInvitationDto,
-    ScheduleWorkspaceDeletionDto, TransferOwnershipDto, VerifyEmailDto, VerifyOtpDto,
-    WorkspaceInvitationEmailDto, WorkspacePageQueryDto,
+    AcceptInvitationDto, AcceptWorkspaceInvitationDto, AcceptWorkspaceInvitationSignupDto,
+    ChangeEmailDto, ChangeMemberRoleDto, ChangePasswordDto, ConfirmEmailChangeDto,
+    CreateInvitationDto, CreateWorkspaceDto, ForgotPasswordDto, InviteToWorkspaceDto, LoginDto,
+    MemberRouteParamsDto, MfaChallengeDto, MfaDisableDto, MfaRegenerateRecoveryCodesDto,
+    MfaSetupDto, MfaVerifyDto, OAuthCallbackQuery, OAuthInitiateQuery, PlatformLoginDto,
+    PreviewWorkspaceInvitationDto, RefreshDto, RegisterDto, RenameWorkspaceDto, ResendOtpDto,
+    ResendVerificationDto, ResetPasswordDto, RevokeInvitationDto, ScheduleWorkspaceDeletionDto,
+    TransferOwnershipDto, VerifyEmailDto, VerifyOtpDto, WorkspaceInvitationEmailDto,
+    WorkspacePageQueryDto,
 };
 
 const ARTEFACT: &str = include_str!("../../../../conformance/openapi-request-schemas.json");
@@ -44,8 +45,16 @@ fn accepts<T: DeserializeOwned + Validate<Context = ()>>(body: &Value) -> bool {
 
 /// Every schema in the artefact and the DTO that answers it. The names differ for the two OAuth
 /// query types and for `RefreshDto`, which answers `RefreshTokenBodyDto`.
-pub(super) const DTOS: [(&str, Accepts); 33] = [
+pub(super) const DTOS: [(&str, Accepts); 35] = [
     ("AcceptInvitationDto", accepts::<AcceptInvitationDto>),
+    (
+        "AcceptWorkspaceInvitationDto",
+        accepts::<AcceptWorkspaceInvitationDto>,
+    ),
+    (
+        "AcceptWorkspaceInvitationSignupDto",
+        accepts::<AcceptWorkspaceInvitationSignupDto>,
+    ),
     ("ChangeEmailDto", accepts::<ChangeEmailDto>),
     ("ChangeMemberRoleDto", accepts::<ChangeMemberRoleDto>),
     ("ChangePasswordDto", accepts::<ChangePasswordDto>),
@@ -495,10 +504,7 @@ fn the_artefact_carries_the_bytes_this_repository_declared() {
 
 #[test]
 fn every_schema_has_a_dto_and_the_rust_only_ones_are_named() {
-    let in_artefact: BTreeSet<String> = schema_names(&artefact())
-        .into_iter()
-        .filter(|name| !PENDING_SCHEMAS.contains(&name.as_str()))
-        .collect();
+    let in_artefact: BTreeSet<String> = schema_names(&artefact()).into_iter().collect();
     let mapped: BTreeSet<String> = DTOS.iter().map(|(name, _)| (*name).to_owned()).collect();
     assert_eq!(mapped, in_artefact);
     assert!(
@@ -515,14 +521,10 @@ fn the_keywords_and_patterns_are_the_ones_this_test_understands() {
     let mut types = BTreeSet::new();
     let mut formats = BTreeSet::new();
     let mut patterns = BTreeSet::new();
-    // A schema still pending is read when its slice builds the DTO, which is also when this
-    // test learns any keyword or pattern it introduces.
     for schema in root["schemas"]
         .as_object()
         .into_iter()
-        .flat_map(Map::iter)
-        .filter(|(name, _)| !PENDING_SCHEMAS.contains(&name.as_str()))
-        .map(|(_, schema)| schema)
+        .flat_map(Map::values)
     {
         schema_keys.extend(schema.as_object().into_iter().flat_map(Map::keys).cloned());
         types.insert(schema["type"].as_str().unwrap_or_default().to_owned());

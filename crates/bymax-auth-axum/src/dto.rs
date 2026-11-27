@@ -44,9 +44,10 @@ mod text_rules;
 mod workspace;
 
 pub use workspace::{
-    ChangeMemberRoleDto, CreateWorkspaceDto, InviteToWorkspaceDto, MemberRouteParamsDto,
-    PreviewWorkspaceInvitationDto, RenameWorkspaceDto, ScheduleWorkspaceDeletionDto,
-    TransferOwnershipDto, WorkspaceInvitationEmailDto, WorkspacePageQueryDto,
+    AcceptWorkspaceInvitationDto, AcceptWorkspaceInvitationSignupDto, ChangeMemberRoleDto,
+    CreateWorkspaceDto, InviteToWorkspaceDto, MemberRouteParamsDto, PreviewWorkspaceInvitationDto,
+    RenameWorkspaceDto, ScheduleWorkspaceDeletionDto, TransferOwnershipDto,
+    WorkspaceInvitationEmailDto, WorkspacePageQueryDto,
 };
 
 /// Declares which schema of the shared request schemas describes each DTO, and whether the DTO
@@ -73,6 +74,8 @@ declared! {
     ChangePasswordDto => "ChangePasswordDto", true;
     ConfirmEmailChangeDto => "ConfirmEmailChangeDto", true;
     CreateInvitationDto => "CreateInvitationDto", true;
+    AcceptWorkspaceInvitationDto in workspace => "AcceptWorkspaceInvitationDto", true;
+    AcceptWorkspaceInvitationSignupDto in workspace => "AcceptWorkspaceInvitationSignupDto", true;
     CreateWorkspaceDto in workspace => "CreateWorkspaceDto", true;
     ForgotPasswordDto => "ForgotPasswordDto", true;
     InviteToWorkspaceDto in workspace => "InviteToWorkspaceDto", true;
