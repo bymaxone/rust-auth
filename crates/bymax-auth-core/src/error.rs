@@ -92,6 +92,14 @@ pub enum ConfigError {
     /// is false, so it would be ignored.
     #[error("a workspace collaborator was supplied but workspaces.enabled is false")]
     WorkspaceCollaboratorsUnused,
+    /// `registration` is invitation-only and no invitation can be accepted, so no account could
+    /// ever be created.
+    #[error(
+        "registration is invitation-only but no invitation can be accepted: it needs \
+         invitations.enabled, or workspaces.enabled with controllers.workspaces and a \
+         WorkspaceInvitationStore"
+    )]
+    RegistrationWithoutInvitationPath,
     /// `api_keys.enabled` is set but the `api-keys` feature is not compiled in, so nothing could
     /// verify a key.
     #[error("api_keys.enabled is true but the `api-keys` feature is not compiled in")]

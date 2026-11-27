@@ -42,7 +42,7 @@ use crate::workspace::limits::{
 };
 use crate::workspace::roles::RoleHierarchy;
 
-mod accept;
+pub(crate) mod accept;
 pub use accept::{AcceptedWorkspaceInvitation, WorkspaceSignup, WorkspaceSignupInput};
 mod platform;
 pub use platform::PlatformWorkspaceInvitation;

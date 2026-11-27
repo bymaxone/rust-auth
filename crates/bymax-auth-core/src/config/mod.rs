@@ -21,6 +21,7 @@ mod cookie_prefix;
 #[cfg(test)]
 mod cookie_prefix_tests;
 mod profiles;
+mod registration;
 pub mod resolvers;
 mod validate;
 mod workspaces;
@@ -34,6 +35,8 @@ use std::time::Duration;
 use secrecy::SecretString;
 
 pub use api_keys::{ApiKeyAuditMode, ApiKeysConfig};
+pub use registration::RegistrationMode;
+pub(crate) use registration::{InvitationPaths, assert_invitation_path};
 pub use resolvers::{
     CookieDomainResolver, MaxSessionsResolver, RequestParts, TenantIdResolver, TenantResolveError,
 };
@@ -721,4 +724,7 @@ pub struct AuthConfig {
     pub api_keys: ApiKeysConfig,
     /// The workspace layer; off unless `workspaces.enabled`.
     pub workspaces: WorkspacesConfig,
+    /// Whether anyone may create an account, or only the holder of an invitation. Default:
+    /// [`RegistrationMode::Open`].
+    pub registration: RegistrationMode,
 }

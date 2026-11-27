@@ -13,8 +13,8 @@ use std::time::Duration;
 use super::{
     ApiKeysConfig, AuthConfig, BruteForceConfig, ControllerToggles, CookieConfig,
     EmailChangeConfig, EmailVerificationConfig, InvitationConfig, JwtConfig, OAuthConfig,
-    PasswordAlgorithm, PasswordConfig, PasswordResetConfig, PlatformConfig, RolesConfig,
-    SessionConfig, TokenDelivery, WorkspacesConfig,
+    PasswordAlgorithm, PasswordConfig, PasswordResetConfig, PlatformConfig, RegistrationMode,
+    RolesConfig, SessionConfig, TokenDelivery, WorkspacesConfig,
 };
 
 impl AuthConfig {
@@ -53,6 +53,7 @@ impl AuthConfig {
             enforce_tenant_binding: false,
             api_keys: ApiKeysConfig::default(),
             workspaces: WorkspacesConfig::default(),
+            registration: RegistrationMode::Open,
         }
     }
 

@@ -31,8 +31,6 @@ mod extractors;
 mod middleware;
 #[cfg(feature = "openapi")]
 pub mod openapi;
-#[cfg(test)]
-mod pending;
 mod rate_limit;
 mod request_schemas;
 mod response;

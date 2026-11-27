@@ -27,8 +27,11 @@ use bymax_auth_crypto::compare::constant_time_eq;
 use crate::RepositoryError;
 use crate::context::{RequestContext, to_safe_user};
 use crate::engine::AuthEngine;
-use crate::services::auth::detached::{run_after_login, run_update_last_login};
+use crate::services::auth::detached::{
+    run_after_invitation_accepted, run_after_login, run_update_last_login,
+};
 use crate::services::auth::{map_repository_error, spawn_guarded};
+use crate::services::workspace_invitations::accept::oauth::FlowInvitation;
 use crate::services::{internal_error, to_hex};
 use crate::traits::{
     HookContext, HookPlane, OAuthLoginResult, OAuthProfile, OAuthProvider, OAuthProviderError,
@@ -167,6 +170,25 @@ impl AuthEngine {
         tenant_id: Option<&str>,
         ctx: &RequestContext,
     ) -> Result<OAuthRedirect, AuthError> {
+        self.oauth_initiate_with_invitation(provider, tenant_id, None, ctx)
+            .await
+    }
+
+    /// [`oauth_initiate`](Self::oauth_initiate) for a sign-in that accepts the workspace
+    /// invitation `invitation` names: the state record carries the SHA-256 of the token, never
+    /// the token, and the callback judges that invitation before the host's hook decides.
+    ///
+    /// # Errors
+    ///
+    /// As [`oauth_initiate`](Self::oauth_initiate), and
+    /// [`AuthError::InvalidInvitationToken`] for a token while the workspace layer is off.
+    pub async fn oauth_initiate_with_invitation(
+        &self,
+        provider: &str,
+        tenant_id: Option<&str>,
+        invitation: Option<&str>,
+        ctx: &RequestContext,
+    ) -> Result<OAuthRedirect, AuthError> {
         // Resolve the provider first: an unknown provider fails without minting state.
         let provider_impl = self.resolve_oauth_provider(provider)?;
         // A deployment that derives the tenant from the request has stated that the caller's
@@ -174,6 +196,10 @@ impl AuthEngine {
         // Resolved before any state is minted, so a request that the resolver refuses consumes
         // nothing — no state record is left behind for a callback to redeem.
         let tenant_id = self.resolve_tenant(tenant_id, ctx).await?;
+
+        let workspace_invitation = invitation
+            .map(|token| self.oauth_invitation_id(token))
+            .transpose()?;
 
         let state = generate_state();
         let (code_verifier, code_challenge) = generate_pkce();
@@ -183,7 +209,7 @@ impl AuthEngine {
             provider: provider_impl.name().to_owned(),
             tenant_id,
             code_verifier,
-            workspace_invitation: None,
+            workspace_invitation,
         })
         .map_err(oauth_state_serialize_failed)?;
 
@@ -203,14 +229,25 @@ impl AuthEngine {
     /// identity up, run the `on_oauth_login` create/link/reject decision, and either issue a
     /// session or route into an MFA challenge.
     ///
+    /// A flow started with a workspace invitation judges it against the provider's profile
+    /// before the hook runs, and writes its membership after the MFA branch, immediately before
+    /// the session: an account with a second factor gets the challenge and the invitation stays
+    /// unspent.
+    ///
     /// # Errors
     ///
     /// Returns [`AuthError::OauthFailed`] for an unknown/malformed provider, a
     /// missing/forged/replayed/malformed `state`, any provider (exchange/profile) failure
     /// including an unverified email, a `reject`/`Err` hook decision, or a `link` with no
     /// existing user; [`AuthError::OauthEmailMismatch`] when a `create` collides with an
-    /// existing account; or a store/repository/issuance [`AuthError`] on infrastructure
-    /// failure (which the adapter surfaces as a 500 rather than an error redirect).
+    /// existing account; [`AuthError::RegistrationClosed`] when the hook asks for an account
+    /// under [`RegistrationMode::InvitationOnly`](crate::config::RegistrationMode) and the flow
+    /// carries no invitation; [`AuthError::InvalidInvitationToken`],
+    /// [`AuthError::InvitationEmailMismatch`] or [`AuthError::EmailNotVerified`] for an
+    /// invitation that cannot be honoured, and the refusals of accepting it (a bootstrap one is
+    /// under the owner cap and the host's create hook); or a store/repository/issuance [`AuthError`] on
+    /// infrastructure failure (which the adapter surfaces as a 500 rather than an error
+    /// redirect).
     pub async fn oauth_callback(
         &self,
         provider: &str,
@@ -289,6 +326,10 @@ impl AuthEngine {
             .await
             .map_err(provider_error)?;
 
+        let invitation = payload.workspace_invitation;
+        self.vet_oauth_invitation(invitation.as_deref(), &tenant_id, &profile)
+            .await?;
+
         // Resolve any user already bound to this OAuth identity within the tenant.
         let existing = self
             .user_repository()
@@ -313,11 +354,13 @@ impl AuthEngine {
             .await
             .map_err(|_| AuthError::OauthFailed)?;
 
+        let flow = FlowInvitation::new(invitation, &decision);
+        self.assert_oauth_may_create(&flow)?;
         let resolved = self
             .execute_oauth_decision(decision, &provider_name, &profile, &tenant_id, existing)
             .await?;
 
-        self.finish_oauth_login(resolved, ctx, hook_ctx).await
+        self.finish_oauth_login(resolved, flow, ctx, hook_ctx).await
     }
 
     /// The operator-configured success redirect (§11.3.3), or `None` for the JSON/SPA flow.
@@ -436,6 +479,7 @@ impl AuthEngine {
     async fn finish_oauth_login(
         &self,
         user: AuthUser,
+        flow: FlowInvitation,
         ctx: &RequestContext,
         hook_ctx: HookContext,
     ) -> Result<OAuthOutcome, AuthError> {
@@ -466,7 +510,28 @@ impl AuthEngine {
             }));
         }
 
-        let safe = SafeAuthUser::from(user);
+        self.open_oauth_session(SafeAuthUser::from(user), flow, ctx, hook_ctx)
+            .await
+    }
+
+    /// Writes the flow's invitation, opens the session and runs the hooks that are owed once
+    /// it exists.
+    ///
+    /// # Errors
+    ///
+    /// Returns the invitation's refusal, or a store/signing [`AuthError`] if the session cannot
+    /// be issued. A membership already written stays.
+    async fn open_oauth_session(
+        &self,
+        safe: SafeAuthUser,
+        flow: FlowInvitation,
+        ctx: &RequestContext,
+        hook_ctx: HookContext,
+    ) -> Result<OAuthOutcome, AuthError> {
+        // The membership is written once nothing but the session is left to refuse.
+        let accepted = self
+            .complete_oauth_invitation(&flow, &safe, &hook_ctx)
+            .await?;
         let result = self
             .tokens()
             .issue_tokens(
@@ -481,6 +546,13 @@ impl AuthEngine {
         // session tracking is disabled) before the fire-and-forget bookkeeping.
         self.enforce_sessions_after_issue(&result, &ctx.ip, &ctx.user_agent, &hook_ctx)
             .await?;
+        if let Some(accepted_ctx) = accepted {
+            spawn_guarded(run_after_invitation_accepted(
+                self.hooks().clone(),
+                safe.clone(),
+                accepted_ctx,
+            ));
+        }
         spawn_guarded(run_update_last_login(
             self.user_repository().clone(),
             safe.tenant_id.clone(),

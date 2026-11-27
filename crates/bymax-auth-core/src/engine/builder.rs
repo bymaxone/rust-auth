@@ -501,6 +501,15 @@ impl AuthEngineBuilder {
         if config.invitations.enabled && invitation_store.is_none() {
             return Err(ConfigError::MissingInvitationStore);
         }
+        crate::config::assert_invitation_path(
+            config.registration,
+            crate::config::InvitationPaths {
+                tenant: config.invitations.enabled,
+                workspace: config.workspaces.enabled
+                    && config.controllers.workspaces
+                    && workspaces.invitations.is_some(),
+            },
+        )?;
 
         // Build the password service (and its startup sentinel hash) from the validated
         // password config before it is moved into the resolved bundle.

@@ -29,6 +29,8 @@ use crate::workspace::domain::{MembershipRef, MembershipStatus, WorkspaceRef, Wo
 use crate::workspace::invitation::{InvitationBase, InvitationRecord, record_key};
 use crate::workspace::keys::invitation_record_id;
 
+#[cfg(feature = "oauth")]
+pub(crate) mod oauth;
 #[cfg(test)]
 mod tests;
 
@@ -399,10 +401,15 @@ impl AuthEngine {
     }
 }
 
-/// The invitation `token` names: a member one granting a role of the hierarchy, or a bootstrap
-/// one granting the owner role.
+/// The invitation `token` names.
 async fn load(runtime: &WorkspaceRuntime, token: &str) -> Result<Loaded, AuthError> {
-    let key = record_key(&invitation_record_id(token));
+    load_record(runtime, &invitation_record_id(token)).await
+}
+
+/// The invitation stored under the record id `id`: a member one granting a role of the hierarchy,
+/// or a bootstrap one granting the owner role.
+async fn load_record(runtime: &WorkspaceRuntime, id: &str) -> Result<Loaded, AuthError> {
+    let key = record_key(id);
     let record = runtime.invitation_store()?.read_record(&key).await?;
     let hierarchy = &runtime.resolved.hierarchy;
     let (base, grant) = match record {
