@@ -446,6 +446,28 @@ async fn a_host_refusal_creates_nothing_and_leaves_the_token_unspent() {
     }
 }
 
+#[tokio::test]
+async fn a_signup_refused_at_creation_keeps_the_account_and_the_token() {
+    let customize =
+        |builder: crate::engine::AuthEngineBuilder| builder.hooks(Arc::new(Refusing(None)));
+    let Some(inv) = setup_customized(config(), |store| store, customize).await else {
+        unreachable!("the fixture builds");
+    };
+    seed_bootstrap(&inv, TOKEN, (JOE, NEW, "owner")).await;
+
+    let refused = signup(&inv).await;
+
+    assert!(
+        matches!(refused, Err(AuthError::ForbiddenWithDetails(_))),
+        "{:?}",
+        refused.err()
+    );
+    let account = inv.f.engine.find_account("t1", JOE).await;
+    assert!(matches!(account, Ok(Some(_))));
+    assert!(found(&inv, NEW).await.is_none());
+    assert!(unspent(&inv).await);
+}
+
 /// Seats `joe` as the owner of `w2`.
 fn owning_w2(inv: &Inv, joe: &str) {
     inv.f

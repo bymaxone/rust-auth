@@ -72,8 +72,8 @@ Because every one of those lists is compared with this repository's own tables i
 | 13.6b | Invitation services: invite, resend, revoke, list, preview | ✅ Done (#443) | 13.5a, 13.6a |
 | 13.6c | Invitation routes and DTOs | ✅ Done (#474) | 13.6b |
 | 13.7a | Acceptance services: accept and accept-signup of a member invitation | ✅ Done (#477) | 13.5b, 13.6b |
-| 13.7b | Acceptance routes, DTOs and limits | 👀 In review | 13.7a |
-| 13.7c | Bootstrap invitations: mint, withdraw, accept, and their hooks | 📋 ToDo | 13.7a |
+| 13.7b | Acceptance routes, DTOs and limits | ✅ Done (#479) | 13.7a |
+| 13.7c | Bootstrap invitations: mint, withdraw, accept, and their hooks | 👀 In review | 13.7a |
 | 13.8 | OAuth invitation, invitation-only registration, the OAuth MFA branch | 📋 ToDo | 13.7a, 13.7c |
 | 13.9 | Realtime surfaces: verifier, sockets, job check, `access.denied` and its limiter | 📋 ToDo | 13.5a |
 | 13.10 | OpenAPI surface, client, npm types and documentation | 📋 ToDo | 13.5b, 13.7b, 13.7c, 13.8, 13.9 |
@@ -279,8 +279,6 @@ An audit of the 13.6b services (findings checked against the code, each with a f
 
 **Surface.** `AuthEngine::accept_workspace_invitation` and `accept_workspace_invitation_signup`, in `crates/bymax-auth-core/src/services/workspace_invitations/accept.rs`. The order of checks and writes is the one listed above for each.
 
-**Bootstrap records** answer `auth.invalid_invitation_token` and stay unspent until 13.7c, which adds their mint, withdrawal and acceptance together.
-
 **Failure points.** A caller whose account no longer exists is `auth.token_invalid`. An existing active member keeps the role they hold and the token is spent; a membership that is not active is not reinstated. A creation that fails while the address has an account by then answers `auth.email_already_exists`.
 
 ### Design of 13.7b — the acceptance routes
@@ -296,6 +294,16 @@ Both routes belong to the `workspaces` group, in `crates/bymax-auth-axum/src/rou
 | Unknown property | refused | refused |
 | Limit per IP (both libraries) | 10 per minute | 5 per minute |
 | Tenant | the caller's claims | the invitation record |
+
+### Design of 13.7c — bootstrap invitations
+
+**Surface.** `AuthEngine::invite_workspace_as_platform` and `revoke_workspace_invitation_as_platform`, in `crates/bymax-auth-core/src/services/workspace_invitations/platform.rs`; no route, as in `workspace-invitation.service.ts` of nest-auth. Acceptance goes through the two calls of 13.7a.
+
+**Issue.** Each call publishes its own invitation to a new workspace id, with the owner role, no inviter, no pending cap and no hourly limit. The inviter name goes in the message and is not stored. It reports `member.invited` with no actor.
+
+**Withdraw.** Removes a bootstrap invitation only and reports `invitation.revoked` with no actor.
+
+**Acceptance.** The record's role must be the owner role. A workspace already under the record's id must be active and held by the caller as its active owner; anything else is `auth.invalid_invitation_token` with the token unspent. Otherwise the create path of self-serve creation runs: the owner cap, `before_workspace_create`, then the workspace and the owner membership in one repository call.
 
 ---
 

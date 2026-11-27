@@ -13,9 +13,13 @@ marked BREAKING, never signalled by the number.
 
 > **Release rule.** The first breaking change below is on `main`, so the next release is the breaking batch: there is no interim release from `main`. A security fix needed before that batch ships from a release branch cut from the last tag.
 
+### Added: bootstrap invitations
+
+- **The platform can invite an address to own a workspace that does not exist yet.** `AuthEngine::invite_workspace_as_platform(PlatformWorkspaceInvitation, ctx)` mails a bootstrap invitation and answers the id the workspace will be created with; `revoke_workspace_invitation_as_platform(workspace, email, ctx)` withdraws it and leaves a member invitation alone. No route is mounted for either: the host authorizes the call. Both acceptance calls, and their routes, now honour such an invitation: the workspace is created with the invitee as owner, under the owner cap and `before_workspace_create` and regardless of `workspaces.allow_create`. The acceptance reports `invitation.accepted` alone to the workspace event hook. A signup refused at the creation of the workspace leaves the account created and the token unspent. **Apply:** the owner cap and `before_workspace_create` are what a host uses to refuse such an acceptance.
+
 ### Added: workspace invitation acceptance
 
-- **`AuthEngine` accepts a member invitation.** `accept_workspace_invitation(tenant_id, user_id, token, ctx)` joins the signed-in account that was invited and answers the role it holds in the workspace; `accept_workspace_invitation_signup(input, ip, user_agent, headers)` creates the account for an invited address that has none, verified, joins it and signs it in. The membership is written before the token is spent, so a signed-in acceptance that fails between the two is completed by retrying. A bootstrap invitation is not accepted.
+- **`AuthEngine` accepts a member invitation.** `accept_workspace_invitation(tenant_id, user_id, token, ctx)` joins the signed-in account that was invited and answers the role it holds in the workspace; `accept_workspace_invitation_signup(input, ip, user_agent, headers)` creates the account for an invited address that has none, verified, joins it and signs it in. The membership is written before the token is spent, so a signed-in acceptance that fails between the two is completed by retrying.
 
 ### Added: workspace invitation acceptance routes
 
