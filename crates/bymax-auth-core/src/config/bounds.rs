@@ -2,14 +2,14 @@
 //!
 //! A value the store cannot represent fails on every request that uses it (an expiry whose
 //! milliseconds overflow 64 bits), and a value that is merely huge turns a security window into a
-//! permanent one. The ranges are the ones `@bymax-one/nest-auth` enforces at boot; the Argon2id
-//! lane ceiling is this library's own, since the same cost argument holds for it.
+//! permanent one. The ranges follow the boot checks of `@bymax-one/nest-auth`; the Argon2id lane
+//! ceiling is this library's own, since the same cost argument holds for it.
 
 use super::AuthConfig;
 use crate::ConfigError;
 
-/// The longest accepted Redis expiry, in seconds (ten years): Redis refuses an expiry whose
-/// milliseconds overflow 64 bits.
+/// The longest accepted store lifetime, in seconds (ten years). A far larger value overflows the
+/// 64-bit millisecond expiry Redis computes, and Redis refuses it.
 const TTL_CEILING_SECS: u64 = 315_360_000;
 
 /// The most concurrent sessions a default cap may name.

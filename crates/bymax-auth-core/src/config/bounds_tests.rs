@@ -1,9 +1,7 @@
 //! The numeric ceilings of the configuration (layer: config, tests).
 //!
 //! Each option is accepted at both edges of its range and refused one past the ceiling, so a
-//! ceiling that silently moves or disappears fails here. The ranges are the ones
-//! `@bymax-one/nest-auth` enforces at boot; the two that differ in unit or in the meaning of zero
-//! are named in the cases below.
+//! ceiling that silently moves or disappears fails here.
 
 use std::collections::HashMap;
 use std::time::Duration;
