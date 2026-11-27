@@ -289,10 +289,11 @@ async fn withdrawing_leaves_a_member_invitation_alone() {
 }
 
 /// The in-memory store, answering that every removal found the index moved, and, unless
-/// `publishes`, that every publication did too.
+/// `publishes`, that every publication did too. With `gone`, an index read finds no record.
 struct Contended {
     store: Arc<InMemoryWorkspaceInvitations>,
     publishes: bool,
+    gone: bool,
 }
 
 #[async_trait]
@@ -305,7 +306,11 @@ impl WorkspaceInvitationStore for Contended {
         &self,
         place: &InvitationPlace,
     ) -> Result<Option<IndexedInvitation>, AuthError> {
-        self.store.read_index(place).await
+        let read = self.store.read_index(place).await?;
+        Ok(read.map(|mut indexed| {
+            indexed.record = indexed.record.filter(|_| !self.gone);
+            indexed
+        }))
     }
 
     async fn publish(&self, publication: Publication<'_>) -> Result<PublishOutcome, AuthError> {
@@ -339,6 +344,7 @@ async fn a_publication_that_does_not_land_mails_nothing() {
         Arc::new(Contended {
             store,
             publishes: false,
+            gone: false,
         })
     };
     let Some(inv) = setup_over(config(), wrap).await else {
@@ -361,6 +367,7 @@ async fn a_withdrawal_that_keeps_losing_the_index_asks_for_a_retry() {
         Arc::new(Contended {
             store,
             publishes: true,
+            gone: false,
         })
     };
     let Some(inv) = setup_over(config(), wrap).await else {
@@ -373,6 +380,51 @@ async fn a_withdrawal_that_keeps_losing_the_index_asks_for_a_retry() {
     assert!(
         matches!(refused, Err(AuthError::TooManyRequests { .. })),
         "{refused:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_withdrawal_over_a_gone_record_that_nothing_replaced_succeeds_and_reports_nothing() {
+    let wrap = |store| -> Arc<dyn WorkspaceInvitationStore> {
+        Arc::new(Contended {
+            store,
+            publishes: true,
+            gone: true,
+        })
+    };
+    let Some(inv) = setup_over(config(), wrap).await else {
+        unreachable!("the fixture builds");
+    };
+    let Ok(id) = issue(&inv, JOE, "Acme").await else {
+        unreachable!("the invitation is issued");
+    };
+    inv.f.hooks.events(1).await;
+
+    let answered = withdraw(&inv, &id, JOE).await;
+
+    assert!(answered.is_ok(), "{answered:?}");
+    assert_eq!(inv.f.hooks.events(1).await.len(), 1);
+}
+
+#[tokio::test]
+async fn a_bootstrap_invitation_expires_the_configured_lifetime_after_it_was_issued() {
+    let mut configured = config();
+    configured.workspaces.invitation_ttl_seconds = 3_600;
+    let Some(inv) = setup(configured).await else {
+        unreachable!("the fixture builds");
+    };
+    let before = time::OffsetDateTime::now_utc();
+
+    assert!(issue(&inv, JOE, "Acme").await.is_ok());
+
+    let sent = inv.mail.sent();
+    let Some((_, _, data)) = sent.first() else {
+        unreachable!("one message is mailed");
+    };
+    let lifetime = data.expires_at - before;
+    assert!(
+        lifetime >= time::Duration::seconds(3_599) && lifetime <= time::Duration::seconds(3_601),
+        "expires {lifetime} after it was issued"
     );
 }
 
