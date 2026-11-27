@@ -17,6 +17,8 @@ mod email_change_record;
 mod grace_successor;
 #[path = "redis_stores/logout_pending.rs"]
 mod logout_pending;
+#[path = "redis_stores/otp_attempts.rs"]
+mod otp_attempts;
 #[path = "redis_stores/session_listing.rs"]
 mod session_listing;
 
@@ -1440,6 +1442,16 @@ async fn ws_ticket_is_single_use() {
     assert!(matches!(stores.redeem(&ticket).await, Ok(None)));
     // An unknown ticket also yields nothing.
     assert!(matches!(stores.redeem("unknown-ticket").await, Ok(None)));
+
+    // The minting token's expiry survives the stored encoding.
+    let expiring = WsTicketSnapshot {
+        exp: Some(4_102_444_800),
+        ..snapshot()
+    };
+    let minted = stores.mint(&expiring, 30).await;
+    assert!(minted.is_ok());
+    let Ok(ticket) = minted else { return };
+    assert!(matches!(stores.redeem(&ticket).await, Ok(Some(s)) if s == expiring));
 }
 
 #[tokio::test]

@@ -19,7 +19,8 @@
 --
 -- Returns a two-element array { tag, code }:
 --   { "EXPIRED", "" }          no record (TTL elapsed), or a record with no code field
---   { "MAX", "" }              the attempt ceiling was already reached (record consumed)
+--   { "MAX", "" }              the ceiling was already reached, or the counter cannot be
+--                              read (record consumed)
 --   { "PRESENT", storedCode }  the record was present and under the ceiling. The record is
 --                              consumed on a plain match and its attempts bumped on a plain
 --                              mismatch; the caller re-compares constant-time to decide the
@@ -28,7 +29,19 @@ local code = redis.call('HGET', KEYS[1], 'code')
 if not code then
     return { 'EXPIRED', '' }
 end
-local attempts = tonumber(redis.call('HGET', KEYS[1], 'attempts')) or 0
+-- An absent field counts as 0. A present one that `HINCRBY` could not bump counts as the
+-- ceiling: no wrong guess would ever be counted against it. `tonumber` alone is not the test,
+-- since it reads some such values as numbers (a NaN is below every ceiling). The length bound
+-- keeps an accepted value within the integers `HINCRBY` holds.
+local raw = redis.call('HGET', KEYS[1], 'attempts')
+local attempts = 0
+if raw then
+    if raw == '0' or (#raw <= 18 and string.match(raw, '^%-?[1-9]%d*$')) then
+        attempts = tonumber(raw)
+    else
+        attempts = tonumber(ARGV[2])
+    end
+end
 if attempts >= tonumber(ARGV[2]) then
     redis.call('DEL', KEYS[1])
     return { 'MAX', '' }
