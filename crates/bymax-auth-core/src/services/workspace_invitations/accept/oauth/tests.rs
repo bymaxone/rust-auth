@@ -2,7 +2,7 @@
 //! service, tests).
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 
 use async_trait::async_trait;
@@ -25,7 +25,7 @@ use crate::traits::{
 use crate::workspace::domain::{MembershipRef, WorkspaceStatus};
 use crate::workspace::keys::invitation_record_id;
 
-mod closed_sessions;
+mod session_writes;
 
 const TOKEN: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 const INVITEE: &str = "joe@x.io";
@@ -100,6 +100,9 @@ struct Hooks {
     asked: AtomicUsize,
     accepted: AtomicUsize,
     closes: OnceLock<Arc<InMemoryWorkspaces>>,
+    /// The session store's flag, and what it read when the acceptance hook ran.
+    session_written: OnceLock<Arc<AtomicBool>>,
+    saw_session: AtomicBool,
 }
 
 #[async_trait]
@@ -122,6 +125,9 @@ impl AuthHooks for Hooks {
         _user: &SafeAuthUser,
         _ctx: &HookContext,
     ) -> Result<(), HookError> {
+        let written = self.session_written.get();
+        let exists = written.is_some_and(|flag| flag.load(Ordering::SeqCst));
+        self.saw_session.store(exists, Ordering::SeqCst);
         self.accepted.fetch_add(1, Ordering::SeqCst);
         Ok(())
     }
@@ -150,6 +156,8 @@ async fn rig_over(
         asked: AtomicUsize::new(0),
         accepted: AtomicUsize::new(0),
         closes: OnceLock::new(),
+        session_written: OnceLock::new(),
+        saw_session: AtomicBool::new(false),
     });
     let provider = Arc::new(Provider {
         profile: Mutex::new((INVITEE.to_owned(), true)),
@@ -312,7 +320,7 @@ async fn a_new_account_joins_the_workspace_and_is_signed_in() {
 
 #[tokio::test]
 async fn a_session_that_cannot_be_written_keeps_the_membership_and_runs_no_hook() {
-    let store = Arc::new(closed_sessions::ClosedSessions::default());
+    let store = Arc::new(session_writes::SlowSessions::default());
     let wired = rig_over(oauth_config(), OAuthLoginResult::Create, move |builder| {
         builder.session_store(store)
     });
@@ -324,6 +332,25 @@ async fn a_session_that_cannot_be_written_keeps_the_membership_and_runs_no_hook(
     assert_eq!(member_of(&rig, "w1", &joe).as_deref(), Some("member"));
     assert!(!unspent(&rig).await);
     assert_eq!(accepted_calls(&rig).await, 0);
+}
+
+#[tokio::test]
+async fn the_after_acceptance_hook_finds_the_session_written() {
+    let store = Arc::new(session_writes::SlowSessions {
+        open: true,
+        ..Default::default()
+    });
+    let written = store.written.clone();
+    let wired = rig_over(oauth_config(), OAuthLoginResult::Create, move |builder| {
+        builder.session_store(store)
+    });
+    let Some(rig) = wired.await else { unreachable!() };
+    seed_member(&rig).await;
+    assert!(rig.hooks.session_written.set(written).is_ok());
+    let outcome = flow(&rig, Some(TOKEN)).await;
+    assert!(matches!(outcome, Ok(OAuthOutcome::Authenticated(_))));
+    assert_eq!(accepted_calls(&rig).await, 1);
+    assert!(rig.hooks.saw_session.load(Ordering::SeqCst));
 }
 
 #[tokio::test]
