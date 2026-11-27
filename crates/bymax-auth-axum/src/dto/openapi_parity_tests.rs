@@ -16,8 +16,6 @@ use garde::Validate;
 use serde::de::DeserializeOwned;
 use serde_json::{Map, Value};
 
-use crate::pending::PENDING_PROPERTIES;
-
 use super::{
     AcceptInvitationDto, AcceptWorkspaceInvitationDto, AcceptWorkspaceInvitationSignupDto,
     ChangeEmailDto, ChangeMemberRoleDto, ChangePasswordDto, ConfirmEmailChangeDto,
@@ -563,16 +561,6 @@ fn the_dtos_agree_with_the_artefact() {
     let mut observed = Findings::new();
     for (dto, check) in DTOS {
         check_dto(&root, dto, check, &mut observed);
-    }
-    // A property still pending is a known difference: it must still be observed, so the slice
-    // that builds it has to delete its entry, and nothing else is accepted.
-    for (schema, property) in PENDING_PROPERTIES {
-        let entry = format!("{schema}.{property}");
-        let mut seen = false;
-        for found in observed.values_mut() {
-            seen |= found.remove(&entry);
-        }
-        assert!(seen, "{entry} is built; remove it from PENDING_PROPERTIES");
     }
     observed.retain(|_, found| !found.is_empty());
     // A difference is a finding, not a skipped case. One accepted on purpose belongs here, as an
