@@ -269,6 +269,11 @@ pub(super) fn without_a_store(config: AuthConfig) -> Option<Fixture> {
 
 /// The place of `email`'s invitation in `t1`'s `w1`.
 pub(super) fn place(inv: &Inv, email: &str) -> InvitationPlace {
+    place_in(inv, "w1", email)
+}
+
+/// The place of `email`'s invitation in `workspace_id` of `t1`.
+pub(super) fn place_in(inv: &Inv, workspace_id: &str, email: &str) -> InvitationPlace {
     let key = inv
         .f
         .engine
@@ -276,8 +281,8 @@ pub(super) fn place(inv: &Inv, email: &str) -> InvitationPlace {
         .map(|runtime| *runtime.identifier_key)
         .unwrap_or([0; 64]);
     InvitationPlace {
-        index_id: invitation_index_id(&key, "t1", "w1", email).unwrap_or_default(),
-        set_id: invitation_set_id(&key, "t1", "w1").unwrap_or_default(),
+        index_id: invitation_index_id(&key, "t1", workspace_id, email).unwrap_or_default(),
+        set_id: invitation_set_id(&key, "t1", workspace_id).unwrap_or_default(),
     }
 }
 
@@ -352,7 +357,7 @@ pub(super) async fn seed_bootstrap(
         workspace_name: "Acme Inc".to_owned(),
     };
     let key = key_of(token);
-    let place = place(inv, email);
+    let place = place_in(inv, workspace_id, email);
     let outcome = inv
         .store
         .publish(Publication {

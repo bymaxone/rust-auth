@@ -19,6 +19,7 @@ use crate::services::auth::detached::run_after_invitation_accepted;
 use crate::services::auth::{map_repository_error, spawn_guarded};
 use crate::services::token_manager::CredentialProof;
 use crate::services::workspace::{WorkspaceRuntime, internal};
+use crate::services::workspace_lifecycle::OwnedWorkspace;
 use crate::services::workspace_writes::audit_event;
 use crate::traits::membership_repository::{CreateMembership, CreateMembershipOutcome};
 use crate::traits::workspace_invitation_store::Removal;
@@ -81,11 +82,19 @@ impl std::fmt::Debug for WorkspaceSignup {
     }
 }
 
-/// A member invitation read by its token, with the key it is stored under.
+/// An invitation read by its token, with the key it is stored under.
 struct Loaded {
     key: String,
     base: InvitationBase,
-    inviter_user_id: String,
+    grant: Grant,
+}
+
+/// What an invitation grants, and what stands behind it.
+enum Grant {
+    /// A seat in an existing workspace, on a member's authority.
+    Member { inviter_user_id: String },
+    /// A workspace to create and own, on the platform's authority.
+    Bootstrap { workspace_name: String },
 }
 
 impl Loaded {
@@ -106,20 +115,23 @@ impl Loaded {
 }
 
 impl AuthEngine {
-    /// Accepts the member invitation `token` names for the signed-in account `user_id` of
-    /// `tenant_id`, and answers the role the account holds in the workspace, which is the role it
-    /// already held when it was an active member before.
+    /// Accepts the invitation `token` names for the signed-in account `user_id` of `tenant_id`,
+    /// and answers the role the account holds in the workspace, which is the role it already held
+    /// when it was an active member before.
     ///
-    /// A bootstrap invitation is not accepted: it reads as a token that cannot be honoured, and
-    /// stays.
+    /// A bootstrap invitation creates its workspace with the account as owner, applying the owner
+    /// cap and the host's `before_workspace_create` and never the self-serve switch. Accepting
+    /// again after the workspace was created, by its active owner, is a success.
     ///
     /// # Errors
     ///
     /// [`AuthError::InvalidInvitationToken`] for a token that cannot be honoured, whatever the
     /// reason; [`AuthError::TokenInvalid`] when the account is gone;
     /// [`AuthError::InvitationEmailMismatch`] when the account's address is not the invited one
-    /// and [`AuthError::EmailNotVerified`] when it is but is not verified. None of these spends
-    /// the token. [`AuthError::Internal`] for a repository or store failure or a disabled layer.
+    /// and [`AuthError::EmailNotVerified`] when it is but is not verified;
+    /// [`AuthError::WorkspaceLimitReached`] and [`AuthError::ForbiddenWithDetails`] when a
+    /// bootstrap invitation's workspace may not be created. None of these spends the token.
+    /// [`AuthError::Internal`] for a repository, hook or store failure or a disabled layer.
     pub async fn accept_workspace_invitation(
         &self,
         tenant_id: &str,
@@ -152,11 +164,11 @@ impl AuthEngine {
             None,
             Some(user.tenant_id.clone()),
         );
-        self.finish_acceptance(runtime, &loaded, &user.id, hook_ctx)
+        self.finish_acceptance(runtime, &loaded, &SafeAuthUser::from(user), hook_ctx)
             .await
     }
 
-    /// Accepts the member invitation `input.token` names by creating the account it was addressed
+    /// Accepts the invitation `input.token` names by creating the account it was addressed
     /// to, verified and with no role of its own, and signs that account in.
     ///
     /// # Errors
@@ -166,7 +178,9 @@ impl AuthEngine {
     /// [`AuthError::EmailAlreadyExists`] when the address already has an account, whose holder
     /// signs in and accepts; whatever the password policy refuses; and [`AuthError::Internal`]
     /// for a repository, hashing or store failure. A refusal before the account is created writes
-    /// nothing and spends nothing.
+    /// nothing and spends nothing. A bootstrap invitation refused at the creation of its
+    /// workspace leaves the account created and the token unspent, so its holder signs in and
+    /// accepts.
     pub async fn accept_workspace_invitation_signup(
         &self,
         input: WorkspaceSignupInput,
@@ -196,7 +210,7 @@ impl AuthEngine {
             Some(user.tenant_id.clone()),
         );
         let accepted = self
-            .finish_acceptance(runtime, &loaded, &user.id, hook_ctx.clone())
+            .finish_acceptance(runtime, &loaded, &user, hook_ctx.clone())
             .await?;
         let result = self.sign_in_invited(user, ip, user_agent, hook_ctx).await?;
         Ok(WorkspaceSignup { result, accepted })
@@ -204,30 +218,42 @@ impl AuthEngine {
 }
 
 impl AuthEngine {
-    /// Re-checks what was true of the inviter and the workspace when the invitation was issued: an
-    /// invitation delegates authority, and authority is revocable. Every failure answers as an
-    /// invalid token, since the reason would describe someone else's account.
+    /// Re-checks what the invitation rests on. A bootstrap invitation is accepted before its
+    /// workspace exists, or again once it was created and the token not yet spent.
     async fn assert_still_grantable(
         &self,
         runtime: &WorkspaceRuntime,
         loaded: &Loaded,
     ) -> Result<(), AuthError> {
-        let workspace = runtime.workspaces.find_by_id(loaded.workspace()).await;
-        if !workspace
-            .map_err(internal)?
-            .is_some_and(|row| row.status == WorkspaceStatus::Active)
-        {
-            return Err(AuthError::InvalidInvitationToken);
+        let found = runtime.workspaces.find_by_id(loaded.workspace()).await;
+        let status = found.map_err(internal)?.map(|row| row.status);
+        match (&loaded.grant, status) {
+            (Grant::Bootstrap { .. }, None | Some(WorkspaceStatus::Active)) => Ok(()),
+            (Grant::Member { inviter_user_id }, Some(WorkspaceStatus::Active)) => {
+                self.assert_inviter_stands(runtime, loaded, inviter_user_id)
+                    .await
+            }
+            _ => Err(AuthError::InvalidInvitationToken),
         }
+    }
+
+    /// An invitation delegates its inviter's authority, and authority is revocable. Every failure
+    /// answers as an invalid token, since the reason would describe someone else's account.
+    async fn assert_inviter_stands(
+        &self,
+        runtime: &WorkspaceRuntime,
+        loaded: &Loaded,
+        inviter_user_id: &str,
+    ) -> Result<(), AuthError> {
         let tenant_id = &loaded.base.tenant_id;
         let inviter = self
             .user_repository()
-            .find_by_id(&loaded.inviter_user_id, Some(tenant_id))
+            .find_by_id(inviter_user_id, Some(tenant_id))
             .await
             .map_err(internal)?;
         let seat = runtime
             .memberships
-            .find(loaded.member(&loaded.inviter_user_id))
+            .find(loaded.member(inviter_user_id))
             .await
             .map_err(internal)?;
         let stands = inviter.is_some_and(|inviter| {
@@ -246,17 +272,27 @@ impl AuthEngine {
         Ok(())
     }
 
-    /// Writes the membership, then spends the token, then ends the cached access and reports the
+    /// Writes the membership, creating a bootstrap invitation's workspace with it, then spends
+    /// the token, then ends the cached access and reports the
     /// event. A revoke or a resend landing between the write and the spend cannot undo the
     /// acceptance: the event says the spend lost.
     async fn finish_acceptance(
         &self,
         runtime: &WorkspaceRuntime,
         loaded: &Loaded,
-        user_id: &str,
+        user: &SafeAuthUser,
         hook_ctx: HookContext,
     ) -> Result<AcceptedWorkspaceInvitation, AuthError> {
-        let role = join(runtime, loaded, user_id).await?;
+        let user_id = user.id.as_str();
+        let role = match &loaded.grant {
+            Grant::Member { inviter_user_id } => {
+                join(runtime, loaded, inviter_user_id, user_id).await?
+            }
+            Grant::Bootstrap { workspace_name } => {
+                self.own_invited_workspace(runtime, loaded, workspace_name, user, &hook_ctx)
+                    .await?
+            }
+        };
         let place = runtime.place(loaded.workspace(), &loaded.base.email)?;
         let spent = runtime
             .invitation_store()?
@@ -273,6 +309,38 @@ impl AuthEngine {
             workspace_id: loaded.base.workspace_id.clone(),
             role,
         })
+    }
+
+    /// Creates a bootstrap invitation's workspace with `owner` as its owner, and answers the
+    /// role held there. A workspace an earlier attempt created without spending the token is a
+    /// success for its active owner alone, with no cap and no hook.
+    async fn own_invited_workspace(
+        &self,
+        runtime: &WorkspaceRuntime,
+        loaded: &Loaded,
+        name: &str,
+        owner: &SafeAuthUser,
+        ctx: &HookContext,
+    ) -> Result<String, AuthError> {
+        let role = loaded.base.role.clone();
+        let existing = runtime.workspaces.find_by_id(loaded.workspace()).await;
+        if let Some(existing) = existing.map_err(internal)? {
+            let seat = runtime.memberships.find(loaded.member(&owner.id)).await;
+            let owns = existing.status == WorkspaceStatus::Active
+                && seat.map_err(internal)?.is_some_and(|seat| {
+                    seat.status == MembershipStatus::Active && seat.role == role
+                });
+            return owns
+                .then_some(role)
+                .ok_or(AuthError::InvalidInvitationToken);
+        }
+        let request = OwnedWorkspace {
+            workspace: loaded.workspace(),
+            name,
+            owner,
+        };
+        self.create_owned_workspace(request, ctx).await?;
+        Ok(role)
     }
 
     /// Creates the invited account. The invitation reached its address, which is what
@@ -331,21 +399,24 @@ impl AuthEngine {
     }
 }
 
-/// The member invitation `token` names, granting a role of the hierarchy.
+/// The invitation `token` names: a member one granting a role of the hierarchy, or a bootstrap
+/// one granting the owner role.
 async fn load(runtime: &WorkspaceRuntime, token: &str) -> Result<Loaded, AuthError> {
     let key = record_key(&invitation_record_id(token));
     let record = runtime.invitation_store()?.read_record(&key).await?;
-    match record {
+    let hierarchy = &runtime.resolved.hierarchy;
+    let (base, grant) = match record {
         Some(InvitationRecord::Member {
             base,
             inviter_user_id,
-        }) if runtime.resolved.hierarchy.knows(&base.role) => Ok(Loaded {
-            key,
+        }) if hierarchy.knows(&base.role) => (base, Grant::Member { inviter_user_id }),
+        Some(InvitationRecord::Bootstrap {
             base,
-            inviter_user_id,
-        }),
-        _ => Err(AuthError::InvalidInvitationToken),
-    }
+            workspace_name,
+        }) if base.role == hierarchy.owner_role() => (base, Grant::Bootstrap { workspace_name }),
+        _ => return Err(AuthError::InvalidInvitationToken),
+    };
+    Ok(Loaded { key, base, grant })
 }
 
 /// The persisted and reported form of an acceptance.
@@ -362,6 +433,7 @@ fn accepted_kind(loaded: &Loaded, user_id: &str, role: &str, lost: bool) -> Audi
 async fn join(
     runtime: &WorkspaceRuntime,
     loaded: &Loaded,
+    inviter_user_id: &str,
     user_id: &str,
 ) -> Result<String, AuthError> {
     let kind = accepted_kind(loaded, user_id, &loaded.base.role, false);
@@ -372,7 +444,7 @@ async fn join(
         .create(CreateMembership {
             member: loaded.member(user_id),
             role: &loaded.base.role,
-            invited_by_user_id: Some(&loaded.inviter_user_id),
+            invited_by_user_id: Some(inviter_user_id),
             audit: &audit,
         })
         .await
