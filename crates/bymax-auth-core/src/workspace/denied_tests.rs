@@ -319,6 +319,8 @@ async fn a_counter_store_that_fails_emits_nothing_and_leaves_the_answer_alone() 
         matches!(answer, Err(AuthError::WorkspaceNotFound)),
         "{answer:?}"
     );
+    // A second refusal inside the window is answered the same and reports nothing either.
+    assert!(world.ask("w1", "u1").await.is_err());
     assert!(world.reports.all().is_empty());
 }
 
@@ -379,6 +381,20 @@ fn the_defaults_bounds_and_messages_are_the_ones_the_rule_states() {
     for text in stated {
         assert!(rule.contains(&text), "{text}");
     }
+}
+
+#[test]
+fn the_surfaces_are_the_names_the_rule_states() {
+    let rule = contract()["workspaceRealtime"]["rules"]["accessDeniedEvents"].clone();
+    let rule = rule.as_str().unwrap_or_default();
+    let [http, verifier, ws] = [
+        AccessSurface::Http,
+        AccessSurface::Verifier,
+        AccessSurface::Ws,
+    ]
+    .map(AccessSurface::as_str);
+    let stated = format!("`surface` is `{http}`, `{verifier}` or `{ws}`");
+    assert!(rule.contains(&stated), "{stated}");
 }
 
 /// The startup message for `option` bounded by `max`.
