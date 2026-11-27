@@ -173,17 +173,17 @@ mod tests {
     async fn ws_auth_user_redeems_a_ticket_once_and_refuses_replay() {
         // A minted ticket redeems once via the extractor; a replay (and a bogus ticket) refuse
         // the handshake with token_invalid. The access JWT never appears in the URL.
-        let Some(s) = scaffold(TokenDelivery::Cookie) else { return };
+        let Some(s) = scaffold(TokenDelivery::Cookie) else { unreachable!() };
         let id = seed(&s.users, "ws@e.com", "USER").await;
         let token = dashboard_token(&s, &id).await;
         // Verify the token to get the claims the engine mints a ticket from; both calls succeed
         // for this seeded user, so they are asserted and bound (never an early return).
         let claims = s.state.engine().verify_access_token(&token).await;
         assert!(claims.is_ok());
-        let Ok(claims) = claims else { return };
+        let Ok(claims) = claims else { unreachable!() };
         let ticket = s.state.engine().issue_ws_ticket(&claims).await;
         assert!(ticket.is_ok());
-        let Ok(issued) = ticket else { return };
+        let Ok(issued) = ticket else { unreachable!() };
         let ticket = issued.ticket;
 
         let mut parts = parts_with_ticket(&ticket);
@@ -222,7 +222,7 @@ mod tests {
     async fn the_header_handshake_applies_the_tenant_binding_like_the_http_extractors() {
         // A token minted for `t1` must not open a socket under another tenant's host when the
         // binding is enforced; the resolver here names the tenant after the `host` header.
-        let Some(s) = scaffold_with(TokenDelivery::Cookie, enforcing) else { return };
+        let Some(s) = scaffold_with(TokenDelivery::Cookie, enforcing) else { unreachable!() };
         let id = seed(&s.users, "wsb@e.com", "USER").await;
         let token = dashboard_token(&s, &id).await;
         let handshake = |host: &str| {
@@ -252,12 +252,12 @@ mod tests {
     async fn a_ticket_minted_for_one_tenant_does_not_open_a_socket_under_another_tenants_host() {
         // The browser path redeems a ticket instead of presenting the token, and a ticket is a
         // bearer credential in its own right: the binding has to hold on the redeemed claims too.
-        let Some(s) = scaffold_with(TokenDelivery::Cookie, enforcing) else { return };
+        let Some(s) = scaffold_with(TokenDelivery::Cookie, enforcing) else { unreachable!() };
         let id = seed(&s.users, "wst@e.com", "USER").await;
         let token = dashboard_token(&s, &id).await;
         let claims = s.state.engine().verify_access_token(&token).await;
         assert!(claims.is_ok());
-        let Ok(claims) = claims else { return };
+        let Ok(claims) = claims else { unreachable!() };
         let handshake = |ticket: &str, host: &str| {
             Request::builder()
                 .uri(format!("/ws?ticket={ticket}"))
@@ -270,14 +270,14 @@ mod tests {
 
         let own = s.state.engine().issue_ws_ticket(&claims).await;
         assert!(own.is_ok());
-        let Ok(own) = own else { return };
+        let Ok(own) = own else { unreachable!() };
         let mut parts = handshake(&own.ticket, "t1");
         let ok = WsAuthUser::from_request_parts(&mut parts, &s.state).await;
         assert!(matches!(ok, Ok(WsAuthUser(c)) if c.sub == id));
 
         let foreign = s.state.engine().issue_ws_ticket(&claims).await;
         assert!(foreign.is_ok());
-        let Ok(foreign) = foreign else { return };
+        let Ok(foreign) = foreign else { unreachable!() };
         let mut parts = handshake(&foreign.ticket, "t2");
         let denied = WsAuthUser::from_request_parts(&mut parts, &s.state).await;
         assert!(
@@ -290,7 +290,7 @@ mod tests {
     async fn ws_auth_user_from_header_validates_the_access_jwt() {
         // The non-browser variant validates the access JWT in the handshake header; a missing
         // or invalid header refuses the handshake.
-        let Some(s) = scaffold(TokenDelivery::Cookie) else { return };
+        let Some(s) = scaffold(TokenDelivery::Cookie) else { unreachable!() };
         let id = seed(&s.users, "wsh@e.com", "USER").await;
         let token = dashboard_token(&s, &id).await;
 

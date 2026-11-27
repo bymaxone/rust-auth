@@ -51,7 +51,7 @@ mod tests {
 
     #[tokio::test]
     async fn requests_are_counted_per_route_and_bucket_within_one_window() {
-        let Some(h) = harness(base_config(), None) else { return };
+        let Some(h) = harness(base_config(), None) else { unreachable!() };
         let count = |route: &'static str, bucket: &'static str| {
             h.engine.count_rate_limited_request(route, bucket, 60)
         };
@@ -72,7 +72,7 @@ mod tests {
         // A steady trickle must not keep a counter alive forever: the window is measured from
         // the first request, so the third request lands in a fresh window even though the
         // second arrived less than a window before it.
-        let Some(h) = harness(base_config(), None) else { return };
+        let Some(h) = harness(base_config(), None) else { unreachable!() };
         let hit = || {
             h.engine
                 .count_rate_limited_request("login", "198.51.100.1", 1)
@@ -97,7 +97,7 @@ mod tests {
             .brute_force_store(stores)
             .build();
         assert!(built.is_ok());
-        let Ok(bare) = built else { return };
+        let Ok(bare) = built else { unreachable!() };
         assert!(bare.rate_limit_store().is_none());
         assert!(matches!(
             bare.count_rate_limited_request("login", "203.0.113.7", 60)
@@ -123,7 +123,7 @@ mod tests {
             .rate_limit_store(counter)
             .build();
         assert!(built.is_ok());
-        let Ok(engine) = built else { return };
+        let Ok(engine) = built else { unreachable!() };
 
         assert!(engine.rate_limit_store().is_some());
         assert!(matches!(

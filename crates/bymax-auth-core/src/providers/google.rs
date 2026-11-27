@@ -348,7 +348,7 @@ mod tests {
         let p = provider(client.clone());
         let tokens = p.exchange_code("the-code", Some("the-verifier")).await;
         assert!(matches!(&tokens, Ok(t) if t.access_token == "at" && t.expires_in == Some(10)));
-        let Some(sent) = client.last_body() else { return };
+        let Some(sent) = client.last_body() else { unreachable!() };
         assert!(sent.contains("code=the-code"));
         assert!(sent.contains("client_secret=csecret"));
         assert!(sent.contains("grant_type=authorization_code"));
@@ -362,7 +362,7 @@ mod tests {
         let client = Arc::new(CapturingClient::ok(200, body));
         let p = provider(client.clone());
         assert!(p.exchange_code("c", None).await.is_ok());
-        let Some(sent) = client.last_body() else { return };
+        let Some(sent) = client.last_body() else { unreachable!() };
         assert!(!sent.contains("code_verifier"));
     }
 
@@ -409,7 +409,7 @@ mod tests {
             && prof.name.as_deref() == Some("U")
             && prof.avatar.as_deref() == Some("https://pic")));
         // The Authorization header carried the bearer token.
-        let Some(req) = lock(&client.captured).last().cloned() else { return };
+        let Some(req) = lock(&client.captured).last().cloned() else { unreachable!() };
         assert!(
             req.headers
                 .iter()

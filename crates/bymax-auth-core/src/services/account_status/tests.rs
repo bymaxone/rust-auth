@@ -285,8 +285,8 @@ fn engine_with_down_cache(h: &Harness, cfg: AuthConfig) -> Option<AuthEngine> {
         .redis_stores(h.stores.clone())
         .user_status_cache(Arc::new(DownCache))
         .build();
-    // Asserted, not skipped: a builder that dropped the cache would otherwise make every test
-    // that uses this helper return early and pass.
+    // Asserted here so that a builder that dropped the cache is named, rather than surfacing in
+    // every test that uses this helper.
     assert!(
         built.is_ok(),
         "the engine must build: {:?}",

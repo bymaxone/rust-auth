@@ -97,7 +97,11 @@ fn production_sources() -> Vec<PathBuf> {
     for group in ["crates", "bindings"] {
         let Ok(members) = fs::read_dir(root.join(group)) else { unreachable!() };
         for member in members.flatten() {
-            rust_files(&member.path().join("src"), &mut files);
+            // An entry without a `src` directory, such as a stray file, is not a crate.
+            let src = member.path().join("src");
+            if src.is_dir() {
+                rust_files(&src, &mut files);
+            }
         }
     }
     files.retain(|path| {

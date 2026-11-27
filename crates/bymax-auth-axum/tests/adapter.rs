@@ -3933,8 +3933,8 @@ async fn the_capturing_mailer_records_the_codes_and_ignores_the_rest() {
     // The harness's double keeps the two codes a flow has to submit back — the OTP record holds
     // a keyed fingerprint, so the mailbox is the only place the plaintext exists — and no-ops
     // the rest. Driven end to end so the object-safe impl is covered, and so the recording
-    // halves are asserted rather than assumed: a double that quietly kept nothing would make
-    // every test reading a code from it skip its own assertions and still pass.
+    // halves are asserted rather than assumed: a double that quietly kept nothing would fail
+    // every test reading a code from it, far from the cause.
     use bymax_auth_core::traits::EmailProvider;
 
     let mailer = common::CapturingEmails::default();

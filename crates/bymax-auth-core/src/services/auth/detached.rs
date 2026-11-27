@@ -623,7 +623,7 @@ mod tests {
     #[tokio::test]
     async fn update_last_login_stamps_the_user() {
         // The wrapper stamps last_login_at on the seeded user via the repository.
-        let Some(h) = harness(base_config(), None) else { return };
+        let Some(h) = harness(base_config(), None) else { unreachable!() };
         let id = h.seed(SeedUser::active("stamp@example.com", "pw")).await;
         assert!(
             run_update_last_login(h.users.clone(), "t1".to_owned(), id.clone())
@@ -637,10 +637,10 @@ mod tests {
     #[tokio::test]
     async fn rehash_password_persists_a_new_hash() {
         // The wrapper hashes the plaintext and replaces the stored hash with the upgrade.
-        let Some(h) = harness(base_config(), None) else { return };
+        let Some(h) = harness(base_config(), None) else { unreachable!() };
         let id = h.seed(SeedUser::active("rehash@example.com", "pw")).await;
         let before = h.users.find_by_id(&id, None).await;
-        let Ok(Some(before)) = before else { return };
+        let Ok(Some(before)) = before else { unreachable!() };
         let original = before.password_hash.clone().unwrap_or_default();
         assert!(
             run_rehash_password(
@@ -655,7 +655,7 @@ mod tests {
             .is_ok()
         );
         let after = h.users.find_by_id(&id, None).await;
-        let Ok(Some(after)) = after else { return };
+        let Ok(Some(after)) = after else { unreachable!() };
         // A fresh hash is produced (different salt), so the stored value changed.
         assert_ne!(after.password_hash.unwrap_or_default(), original);
     }
@@ -666,11 +666,11 @@ mod tests {
         // verified. Reading it without a tenant could confirm against another tenant's row and
         // then write there. Scoped to a tenant the account is not in, it finds nothing and
         // declines, so the stored hash is exactly what it was.
-        let Some(h) = harness(base_config(), None) else { return };
+        let Some(h) = harness(base_config(), None) else { unreachable!() };
         let id = h
             .seed(SeedUser::active("rehash-scope@example.com", "pw"))
             .await;
-        let Ok(Some(before)) = h.users.find_by_id(&id, None).await else { return };
+        let Ok(Some(before)) = h.users.find_by_id(&id, None).await else { unreachable!() };
         let original = before.password_hash.clone().unwrap_or_default();
 
         assert!(
@@ -685,7 +685,7 @@ mod tests {
             .await
             .is_ok()
         );
-        let Ok(Some(after)) = h.users.find_by_id(&id, None).await else { return };
+        let Ok(Some(after)) = h.users.find_by_id(&id, None).await else { unreachable!() };
         assert_eq!(
             after.password_hash.unwrap_or_default(),
             original,
@@ -703,12 +703,12 @@ mod tests {
         // unconditional write re-installs the compromised credential over the new one — the old
         // password works again, the new one does not, and the "password changed" mail has
         // already gone out.
-        let Some(h) = harness(base_config(), None) else { return };
+        let Some(h) = harness(base_config(), None) else { unreachable!() };
         let id = h
             .seed(SeedUser::active("reset-race@example.com", "pw"))
             .await;
         let before = h.users.find_by_id(&id, None).await;
-        let Ok(Some(before)) = before else { return };
+        let Ok(Some(before)) = before else { unreachable!() };
         let original = before.password_hash.clone().unwrap_or_default();
 
         // The reset lands first, so the row no longer holds the hash that was verified.
@@ -734,7 +734,7 @@ mod tests {
         );
 
         let after = h.users.find_by_id(&id, None).await;
-        let Ok(Some(after)) = after else { return };
+        let Ok(Some(after)) = after else { unreachable!() };
         assert_eq!(
             after.password_hash.unwrap_or_default(),
             "$scrypt$reset",

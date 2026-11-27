@@ -479,7 +479,7 @@ mod tests {
         // crate closes it — but "nothing closes it" is a property of today's code, not of the
         // type. Closing it here proves the refusal is a refusal: the derivation does not fall
         // through to running unbounded, which is the one outcome the limiter exists to prevent.
-        let Some(svc) = service() else { return };
+        let Some(svc) = service() else { unreachable!() };
         svc.kdf_permits.close();
 
         assert!(matches!(
@@ -498,12 +498,12 @@ mod tests {
         // The permit is held for the whole derivation, not merely taken and dropped. Draining
         // the semaphore and watching a hash fail to make progress is what proves it: without
         // the acquire, the hash would complete while every permit is held elsewhere.
-        let Some(svc) = service() else { return };
+        let Some(svc) = service() else { unreachable!() };
         let permits = u32::try_from(kdf_permit_count(&config())).unwrap_or(u32::MAX);
         let all = Arc::clone(&svc.kdf_permits)
             .acquire_many_owned(permits)
             .await;
-        let Ok(held) = all else { return };
+        let Ok(held) = all else { unreachable!() };
 
         let blocked = tokio::time::timeout(
             std::time::Duration::from_millis(250),
@@ -524,10 +524,10 @@ mod tests {
     async fn hash_then_verify_round_trips_and_rejects_a_wrong_password() {
         // A freshly hashed password verifies; a different password does not — the core
         // hash/verify contract, exercised through the spawn_blocking dispatch.
-        let Some(svc) = service() else { return };
+        let Some(svc) = service() else { unreachable!() };
         let result = svc.hash("correct horse battery staple").await;
         assert!(result.is_ok());
-        let Ok(phc) = result else { return };
+        let Ok(phc) = result else { unreachable!() };
         assert!(phc.starts_with('$'));
 
         let good = svc.verify("correct horse battery staple", &phc).await;
@@ -540,8 +540,8 @@ mod tests {
     async fn verify_reports_needs_rehash_for_an_unreadable_or_weaker_hash() {
         // A fresh hash under the active params does not need rehashing; a value that is not a
         // PHC string always reports stale so it migrates on the next login.
-        let Some(svc) = service() else { return };
-        let Ok(phc) = svc.hash("pw").await else { return };
+        let Some(svc) = service() else { unreachable!() };
+        let Ok(phc) = svc.hash("pw").await else { unreachable!() };
         let outcome = svc.verify("pw", &phc).await;
         assert!(matches!(
             outcome,
@@ -571,7 +571,7 @@ mod tests {
     async fn verify_sentinel_runs_a_verify_without_revealing_a_result() {
         // The absent-user path runs the sentinel verify for uniform timing; it must succeed
         // (no error) regardless of the supplied password.
-        let Some(svc) = service() else { return };
+        let Some(svc) = service() else { unreachable!() };
         assert!(
             svc.verify_sentinel("whatever the attacker tried")
                 .await
@@ -588,9 +588,9 @@ mod tests {
         // Compared against a real verify measured in the same test, as a *lower* bound: a
         // loaded machine slows both, and can never make the sentinel finish faster than a
         // quarter of a real verify. The comparison cannot flake in the failing direction.
-        let Some(svc) = service() else { return };
+        let Some(svc) = service() else { unreachable!() };
         let hashed = svc.hash("correct horse battery staple").await;
-        let Ok(phc) = hashed else { return };
+        let Ok(phc) = hashed else { unreachable!() };
 
         let started = std::time::Instant::now();
         let _ = svc.verify("correct horse battery staple", &phc).await;
@@ -613,7 +613,7 @@ mod tests {
         cfg.rehash_on_verify = false;
         let off = PasswordService::new(&cfg, Arc::new(AllowAllBreachChecker));
         assert!(matches!(off, Ok(s) if !s.rehash_on_verify()));
-        let Some(on) = service() else { return };
+        let Some(on) = service() else { unreachable!() };
         assert!(on.rehash_on_verify());
     }
 
@@ -652,7 +652,7 @@ mod tests {
         let handle = tokio::spawn(std::future::pending::<()>());
         handle.abort();
         let join_result = handle.await;
-        let Err(join_error) = join_result else { return };
+        let Err(join_error) = join_result else { unreachable!() };
         assert!(matches!(
             flatten_hash(Err(join_error)),
             Err(AuthError::Internal(_))
@@ -744,7 +744,7 @@ mod tests {
         // shared error catalog gains no entry and a client already handling a short password
         // sees nothing new. The field travels in so the error points at the input the caller
         // actually sent rather than at whatever this library calls it internally.
-        let Some(svc) = service() else { return };
+        let Some(svc) = service() else { unreachable!() };
 
         let refused = svc.assert_long_enough(&"x".repeat(14), "newPassword");
 
@@ -771,7 +771,7 @@ mod tests {
         // rejects a password the policy allows, on every registration. And the floor is the
         // CONFIGURED number: without the second half, a hardcoded 15 would satisfy every other
         // test in this module.
-        let Some(default) = service() else { return };
+        let Some(default) = service() else { unreachable!() };
         assert!(
             default
                 .assert_long_enough(&"x".repeat(15), "password")
@@ -785,7 +785,7 @@ mod tests {
 
         // One line on purpose: a `let-else` whose body is on its own line leaves that line
         // unreachable, and the coverage gate is per line.
-        let Some(raised) = service_with_floor(20) else { return };
+        let Some(raised) = service_with_floor(20) else { unreachable!() };
         assert!(
             raised
                 .assert_long_enough(&"x".repeat(20), "password")
@@ -804,7 +804,7 @@ mod tests {
         // written with accents are 20-odd bytes and written in a non-Latin script more still, so
         // a byte floor silently demands a shorter password from some users and a longer one from
         // others. Fifteen characters is fifteen characters.
-        let Some(svc) = service() else { return };
+        let Some(svc) = service() else { unreachable!() };
         let accented = "ãéîõüçñáàâê"
             .chars()
             .chain("çãõü".chars())
@@ -820,7 +820,7 @@ mod tests {
         // One astral character is one code point, four bytes and two UTF-16 units. The floor
         // counts code points, so fifteen of them reach it and fourteen do not; counting bytes
         // would admit four, and counting UTF-16 units would admit eight.
-        let Some(svc) = service() else { return };
+        let Some(svc) = service() else { unreachable!() };
         let astral = |count: usize| "\u{1F600}".repeat(count);
         assert!(svc.assert_long_enough(&astral(15), "password").is_ok());
         assert!(svc.assert_long_enough(&astral(14), "password").is_err());
@@ -838,7 +838,7 @@ mod tests {
         // associated-function form resolves against `Arc<dyn …>` and then rejects a
         // `&Arc<RecordingChecker>`. `.clone()` resolves on the concrete type and coerces after.
         let breach: Arc<dyn PasswordBreachChecker> = checker.clone();
-        let Ok(svc) = PasswordService::new(&config(), breach) else { return };
+        let Ok(svc) = PasswordService::new(&config(), breach) else { unreachable!() };
 
         assert!(svc.assert_acceptable("short", "password").await.is_err());
         assert!(

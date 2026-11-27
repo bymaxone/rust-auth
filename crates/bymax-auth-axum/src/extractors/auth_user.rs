@@ -43,7 +43,7 @@ mod tests {
     #[tokio::test]
     async fn bearer_mode_sources_from_the_authorization_header_and_caches_claims() {
         // In bearer mode the token comes from the `Authorization` header; a cookie is ignored.
-        let Some(s) = scaffold(TokenDelivery::Bearer) else { return };
+        let Some(s) = scaffold(TokenDelivery::Bearer) else { unreachable!() };
         let id = seed(&s.users, "bear@e.com", "USER").await;
         let token = dashboard_token(&s, &id).await;
 
@@ -67,7 +67,7 @@ mod tests {
     async fn bearer_mode_accepts_a_lowercase_bearer_scheme() {
         // The scheme token is case-insensitive: `authorization: bearer <token>` resolves the
         // same as `Bearer <token>` (the lowercase fallback branch of `bearer_from_header`).
-        let Some(s) = scaffold(TokenDelivery::Bearer) else { return };
+        let Some(s) = scaffold(TokenDelivery::Bearer) else { unreachable!() };
         let id = seed(&s.users, "lower@e.com", "USER").await;
         let token = dashboard_token(&s, &id).await;
 
@@ -85,7 +85,7 @@ mod tests {
     async fn bearer_mode_with_an_empty_bearer_value_is_missing() {
         // `Authorization: Bearer ` (empty value) sources no token (the empty-token branch of
         // `bearer_from_header`), so the guard rejects with token_missing.
-        let Some(s) = scaffold(TokenDelivery::Bearer) else { return };
+        let Some(s) = scaffold(TokenDelivery::Bearer) else { unreachable!() };
         let (mut parts, ()) = http::Request::builder()
             .uri("/auth/me")
             .header(http::header::AUTHORIZATION, "Bearer ")
@@ -103,7 +103,7 @@ mod tests {
     async fn cookie_mode_with_an_empty_jar_is_missing() {
         // In cookie mode, a present jar with no `access_token` cookie sources no token (the
         // `access_cookie` None branch), so the guard rejects with token_missing.
-        let Some(s) = scaffold(TokenDelivery::Cookie) else { return };
+        let Some(s) = scaffold(TokenDelivery::Cookie) else { unreachable!() };
         let mut parts = parts_with_cookie(""); // installs an empty jar, no value set
         let missing = AuthUser::from_request_parts(&mut parts, &s.state).await;
         assert!(matches!(
@@ -115,7 +115,7 @@ mod tests {
     #[tokio::test]
     async fn both_mode_accepts_cookie_or_header() {
         // In `both` mode either channel works.
-        let Some(s) = scaffold(TokenDelivery::Both) else { return };
+        let Some(s) = scaffold(TokenDelivery::Both) else { unreachable!() };
         let id = seed(&s.users, "both@e.com", "USER").await;
         let token = dashboard_token(&s, &id).await;
 

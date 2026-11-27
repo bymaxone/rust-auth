@@ -41,7 +41,7 @@ mod tests {
     #[tokio::test]
     async fn current_user_exposes_claims_and_rejects_when_absent() {
         // A valid token yields the claims as a parameter; an absent token rejects.
-        let Some(s) = scaffold(TokenDelivery::Cookie) else { return };
+        let Some(s) = scaffold(TokenDelivery::Cookie) else { unreachable!() };
         let id = seed(&s.users, "cu@e.com", "USER").await;
         let token = dashboard_token(&s, &id).await;
         let mut parts = parts_with_cookie(&token);

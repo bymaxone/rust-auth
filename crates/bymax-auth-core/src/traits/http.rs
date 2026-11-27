@@ -106,7 +106,7 @@ mod tests {
         };
         let res = client.send(req).await;
         assert!(matches!(&res, Ok(r) if r.status == 200));
-        let Ok(res) = res else { return };
+        let Ok(res) = res else { unreachable!() };
         assert_eq!(res.body, b"payload");
         assert_eq!(res.headers[0].0, "content-type");
 

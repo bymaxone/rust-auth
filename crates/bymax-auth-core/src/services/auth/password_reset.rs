@@ -823,7 +823,7 @@ mod tests {
     async fn token_method_resets_and_revokes_all_sessions() {
         // The token method stores a reset token, the reset consumes it, the password changes,
         // and every session is revoked.
-        let Some(h) = token_harness() else { return };
+        let Some(h) = token_harness() else { unreachable!() };
         let id = h
             .seed(SeedUser::active("reset@example.com", "old-pw"))
             .await;
@@ -869,7 +869,7 @@ mod tests {
                 .is_ok()
         );
         // The stored token is opaque to the test; reset via a freshly minted, known token.
-        let Ok(Some(user)) = h.users.find_by_id(&id, None).await else { return };
+        let Ok(Some(user)) = h.users.find_by_id(&id, None).await else { unreachable!() };
         let known = "f".repeat(64);
         assert!(
             h.stores
@@ -923,7 +923,7 @@ mod tests {
         // A reset revokes the refresh sessions AND advances the user's token epoch, so every
         // already-issued (stateless) access token is rejected on its next verification rather
         // than lingering for its remaining lifetime.
-        let Some(h) = token_harness() else { return };
+        let Some(h) = token_harness() else { unreachable!() };
         let id = h.seed(SeedUser::active("epoch@example.com", "pw")).await;
         // Before the reset the user carries the inert epoch 0.
         assert!(matches!(
@@ -980,7 +980,7 @@ mod tests {
         // after the consumption told the caller their password was unacceptable and, in the
         // same breath, that the only credential they had to fix it was gone — the whole mail
         // round trip repeated for a mistake the request itself carried.
-        let Some(h) = token_harness() else { return };
+        let Some(h) = token_harness() else { unreachable!() };
         let id = h.seed(SeedUser::active("spend@example.com", "pw")).await;
         let known = "c".repeat(64);
         assert!(
@@ -1029,7 +1029,7 @@ mod tests {
     #[tokio::test]
     async fn token_binding_rejects_a_mismatched_email() {
         // A token whose stored context was bound to a different email is rejected on reset.
-        let Some(h) = token_harness() else { return };
+        let Some(h) = token_harness() else { unreachable!() };
         let id = h.seed(SeedUser::active("bind@example.com", "pw")).await;
         let known = "b".repeat(64);
         assert!(
@@ -1066,7 +1066,7 @@ mod tests {
     async fn otp_method_resets_directly_and_via_verified_token() {
         // The OTP method resets with a direct OTP, and the verify→verified-token→reset bridge
         // also completes a reset.
-        let Some(h) = otp_harness() else { return };
+        let Some(h) = otp_harness() else { unreachable!() };
         let id = h.seed(SeedUser::active("otp@example.com", "old")).await;
         let identifier = h.engine.hashed_identifier("t1", "otp@example.com");
 
@@ -1083,7 +1083,7 @@ mod tests {
         // neither reset path and still reports success.
         let mailed = crate::services::auth::test_support::await_password_reset_code(&h).await;
         assert!(mailed.is_some(), "the reset mail never carried a code");
-        let Some(code) = mailed else { return };
+        let Some(code) = mailed else { unreachable!() };
         let reset = ResetPasswordInput {
             email: "otp@example.com".to_owned(),
             tenant_id: Some("t1".to_owned()),
@@ -1112,7 +1112,7 @@ mod tests {
         // Awaited and asserted: the send is detached, and a lost race must fail rather than skip.
         let mailed = crate::services::auth::test_support::await_password_reset_code(&h).await;
         assert!(mailed.is_some(), "the reset mail never carried a code");
-        let Some(code2) = mailed else { return };
+        let Some(code2) = mailed else { unreachable!() };
         let verified = h
             .engine
             .verify_reset_otp(
@@ -1125,7 +1125,7 @@ mod tests {
             )
             .await;
         assert!(verified.is_ok());
-        let Ok(verified_token) = verified else { return };
+        let Ok(verified_token) = verified else { unreachable!() };
         let reset2 = ResetPasswordInput {
             email: "otp@example.com".to_owned(),
             tenant_id: Some("t1".to_owned()),
@@ -1159,7 +1159,7 @@ mod tests {
         // rewrites the record with `attempts: 0` — so an attacker who knows an address could
         // loop "initiate, guess five times" at a six-digit code forever, and mail the victim
         // once per lap while doing it.
-        let Some(h) = otp_harness() else { return };
+        let Some(h) = otp_harness() else { unreachable!() };
         let _ = h
             .seed(SeedUser::active("throttled@example.com", "old"))
             .await;
@@ -1214,7 +1214,7 @@ mod tests {
         // Without that, the OTP identifier written by `initiate_reset` and the one read by
         // `reset_password` disagree whenever the user types their address differently — and
         // every test above happens to use one spelling throughout, so nothing noticed.
-        let Some(h) = otp_harness() else { return };
+        let Some(h) = otp_harness() else { unreachable!() };
         let id = h.seed(SeedUser::active("case@example.com", "old")).await;
         let before = stored_hash(&h, &id).await;
         // Started with the address shouted.
@@ -1279,7 +1279,7 @@ mod tests {
             )
             .await;
         assert!(verified.is_ok(), "the OTP must verify under any spelling");
-        let Ok(verified_token) = verified else { return };
+        let Ok(verified_token) = verified else { unreachable!() };
         let bridged = ResetPasswordInput {
             email: "CASE@example.com".to_owned(),
             tenant_id: Some("t1".to_owned()),
@@ -1295,7 +1295,7 @@ mod tests {
     #[tokio::test]
     async fn reset_password_rejects_zero_or_multiple_proofs_and_method_mismatch() {
         // No proof, two proofs, and a token presented to the OTP method are all rejected.
-        let Some(h) = otp_harness() else { return };
+        let Some(h) = otp_harness() else { unreachable!() };
         let none = ResetPasswordInput {
             email: "x@example.com".to_owned(),
             tenant_id: Some("t1".to_owned()),
@@ -1335,7 +1335,7 @@ mod tests {
         ));
 
         // The token method rejects an OTP proof (no token present).
-        let Some(ht) = token_harness() else { return };
+        let Some(ht) = token_harness() else { unreachable!() };
         let otp_to_token = ResetPasswordInput {
             email: "x@example.com".to_owned(),
             tenant_id: Some("t1".to_owned()),
@@ -1356,7 +1356,7 @@ mod tests {
         // line is the only place an operator can learn that no code is being stored. It carries
         // the cause and nothing that identifies the account, so it reads the same whichever
         // account it belonged to.
-        let Some(h) = otp_harness() else { return };
+        let Some(h) = otp_harness() else { unreachable!() };
         let _ = h.seed(SeedUser::active("logged@example.com", "pw")).await;
         h.stores.fail_next_otp_puts(1);
 
@@ -1390,7 +1390,7 @@ mod tests {
     async fn initiate_and_resend_are_anti_enumerating() {
         // Initiate and resend both return Ok and honor the ≥300ms floor for an existing, a
         // blocked, and an absent account; a second resend within the window is a silent Ok.
-        let Some(h) = otp_harness() else { return };
+        let Some(h) = otp_harness() else { unreachable!() };
         let _ = h.seed(SeedUser::active("present@example.com", "pw")).await;
         let _ = h
             .seed(SeedUser {
@@ -1490,7 +1490,7 @@ mod tests {
     async fn verify_reset_otp_rejects_a_vanished_account_and_a_wrong_code() {
         // A wrong OTP surfaces the OTP error; a valid OTP for an email with no backing user
         // does not mint a verified token.
-        let Some(h) = otp_harness() else { return };
+        let Some(h) = otp_harness() else { unreachable!() };
         let _ = h.seed(SeedUser::active("vrf@example.com", "pw")).await;
         assert!(
             h.engine
@@ -1836,9 +1836,9 @@ mod tests {
             .redis_stores(stores)
             .email_provider(mailer.clone())
             .build();
-        let Ok(engine) = built else { return };
+        let Ok(engine) = built else { unreachable!() };
         let hashed = engine.passwords().hash("oldsecret77").await;
-        let Ok(password_hash) = hashed else { return };
+        let Ok(password_hash) = hashed else { unreachable!() };
         let created = users
             .create(bymax_auth_types::CreateUserData {
                 email: "notified@example.com".to_owned(),
@@ -1850,7 +1850,7 @@ mod tests {
                 email_verified: Some(true),
             })
             .await;
-        let Ok(user) = created else { return };
+        let Ok(user) = created else { unreachable!() };
 
         assert!(
             engine
@@ -1918,7 +1918,7 @@ mod tests {
         let hooks: std::sync::Arc<dyn crate::traits::AuthHooks> = spy.clone();
         let mut cfg = base_config();
         cfg.password_reset.method = ResetMethod::Otp;
-        let Some(h) = harness(cfg, Some(hooks)) else { return };
+        let Some(h) = harness(cfg, Some(hooks)) else { unreachable!() };
         let id = h.seed(SeedUser::active("hooked@example.com", "old")).await;
         assert!(
             h.engine
@@ -1964,7 +1964,7 @@ mod tests {
             .redis_stores(stores)
             .email_provider(mailer.clone())
             .build();
-        let Ok(engine) = built else { return };
+        let Ok(engine) = built else { unreachable!() };
         let created = users
             .create(bymax_auth_types::CreateUserData {
                 email: "mailed@example.com".to_owned(),
@@ -1976,7 +1976,7 @@ mod tests {
                 email_verified: Some(true),
             })
             .await;
-        let Ok(user) = created else { return };
+        let Ok(user) = created else { unreachable!() };
 
         assert!(
             engine
@@ -2062,7 +2062,7 @@ mod tests {
             .redis_stores(stores.clone())
             .email_provider(std::sync::Arc::new(FailingResetEmail))
             .build();
-        let Ok(engine) = built else { return };
+        let Ok(engine) = built else { unreachable!() };
         assert!(
             users
                 .create(bymax_auth_types::CreateUserData {
@@ -2185,7 +2185,7 @@ mod tests {
             .otp_store(stores.clone())
             .brute_force_store(stores.clone())
             .build();
-        let Ok(engine) = built else { return };
+        let Ok(engine) = built else { unreachable!() };
         assert!(
             users
                 .create(bymax_auth_types::CreateUserData {
@@ -2321,7 +2321,7 @@ mod tests {
             .user_repository(std::sync::Arc::new(FailingLookupRepo))
             .redis_stores(stores)
             .build();
-        let Ok(engine) = built else { return };
+        let Ok(engine) = built else { unreachable!() };
 
         let started = Instant::now();
         let initiate = engine
@@ -2454,14 +2454,14 @@ mod tests {
         // it matters: a victim who resets BECAUSE an attacker read a link from their mailbox had
         // not closed the link the attacker read, and the attacker could set the password again
         // for the rest of the TTL.
-        let Some(h) = token_harness() else { return };
+        let Some(h) = token_harness() else { unreachable!() };
         let id = h
             .seed(SeedUser::active("siblings@example.com", "oldsecret77"))
             .await;
-        let Some(store) = h.engine.password_reset_store() else { return };
+        let Some(store) = h.engine.password_reset_store() else { unreachable!() };
 
         // Two proofs, both bound to the password in force now.
-        let Ok(Some(user)) = h.users.find_by_id(&id, None).await else { return };
+        let Ok(Some(user)) = h.users.find_by_id(&id, None).await else { unreachable!() };
         let context = ResetContext {
             user_id: id.clone(),
             email: "siblings@example.com".to_owned(),
@@ -2511,7 +2511,7 @@ mod tests {
         // takes both the current and the new one. The current password is what makes it safe —
         // a session alone is not proof of identity, so a token lifted by XSS or from a shared
         // machine must not be enough to rotate the credential and lock the owner out.
-        let Some(h) = token_harness() else { return };
+        let Some(h) = token_harness() else { unreachable!() };
         let id = h
             .seed(SeedUser::active("changer@example.com", "oldsecret77"))
             .await;
@@ -2543,7 +2543,7 @@ mod tests {
         // caller in `t2` naming an id that lives in `t1` verified the current password against
         // `t1`'s account and rotated it, while the session revocation (keyed on the caller's
         // tenant) swept `t2`'s sessions: the wrong account changed and the right sessions went.
-        let Some(h) = token_harness() else { return };
+        let Some(h) = token_harness() else { unreachable!() };
         let id = h
             .seed(SeedUser::active("tenant-one@example.com", "oldsecret77"))
             .await;
@@ -2576,11 +2576,11 @@ mod tests {
         // bound to the password, and the user handed to the hook) are scoped by it. Unscoped,
         // a context naming `t2` still found the `t1` account, compared its password fingerprint
         // and handed its profile to the hook.
-        let Some(h) = token_harness() else { return };
+        let Some(h) = token_harness() else { unreachable!() };
         let id = h
             .seed(SeedUser::active("ctx-scope@example.com", "oldsecret77"))
             .await;
-        let Ok(Some(user)) = h.users.find_by_id(&id, None).await else { return };
+        let Ok(Some(user)) = h.users.find_by_id(&id, None).await else { unreachable!() };
         let foreign = ResetContext {
             user_id: id.clone(),
             email: user.email.clone(),
@@ -2606,7 +2606,7 @@ mod tests {
         // which locks the owner out of their own account. The per-IP limiter is not that
         // control: in this crate it is in-process and per-instance, so a distributed caller
         // sidesteps it entirely, and it is not keyed to the account under attack.
-        let Some(h) = token_harness() else { return };
+        let Some(h) = token_harness() else { unreachable!() };
         let id = h
             .seed(SeedUser::active("locked@example.com", "oldsecret77"))
             .await;
@@ -2643,12 +2643,14 @@ mod tests {
         // ASVS v5 §7.4.3: the other sessions end. The caller's own survives, so the device that
         // made the change is not signed out by making it — it silently re-mints its access
         // token on the next rotation instead.
-        let Some(h) = token_harness() else { return };
+        let Some(h) = token_harness() else { unreachable!() };
         let id = h
             .seed(SeedUser::active("keeper@example.com", "oldsecret77"))
             .await;
-        let Some(mine) = login_ok(&h, "keeper@example.com", "oldsecret77").await else { return };
-        let Some(other) = login_ok(&h, "keeper@example.com", "oldsecret77").await else { return };
+        let mine = login_ok(&h, "keeper@example.com", "oldsecret77").await;
+        let Some(mine) = mine else { unreachable!() };
+        let other = login_ok(&h, "keeper@example.com", "oldsecret77").await;
+        let Some(other) = other else { unreachable!() };
 
         assert!(
             h.engine
@@ -2684,7 +2686,7 @@ mod tests {
         // An account provisioned purely through OAuth has nothing to prove and nothing to
         // change — its credential belongs to the provider. Answering the same
         // `InvalidCredentials` as a wrong password keeps the two indistinguishable.
-        let Some(h) = token_harness() else { return };
+        let Some(h) = token_harness() else { unreachable!() };
         let created = h
             .users
             .create(CreateUserData {
@@ -2697,7 +2699,7 @@ mod tests {
                 email_verified: Some(true),
             })
             .await;
-        let Ok(user) = created else { return };
+        let Ok(user) = created else { unreachable!() };
 
         let refused = h
             .engine
@@ -2711,7 +2713,7 @@ mod tests {
         // The screen runs on the change path as it does on register and reset — otherwise the
         // one flow a user reaches *because* they were told their password was weak is the one
         // that lets them pick another weak one.
-        let Some(h) = token_harness() else { return };
+        let Some(h) = token_harness() else { unreachable!() };
         let id = h
             .seed(SeedUser::active("weak@example.com", "oldsecret77"))
             .await;
@@ -2728,7 +2730,7 @@ mod tests {
         // A reset whose bound context points at a user id that no longer resolves still
         // succeeds (password update + revoke run on the id), and the hook projection is
         // skipped — covering the `None` arm of the hook user lookup.
-        let Some(h) = token_harness() else { return };
+        let Some(h) = token_harness() else { unreachable!() };
         // Seed a real account so the email/tenant binding matches, then plant a token whose
         // stored user_id is a non-existent id.
         let _ = h.seed(SeedUser::active("vanish@example.com", "pw")).await;
