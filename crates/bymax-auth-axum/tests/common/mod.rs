@@ -94,6 +94,9 @@ pub struct EngineSpec {
     pub hooks: Option<Arc<dyn AuthHooks>>,
     /// Switches the workspace layer and its routes on, over the harness's workspace doubles.
     pub workspaces: bool,
+    /// Grants `manage_members` to the workspace admin too. The default leaves it to the owner, so
+    /// an admin is refused by the guard before any rule of the service runs.
+    pub admins_manage_members: bool,
 }
 
 impl Default for EngineSpec {
@@ -116,6 +119,7 @@ impl Default for EngineSpec {
             environment: Environment::Test,
             hooks: None,
             workspaces: false,
+            admins_manage_members: false,
         }
     }
 }
@@ -393,6 +397,10 @@ pub fn build(spec: EngineSpec) -> Option<Harness> {
     if spec.workspaces {
         WorkspaceDoubles::enable(&mut config);
     }
+    if spec.admins_manage_members {
+        config.workspaces.permissions.manage_members =
+            Some(vec!["owner".to_owned(), "admin".to_owned()]);
+    }
     if spec.platform {
         config.platform.enabled = true;
         config.roles.platform_hierarchy = Some(HashMap::from([
@@ -426,7 +434,15 @@ pub fn build(spec: EngineSpec) -> Option<Harness> {
         builder = workspaces.wire(builder);
     }
 
-    let engine = Arc::new(builder.build().ok()?);
+    // Every caller returns early on `None`, so a harness that fails to build has to panic here or
+    // each of those tests passes having checked nothing.
+    let built = builder.build();
+    assert!(
+        built.is_ok(),
+        "the harness engine: {:?}",
+        built.as_ref().err()
+    );
+    let engine = Arc::new(built.ok()?);
     Some(Harness {
         engine,
         users,

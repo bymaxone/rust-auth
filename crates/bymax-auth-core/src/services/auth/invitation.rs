@@ -1001,23 +1001,6 @@ mod tests {
         ));
     }
 
-    #[tokio::test]
-    async fn invite_clamps_an_oversized_ttl_when_computing_the_expiry() {
-        // A token TTL larger than `i64::MAX` seconds saturates rather than overflowing, so the
-        // expiry computation stays total — exercising the `try_from(ttl)` fallback.
-        let mut cfg = invite_config();
-        cfg.invitations.token_ttl = std::time::Duration::from_secs(u64::MAX);
-        let Some(s) = setup(cfg) else { return };
-        let admin = seed_admin(&s.users, "bigttl@example.com", "ADMIN").await;
-        // The invite still succeeds; the oversized TTL is clamped internally.
-        assert!(
-            s.engine
-                .invite(&admin, "invitee@example.com", "MEMBER", "t1", None)
-                .await
-                .is_ok()
-        );
-    }
-
     #[test]
     fn has_role_honors_the_denormalized_hierarchy() {
         // The holder satisfies its own role and every role its denormalized entry includes,

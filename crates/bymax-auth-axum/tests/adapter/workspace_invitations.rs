@@ -28,8 +28,18 @@ struct Team {
 }
 
 async fn team() -> Option<Team> {
+    team_of(false).await
+}
+
+/// As [`team`], with the admin allowed past the guard of the managing routes.
+async fn team_with_a_managing_admin() -> Option<Team> {
+    team_of(true).await
+}
+
+async fn team_of(admins_manage_members: bool) -> Option<Team> {
     let h = build(EngineSpec {
         workspaces: true,
+        admins_manage_members,
         ..EngineSpec::default()
     })?;
     let mut config =
@@ -51,6 +61,7 @@ async fn team() -> Option<Team> {
             .seed_member("w1", &id, role, MembershipStatus::Active);
         signed_in.push((id, login_access_cookie(&app, email, PASSWORD).await));
     }
+    assert_eq!(signed_in.len(), 3);
     let [(owner_id, owner), (_, admin), (_, member)] = <[_; 3]>::try_from(signed_in).ok()?;
     Some(Team {
         h,
@@ -246,7 +257,12 @@ async fn a_preview_says_what_the_token_is_for_and_nothing_once_revoked() {
 
 #[tokio::test]
 async fn the_role_ceiling_and_an_existing_membership_are_refused() {
-    let Some(team) = team().await else { return };
+    let Some(team) = team_with_a_managing_admin().await else {
+        return;
+    };
+    let below = json!({ "email": "y@e.com", "role": "member" });
+    let allowed = team.post(&team.admin, INVITATIONS, below).await;
+    assert!(answered_nothing(&allowed), "{}", allowed.json());
     let above = team
         .post(
             &team.admin,
@@ -296,6 +312,80 @@ async fn managing_invitations_needs_a_credential_and_the_permission() {
         assert_eq!(member.status, StatusCode::FORBIDDEN, "{method} {path}");
     }
     assert!(team.h.workspaces.mails.sent().is_empty());
+}
+
+/// The pending list of `w1` without `expiresAt`, which each read derives from the time left.
+async fn standing(team: &Team) -> Value {
+    let mut items = team.pending("").await.json()["items"].clone();
+    for item in items.as_array_mut().into_iter().flatten() {
+        if let Some(item) = item.as_object_mut() {
+            item.remove("expiresAt");
+        }
+    }
+    items
+}
+
+#[tokio::test]
+async fn an_admin_resend_or_revoke_of_an_owner_invitation_changes_nothing() {
+    let Some(team) = team_with_a_managing_admin().await else {
+        return;
+    };
+    assert!(answered_nothing(&team.invite("o@e.com", "owner").await));
+    let before = standing(&team).await;
+    for path in [RESEND, REVOKE] {
+        let answer = team
+            .post(&team.admin, path, json!({ "email": "o@e.com" }))
+            .await;
+        assert!(answered_nothing(&answer), "{path} {}", answer.json());
+    }
+    assert_eq!(standing(&team).await, before);
+    assert_eq!(before[0]["email"], "o@e.com");
+    assert_eq!(team.h.workspaces.mails.sent().len(), 1);
+    assert_eq!(
+        team.preview(&team.last_token()).await.status,
+        StatusCode::OK
+    );
+}
+
+/// A signed-in member of the workspace `w2`, holding the owner role there and none in `w1`.
+async fn manager_of_w2(team: &Team) -> String {
+    team.h
+        .workspaces
+        .seed_workspace("w2", WorkspaceStatus::Active);
+    let id = seed_user(&team.h, "w2@e.com", PASSWORD, "USER").await;
+    team.h
+        .workspaces
+        .seed_member("w2", &id, "owner", MembershipStatus::Active);
+    login_access_cookie(&team.app, "w2@e.com", PASSWORD).await
+}
+
+#[tokio::test]
+async fn a_manager_of_another_workspace_neither_sees_nor_changes_an_invitation() {
+    let Some(team) = team().await else { return };
+    assert!(answered_nothing(&team.invite("a@e.com", "member").await));
+    let before = standing(&team).await;
+    let outsider = manager_of_w2(&team).await;
+    let w2 = "/auth/workspaces/w2/invitations";
+    let listed = Req::new(Method::GET, w2)
+        .cookie("access_token", &outsider)
+        .send(&team.app)
+        .await;
+    assert_eq!(listed.status, StatusCode::OK, "{}", listed.json());
+    assert_eq!(listed.json()["items"], json!([]));
+    for action in ["resend", "revoke"] {
+        let path = format!("{w2}/{action}");
+        let answer = team
+            .post(&outsider, &path, json!({ "email": "a@e.com" }))
+            .await;
+        assert!(answered_nothing(&answer), "{action} {}", answer.json());
+    }
+    assert_eq!(standing(&team).await, before);
+    assert_eq!(before[0]["email"], "a@e.com");
+    assert_eq!(team.h.workspaces.mails.sent().len(), 1);
+    assert_eq!(
+        team.preview(&team.last_token()).await.status,
+        StatusCode::OK
+    );
 }
 
 /// Publishes a bootstrap invitation under `token`, for a workspace that does not exist yet.

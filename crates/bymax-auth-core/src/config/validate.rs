@@ -431,6 +431,9 @@ impl AuthConfig {
         // Rule 15-18: OAuth provider fields and redirect safety.
         self.validate_oauth(environment)?;
 
+        // Rule 18a: the ceilings, after every rule that names its own refusal.
+        self.validate_ceilings()?;
+
         // Rule 19: SameSite=None requires resolved secure cookies.
         if self.cookies.same_site == SameSite::None && !secure_cookies {
             return Err(ConfigError::SameSiteNoneRequiresSecure);
