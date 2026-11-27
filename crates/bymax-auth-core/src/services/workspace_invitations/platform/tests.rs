@@ -138,6 +138,14 @@ fn seat(inv: &Inv, workspace_id: &str, user: &str) -> Option<(String, Membership
     inv.f.repo.membership(member).map(|m| (m.role, m.status))
 }
 
+/// The names of every event reported, read once `expected` of them have landed and a delivery
+/// spawned beyond them has had time to: reading on the count alone would miss a stray one.
+async fn reported(inv: &Inv, expected: usize) -> Vec<&'static str> {
+    inv.f.hooks.events(expected).await;
+    let events = inv.f.hooks.events(0).await;
+    events.iter().map(|e| e.kind.type_name()).collect()
+}
+
 fn owner_of_the_new_workspace() -> AcceptedWorkspaceInvitation {
     AcceptedWorkspaceInvitation {
         workspace_id: NEW.to_owned(),
@@ -398,12 +406,10 @@ async fn a_withdrawal_over_a_gone_record_that_nothing_replaced_succeeds_and_repo
     let Ok(id) = issue(&inv, JOE, "Acme").await else {
         unreachable!("the invitation is issued");
     };
-    inv.f.hooks.events(1).await;
-
     let answered = withdraw(&inv, &id, JOE).await;
 
     assert!(answered.is_ok(), "{answered:?}");
-    assert_eq!(inv.f.hooks.events(1).await.len(), 1);
+    assert_eq!(reported(&inv, 1).await, ["member.invited"]);
 }
 
 #[tokio::test]
@@ -443,9 +449,7 @@ async fn accepting_creates_the_workspace_with_the_caller_as_its_owner() {
     let active_owner = ("owner".to_owned(), MembershipStatus::Active);
     assert_eq!(seat(&inv, NEW, &joe), Some(active_owner));
     assert!(!unspent(&inv).await);
-    let events = inv.f.hooks.events(1).await;
-    let kinds: Vec<&str> = events.iter().map(|e| e.kind.type_name()).collect();
-    assert_eq!(kinds, ["invitation.accepted"]);
+    assert_eq!(reported(&inv, 1).await, ["invitation.accepted"]);
 }
 
 /// Hooks that refuse every workspace with the reason they hold, and count the sign-ups they were
