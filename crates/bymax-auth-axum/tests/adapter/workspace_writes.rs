@@ -439,8 +439,13 @@ async fn a_scheduled_deletion_is_restored_only_by_the_owner_on_the_restore_route
         .send(Method::POST, "/auth/workspaces/w1/restore", None)
         .await;
     assert_eq!(code(&not_pending), "auth.workspace_not_found");
+    // The refused read is reported too; the report is detached, so its place is not fixed.
+    let mut seen = o.hooks.types(3).await;
+    let reported = seen.len();
+    seen.retain(|event| *event != "access.denied");
+    assert_eq!(seen.len() + 1, reported, "{seen:?}");
     let expected = ["workspace.deletion_scheduled", "workspace.restored"];
-    assert_eq!(o.hooks.types(2).await, expected);
+    assert_eq!(seen, expected);
 }
 
 #[tokio::test]

@@ -167,7 +167,7 @@ async fn settle() {
     }
 }
 
-/// The digest the engine keys `user` of tenant `t1` by.
+/// The one digest the store has counted.
 fn only_digest(world: &World) -> String {
     let digests = world.cache.denial_digests();
     assert_eq!(digests.len(), 1, "{digests:?}");
@@ -361,7 +361,7 @@ async fn the_counters_are_keyed_by_the_callers_tenant_scoped_subject() {
     assert_eq!(Some(only_digest(&world)), digest);
 }
 
-/// The rule's text states the numbers and the two startup messages this crate hard-codes.
+/// The rule's text states the numbers and startup messages this crate hard-codes.
 #[test]
 fn the_defaults_bounds_and_messages_are_the_ones_the_rule_states() {
     let rule = contract()["workspaceRealtime"]["rules"]["accessDeniedEvents"].clone();

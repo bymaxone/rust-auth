@@ -1,7 +1,7 @@
 //! The report of a refused workspace access to the host, bounded per account (layer: domain).
 //!
 //! `workspaceRealtime.rules.accessDeniedEvents` in the shared wire contract pins the event, its
-//! two counters and the order they are touched in. The report runs detached from the decision: it
+//! counters and the order they are touched in. The report runs detached from the decision: it
 //! never changes or delays the answer, and a counter store that fails emits nothing.
 
 use std::sync::{Arc, Mutex, PoisonError};

@@ -1,6 +1,6 @@
-//! The audit event a workspace or membership write persists with its change (layer: domain).
+//! The workspace events: what a write persists and what the host hook receives (layer: domain).
 //!
-//! The library fills an event in completely before the write and the repository stores it as
+//! The library fills a write's event in completely before the write and the repository stores it as
 //! given, in the same transaction as the change. Its tenant and workspace are the key of the call
 //! that carries it, and its instant is written as `Date.prototype.toISOString` writes one, the
 //! form `@bymax-one/nest-auth` stores, so a deployment running both reads one audit trail.
@@ -38,7 +38,7 @@ pub struct WorkspaceAuditEvent {
     pub tenant_id: String,
     /// The workspace the event is about.
     pub workspace_id: String,
-    /// The member who made the change, or `None` for a job.
+    /// The caller who made the change or was refused, or `None` for a job.
     pub actor_user_id: Option<String>,
     /// When the change was decided, as an ISO-8601 UTC string.
     pub at: String,

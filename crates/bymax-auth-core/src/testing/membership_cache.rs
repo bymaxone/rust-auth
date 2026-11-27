@@ -33,7 +33,7 @@ struct State {
     counters: HashMap<(VersionCounter, String), Slot<u64>>,
     entries: HashMap<String, Slot<String>>,
     operations: Vec<&'static str>,
-    /// The two `access.denied` counters, keyed by whether it is the suppressed one and by digest.
+    /// The `access.denied` counters, keyed by whether it is the suppressed one and by digest.
     denials: HashMap<(bool, String), Slot<u64>>,
     /// The instant a frozen clock stands at; `None` follows the wall clock.
     frozen: Option<Instant>,
@@ -246,7 +246,7 @@ impl InMemoryMembershipCache {
 }
 
 /// The counters fail while the cache is unavailable, and are not among the recorded operations:
-/// a denial is reported detached, after the answer.
+/// a denial is reported detached.
 #[async_trait]
 impl AccessDeniedStore for InMemoryMembershipCache {
     async fn count_denial(&self, digest: &str, window_seconds: u64) -> Result<u64, AuthError> {

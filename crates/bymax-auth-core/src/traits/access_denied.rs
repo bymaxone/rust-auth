@@ -8,7 +8,7 @@
 use async_trait::async_trait;
 use bymax_auth_types::AuthError;
 
-/// The two counters of one account, named by the digest of its dashboard subject.
+/// The counters of one account, named by the digest of its dashboard subject.
 ///
 /// Each increment sets the expiry on the increment that creates the counter, in ONE atomic step: a
 /// counter left without an expiry would silence its account for good.

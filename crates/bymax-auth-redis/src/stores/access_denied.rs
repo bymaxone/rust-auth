@@ -1,4 +1,4 @@
-//! [`AccessDeniedStore`] over Redis: the two `access.denied` counters nest-auth shares (layer:
+//! [`AccessDeniedStore`] over Redis: the `access.denied` counters nest-auth shares (layer:
 //! store adapter).
 //!
 //! Both counters go through `brute_force_incr`, which sets the expiry in the same atomic step as

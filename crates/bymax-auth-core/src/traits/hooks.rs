@@ -326,8 +326,8 @@ pub trait AuthHooks: Send + Sync {
     // ---- Fire-and-forget notifications (errors logged, never propagated) ----
 
     /// Called after a workspace or membership change has committed, with the event the
-    /// repository persisted with it, and for `workspace.switched`, which rides on no repository
-    /// write and reaches this hook only.
+    /// repository persisted with it. `workspace.switched` and `access.denied` ride on no
+    /// repository write and reach this hook only.
     ///
     /// Informational and best-effort: it runs detached, never delays or fails the operation, and
     /// can be lost if the process stops between the commit and the call, which is why the
