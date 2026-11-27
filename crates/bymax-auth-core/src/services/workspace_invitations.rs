@@ -25,7 +25,7 @@ use crate::services::internal_error;
 use crate::services::workspace::{PageQuery, WorkspaceRuntime, internal, invalid};
 use crate::services::workspace_writes::{audit_event, member_hook_context};
 use crate::traits::workspace_invitation_store::{
-    InvitationPlace, PendingInvitation, Publication, PublishOutcome, Removal,
+    InvitationPlace, PendingInvitation, Publication, PublishOutcome,
 };
 use crate::traits::{
     EmailError, WorkspaceInvitationStore, WorkspaceInviteData, WorkspaceInviteKind,
@@ -44,6 +44,10 @@ use crate::workspace::roles::RoleHierarchy;
 
 mod accept;
 pub use accept::{AcceptedWorkspaceInvitation, WorkspaceSignup, WorkspaceSignupInput};
+mod platform;
+pub use platform::PlatformWorkspaceInvitation;
+mod withdraw;
+use withdraw::withdraw;
 
 /// The token a holder previews: what it is for, without signing in.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -207,9 +211,6 @@ fn cooldown_seconds() -> i64 {
     i64::try_from(INVITATION_RESEND_COOLDOWN_SECONDS).unwrap_or(i64::MAX)
 }
 
-/// How many times a revoke reads the address again after a replacement landed under it.
-const REVOKE_ATTEMPTS: usize = 3;
-
 /// `auth.too_many_requests` with no retry hint: the limit and the lost write both answer it.
 fn too_many_requests() -> AuthError {
     AuthError::TooManyRequests {
@@ -335,39 +336,12 @@ impl AuthEngine {
         let store = runtime.invitation_store()?;
         let email = normalize_email(email);
         let place = runtime.place(member.workspace(), &email)?;
-        for _ in 0..REVOKE_ATTEMPTS {
-            let Some(indexed) = store.read_index(&place).await? else {
-                return Ok(());
-            };
-            let Some(record) = indexed.record else {
-                // A store reads the index and then the record, and a resend between the two
-                // retires the record it was about to read. An index that moved is read again.
-                let replaced = !indexed.unreadable
-                    && store
-                        .read_index(&place)
-                        .await?
-                        .is_some_and(|now| now.record_key != indexed.record_key);
-                if replaced {
-                    continue;
-                }
-                return Ok(());
-            };
-            let role = record.base().role.clone();
-            if !runtime.outranks(&member.role, &role) {
-                return Ok(());
-            }
-            if store
-                .remove(&place, &indexed.record_key, Removal::Owned)
-                .await?
-            {
-                let kind = AuditKind::InvitationRevoked { email, role };
-                self.report(member, kind, ctx, &iso_instant(OffsetDateTime::now_utc()));
-                return Ok(());
-            }
-            // The index no longer names the record that was read: a replacement landed between
-            // the read and the removal. Read again, so the ceiling is applied to what is there.
+        let below = |record: &InvitationRecord| runtime.outranks(&member.role, &record.base().role);
+        if let Some(role) = withdraw(store, &place, below).await? {
+            let kind = AuditKind::InvitationRevoked { email, role };
+            self.report(member, kind, ctx, &iso_instant(OffsetDateTime::now_utc()));
         }
-        Err(too_many_requests())
+        Ok(())
     }
 
     /// The workspace's pending member invitations, oldest first.

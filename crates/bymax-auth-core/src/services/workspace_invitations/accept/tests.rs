@@ -12,8 +12,7 @@ use super::{AcceptedWorkspaceInvitation, WorkspaceSignup, WorkspaceSignupInput, 
 use crate::config::AuthConfig;
 use crate::services::auth::test_support::ctx;
 use crate::services::workspace_invitations_support_tests::{
-    Inv, Seeded, key_of, place, seed, seed_bootstrap, setup, setup_customized, setup_over,
-    without_a_store,
+    Inv, Seeded, key_of, place, seed, setup, setup_customized, setup_over, without_a_store,
 };
 use crate::services::workspace_support_tests::{
     active, authorize, config, membership, seed_account,
@@ -317,18 +316,6 @@ async fn a_token_that_names_nothing_usable_is_invalid() {
         unknown_role,
         Err(AuthError::InvalidInvitationToken)
     ));
-    assert!(unspent(&inv, JOE).await);
-}
-
-#[tokio::test]
-async fn a_bootstrap_record_is_not_accepted_and_stays() {
-    let Some(inv) = setup(config()).await else {
-        unreachable!("the fixture builds");
-    };
-    let joe = seed_account(&inv.f, "t1", JOE, false).await;
-    seed_bootstrap(&inv, TOKEN, (JOE, "w9", "owner")).await;
-    let refused = accept(&inv, &joe).await;
-    assert!(matches!(refused, Err(AuthError::InvalidInvitationToken)));
     assert!(unspent(&inv, JOE).await);
 }
 
