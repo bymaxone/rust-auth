@@ -5,6 +5,7 @@
 
 use bymax_auth_types::{AuthError, AuthUser, CreateUserData, LoginResult, SafeAuthUser};
 
+use crate::config::RegistrationMode;
 use crate::context::RequestContext;
 use crate::engine::AuthEngine;
 use crate::normalize::normalize_email;
@@ -20,7 +21,9 @@ impl AuthEngine {
     ///
     /// # Errors
     ///
-    /// Returns [`AuthError::Forbidden`] if the `before_register` hook rejects,
+    /// Returns [`AuthError::RegistrationClosed`] under
+    /// [`RegistrationMode::InvitationOnly`], [`AuthError::Forbidden`] if the `before_register`
+    /// hook rejects,
     /// [`AuthError::EmailAlreadyExists`] on a duplicate email within the tenant, or a
     /// hashing/store [`AuthError`]. Email verification never blocks registration.
     pub async fn register(
@@ -28,6 +31,10 @@ impl AuthEngine {
         input: RegisterInput,
         ctx: &RequestContext,
     ) -> Result<LoginResult, AuthError> {
+        // Refused before anything is read or run, so a closed sign-up answers every request alike.
+        if self.config().config().registration == RegistrationMode::InvitationOnly {
+            return Err(AuthError::RegistrationClosed);
+        }
         // Canonicalize before the uniqueness check and the stored identity are derived, so a
         // single address cannot be registered once per casing and later resolve to whichever
         // row a lookup happens to hit.

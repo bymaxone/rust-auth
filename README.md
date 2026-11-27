@@ -571,6 +571,7 @@ Everything is configured through `AuthConfig`. Two ready-made profiles bundle se
 | **email_change**   | `token_ttl` (the routes mount only with `controllers.email_change`)          | 3600 s                     |
 | **platform**       | `enabled` (requires `roles.platform_hierarchy`)                              | `false`                    |
 | **invitations**    | `enabled`, `token_ttl`                                                       | `false`, 48 h              |
+| **registration**   | `Open` \| `InvitationOnly` (an account is created only on an invitation; needs `invitations.enabled`, or `workspaces.enabled` with `controllers.workspaces` and an invitation store) | `Open` |
 | **api_keys**       | `enabled`, `pepper`, `scopes`, `header`, `prefix`, `last_used_flush`, `audit_mode` | `false`, —, —, `x-api-key`, `bak`, 60 s, best-effort |
 | **roles**          | `hierarchy` (required), `platform_hierarchy`                                 | —                          |
 | **oauth**          | `google`, `redirect_allowlist`, `*_redirect_url`                            | —                          |
@@ -1069,6 +1070,7 @@ Route groups mount only when their feature **and** runtime toggle are enabled, s
 | POST   | `/auth/platform/refresh`      | Public (platform refresh cookie)| Rotate the platform refresh token                    |
 | DELETE | `/auth/platform/sessions`     | `PlatformUser`                  | Revoke all platform sessions                         |
 | GET    | `/auth/oauth/:provider`       | Public                          | Initiate the OAuth authorize redirect                |
+| GET    | `/auth/oauth/:provider?workspaceInvitation=<token>` | Public    | The same, for a sign-in that accepts a workspace invitation |
 | GET    | `/auth/oauth/:provider/callback` | Public                       | Handle the callback, exchange the code, issue tokens |
 | POST   | `/auth/ws-ticket`             | `AuthUser`, `UserStatus`, `MfaSatisfied` | Mint a single-use WebSocket upgrade ticket  |
 | GET    | `/auth/workspaces`            | `UserStatus`                    | List the caller's workspaces (cursor-paged)          |

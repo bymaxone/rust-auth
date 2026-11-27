@@ -9,8 +9,7 @@
 
 /// Properties of a schema that exists here, which the artefact gives and the DTO lacks, as
 /// `(schema, property)`.
-pub(crate) const PENDING_PROPERTIES: [(&str, &str); 1] =
-    [("OAuthInitiateQueryDto", "workspaceInvitation")];
+pub(crate) const PENDING_PROPERTIES: [(&str, &str); 0] = [];
 
 #[cfg(test)]
 mod tests {

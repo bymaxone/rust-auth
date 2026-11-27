@@ -73,8 +73,8 @@ Because every one of those lists is compared with this repository's own tables i
 | 13.6c | Invitation routes and DTOs | ✅ Done (#474) | 13.6b |
 | 13.7a | Acceptance services: accept and accept-signup of a member invitation | ✅ Done (#477) | 13.5b, 13.6b |
 | 13.7b | Acceptance routes, DTOs and limits | ✅ Done (#479) | 13.7a |
-| 13.7c | Bootstrap invitations: mint, withdraw, accept, and their hooks | 👀 In review | 13.7a |
-| 13.8 | OAuth invitation, invitation-only registration, the OAuth MFA branch | 📋 ToDo | 13.7a, 13.7c |
+| 13.7c | Bootstrap invitations: mint, withdraw, accept, and their hooks | ✅ Done (#480) | 13.7a |
+| 13.8 | OAuth invitation, invitation-only registration, the OAuth MFA branch | 👀 In review | 13.7a, 13.7c |
 | 13.9 | Realtime surfaces: verifier, sockets, job check, `access.denied` and its limiter | 📋 ToDo | 13.5a |
 | 13.10 | OpenAPI surface, client, npm types and documentation | 📋 ToDo | 13.5b, 13.7b, 13.7c, 13.8, 13.9 |
 
@@ -314,6 +314,25 @@ Both routes belong to the `workspaces` group, in `crates/bymax-auth-axum/src/rou
 **Work.** `GET oauth/{provider}?workspaceInvitation=<token>` (the token is exactly 64 characters, `Referrer-Policy: no-referrer` on the start response, `400 auth.invalid_invitation_token` when workspaces are not enabled); the optional `workspaceInvitation` field of the state record, the SHA-256 of the token and never the token; the callback checks, before the host's `onOAuthLogin` hook runs; the MFA branch; and the `registration` option.
 
 **Behaviour to probe:** an account with a second factor receives the MFA challenge exactly as any OAuth sign-in does, and the invitation is neither completed nor spent; `registration: 'invitation-only'` makes `POST register` answer `403 auth.registration_closed` before anything else is read, and the OAuth `create` action answers it unless the flow carries an invitation that passed the callback checks; sign-in, linking and every accept route are unaffected; startup refuses the mode when workspaces and invitations are both off, naming both. A state record carrying `workspaceInvitation` as anything but 64 lowercase hex characters is refused as corrupt.
+
+### Design of 13.8
+
+**Surface.** `AuthEngine::oauth_initiate_with_invitation`, the `workspaceInvitation` query property of `GET oauth/{provider}`, and `AuthConfig::registration` (`Open`, the default, or `InvitationOnly`).
+
+| | nest-auth | rust-auth |
+| --- | --- | --- |
+| Query property | `workspaceInvitation`, a string of exactly 64 characters | the same; anything else is `400 auth.validation` |
+| Token with workspaces disabled | `400 auth.invalid_invitation_token`, no state written | the same |
+| State record | the SHA-256 of the token | the same |
+| Start redirect for a token | `Referrer-Policy: no-referrer` | the same |
+| Before `onOAuthLogin` | tenant, address, verified address, workspace and inviter | the same, in that order |
+| After the MFA branch | the same checks on the account, then the membership and the spend | the same |
+| After-accepted hook | only when the flow created the account | the same |
+| `invitation-only`: register | `403 auth.registration_closed` | the same |
+| `invitation-only`: OAuth `create` | refused unless the flow carries an invitation | the same |
+| `invitation-only` at startup | refused when no invitation can be accepted | refused unless tenant invitations are enabled, or workspaces are enabled with their routes mounted and an invitation store wired |
+
+**Failure points.** A refusal of the invitation after the account was created leaves the account in place and the token unspent.
 
 ---
 

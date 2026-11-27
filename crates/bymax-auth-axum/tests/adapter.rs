@@ -115,6 +115,9 @@ mod status_gates;
 #[path = "adapter/tenant_binding.rs"]
 mod tenant_binding;
 
+#[path = "adapter/oauth_workspace_invitation.rs"]
+mod oauth_workspace_invitation;
+
 #[path = "adapter/workspace_invitations.rs"]
 mod workspace_invitations;
 

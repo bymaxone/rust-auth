@@ -547,6 +547,12 @@ pub struct OAuthInitiateQuery {
         inner(custom(no_control_characters))
     )]
     pub tenant_id: Option<String>,
+
+    /// The workspace invitation token this sign-in accepts, exactly 64 characters. Only its
+    /// SHA-256 is stored, and the redirect it answers sends `Referrer-Policy: no-referrer`
+    /// because this query string holds the token.
+    #[garde(inner(length(chars, min = 64, max = 64)))]
+    pub workspace_invitation: Option<String>,
 }
 
 /// `GET /auth/oauth/{provider}/callback` query (§11.3.2). Only `code` and `state` are

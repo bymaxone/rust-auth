@@ -102,6 +102,16 @@ pub(crate) fn routes(config: &AxumAuthConfig, ip_source: &Throttle) -> Router<Au
         )
 }
 
+/// `response` telling the browser to send no `Referer` onward: the URL that produced it carries
+/// an invitation token, and the redirect target belongs to somebody else.
+fn without_referrer(mut response: Response) -> Response {
+    response.headers_mut().insert(
+        header::REFERRER_POLICY,
+        header::HeaderValue::from_static("no-referrer"),
+    );
+    response
+}
+
 /// `GET /auth/oauth/{provider}` (302). Public. Redirects to the provider authorize URL.
 async fn initiate(
     State(state): State<AuthState>,
@@ -113,16 +123,21 @@ async fn initiate(
     // The context is what lets the engine consult the configured `TenantIdResolver`. Without
     // it this route took `?tenantId=` verbatim — the only flow that did — and it is the flow
     // that decides which tenant an account is provisioned into.
-    match state
+    let invitation = query.workspace_invitation.as_deref();
+    let started = state
         .engine()
-        .oauth_initiate(&provider, query.tenant_id.as_deref(), &ctx)
-        .await
-    {
+        .oauth_initiate_with_invitation(&provider, query.tenant_id.as_deref(), invitation, &ctx)
+        .await;
+    match started {
         Ok(redirect) => {
             // Bind the flow to this browser: the callback refuses any request that does not
             // send this cookie back (RFC 6749 §10.12). See `set_oauth_state_cookie`.
             TokenDelivery::new(state.config()).set_oauth_state_cookie(&cookies, &redirect.state);
-            found(&redirect.authorize_url)
+            let response = found(&redirect.authorize_url);
+            match invitation {
+                Some(_) => without_referrer(response),
+                None => response,
+            }
         }
         Err(error) => error_response(&error),
     }
