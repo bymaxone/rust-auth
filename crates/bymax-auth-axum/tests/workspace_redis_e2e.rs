@@ -9,6 +9,8 @@
 
 #[path = "../../bymax-auth-redis/tests/common/docker_gate.rs"]
 mod docker_gate;
+#[path = "../../bymax-auth-redis/tests/common/published_address.rs"]
+mod published_address;
 #[path = "../../bymax-auth-redis/tests/common/redis_ready.rs"]
 mod redis_ready;
 
@@ -51,9 +53,8 @@ async fn try_start() -> Option<(ContainerAsync<Redis>, String)> {
         Ok(container) => container,
         Err(error) => return docker_gate::docker_unavailable("redis:8", error),
     };
-    let Ok(host) = container.get_host().await else { unreachable!() };
-    let Ok(port) = container.get_host_port_ipv4(REDIS_PORT).await else { unreachable!() };
-    let url = redis_ready::redis_url(&host.to_string(), port);
+    let (host, port) = published_address::host_and_port(&container, REDIS_PORT).await;
+    let url = redis_ready::redis_url(&host, port);
     redis_ready::wait_until_ready(&url).await;
     Some((container, url))
 }

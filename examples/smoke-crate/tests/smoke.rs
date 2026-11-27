@@ -12,6 +12,8 @@
 
 #[path = "../../../crates/bymax-auth-redis/tests/common/docker_gate.rs"]
 mod docker_gate;
+#[path = "../../../crates/bymax-auth-redis/tests/common/published_address.rs"]
+mod published_address;
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -47,8 +49,7 @@ async fn try_start() -> Option<TestRedis> {
         Ok(container) => container,
         Err(error) => return docker_gate::docker_unavailable("redis:8", error),
     };
-    let Ok(host) = container.get_host().await else { unreachable!() };
-    let Ok(port) = container.get_host_port_ipv4(REDIS_PORT).await else { unreachable!() };
+    let (host, port) = published_address::host_and_port(&container, REDIS_PORT).await;
     let url = format!("redis://{host}:{port}");
     Some(TestRedis { container, url })
 }
