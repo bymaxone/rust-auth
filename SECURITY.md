@@ -38,3 +38,12 @@ assessment, and a minimal reproduction where possible.
 Because the compiled WASM edge verifier ships inside the npm package, a fix that
 touches only that path still triggers a patched npm release so consumers receive
 the rebuilt binary.
+
+## Threat model: same-process code
+
+Code that runs in the same process as the library (your application, every crate it links, and
+anything loaded into it) is trusted, as it is in Rust and the operating system's own process
+model. The library's checks are not a security boundary against such code: code that can run in
+the process can also read the keys, call the repositories and stores, and replace the trait
+implementations the engine is built with. An attack that needs code already running in the
+process is out of scope for a security report.

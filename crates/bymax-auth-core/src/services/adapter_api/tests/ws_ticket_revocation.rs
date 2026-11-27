@@ -35,7 +35,7 @@ async fn a_live_session_redeems_its_ticket() {
     let ticket = minted(&h, &claims).await;
     assert!(!ticket.is_empty());
 
-    let redeemed = h.engine.redeem_ws_ticket(&ticket).await;
+    let redeemed = h.engine.redeem_ws_ticket(&ticket, None).await;
     assert!(matches!(&redeemed, Ok(c) if c.sub == claims.sub));
 }
 
@@ -53,7 +53,7 @@ async fn a_ticket_minted_before_logout_is_refused() {
             .is_ok()
     );
 
-    let redeemed = h.engine.redeem_ws_ticket(&ticket).await;
+    let redeemed = h.engine.redeem_ws_ticket(&ticket, None).await;
     assert!(matches!(redeemed, Err(AuthError::TokenInvalid)));
 }
 
@@ -71,7 +71,7 @@ async fn a_ticket_minted_before_an_epoch_bump_is_refused() {
             .is_ok()
     );
 
-    let redeemed = h.engine.redeem_ws_ticket(&ticket).await;
+    let redeemed = h.engine.redeem_ws_ticket(&ticket, None).await;
     assert!(matches!(redeemed, Err(AuthError::TokenInvalid)));
 }
 
@@ -93,7 +93,7 @@ async fn a_ticket_minted_after_an_epoch_bump_from_a_current_token_is_accepted() 
     };
     let ticket = minted(&h, &current).await;
 
-    assert!(h.engine.redeem_ws_ticket(&ticket).await.is_ok());
+    assert!(h.engine.redeem_ws_ticket(&ticket, None).await.is_ok());
 }
 
 /// Store `snapshot` directly, as a writer of any age could, and return the raw ticket.
@@ -117,6 +117,7 @@ fn snapshot(tenant_id: Option<&str>, jti: &str, epoch: u64) -> WsTicketSnapshot 
         mfa_verified: false,
         jti: jti.to_owned(),
         epoch,
+        exp: None,
     }
 }
 
@@ -125,7 +126,7 @@ async fn a_ticket_without_an_identifier_to_check_is_refused() {
     let Some(h) = harness(base_config(), None) else { return };
     let ticket = stored(&h, &snapshot(Some("t1"), "", 0)).await;
 
-    let redeemed = h.engine.redeem_ws_ticket(&ticket).await;
+    let redeemed = h.engine.redeem_ws_ticket(&ticket, None).await;
     assert!(matches!(redeemed, Err(AuthError::TokenInvalid)));
 }
 
@@ -138,7 +139,7 @@ async fn a_ticket_that_names_no_usable_tenant_is_refused() {
     let Some(h) = harness(base_config(), None) else { return };
     for tenant in [None, Some("")] {
         let ticket = stored(&h, &snapshot(tenant, "jti-live", 0)).await;
-        let redeemed = h.engine.redeem_ws_ticket(&ticket).await;
+        let redeemed = h.engine.redeem_ws_ticket(&ticket, None).await;
         assert!(
             matches!(redeemed, Err(AuthError::TokenInvalid)),
             "tenant {tenant:?} was redeemed"
@@ -160,8 +161,8 @@ async fn a_revoked_ticket_gets_the_answer_of_an_unknown_one() {
             .is_ok()
     );
 
-    let revoked = h.engine.redeem_ws_ticket(&ticket).await;
-    let unknown = h.engine.redeem_ws_ticket(&"0".repeat(64)).await;
+    let revoked = h.engine.redeem_ws_ticket(&ticket, None).await;
+    let unknown = h.engine.redeem_ws_ticket(&"0".repeat(64), None).await;
     assert!(matches!(
         (revoked, unknown),
         (Err(AuthError::TokenInvalid), Err(AuthError::TokenInvalid))

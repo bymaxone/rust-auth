@@ -2101,8 +2101,8 @@ impl TokenManagerService {
     pub async fn consume_mfa_temp_token(&self, jti: &str) -> Result<(), AuthError>;
     // WebSocket upgrade tickets (feature `websocket`; §7.3.6) — opaque, single-use,
     // so an access/refresh JWT is never placed in a URL.
-    pub async fn issue_ws_ticket(&self, snapshot: WsTicketSnapshot) -> Result<String, AuthError>;
-    pub async fn redeem_ws_ticket(&self, raw_ticket: &str) -> Result<DashboardClaims, AuthError>;
+    pub async fn issue_ws_ticket(&self, claims: &DashboardClaims) -> Result<IssuedWsTicket, AuthError>;
+    pub async fn redeem_ws_ticket(&self, ticket: &str, expected_tenant_id: Option<&str>) -> Result<DashboardClaims, AuthError>;
 }
 ```
 
@@ -2184,22 +2184,24 @@ with a credential that is opaque, single-use, short-lived, and worthless against
 the REST API. They are compiled only under the `websocket` Cargo feature and back
 the `WsAuthUser` upgrade extractor (§8.7).
 
-`issue_ws_ticket(snapshot)` — called from an already-authorized request (`POST
+`issue_ws_ticket(claims)` — called from an already-authorized request (`POST
 /auth/ws-ticket` gates on `AuthUser` + `UserStatus` + `MfaSatisfied`, so a live,
 non-blocked, MFA-satisfied session is proven *before* a ticket exists):
 0. The engine refuses (`MfaRequired`, before any read) a session enrolled in MFA that has not cleared its challenge, so a host that reaches `issue_ws_ticket` without the `MfaSatisfied` extractor gets the same answer. nest-auth's `issue` asks the same question first.
 1. `raw = generate_secure_token(32)` — opaque CSPRNG, **not** a JWT; `hash = sha256(raw)`.
-2. `set_session("wst:{hash}", json(snapshot), ttl)` where `ttl` is the lesser of `WS_TICKET_TTL_SECONDS` (~30 s) and the minting token's remaining life less one second (the clocks count whole seconds) — a logout blacklists the `jti` only until the token expires, so a ticket must not outlive it; a token with no life left mints nothing (`TokenInvalid`). The `WsTicketSnapshot` carries only the verified identity already on the access token (`sub, tenant_id, role, status, mfa_enabled, mfa_verified`) plus the minting token's `jti` and `epoch` — identifiers, not credentials; no secret, no signature.
+2. `set_session("wst:{hash}", json(snapshot), ttl)` where `ttl` is the lesser of `WS_TICKET_TTL_SECONDS` (~30 s) and the minting token's remaining life less one second (the clocks count whole seconds) — a logout blacklists the `jti` only until the token expires, so a ticket must not outlive it; a token with no life left mints nothing (`TokenInvalid`), before any account read and again after it. The `WsTicketSnapshot` carries the identity as read from the account, the session's MFA flags and the minting token's `jti`, `epoch` and `exp` — identifiers, not credentials; no secret, no signature.
 3. Return `raw` together with the `ttl` it was stored under, in whole seconds (delivered as the body's `{ ticket, expiresIn }`, the shape `responseBodies.wsTicket` pins in the shared wire contract).
 
-`redeem_ws_ticket(raw)` — called once, inside the upgrade extractor:
-1. `getdel("wst:{sha256(raw)}")` — atomic single-use; `None` (absent / expired / already redeemed) → `TokenInvalid`, handshake refused. A record that is not a whole ticket (a missing `jti` or `epoch`, a `jti` that is not a string, an `epoch` that is not a non-negative integer) reads as `None`: the record was consumed by the `getdel`, and a ticket written by an older writer fails closed.
-2. Revocation: refuse (same `TokenInvalid`, no oracle, a warning without identifiers) when the `jti` is empty, when `rv:{jti}` is present (a logout), or when the account's stored epoch (`ep:`) is above the ticket's. A snapshot that names no tenant, or an empty one, is refused before the revocation reads: this engine mints only dashboard tickets, so such a record was not written by it, and although the shared record shape allows an untenanted record (nest-auth's interface calls it a platform ticket), neither library mints one. A logout blacklists only the access token it was given and does not move the epoch, so a ticket minted from an access token that a refresh had already replaced is not refused after that logout, as a bearer token of that kind is not; it is refused only after a later epoch bump (a password reset or change, an MFA enable, disable or reset, revoking another session or all of them).
-3. Rebuild a `DashboardClaims` value from the snapshot (an authorization snapshot for the socket's lifetime — it is **not** re-signed and confers no REST access) and return it.
+`redeem_ws_ticket(raw, expected_tenant_id)` — a refusal consumes the ticket like a success does:
+1. `getdel("wst:{sha256(raw)}")` — atomic single-use; `None` (absent / expired / already redeemed) → `TokenInvalid`, handshake refused. A record that is not a whole ticket (a missing `jti` or `epoch`, a `jti` that is not a string, an `epoch` that is not a non-negative integer) reads as `None`: the record was consumed by the `getdel`, and a ticket written by an older writer fails closed. An `exp` that is present and is not a whole number from 0 to 2^53 - 1 reads as `None` too, `null` included; a record without `exp` is accepted.
+2. What the record alone decides, each refused as `TokenInvalid` with its own warning: no tenant (below); an `exp` at or before the current second (the record's own lifetime already ends before the token's, so this holds against a keyspace writer, or a clock, that did not keep that); and, when the caller passes `expected_tenant_id`, a tenant other than that one. A host that calls the engine itself must pass it: with `None` a ticket of any tenant is accepted. The `WsAuthUser` extractor passes `None` and applies the configured tenant binding (`enforce_tenant_binding`) to the redeemed claims.
+3. Revocation: refuse (same `TokenInvalid`, no oracle, a warning without identifiers) when the `jti` is empty, when `rv:{jti}` is present (a logout), or when the account's stored epoch (`ep:`) is above the ticket's. A snapshot that names no tenant, or an empty one, is refused before the revocation reads: this engine mints only dashboard tickets, so such a record was not written by it, and although the shared record shape allows an untenanted record (nest-auth's interface calls it a platform ticket), neither library mints one. A logout blacklists only the access token it was given and does not move the epoch, so a ticket minted from an access token that a refresh had already replaced is not refused after that logout, as a bearer token of that kind is not; its revocation check refuses it only after a later epoch bump.
+4. The account, read from the repository (not the status cache) under the snapshot's tenant: one that no longer exists is `TokenInvalid`, a blocked one gets the status-specific error.
+5. Rebuild a `DashboardClaims` value from the snapshot (an authorization snapshot for the socket's lifetime — it is **not** re-signed and confers no REST access) and return it. Its `exp` is the minting token's, so a host that closes a socket when its token expires has that instant; a record without one is given `WS_TICKET_TTL_SECONDS` from redemption.
 
 Security: the HS256 signature and `type = dashboard` assertion are enforced at
-**mint** time (they gate `AuthUser`), and the revocation of the minting token
-(`rv:{jti}` and the account epoch) is enforced again at **redemption**; the
+**mint** time (they gate `AuthUser`), and the revocation and expiry of the
+minting token and the account's status are enforced again at **redemption**; the
 ticket itself is redeemable exactly once and only at the upgrade endpoint, so a
 leaked WS URL exposes at most one already-consumed, seconds-long handshake. The
 `wst:` key holds the snapshot (not a token), so a Redis snapshot leaks no
@@ -2723,7 +2725,7 @@ The Axum adapter is built only on public `AuthEngine` methods, so a host that au
 | `list_user_sessions(tenant_id, user_id, raw_refresh)` | argument | `Vec<SessionInfo>`, the current session flagged when `raw_refresh` names it |
 | `revoke_user_session(tenant_id, user_id, session_hash)` | argument | `()`; a malformed or unowned hash is `session_not_found`; bumps the account's token epoch afterwards |
 | `revoke_other_user_sessions(tenant_id, user_id, raw_refresh)` | argument | `()`; without a refresh token naming the current session the call is refused with `session_not_found` rather than answered as a no-op |
-| `issue_ws_ticket(&claims)` / `redeem_ws_ticket(ticket)` | in the claims / the snapshot | `IssuedWsTicket` / `DashboardClaims`; issue refuses an MFA-enrolled session that has not cleared its challenge and a blocked account |
+| `issue_ws_ticket(&claims)` / `redeem_ws_ticket(ticket, expected_tenant_id)` | in the claims / the snapshot | `IssuedWsTicket` / `DashboardClaims`; issue refuses an MFA-enrolled session that has not cleared its challenge and a blocked account; redeem refuses an expired or revoked minting token, another tenant than the expected one, and an account that is gone or blocked |
 | `platform_logout(access_token, raw_refresh)` / `platform_revoke_all(admin_id)` (`platform`) | none | `platform_auth_required` when the platform domain is off |
 
 **Workspaces** (`services/workspace*.rs`, `account_removal.rs`; the layer is off unless `workspaces.enabled`, and every method then answers `auth.internal`). The route-facing methods take the `WorkspaceMember` the `RequireWorkspace` extractor produced (§8.3.8), which carries the tenant, the workspace and the caller:
@@ -3994,7 +3996,8 @@ upgrade ticket** that is *not* a JWT and is worthless against the REST API.
    `wst:{sha256(ticket)}` — atomic single-use, so the first redemption wins and
    the key is gone; a captured URL cannot be replayed. On a hit it reconstructs
    `DashboardClaims` from the stored snapshot; a missing / expired / already-
-   redeemed ticket refuses the handshake with 401.
+   redeemed ticket refuses the handshake with 401, as do the other refusals of
+   §7.3.6, with a blocked account answering its status error.
 
 ```rust
 /// WebSocket-upgrade auth: redeems a single-use upgrade ticket from the `ticket`
@@ -4030,8 +4033,9 @@ async fn ws_handler(
 > upgrade endpoint — never against the REST API — and (c) carries no signature an
 > attacker could forge or reuse. The HS256/type checks of the originating
 > session are enforced at **mint** time (they gate `AuthUser` on
-> `POST /auth/ws-ticket`), its revocation (logout, epoch bump) again at
-> **redemption**, and the ~30 s TTL bounds snapshot staleness.
+> `POST /auth/ws-ticket`), its expiry and revocation (logout, epoch bump) and the
+> account's status again at **redemption**, and the ~30 s TTL bounds the
+> staleness of the role.
 > Deployments are still advised to disable query-string logging at the proxy, but
 > a leak is now bounded to a single, already-consumed handshake.
 
@@ -5231,7 +5235,7 @@ preimage and the full list of keys derived from it are pinned by `conformance/wi
 | `winvidx` | `auth:winvidx:{hmac_sha256(hmacKey, "wie:" + len(tenantId) + ":" + tenantId + ":" + len(workspaceId) + ":" + workspaceId + ":" + email)}` | The record key `winv:{hash}` | as the record | Invitee index: the live invitation of one address to one workspace. |
 | `winvset` | `auth:winvset:{hmac_sha256(hmacKey, workspaceSubject)}` | Redis SET of record keys `winv:{hash}` | as the records | The live invitations of one workspace, which the pending cap counts. |
 | `winvrl` | `auth:winvrl:{hmac_sha256(hmacKey, "wir:" + len(tenantId) + ":" + tenantId + ":" + userId)}` | Numeric counter (string) | 3600 s, set on the first increment only | Invitations one member has issued, counted for one hour from the first. |
-| `wst` | `auth:wst:{sha256(ws_ticket)}` | JSON `WsTicketSnapshot` `{ sub, tenantId, role, status, mfaEnabled, mfaVerified, jti, epoch }` | `WS_TICKET_TTL_SECONDS` (30 s) | **rust-auth-only, feature `websocket`.** Single-use WebSocket upgrade ticket (§7.3.6 / §8.7). Minted from an already-authorized, MFA-satisfied session and redeemed once (`GETDEL`) at the WS handshake, so an access JWT never appears in a URL. The value is a verified-claims **snapshot**, never a token. This prefix is outside the nest-auth parity surface (nest-auth authenticates WebSockets via the `Authorization` header, not a ticket), so it is purely additive: a `nest-auth` server never reads or writes `wst:`, and cross-backend Redis sharing is unaffected. |
+| `wst` | `auth:wst:{sha256(ws_ticket)}` | JSON `WsTicketSnapshot` `{ sub, tenantId, role, status, mfaEnabled, mfaVerified, jti, epoch, exp? }` | `WS_TICKET_TTL_SECONDS` (30 s) | **Feature `websocket`.** Single-use WebSocket upgrade ticket (§7.3.6 / §8.7). Minted from an already-authorized, MFA-satisfied session and redeemed once (`GETDEL`) at the WS handshake, so an access JWT never appears in a URL. The value is a verified-claims **snapshot**, never a token. nest-auth mints and redeems the same key, and the shared contract names it and its record (`recordEncodings.wsTicket`); `exp` is the minting token's expiry, optional on read. |
 | `tu` | `auth:tu:{hmac_sha256(hmacKey, userSubject + ":" + code)}` | `"1"` | 90 s (≈ 3 × TOTP window) | TOTP anti-replay. The key is the **HMAC of `{userSubject}:{code}`**, never the raw 6-digit code (which is low-entropy and would be reversible as a bare key) — matching §7.5.6. A code that just verified is marked so it cannot be replayed inside its drift window. |
 | `prt` | `auth:prt:{sha256(refresh_token)}` | JSON `{ userId, role, device, ip, createdAt, mfaEnabled, mfaVerified, familyId }` (`familyId` omitted when empty; `mfaVerified` written only as `true` and omitted otherwise) | `refresh_expires_in_days` × 86400 s | Platform-admin refresh session. Platform analogue of `rt`. |
 | `lp` | `auth:lp:{sha256(refresh_token)}` | JSON `{ userId, tenantId? }` (`tenantId` omitted when the session record carried none) | max(access-token lifetime rounded up, 300 s) | Dashboard pending-logout owner marker (step 6 of §7.1.3). Written only by a logout attempt that failed a write after reading its owner from the live session; read by the retry that finds the session gone; claimed by an atomic delete so exactly one racing retry announces. |

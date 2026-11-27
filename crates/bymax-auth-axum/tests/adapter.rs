@@ -1672,11 +1672,11 @@ async fn ws_ticket_mint_and_single_use_redeem() {
     assert_eq!(no_auth.status, StatusCode::UNAUTHORIZED);
 
     // The ticket redeems once via the engine; a second redemption is refused (single-use).
-    let first = h.engine.redeem_ws_ticket(&ticket).await;
+    let first = h.engine.redeem_ws_ticket(&ticket, None).await;
     assert!(
         matches!(first, Ok(claims) if claims.sub == reg.json()["user"]["id"].as_str().unwrap_or_default())
     );
-    let second = h.engine.redeem_ws_ticket(&ticket).await;
+    let second = h.engine.redeem_ws_ticket(&ticket, None).await;
     assert!(second.is_err());
 }
 

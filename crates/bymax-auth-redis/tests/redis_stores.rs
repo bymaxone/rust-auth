@@ -124,6 +124,7 @@ fn snapshot() -> WsTicketSnapshot {
         mfa_verified: false,
         jti: "jti-1".into(),
         epoch: 0,
+        exp: None,
     }
 }
 

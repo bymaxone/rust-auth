@@ -899,6 +899,10 @@ A test (`crates/bymax-auth-core/tests/log_events.rs`) reads every crate's source
 | `RUST_AUTH_WS_TICKET_REFUSED_MFA_PENDING` | warn | A WebSocket ticket was refused: the session has not satisfied its second factor |
 | `RUST_AUTH_WS_TICKET_REFUSED_NO_TENANT` | warn | A WebSocket ticket was refused: the snapshot names no tenant |
 | `RUST_AUTH_WS_TICKET_REFUSED_TOKEN_REVOKED` | warn | A WebSocket ticket was refused: the token it was minted from is revoked |
+| `RUST_AUTH_WS_TICKET_REFUSED_EXPIRED` | warn | A WebSocket ticket was refused: the token it was minted from has expired |
+| `RUST_AUTH_WS_TICKET_REFUSED_TENANT_MISMATCH` | warn | A WebSocket ticket was refused: the snapshot names another tenant than the expected one |
+| `RUST_AUTH_WS_TICKET_REFUSED_ACCOUNT_GONE` | warn | A WebSocket ticket was refused: the account no longer exists |
+| `RUST_AUTH_WS_TICKET_REFUSED_ACCOUNT_BLOCKED` | warn | A WebSocket ticket was refused: the account is blocked |
 
 ---
 

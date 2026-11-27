@@ -78,7 +78,7 @@ where
     async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
         let auth_state = AuthState::from_ref(state);
         let ticket = ticket_from_query(parts).ok_or(AuthError::TokenInvalid)?;
-        let claims = auth_state.engine().redeem_ws_ticket(&ticket).await?;
+        let claims = auth_state.engine().redeem_ws_ticket(&ticket, None).await?;
         enforce_tenant_binding(&auth_state, &claims, parts).await?;
         Ok(Self(claims))
     }
