@@ -231,17 +231,17 @@ fn deliver_platform(
 
 /// Pair a rotated platform token pair with the admin it belongs to, producing the
 /// [`PlatformAuthResult`] the refresh body carries. The subject comes from the freshly-minted
-/// platform access token (it verifies by construction) and the record is re-read through
+/// platform access token, whose session entry is not read, and the record is re-read through
 /// `platform_me` — the "rotate, then `getMe`" sequence nest-auth's controller performs.
 async fn rotated_into_platform_result(
     state: &AuthState,
     tokens: RotatedTokens,
 ) -> Result<PlatformAuthResult, bymax_auth_types::AuthError> {
-    let claims = state
+    let subject = state
         .engine()
-        .verify_platform_token(&tokens.access_token)
+        .issued_platform_subject(&tokens.access_token)
         .await?;
-    let admin = state.engine().platform_me(&claims.sub).await?;
+    let admin = state.engine().platform_me(&subject).await?;
     Ok(PlatformAuthResult {
         admin,
         access_token: tokens.access_token,

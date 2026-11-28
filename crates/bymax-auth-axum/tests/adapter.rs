@@ -45,6 +45,9 @@ mod ws_ticket_body;
 #[path = "adapter/logout_failure.rs"]
 mod logout_failure;
 
+#[path = "adapter/session_access_refresh.rs"]
+mod session_access_refresh;
+
 #[path = "adapter/refresh_cookie_bound.rs"]
 mod refresh_cookie_bound;
 

@@ -285,3 +285,37 @@ async fn a_ticket_is_not_redeemed_while_the_entry_cannot_be_read() {
         "{redeemed:?}"
     );
 }
+
+#[tokio::test]
+async fn a_session_sharing_an_ended_family_keeps_the_token_pair_its_refresh_returns() {
+    let Some((h, auth, _)) = with_session().await else { unreachable!() };
+    // Two refreshes of one token: the second is a grace recovery, a second session of the family.
+    let first = h
+        .engine
+        .refresh(&auth.refresh_token, "10.0.0.1", "agent")
+        .await;
+    let second = h
+        .engine
+        .refresh(&auth.refresh_token, "10.0.0.1", "agent")
+        .await;
+    let (Ok(first), Ok(second)) = (first, second) else { unreachable!() };
+    let ended = refresh_hash(&first.tokens.refresh_token);
+    assert!(
+        h.engine
+            .revoke_user_session("t1", &auth.user.id, &ended)
+            .await
+            .is_ok()
+    );
+    let kept = h
+        .engine
+        .refresh(&second.tokens.refresh_token, "10.0.0.1", "agent")
+        .await;
+    let Ok(kept) = kept else { unreachable!("{:?}", kept.err()) };
+    // The family's entry still refuses the access token.
+    let checked = h
+        .engine
+        .tokens()
+        .verify_access(&kept.tokens.access_token)
+        .await;
+    assert!(matches!(checked, Err(AuthError::TokenRevoked)));
+}

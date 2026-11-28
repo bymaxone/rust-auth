@@ -263,9 +263,13 @@ impl AuthEngine {
             .await?;
 
         // The owner: read from the token we just minted, which is the only place it is
-        // available on both the live and the grace path. The adapter verified this same token
-        // to build its response body, so the work is moved rather than added.
-        let claims = self.tokens().verify_access(&rotated.access_token).await?;
+        // available on both the live and the grace path. The session entry is not read: a family
+        // can hold a second session, and the entry of an ended one would refuse this token after
+        // rotation had already spent the presented one.
+        let claims = self
+            .tokens()
+            .verify_issued_access(&rotated.access_token)
+            .await?;
         let user_id = claims.sub.clone();
 
         // Re-read the account and re-apply the two gates `login` applies. Rotation works

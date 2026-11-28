@@ -987,14 +987,31 @@ impl TokenManagerService {
     /// public [`AuthError::TokenInvalid`]; all collapse to `token_invalid` at the boundary.
     #[cfg(feature = "platform")]
     pub async fn verify_platform_access(&self, token: &str) -> Result<PlatformClaims, AuthError> {
+        let claims = self.verify_issued_platform_access(token).await?;
+        self.refuse_ended_session(SessionKind::Platform, claims.sid.as_deref())
+            .await?;
+        Ok(claims)
+    }
+
+    /// [`TokenManagerService::verify_platform_access`] without the session entry, for the token a
+    /// refresh has just minted: a family can hold a second session, and the entry of an ended one
+    /// would refuse this token after rotation had already spent the presented one. Never
+    /// authenticate a request with it.
+    ///
+    /// # Errors
+    ///
+    /// As [`TokenManagerService::verify_platform_access`].
+    #[cfg(feature = "platform")]
+    pub(crate) async fn verify_issued_platform_access(
+        &self,
+        token: &str,
+    ) -> Result<PlatformClaims, AuthError> {
         let claims = self
             .verify_rotating::<PlatformClaims>(token)
             .map_err(map_jwt_error)?;
         if self.session_store.is_blacklisted(&claims.jti).await? {
             return Err(AuthError::TokenRevoked);
         }
-        self.refuse_ended_session(SessionKind::Platform, claims.sid.as_deref())
-            .await?;
         // A token stamped below the admin's current epoch predates an invalidating event (a
         // password reset or sign-out-everywhere) and is revoked.
         if claims.epoch
@@ -1091,14 +1108,29 @@ impl TokenManagerService {
     /// the public [`AuthError::TokenInvalid`]; all collapse to `token_invalid` at the HTTP
     /// boundary so no oracle is exposed.
     pub async fn verify_access(&self, token: &str) -> Result<DashboardClaims, AuthError> {
+        let claims = self.verify_issued_access(token).await?;
+        self.refuse_ended_session(SessionKind::Dashboard, claims.sid.as_deref())
+            .await?;
+        Ok(claims)
+    }
+
+    /// The dashboard twin of `verify_issued_platform_access`: every check of
+    /// [`TokenManagerService::verify_access`] but the session entry, for the token a refresh has
+    /// just minted. Never authenticate a request with it.
+    ///
+    /// # Errors
+    ///
+    /// As [`TokenManagerService::verify_access`].
+    pub(crate) async fn verify_issued_access(
+        &self,
+        token: &str,
+    ) -> Result<DashboardClaims, AuthError> {
         let claims = self
             .verify_rotating::<DashboardClaims>(token)
             .map_err(map_jwt_error)?;
         if self.session_store.is_blacklisted(&claims.jti).await? {
             return Err(AuthError::TokenRevoked);
         }
-        self.refuse_ended_session(SessionKind::Dashboard, claims.sid.as_deref())
-            .await?;
         // A token stamped below the user's current epoch predates an invalidating event (a
         // password reset or sign-out-everywhere) and is revoked.
         if claims.epoch

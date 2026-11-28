@@ -125,3 +125,16 @@ async fn a_platform_access_token_is_not_accepted_while_the_entry_cannot_be_read(
         "{verified:?}"
     );
 }
+
+#[tokio::test]
+async fn a_platform_session_in_an_ended_family_keeps_the_token_pair_its_refresh_returns() {
+    let Some((h, auth, sid)) = with_session().await else { unreachable!() };
+    let Some(svc) = h.engine.platform_auth() else { unreachable!() };
+    let store: &dyn SessionStore = h.stores.as_ref();
+    assert!(store.revoke_session_access(KIND, &sid, 60).await.is_ok());
+    let rotated = svc.refresh(&auth.refresh_token, "1.2.3.4", "agent").await;
+    let Ok(rotated) = rotated else { unreachable!("{:?}", rotated.err()) };
+    let tokens = h.engine.tokens();
+    let checked = tokens.verify_platform_access(&rotated.access_token).await;
+    assert!(matches!(checked, Err(AuthError::TokenRevoked)));
+}

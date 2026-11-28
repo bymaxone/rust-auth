@@ -252,9 +252,11 @@ impl PlatformAuthService {
         // renewing access every fifteen minutes for the refresh token's whole lifetime, on the
         // highest-privilege identity in the system, and the kill switch was advisory exactly
         // where it mattered most.
+        // The session entry is not read: a family can hold a second session, and the entry of an
+        // ended one would refuse this token after rotation had already spent the presented one.
         let claims = self
             .tokens
-            .verify_platform_access(&rotated.access_token)
+            .verify_issued_platform_access(&rotated.access_token)
             .await?;
         let admin = self
             .repo
@@ -330,19 +332,8 @@ impl PlatformAuthService {
             self.revoke_logout_session(raw_refresh, admin_id, &mut failure)
                 .await;
         }
-        let owner = resolved.owner.as_ref();
-        let ended = end_logout_access(
-            store,
-            SessionKind::Platform,
-            owner,
-            self.tokens.access_ttl(),
-        )
-        .await;
-        note_logout_failure(
-            &mut failure,
-            "logout: session access revocation failed",
-            ended,
-        );
+        self.end_logout_session_access(resolved.owner.as_ref(), &mut failure)
+            .await;
         if let Some(error) = failure {
             let ttl = marker_ttl_secs(self.tokens.access_ttl());
             remember_failed_attempt(store, SessionKind::Platform, hash, &resolved, ttl).await;
@@ -363,6 +354,19 @@ impl PlatformAuthService {
             ));
         }
         Ok(admin_id.to_owned())
+    }
+
+    /// Write the platform session entry for the family `owner` names, so every access token of
+    /// the session being signed out is refused.
+    async fn end_logout_session_access(
+        &self,
+        owner: Option<&LogoutOwner>,
+        failure: &mut Option<AuthError>,
+    ) {
+        let ttl = self.tokens.access_ttl();
+        let store = self.session_store.as_ref();
+        let ended = end_logout_access(store, SessionKind::Platform, owner, ttl).await;
+        note_logout_failure(failure, "logout: session access revocation failed", ended);
     }
 
     /// The admin the live platform refresh session names, or `None` when the session is gone.
