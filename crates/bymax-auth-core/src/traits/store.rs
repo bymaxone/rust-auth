@@ -702,8 +702,10 @@ pub trait SessionStore: Send + Sync {
 
     /// Revoke every live session in a refresh-token **family** (one login lineage), deleting
     /// each descendant's refresh/detail keys and clearing the family index. Called on
-    /// reuse-detection ([`RotateOutcome::Reused`]) to lock out a stolen token's whole chain.
-    /// Idempotent: an unknown or already-cleared family is a no-op.
+    /// reuse-detection ([`RotateOutcome::Reused`]) to lock out a stolen token's whole chain, and
+    /// when one session of a sign-in is ended (a logout, an eviction, a single revocation), which
+    /// ends the whole sign-in. Once it returns, no session of the family may rotate or be
+    /// recovered. Idempotent: an unknown or already-cleared family is a no-op.
     ///
     /// `owner_subject_hash` names the session index to prune each revoked member from, and is
     /// `None` when [`SessionStore::find_family_owner`] found nothing readable — in which case

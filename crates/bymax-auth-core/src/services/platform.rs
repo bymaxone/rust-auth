@@ -252,11 +252,9 @@ impl PlatformAuthService {
         // renewing access every fifteen minutes for the refresh token's whole lifetime, on the
         // highest-privilege identity in the system, and the kill switch was advisory exactly
         // where it mattered most.
-        // The session entry is not read: a family can hold a second session, and the entry of an
-        // ended one would refuse this token after rotation had already spent the presented one.
         let claims = self
             .tokens
-            .verify_issued_platform_access(&rotated.access_token)
+            .verify_platform_access(&rotated.access_token)
             .await?;
         let admin = self
             .repo
@@ -302,7 +300,7 @@ impl PlatformAuthService {
     /// Revoke the current platform session: blacklist the access token's `jti` for its
     /// remaining lifetime — only when the token actually verifies as a platform token — and
     /// delete BOTH the primary refresh session and any rotation grace pointer for it. The
-    /// session's access tokens are ended with it.
+    /// whole sign-in ends with it: every session of its family, and their access tokens.
     ///
     /// # Errors
     ///
@@ -332,7 +330,7 @@ impl PlatformAuthService {
             self.revoke_logout_session(raw_refresh, admin_id, &mut failure)
                 .await;
         }
-        self.end_logout_session_access(resolved.owner.as_ref(), &mut failure)
+        self.end_logout_sign_in(resolved.owner.as_ref(), &mut failure)
             .await;
         if let Some(error) = failure {
             let ttl = marker_ttl_secs(self.tokens.access_ttl());
@@ -356,16 +354,17 @@ impl PlatformAuthService {
         Ok(admin_id.to_owned())
     }
 
-    /// Write the platform session entry for the family `owner` names, so every access token of
-    /// the session being signed out is refused.
-    async fn end_logout_session_access(
+    /// End the rest of the sign-in `owner` names: every platform refresh session of its family,
+    /// then its access tokens.
+    async fn end_logout_sign_in(
         &self,
         owner: Option<&LogoutOwner>,
         failure: &mut Option<AuthError>,
     ) {
-        let ttl = self.tokens.access_ttl();
+        let subject = self.session_subject(owner.map_or("", |owner| owner.user_id.as_str()));
         let store = self.session_store.as_ref();
-        let ended = end_logout_access(store, SessionKind::Platform, owner, ttl).await;
+        let ttl = self.tokens.access_ttl();
+        let ended = end_logout_access(store, SessionKind::Platform, owner, &subject, ttl).await;
         note_logout_failure(failure, "logout: session access revocation failed", ended);
     }
 

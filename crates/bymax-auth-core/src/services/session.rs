@@ -18,7 +18,7 @@ use bymax_auth_types::AuthError;
 use crate::config::SessionConfig;
 use crate::services::auth::detached::{run_on_new_session, run_on_session_evicted};
 use crate::services::auth::spawn_guarded;
-use crate::services::session_access::end_session_access;
+use crate::services::session_access::end_sign_in;
 use crate::traits::{
     AuthHooks, HookContext, SessionDetail, SessionEntry, SessionKind, SessionRecord,
     SessionRotation, SessionStore, UserRepository,
@@ -272,7 +272,9 @@ impl SessionService {
             .collect())
     }
 
-    /// Revoke a single session, ownership-checked. A hash that is not 64 lowercase hex is
+    /// Revoke one session, ownership-checked, and with it the sign-in it belongs to: the other
+    /// sessions of its family and their access tokens, the caller's own when the revoked session
+    /// is of the caller's sign-in. A hash that is not 64 lowercase hex is
     /// rejected as [`AuthError::SessionNotFound`] (callers cannot distinguish a bad format
     /// from an absent session, blocking format enumeration), and the store's atomic
     /// membership-then-delete closes the TOCTOU between the ownership check and the delete.
@@ -311,9 +313,10 @@ impl SessionService {
         self.end_session(&subject, session_hash).await
     }
 
-    /// Remove one session of `subject`, ownership-checked, and then its access tokens. The
-    /// family is read first, from the record the removal deletes, and used only once the removal
-    /// has shown the session to be the subject's.
+    /// Remove one session of `subject`, ownership-checked, and then the rest of its sign-in,
+    /// access tokens included. The family is read first, from the record the removal deletes, and
+    /// used only once the removal has shown the session to be the subject's. A record naming no
+    /// family ends alone.
     async fn end_session(&self, subject: &str, session_hash: &str) -> Result<bool, AuthError> {
         let family = self.family_of(session_hash).await;
         self.store
@@ -323,7 +326,14 @@ impl SessionService {
             return Ok(false);
         };
         let store = self.store.as_ref();
-        end_session_access(store, SessionKind::Dashboard, &family, self.access_ttl).await?;
+        end_sign_in(
+            store,
+            SessionKind::Dashboard,
+            &family,
+            subject,
+            self.access_ttl,
+        )
+        .await?;
         Ok(true)
     }
 

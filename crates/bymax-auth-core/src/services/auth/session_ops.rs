@@ -53,8 +53,11 @@ impl AuthEngine {
     ///
     /// # Errors
     ///
+    /// The logout ends the whole sign-in the session belongs to: every session of its family, and
+    /// their access tokens.
+    ///
     /// Attempts every revocation write — the access-token blacklist, the refresh-session delete,
-    /// the session's access entry and the grace-pointer delete — whatever an earlier one did, then answers the first
+    /// the sign-in's family and access entry, and the grace-pointer delete — whatever an earlier one did, then answers the first
     /// failure as [`AuthError::Internal`]. A `204` for a logout that left the access token or the
     /// refresh session alive would tell a user who signed out of a lost device that it worked, so
     /// it is never answered unless every write succeeded. A session already rotated or evicted
@@ -79,25 +82,37 @@ impl AuthEngine {
             self.revoke_logout_session(session_hash, resolved.owner.as_ref(), &mut failure)
                 .await;
         }
-        let owner = resolved.owner.as_ref();
-        let ended = end_logout_access(
-            store,
-            SessionKind::Dashboard,
-            owner,
-            self.tokens().access_ttl(),
-        )
-        .await;
-        note_logout_failure(
-            &mut failure,
-            "logout: session access revocation failed",
-            ended,
-        );
+        self.end_logout_sign_in(resolved.owner.as_ref(), &mut failure)
+            .await;
         if let Some(error) = failure {
             let ttl = marker_ttl_secs(self.tokens().access_ttl());
             remember_failed_attempt(store, SessionKind::Dashboard, hash, &resolved, ttl).await;
             return Err(error);
         }
         self.announce_completed_logout(hash, &resolved).await
+    }
+
+    /// End the rest of the sign-in `owner` names: every refresh session of its family, then its
+    /// access tokens.
+    async fn end_logout_sign_in(
+        &self,
+        owner: Option<&LogoutOwner>,
+        failure: &mut Option<AuthError>,
+    ) {
+        let subject = self.logout_subject(owner);
+        let store = self.session_store().as_ref();
+        let ttl = self.tokens().access_ttl();
+        let ended = end_logout_access(store, SessionKind::Dashboard, owner, &subject, ttl).await;
+        note_logout_failure(failure, "logout: session access revocation failed", ended);
+    }
+
+    /// The tenant-scoped subject whose session index a logout prunes.
+    fn logout_subject(&self, owner: Option<&LogoutOwner>) -> String {
+        self.session_subject(
+            SessionKind::Dashboard,
+            owner.and_then(|owner| owner.tenant_id.as_deref()),
+            owner.map_or("", |owner| owner.user_id.as_str()),
+        )
     }
 
     /// The owner the live refresh session names, or `None` when the session is gone.
@@ -192,11 +207,7 @@ impl AuthEngine {
         owner: Option<&LogoutOwner>,
         failure: &mut Option<AuthError>,
     ) {
-        let subject = self.session_subject(
-            SessionKind::Dashboard,
-            owner.and_then(|owner| owner.tenant_id.as_deref()),
-            owner.map_or("", |owner| owner.user_id.as_str()),
-        );
+        let subject = self.logout_subject(owner);
         let revoked = self
             .session_store()
             .revoke_session(SessionKind::Dashboard, &subject, session_hash)
@@ -263,13 +274,9 @@ impl AuthEngine {
             .await?;
 
         // The owner: read from the token we just minted, which is the only place it is
-        // available on both the live and the grace path. The session entry is not read: a family
-        // can hold a second session, and the entry of an ended one would refuse this token after
-        // rotation had already spent the presented one.
-        let claims = self
-            .tokens()
-            .verify_issued_access(&rotated.access_token)
-            .await?;
+        // available on both the live and the grace path. The adapter verified this same token
+        // to build its response body, so the work is moved rather than added.
+        let claims = self.tokens().verify_access(&rotated.access_token).await?;
         let user_id = claims.sub.clone();
 
         // Re-read the account and re-apply the two gates `login` applies. Rotation works
@@ -1067,14 +1074,15 @@ mod tests {
     async fn logout_reports_a_store_that_refuses_both_cleanups() {
         // A backend outage during logout must not read as a success: a `204` would tell a user
         // who signed out of a lost device that the refresh session is gone when it is not. Both
-        // cleanups are armed to fail, both are attempted and both are logged, and the answer is
-        // an internal error the caller can retry.
+        // cleanups and the family removal are armed to fail, both cleanups are attempted and
+        // logged, and the answer is an error the caller can retry.
         let mut cfg = base_config();
         cfg.email_verification.required = false;
         let Some(h) = harness(cfg, None) else { return };
         let Some((_id, auth)) = logged_in(&h, "down@x.io", "pw").await else { return };
 
         h.stores.fail_next_cleanup_writes(2);
+        h.stores.fail_next_family_removals(1);
         let (events, capture) = crate::log_capture::capture_events();
         assert!(matches!(
             h.engine
@@ -1089,7 +1097,7 @@ mod tests {
         assert!(events.contains_at(tracing::Level::WARN, "logout: session cleanup failed"));
         assert!(events.contains_at(tracing::Level::WARN, "logout: grace pointer cleanup failed"));
 
-        // The failures were consumed by the two cleanup calls, and the session survives them —
+        // Every removal was refused, and the session survives them —
         // which is what the error answer tells the caller to retry.
         let store: &dyn crate::traits::SessionStore = h.stores.as_ref();
         assert!(matches!(

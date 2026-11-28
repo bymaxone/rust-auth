@@ -83,20 +83,6 @@ impl AuthEngine {
         self.tokens().verify_platform_access(token).await
     }
 
-    /// The subject of a platform access token this engine has just issued by a refresh. Every
-    /// check of [`AuthEngine::verify_platform_token`] runs but the session entry: a refreshed
-    /// token can belong to a family with an ended session, and the rotated pair is delivered all
-    /// the same. Never authenticate a request with it.
-    ///
-    /// # Errors
-    ///
-    /// As [`AuthEngine::verify_platform_token`].
-    #[cfg(feature = "platform")]
-    pub async fn issued_platform_subject(&self, token: &str) -> Result<String, AuthError> {
-        let claims = self.tokens().verify_issued_platform_access(token).await?;
-        Ok(claims.sub)
-    }
-
     /// As [`AuthEngine::verify_platform_token`], but a refusal is answered the way
     /// [`AuthEngine::verify_access`] answers it on the platform plane (its `# Errors` section
     /// lists which refusal is [`AuthError::PlatformAuthRequired`] and which the opaque

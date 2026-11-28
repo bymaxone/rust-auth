@@ -286,36 +286,86 @@ async fn a_ticket_is_not_redeemed_while_the_entry_cannot_be_read() {
     );
 }
 
+/// A sign-in holding two live sessions: one refresh token presented twice, the second time inside
+/// its grace window. Returns the two refresh tokens.
+async fn two_sessions(h: &Harness, auth: &AuthResult) -> Option<(String, String)> {
+    let tokens = h.engine.tokens();
+    let rotated = tokens
+        .reissue_tokens(&auth.refresh_token, "10.0.0.1", "agent/1.0")
+        .await
+        .ok()?;
+    let recovered = tokens
+        .reissue_tokens(&auth.refresh_token, "10.0.0.1", "agent/1.0")
+        .await
+        .ok()?;
+    Some((rotated.refresh_token, recovered.refresh_token))
+}
+
+async fn refuses_refresh(h: &Harness, raw: &str) -> bool {
+    let refreshed = h.engine.refresh(raw, "1.2.3.4", "agent").await;
+    matches!(refreshed, Err(AuthError::RefreshTokenInvalid))
+}
+
 #[tokio::test]
-async fn a_session_sharing_an_ended_family_keeps_the_token_pair_its_refresh_returns() {
-    let Some((h, auth, _)) = with_session().await else { unreachable!() };
-    // Two refreshes of one token: the second is a grace recovery, a second session of the family.
-    let first = h
+async fn a_logout_of_one_session_leaves_the_other_of_its_sign_in_unable_to_refresh() {
+    let Some((h, auth, sid)) = with_session().await else { unreachable!() };
+    let Some((one, other)) = two_sessions(&h, &auth).await else { unreachable!() };
+    assert!(h.engine.logout("", &one).await.is_ok());
+    assert!(refuses_refresh(&h, &other).await);
+    assert_eq!(entry(&h, &sid), Some(ENTRY_TTL));
+}
+
+#[tokio::test]
+async fn revoking_one_session_leaves_the_other_of_its_sign_in_unable_to_refresh() {
+    let Some((h, auth, sid)) = with_session().await else { unreachable!() };
+    let Some((one, other)) = two_sessions(&h, &auth).await else { unreachable!() };
+    let revoked = h
         .engine
-        .refresh(&auth.refresh_token, "10.0.0.1", "agent")
+        .revoke_user_session("t1", &auth.user.id, &refresh_hash(&one))
         .await;
+    assert!(revoked.is_ok(), "{revoked:?}");
+    assert!(refuses_refresh(&h, &other).await);
+    assert_eq!(entry(&h, &sid), Some(ENTRY_TTL));
+}
+
+#[tokio::test]
+async fn an_eviction_past_the_cap_ends_every_session_of_the_evicted_sign_in() {
+    let tune = |cfg: &mut crate::config::AuthConfig| {
+        cfg.sessions.enabled = true;
+        cfg.sessions.default_max_sessions = 2;
+    };
+    let Some((h, auth)) = signed_in_with(None, tune).await else { unreachable!() };
+    let Some((one, other)) = two_sessions(&h, &auth).await else { unreachable!() };
     let second = h
         .engine
-        .refresh(&auth.refresh_token, "10.0.0.1", "agent")
+        .login(login_input("out@example.com", "pw"), &ctx())
         .await;
-    let (Ok(first), Ok(second)) = (first, second) else { unreachable!() };
-    let ended = refresh_hash(&first.tokens.refresh_token);
-    assert!(
-        h.engine
-            .revoke_user_session("t1", &auth.user.id, &ended)
-            .await
-            .is_ok()
-    );
-    let kept = h
+    assert!(matches!(second, Ok(LoginResult::Success(_))));
+    assert!(refuses_refresh(&h, &one).await);
+    assert!(refuses_refresh(&h, &other).await);
+    assert_eq!(h.stores.ended_session_count(), 1);
+}
+
+#[tokio::test]
+async fn a_logout_that_could_not_remove_the_family_fails_and_writes_no_entry() {
+    let Some((h, auth, sid)) = with_session().await else { unreachable!() };
+    h.stores.fail_next_family_removals(1);
+    let first = h.engine.logout("", &auth.refresh_token).await;
+    assert!(first.is_err());
+    assert_eq!(entry(&h, &sid), None);
+
+    assert!(h.engine.logout("", &auth.refresh_token).await.is_ok());
+    assert_eq!(entry(&h, &sid), Some(ENTRY_TTL));
+}
+
+#[tokio::test]
+async fn revoking_a_session_whose_family_cannot_be_removed_fails_and_writes_no_entry() {
+    let Some((h, auth, sid)) = with_session().await else { unreachable!() };
+    h.stores.fail_next_family_removals(1);
+    let revoked = h
         .engine
-        .refresh(&second.tokens.refresh_token, "10.0.0.1", "agent")
+        .revoke_user_session("t1", &auth.user.id, &refresh_hash(&auth.refresh_token))
         .await;
-    let Ok(kept) = kept else { unreachable!("{:?}", kept.err()) };
-    // The family's entry still refuses the access token.
-    let checked = h
-        .engine
-        .tokens()
-        .verify_access(&kept.tokens.access_token)
-        .await;
-    assert!(matches!(checked, Err(AuthError::TokenRevoked)));
+    assert!(revoked.is_err(), "{revoked:?}");
+    assert_eq!(entry(&h, &sid), None);
 }

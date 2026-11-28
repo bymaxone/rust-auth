@@ -78,12 +78,14 @@ async fn a_refused_blacklist_write_fails_the_logout_and_a_retry_finishes_it() {
 
 #[tokio::test]
 async fn refused_cleanup_writes_fail_the_logout_yet_the_access_token_is_revoked() {
-    // The session delete and the grace-pointer delete both refuse. The blacklist write is
-    // attempted regardless and lands; the logout reports the failure and the retry clears the
-    // session. Both refusals are logged: the log is the operator's only view of which step failed.
+    // The session delete, the grace-pointer delete and the removal of the sign-in's family all
+    // refuse. The blacklist write is attempted regardless and lands; the logout reports the
+    // failure and the retry clears the session. Both cleanup refusals are logged: the log is the
+    // operator's only view of which step failed.
     let Some((h, auth)) = signed_in(None).await else { unreachable!() };
 
     h.stores.fail_next_cleanup_writes(2);
+    h.stores.fail_next_family_removals(1);
     let (events, capture) = crate::log_capture::capture_events();
     let outcome = h
         .engine
@@ -164,10 +166,12 @@ async fn a_session_lookup_that_fails_ends_the_logout_before_any_write() {
 async fn a_refused_session_delete_keeps_the_session_indexed_for_a_later_revoke_all() {
     // The credential and its index entry go together or not at all: a delete that was refused
     // leaves the session in the account's index, so the next sign-out-everywhere, which only
-    // reaches indexed credentials, still kills it once the store is healthy again.
+    // reaches indexed credentials, still kills it once the store is healthy again. The removal of
+    // the sign-in's family is refused with it, since that removes the session too.
     let Some((h, auth)) = signed_in(None).await else { unreachable!() };
 
     h.stores.fail_next_cleanup_writes(1);
+    h.stores.fail_next_family_removals(1);
     let outcome = h
         .engine
         .logout(&auth.access_token, &auth.refresh_token)

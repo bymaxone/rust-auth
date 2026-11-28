@@ -1,4 +1,4 @@
-//! Ending the access tokens of one session (services layer).
+//! Ending one sign-in, access tokens included (services layer).
 //!
 //! An access token is stateless, so deleting its session does not stop it. The paths that end one
 //! session write an entry naming the session's family, which is what the token's `sid` claim
@@ -50,20 +50,47 @@ pub(crate) async fn end_session_access(
     }
 }
 
-/// [`end_session_access`] for the session a logout resolved. A logout with no owner, or whose
-/// owner names no family, writes nothing.
+/// End the sign-in `family_id` names: remove every refresh session of the family, then refuse its
+/// access tokens. The sessions go first, so none is left able to refresh into a token the entry
+/// refuses; when they cannot be removed, no entry is written. A family id that is not in the `sid`
+/// claim's form touches nothing.
+///
+/// `owner_subject_hash` names the session index the removed sessions are pruned from.
 ///
 /// # Errors
 ///
-/// Returns a store [`AuthError`] when the entry cannot be written.
+/// Returns a store [`AuthError`] when the family cannot be removed or the entry cannot be written.
+pub(crate) async fn end_sign_in(
+    store: &dyn SessionStore,
+    kind: SessionKind,
+    family_id: &str,
+    owner_subject_hash: &str,
+    access_ttl: Duration,
+) -> Result<(), AuthError> {
+    let Some(sid) = crate::services::session_id(family_id) else {
+        return Ok(());
+    };
+    store
+        .revoke_family(kind, sid, Some(owner_subject_hash))
+        .await?;
+    end_session_access(store, kind, sid, access_ttl).await
+}
+
+/// [`end_sign_in`] for the sign-in a logout resolved. A logout with no owner, or whose owner names
+/// no family, writes nothing.
+///
+/// # Errors
+///
+/// As [`end_sign_in`].
 pub(crate) async fn end_logout_access(
     store: &dyn SessionStore,
     kind: SessionKind,
     owner: Option<&LogoutOwner>,
+    owner_subject_hash: &str,
     access_ttl: Duration,
 ) -> Result<(), AuthError> {
     match owner.and_then(|owner| owner.family_id.as_deref()) {
-        Some(family) => end_session_access(store, kind, family, access_ttl).await,
+        Some(family) => end_sign_in(store, kind, family, owner_subject_hash, access_ttl).await,
         None => Ok(()),
     }
 }

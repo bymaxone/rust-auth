@@ -60,14 +60,52 @@ fn contract_row() -> serde_json::Value {
 }
 
 #[test]
-fn the_entry_lives_as_long_as_the_contracts_rule_says() {
-    let ttl = contract_row()["ttl"]
+fn the_contract_row_holds_exactly_these_fields() {
+    let row = contract_row();
+    let mut fields: Vec<&str> = row
+        .as_object()
+        .map_or(vec![], |row| row.keys().map(String::as_str).collect());
+    fields.sort_unstable();
+    assert_eq!(
+        fields,
+        ["$comment", "key", "reader", "ttl", "value", "writer"]
+    );
+}
+
+/// Assert that the contract's `field` states every one of `clauses`.
+fn states(field: &str, clauses: &[&str]) {
+    let rule = contract_row()[field]
         .as_str()
         .unwrap_or_default()
         .to_owned();
-    assert!(
-        ttl.contains("rounded up") && ttl.contains("plus 60"),
-        "{ttl}"
-    );
+    for clause in clauses {
+        assert!(rule.contains(clause), "{field}: {clause}: {rule}");
+    }
+}
+
+#[test]
+fn the_entry_lives_as_long_as_the_contracts_rule_says() {
+    states("ttl", &["access-token lifetime", "rounded up, plus 60"]);
     assert_eq!(CLOCK_MARGIN_SECS, 60);
+}
+
+#[test]
+fn the_contract_states_the_writer_and_reader_rules_this_module_implements() {
+    states(
+        "writer",
+        &[
+            "a logout, an eviction past the session limit",
+            "the revocation of one session through the session service and a replayed refresh token",
+            "Every refresh session of the family is removed first",
+            "the entry is written only after that succeeded",
+            "a record without a conforming one ends that session alone and writes nothing",
+        ],
+    );
+    states(
+        "reader",
+        &[
+            "an existing entry refuses, a failed read refuses",
+            "a token without a conforming sid is not checked",
+        ],
+    );
 }

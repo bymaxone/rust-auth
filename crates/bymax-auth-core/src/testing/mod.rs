@@ -651,6 +651,8 @@ pub struct InMemoryStores {
     /// Armed count of `revoke_session_access` calls that must fail, set through
     /// [`InMemoryStores::fail_next_session_access_writes`].
     forced_session_access_write_failures: Mutex<usize>,
+    /// Armed failures for the removal of a whole refresh-token family.
+    forced_family_removal_failures: Mutex<usize>,
     /// Whether `is_session_access_revoked` fails, set through
     /// [`InMemoryStores::fail_session_access_reads`].
     forced_session_access_read_failure: Mutex<bool>,
@@ -740,6 +742,11 @@ impl InMemoryStores {
     /// just created is already stored.
     pub fn fail_next_session_listings(&self, count: usize) {
         *lock(&self.forced_session_listing_failures) = count;
+    }
+
+    /// Make the next `count` `revoke_family` calls fail with a backend error, removing nothing.
+    pub fn fail_next_family_removals(&self, count: usize) {
+        *lock(&self.forced_family_removal_failures) = count;
     }
 
     /// Make the next `count` `revoke_session_access` calls fail with a backend error.
@@ -1225,6 +1232,15 @@ impl SessionStore for InMemoryStores {
         family_id: &str,
         owner_subject_hash: Option<&str>,
     ) -> Result<(), AuthError> {
+        {
+            let mut armed = lock(&self.forced_family_removal_failures);
+            if *armed > 0 {
+                *armed -= 1;
+                return Err(crate::services::internal_error(
+                    "forced family removal failure",
+                ));
+            }
+        }
         // Idempotent: an empty, unknown, or already-cleared family drops nothing.
         if family_id.is_empty() {
             return Ok(());

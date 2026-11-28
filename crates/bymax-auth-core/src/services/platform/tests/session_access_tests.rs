@@ -127,14 +127,32 @@ async fn a_platform_access_token_is_not_accepted_while_the_entry_cannot_be_read(
 }
 
 #[tokio::test]
-async fn a_platform_session_in_an_ended_family_keeps_the_token_pair_its_refresh_returns() {
+async fn a_platform_logout_of_one_session_leaves_the_other_of_its_sign_in_unable_to_refresh() {
     let Some((h, auth, sid)) = with_session().await else { unreachable!() };
     let Some(svc) = h.engine.platform_auth() else { unreachable!() };
-    let store: &dyn SessionStore = h.stores.as_ref();
-    assert!(store.revoke_session_access(KIND, &sid, 60).await.is_ok());
-    let rotated = svc.refresh(&auth.refresh_token, "1.2.3.4", "agent").await;
-    let Ok(rotated) = rotated else { unreachable!("{:?}", rotated.err()) };
     let tokens = h.engine.tokens();
-    let checked = tokens.verify_platform_access(&rotated.access_token).await;
-    assert!(matches!(checked, Err(AuthError::TokenRevoked)));
+    let (raw, ip, agent) = (&auth.refresh_token, "10.0.0.1", "agent/1.0");
+    let Ok(one) = tokens.reissue_platform_tokens(raw, ip, agent).await else { unreachable!() };
+    let Ok(other) = tokens.reissue_platform_tokens(raw, ip, agent).await else { unreachable!() };
+    assert!(svc.logout("", &one.refresh_token).await.is_ok());
+    let refreshed = tokens
+        .reissue_platform_tokens(&other.refresh_token, ip, agent)
+        .await;
+    assert!(
+        matches!(refreshed, Err(AuthError::RefreshTokenInvalid)),
+        "{refreshed:?}"
+    );
+    assert_eq!(
+        h.stores.peek_session_access_ttl(KIND, &sid),
+        Some(ENTRY_TTL)
+    );
+}
+
+#[tokio::test]
+async fn a_platform_logout_that_could_not_remove_the_family_fails_and_writes_no_entry() {
+    let Some((h, auth, sid)) = with_session().await else { unreachable!() };
+    let Some(svc) = h.engine.platform_auth() else { unreachable!() };
+    h.stores.fail_next_family_removals(1);
+    assert!(svc.logout("", &auth.refresh_token).await.is_err());
+    assert_eq!(h.stores.peek_session_access_ttl(KIND, &sid), None);
 }
