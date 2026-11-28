@@ -316,6 +316,24 @@ async fn a_logout_of_one_session_leaves_the_other_of_its_sign_in_unable_to_refre
 }
 
 #[tokio::test]
+async fn a_logout_leaves_no_session_of_its_sign_in_in_the_account_session_index() {
+    let Some((h, auth, _sid)) = with_session().await else { unreachable!() };
+    let Some((one, _other)) = two_sessions(&h, &auth).await else { unreachable!() };
+    let subject = h.engine.session_subject(KIND, Some("t1"), &auth.user.id);
+    let store: &dyn SessionStore = h.stores.as_ref();
+    let listed = store
+        .list_sessions(KIND, &subject)
+        .await
+        .unwrap_or_default();
+    assert!(listed.len() >= 2, "{listed:?}");
+
+    assert!(h.engine.logout("", &one).await.is_ok());
+
+    let listed = store.list_sessions(KIND, &subject).await;
+    assert!(matches!(&listed, Ok(left) if left.is_empty()), "{listed:?}");
+}
+
+#[tokio::test]
 async fn revoking_one_session_leaves_the_other_of_its_sign_in_unable_to_refresh() {
     let Some((h, auth, sid)) = with_session().await else { unreachable!() };
     let Some((one, other)) = two_sessions(&h, &auth).await else { unreachable!() };
