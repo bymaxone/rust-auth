@@ -2161,9 +2161,9 @@ Platform rotation (`reissue_platform_tokens`) mirrors this with `prt:`/`prp:`/`p
 
 #### 7.3.4 Access-token revocation blacklist (JTI)
 
-On logout, the access token's `jti` is written to `rv:{jti}` with TTL = remaining token lifetime (§7.1.3 / §7.9). Guards (§8) call `session_store.is_blacklisted(&jti)` (the store owns the `rv:` prefix; §12.3) after signature/expiry verification and reject with `TokenInvalid` on a hit. The TTL self-prunes the entry exactly when the token would have expired anyway.
+On logout, the access token's `jti` is written to `rv:{jti}` with TTL = remaining token lifetime (§7.1.3 / §7.9). Guards (§8) call `session_store.is_blacklisted(&jti)` (the store owns the `rv:` prefix; §12.3) after signature/expiry verification and reject with `TokenRevoked` on a hit. The TTL self-prunes the entry exactly when the token would have expired anyway.
 
-**Session revocation.** Ending a session — logout on either plane, eviction past the session limit, a replayed refresh token, the revocation of one session — writes `rvs:{sid}` (`prvs:{sid}` on the platform plane) with the value `"1"`, where `sid` is the refresh family id taken from the session's own record, for the access-token lifetime rounded up to whole seconds plus 60. Every verification of an access token that carries `sid`, the WebSocket ticket checks included, reads the entry and answers `TokenRevoked` on a hit; a failed read refuses. Only a conforming `sid` is written or looked up.
+**Session revocation.** Ending a session — logout on either plane, eviction past the session limit, a replayed refresh token, the revocation of one session — writes `rvs:{sid}` (`prvs:{sid}` on the platform plane) with the value `"1"`, where `sid` is the refresh family id, for the access-token lifetime rounded up to whole seconds plus 60. Every verification of an access token that carries `sid`, the WebSocket ticket checks included, reads the entry and refuses on a hit; a failed read refuses. Only a conforming `sid` is written or looked up.
 
 #### 7.3.5 MFA temp tokens (split verify/consume)
 
@@ -2725,7 +2725,7 @@ The Axum adapter is built only on public `AuthEngine` methods, so a host that au
 | `assert_user_active_and_verified(sub, tenant_id)` | argument | as above, plus `email_not_verified` when `email_verification.required` and the address is unproven |
 | `invalidate_account_status(user_id, tenant_id)` | argument | `()`; drops the cached status and verified flag so the next check reads the repository |
 | `list_user_sessions(tenant_id, user_id, raw_refresh)` | argument | `Vec<SessionInfo>`, the current session flagged when `raw_refresh` names it |
-| `revoke_user_session(tenant_id, user_id, session_hash)` | argument | `()`; a malformed or unowned hash is `session_not_found`; ends that session's access tokens, and bumps the account's token epoch only when the record names no family |
+| `revoke_user_session(tenant_id, user_id, session_hash)` | argument | `()`; a malformed or unowned hash is `session_not_found`; ends that session's access tokens, and bumps the account's token epoch only when no family can be read from the record |
 | `revoke_other_user_sessions(tenant_id, user_id, raw_refresh)` | argument | `()`; without a refresh token naming the current session the call is refused with `session_not_found` rather than answered as a no-op |
 | `issue_ws_ticket(&claims)` / `redeem_ws_ticket(ticket, expected_tenant_id)` | in the claims / the snapshot | `IssuedWsTicket` / `DashboardClaims`; issue refuses an MFA-enrolled session that has not cleared its challenge and a blocked account; redeem refuses an expired or revoked minting token, another tenant than the expected one, and an account that is gone or blocked |
 | `platform_logout(access_token, raw_refresh)` / `platform_revoke_all(admin_id)` (`platform`) | none | `platform_auth_required` when the platform domain is off |

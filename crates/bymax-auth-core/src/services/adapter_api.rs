@@ -199,8 +199,8 @@ impl AuthEngine {
     /// Revoke one of the caller's sessions by its full hash (`DELETE /auth/sessions/{id}`),
     /// ownership-checked. A malformed or unowned hash is [`AuthError::SessionNotFound`]
     /// (anti-IDOR; callers cannot distinguish a bad format from an absent session). The revoked
-    /// session's access tokens are refused from then on; a session whose record names no family
-    /// has no entry to write, so the account's token epoch advances instead.
+    /// session's access tokens are refused from then on; when no family can be read from its
+    /// record there is no entry to write, so the account's token epoch advances instead.
     ///
     /// # Errors
     ///
