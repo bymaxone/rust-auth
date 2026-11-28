@@ -160,7 +160,7 @@ impl SessionStore for SlowSessions {
         kind: SessionKind,
         family_id: &str,
         owner_subject_hash: Option<&str>,
-    ) -> Result<(), AuthError> {
+    ) -> Result<Vec<String>, AuthError> {
         self.inner
             .revoke_family(kind, family_id, owner_subject_hash)
             .await

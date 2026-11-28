@@ -55,7 +55,8 @@ pub(crate) async fn end_session_access(
 /// refuses; when they cannot be removed, no entry is written. A family id that is not in the `sid`
 /// claim's form touches nothing.
 ///
-/// `owner_subject_hash` names the session index the removed sessions are pruned from.
+/// `owner_subject_hash` names the session index the removed sessions are pruned from. The hashes
+/// of the removed sessions are appended to `removed`, also when the entry write then fails.
 ///
 /// # Errors
 ///
@@ -66,13 +67,15 @@ pub(crate) async fn end_sign_in(
     family_id: &str,
     owner_subject_hash: &str,
     access_ttl: Duration,
+    removed: &mut Vec<String>,
 ) -> Result<(), AuthError> {
     let Some(sid) = crate::services::session_id(family_id) else {
         return Ok(());
     };
-    store
+    let family = store
         .revoke_family(kind, sid, Some(owner_subject_hash))
         .await?;
+    removed.extend(family);
     end_session_access(store, kind, sid, access_ttl).await
 }
 
@@ -90,7 +93,18 @@ pub(crate) async fn end_logout_access(
     access_ttl: Duration,
 ) -> Result<(), AuthError> {
     match owner.and_then(|owner| owner.family_id.as_deref()) {
-        Some(family) => end_sign_in(store, kind, family, owner_subject_hash, access_ttl).await,
+        Some(family) => {
+            let mut removed = Vec::new();
+            end_sign_in(
+                store,
+                kind,
+                family,
+                owner_subject_hash,
+                access_ttl,
+                &mut removed,
+            )
+            .await
+        }
         None => Ok(()),
     }
 }

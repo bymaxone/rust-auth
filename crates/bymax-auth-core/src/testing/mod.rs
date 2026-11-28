@@ -1231,7 +1231,7 @@ impl SessionStore for InMemoryStores {
         kind: SessionKind,
         family_id: &str,
         owner_subject_hash: Option<&str>,
-    ) -> Result<(), AuthError> {
+    ) -> Result<Vec<String>, AuthError> {
         {
             let mut armed = lock(&self.forced_family_removal_failures);
             if *armed > 0 {
@@ -1243,24 +1243,24 @@ impl SessionStore for InMemoryStores {
         }
         // Idempotent: an empty, unknown, or already-cleared family drops nothing.
         if family_id.is_empty() {
-            return Ok(());
+            return Ok(Vec::new());
         }
         let Some(hashes) = lock(&self.families).remove(&(kind, family_id.to_owned())) else {
-            return Ok(());
+            return Ok(Vec::new());
         };
         let mut sessions = lock(&self.sessions);
         let mut index = lock(&self.session_index);
-        for hash in hashes {
+        for hash in &hashes {
             // Every live descendant of the compromised login is deleted, and pruned from its
             // owner's session index (all family members share one login, so one subject).
             sessions.remove(&(kind, hash.clone()));
             if let Some(owner) = owner_subject_hash
                 && let Some(details) = index.get_mut(&(kind, owner.to_owned()))
             {
-                details.retain(|detail| detail.session_hash != hash);
+                details.retain(|detail| detail.session_hash != *hash);
             }
         }
-        Ok(())
+        Ok(hashes.into_iter().collect())
     }
 
     async fn blacklist_access(
@@ -2333,12 +2333,10 @@ mod tests {
             store.find_family_owner(kind, "famA").await,
             Ok(Some(owner)) if owner.user_id == "u1"
         ));
-        assert!(
-            store
-                .revoke_family(kind, "famA", Some(&subject("u1")))
-                .await
-                .is_ok()
-        );
+        assert!(matches!(
+            store.revoke_family(kind, "famA", Some(&subject("u1"))).await,
+            Ok(removed) if removed == ["h2"]
+        ));
         assert!(matches!(store.find_session(kind, "h2").await, Ok(None)));
         assert!(matches!(store.list_sessions(kind, &subject("u1")).await, Ok(v) if v.is_empty()));
         // A family with nothing left readable names nobody rather than someone, and revoking it
@@ -2348,8 +2346,10 @@ mod tests {
             Ok(None)
         ));
         assert!(matches!(store.find_family_owner(kind, "").await, Ok(None)));
-        assert!(store.revoke_family(kind, "famA", None).await.is_ok());
-        assert!(store.revoke_family(kind, "", None).await.is_ok());
+        assert!(
+            matches!(store.revoke_family(kind, "famA", None).await, Ok(none) if none.is_empty())
+        );
+        assert!(matches!(store.revoke_family(kind, "", None).await, Ok(none) if none.is_empty()));
 
         // A member whose record carries no owner is skipped rather than reported: an event
         // naming the empty string is worse than no event, because a consumer would act on it.

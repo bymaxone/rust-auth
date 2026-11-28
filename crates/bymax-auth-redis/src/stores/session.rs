@@ -426,10 +426,10 @@ impl RedisStores {
         kind: SessionKind,
         family_id: &str,
         owner_subject_hash: Option<&str>,
-    ) -> Result<(), RedisStoreError> {
+    ) -> Result<Vec<String>, RedisStoreError> {
         // An empty family id has no index key; nothing to revoke.
         if family_id.is_empty() {
-            return Ok(());
+            return Ok(Vec::new());
         }
         let prefixes = kind_prefixes(kind);
         let keys = self.keys();
@@ -437,16 +437,16 @@ impl RedisStores {
         let owner_index =
             owner_subject_hash.map_or_else(String::new, |hash| keys.key(prefixes.sess, hash));
         let mut conn = self.connection().await?;
-        script::REVOKE_FAMILY
+        let removed = script::REVOKE_FAMILY
             .prepare()
             .key(&fam_key)
             .arg(keys.namespace())
             .arg(prefixes.rt.as_str())
             .arg(prefixes.sd.as_str())
             .arg(&owner_index)
-            .invoke_async::<i64>(&mut conn)
+            .invoke_async::<Vec<String>>(&mut conn)
             .await?;
-        Ok(())
+        Ok(removed)
     }
 
     /// The record of any one live member of a family, or `None` when no member record is
@@ -969,7 +969,7 @@ impl SessionStore for RedisStores {
         kind: SessionKind,
         family_id: &str,
         owner_subject_hash: Option<&str>,
-    ) -> Result<(), AuthError> {
+    ) -> Result<Vec<String>, AuthError> {
         self.revoke_family_inner(kind, family_id, owner_subject_hash)
             .await
             .map_err(AuthError::from)

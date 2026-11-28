@@ -705,7 +705,8 @@ pub trait SessionStore: Send + Sync {
     /// reuse-detection ([`RotateOutcome::Reused`]) to lock out a stolen token's whole chain, and
     /// when one session of a sign-in is ended (a logout, an eviction, a single revocation), which
     /// ends the whole sign-in. Once it returns, no session of the family may rotate or be
-    /// recovered. Idempotent: an unknown or already-cleared family is a no-op.
+    /// recovered. Returns the hashes of the members it removed. Idempotent: an unknown or
+    /// already-cleared family is a no-op that returns none.
     ///
     /// `owner_subject_hash` names the session index to prune each revoked member from, and is
     /// `None` when [`SessionStore::find_family_owner`] found nothing readable — in which case
@@ -717,7 +718,7 @@ pub trait SessionStore: Send + Sync {
         kind: SessionKind,
         family_id: &str,
         owner_subject_hash: Option<&str>,
-    ) -> Result<(), AuthError>;
+    ) -> Result<Vec<String>, AuthError>;
 
     /// Add a JTI (preferred) or full-JWT hash to the access-token blacklist for its
     /// remaining lifetime.

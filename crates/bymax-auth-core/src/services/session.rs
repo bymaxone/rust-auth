@@ -20,8 +20,8 @@ use crate::services::auth::detached::{run_on_new_session, run_on_session_evicted
 use crate::services::auth::spawn_guarded;
 use crate::services::session_access::end_sign_in;
 use crate::traits::{
-    AuthHooks, HookContext, SessionDetail, SessionEntry, SessionKind, SessionRecord,
-    SessionRotation, SessionStore, UserRepository,
+    AuthHooks, HookContext, SessionDetail, SessionKind, SessionRecord, SessionRotation,
+    SessionStore, UserRepository,
 };
 
 /// The maximum stored IP length, in **bytes**: a maximal IPv6 textual address is 45 ASCII
@@ -153,6 +153,8 @@ impl SessionService {
     /// Never fails. A listing that cannot be read leaves the cap unenforced for this login
     /// (nobody is evicted, so the user may stay over the cap until a later login) and the
     /// per-victim revoke is best-effort; either way the already committed session stands.
+    ///
+    /// The victims are the oldest sessions over the cap, ended as `evict` describes.
     async fn enforce_session_limit(
         &self,
         record: &SessionRecord,
@@ -204,30 +206,12 @@ impl SessionService {
             return;
         }
 
-        // Choose the oldest `over` sessions, excluding the just-created one, and evict them.
-        let victims: Vec<SessionEntry> = sessions
+        let candidates: Vec<String> = sessions
             .into_iter()
-            .filter(|entry| !constant_time_eq(entry.session_hash.as_bytes(), new_hash.as_bytes()))
-            .take(over)
+            .map(|entry| entry.session_hash)
+            .filter(|hash| !constant_time_eq(hash.as_bytes(), new_hash.as_bytes()))
             .collect();
-        for victim in victims {
-            // Ownership-checked revoke; a SessionNotFound (a concurrent logout already removed
-            // it) or any other store error is swallowed — the new session is already committed,
-            // so eviction must never fail the operation that scheduled it.
-            if let Err(error) = self.end_session(&subject, &victim.session_hash).await
-                && !matches!(error, AuthError::SessionNotFound)
-            {
-                // Swallowed, but visible: a store that keeps refusing the eviction is a cap
-                // that is not being enforced, which reads as "no error" on every response.
-                let cause = crate::services::failure_cause(&error);
-                tracing::warn!(
-                    event = "RUST_AUTH_SESSION_EVICTION_FAILED",
-                    cause,
-                    "sessions: eviction of an over-cap session failed"
-                );
-            }
-            self.fire_session_evicted(user_id, &victim.session_hash, ctx);
-        }
+        self.evict(&subject, user_id, &candidates, over, ctx).await;
     }
 
     /// Resolve the per-user concurrent-session cap: the optional resolver wins when it is
@@ -310,18 +294,26 @@ impl SessionService {
             return Err(AuthError::SessionNotFound);
         }
         let subject = self.subject(Some(tenant_id), user_id);
-        self.end_session(&subject, session_hash).await
+        self.end_session(&subject, session_hash, &mut Vec::new())
+            .await
     }
 
     /// Remove one session of `subject`, ownership-checked, and then the rest of its sign-in,
     /// access tokens included. The family is read first, from the record the removal deletes, and
     /// used only once the removal has shown the session to be the subject's. A record naming no
-    /// family ends alone.
-    async fn end_session(&self, subject: &str, session_hash: &str) -> Result<bool, AuthError> {
+    /// family ends alone. Every hash this removes is appended to `removed`, also when a later
+    /// step fails.
+    async fn end_session(
+        &self,
+        subject: &str,
+        session_hash: &str,
+        removed: &mut Vec<String>,
+    ) -> Result<bool, AuthError> {
         let family = self.family_of(session_hash).await;
         self.store
             .revoke_session(SessionKind::Dashboard, subject, session_hash)
             .await?;
+        removed.push(session_hash.to_owned());
         let Some(family) = family else {
             return Ok(false);
         };
@@ -332,6 +324,7 @@ impl SessionService {
             &family,
             subject,
             self.access_ttl,
+            removed,
         )
         .await?;
         Ok(true)
@@ -679,6 +672,8 @@ fn detect_os(ua: &str) -> &'static str {
     }
 }
 
+mod eviction;
+
 #[cfg(test)]
 mod tests {
     /// The identifier-hashing key these fixtures derive the session subject under. Fixed so a
@@ -687,6 +682,7 @@ mod tests {
 
     mod damaged_detail_tests;
     mod eviction_failure_tests;
+    mod eviction_sign_in_tests;
     mod listing_failure_tests;
     mod live_session_tests;
 
@@ -1885,8 +1881,8 @@ mod tests {
             _kind: SessionKind,
             _family_id: &str,
             _owner_subject_hash: Option<&str>,
-        ) -> Result<(), AuthError> {
-            Ok(())
+        ) -> Result<Vec<String>, AuthError> {
+            Ok(Vec::new())
         }
         async fn blacklist_access(
             &self,

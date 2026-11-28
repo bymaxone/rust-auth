@@ -18,6 +18,7 @@ pub(super) struct DamagedDetails {
     damaged: Mutex<HashSet<String>>,
     listing_error: Option<ListingError>,
     revoke_error: Option<ListingError>,
+    lost: Option<String>,
 }
 
 impl DamagedDetails {
@@ -28,6 +29,7 @@ impl DamagedDetails {
             damaged: Mutex::new(damaged),
             listing_error: None,
             revoke_error: None,
+            lost: None,
         }
     }
 
@@ -46,6 +48,12 @@ impl DamagedDetails {
         make: impl Fn() -> AuthError + Send + Sync + 'static,
     ) -> Self {
         self.revoke_error = Some(Box::new(make));
+        self
+    }
+
+    /// Make revoking `hash` find it already gone, as when a concurrent logout removed it first.
+    pub(super) fn losing(mut self, hash: &str) -> Self {
+        self.lost = Some(hash.to_owned());
         self
     }
 
@@ -139,7 +147,11 @@ impl SessionStore for DamagedDetails {
         }
         self.inner
             .revoke_session(kind, subject_hash, session_hash)
-            .await
+            .await?;
+        if self.lost.as_deref() == Some(session_hash) {
+            return Err(AuthError::SessionNotFound);
+        }
+        Ok(())
     }
 
     async fn delete_grace_pointer(
@@ -175,7 +187,7 @@ impl SessionStore for DamagedDetails {
         kind: SessionKind,
         family_id: &str,
         owner_subject_hash: Option<&str>,
-    ) -> Result<(), AuthError> {
+    ) -> Result<Vec<String>, AuthError> {
         self.inner
             .revoke_family(kind, family_id, owner_subject_hash)
             .await

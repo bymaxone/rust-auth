@@ -16,12 +16,12 @@
 -- store crate holds. The membership is still re-read here, so a member added between the two
 -- steps is revoked too.
 --
--- Returns the number of family members that were removed. Idempotent: an unknown or empty
--- family removes nothing.
+-- Returns the hashes of the family members that were removed. Idempotent: an unknown or empty
+-- family removes nothing and returns none.
 local members = redis.call('SMEMBERS', KEYS[1])
 if #members == 0 then
     redis.call('DEL', KEYS[1])
-    return 0
+    return members
 end
 local ns, rt, sd, sess_key = ARGV[1], ARGV[2], ARGV[3], ARGV[4]
 for _, hash in ipairs(members) do
@@ -35,4 +35,4 @@ for _, hash in ipairs(members) do
     end
 end
 redis.call('DEL', KEYS[1])
-return #members
+return members

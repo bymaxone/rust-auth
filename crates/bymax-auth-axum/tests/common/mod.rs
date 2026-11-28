@@ -832,7 +832,7 @@ impl bymax_auth_core::traits::SessionStore for FailingStores {
         kind: bymax_auth_core::traits::SessionKind,
         family_id: &str,
         owner_subject_hash: Option<&str>,
-    ) -> Result<(), bymax_auth_types::AuthError> {
+    ) -> Result<Vec<String>, bymax_auth_types::AuthError> {
         self.inner
             .revoke_family(kind, family_id, owner_subject_hash)
             .await
