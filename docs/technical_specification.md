@@ -1180,7 +1180,7 @@ The **Default** column lists `AuthConfig::default()` (≡ `nest_compat_defaults(
 | `oauth.google` | `Option<GoogleOAuthConfig>` | Cond. | `None` | Built-in Google provider |
 | `route_prefix` | `String` | No | `auth` | |
 | `blocked_statuses` | `Vec<String>` | No | `["BANNED","INACTIVE","SUSPENDED"]` | |
-| `user_status_cache_ttl` | `Duration` | No | `60s` | How long an account's cached status (and, where `email_verification.required`, its verified-address flag) answers the per-request status gate before the repository is read again. A status change reaches requests within this TTL, or at once after `AuthEngine::invalidate_account_status`. `0` turns the cache off. The platform plane is never cached |
+| `user_status_cache_ttl` | `Duration` | No | `60s` | How long an account's cached status (and, where `email_verification.required`, its verified-address flag) answers the per-request status gate before the repository is read again. A status change reaches requests within this TTL, or at once after `AuthEngine::invalidate_account_status`. `0` turns the cache off. The platform plane is never cached. At most 3600 seconds |
 | `controllers.*` | `ControllerToggles` | No | see 5.1.8 | Gates router mounting |
 | `tenant_id_resolver` | `Option<Arc<dyn …>>` | No | `None` | Anti-spoofing: when set, its value is authoritative and a request body naming its own `tenant_id` is refused with `auth.validation`; `null` or an absent field is accepted (§5.7) |
 | `enforce_tenant_binding` | `bool` | No | `false` | Refuses a token minted for another tenant than the resolver names for the request; requires `tenant_id_resolver` |
@@ -3251,11 +3251,14 @@ bumped either way.
 
 - `workspaces.allow_create` is a boolean. A host that needs a per-user decision uses
   `AuthHooks::before_workspace_create`, whose refusal carries `details`.
-- The password-less re-proof marker (`recentAuthMarker`) is keyed only by the user subject. It is
-  not bound to a session or a token id and is not consumed on use. Since the workspace write routes
-  it also gates `schedule-deletion` and `transfer-ownership`, so during its lifetime another
-  session's access token passes that re-proof repeatedly. Binding it to the session and consuming it
-  on a destructive use is a cross-implementation contract change that has not been made.
+- The password-less re-proof marker (`recentAuthMarker`) is bound to the session that earned it
+  (shared contract version 8): its key is `ra:{hmac_sha256(hmacKey, userSubject)}:{sid}`, with the
+  `sid` the access token carries (the refresh family id), and the mark is written in the same
+  atomic step as the session, only when a credential was presented. A token with no usable `sid`
+  earns no proof, and another session of the same account cannot ride a real sign-in it did not
+  perform, on MFA enrolment, `schedule-deletion` or `transfer-ownership`. It is not consumed on use,
+  so within its lifetime the signed-in session passes that re-proof repeatedly; consuming it on a
+  destructive use is a further contract change that has not been made.
 - The re-proof failure counter is shared by MFA enrolment, `schedule-deletion` and
   `transfer-ownership`, so a holder of a token can lock the owner out of those re-proofs. This is
   by design.
@@ -5170,7 +5173,7 @@ pub trait SessionStore: Send + Sync {
     async fn is_blacklisted(&self, jti_or_hash: &str) -> Result<bool, AuthError>;
     // Omitted here: `create_recovered_session`, `put/read/claim_logout_pending`,
     // `delete_grace_pointer`, `grace_successor`, `sweep_grace_pointers`, `find_family_owner`,
-    // `revoke_family`, `current_epoch`, `bump_epoch`, `mark_recent_auth` and `has_recent_auth`.
+    // `revoke_family`, `current_epoch`, `bump_epoch`, `create_session_with_recent_auth` and `has_recent_auth`.
 }
 
 /// One-time-password records for email verification and OTP-based password reset (`otp:`, `resend:`).
@@ -5248,7 +5251,7 @@ preimage and the full list of keys derived from it are pinned by `conformance/wi
 | `psess` | `auth:psess:{hmac_sha256(hmacKey, userSubject)}` | Redis SET of full key **suffixes**: `prt:{sha256(refresh_token)}` and `prp:{sha256(old_refresh_token)}` | max refresh TTL | Platform active-session index. Analogue of `sess`; the platform keyspace is deliberately separate. |
 | `psd` | `auth:psd:{sessionHash}` | JSON `{ device, ip, createdAt, lastActivityAt }` (Unix-millisecond timestamps, as `sd`) | max refresh TTL | Platform per-session detail. Analogue of `sd`. |
 | `rcu` | `auth:rcu:{hmac_sha256(hmacKey, userSubject + ":" + code)}` | `"1"` (`SET NX`) | 300 s | Single-use claim on an MFA recovery code, keyed like `tu`. Serializes two attempts at the *same* code for the span of a repository write; the durable record of consumption is the repository, so the claim is deliberately short-lived. |
-| `ra` | `auth:ra:{hmac_sha256(hmacKey, userSubject)}` | `"1"` | 300 s | Recent-authentication marker. Planted only where a credential was actually proved (login, MFA challenge, OAuth callback, registration) — never on a refresh rotation, which proves a token rather than a credential, and never on password-less issuance — and read with `EXISTS`, never consumed. Gates enrolling MFA on an account with no local password to re-prove. The plane is inside the subject, so the key carries no further segment. |
+| `ra` | `auth:ra:{hmac_sha256(hmacKey, userSubject)}:{sid}` | `"1"` | 300 s | Recent-authentication marker. Planted only where a credential was actually proved — never on a refresh rotation, which proves a token rather than a credential, and never on password-less issuance — and read with `EXISTS`, never consumed. Gates enrolling MFA on an account with no local password to re-prove. The plane is inside the subject; `sid` is the refresh family id the session's access token carries, so the mark belongs to that session and is written in the same transaction that creates it. |
 | `ec` | `auth:ec:{sha256(token)}` | JSON `{ userId, newEmail, tenantId, passwordFingerprint }` (`newEmail` normalized; an absent `passwordFingerprint` reads as "no binding") | `email_change.token_ttl` (default 3600 s) | Pending address change. Consumed on confirm. |
 | `invidx` | `auth:invidx:{tenantId}:{invitee_hash}` | The invitation's token hash | `invitations.token_ttl` (default 172800 s) | Invitee index of a pending invitation: the only handle the issuing side has on a record keyed by a token it never saw. `invitee_hash` is the HMAC of the address, so a keyspace dump does not enumerate who a tenant has invited. Written with the compare-and-set script `publish_invitation`, removed with `withdraw_invitation` or `release_invitation_index` (§12.5.8). |
 | `us` | `auth:us:{hmac_sha256(hmacKey, userSubject)}` | The account's status string | `user_status_cache_ttl` (default 60 s) | Cached account status for the `UserStatus` gate (§8.3.7). Dashboard plane only; the platform status is never cached. Pinned by `userStatusCache` in the shared contract. |

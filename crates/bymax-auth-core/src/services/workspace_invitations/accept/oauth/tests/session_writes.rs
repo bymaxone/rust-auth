@@ -13,7 +13,7 @@ use crate::traits::{
     RotateOutcome, SessionDetail, SessionKind, SessionRecord, SessionRotation, SessionStore,
 };
 
-/// Delays `create_session` and refuses it unless `open`; everything else is answered by the
+/// Delays a session write and refuses it unless `open`; everything else is answered by the
 /// store inside.
 #[derive(Default)]
 pub(super) struct SlowSessions {
@@ -23,6 +23,18 @@ pub(super) struct SlowSessions {
     pub(super) open: bool,
     /// Raised once a session has been written.
     pub(super) written: Arc<AtomicBool>,
+}
+
+impl SlowSessions {
+    /// Wait as a networked write would, then refuse unless `open`.
+    async fn delay_and_admit(&self) -> Result<(), AuthError> {
+        // Long enough for a task already spawned to run before the session exists.
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        if !self.open {
+            return Err(AuthError::ServiceUnavailable("no new sessions".into()));
+        }
+        Ok(())
+    }
 }
 
 #[async_trait]
@@ -35,13 +47,33 @@ impl SessionStore for SlowSessions {
         detail: &SessionRecord,
         ttl_secs: u64,
     ) -> Result<(), AuthError> {
-        // Long enough for a task already spawned to run before the session exists.
-        tokio::time::sleep(Duration::from_millis(20)).await;
-        if !self.open {
-            return Err(AuthError::ServiceUnavailable("no new sessions".into()));
-        }
+        self.delay_and_admit().await?;
         self.inner
             .create_session(kind, subject_hash, token_hash, detail, ttl_secs)
+            .await?;
+        self.written.store(true, Ordering::SeqCst);
+        Ok(())
+    }
+
+    async fn create_session_with_recent_auth(
+        &self,
+        kind: SessionKind,
+        subject_hash: &str,
+        token_hash: &str,
+        detail: &SessionRecord,
+        ttl_secs: u64,
+        recent_auth_ttl_secs: u64,
+    ) -> Result<(), AuthError> {
+        self.delay_and_admit().await?;
+        self.inner
+            .create_session_with_recent_auth(
+                kind,
+                subject_hash,
+                token_hash,
+                detail,
+                ttl_secs,
+                recent_auth_ttl_secs,
+            )
             .await?;
         self.written.store(true, Ordering::SeqCst);
         Ok(())
@@ -156,11 +188,7 @@ impl SessionStore for SlowSessions {
         self.inner.bump_epoch(kind, subject_hash).await
     }
 
-    async fn mark_recent_auth(&self, user_id_hash: &str, ttl: u64) -> Result<(), AuthError> {
-        self.inner.mark_recent_auth(user_id_hash, ttl).await
-    }
-
-    async fn has_recent_auth(&self, user_id_hash: &str) -> Result<bool, AuthError> {
-        self.inner.has_recent_auth(user_id_hash).await
+    async fn has_recent_auth(&self, user_id_hash: &str, sid: &str) -> Result<bool, AuthError> {
+        self.inner.has_recent_auth(user_id_hash, sid).await
     }
 }

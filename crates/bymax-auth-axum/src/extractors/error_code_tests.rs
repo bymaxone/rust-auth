@@ -40,6 +40,7 @@ fn platform_claims(exp: i64) -> PlatformClaims {
         iat: 1_700_000_000,
         exp,
         epoch: 0,
+        sid: None,
     }
 }
 
@@ -254,6 +255,7 @@ async fn a_signed_token_of_another_kind_with_a_malformed_identity_is_token_inval
         iat: 1_700_000_000,
         exp: 4_700_000_000,
         epoch: 0,
+        sid: None,
     };
     let refusal = platform_refusal(&s, parts_with_bearer(&mint_token(&dashboard))).await;
     assert!(

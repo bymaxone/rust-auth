@@ -590,6 +590,7 @@ Everything is configured through `AuthConfig`. Two ready-made profiles bundle se
 | `jwt.absolute_session_lifetime_days` | `0` (off) or 1 to 3650 |
 | `jwt.access_cookie_max_age` | 1 to 315 360 000 s |
 | `brute_force.window` | 1 to 604 800 s |
+| `user_status_cache_ttl` | 0 (no cache) to 3600 s |
 | `password_reset.token_ttl`, `password_reset.otp_ttl`, `email_verification.otp_ttl`, `email_change.token_ttl`, `invitations.token_ttl` | 1 to 315 360 000 s (ten years) |
 | scrypt `parallelization`, Argon2id `parallelism` | 1 to 16 |
 

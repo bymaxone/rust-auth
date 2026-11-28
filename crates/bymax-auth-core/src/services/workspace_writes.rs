@@ -229,6 +229,7 @@ impl AuthEngine {
             tenant_id: Some(&member.tenant_id),
             user_id: &member.user_id,
             password_hash: user.password_hash.as_deref(),
+            sid: member.sid.as_deref(),
         };
         reproof.assert(account, password).await
     }

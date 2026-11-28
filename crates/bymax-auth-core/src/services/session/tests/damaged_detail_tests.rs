@@ -203,12 +203,29 @@ impl SessionStore for DamagedDetails {
         self.inner.bump_epoch(kind, subject_hash).await
     }
 
-    async fn mark_recent_auth(&self, user_id_hash: &str, ttl: u64) -> Result<(), AuthError> {
-        self.inner.mark_recent_auth(user_id_hash, ttl).await
+    async fn create_session_with_recent_auth(
+        &self,
+        kind: SessionKind,
+        subject_hash: &str,
+        token_hash: &str,
+        detail: &SessionRecord,
+        ttl_secs: u64,
+        recent_auth_ttl_secs: u64,
+    ) -> Result<(), AuthError> {
+        self.inner
+            .create_session_with_recent_auth(
+                kind,
+                subject_hash,
+                token_hash,
+                detail,
+                ttl_secs,
+                recent_auth_ttl_secs,
+            )
+            .await
     }
 
-    async fn has_recent_auth(&self, user_id_hash: &str) -> Result<bool, AuthError> {
-        self.inner.has_recent_auth(user_id_hash).await
+    async fn has_recent_auth(&self, user_id_hash: &str, sid: &str) -> Result<bool, AuthError> {
+        self.inner.has_recent_auth(user_id_hash, sid).await
     }
 }
 

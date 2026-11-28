@@ -26,6 +26,7 @@ impl MfaService {
         ctx: MfaContext,
         tenant_id: Option<&str>,
         password: Option<&str>,
+        sid: Option<&str>,
     ) -> Result<MfaSetupResult, AuthError> {
         super::require_plane_tenant(ctx, tenant_id)?;
         let view = self.fetch_user_mfa(user_id, ctx, tenant_id).await?;
@@ -48,6 +49,7 @@ impl MfaService {
             user_id,
             view.password_hash.as_deref(),
             password,
+            sid,
         )
         .await?;
         let key = self.setup_key(ctx, tenant_id, user_id);

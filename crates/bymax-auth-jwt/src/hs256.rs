@@ -239,6 +239,7 @@ mod tests {
             iat,
             exp,
             epoch: 0,
+            sid: None,
         }
     }
 
@@ -403,6 +404,7 @@ mod tests {
             iat: 1_000,
             exp: 2_000,
             epoch: 0,
+            sid: None,
         };
         let ptoken = sign(&platform, &key).unwrap_or_default();
         assert_eq!(
@@ -719,7 +721,7 @@ mod tests {
                 sub, jti, tenant_id: "t".to_owned(), role,
                 token_type: DashboardType::Dashboard, status: "ACTIVE".to_owned(),
                 mfa_enabled, mfa_verified, iat, exp, epoch,
-            };
+            sid: None, };
             let token = sign(&claims, &key).unwrap_or_default();
             prop_assert_eq!(verify::<DashboardClaims>(&token, &key, &opts_at(iat)).ok(), Some(claims));
         }

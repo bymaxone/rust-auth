@@ -166,5 +166,6 @@ fn redeemed_claims(snapshot: WsTicketSnapshot, tenant: String) -> DashboardClaim
         iat: now,
         exp,
         epoch: 0,
+        sid: None,
     }
 }

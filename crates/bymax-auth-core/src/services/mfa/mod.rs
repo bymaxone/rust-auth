@@ -350,12 +350,14 @@ impl MfaService {
         user_id: &str,
         password_hash: Option<&str>,
         password: Option<&str>,
+        sid: Option<&str>,
     ) -> Result<(), AuthError> {
         let account = ProvingAccount {
             plane: ctx,
             tenant_id,
             user_id,
             password_hash,
+            sid,
         };
         self.reproof().assert(account, password).await
     }

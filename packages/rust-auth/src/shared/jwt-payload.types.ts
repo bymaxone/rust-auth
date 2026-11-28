@@ -62,6 +62,14 @@ exp: number,
  */
 epoch?: number, 
 /**
+ * The session this token belongs to: the refresh family id (a UUID v4 in its stored form),
+ * kept through every rotation. The recent-authentication mark is keyed by it, so another
+ * session of the same account cannot ride a sign-in it did not perform (`sessionClaim` in the
+ * shared contract). Absent from a token minted before the claim existed, which names no
+ * session: the passwordless-account gate then fails closed.
+ */
+sid?: string, 
+/**
  * The `iss` claim, present only when the deployment configured `jwt.issuer`.
  *
  * Absent by default. When the verifier is configured with a value, a token carrying a
@@ -208,6 +216,14 @@ exp: number,
  * [`DashboardClaims::epoch`].
  */
 epoch?: number, 
+/**
+ * The session this token belongs to: the refresh family id (a UUID v4 in its stored form),
+ * kept through every rotation. The recent-authentication mark is keyed by it, so another
+ * session of the same account cannot ride a sign-in it did not perform (`sessionClaim` in the
+ * shared contract). Absent from a token minted before the claim existed, which names no
+ * session: the passwordless-account gate then fails closed.
+ */
+sid?: string, 
 /**
  * The `iss` claim, present only when the deployment configured `jwt.issuer`.
  *

@@ -214,7 +214,12 @@ where
         allow_pending: P::ALLOW_PENDING,
     };
     let member = engine
-        .authorize_workspace(&claims.tenant_id, &claims.sub, request)
+        .authorize_workspace(
+            &claims.tenant_id,
+            &claims.sub,
+            claims.sid.as_deref(),
+            request,
+        )
         .await?;
     Ok((member, target))
 }

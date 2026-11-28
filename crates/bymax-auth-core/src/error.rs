@@ -235,6 +235,15 @@ pub enum ConfigError {
     /// created (`EXPIRE key 0`) and silently disables the account lockout.
     #[error("brute_force.window must be at least 1s (a zero window deletes the counter)")]
     BruteForceWindowInvalid,
+    /// `user_status_cache_ttl` is longer than the ceiling. It is how long a suspended account
+    /// still passes, so an unbounded value is an unbounded revocation delay.
+    #[error("user_status_cache_ttl must not exceed {max}s (got {got}s)")]
+    UserStatusCacheTtlCeiling {
+        /// The configured TTL, in seconds.
+        got: u64,
+        /// The ceiling, in seconds.
+        max: u64,
+    },
     /// `brute_force.max_attempts` is outside the accepted `1..=100` range.
     #[error("brute_force.max_attempts must be within 1..=100 (got {got})")]
     BruteForceAttemptsRange {

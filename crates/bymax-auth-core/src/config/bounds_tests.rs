@@ -156,6 +156,19 @@ fn every_option_is_refused_at_zero_except_the_absolute_lifetime() {
             "{} = 0: {outcome:?}",
             bound.field
         );
+        // A zero refresh lifetime or counting window is refused by an earlier rule of its own.
+        let earlier = ["jwt.refresh_expires_in_days", "brute_force.window"];
+        if !accepted && !earlier.contains(&bound.field) {
+            assert!(
+                matches!(
+                    outcome,
+                    Err(ConfigError::OutOfRange { field, got: 0, min: 1, max })
+                        if field == bound.field && max == bound.max
+                ),
+                "{} = 0 must be refused as out of range: {outcome:?}",
+                bound.field
+            );
+        }
     }
 }
 
@@ -171,6 +184,25 @@ fn a_sub_second_lifetime_is_zero_seconds_and_is_refused() {
             ..
         })
     ));
+}
+
+#[test]
+fn the_user_status_cache_ttl_is_at_most_an_hour_and_zero_means_no_cache() {
+    let mut cfg = valid();
+    for (secs, accepted) in [(0, true), (60, true), (3_600, true), (3_601, false)] {
+        cfg.user_status_cache_ttl = Duration::from_secs(secs);
+        let outcome = cfg.validate(Environment::Production);
+        assert_eq!(outcome.is_ok(), accepted, "{secs}s gave {outcome:?}");
+        if !accepted {
+            assert!(matches!(
+                outcome,
+                Err(ConfigError::UserStatusCacheTtlCeiling {
+                    got: 3_601,
+                    max: 3_600
+                })
+            ));
+        }
+    }
 }
 
 #[cfg(feature = "scrypt")]
