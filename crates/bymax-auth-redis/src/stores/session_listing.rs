@@ -64,13 +64,29 @@ pub(super) async fn prune_dead_members(
     Ok(invocation.invoke_async(conn).await?)
 }
 
+/// The closed cause a log line names for a failed prune: `store_unavailable` when the store could
+/// not answer, `internal` for any other failure. The error's own text never reaches a log line.
+fn prune_cause(error: &RedisStoreError) -> &'static str {
+    if error.is_outage() {
+        "store_unavailable"
+    } else {
+        "internal"
+    }
+}
+
 /// What a failed prune means for the listing: nothing. The prune is a tidy-up that did not happen,
 /// not a listing that should fail, so every candidate stays listed (it is not known to be dead) and
 /// the next listing tries again. The listing also feeds session-cap enforcement at login, which a
 /// failed tidy-up must not stop.
 pub(super) fn settle_prune(pruned: Result<Vec<String>, RedisStoreError>) -> Vec<String> {
     pruned.unwrap_or_else(|error| {
-        tracing::warn!(%error, "listing sessions: the dead-member prune failed; it is retried on the next listing");
+        // Bound first: a macro argument is not evaluated when no subscriber is listening.
+        let cause = prune_cause(&error);
+        tracing::warn!(
+            event = "RUST_AUTH_SESSION_PRUNE_FAILED",
+            cause,
+            "listing sessions: the dead-member prune failed; it is retried on the next listing"
+        );
         Vec::new()
     })
 }
@@ -208,6 +224,16 @@ mod tests {
         let failed = Err(RedisStoreError::Decode(source));
         let listed = settle_listing(three_entries(), failed, Prefix::Rt);
         assert_eq!(hashes(&listed), ["a", "b", "c"]);
+    }
+
+    #[test]
+    fn a_prune_cause_separates_an_outage_from_any_other_failure() {
+        let outage = RedisStoreError::Pool(deadpool_redis::PoolError::Closed);
+        assert_eq!(prune_cause(&outage), "store_unavailable");
+        let decode = serde_json::from_str::<u8>("x").err();
+        assert!(decode.is_some(), "the fixture must be a decode failure");
+        let Some(source) = decode else { return };
+        assert_eq!(prune_cause(&RedisStoreError::Decode(source)), "internal");
     }
 
     #[test]
