@@ -1,6 +1,6 @@
 -- revoke_family: revoke every live session in a refresh-token family in one transaction
--- (spec section 12.5.2). Called on reuse detection to lock out a stolen token's whole lineage:
--- every descendant of the compromised login is deleted, forcing each holder to re-authenticate.
+-- (spec section 12.5.2). Every
+-- descendant of the login is deleted, forcing each holder to re-authenticate.
 --
 -- KEYS[1] = fam:{family}     the family index SET of live session hashes (already namespaced)
 -- ARGV[1] = namespace        e.g. "auth"
