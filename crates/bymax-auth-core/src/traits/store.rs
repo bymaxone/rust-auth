@@ -688,6 +688,10 @@ pub trait SessionStore: Send + Sync {
     /// was rotated, so the family index is the only surviving link between that token and an
     /// account.
     ///
+    /// A rotation deletes the record of the member it replaces, so an implementation reading a
+    /// store that rotates concurrently reads the family again while no member read names the
+    /// owner.
+    ///
     /// Split out of [`SessionStore::revoke_family`] because the revocation has to prune the
     /// owner's session index, and that key is now `{sess|psess}:{subject_hash}` — a derivation
     /// that needs the engine's identifier key, which a store deliberately does not hold. The
