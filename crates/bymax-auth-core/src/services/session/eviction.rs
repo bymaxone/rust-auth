@@ -7,7 +7,7 @@ use bymax_auth_types::AuthError;
 impl SessionService {
     /// End the oldest `over` of `candidates`, the account's other sessions oldest first. Ending
     /// one removes its whole sign-in, so after the first removal the index is read again before
-    /// each further live victim, and none is ended once the account is within `cap`; a chosen
+    /// each further live victim, which is ended only if that read shows more than `cap`; a chosen
     /// session already gone with an earlier one's sign-in still fires the eviction hook. A victim
     /// that cannot be removed is not replaced.
     pub(super) async fn evict(
@@ -33,7 +33,7 @@ impl SessionService {
 
     /// Whether the live index still lists more than `cap` sessions besides those in `removed`,
     /// which a refused index write may have left listed. An index that cannot be read answers no:
-    /// nothing further is ended on a guess.
+    /// no live session is ended without a successful read.
     async fn still_over(&self, subject: &str, cap: usize, removed: &[String]) -> bool {
         match self
             .store

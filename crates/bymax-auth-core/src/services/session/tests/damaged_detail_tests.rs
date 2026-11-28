@@ -3,6 +3,7 @@
 //! session: the display listing omits it, the entries still name it with no detail.
 
 use std::collections::HashSet;
+use std::ops::Range;
 use std::sync::Mutex;
 use std::sync::atomic::AtomicUsize;
 
@@ -21,7 +22,8 @@ pub(super) struct DamagedDetails {
     revoke_error: Option<ListingError>,
     lost: Option<String>,
     rotating: Mutex<Option<(String, String)>>,
-    listings_left: Option<AtomicUsize>,
+    refused_listings: Range<usize>,
+    listings: AtomicUsize,
     ownerless: bool,
 }
 
@@ -35,7 +37,8 @@ impl DamagedDetails {
             revoke_error: None,
             lost: None,
             rotating: Mutex::new(None),
-            listings_left: None,
+            refused_listings: 0..0,
+            listings: AtomicUsize::new(0),
             ownerless: false,
         }
     }
@@ -74,9 +77,9 @@ impl DamagedDetails {
         }
     }
 
-    /// Answer `count` entries listings and refuse the ones after them.
-    pub(super) fn listing_only(mut self, count: usize) -> Self {
-        self.listings_left = Some(AtomicUsize::new(count));
+    /// Refuse the entries listings whose position, counted from zero, falls in `refused`.
+    pub(super) fn refusing_listings(mut self, refused: Range<usize>) -> Self {
+        self.refused_listings = refused;
         self
     }
 
@@ -137,11 +140,8 @@ impl SessionStore for DamagedDetails {
         if let Some(make) = &self.listing_error {
             return Err(make());
         }
-        let spent = self.listings_left.as_ref().is_some_and(|left| {
-            left.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
-                .is_err()
-        });
-        if spent {
+        let position = self.listings.fetch_add(1, Ordering::SeqCst);
+        if self.refused_listings.contains(&position) {
             return Err(crate::services::internal_error("listing refused"));
         }
         let all = self.inner.list_sessions(kind, subject_hash).await?;

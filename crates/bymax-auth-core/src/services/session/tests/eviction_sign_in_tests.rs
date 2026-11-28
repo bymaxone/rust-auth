@@ -204,7 +204,7 @@ async fn a_removed_session_the_index_still_lists_is_not_counted_as_live() {
 #[tokio::test]
 async fn an_index_that_cannot_be_read_again_ends_no_further_session_and_is_logged() {
     let inner = Arc::new(InMemoryStores::new());
-    let store = Arc::new(DamagedDetails::new(inner.clone(), &[]).listing_only(1));
+    let store = Arc::new(DamagedDetails::new(inner.clone(), &[]).refusing_listings(1..usize::MAX));
     let seeds = [("a1", FAMILY_A), ("b1", ""), ("d1", ""), ("c1", "")];
     let (events, guard) = crate::log_capture::capture_events();
     let outcome = run(inner, store, &seeds, 1).await;
@@ -219,7 +219,7 @@ async fn an_index_that_cannot_be_read_again_ends_no_further_session_and_is_logge
 async fn a_victim_found_already_gone_is_followed_by_a_second_read_of_the_index() {
     let inner = Arc::new(InMemoryStores::new());
     let store = DamagedDetails::new(inner.clone(), &[]).losing(&hash("a1"));
-    let store = Arc::new(store.listing_only(1));
+    let store = Arc::new(store.refusing_listings(1..usize::MAX));
     let seeds = [("a1", FAMILY_A), ("b1", ""), ("d1", ""), ("c1", "")];
     let Some(outcome) = run(inner, store, &seeds, 1).await else { unreachable!() };
     assert!(outcome.live.contains(&hash("b1")));
@@ -229,8 +229,24 @@ async fn a_victim_found_already_gone_is_followed_by_a_second_read_of_the_index()
 async fn a_victim_whose_family_removal_fails_is_followed_by_a_second_read_of_the_index() {
     let inner = Arc::new(InMemoryStores::new());
     inner.fail_next_family_removals(1);
-    let store = Arc::new(DamagedDetails::new(inner.clone(), &[]).listing_only(1));
+    let store = Arc::new(DamagedDetails::new(inner.clone(), &[]).refusing_listings(1..usize::MAX));
     let seeds = [("a1", FAMILY_A), ("b1", ""), ("d1", ""), ("c1", "")];
     let Some(outcome) = run(inner, store, &seeds, 1).await else { unreachable!() };
     assert!(outcome.live.contains(&hash("b1")));
+}
+
+#[tokio::test]
+async fn a_failed_read_spares_that_victim_only_and_the_next_chosen_one_is_read_for_again() {
+    let inner = Arc::new(InMemoryStores::new());
+    let store = Arc::new(DamagedDetails::new(inner.clone(), &[]).refusing_listings(1..2));
+    let seeds = [
+        ("a1", FAMILY_A),
+        ("b1", ""),
+        ("d1", ""),
+        ("e1", ""),
+        ("c1", ""),
+    ];
+    let Some(outcome) = run(inner, store, &seeds, 2).await else { unreachable!() };
+    assert_eq!(outcome.live, hashes(&["b1", "c1", "e1"]));
+    assert_eq!(outcome.told, hashes(&["a1", "d1"]));
 }
