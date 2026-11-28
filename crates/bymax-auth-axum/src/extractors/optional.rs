@@ -1,8 +1,8 @@
 //! [`OptionalAuthUser`] (§8.3.3): the `OptionalAuthGuard` equivalent — identical sourcing
-//! and verification to [`super::AuthUser`], but a token that does not verify degrades to `None`.
-//! The one rejection is a store that cannot answer: the revocation, epoch and account-status
-//! reads come before any decision, so an outage is `503 auth.service_unavailable`, never an
-//! anonymous caller (`serviceUnavailable.appliesTo`).
+//! and verification to [`super::AuthUser`], but a request that carries no token at all is
+//! anonymous. A token that is present is verified like any other: one that does not verify is
+//! rejected exactly as [`super::AuthUser`] rejects it, never read as anonymous, and a store that
+//! cannot answer is `503 auth.service_unavailable`.
 
 use axum::extract::{FromRef, FromRequestParts};
 use bymax_auth_types::{AuthError, DashboardClaims};
@@ -12,10 +12,11 @@ use crate::extractors::verified_dashboard_claims;
 use crate::response::AuthRejection;
 use crate::state::AuthState;
 
-/// The verified claims when a valid dashboard token is present, else `None`. An absent,
-/// malformed, expired, or revoked token yields `None` rather than a rejection — used by
-/// public endpoints that render extra content for signed-in users. A store that cannot answer
-/// is rejected with `503`, because answering `None` would treat a signed-in caller as anonymous.
+/// The verified claims when a valid dashboard token is present, `None` when the request carries no
+/// token, and a rejection when a token is present and does not verify (malformed, expired,
+/// revoked, of another type) or the store cannot answer. Used by public endpoints that render
+/// extra content for signed-in users: a caller who sent a credential is told it failed, not served
+/// as anonymous.
 #[derive(Debug, Clone)]
 pub struct OptionalAuthUser(pub Option<DashboardClaims>);
 
@@ -33,15 +34,15 @@ where
     }
 }
 
-/// Turns a verification result into the optional claims: a missing, malformed, expired or revoked
-/// token degrades to `None`, and an outage stays the rejection.
+/// Turns a verification result into the optional claims: a missing token is anonymous, and every
+/// failure of a token that was sent stays the rejection.
 fn degrade(
     verified: Result<DashboardClaims, AuthError>,
 ) -> Result<Option<DashboardClaims>, AuthRejection> {
     match verified {
         Ok(claims) => Ok(Some(claims)),
-        Err(outage @ AuthError::ServiceUnavailable(_)) => Err(AuthRejection(outage)),
-        Err(_) => Ok(None),
+        Err(AuthError::TokenMissing) => Ok(None),
+        Err(error) => Err(AuthRejection(error)),
     }
 }
 
@@ -52,8 +53,8 @@ mod tests {
     use bymax_auth_core::config::TokenDelivery;
 
     #[tokio::test]
-    async fn optional_yields_some_for_valid_and_none_otherwise() {
-        // A valid token yields `Some`; an absent or invalid token yields `None`, never an error.
+    async fn optional_yields_some_for_a_valid_token_and_none_for_no_token() {
+        // A valid token yields `Some`; no token at all yields `None`, never an error.
         let Some(s) = scaffold(TokenDelivery::Cookie) else { return };
         let id = seed(&s.users, "opt@e.com", "USER").await;
         let token = dashboard_token(&s, &id).await;
@@ -64,26 +65,37 @@ mod tests {
         let mut empty = parts_empty();
         let none = OptionalAuthUser::from_request_parts(&mut empty, &s.state).await;
         assert!(matches!(none, Ok(OptionalAuthUser(None))));
+    }
 
+    #[tokio::test]
+    async fn a_token_that_is_present_but_does_not_verify_is_rejected_like_auth_user() {
+        // A presented credential is never read as "anonymous": a caller who sent a bad token
+        // learns it, exactly as on a route that requires authentication.
+        let Some(s) = scaffold(TokenDelivery::Cookie) else { return };
         let mut bad = parts_with_cookie("garbage");
-        let bad_none = OptionalAuthUser::from_request_parts(&mut bad, &s.state).await;
-        assert!(matches!(bad_none, Ok(OptionalAuthUser(None))));
+        let rejected = OptionalAuthUser::from_request_parts(&mut bad, &s.state).await;
+        assert!(
+            matches!(rejected, Err(AuthRejection(AuthError::TokenInvalid))),
+            "got {rejected:?}"
+        );
     }
 
     #[test]
-    fn an_outage_is_rejected_and_every_other_failure_degrades_to_none() {
-        let outage = Err(AuthError::ServiceUnavailable("store unavailable".into()));
-        assert!(matches!(
-            degrade(outage),
-            Err(AuthRejection(AuthError::ServiceUnavailable(_)))
-        ));
+    fn only_a_missing_token_degrades_to_none_and_other_failures_keep_their_variant() {
+        assert!(matches!(degrade(Err(AuthError::TokenMissing)), Ok(None)));
         for error in [
             AuthError::TokenInvalid,
-            AuthError::TokenMissing,
             AuthError::TokenRevoked,
+            AuthError::TokenExpired,
+            AuthError::ServiceUnavailable("store unavailable".into()),
             AuthError::Internal("defect".into()),
         ] {
-            assert!(matches!(degrade(Err(error)), Ok(None)));
+            let sent = std::mem::discriminant(&error);
+            let rejected = degrade(Err(error));
+            assert!(
+                matches!(&rejected, Err(AuthRejection(kept)) if std::mem::discriminant(kept) == sent),
+                "got {rejected:?}"
+            );
         }
     }
 }
