@@ -26,6 +26,23 @@ async fn a_family_id_outside_the_claims_form_is_not_written() {
 }
 
 #[tokio::test]
+async fn a_family_id_outside_the_claims_form_ends_no_sign_in() {
+    let store = InMemoryStores::new();
+    store.fail_next_family_removals(1);
+    let mut removed = Vec::new();
+    let ttl = Duration::from_secs(900);
+    let ended = end_sign_in(&store, KIND, "a:b", "subject", ttl, &mut removed).await;
+    assert!(ended.is_ok());
+    assert!(removed.is_empty());
+    assert_eq!(store.ended_session_count(), 0);
+    let reached = end_sign_in(&store, KIND, SID, "subject", ttl, &mut removed).await;
+    assert!(
+        reached.is_err(),
+        "the armed family removal was already spent"
+    );
+}
+
+#[tokio::test]
 async fn a_sid_outside_the_claims_form_is_not_looked_up() {
     let store = InMemoryStores::new();
     store.fail_session_access_reads(true);
