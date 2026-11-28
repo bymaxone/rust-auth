@@ -2110,6 +2110,18 @@ mod tests {
         );
         assert!(store.blacklist_access("jti", 60).await.is_ok());
         assert!(matches!(store.is_blacklisted("jti").await, Ok(false)));
+        assert!(
+            store
+                .revoke_session_access(SessionKind::Dashboard, "fam-1", 960)
+                .await
+                .is_ok()
+        );
+        assert!(matches!(
+            store
+                .is_session_access_revoked(SessionKind::Dashboard, "fam-1")
+                .await,
+            Ok(false)
+        ));
         assert!(matches!(
             store
                 .current_epoch(SessionKind::Dashboard, &subject("u1"))
