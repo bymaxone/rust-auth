@@ -1659,6 +1659,7 @@ mod tests {
     use time::OffsetDateTime;
 
     mod mfa_rotation;
+    mod session_id_rotation;
 
     fn key() -> HsKey {
         HsKey::from_bytes(b"a-test-hs256-secret-key-0123456789")
