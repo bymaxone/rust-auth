@@ -1,6 +1,6 @@
 //! Regression tests for the `sid` claim across a refresh rotation (dashboard and platform
 //! planes): the access token of a login, of its rotation and of a grace-window recovery all
-//! name the same session.
+//! name the same session, and a rotated record with no well-formed family id names none.
 //!
 //! Layer: unit tests of `TokenManagerService`, sharing the fixtures of the parent test module.
 
@@ -52,4 +52,44 @@ async fn platform_rotation_and_grace_recovery_keep_the_session_id_of_the_login()
             if login == next && login == grace),
         "{sids:?}"
     );
+}
+
+/// Seed a session whose record carries `family_id`, rotate it, and return the `sid` of the new
+/// access token, or `None` when any of those steps failed.
+async fn rotated_sid_of(family_id: &str) -> Option<Option<String>> {
+    let store = Arc::new(InMemoryStores::new());
+    let svc = service(store.clone());
+    let record = SessionRecord {
+        user_id: user().id,
+        tenant_id: Some(user().tenant_id),
+        role: user().role,
+        device: "Chrome".to_owned(),
+        ip: "203.0.113.4".to_owned(),
+        created_at: now_offset(),
+        mfa_enabled: false,
+        mfa_verified: false,
+        family_id: family_id.to_owned(),
+        family_created_at: Some(now_offset()),
+    };
+    let old = RawRefreshToken::generate();
+    store
+        .create_session(
+            SessionKind::Dashboard,
+            &dashboard_subject(),
+            &old.redis_hash(),
+            &record,
+            3600,
+        )
+        .await
+        .ok()?;
+    let rotated = rotated_for(&svc, old.expose_secret()).await?;
+    Some(svc.verify_access(&rotated.access_token).await.ok()?.sid)
+}
+
+#[tokio::test]
+async fn a_rotated_record_without_a_well_formed_family_id_names_no_session() {
+    for family_id in ["", "fam-1", "00000000-0000-4000-8000-00000000000A"] {
+        let sid = rotated_sid_of(family_id).await;
+        assert!(matches!(sid, Some(None)), "{family_id:?} gave {sid:?}");
+    }
 }
