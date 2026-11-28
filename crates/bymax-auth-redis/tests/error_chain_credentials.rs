@@ -23,8 +23,8 @@ fn chain(error: &(dyn std::error::Error + 'static)) -> String {
     out
 }
 
-/// The engine-facing chain of the failure a pool built from `url` hits, or `None` when it did not
-/// fail.
+/// The chain of the [`AuthError`] for the failure a pool built from `url` hits, or `None` when it
+/// did not fail.
 async fn failure_chain(url: &str) -> Option<String> {
     let config = deadpool_redis::Config::from_url(url);
     let store_error: RedisStoreError =

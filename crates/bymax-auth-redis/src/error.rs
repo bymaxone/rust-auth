@@ -5,7 +5,8 @@
 //! built — is captured as a [`RedisStoreError`]. Store-trait methods surface it as the
 //! opaque [`AuthError::Internal`], or [`AuthError::ServiceUnavailable`] when the store could not
 //! answer at all (see [`RedisStoreError::is_outage`]); the concrete cause travels as that error's
-//! source, for a host to read, is never serialized to a client, and never contains a secret.
+//! source, for a host to read, and is never serialized to a client. Each variant's own `Display`
+//! text is fixed; what the driver or decoder says sits below it in the source chain.
 
 use bymax_auth_types::AuthError;
 
