@@ -1,7 +1,7 @@
 //! A store failure's error chain never carries the connection string (layer: store, tests).
 //!
-//! The chain is what the engine logs for operators when the store cannot answer, so it must not
-//! be able to hold the URL, its user, its password or its host. Each case builds a pool from a URL
+//! The chain reaches the host as the source of the engine's error, and a host may log it, so it
+//! must not be able to hold the URL, its user, its password or its host. Each case builds a pool from a URL
 //! whose password is a sentinel, fails on it, and asserts the sentinel is absent from the whole
 //! chain, so an error type that starts echoing its input fails here.
 

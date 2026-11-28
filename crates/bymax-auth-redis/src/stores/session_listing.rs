@@ -75,7 +75,7 @@ fn prune_cause(error: &RedisStoreError) -> &'static str {
 }
 
 /// What a failed prune means for the listing: nothing. The prune is a tidy-up that did not happen,
-/// not a listing that should fail, so every candidate stays listed (it is not known to be dead) and
+/// not a listing that should fail, so no session is dropped as dead (none is known to be) and
 /// the next listing tries again. The listing also feeds session-cap enforcement at login, which a
 /// failed tidy-up must not stop.
 pub(super) fn settle_prune(pruned: Result<Vec<String>, RedisStoreError>) -> Vec<String> {
