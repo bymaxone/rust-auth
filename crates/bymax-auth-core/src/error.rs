@@ -236,14 +236,13 @@ pub enum ConfigError {
     #[error("brute_force.window must be at least 1s (a zero window deletes the counter)")]
     BruteForceWindowInvalid,
     /// A one-time-code or reset-token lifetime is zero. The store refuses `SET key value EX 0`, so
-    /// every request that issues one would fail, and the failure would first appear on a user's
-    /// first reset instead of at startup.
+    /// the failure belongs at startup and not on a live request.
     #[error("{field} must be at least 1s (a zero lifetime cannot be stored)")]
     TtlInvalid {
         /// The setting that was zero.
         field: &'static str,
     },
-    /// `sessions.default_max_sessions` is zero, which would evict every session as it is created.
+    /// `sessions.default_max_sessions` is zero, which is not a cap a session can be held to.
     #[error("sessions.default_max_sessions must be a positive integer (got {got})")]
     DefaultMaxSessionsInvalid {
         /// The rejected cap.

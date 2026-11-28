@@ -3255,7 +3255,7 @@ bumped either way.
   (shared contract version 8): its key is `ra:{hmac_sha256(hmacKey, userSubject)}:{sid}`, with the
   `sid` the access token carries (the refresh family id), and the mark is written in the same
   atomic step as the session, only when a credential was presented. A token with no usable `sid`
-  earns no proof, so another session of the same account cannot ride a real sign-in it did not
+  earns no proof, and another session of the same account cannot ride a real sign-in it did not
   perform, on MFA enrolment, `schedule-deletion` or `transfer-ownership`. It is not consumed on use,
   so within its lifetime the signed-in session passes that re-proof repeatedly; consuming it on a
   destructive use is a further contract change that has not been made.

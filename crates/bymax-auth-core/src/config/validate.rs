@@ -516,7 +516,7 @@ impl AuthConfig {
 
     /// Rule 14a: a one-time-code or reset-token lifetime of zero cannot be stored (`SET key value
     /// EX 0` is refused), so that failure belongs at startup and not on the first request; a
-    /// session cap of zero would evict every session as it is created; and the status-cache
+    /// session cap of zero is not a cap a session can be held to; and the status-cache
     /// lifetime is how long a suspended account still passes, so it has a ceiling (`0` is no
     /// cache, and stays valid).
     fn validate_numeric_bounds(&self) -> Result<(), ConfigError> {
