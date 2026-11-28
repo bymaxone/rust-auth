@@ -20,8 +20,8 @@ use crate::config::{AccessDeniedEventsConfig, AuthConfig, Environment};
 use crate::engine::AuthEngine;
 use crate::error::ConfigError;
 use crate::services::auth::test_support::base_config;
-use crate::services::user_subject_hash;
 use crate::services::workspace::WorkspaceAccessRequest;
+use crate::services::{user_subject, user_subject_hash};
 use crate::testing::{
     InMemoryMembershipCache, InMemoryStores, InMemoryUserRepository, InMemoryWorkspaces,
 };
@@ -341,9 +341,26 @@ async fn the_accounts_are_keyed_by_the_subjects_the_contract_pins() {
     let vectors = contract()["workspaceRealtime"]["accessDeniedVectors"].clone();
     let vectors = vectors.as_array().cloned().unwrap_or_default();
     assert!(!vectors.is_empty());
+    let fields = [
+        "digestHex",
+        "suppressedKey",
+        "tenantId",
+        "userId",
+        "userSubject",
+        "windowKey",
+    ];
     for vector in vectors {
+        let mut named: Vec<&String> = vector
+            .as_object()
+            .into_iter()
+            .flat_map(|v| v.keys())
+            .collect();
+        named.sort();
+        assert_eq!(named, fields);
         let text = |name: &str| vector[name].as_str().unwrap_or_default().to_owned();
         let (tenant, user) = (text("tenantId"), text("userId"));
+        let subject = user_subject(MfaContext::Dashboard, Some(&tenant), &user);
+        assert_eq!(subject, text("userSubject"));
         let digest = user_subject_hash(&hmac_key(), MfaContext::Dashboard, Some(&tenant), &user);
         assert_eq!(digest, text("digestHex"));
         assert_eq!(text("windowKey"), format!("wad:{digest}"));
