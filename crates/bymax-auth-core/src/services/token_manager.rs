@@ -2498,6 +2498,7 @@ mod tests {
             iat,
             exp,
             epoch: 0,
+            sid: None,
         }
     }
 
