@@ -781,8 +781,13 @@ impl MfaService {
     /// refused with [`AuthError::MfaStateConflict`] exactly as while one is in flight.
     async fn release_transition_lock(&self, lock_id: &str, lock_token: &str) {
         if let Err(error) = self.mfa_store.release_mfa_lock(lock_id, lock_token).await {
-            let cause = crate::services::error_chain(&error);
-            tracing::warn!(%cause, "mfa transition: the lock release failed; the lock expires on its own");
+            // Bound first: a macro argument is not evaluated when no subscriber is listening.
+            let cause = crate::services::failure_cause(&error);
+            tracing::warn!(
+                event = "RUST_AUTH_MFA_LOCK_RELEASE_FAILED",
+                cause,
+                "mfa transition: the lock release failed; the lock expires on its own"
+            );
         }
     }
 
