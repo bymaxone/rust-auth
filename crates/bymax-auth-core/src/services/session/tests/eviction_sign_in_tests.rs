@@ -173,3 +173,64 @@ async fn a_victim_a_concurrent_logout_removed_counts_as_removed_and_is_not_logge
     assert_eq!(outcome.live, hashes(&["c1", "d1"]));
     assert!(!events.contains("eviction of an over-cap session failed"));
 }
+
+/// Two are over the cap: `a1`, whose sibling `aa` is newer than the second chosen `b1`.
+const TWO_OVER: &[Seed<'_>] = &[
+    ("a1", FAMILY_A),
+    ("b1", FAMILY_B),
+    ("aa", FAMILY_A),
+    ("c1", ""),
+];
+
+#[tokio::test]
+async fn a_sibling_that_rotates_before_the_removal_does_not_cost_a_further_sign_in() {
+    let inner = Arc::new(InMemoryStores::new());
+    let store = DamagedDetails::new(inner.clone(), &[]);
+    let store = Arc::new(store.rotating_before_removal(&hash("aa"), &hash("af")));
+    let Some(outcome) = run(inner, store, TWO_OVER, 1).await else { unreachable!() };
+    assert_eq!(outcome.live, hashes(&["b1", "c1"]));
+    assert_eq!(outcome.told, hashes(&["a1"]));
+}
+
+#[tokio::test]
+async fn a_removed_session_the_index_still_lists_is_not_counted_as_live() {
+    let inner = Arc::new(InMemoryStores::new());
+    let store = Arc::new(DamagedDetails::new(inner.clone(), &[]).leaving_members_listed());
+    let Some(outcome) = run(inner, store, SIBLINGS_AROUND, 1).await else { unreachable!() };
+    assert_eq!(outcome.told, hashes(&["a1"]));
+    assert!(outcome.live.contains(&hash("b1")));
+}
+
+#[tokio::test]
+async fn an_index_that_cannot_be_read_again_ends_no_further_session_and_is_logged() {
+    let inner = Arc::new(InMemoryStores::new());
+    let store = Arc::new(DamagedDetails::new(inner.clone(), &[]).listing_only(1));
+    let seeds = [("a1", FAMILY_A), ("b1", ""), ("d1", ""), ("c1", "")];
+    let (events, guard) = crate::log_capture::capture_events();
+    let outcome = run(inner, store, &seeds, 1).await;
+    drop(guard);
+    let Some(outcome) = outcome else { unreachable!() };
+    assert_eq!(outcome.live, hashes(&["b1", "c1", "d1"]));
+    assert_eq!(outcome.told, hashes(&["a1"]));
+    assert!(events.contains("the session cap was not enforced"));
+}
+
+#[tokio::test]
+async fn a_victim_found_already_gone_is_followed_by_a_second_read_of_the_index() {
+    let inner = Arc::new(InMemoryStores::new());
+    let store = DamagedDetails::new(inner.clone(), &[]).losing(&hash("a1"));
+    let store = Arc::new(store.listing_only(1));
+    let seeds = [("a1", FAMILY_A), ("b1", ""), ("d1", ""), ("c1", "")];
+    let Some(outcome) = run(inner, store, &seeds, 1).await else { unreachable!() };
+    assert!(outcome.live.contains(&hash("b1")));
+}
+
+#[tokio::test]
+async fn a_victim_whose_family_removal_fails_is_followed_by_a_second_read_of_the_index() {
+    let inner = Arc::new(InMemoryStores::new());
+    inner.fail_next_family_removals(1);
+    let store = Arc::new(DamagedDetails::new(inner.clone(), &[]).listing_only(1));
+    let seeds = [("a1", FAMILY_A), ("b1", ""), ("d1", ""), ("c1", "")];
+    let Some(outcome) = run(inner, store, &seeds, 1).await else { unreachable!() };
+    assert!(outcome.live.contains(&hash("b1")));
+}

@@ -199,9 +199,8 @@ impl SessionService {
         // (`None` sorts before every `Some`), so it is evicted first.
         sessions.sort_by_key(|entry| entry.detail.as_ref().map(|detail| detail.created_at));
 
-        let over = sessions
-            .len()
-            .saturating_sub(usize::try_from(limit).unwrap_or(usize::MAX));
+        let cap = usize::try_from(limit).unwrap_or(usize::MAX);
+        let over = sessions.len().saturating_sub(cap);
         if over == 0 {
             return;
         }
@@ -211,7 +210,8 @@ impl SessionService {
             .map(|entry| entry.session_hash)
             .filter(|hash| !constant_time_eq(hash.as_bytes(), new_hash.as_bytes()))
             .collect();
-        self.evict(&subject, user_id, &candidates, over, ctx).await;
+        self.evict(&subject, user_id, &candidates, over, cap, ctx)
+            .await;
     }
 
     /// Resolve the per-user concurrent-session cap: the optional resolver wins when it is

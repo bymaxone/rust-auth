@@ -4,6 +4,7 @@
 
 use std::collections::HashSet;
 use std::sync::Mutex;
+use std::sync::atomic::AtomicUsize;
 
 use super::*;
 use crate::traits::{SessionDetail, SessionEntry, SessionRotation};
@@ -19,6 +20,9 @@ pub(super) struct DamagedDetails {
     listing_error: Option<ListingError>,
     revoke_error: Option<ListingError>,
     lost: Option<String>,
+    rotating: Mutex<Option<(String, String)>>,
+    listings_left: Option<AtomicUsize>,
+    ownerless: bool,
 }
 
 impl DamagedDetails {
@@ -30,6 +34,9 @@ impl DamagedDetails {
             listing_error: None,
             revoke_error: None,
             lost: None,
+            rotating: Mutex::new(None),
+            listings_left: None,
+            ownerless: false,
         }
     }
 
@@ -55,6 +62,52 @@ impl DamagedDetails {
     pub(super) fn losing(mut self, hash: &str) -> Self {
         self.lost = Some(hash.to_owned());
         self
+    }
+
+    /// Rotate `old` to `new` as the first family removal is asked for, which is after the cap has
+    /// listed the index and before the family is read.
+    pub(super) fn rotating_before_removal(self, old: &str, new: &str) -> Self {
+        let rotation = Some((old.to_owned(), new.to_owned()));
+        Self {
+            rotating: Mutex::new(rotation),
+            ..self
+        }
+    }
+
+    /// Answer `count` entries listings and refuse the ones after them.
+    pub(super) fn listing_only(mut self, count: usize) -> Self {
+        self.listings_left = Some(AtomicUsize::new(count));
+        self
+    }
+
+    /// Remove families without pruning the index, as when its `SREM` is refused.
+    pub(super) fn leaving_members_listed(mut self) -> Self {
+        self.ownerless = true;
+        self
+    }
+
+    async fn rotate_pending(
+        &self,
+        kind: SessionKind,
+        owner_subject_hash: Option<&str>,
+    ) -> Result<(), AuthError> {
+        let pending = self.rotating.lock().ok().and_then(|mut slot| slot.take());
+        let (Some((old, new)), Some(subject_hash)) = (pending, owner_subject_hash) else {
+            return Ok(());
+        };
+        let Some(new_record) = self.inner.find_session(kind, &old).await? else {
+            return Ok(());
+        };
+        let rotation = SessionRotation {
+            old_hash: old,
+            new_hash: new,
+            new_raw: String::new(),
+            new_record,
+            subject_hash: subject_hash.to_owned(),
+            refresh_ttl: 3600,
+            grace_ttl: 60,
+        };
+        self.inner.rotate(kind, &rotation).await.map(|_| ())
     }
 
     fn is_damaged(&self, hash: &str) -> bool {
@@ -83,6 +136,13 @@ impl SessionStore for DamagedDetails {
     ) -> Result<Vec<SessionEntry>, AuthError> {
         if let Some(make) = &self.listing_error {
             return Err(make());
+        }
+        let spent = self.listings_left.as_ref().is_some_and(|left| {
+            left.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
+                .is_err()
+        });
+        if spent {
+            return Err(crate::services::internal_error("listing refused"));
         }
         let all = self.inner.list_sessions(kind, subject_hash).await?;
         Ok(all
@@ -188,9 +248,9 @@ impl SessionStore for DamagedDetails {
         family_id: &str,
         owner_subject_hash: Option<&str>,
     ) -> Result<Vec<String>, AuthError> {
-        self.inner
-            .revoke_family(kind, family_id, owner_subject_hash)
-            .await
+        self.rotate_pending(kind, owner_subject_hash).await?;
+        let owner = owner_subject_hash.filter(|_| !self.ownerless);
+        self.inner.revoke_family(kind, family_id, owner).await
     }
 
     async fn blacklist_access(
