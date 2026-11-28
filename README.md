@@ -866,6 +866,7 @@ A test (`crates/bymax-auth-core/tests/log_events.rs`) reads every crate's source
 | `RUST_AUTH_MFA_DISABLE_INVALID_CODE` | warn | Disabling MFA was refused: invalid code |
 | `RUST_AUTH_MFA_ENABLED` | info | MFA was enabled |
 | `RUST_AUTH_MFA_INVALID_CODE` | warn | An MFA challenge was refused: invalid code |
+| `RUST_AUTH_MFA_LOCK_RELEASE_FAILED` | warn | Releasing the MFA transition lock failed; the lock expires on its own |
 | `RUST_AUTH_MFA_PLATFORM_CHALLENGE_PASSED` | info | A platform MFA challenge was passed |
 | `RUST_AUTH_MFA_RESET_ADMINISTRATIVE` | warn | MFA was removed administratively |
 | `RUST_AUTH_MFA_RESET_NOTHING_TO_REMOVE` | info | An administrative MFA reset found no second factor to remove |

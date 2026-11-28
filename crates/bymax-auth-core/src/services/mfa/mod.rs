@@ -22,6 +22,8 @@ mod contract_tests;
 #[cfg(test)]
 mod hook_tests;
 #[cfg(test)]
+mod lock_release_tests;
+#[cfg(test)]
 mod plane_tests;
 #[cfg(test)]
 mod recovery_tests;
@@ -730,7 +732,8 @@ impl MfaService {
     /// A caller that cannot take the lock is refused with [`AuthError::MfaStateConflict`]
     /// rather than made to wait: concurrent MFA state changes on one account are pathological,
     /// and "try again" is the honest answer. The lock is released on every exit, so an ordinary
-    /// failure does not strand the account either.
+    /// failure does not strand the account either. A release that fails is logged and
+    /// changes nothing (see [`Self::release_transition_lock`]).
     ///
     /// # Errors
     ///
@@ -766,10 +769,26 @@ impl MfaService {
             .await;
         // Released on every exit, including the error one: a failed transition must not leave
         // the account unchangeable for the lock's whole TTL.
-        self.mfa_store
-            .release_mfa_lock(&lock_id, &lock_token)
-            .await?;
+        self.release_transition_lock(&lock_id, &lock_token).await;
         outcome
+    }
+
+    /// Releases the lock `transition_mfa_record` took. Releasing never changes what a transition
+    /// answers: once the record has been written the transition happened, and a store that cannot
+    /// answer the release must neither turn that into an error nor replace the transition's own
+    /// error. The failure is logged; the lock expires on its own after
+    /// [`MFA_TRANSITION_LOCK_TTL_SECONDS`], and until then another transition on the account is
+    /// refused with [`AuthError::MfaStateConflict`] exactly as while one is in flight.
+    async fn release_transition_lock(&self, lock_id: &str, lock_token: &str) {
+        if let Err(error) = self.mfa_store.release_mfa_lock(lock_id, lock_token).await {
+            // Bound first: a macro argument is not evaluated when no subscriber is listening.
+            let cause = crate::services::failure_cause(&error);
+            tracing::warn!(
+                event = "RUST_AUTH_MFA_LOCK_RELEASE_FAILED",
+                cause,
+                "mfa transition: the lock release failed; the lock expires on its own"
+            );
+        }
     }
 
     /// The body of [`Self::transition_mfa_record`], split out so the lock release is a single

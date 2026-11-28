@@ -29,7 +29,7 @@ use crate::traits::{
 use zeroize::Zeroizing;
 
 pub(super) const PASSWORD: &str = "correct horse battery staple";
-const TENANT: &str = "t1";
+pub(super) const TENANT: &str = "t1";
 
 /// The identifier-hashing key every service in these fixtures shares.
 ///
@@ -2550,7 +2550,7 @@ async fn enrol(
 }
 
 /// Seed a fresh user (not MFA-enabled) and return its id.
-async fn seed_user(users: &InMemoryUserRepository, email: &str) -> Option<String> {
+pub(super) async fn seed_user(users: &InMemoryUserRepository, email: &str) -> Option<String> {
     let created = users
         .create(bymax_auth_types::CreateUserData {
             email: email.to_owned(),
