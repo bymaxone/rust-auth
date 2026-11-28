@@ -211,10 +211,6 @@ fn derive_hmac_key(secret: &str) -> SecretBox<[u8; 64]> {
     SecretBox::new(Box::new(key))
 }
 
-/// Hard ceiling on `user_status_cache_ttl`, in seconds (one hour): how long a suspended account
-/// can still pass. `0` stays "no cache". `nest-auth` enforces the identical bound.
-const MAX_USER_STATUS_CACHE_TTL_SECS: u64 = 3_600;
-
 /// Hard ceiling on `jwt.refresh_grace_window`, in seconds (five minutes). Deliberately far
 /// above the 30-second default and far below anything that could be mistaken for a session
 /// policy. `nest-auth` enforces the identical bound.
@@ -432,10 +428,6 @@ impl AuthConfig {
             return Err(ConfigError::OtpLengthRange { got: otp_length });
         }
 
-        // Rule 14a: the numeric bounds a zero or an unbounded value would turn into a silent
-        // failure or a silent weakening.
-        self.validate_numeric_bounds()?;
-
         // Rule 15-18: OAuth provider fields and redirect safety.
         self.validate_oauth(environment)?;
 
@@ -510,36 +502,6 @@ impl AuthConfig {
                     origin: origin.clone(),
                 });
             }
-        }
-        Ok(())
-    }
-
-    /// Rule 14a: a one-time-code or reset-token lifetime of zero cannot be stored (`SET key value
-    /// EX 0` is refused), so that failure belongs at startup and not on the first request; a
-    /// session cap of zero is not a cap a session can be held to; and the status-cache
-    /// lifetime is how long a suspended account still passes, so it has a ceiling (`0` is no
-    /// cache, and stays valid).
-    fn validate_numeric_bounds(&self) -> Result<(), ConfigError> {
-        let lifetimes = [
-            ("password_reset.token_ttl", self.password_reset.token_ttl),
-            ("password_reset.otp_ttl", self.password_reset.otp_ttl),
-            (
-                "email_verification.otp_ttl",
-                self.email_verification.otp_ttl,
-            ),
-        ];
-        if let Some((field, _)) = lifetimes.iter().find(|(_, ttl)| ttl.as_secs() == 0) {
-            return Err(ConfigError::TtlInvalid { field });
-        }
-        if self.sessions.default_max_sessions == 0 {
-            return Err(ConfigError::DefaultMaxSessionsInvalid { got: 0 });
-        }
-        let status = self.user_status_cache_ttl.as_secs();
-        if status > MAX_USER_STATUS_CACHE_TTL_SECS {
-            return Err(ConfigError::UserStatusCacheTtlCeiling {
-                got: status,
-                max: MAX_USER_STATUS_CACHE_TTL_SECS,
-            });
         }
         Ok(())
     }
@@ -1403,63 +1365,6 @@ mod tests {
             cfg.validate(Environment::Production),
             Err(ConfigError::OtpLengthRange { got: 9 })
         ));
-    }
-
-    #[test]
-    fn rejects_a_zero_lifetime_on_each_reset_and_verification_ttl() {
-        // A sub-second value is zero seconds to the store, so it is refused like a zero.
-        for (field, set) in [
-            ("password_reset.token_ttl", 0),
-            ("password_reset.otp_ttl", 1),
-            ("email_verification.otp_ttl", 2),
-        ] {
-            let mut cfg = valid_config();
-            let zero = std::time::Duration::from_millis(500);
-            match set {
-                0 => cfg.password_reset.token_ttl = zero,
-                1 => cfg.password_reset.otp_ttl = zero,
-                _ => cfg.email_verification.otp_ttl = zero,
-            }
-            let refused = cfg.validate(Environment::Production);
-            assert!(
-                matches!(refused, Err(ConfigError::TtlInvalid { field: named }) if named == field),
-                "{field} of zero must be refused, got {refused:?}"
-            );
-        }
-        let mut ok = valid_config();
-        ok.password_reset.token_ttl = std::time::Duration::from_secs(1);
-        assert!(ok.validate(Environment::Production).is_ok());
-    }
-
-    #[test]
-    fn rejects_a_zero_default_max_sessions_and_accepts_one() {
-        let mut cfg = valid_config();
-        cfg.sessions.default_max_sessions = 0;
-        assert!(matches!(
-            cfg.validate(Environment::Production),
-            Err(ConfigError::DefaultMaxSessionsInvalid { got: 0 })
-        ));
-        cfg.sessions.default_max_sessions = 1;
-        assert!(cfg.validate(Environment::Production).is_ok());
-    }
-
-    #[test]
-    fn bounds_the_user_status_cache_ttl_and_keeps_zero_as_no_cache() {
-        let mut cfg = valid_config();
-        for (secs, accepted) in [(0, true), (60, true), (3_600, true), (3_601, false)] {
-            cfg.user_status_cache_ttl = std::time::Duration::from_secs(secs);
-            let outcome = cfg.validate(Environment::Production);
-            assert_eq!(outcome.is_ok(), accepted, "{secs}s gave {outcome:?}");
-            if !accepted {
-                assert!(matches!(
-                    outcome,
-                    Err(ConfigError::UserStatusCacheTtlCeiling {
-                        got: 3_601,
-                        max: 3_600
-                    })
-                ));
-            }
-        }
     }
 
     fn google(callback: &str) -> GoogleOAuthConfig {

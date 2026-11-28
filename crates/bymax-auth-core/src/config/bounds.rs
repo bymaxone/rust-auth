@@ -21,6 +21,10 @@ const LIFETIME_CEILING_DAYS: u64 = 3_650;
 /// The longest failure-counting window, in seconds (one week).
 const BRUTE_FORCE_WINDOW_CEILING_SECS: u64 = 604_800;
 
+/// The longest status-cache lifetime, in seconds (one hour): how long a suspended account can
+/// still pass. `0` is no cache. `nest-auth` enforces the same ceiling.
+const MAX_USER_STATUS_CACHE_TTL_SECS: u64 = 3_600;
+
 /// The most lanes a password hasher may be asked for.
 #[cfg(any(feature = "scrypt", feature = "argon2"))]
 const PARALLELISM_CEILING: u64 = 16;
@@ -43,7 +47,20 @@ impl AuthConfig {
     pub(super) fn validate_ceilings(&self) -> Result<(), ConfigError> {
         self.validate_session_ceilings()?;
         self.validate_lifetime_ceilings()?;
+        self.validate_status_cache_ceiling()?;
         self.validate_parallelism_ceilings()
+    }
+
+    /// The status-cache lifetime has a ceiling and no floor.
+    fn validate_status_cache_ceiling(&self) -> Result<(), ConfigError> {
+        let got = self.user_status_cache_ttl.as_secs();
+        if got > MAX_USER_STATUS_CACHE_TTL_SECS {
+            return Err(ConfigError::UserStatusCacheTtlCeiling {
+                got,
+                max: MAX_USER_STATUS_CACHE_TTL_SECS,
+            });
+        }
+        Ok(())
     }
 
     /// The session cap, the session lifetimes and the failure-counting window.
