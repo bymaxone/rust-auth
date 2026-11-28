@@ -29,6 +29,8 @@ async-trait = "0.1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
+# A listing whose tidy-up failed still answers; the failure is logged here, where only this crate sees it.
+tracing = "0.1"
 # RFC 3339 timestamps on the `sd:`/`psd:` per-session detail value, matching the wire shape
 # of the session DTOs in `bymax-auth-types`.
 time = { version = "0.3", default-features = false, features = ["std", "serde-well-known"] }

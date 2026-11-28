@@ -35,12 +35,13 @@ const ALLOWED_ARGS: [&str; 8] = [
 
 /// The functions a `let cause = ...` may bind from: each returns a `&'static str` out of a
 /// closed set and never formats the error it was given.
-const CLOSED_CAUSES: [&str; 5] = [
+const CLOSED_CAUSES: [&str; 6] = [
     "crate::services::failure_cause(",
     "failure_cause(",
     "unmigrated_cause(",
     "unsent_cause(",
     "provider_cause(",
+    "prune_cause(",
 ];
 
 /// The inline captures a message may name. Each is a `&'static str` the library fixes (a logout

@@ -4,9 +4,9 @@
 //! Lua script that fails, a stored value that will not deserialize, or a pool that cannot be
 //! built — is captured as a [`RedisStoreError`]. Store-trait methods surface it as the
 //! opaque [`AuthError::Internal`], or [`AuthError::ServiceUnavailable`] when the store could not
-//! answer at all (see [`RedisStoreError::is_outage`]); the concrete cause is carried for
-//! diagnostics (the engine logs it) but never serialized to a client, and it never contains a
-//! secret.
+//! answer at all (see [`RedisStoreError::is_outage`]); the concrete cause travels as that error's
+//! source, for a host to read, and is never serialized to a client. Each variant's own `Display`
+//! text is fixed; what the driver or decoder says sits below it in the source chain.
 
 use bymax_auth_types::AuthError;
 
@@ -77,7 +77,7 @@ fn command_is_outage(error: &redis::RedisError) -> bool {
 impl From<RedisStoreError> for AuthError {
     /// Classify a backend failure: [`AuthError::ServiceUnavailable`] when the store could not
     /// answer, otherwise the opaque [`AuthError::Internal`]. The cause is preserved as the boxed
-    /// source (logged, never serialized); none of the variants carry a secret in their `Display`
+    /// source (never serialized); none of the variants carry a secret in their `Display`
     /// form.
     fn from(error: RedisStoreError) -> Self {
         if error.is_outage() {

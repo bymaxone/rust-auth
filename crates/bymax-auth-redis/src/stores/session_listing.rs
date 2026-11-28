@@ -9,6 +9,7 @@ use redis::AsyncCommands;
 
 use super::session::{SessionDetailValue, index_member, kind_prefixes, live_member_hash};
 use crate::error::RedisStoreError;
+use crate::keys::Prefix;
 use crate::pool::RedisStores;
 use crate::script;
 
@@ -61,6 +62,48 @@ pub(super) async fn prune_dead_members(
         invocation.arg(*member);
     }
     Ok(invocation.invoke_async(conn).await?)
+}
+
+/// The closed cause a log line names for a failed prune: `store_unavailable` when the store could
+/// not answer, `internal` for any other failure. The error's own text never reaches a log line.
+fn prune_cause(error: &RedisStoreError) -> &'static str {
+    if error.is_outage() {
+        "store_unavailable"
+    } else {
+        "internal"
+    }
+}
+
+/// What a failed prune means for the listing: nothing. The prune is a tidy-up that did not happen,
+/// not a listing that should fail, so no session is dropped as dead (none is known to be) and
+/// the next listing tries again. The listing also feeds session-cap enforcement at login, which a
+/// failed tidy-up must not stop.
+pub(super) fn settle_prune(pruned: Result<Vec<String>, RedisStoreError>) -> Vec<String> {
+    pruned.unwrap_or_else(|error| {
+        // Bound first: a macro argument is not evaluated when no subscriber is listening.
+        let cause = prune_cause(&error);
+        tracing::warn!(
+            event = "RUST_AUTH_SESSION_PRUNE_FAILED",
+            cause,
+            "listing sessions: the dead-member prune failed; it is retried on the next listing"
+        );
+        Vec::new()
+    })
+}
+
+/// The listing once the prune has been tried: a prune that answered drops the detail-less entries
+/// it removed (their `rt:` key is gone, so the session is dead, not merely detail-less), and a prune
+/// that failed (see [`settle_prune`]) drops none.
+pub(super) fn settle_listing(
+    mut entries: Vec<SessionEntry>,
+    pruned: Result<Vec<String>, RedisStoreError>,
+    rt: Prefix,
+) -> Vec<SessionEntry> {
+    let removed = settle_prune(pruned);
+    entries.retain(|entry| {
+        entry.detail.is_some() || !removed.contains(&index_member(rt, &entry.session_hash))
+    });
+    entries
 }
 
 impl RedisStores {
@@ -134,13 +177,8 @@ impl RedisStores {
                 }
             }
         }
-        let removed = prune_dead_members(&mut conn, keys.namespace(), &sess_key, &stale).await?;
-        // A removed member's key is gone: that session is dead, not merely detail-less.
-        entries.retain(|entry| {
-            entry.detail.is_some()
-                || !removed.contains(&index_member(prefixes.rt, &entry.session_hash))
-        });
-        Ok(entries)
+        let pruned = prune_dead_members(&mut conn, keys.namespace(), &sess_key, &stale).await;
+        Ok(settle_listing(entries, pruned, prefixes.rt))
     }
 }
 
@@ -153,6 +191,56 @@ mod tests {
         format!(
             r#"{{"device":"{device}","ip":"1.2.3.4","createdAt":1700000000000,"lastActivityAt":1700000001000}}"#
         )
+    }
+
+    /// A listing of one fully described session and two with no detail record.
+    fn three_entries() -> Vec<SessionEntry> {
+        let detail = Some(SessionDetail {
+            session_hash: "a".to_owned(),
+            device: "Firefox".to_owned(),
+            ip: "1.2.3.4".to_owned(),
+            created_at: time::OffsetDateTime::UNIX_EPOCH,
+            last_activity_at: time::OffsetDateTime::UNIX_EPOCH,
+        });
+        let entry = |hash: &str, detail| SessionEntry {
+            session_hash: hash.to_owned(),
+            detail,
+        };
+        vec![entry("a", detail), entry("b", None), entry("c", None)]
+    }
+
+    fn hashes(entries: &[SessionEntry]) -> Vec<&str> {
+        entries
+            .iter()
+            .map(|entry| entry.session_hash.as_str())
+            .collect()
+    }
+
+    #[test]
+    fn a_failed_prune_leaves_every_entry_listed() {
+        let decode = serde_json::from_str::<u8>("x").err();
+        assert!(decode.is_some(), "the fixture must be a decode failure");
+        let Some(source) = decode else { return };
+        let failed = Err(RedisStoreError::Decode(source));
+        let listed = settle_listing(three_entries(), failed, Prefix::Rt);
+        assert_eq!(hashes(&listed), ["a", "b", "c"]);
+    }
+
+    #[test]
+    fn a_prune_cause_separates_an_outage_from_any_other_failure() {
+        let outage = RedisStoreError::Pool(deadpool_redis::PoolError::Closed);
+        assert_eq!(prune_cause(&outage), "store_unavailable");
+        let decode = serde_json::from_str::<u8>("x").err();
+        assert!(decode.is_some(), "the fixture must be a decode failure");
+        let Some(source) = decode else { return };
+        assert_eq!(prune_cause(&RedisStoreError::Decode(source)), "internal");
+    }
+
+    #[test]
+    fn a_prune_that_answered_drops_the_detail_less_entries_it_removed() {
+        let removed = Ok(vec!["rt:b".to_owned(), "rp:x".to_owned()]);
+        let listed = settle_listing(three_entries(), removed, Prefix::Rt);
+        assert_eq!(hashes(&listed), ["a", "c"]);
     }
 
     #[test]

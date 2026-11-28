@@ -908,6 +908,7 @@ A test (`crates/bymax-auth-core/tests/log_events.rs`) reads every crate's source
 | `RUST_AUTH_SESSIONS_OTHER_DEVICES_REVOKED` | info | Every other device was signed out and the token epoch advanced |
 | `RUST_AUTH_SESSION_CAP_NOT_ENFORCED` | warn | The session cap could not be enforced |
 | `RUST_AUTH_SESSION_EVICTION_FAILED` | warn | Evicting an over-cap session failed |
+| `RUST_AUTH_SESSION_PRUNE_FAILED` | warn | Removing dead entries from the session index failed; the next listing retries |
 | `RUST_AUTH_SIDE_EFFECT_FAILED` | warn | A detached side effect returned an error, which is ignored |
 | `RUST_AUTH_SIDE_EFFECT_TIMEOUT` | warn | A detached side effect exceeded its timeout ceiling and is ignored |
 | `RUST_AUTH_STORE_UNAVAILABLE` | error | A request failed because a store could not answer (answered 503) |
