@@ -9,11 +9,13 @@ use super::*;
 use crate::testing::InMemoryStores;
 
 const HASH: &str = "hhhhhhhh";
+const FAMILY: &str = "0f8fad5b-d9cb-469f-a165-70867728950e";
 
 fn owner() -> LogoutOwner {
     LogoutOwner {
         user_id: "u1".to_owned(),
         tenant_id: Some("t1".to_owned()),
+        family_id: None,
     }
 }
 
@@ -58,6 +60,7 @@ fn the_stored_form_is_the_contracts_record() {
         .map(|f| f.iter().filter_map(|v| v.as_str()).collect())
         .unwrap_or_default();
     assert_eq!(fields, ["userId", "tenantId"]);
+    assert_eq!(row["optionalFields"], serde_json::json!(["familyId"]));
     let with_tenant = serde_json::to_value(owner()).unwrap_or_default();
     let mut keys: Vec<&str> = with_tenant
         .as_object()
@@ -71,6 +74,13 @@ fn the_stored_form_is_the_contracts_record() {
     };
     let bare = serde_json::to_value(without).unwrap_or_default();
     assert_eq!(bare.as_object().map(serde_json::Map::len), Some(1));
+    // `familyId` is written only when the session record named one.
+    let named = LogoutOwner {
+        family_id: Some(FAMILY.to_owned()),
+        ..owner()
+    };
+    let named = serde_json::to_value(named).unwrap_or_default();
+    assert_eq!(named["familyId"], serde_json::json!(FAMILY));
     assert!(
         row["tenantId"]
             .as_str()
@@ -224,4 +234,22 @@ async fn a_logout_with_no_owner_announces_nothing() {
     assert_eq!(settled.ok(), Some(false));
     let no_hash = settle_completed(&store, SessionKind::Dashboard, None, &nobody, 900).await;
     assert_eq!(no_hash.ok(), Some(false));
+}
+
+#[test]
+fn a_family_id_that_does_not_conform_reads_as_absent_and_keeps_the_marker() {
+    let read = |value: serde_json::Value| {
+        let record = serde_json::json!({ "userId": "u1", "tenantId": "t1", "familyId": value });
+        serde_json::from_value::<LogoutOwner>(record).ok()
+    };
+    for bad in [
+        serde_json::Value::Null,
+        serde_json::json!(7),
+        serde_json::json!("a:b"),
+        serde_json::json!(""),
+    ] {
+        assert_eq!(read(bad.clone()), Some(owner()), "{bad}");
+    }
+    let named = read(serde_json::json!(FAMILY)).and_then(|owner| owner.family_id);
+    assert_eq!(named.as_deref(), Some(FAMILY));
 }

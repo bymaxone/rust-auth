@@ -194,6 +194,7 @@ async fn fail_logout_pending_ops_skips_then_fails_exactly_count() {
     let owner = LogoutOwner {
         user_id: "u1".to_owned(),
         tenant_id: None,
+        family_id: None,
     };
 
     let mut failed = Vec::new();

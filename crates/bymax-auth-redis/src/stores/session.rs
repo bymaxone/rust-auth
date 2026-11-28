@@ -132,6 +132,14 @@ pub(super) fn kind_prefixes(kind: SessionKind) -> KindPrefixes {
     }
 }
 
+/// The prefix of the entry that ends the access tokens of one session, by plane.
+fn session_revocation_prefix(kind: SessionKind) -> Prefix {
+    match kind {
+        SessionKind::Dashboard => Prefix::Rvs,
+        SessionKind::Platform => Prefix::Prvs,
+    }
+}
+
 /// The parsed outcome of the `refresh_rotate` script, before the non-atomic session-index
 /// bookkeeping the caller performs on a live rotation.
 enum RotateParsed {
@@ -671,6 +679,31 @@ impl RedisStores {
         Ok(())
     }
 
+    /// Write the entry that refuses every access token of one session.
+    async fn revoke_session_access_inner(
+        &self,
+        kind: SessionKind,
+        session_id: &str,
+        ttl_secs: u64,
+    ) -> Result<(), RedisStoreError> {
+        let key = self.keys().key(session_revocation_prefix(kind), session_id);
+        let mut conn = self.connection().await?;
+        conn.set_ex::<_, _, ()>(&key, "1", ttl_secs).await?;
+        Ok(())
+    }
+
+    /// Whether the entry of this session exists.
+    async fn is_session_access_revoked_inner(
+        &self,
+        kind: SessionKind,
+        session_id: &str,
+    ) -> Result<bool, RedisStoreError> {
+        let key = self.keys().key(session_revocation_prefix(kind), session_id);
+        let mut conn = self.connection().await?;
+        let present: bool = conn.exists(&key).await?;
+        Ok(present)
+    }
+
     /// Whether an access `jti`/JWT hash is on the `rv:` blacklist.
     async fn is_blacklisted_inner(&self, jti_or_hash: &str) -> Result<bool, RedisStoreError> {
         let key = self.keys().key(Prefix::Rv, jti_or_hash);
@@ -954,6 +987,27 @@ impl SessionStore for RedisStores {
 
     async fn is_blacklisted(&self, jti_or_hash: &str) -> Result<bool, AuthError> {
         self.is_blacklisted_inner(jti_or_hash)
+            .await
+            .map_err(AuthError::from)
+    }
+
+    async fn revoke_session_access(
+        &self,
+        kind: SessionKind,
+        session_id: &str,
+        ttl_secs: u64,
+    ) -> Result<(), AuthError> {
+        self.revoke_session_access_inner(kind, session_id, ttl_secs)
+            .await
+            .map_err(AuthError::from)
+    }
+
+    async fn is_session_access_revoked(
+        &self,
+        kind: SessionKind,
+        session_id: &str,
+    ) -> Result<bool, AuthError> {
+        self.is_session_access_revoked_inner(kind, session_id)
             .await
             .map_err(AuthError::from)
     }

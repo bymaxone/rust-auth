@@ -20,6 +20,7 @@ async fn stored(h: &Harness, claims: &DashboardClaims, exp: Option<u64>) -> Stri
         jti: claims.jti.clone(),
         epoch: claims.epoch,
         exp,
+        sid: None,
     };
     match h.engine.ws_ticket_store() {
         Some(store) => store.mint(&snapshot, 30).await.unwrap_or_default(),

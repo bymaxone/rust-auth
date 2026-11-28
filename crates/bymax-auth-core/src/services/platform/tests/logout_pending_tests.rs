@@ -39,6 +39,10 @@ async fn announced(spy: &LogoutSpy) -> usize {
 async fn a_failed_attempt_leaves_the_admin_with_no_tenant_for_the_access_lifetime() {
     let Some((h, auth, _spy)) = watched().await else { unreachable!() };
     let Some(svc) = h.engine.platform_auth() else { unreachable!() };
+    let tokens = h.engine.tokens();
+    let Ok(claims) = tokens.verify_platform_access(&auth.access_token).await else {
+        unreachable!()
+    };
     h.stores.fail_next_blacklist_writes(1);
     assert!(
         svc.logout(&auth.access_token, &auth.refresh_token)
@@ -51,6 +55,7 @@ async fn a_failed_attempt_leaves_the_admin_with_no_tenant_for_the_access_lifetim
     let owner = LogoutOwner {
         user_id: auth.admin.id.clone(),
         tenant_id: None,
+        family_id: claims.sid,
     };
     assert_eq!(marker, Some((owner, 900)));
 }
@@ -112,6 +117,10 @@ async fn an_unclaimable_marker_fails_the_platform_retry_and_announces_nothing_ye
 async fn an_unreadable_marker_ends_the_platform_retry_before_any_write() {
     let Some((h, auth, _spy)) = watched().await else { unreachable!() };
     let Some(svc) = h.engine.platform_auth() else { unreachable!() };
+    let tokens = h.engine.tokens();
+    let Ok(claims) = tokens.verify_platform_access(&auth.access_token).await else {
+        unreachable!()
+    };
     h.stores.fail_next_blacklist_writes(1);
     assert!(
         svc.logout(&auth.access_token, &auth.refresh_token)
@@ -124,13 +133,7 @@ async fn an_unreadable_marker_ends_the_platform_retry_before_any_write() {
             .await
             .is_err()
     );
-    assert!(
-        h.engine
-            .tokens()
-            .verify_platform_access(&auth.access_token)
-            .await
-            .is_ok()
-    );
+    assert!(!super::logout_failure_tests::blacklisted(&h, &claims.jti).await);
 }
 
 #[tokio::test]

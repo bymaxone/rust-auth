@@ -11,6 +11,7 @@ fn owner(tenant: Option<&str>) -> LogoutOwner {
     LogoutOwner {
         user_id: "u1".to_owned(),
         tenant_id: tenant.map(str::to_owned),
+        family_id: None,
     }
 }
 

@@ -2460,6 +2460,7 @@ pub(super) fn service_deps(
         Arc::new(NoOpAuthHooks),
         SessionConfig::default(),
         3600,
+        std::time::Duration::from_secs(900),
         Zeroizing::new(TEST_IDENTIFIER_KEY),
     ));
     let brute_force = Arc::new(BruteForceService::new(brute_force_store, 5, 900));

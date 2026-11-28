@@ -409,6 +409,28 @@ pub struct WsTicketSnapshot {
         deserialize_with = "present_whole_seconds"
     )]
     pub exp: Option<u64>,
+    /// The `sid` of the access token that minted the ticket, when it carried a conforming one:
+    /// a redemption is refused once that session's access has been ended. A value that is not a
+    /// session id, `null` and non-strings included, reads as absent.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "session_id_or_absent"
+    )]
+    pub sid: Option<String>,
+}
+
+/// Read an optional session id: whatever does not conform reads as absent instead of refusing the
+/// record that carries it.
+pub(crate) fn session_id_or_absent<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = serde_json::Value::deserialize(deserializer)?;
+    Ok(value
+        .as_str()
+        .and_then(crate::services::session_id)
+        .map(str::to_owned))
 }
 
 /// The largest whole number a JSON writer holding numbers as doubles stores exactly.
@@ -706,6 +728,32 @@ pub trait SessionStore: Send + Sync {
     /// Whether an access JTI or JWT hash is blacklisted — consulted on every protected
     /// request.
     async fn is_blacklisted(&self, jti_or_hash: &str) -> Result<bool, AuthError>;
+
+    /// Refuse every access token of one session for `ttl_secs`: `rvs:{sid}` on the dashboard
+    /// plane, `prvs:{sid}` on the platform plane, value `1`. `session_id` is the session's refresh
+    /// family id in the form the `sid` claim carries; it is an identifier, not a credential.
+    ///
+    /// # Errors
+    ///
+    /// Returns a store [`AuthError`] when the entry cannot be written.
+    async fn revoke_session_access(
+        &self,
+        kind: SessionKind,
+        session_id: &str,
+        ttl_secs: u64,
+    ) -> Result<(), AuthError>;
+
+    /// Whether the access tokens of this session were ended — consulted on every protected
+    /// request whose token carries a `sid`.
+    ///
+    /// # Errors
+    ///
+    /// Returns a store [`AuthError`] when the entry cannot be read; a caller then refuses.
+    async fn is_session_access_revoked(
+        &self,
+        kind: SessionKind,
+        session_id: &str,
+    ) -> Result<bool, AuthError>;
 
     /// The user's current token **epoch** (generation counter), or `0` when none is stored.
     /// Stamped into a freshly-issued access token and re-read on every verification: a token
@@ -1227,6 +1275,7 @@ mod tests {
     use super::*;
 
     mod session_record_wire;
+    mod session_revocation_wire;
 
     fn session_record() -> SessionRecord {
         SessionRecord {
@@ -1473,6 +1522,7 @@ mod tests {
             jti: "jti-1".into(),
             epoch: 0,
             exp: None,
+            sid: None,
         };
         let json = serde_json::to_string(&snap)?;
         assert!(json.contains("\"mfaEnabled\":true"));
@@ -1688,8 +1738,8 @@ mod tests {
     fn the_ws_ticket_snapshot_matches_the_shared_wire_contract() -> serde_json::Result<()> {
         // A ticket minted by one backend is redeemed by whichever one receives the upgrade, so
         // the snapshot's field names are a contract, not an internal detail. It is a snapshot
-        // and not a token by design: no `jti` to revoke, no signature to re-verify, nothing the
-        // holder could present back to the REST surface.
+        // and not a token by design: no signature to re-verify, nothing the holder could present
+        // back to the REST surface.
         let snapshot = WsTicketSnapshot {
             sub: "u1".into(),
             tenant_id: Some("t1".into()),
@@ -1699,7 +1749,8 @@ mod tests {
             mfa_verified: true,
             jti: "jti-1".into(),
             epoch: 0,
-            exp: None,
+            exp: Some(1_700_000_000),
+            sid: None,
         };
         let json: serde_json::Value = serde_json::to_value(&snapshot)?;
         for field in contract_fields("wsTicket") {

@@ -180,6 +180,25 @@ impl SessionStore for SlowSessions {
         self.inner.is_blacklisted(jti_or_hash).await
     }
 
+    async fn revoke_session_access(
+        &self,
+        kind: SessionKind,
+        session_id: &str,
+        ttl_secs: u64,
+    ) -> Result<(), AuthError> {
+        self.inner
+            .revoke_session_access(kind, session_id, ttl_secs)
+            .await
+    }
+
+    async fn is_session_access_revoked(
+        &self,
+        kind: SessionKind,
+        session_id: &str,
+    ) -> Result<bool, AuthError> {
+        self.inner.is_session_access_revoked(kind, session_id).await
+    }
+
     async fn current_epoch(&self, kind: SessionKind, subject_hash: &str) -> Result<u64, AuthError> {
         self.inner.current_epoch(kind, subject_hash).await
     }

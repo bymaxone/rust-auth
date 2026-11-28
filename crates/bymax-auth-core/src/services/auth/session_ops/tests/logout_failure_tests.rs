@@ -16,6 +16,12 @@ async fn session_alive(h: &Harness, auth: &AuthResult) -> bool {
     )
 }
 
+/// Whether the token `jti` is on the blacklist.
+pub(super) async fn blacklisted(h: &Harness, jti: &str) -> bool {
+    let store: &dyn crate::traits::SessionStore = h.stores.as_ref();
+    matches!(store.is_blacklisted(jti).await, Ok(true))
+}
+
 /// A harness with email verification off and an account signed in.
 pub(super) async fn signed_in(
     hooks: Option<Arc<dyn crate::traits::AuthHooks>>,
@@ -40,6 +46,9 @@ pub(super) async fn signed_in_with(
 async fn a_refused_blacklist_write_fails_the_logout_and_a_retry_finishes_it() {
     let Some((h, auth)) = signed_in(None).await else { unreachable!() };
 
+    let Ok(claims) = h.engine.tokens().verify_access(&auth.access_token).await else {
+        unreachable!()
+    };
     h.stores.fail_next_blacklist_writes(1);
     let outcome = h
         .engine
@@ -52,14 +61,8 @@ async fn a_refused_blacklist_write_fails_the_logout_and_a_retry_finishes_it() {
 
     // The other revocations were still attempted: the long-lived credential is gone.
     assert!(!session_alive(&h, &auth).await);
-    // The access token is still accepted, which is why the caller has to hear about it.
-    assert!(
-        h.engine
-            .tokens()
-            .verify_access(&auth.access_token)
-            .await
-            .is_ok()
-    );
+    // The token itself is not on the blacklist, which is why the caller has to hear about it.
+    assert!(!blacklisted(&h, &claims.jti).await);
 
     // The retry has nothing left to delete and finishes the blacklist write.
     assert!(
@@ -68,6 +71,7 @@ async fn a_refused_blacklist_write_fails_the_logout_and_a_retry_finishes_it() {
             .await
             .is_ok()
     );
+    assert!(blacklisted(&h, &claims.jti).await);
     let after = h.engine.tokens().verify_access(&auth.access_token).await;
     assert!(matches!(after, Err(AuthError::TokenRevoked)));
 }

@@ -18,6 +18,7 @@ use bymax_auth_types::AuthError;
 use crate::config::SessionConfig;
 use crate::services::auth::detached::{run_on_new_session, run_on_session_evicted};
 use crate::services::auth::spawn_guarded;
+use crate::services::session_access::end_session_access;
 use crate::traits::{
     AuthHooks, HookContext, SessionDetail, SessionEntry, SessionKind, SessionRecord,
     SessionRotation, SessionStore, UserRepository,
@@ -60,6 +61,8 @@ pub struct SessionService {
     hooks: Arc<dyn AuthHooks>,
     config: SessionConfig,
     refresh_ttl_secs: u64,
+    /// The access-token lifetime, which bounds how long an ended session's entry is kept.
+    access_ttl: std::time::Duration,
     /// The engine's identifier-hashing key, which derives the session subject every key this
     /// service touches is suffixed with. Required, never optional: a service that derived a
     /// subject under a different key would list, evict and revoke in a keyspace no other
@@ -69,14 +72,15 @@ pub struct SessionService {
 
 impl SessionService {
     /// Assemble the service from the session store, the user repository, the hooks, the
-    /// resolved [`SessionConfig`], and the refresh-session TTL (seconds) used when rotating
-    /// the per-session detail.
+    /// resolved [`SessionConfig`], the refresh-session TTL (seconds) used when rotating the
+    /// per-session detail, and the access-token lifetime.
     pub(crate) fn new(
         store: Arc<dyn SessionStore>,
         users: Arc<dyn UserRepository>,
         hooks: Arc<dyn AuthHooks>,
         config: SessionConfig,
         refresh_ttl_secs: u64,
+        access_ttl: std::time::Duration,
         identifier_key: zeroize::Zeroizing<[u8; 64]>,
     ) -> Self {
         Self {
@@ -85,6 +89,7 @@ impl SessionService {
             hooks,
             config,
             refresh_ttl_secs,
+            access_ttl,
             identifier_key,
         }
     }
@@ -209,10 +214,7 @@ impl SessionService {
             // Ownership-checked revoke; a SessionNotFound (a concurrent logout already removed
             // it) or any other store error is swallowed — the new session is already committed,
             // so eviction must never fail the operation that scheduled it.
-            if let Err(error) = self
-                .store
-                .revoke_session(SessionKind::Dashboard, &subject, &victim.session_hash)
-                .await
+            if let Err(error) = self.end_session(&subject, &victim.session_hash).await
                 && !matches!(error, AuthError::SessionNotFound)
             {
                 // Swallowed, but visible: a store that keeps refusing the eviction is a cap
@@ -285,16 +287,67 @@ impl SessionService {
         user_id: &str,
         session_hash: &str,
     ) -> Result<(), AuthError> {
+        self.end_owned_session(tenant_id, user_id, session_hash)
+            .await
+            .map(|_named| ())
+    }
+
+    /// [`Self::revoke_session`], answering whether the session's record named a family, and so
+    /// whether its access tokens were cut by name.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::revoke_session`].
+    pub(crate) async fn end_owned_session(
+        &self,
+        tenant_id: &str,
+        user_id: &str,
+        session_hash: &str,
+    ) -> Result<bool, AuthError> {
         if !is_session_hash(session_hash) {
             return Err(AuthError::SessionNotFound);
         }
+        let subject = self.subject(Some(tenant_id), user_id);
+        self.end_session(&subject, session_hash).await
+    }
+
+    /// Remove one session of `subject`, ownership-checked, and then its access tokens. The
+    /// family is read first, from the record the removal deletes, and used only once the removal
+    /// has shown the session to be the subject's.
+    async fn end_session(&self, subject: &str, session_hash: &str) -> Result<bool, AuthError> {
+        let family = self.family_of(session_hash).await;
         self.store
-            .revoke_session(
-                SessionKind::Dashboard,
-                &self.subject(Some(tenant_id), user_id),
-                session_hash,
-            )
+            .revoke_session(SessionKind::Dashboard, subject, session_hash)
+            .await?;
+        let Some(family) = family else {
+            return Ok(false);
+        };
+        let store = self.store.as_ref();
+        end_session_access(store, SessionKind::Dashboard, &family, self.access_ttl).await?;
+        Ok(true)
+    }
+
+    /// The family a session's record names, in the form a token's `sid` carries. A record that
+    /// cannot be read names none, and does not stop the session from being removed.
+    async fn family_of(&self, session_hash: &str) -> Option<String> {
+        match self
+            .store
+            .find_session(SessionKind::Dashboard, session_hash)
             .await
+        {
+            Ok(record) => record.and_then(|record| {
+                crate::services::session_id(&record.family_id).map(str::to_owned)
+            }),
+            Err(error) => {
+                let cause = crate::services::failure_cause(&error);
+                tracing::warn!(
+                    event = "RUST_AUTH_SESSION_FAMILY_UNREAD",
+                    cause,
+                    "sessions: the ended session's family could not be read"
+                );
+                None
+            }
+        }
     }
 
     /// The hash of the live session a presented refresh-token hash stands for.
@@ -809,6 +862,7 @@ mod tests {
             hooks,
             cfg,
             3600,
+            std::time::Duration::from_secs(900),
             zeroize::Zeroizing::new(TEST_IDENTIFIER_KEY),
         )
     }
@@ -1834,6 +1888,22 @@ mod tests {
         async fn is_blacklisted(&self, _jti_or_hash: &str) -> Result<bool, AuthError> {
             Ok(false)
         }
+
+        async fn revoke_session_access(
+            &self,
+            _kind: SessionKind,
+            _session_id: &str,
+            _ttl_secs: u64,
+        ) -> Result<(), AuthError> {
+            Ok(())
+        }
+        async fn is_session_access_revoked(
+            &self,
+            _kind: SessionKind,
+            _session_id: &str,
+        ) -> Result<bool, AuthError> {
+            Ok(false)
+        }
         async fn current_epoch(
             &self,
             _kind: SessionKind,
@@ -1940,6 +2010,7 @@ mod tests {
             Arc::new(NoOpAuthHooks),
             config(5, None),
             3600,
+            std::time::Duration::from_secs(900),
             zeroize::Zeroizing::new(TEST_IDENTIFIER_KEY),
         );
         assert!(matches!(

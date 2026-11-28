@@ -36,6 +36,7 @@ use crate::services::logout_pending::{
     marker_ttl_secs, remember_failed_attempt, resolve_owner, settle_completed,
 };
 use crate::services::password::PasswordService;
+use crate::services::session_access::end_logout_access;
 use crate::services::token_manager::TokenManagerService;
 use crate::services::{is_refresh_token_shape, note_logout_failure, now_unix, to_hex};
 use crate::traits::{
@@ -298,7 +299,8 @@ impl PlatformAuthService {
 
     /// Revoke the current platform session: blacklist the access token's `jti` for its
     /// remaining lifetime — only when the token actually verifies as a platform token — and
-    /// delete BOTH the primary refresh session and any rotation grace pointer for it.
+    /// delete BOTH the primary refresh session and any rotation grace pointer for it. The
+    /// session's access tokens are ended with it.
     ///
     /// # Errors
     ///
@@ -328,6 +330,19 @@ impl PlatformAuthService {
             self.revoke_logout_session(raw_refresh, admin_id, &mut failure)
                 .await;
         }
+        let owner = resolved.owner.as_ref();
+        let ended = end_logout_access(
+            store,
+            SessionKind::Platform,
+            owner,
+            self.tokens.access_ttl(),
+        )
+        .await;
+        note_logout_failure(
+            &mut failure,
+            "logout: session access revocation failed",
+            ended,
+        );
         if let Some(error) = failure {
             let ttl = marker_ttl_secs(self.tokens.access_ttl());
             remember_failed_attempt(store, SessionKind::Platform, hash, &resolved, ttl).await;
@@ -375,6 +390,7 @@ impl PlatformAuthService {
         Ok(found.map(|record| LogoutOwner {
             user_id: record.user_id,
             tenant_id: None,
+            family_id: crate::services::session_id(&record.family_id).map(str::to_owned),
         }))
     }
 

@@ -28,6 +28,7 @@ use zeroize::Zeroizing;
 use crate::services::auth::detached::run_on_refresh_token_reuse_detected;
 use crate::services::auth::spawn_guarded;
 use crate::services::session::normalize_session_metadata;
+use crate::services::session_access::{end_session_access, is_session_ended};
 use crate::services::{internal_error, is_refresh_token_shape, new_uuid_v4, now_offset, now_unix};
 use crate::traits::{
     AuthHooks, HookContext, HookPlane, RotateOutcome, SessionKind, SessionRecord, SessionRotation,
@@ -690,6 +691,15 @@ impl TokenManagerService {
                 self.session_store
                     .revoke_family(SessionKind::Dashboard, &family, owner_subject.as_deref())
                     .await?;
+                // Raised only after the finding is logged and the hook is fired: a store that
+                // refuses this write must not take either down with it.
+                let ended = end_session_access(
+                    self.session_store.as_ref(),
+                    SessionKind::Dashboard,
+                    &family,
+                    self.access_ttl,
+                )
+                .await;
                 let owner_id = owner.as_ref().map(|record| record.user_id.as_str());
                 // Bound rather than inlined in the field; see the note in `login`.
                 tracing::warn!(
@@ -697,6 +707,7 @@ impl TokenManagerService {
                     "refresh: token family revoked after reuse detection"
                 );
                 self.fire_reuse_detected(HookPlane::Dashboard, owner_id, &family, ip, user_agent);
+                ended?;
                 Err(AuthError::RefreshTokenInvalid)
             }
             RotateOutcome::Invalid => {
@@ -937,12 +948,22 @@ impl TokenManagerService {
                 self.session_store
                     .revoke_family(SessionKind::Platform, &family, owner_subject.as_deref())
                     .await?;
+                // Raised only after the finding is logged and the hook is fired: a store that
+                // refuses this write must not take either down with it.
+                let ended = end_session_access(
+                    self.session_store.as_ref(),
+                    SessionKind::Platform,
+                    &family,
+                    self.access_ttl,
+                )
+                .await;
                 let owner_id = owner.as_ref().map(|record| record.user_id.as_str());
                 tracing::warn!(
                     event = "RUST_AUTH_PLATFORM_REFRESH_FAMILY_REVOKED",
                     "platform refresh: token family revoked after reuse detection"
                 );
                 self.fire_reuse_detected(HookPlane::Platform, owner_id, &family, ip, user_agent);
+                ended?;
                 Err(AuthError::RefreshTokenInvalid)
             }
             RotateOutcome::Invalid => {
@@ -972,6 +993,8 @@ impl TokenManagerService {
         if self.session_store.is_blacklisted(&claims.jti).await? {
             return Err(AuthError::TokenRevoked);
         }
+        self.refuse_ended_session(SessionKind::Platform, claims.sid.as_deref())
+            .await?;
         // A token stamped below the admin's current epoch predates an invalidating event (a
         // password reset or sign-out-everywhere) and is revoked.
         if claims.epoch
@@ -1074,6 +1097,8 @@ impl TokenManagerService {
         if self.session_store.is_blacklisted(&claims.jti).await? {
             return Err(AuthError::TokenRevoked);
         }
+        self.refuse_ended_session(SessionKind::Dashboard, claims.sid.as_deref())
+            .await?;
         // A token stamped below the user's current epoch predates an invalidating event (a
         // password reset or sign-out-everywhere) and is revoked.
         if claims.epoch
@@ -1092,6 +1117,18 @@ impl TokenManagerService {
             return Err(AuthError::TokenRevoked);
         }
         Ok(claims)
+    }
+
+    /// Refuses a token whose session has been ended, and refuses too when that cannot be read.
+    async fn refuse_ended_session(
+        &self,
+        kind: SessionKind,
+        sid: Option<&str>,
+    ) -> Result<(), AuthError> {
+        if is_session_ended(self.session_store.as_ref(), kind, sid).await? {
+            return Err(AuthError::TokenRevoked);
+        }
+        Ok(())
     }
 
     /// Blacklist an access token by its `jti` for its remaining lifetime (logout).

@@ -198,7 +198,9 @@ impl AuthEngine {
 
     /// Revoke one of the caller's sessions by its full hash (`DELETE /auth/sessions/{id}`),
     /// ownership-checked. A malformed or unowned hash is [`AuthError::SessionNotFound`]
-    /// (anti-IDOR; callers cannot distinguish a bad format from an absent session).
+    /// (anti-IDOR; callers cannot distinguish a bad format from an absent session). The revoked
+    /// session's access tokens are refused from then on; a session whose record names no family
+    /// has no entry to write, so the account's token epoch advances instead.
     ///
     /// # Errors
     ///
@@ -210,24 +212,21 @@ impl AuthEngine {
         user_id: &str,
         session_hash: &str,
     ) -> Result<(), AuthError> {
-        self.sessions()
-            .revoke_session(tenant_id, user_id, session_hash)
-            .await?;
-        // …and cut the access tokens with it. Deleting the refresh session stops rotation but
-        // says nothing about the stateless access token that session's holder is already
-        // carrying, and that token keeps working until it expires — up to whatever
-        // `access_expires_in` allows. Someone who opens their session list and revokes a device
-        // does so because they think it is compromised: a decision about *right now*.
+        // The session's own access tokens are cut by name. Only a record that names no family
+        // leaves them nothing to be refused by.
+        if self
+            .sessions()
+            .end_owned_session(tenant_id, user_id, session_hash)
+            .await?
+        {
+            return Ok(());
+        }
+        // The account's epoch is then the only lever. It reaches every device's access token,
+        // and the others re-mint one on their next rotation; the revoked session cannot.
         //
-        // The epoch is the only lever available, since a session hash does not name the `jti`
-        // of any access token. The collateral is that the account's other devices lose their
-        // access tokens too and silently re-mint one on their next rotation — they still hold
-        // live refresh sessions. The revoked device cannot, which is the point.
-        //
-        // Bumped AFTER the revoke: a failure above then leaves the epoch untouched and the
-        // operation visibly incomplete, rather than signing every device out for a session that
-        // is in fact still alive. `logout` keeps the plain revoke — it blacklists its own `jti`
-        // by name, and ending one session must not reach every other device's access token.
+        // Bumped AFTER the revoke: a failure above leaves the epoch untouched and the operation
+        // visibly incomplete, rather than signing every device out for a session that is still
+        // alive.
         self.session_store()
             .bump_epoch(
                 crate::traits::SessionKind::Dashboard,
@@ -352,6 +351,11 @@ impl AuthEngine {
             epoch: claims.epoch,
             // Redemption refuses the ticket from this instant on, and hands it to the socket.
             exp: u64::try_from(claims.exp).ok(),
+            sid: claims
+                .sid
+                .as_deref()
+                .and_then(crate::services::session_id)
+                .map(str::to_owned),
         };
         // Measured again, after the account read: the store counts the lifetime from the write.
         let ttl = ticket_ttl(claims.exp, now_unix_ceil()).ok_or(AuthError::TokenInvalid)?;

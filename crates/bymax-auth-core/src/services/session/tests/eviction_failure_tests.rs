@@ -24,6 +24,7 @@ async fn a_refused_eviction_is_logged_with_its_cause_and_never_fails_the_login()
         Arc::new(CountingHooks::default()),
         config(1, None),
         3600,
+        std::time::Duration::from_secs(900),
         zeroize::Zeroizing::new(TEST_IDENTIFIER_KEY),
     );
 

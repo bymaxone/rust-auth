@@ -168,7 +168,7 @@ exclude_re = [
     'delete match arm "inactive" in assert_not_blocked',
     'replace == with != in validate_password',
     'builder\.rs:253:9: replace AuthEngineBuilder::redis_stores',
-    'token_manager\.rs:1168:9: replace TokenManagerService::issue_mfa_temp_token',
+    'token_manager\.rs:1205:9: replace TokenManagerService::issue_mfa_temp_token',
     'replace <impl EmailProvider for NoOpEmailProvider>::\w+ -> Result<\(\), EmailError> with Ok\(\(\)\)',
     'replace AuthHooks::\w+ -> Result<\(\), HookError> with Ok\(\(\)\)',
     'replace < with <= in MfaService::challenge_platform',

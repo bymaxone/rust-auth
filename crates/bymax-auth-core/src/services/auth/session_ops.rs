@@ -13,6 +13,7 @@ use crate::services::auth::{map_repository_error, spawn_guarded};
 use crate::services::logout_pending::{
     ResolvedOwner, marker_ttl_secs, remember_failed_attempt, resolve_owner, settle_completed,
 };
+use crate::services::session_access::end_logout_access;
 use crate::services::{is_refresh_token_shape, note_logout_failure, now_unix};
 use crate::traits::{HookContext, HookPlane, LogoutOwner, SessionKind};
 
@@ -34,7 +35,8 @@ pub struct RefreshedSession {
 
 impl AuthEngine {
     /// Revoke the current session: blacklist the access token's `jti` for its remaining
-    /// lifetime — only when the token's signature verifies — and delete the refresh session
+    /// lifetime — only when the token's signature verifies — end the session's access tokens,
+    /// and delete the refresh session
     /// (idempotent on an already-gone session).
     ///
     /// The caller is **not** required to hold a live access token. The common case is a user
@@ -51,8 +53,8 @@ impl AuthEngine {
     ///
     /// # Errors
     ///
-    /// Attempts every revocation write — the access-token blacklist, the refresh-session delete
-    /// and the grace-pointer delete — whatever an earlier one did, then answers the first
+    /// Attempts every revocation write — the access-token blacklist, the refresh-session delete,
+    /// the session's access entry and the grace-pointer delete — whatever an earlier one did, then answers the first
     /// failure as [`AuthError::Internal`]. A `204` for a logout that left the access token or the
     /// refresh session alive would tell a user who signed out of a lost device that it worked, so
     /// it is never answered unless every write succeeded. A session already rotated or evicted
@@ -77,6 +79,19 @@ impl AuthEngine {
             self.revoke_logout_session(session_hash, resolved.owner.as_ref(), &mut failure)
                 .await;
         }
+        let owner = resolved.owner.as_ref();
+        let ended = end_logout_access(
+            store,
+            SessionKind::Dashboard,
+            owner,
+            self.tokens().access_ttl(),
+        )
+        .await;
+        note_logout_failure(
+            &mut failure,
+            "logout: session access revocation failed",
+            ended,
+        );
         if let Some(error) = failure {
             let ttl = marker_ttl_secs(self.tokens().access_ttl());
             remember_failed_attempt(store, SessionKind::Dashboard, hash, &resolved, ttl).await;
@@ -112,6 +127,7 @@ impl AuthEngine {
         Ok(found.map(|record| LogoutOwner {
             user_id: record.user_id,
             tenant_id: record.tenant_id,
+            family_id: crate::services::session_id(&record.family_id).map(str::to_owned),
         }))
     }
 
@@ -490,6 +506,7 @@ mod tests {
     mod logout_failure_tests;
     mod logout_hook_tests;
     mod logout_pending_tests;
+    mod session_access_tests;
     use crate::services::auth::LoginInput;
     use crate::services::auth::test_support::{Harness, SeedUser, base_config, ctx, harness};
     use crate::traits::{SessionRecord, SessionStore as _, UserRepository as _};
@@ -845,20 +862,19 @@ mod tests {
         cfg.email_verification.required = false;
         let Some(h) = harness(cfg, None) else { return };
         let Some((_id, auth)) = logged_in(&h, "skip@example.com", "pw").await else { return };
+        let Ok(claims) = h.engine.tokens().verify_access(&auth.access_token).await else { return };
         assert!(
             h.engine
                 .logout("not-a-jwt", &auth.refresh_token)
                 .await
                 .is_ok()
         );
-        // The blacklist was skipped: the genuine access token still verifies.
-        assert!(
-            h.engine
-                .tokens()
-                .verify_access(&auth.access_token)
-                .await
-                .is_ok()
-        );
+        // The blacklist was skipped: the genuine access token is not on it, and is refused only
+        // because its session ended.
+        let store: &dyn crate::traits::SessionStore = h.stores.as_ref();
+        assert!(matches!(store.is_blacklisted(&claims.jti).await, Ok(false)));
+        let after = h.engine.tokens().verify_access(&auth.access_token).await;
+        assert!(matches!(after, Err(AuthError::TokenRevoked)));
         // The refresh session was revoked all the same.
         assert!(matches!(
             h.engine

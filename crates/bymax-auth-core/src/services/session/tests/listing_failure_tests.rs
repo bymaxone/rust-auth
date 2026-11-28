@@ -198,6 +198,7 @@ async fn a_host_stores_error_is_logged_as_a_closed_cause_not_its_text() {
         Arc::new(CountingHooks::default()),
         config(1, None),
         3600,
+        std::time::Duration::from_secs(900),
         zeroize::Zeroizing::new(TEST_IDENTIFIER_KEY),
     );
 

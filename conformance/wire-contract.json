@@ -22,7 +22,7 @@
     "A case that needs an ill-formed string states it as UTF-16 code units beside its `case`, for",
     "example `unpairedSurrogateCodeUnits: [55296]`, and each library's test builds the string itself."
   ],
-  "version": 8,
+  "version": 9,
   "hmacKeyDerivation": {
     "$comment": [
       "The identifier-hashing key both sides derive from the identifier secret, and one",
@@ -75,10 +75,10 @@
       "token (`accessTokenClaims.sessionClaim`), so the mark belongs to the session that earned it",
       "and another session of the same account cannot ride a real sign-in it did not perform. Only",
       "the dashboard plants and reads it: platform admins always hold a local password, so the",
-      "passwordless branch is not reachable there, and their tokens carry `sid` that nothing",
-      "consumes. Cutover: marks planted under the v7 shape are never read by a v8 reader, and a",
-      "token minted before `sid` fails closed for a passwordless account until its next refresh",
-      "or sign-in, so a mixed deployment on one Redis must expect one extra re-authentication."
+      "passwordless branch is not reachable there, and the marker never reads the `sid` of their",
+      "tokens. Cutover: marks planted under the v7 shape are never read by a v8 reader, and a",
+      "token minted before `sid` fails closed for a passwordless account until its next",
+      "sign-in, so a mixed deployment on one Redis must expect one extra re-authentication."
     ],
     "dashboardRefreshSession": "rt",
     "dashboardGracePointer": "rp",
@@ -97,6 +97,8 @@
     "platformLogoutPending": "plp",
     "platformTokenEpoch": "pep",
     "accessTokenBlacklist": "rv",
+    "dashboardSessionRevocation": "rvs",
+    "platformSessionRevocation": "prvs",
     "failedLoginCounter": "lf",
     "oneTimePassword": "otp",
     "passwordResetToken": "pw_reset",
@@ -1201,16 +1203,30 @@
         "mfaEnabled",
         "mfaVerified",
         "jti",
-        "epoch"
+        "epoch",
+        "exp"
       ],
+      "optionalFields": ["sid"],
+      "sid": "optional; the conforming sid of the minting access token (accessTokenClaims.sessionClaim), omitted from the record when that token carries none; redemption is refused once the entry of that session exists (recordEncodings.sessionRevocation). A reader takes a present value that does not conform, null and non-strings included, as absent: the record stays a ticket and no entry is read for it",
+      "exp": "optional; when present a non-negative integer no greater than 2^53-1 (null is refused), the expiry of the minting access token in seconds since the Unix epoch, and a record is not redeemed from that instant on; a record without it is accepted",
       "tenantId": "omitted from the record entirely when the ticket is not tenant-scoped",
       "jti": "string, non-empty; the jti of the access token that minted the ticket — the key of the per-token blacklist rv:{jti}",
       "epoch": "non-negative integer; the token epoch stamped on the minting access token, 0 when it carried none",
-      "$comment": "A verified-identity SNAPSHOT, never a token: no signature, no expiry of its own. The socket it authorizes cannot be turned back into a session. Redemption is a single-use GETDEL, so a captured upgrade URL is worthless once the socket opens. jti and epoch are identifiers, not credentials: they are the two keys the revocation channels are read by, so redemption is refused exactly when the minting token would be — blacklisted, or stamped below the user's current epoch. A record missing either, or carrying them malformed, is not a ticket."
+      "$comment": "A verified-identity SNAPSHOT, never a token: no signature, no lifetime of its own beyond the TTL of its key. The socket it authorizes cannot be turned back into a session. Redemption is a single-use GETDEL, so a captured upgrade URL is worthless once the socket opens. jti, sid and epoch are identifiers, not credentials: they are the keys the revocation channels are read by, so redemption is refused exactly when the minting token would be — blacklisted, its session ended, or stamped below the user's current epoch. A record missing jti or epoch, or carrying either malformed, is not a ticket, and neither is one carrying a malformed exp."
+    },
+    "sessionRevocation": {
+      "key": "rvs:{sid} on the dashboard plane, prvs:{sid} on the platform plane",
+      "value": "1",
+      "ttl": "the configured access-token lifetime in seconds, rounded up, plus 60",
+      "writer": "whatever ends one session: a logout, an eviction past the session limit, a replayed refresh token (the revoked family) and the revocation of one session through the session service; the family id comes from the session's own record, and a record without a conforming one writes nothing",
+      "reader": "every access-token and WebSocket-ticket revocation check, for a sid that conforms to accessTokenClaims.sessionClaim: an existing entry refuses, a failed read refuses, and a token without a conforming sid is not checked against this entry",
+      "$comment": "Ends the access tokens of one session and leaves the other sessions of the account alone, which the per-token entry rv:{jti} cannot do for tokens whose jti nobody holds and the token epoch can only do for the whole account. The sid is a family id, not a credential, so the key carries it in the clear. Backends sharing one Redis must configure the same access-token lifetime: the writer sizes the entry from its own, and an entry shorter than the longest lifetime lets a token with the longer one be accepted again before it expires."
     },
     "logoutPending": {
       "key": "lp:{sha256(refreshToken)} on the dashboard plane, plp:{sha256(refreshToken)} on the platform plane",
       "fields": ["userId", "tenantId"],
+      "optionalFields": ["familyId"],
+      "familyId": "optional; the family id the session record named, omitted from the record when it named no conforming one; a retried logout ends the access tokens of that session with it",
       "tenantId": "omitted from the record entirely when the session record carried none, always on the platform plane",
       "ttl": "the configured access-token lifetime in seconds, rounded up, and never less than 300",
       "writer": "only a logout attempt that FAILED a revocation write and had read its owner from the live refresh session; best effort, written before the failure is raised; never written on the success path and never by a retry that read only the marker",

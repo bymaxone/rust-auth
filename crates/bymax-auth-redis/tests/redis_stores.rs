@@ -19,6 +19,8 @@ mod grace_successor;
 mod logout_pending;
 #[path = "redis_stores/otp_attempts.rs"]
 mod otp_attempts;
+#[path = "redis_stores/session_access.rs"]
+mod session_access;
 #[path = "redis_stores/session_listing.rs"]
 mod session_listing;
 
@@ -127,6 +129,7 @@ fn snapshot() -> WsTicketSnapshot {
         jti: "jti-1".into(),
         epoch: 0,
         exp: None,
+        sid: None,
     }
 }
 

@@ -852,6 +852,25 @@ impl bymax_auth_core::traits::SessionStore for FailingStores {
         }
         self.inner.is_blacklisted(jti_or_hash).await
     }
+
+    async fn revoke_session_access(
+        &self,
+        kind: bymax_auth_core::traits::SessionKind,
+        session_id: &str,
+        ttl_secs: u64,
+    ) -> Result<(), bymax_auth_types::AuthError> {
+        self.inner
+            .revoke_session_access(kind, session_id, ttl_secs)
+            .await
+    }
+
+    async fn is_session_access_revoked(
+        &self,
+        kind: bymax_auth_core::traits::SessionKind,
+        session_id: &str,
+    ) -> Result<bool, bymax_auth_types::AuthError> {
+        self.inner.is_session_access_revoked(kind, session_id).await
+    }
     async fn current_epoch(
         &self,
         kind: bymax_auth_core::traits::SessionKind,
