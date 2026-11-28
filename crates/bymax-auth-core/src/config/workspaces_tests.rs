@@ -3,7 +3,8 @@
 use std::collections::BTreeMap;
 
 use super::workspaces::{
-    WorkspacePermission, WorkspacePermissionsConfig, WorkspaceRolesConfig, WorkspacesConfig,
+    AccessDeniedEventsConfig, WorkspacePermission, WorkspacePermissionsConfig,
+    WorkspaceRolesConfig, WorkspacesConfig,
 };
 use crate::error::ConfigError;
 use crate::workspace::access::AcceptedRoles;
@@ -245,4 +246,35 @@ fn a_refused_invitation_option_is_named_with_its_bound() {
         message(&|c| c.max_pending_invitations_per_workspace = 10_001).as_deref(),
         Some("workspaces.maxPendingInvitationsPerWorkspace must be at most 10000")
     );
+}
+
+#[test]
+fn the_access_denied_budget_defaults_and_bounds_are_the_contracts() {
+    let default = AccessDeniedEventsConfig::default();
+    assert_eq!((default.max, default.window_seconds), (10, 60));
+    let refused = |max: u32, window_seconds: u32| {
+        let mut config = enabled();
+        config.access_denied_events = AccessDeniedEventsConfig {
+            max,
+            window_seconds,
+        };
+        config.resolve().err().map(|error| error.to_string())
+    };
+    for (max, window) in [(1, 1), (10_000, 3_600)] {
+        assert_eq!(refused(max, window), None);
+    }
+    let max = "workspaces.accessDeniedEvents.max must be an integer from 1 to 10000.";
+    let window = "workspaces.accessDeniedEvents.windowSeconds must be an integer from 1 to 3600.";
+    for (given, message) in [
+        ((0, 60), max),
+        ((10_001, 60), max),
+        ((10, 0), window),
+        ((10, 3_601), window),
+    ] {
+        assert_eq!(
+            refused(given.0, given.1).as_deref(),
+            Some(message),
+            "{given:?}"
+        );
+    }
 }

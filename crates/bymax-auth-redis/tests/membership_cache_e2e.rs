@@ -26,7 +26,9 @@ use bymax_auth_core::testing::InMemoryWorkspaces;
 use bymax_auth_core::testing::membership_cache_scenarios::{
     MembershipCacheProbe, run_membership_cache_scenarios,
 };
-use bymax_auth_core::traits::{FillOutcome, MembershipCacheRead, MembershipCacheStore};
+use bymax_auth_core::traits::{
+    AccessDeniedStore, FillOutcome, MembershipCacheRead, MembershipCacheStore,
+};
 use bymax_auth_core::workspace::domain::{
     Membership, MembershipRef, MembershipStatus, Workspace, WorkspaceStatus,
 };
@@ -166,6 +168,21 @@ impl RedisProbe {
             .query_async::<()>(&mut conn)
             .await
             .is_ok()
+    }
+}
+
+#[async_trait]
+impl AccessDeniedStore for RedisProbe {
+    async fn count_denial(&self, digest: &str, window_seconds: u64) -> Result<u64, AuthError> {
+        self.stores.count_denial(digest, window_seconds).await
+    }
+
+    async fn count_suppressed(&self, digest: &str, ttl_seconds: u64) -> Result<(), AuthError> {
+        self.stores.count_suppressed(digest, ttl_seconds).await
+    }
+
+    async fn take_suppressed(&self, digest: &str) -> Result<Option<String>, AuthError> {
+        self.stores.take_suppressed(digest).await
     }
 }
 
@@ -513,4 +530,32 @@ async fn an_unreachable_redis_answers_from_the_repositories() {
     };
     assert_eq!(answer.ok(), Some(expected));
     assert!(stores.bump_membership("m").await.is_err());
+}
+
+#[tokio::test]
+async fn the_denial_counters_are_the_pinned_keys_and_keep_their_first_expiry() {
+    let Some(redis) = try_start().await else { return };
+    let Some(probe) = redis.connected("auth").await else { unreachable!() };
+    let window = probe.keys.key(Prefix::Wad, "digest");
+    let suppressed = probe.keys.key(Prefix::Wads, "digest");
+    assert!(matches!(probe.take_suppressed("digest").await, Ok(None)));
+    assert!(probe.keys().await.is_empty());
+
+    assert!(matches!(probe.count_denial("digest", 60).await, Ok(1)));
+    assert!(probe.count_suppressed("digest", 86_400).await.is_ok());
+    // A later increment counts and leaves the lifetime the creating one set.
+    assert!(matches!(probe.count_denial("digest", 9_000).await, Ok(2)));
+    assert!(probe.count_suppressed("digest", 9_000_000).await.is_ok());
+    assert_eq!(probe.keys().await, [window.clone(), suppressed.clone()]);
+    let left = probe.ttl(&window).await;
+    assert!((55..=60).contains(&left), "{left}");
+    let left = probe.ttl(&suppressed).await;
+    assert!((86_395..=86_400).contains(&left), "{left}");
+
+    let held = probe.take_suppressed("digest").await;
+    assert!(
+        matches!(held.as_ref().map(Option::as_deref), Ok(Some("2"))),
+        "{held:?}"
+    );
+    assert_eq!(probe.keys().await, [window]);
 }

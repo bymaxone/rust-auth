@@ -576,7 +576,7 @@ Everything is configured through `AuthConfig`. Two ready-made profiles bundle se
 | **roles**          | `hierarchy` (required), `platform_hierarchy`                                 | —                          |
 | **oauth**          | `google`, `redirect_allowlist`, `*_redirect_url`                            | —                          |
 | **controllers**    | per-group route toggles (`auth`, `password_reset`, `mfa`, `sessions`, `platform`, `oauth`, `invitations`, `email_change`, `workspaces`); `sessions`, `platform` and `invitations` follow their `enabled` flag | `auth` and `password_reset` on, the rest off |
-| **workspaces**     | `enabled` (needs `WorkspaceRepository`, `MembershipRepository` and a membership cache store on the builder), `roles` (`hierarchy`, `owner_role`), `permissions`, `membership_cache_ttl_seconds`, `allow_create`, `max_workspaces_per_user`, `deletion_grace_days`, `invitation_ttl_seconds`, `max_pending_invitations_per_workspace` | `false`, —, owner-only except `view_members`, 60, `true`, `0` (no limit), 14, 604800 (60 to 2592000), 100 (1 to 10000) |
+| **workspaces**     | `enabled` (needs `WorkspaceRepository`, `MembershipRepository` and a membership cache store on the builder), `roles` (`hierarchy`, `owner_role`), `permissions`, `membership_cache_ttl_seconds`, `allow_create`, `max_workspaces_per_user`, `deletion_grace_days`, `invitation_ttl_seconds`, `max_pending_invitations_per_workspace`, `access_denied_events` (`max`, `window_seconds`: the `access.denied` events one account can raise per window) | `false`, —, owner-only except `view_members`, 60, `true`, `0` (no limit), 14, 604800 (60 to 2592000), 100 (1 to 10000), 10 (1 to 10000) per 60 s (1 to 3600) |
 | **route_prefix**   | the mount segment of every route; a value other than `auth` requires an explicit `cookies.refresh_cookie_path` (`RefreshPathMismatch`) | `auth`                     |
 | **tenancy**        | `tenant_id_resolver`, `enforce_tenant_binding` (refuses a token minted for another tenant than the resolver names; requires a resolver, else `TenantBindingWithoutResolver`) | none, `false`              |
 | **account status** | `blocked_statuses`, `user_status_cache_ttl` (how long a status change takes to reach a live token) | `BANNED`, `INACTIVE`, `SUSPENDED`; 60 s |
@@ -805,6 +805,8 @@ A test (`crates/bymax-auth-core/tests/log_events.rs`) reads every crate's source
 
 | Code | Level | Emitted when |
 | ---- | ----- | ------------ |
+| `RUST_AUTH_ACCESS_DENIED_COUNT_INVALID` | warn | The stored count of unreported workspace refusals was not an integer and was reported as 0 |
+| `RUST_AUTH_ACCESS_DENIED_UNAVAILABLE` | warn | The `access.denied` counter store could not answer, so no event was emitted (once per window) |
 | `RUST_AUTH_ACCOUNT_REMOVAL_COUNTERS_NOT_BUMPED` | warn | An account removal committed but some workspace membership counters were not bumped |
 | `RUST_AUTH_ACCOUNT_STATUS_CACHE_INVALIDATION_FAILED` | error | Invalidating the account-status cache failed |
 | `RUST_AUTH_API_KEY_AUDIT_HOOK_FAILED` | error | The API-key audit hook returned an error |

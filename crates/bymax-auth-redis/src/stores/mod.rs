@@ -6,12 +6,14 @@
 //! ([`rate_limit`]), the single-use WebSocket ticket
 //! ([`ws_ticket`]), the small single-use opaque-token keyspaces for password reset and
 //! invitations ([`single_use`]), the workspace-membership cache shared with nest-auth
-//! ([`membership_cache`]), and — under the `oauth` feature — the single-use OAuth
+//! ([`membership_cache`]), the counters that bound
+//! `access.denied` ([`access_denied`]), and — under the `oauth` feature — the single-use OAuth
 //! `state` + PKCE keyspace ([`oauth`]). The atomic, race-sensitive transitions run as Lua scripts
 //! (section 12.5); the rest are single commands. Every fallible Redis interaction is funneled
 //! through a private `Result<_, RedisStoreError>` helper, and the trait method projects that
 //! into the engine's [`bymax_auth_types::AuthError`] at the boundary.
 
+mod access_denied;
 mod brute_force;
 mod logout_pending;
 mod membership_cache;

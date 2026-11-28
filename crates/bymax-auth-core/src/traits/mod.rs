@@ -4,6 +4,7 @@
 //! Redis-store abstraction, the OAuth providers, and the dependency-free
 //! [`HttpClient`] transport.
 
+pub mod access_denied;
 #[cfg(feature = "api-keys")]
 pub mod api_key;
 pub mod api_key_event;
@@ -26,6 +27,8 @@ pub mod user_status_cache;
 pub mod workspace_invitation_store;
 pub mod workspace_repository;
 
+#[doc(inline)]
+pub use access_denied::AccessDeniedStore;
 #[cfg(feature = "api-keys")]
 pub use api_key::{ApiKey, ApiKeyPrincipal, ApiKeyRepository, ApiKeySummary, NewApiKey};
 #[doc(inline)]

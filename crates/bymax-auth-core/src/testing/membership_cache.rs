@@ -19,7 +19,7 @@ use bymax_auth_types::AuthError;
 
 use super::lock;
 use super::membership_cache_scenarios::MembershipCacheProbe;
-use crate::traits::{FillOutcome, MembershipCacheRead, MembershipCacheStore};
+use crate::traits::{AccessDeniedStore, FillOutcome, MembershipCacheRead, MembershipCacheStore};
 use crate::workspace::limits::VERSION_RETENTION_SECONDS;
 use crate::workspace::membership_cache::{
     MembershipCacheIds, MembershipVersions, VersionCounter, entry_value,
@@ -33,6 +33,8 @@ struct State {
     counters: HashMap<(VersionCounter, String), Slot<u64>>,
     entries: HashMap<String, Slot<String>>,
     operations: Vec<&'static str>,
+    /// The `access.denied` counters, keyed by whether it is the suppressed one and by digest.
+    denials: HashMap<(bool, String), Slot<u64>>,
     /// The instant a frozen clock stands at; `None` follows the wall clock.
     frozen: Option<Instant>,
 }
@@ -97,6 +99,25 @@ impl State {
         {
             slot.1 = expires;
         }
+    }
+
+    /// The live value of an `access.denied` counter and its expiry.
+    fn denial(&self, key: &(bool, String)) -> Option<Slot<u64>> {
+        let now = self.now();
+        self.denials
+            .get(key)
+            .copied()
+            .filter(|(_, expires)| *expires > now)
+    }
+
+    /// `INCR`, with the expiry set only by the increment that creates the counter.
+    fn count(&mut self, key: (bool, String), ttl_seconds: u64) -> u64 {
+        let (count, expires) = match self.denial(&key) {
+            Some((count, expires)) => (count.saturating_add(1), expires),
+            None => (1, self.expiry(Duration::from_secs(ttl_seconds))),
+        };
+        self.denials.insert(key, (count, expires));
+        count
     }
 
     /// How long a slot expiring at `expires` has left.
@@ -176,6 +197,23 @@ impl InMemoryMembershipCache {
         Some(state.left(*expires))
     }
 
+    /// What the `access.denied` counter of `digest` holds and how long it has left, the
+    /// suppressed one when `suppressed`.
+    #[must_use]
+    pub fn denial_counter(&self, suppressed: bool, digest: &str) -> Option<(u64, Duration)> {
+        let state = lock(&self.state);
+        let (count, expires) = state.denial(&(suppressed, digest.to_owned()))?;
+        Some((count, state.left(expires)))
+    }
+
+    /// The digests that have ever had an `access.denied` window counter.
+    #[must_use]
+    pub fn denial_digests(&self) -> Vec<String> {
+        let state = lock(&self.state);
+        let windows = state.denials.keys().filter(|(suppressed, _)| !suppressed);
+        windows.map(|(_, digest)| digest.clone()).collect()
+    }
+
     /// How long entry `id` has left, or `None` when it does not exist.
     #[must_use]
     pub fn entry_ttl(&self, id: &str) -> Option<Duration> {
@@ -183,6 +221,14 @@ impl InMemoryMembershipCache {
         state.entry(id)?;
         let (_, expires) = state.entries.get(id)?;
         Some(state.left(*expires))
+    }
+
+    /// The state, unless the cache is unavailable.
+    fn counters(&self) -> Result<std::sync::MutexGuard<'_, State>, AuthError> {
+        if self.unavailable.load(Ordering::SeqCst) {
+            return Err(AuthError::Internal("membership cache unavailable".into()));
+        }
+        Ok(lock(&self.state))
     }
 
     /// Records `operation` and fails it while the cache is unavailable.
@@ -196,6 +242,30 @@ impl InMemoryMembershipCache {
             return Err(AuthError::Internal("membership cache unavailable".into()));
         }
         Ok(state)
+    }
+}
+
+/// The counters fail while the cache is unavailable, and are not among the recorded operations:
+/// a denial is reported detached.
+#[async_trait]
+impl AccessDeniedStore for InMemoryMembershipCache {
+    async fn count_denial(&self, digest: &str, window_seconds: u64) -> Result<u64, AuthError> {
+        let mut state = self.counters()?;
+        Ok(state.count((false, digest.to_owned()), window_seconds))
+    }
+
+    async fn count_suppressed(&self, digest: &str, ttl_seconds: u64) -> Result<(), AuthError> {
+        let mut state = self.counters()?;
+        state.count((true, digest.to_owned()), ttl_seconds);
+        Ok(())
+    }
+
+    async fn take_suppressed(&self, digest: &str) -> Result<Option<String>, AuthError> {
+        let mut state = self.counters()?;
+        let key = (true, digest.to_owned());
+        let held = state.denial(&key).map(|(count, _)| count.to_string());
+        state.denials.remove(&key);
+        Ok(held)
     }
 }
 

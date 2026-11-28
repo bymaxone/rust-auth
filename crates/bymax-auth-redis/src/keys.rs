@@ -145,6 +145,12 @@ pub enum Prefix {
     /// Per-inviter hourly invitation counter (`winvrl`), suffixed by `hmac_sha256(hmacKey,
     /// workspaceInviterRate preimage)`. Its lifetime is set on the first increment only.
     Winvrl,
+    /// Fixed-window count of the refused workspace accesses of one account (`wad`), suffixed by
+    /// `hmac_sha256(hmacKey, userSubject)`. Its lifetime is set on the first increment only.
+    Wad,
+    /// Count of the refusals of one account that went unreported (`wads`), suffixed as
+    /// [`Prefix::Wad`]. Its lifetime is set on the first increment only.
+    Wads,
 }
 
 impl Prefix {
@@ -194,6 +200,8 @@ impl Prefix {
             Self::Winvidx => "winvidx",
             Self::Winvset => "winvset",
             Self::Winvrl => "winvrl",
+            Self::Wad => "wad",
+            Self::Wads => "wads",
         }
     }
 }
@@ -270,7 +278,7 @@ mod tests {
     }
 
     /// Every name `redisKeyPrefixes` carries and the prefix this crate writes for it.
-    fn modelled_prefixes() -> [(&'static str, Prefix); 42] {
+    fn modelled_prefixes() -> [(&'static str, Prefix); 44] {
         [
             ("dashboardRefreshSession", Prefix::Rt),
             ("dashboardGracePointer", Prefix::Rp),
@@ -314,6 +322,8 @@ mod tests {
             ("workspaceInvitationIndex", Prefix::Winvidx),
             ("workspaceInvitationSet", Prefix::Winvset),
             ("workspaceInvitationInviterRate", Prefix::Winvrl),
+            ("accessDeniedWindow", Prefix::Wad),
+            ("accessDeniedSuppressed", Prefix::Wads),
         ]
     }
 
@@ -352,29 +362,6 @@ mod tests {
         }
     }
 
-    /// Prefixes the contract names that this crate does not model yet, with the slice that
-    /// models each. The comparison below leaves them out of the contract's side, and
-    /// [`the_pending_prefixes_are_still_unmodelled`] requires each to be absent from
-    /// [`modelled_prefixes`] and present in the contract, so the slice that models a prefix has
-    /// to delete its entry, and a prefix the contract adds that is not listed fails the build.
-    const PENDING_PREFIXES: [&str; 2] = ["accessDeniedSuppressed", "accessDeniedWindow"];
-
-    #[test]
-    fn the_pending_prefixes_are_still_unmodelled() {
-        let in_contract = contract_prefix_names();
-        let modelled = modelled_prefixes();
-        for name in PENDING_PREFIXES {
-            assert!(
-                in_contract.contains(name),
-                "{name} is pending but the contract does not name it"
-            );
-            assert!(
-                modelled.iter().all(|(built, _)| *built != name),
-                "{name} is modelled; remove it from PENDING_PREFIXES"
-            );
-        }
-    }
-
     #[test]
     fn the_contract_and_this_crate_name_the_same_prefixes_in_both_directions() {
         // A prefix the contract adds must fail the build until it is modelled, and one removed
@@ -384,10 +371,8 @@ mod tests {
             .iter()
             .map(|(name, _)| (*name).to_owned())
             .collect();
-        let built: std::collections::BTreeSet<String> = contract_prefix_names()
-            .into_iter()
-            .filter(|name| !PENDING_PREFIXES.contains(&name.as_str()))
-            .collect();
+        let built: std::collections::BTreeSet<String> =
+            contract_prefix_names().into_iter().collect();
         assert_eq!(modelled, built);
     }
 

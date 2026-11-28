@@ -313,8 +313,11 @@ impl AuthEngine {
             accepted: request.accepted,
             allow_pending: request.allow_pending,
         };
-        let role = decide(&access, rules, &runtime.resolved.hierarchy)
-            .map_err(|refusal| refusal.code.to_error())?;
+        let role = decide(&access, rules, &runtime.resolved.hierarchy).map_err(|refusal| {
+            let surface = crate::workspace::audit::AccessSurface::Http;
+            self.report_access_denied(runtime, member, surface, refusal);
+            refusal.code.to_error()
+        })?;
         Ok(WorkspaceMember {
             tenant_id: tenant_id.to_owned(),
             workspace_id: workspace_id.to_owned(),

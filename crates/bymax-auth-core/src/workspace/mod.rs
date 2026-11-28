@@ -9,6 +9,7 @@
 pub mod access;
 pub mod audit;
 pub mod bounds;
+pub(crate) mod denied;
 pub mod domain;
 pub mod invitation;
 pub mod keys;
@@ -19,6 +20,8 @@ pub mod scoped_name;
 
 #[cfg(test)]
 mod access_tests;
+#[cfg(test)]
+mod denied_tests;
 #[cfg(test)]
 mod domain_tests;
 #[cfg(test)]

@@ -1,11 +1,13 @@
-//! The audit event a workspace or membership write persists with its change (layer: domain).
+//! The workspace events: what a write persists and what the host hook receives (layer: domain).
 //!
-//! The library fills an event in completely before the write and the repository stores it as
+//! The library fills a write's event in completely before the write and the repository stores it as
 //! given, in the same transaction as the change. Its tenant and workspace are the key of the call
 //! that carries it, and its instant is written as `Date.prototype.toISOString` writes one, the
 //! form `@bymax-one/nest-auth` stores, so a deployment running both reads one audit trail.
 
 use time::{OffsetDateTime, UtcOffset};
+
+use crate::workspace::access::{RefusalCode, RefusalReason};
 
 /// An instant as `Date.prototype.toISOString` writes it: UTC, milliseconds, `Z`, and a six-digit
 /// signed year outside 0 to 9999.
@@ -36,12 +38,35 @@ pub struct WorkspaceAuditEvent {
     pub tenant_id: String,
     /// The workspace the event is about.
     pub workspace_id: String,
-    /// The member who made the change, or `None` for a job.
+    /// The caller who made the change or was refused, or `None` for a job.
     pub actor_user_id: Option<String>,
     /// When the change was decided, as an ISO-8601 UTC string.
     pub at: String,
     /// What happened, with the fields that kind carries.
     pub kind: AuditKind,
+}
+
+/// Where a refused access was decided.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AccessSurface {
+    /// A guarded HTTP route.
+    Http,
+    /// A stream verification.
+    Verifier,
+    /// A socket message.
+    Ws,
+}
+
+impl AccessSurface {
+    /// The name the event carries: `http`, `verifier` or `ws`.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Http => "http",
+            Self::Verifier => "verifier",
+            Self::Ws => "ws",
+        }
+    }
 }
 
 /// What an audit event records.
@@ -120,6 +145,19 @@ pub enum AuditKind {
         /// The new owner.
         to_user_id: String,
     },
+    /// A caller was refused a workspace. It reaches the hook only and is never persisted.
+    AccessDenied {
+        /// The refused account, which is also the actor.
+        user_id: String,
+        /// Where the refusal was decided.
+        surface: AccessSurface,
+        /// The code the caller was answered with.
+        code: RefusalCode,
+        /// Why, as only the host is told.
+        reason: RefusalReason,
+        /// The refusals of this account that went unreported since the last event.
+        suppressed_count: u64,
+    },
 }
 
 impl AuditKind {
@@ -141,6 +179,7 @@ impl AuditKind {
             Self::MemberLeft { .. } => "member.left",
             Self::WorkspaceSwitched { .. } => "workspace.switched",
             Self::OwnershipTransferred { .. } => "ownership.transferred",
+            Self::AccessDenied { .. } => "access.denied",
         }
     }
 }

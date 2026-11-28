@@ -70,6 +70,14 @@ pub enum ConfigError {
         /// The largest value accepted.
         max: u64,
     },
+    /// A `workspaces.accessDeniedEvents` value is outside its bounds.
+    #[error("workspaces.accessDeniedEvents.{option} must be an integer from 1 to {max}.")]
+    WorkspaceAccessDeniedEventsOption {
+        /// The option, as the shared contract names it.
+        option: &'static str,
+        /// The largest value accepted.
+        max: u32,
+    },
     /// `workspaces.membership_cache_ttl_seconds` is over the maximum.
     #[error(transparent)]
     WorkspaceMembershipCacheTtl(crate::workspace::membership_cache::MembershipCacheTtlTooLong),
