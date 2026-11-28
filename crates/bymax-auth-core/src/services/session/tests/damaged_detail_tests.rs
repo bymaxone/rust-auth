@@ -3,7 +3,9 @@
 //! session: the display listing omits it, the entries still name it with no detail.
 
 use std::collections::HashSet;
+use std::ops::Range;
 use std::sync::Mutex;
+use std::sync::atomic::AtomicUsize;
 
 use super::*;
 use crate::traits::{SessionDetail, SessionEntry, SessionRotation};
@@ -18,6 +20,11 @@ pub(super) struct DamagedDetails {
     damaged: Mutex<HashSet<String>>,
     listing_error: Option<ListingError>,
     revoke_error: Option<ListingError>,
+    lost: Option<String>,
+    rotating: Mutex<Option<(String, String)>>,
+    refused_listings: Range<usize>,
+    listings: AtomicUsize,
+    ownerless: bool,
 }
 
 impl DamagedDetails {
@@ -28,6 +35,11 @@ impl DamagedDetails {
             damaged: Mutex::new(damaged),
             listing_error: None,
             revoke_error: None,
+            lost: None,
+            rotating: Mutex::new(None),
+            refused_listings: 0..0,
+            listings: AtomicUsize::new(0),
+            ownerless: false,
         }
     }
 
@@ -47,6 +59,58 @@ impl DamagedDetails {
     ) -> Self {
         self.revoke_error = Some(Box::new(make));
         self
+    }
+
+    /// Make revoking `hash` find it already gone, as when a concurrent logout removed it first.
+    pub(super) fn losing(mut self, hash: &str) -> Self {
+        self.lost = Some(hash.to_owned());
+        self
+    }
+
+    /// Rotate `old` to `new` as the first family removal is asked for, which is after the cap has
+    /// listed the index and before the family is read.
+    pub(super) fn rotating_before_removal(self, old: &str, new: &str) -> Self {
+        let rotation = Some((old.to_owned(), new.to_owned()));
+        Self {
+            rotating: Mutex::new(rotation),
+            ..self
+        }
+    }
+
+    /// Refuse the entries listings whose position, counted from zero, falls in `refused`.
+    pub(super) fn refusing_listings(mut self, refused: Range<usize>) -> Self {
+        self.refused_listings = refused;
+        self
+    }
+
+    /// Remove families without pruning the index, as when its `SREM` is refused.
+    pub(super) fn leaving_members_listed(mut self) -> Self {
+        self.ownerless = true;
+        self
+    }
+
+    async fn rotate_pending(
+        &self,
+        kind: SessionKind,
+        owner_subject_hash: Option<&str>,
+    ) -> Result<(), AuthError> {
+        let pending = self.rotating.lock().ok().and_then(|mut slot| slot.take());
+        let (Some((old, new)), Some(subject_hash)) = (pending, owner_subject_hash) else {
+            return Ok(());
+        };
+        let Some(new_record) = self.inner.find_session(kind, &old).await? else {
+            return Ok(());
+        };
+        let rotation = SessionRotation {
+            old_hash: old,
+            new_hash: new,
+            new_raw: String::new(),
+            new_record,
+            subject_hash: subject_hash.to_owned(),
+            refresh_ttl: 3600,
+            grace_ttl: 60,
+        };
+        self.inner.rotate(kind, &rotation).await.map(|_| ())
     }
 
     fn is_damaged(&self, hash: &str) -> bool {
@@ -75,6 +139,10 @@ impl SessionStore for DamagedDetails {
     ) -> Result<Vec<SessionEntry>, AuthError> {
         if let Some(make) = &self.listing_error {
             return Err(make());
+        }
+        let position = self.listings.fetch_add(1, Ordering::SeqCst);
+        if self.refused_listings.contains(&position) {
+            return Err(crate::services::internal_error("listing refused"));
         }
         let all = self.inner.list_sessions(kind, subject_hash).await?;
         Ok(all
@@ -139,7 +207,11 @@ impl SessionStore for DamagedDetails {
         }
         self.inner
             .revoke_session(kind, subject_hash, session_hash)
-            .await
+            .await?;
+        if self.lost.as_deref() == Some(session_hash) {
+            return Err(AuthError::SessionNotFound);
+        }
+        Ok(())
     }
 
     async fn delete_grace_pointer(
@@ -175,10 +247,10 @@ impl SessionStore for DamagedDetails {
         kind: SessionKind,
         family_id: &str,
         owner_subject_hash: Option<&str>,
-    ) -> Result<(), AuthError> {
-        self.inner
-            .revoke_family(kind, family_id, owner_subject_hash)
-            .await
+    ) -> Result<Vec<String>, AuthError> {
+        self.rotate_pending(kind, owner_subject_hash).await?;
+        let owner = owner_subject_hash.filter(|_| !self.ownerless);
+        self.inner.revoke_family(kind, family_id, owner).await
     }
 
     async fn blacklist_access(
@@ -193,6 +265,25 @@ impl SessionStore for DamagedDetails {
 
     async fn is_blacklisted(&self, jti_or_hash: &str) -> Result<bool, AuthError> {
         self.inner.is_blacklisted(jti_or_hash).await
+    }
+
+    async fn revoke_session_access(
+        &self,
+        kind: SessionKind,
+        session_id: &str,
+        ttl_secs: u64,
+    ) -> Result<(), AuthError> {
+        self.inner
+            .revoke_session_access(kind, session_id, ttl_secs)
+            .await
+    }
+
+    async fn is_session_access_revoked(
+        &self,
+        kind: SessionKind,
+        session_id: &str,
+    ) -> Result<bool, AuthError> {
+        self.inner.is_session_access_revoked(kind, session_id).await
     }
 
     async fn current_epoch(&self, kind: SessionKind, subject_hash: &str) -> Result<u64, AuthError> {
@@ -240,6 +331,7 @@ fn damaged_service(damaged: &[&str], cap: u32) -> (SessionService, Arc<InMemoryS
         Arc::new(NoOpAuthHooks),
         config(cap, None),
         3600,
+        std::time::Duration::from_secs(900),
         zeroize::Zeroizing::new(TEST_IDENTIFIER_KEY),
     );
     (svc, inner)

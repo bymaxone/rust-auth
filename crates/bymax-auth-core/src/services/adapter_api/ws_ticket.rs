@@ -8,6 +8,7 @@ use bymax_auth_types::{AuthError, DashboardClaims, DashboardType};
 
 use super::WS_TICKET_TTL_SECONDS;
 use crate::engine::AuthEngine;
+use crate::services::session_access::is_session_ended;
 use crate::services::{is_refresh_token_shape, new_uuid_v4, now_unix};
 use crate::traits::{SessionKind, WsTicketSnapshot};
 
@@ -59,15 +60,19 @@ impl AuthEngine {
     }
 
     /// Refuses a snapshot whose minting token is revoked: no identifier to read it by, the
-    /// `rv:{jti}` blacklist (logout), or an account epoch above the ticket's (a password reset
-    /// or sign-out-everywhere). A revoked ticket gets the answer of an unknown one.
+    /// `rv:{jti}` blacklist (logout), an ended session, or an account epoch above the ticket's
+    /// (a password reset or sign-out-everywhere). A revoked ticket gets the answer of an unknown
+    /// one.
     async fn assert_ticket_session_stands(
         &self,
         snapshot: &WsTicketSnapshot,
         tenant: &str,
     ) -> Result<(), AuthError> {
-        let mut revoked =
-            snapshot.jti.is_empty() || self.session_store().is_blacklisted(&snapshot.jti).await?;
+        let store = self.session_store().as_ref();
+        let sid = snapshot.sid.as_deref();
+        let mut revoked = snapshot.jti.is_empty()
+            || store.is_blacklisted(&snapshot.jti).await?
+            || is_session_ended(store, SessionKind::Dashboard, sid).await?;
         if !revoked {
             let subject = self.session_subject(SessionKind::Dashboard, Some(tenant), &snapshot.sub);
             let current = self
@@ -166,6 +171,6 @@ fn redeemed_claims(snapshot: WsTicketSnapshot, tenant: String) -> DashboardClaim
         iat: now,
         exp,
         epoch: 0,
-        sid: None,
+        sid: snapshot.sid,
     }
 }

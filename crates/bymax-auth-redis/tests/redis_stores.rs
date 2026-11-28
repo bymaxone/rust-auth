@@ -13,12 +13,16 @@
 mod common;
 #[path = "redis_stores/email_change_record.rs"]
 mod email_change_record;
+#[path = "redis_stores/family_race.rs"]
+mod family_race;
 #[path = "redis_stores/grace_successor.rs"]
 mod grace_successor;
 #[path = "redis_stores/logout_pending.rs"]
 mod logout_pending;
 #[path = "redis_stores/otp_attempts.rs"]
 mod otp_attempts;
+#[path = "redis_stores/session_access.rs"]
+mod session_access;
 #[path = "redis_stores/session_listing.rs"]
 mod session_listing;
 
@@ -127,6 +131,7 @@ fn snapshot() -> WsTicketSnapshot {
         jti: "jti-1".into(),
         epoch: 0,
         exp: None,
+        sid: None,
     }
 }
 
@@ -619,12 +624,10 @@ async fn reuse_past_grace_is_detected_and_revoke_family_kills_the_lineage() {
 
     // Revoking the family deletes the live descendant r2, prunes it from the owner's `sess:` set,
     // and drops the family index.
-    assert!(
-        stores
-            .revoke_family(kind, "fam-fu", Some(&subject("fu")))
-            .await
-            .is_ok()
-    );
+    assert!(matches!(
+        stores.revoke_family(kind, "fam-fu", Some(&subject("fu"))).await,
+        Ok(removed) if removed == ["r2"]
+    ));
     // …and once every member is gone the family names nobody, which is the `None` the caller
     // turns into an empty index key rather than pruning a wrong one.
     assert!(matches!(
@@ -636,13 +639,11 @@ async fn reuse_past_grace_is_detected_and_revoke_family_kills_the_lineage() {
     assert_eq!(redis.ttl("auth:fam:fam-fu").await, -2);
 
     // revoke_family is idempotent: an empty and an unknown family are both no-ops.
-    assert!(stores.revoke_family(kind, "", None).await.is_ok());
-    assert!(
-        stores
-            .revoke_family(kind, "unknown-family", None)
-            .await
-            .is_ok()
-    );
+    assert!(matches!(stores.revoke_family(kind, "", None).await, Ok(none) if none.is_empty()));
+    assert!(matches!(
+        stores.revoke_family(kind, "unknown-family", None).await,
+        Ok(none) if none.is_empty()
+    ));
 }
 
 #[tokio::test]

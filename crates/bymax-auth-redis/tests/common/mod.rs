@@ -27,6 +27,11 @@ pub struct TestRedis {
 }
 
 impl TestRedis {
+    /// The URL of the running container, for a test that puts something in front of it.
+    pub fn url(&self) -> &str {
+        &self.url
+    }
+
     /// A fresh store handle over the running container, under the default namespace.
     pub fn stores(&self) -> Option<RedisStores> {
         RedisStores::connect(&self.url, NAMESPACE).ok()

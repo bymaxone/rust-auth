@@ -1,6 +1,6 @@
 -- revoke_family: revoke every live session in a refresh-token family in one transaction
--- (spec section 12.5.2). Called on reuse detection to lock out a stolen token's whole lineage:
--- every descendant of the compromised login is deleted, forcing each holder to re-authenticate.
+-- (spec section 12.5.2). Every
+-- descendant of the login is deleted, forcing each holder to re-authenticate.
 --
 -- KEYS[1] = fam:{family}     the family index SET of live session hashes (already namespaced)
 -- ARGV[1] = namespace        e.g. "auth"
@@ -16,12 +16,12 @@
 -- store crate holds. The membership is still re-read here, so a member added between the two
 -- steps is revoked too.
 --
--- Returns the number of family members that were removed. Idempotent: an unknown or empty
--- family removes nothing.
+-- Returns the hashes of the family members that were removed. Idempotent: an unknown or empty
+-- family removes nothing and returns none.
 local members = redis.call('SMEMBERS', KEYS[1])
 if #members == 0 then
     redis.call('DEL', KEYS[1])
-    return 0
+    return members
 end
 local ns, rt, sd, sess_key = ARGV[1], ARGV[2], ARGV[3], ARGV[4]
 for _, hash in ipairs(members) do
@@ -35,4 +35,4 @@ for _, hash in ipairs(members) do
     end
 end
 redis.call('DEL', KEYS[1])
-return #members
+return members

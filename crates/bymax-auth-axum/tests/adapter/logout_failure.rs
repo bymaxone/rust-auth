@@ -35,12 +35,12 @@ async fn a_failed_dashboard_logout_is_an_error_that_keeps_the_cookies_and_a_retr
     assert_eq!(error_code(&failed), "auth.internal");
     assert!(failed.set_cookies.is_empty(), "{:?}", failed.set_cookies);
 
-    // The access token still authenticates, which is the reason the failure has to be loud.
+    // The token is refused already, by the entry of its ended session.
     let me = Req::get("/auth/me")
         .cookie("access_token", &access)
         .send(&app)
         .await;
-    assert_eq!(me.status, StatusCode::OK);
+    assert_eq!(me.status, StatusCode::UNAUTHORIZED);
 
     let retried = cookie_logout(&access, &refresh).send(&app).await;
     assert_eq!(retried.status, StatusCode::NO_CONTENT);
@@ -78,7 +78,7 @@ async fn a_failed_platform_logout_is_an_error_and_a_retry_finishes_it() {
         .bearer(&access)
         .send(&app)
         .await;
-    assert_eq!(me.status, StatusCode::OK);
+    assert_eq!(me.status, StatusCode::UNAUTHORIZED);
 
     let retried = Req::post("/auth/platform/logout")
         .bearer(&access)

@@ -3,7 +3,7 @@
 
 use std::sync::Arc;
 
-use super::logout_failure_tests::{signed_in, signed_in_with};
+use super::logout_failure_tests::{blacklisted, signed_in, signed_in_with};
 use super::logout_hook_tests::LogoutSpy;
 use super::*;
 use crate::traits::LogoutOwner;
@@ -28,6 +28,9 @@ async fn announced(spy: &LogoutSpy) -> usize {
 #[tokio::test]
 async fn a_failed_attempt_leaves_the_owner_for_the_access_lifetime() {
     let Some((h, auth)) = signed_in(None).await else { unreachable!() };
+    let Ok(claims) = h.engine.tokens().verify_access(&auth.access_token).await else {
+        unreachable!()
+    };
     h.stores.fail_next_blacklist_writes(1);
     let attempt = h
         .engine
@@ -40,6 +43,7 @@ async fn a_failed_attempt_leaves_the_owner_for_the_access_lifetime() {
     let owner = LogoutOwner {
         user_id: auth.user.id.clone(),
         tenant_id: Some(auth.user.tenant_id.clone()),
+        family_id: claims.sid,
     };
     // The default access lifetime is fifteen minutes.
     assert_eq!(marker, Some((owner, 900)));
@@ -78,6 +82,7 @@ async fn a_retry_that_fails_again_leaves_the_first_marker_as_it_was() {
     let owner = LogoutOwner {
         user_id: auth.user.id.clone(),
         tenant_id: Some("t1".to_owned()),
+        family_id: None,
     };
     let store: &dyn crate::traits::SessionStore = h.stores.as_ref();
     assert!(
@@ -104,6 +109,7 @@ async fn a_completed_logout_with_a_live_session_clears_a_stale_marker_and_announ
     let owner = LogoutOwner {
         user_id: auth.user.id.clone(),
         tenant_id: None,
+        family_id: None,
     };
     let store: &dyn crate::traits::SessionStore = h.stores.as_ref();
     assert!(
@@ -128,6 +134,9 @@ async fn a_completed_logout_with_a_live_session_clears_a_stale_marker_and_announ
 #[tokio::test]
 async fn an_unreadable_marker_ends_the_retry_before_any_write() {
     let Some((h, auth, spy)) = watched().await else { unreachable!() };
+    let Ok(claims) = h.engine.tokens().verify_access(&auth.access_token).await else {
+        unreachable!()
+    };
     h.stores.fail_next_blacklist_writes(1);
     assert!(
         h.engine
@@ -142,14 +151,8 @@ async fn an_unreadable_marker_ends_the_retry_before_any_write() {
             .await
             .is_err()
     );
-    // Nothing was written by that retry: the access token is still accepted.
-    assert!(
-        h.engine
-            .tokens()
-            .verify_access(&auth.access_token)
-            .await
-            .is_ok()
-    );
+    // Nothing was written by that retry: the access token is not on the blacklist.
+    assert!(!blacklisted(&h, &claims.jti).await);
     assert!(
         h.engine
             .logout(&auth.access_token, &auth.refresh_token)

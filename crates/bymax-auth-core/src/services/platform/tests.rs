@@ -7,6 +7,7 @@ mod logout_failure_tests;
 mod logout_pending_tests;
 mod logout_tests;
 mod mfa_and_rehash_tests;
+mod session_access_tests;
 use crate::config::{AuthConfig, Environment};
 use crate::context::RequestContext;
 use crate::engine::AuthEngine;

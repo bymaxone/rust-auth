@@ -118,6 +118,7 @@ fn snapshot(tenant_id: Option<&str>, jti: &str, epoch: u64) -> WsTicketSnapshot 
         jti: jti.to_owned(),
         epoch,
         exp: None,
+        sid: None,
     }
 }
 

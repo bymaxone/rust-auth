@@ -160,7 +160,7 @@ impl SessionStore for SlowSessions {
         kind: SessionKind,
         family_id: &str,
         owner_subject_hash: Option<&str>,
-    ) -> Result<(), AuthError> {
+    ) -> Result<Vec<String>, AuthError> {
         self.inner
             .revoke_family(kind, family_id, owner_subject_hash)
             .await
@@ -178,6 +178,25 @@ impl SessionStore for SlowSessions {
 
     async fn is_blacklisted(&self, jti_or_hash: &str) -> Result<bool, AuthError> {
         self.inner.is_blacklisted(jti_or_hash).await
+    }
+
+    async fn revoke_session_access(
+        &self,
+        kind: SessionKind,
+        session_id: &str,
+        ttl_secs: u64,
+    ) -> Result<(), AuthError> {
+        self.inner
+            .revoke_session_access(kind, session_id, ttl_secs)
+            .await
+    }
+
+    async fn is_session_access_revoked(
+        &self,
+        kind: SessionKind,
+        session_id: &str,
+    ) -> Result<bool, AuthError> {
+        self.inner.is_session_access_revoked(kind, session_id).await
     }
 
     async fn current_epoch(&self, kind: SessionKind, subject_hash: &str) -> Result<u64, AuthError> {

@@ -646,6 +646,16 @@ pub struct InMemoryStores {
     /// recorded rather than discarded, and read back through [`InMemoryStores::peek_session_ttl`].
     last_session_ttl_secs: Mutex<Option<u64>>,
     blacklist: Mutex<HashSet<String>>,
+    /// The ended sessions, each with the lifetime its entry was written with.
+    ended_sessions: Mutex<HashMap<(SessionKind, String), u64>>,
+    /// Armed count of `revoke_session_access` calls that must fail, set through
+    /// [`InMemoryStores::fail_next_session_access_writes`].
+    forced_session_access_write_failures: Mutex<usize>,
+    /// Armed failures for the removal of a whole refresh-token family.
+    forced_family_removal_failures: Mutex<usize>,
+    /// Whether `is_session_access_revoked` fails, set through
+    /// [`InMemoryStores::fail_session_access_reads`].
+    forced_session_access_read_failure: Mutex<bool>,
     otps: Mutex<HashMap<(OtpPurpose, String), (String, u32)>>,
     resend: Mutex<HashSet<(OtpPurpose, String)>>,
     brute_force: Mutex<HashMap<String, (i64, u64)>>,
@@ -732,6 +742,35 @@ impl InMemoryStores {
     /// just created is already stored.
     pub fn fail_next_session_listings(&self, count: usize) {
         *lock(&self.forced_session_listing_failures) = count;
+    }
+
+    /// Make the next `count` `revoke_family` calls fail with a backend error, removing nothing.
+    pub fn fail_next_family_removals(&self, count: usize) {
+        *lock(&self.forced_family_removal_failures) = count;
+    }
+
+    /// Make the next `count` `revoke_session_access` calls fail with a backend error.
+    pub fn fail_next_session_access_writes(&self, count: usize) {
+        *lock(&self.forced_session_access_write_failures) = count;
+    }
+
+    /// Make every `is_session_access_revoked` call fail with a backend error, or stop doing so.
+    pub fn fail_session_access_reads(&self, failing: bool) {
+        *lock(&self.forced_session_access_read_failure) = failing;
+    }
+
+    /// The lifetime in seconds the entry ending this session was written with, if one was.
+    #[must_use]
+    pub fn peek_session_access_ttl(&self, kind: SessionKind, session_id: &str) -> Option<u64> {
+        lock(&self.ended_sessions)
+            .get(&(kind, session_id.to_owned()))
+            .copied()
+    }
+
+    /// How many sessions of either plane have an entry ending their access tokens.
+    #[must_use]
+    pub fn ended_session_count(&self) -> usize {
+        lock(&self.ended_sessions).len()
     }
 
     /// Make the next `count` `blacklist_access` calls fail with a backend error: the write a
@@ -1192,27 +1231,36 @@ impl SessionStore for InMemoryStores {
         kind: SessionKind,
         family_id: &str,
         owner_subject_hash: Option<&str>,
-    ) -> Result<(), AuthError> {
+    ) -> Result<Vec<String>, AuthError> {
+        {
+            let mut armed = lock(&self.forced_family_removal_failures);
+            if *armed > 0 {
+                *armed -= 1;
+                return Err(crate::services::internal_error(
+                    "forced family removal failure",
+                ));
+            }
+        }
         // Idempotent: an empty, unknown, or already-cleared family drops nothing.
         if family_id.is_empty() {
-            return Ok(());
+            return Ok(Vec::new());
         }
         let Some(hashes) = lock(&self.families).remove(&(kind, family_id.to_owned())) else {
-            return Ok(());
+            return Ok(Vec::new());
         };
         let mut sessions = lock(&self.sessions);
         let mut index = lock(&self.session_index);
-        for hash in hashes {
+        for hash in &hashes {
             // Every live descendant of the compromised login is deleted, and pruned from its
             // owner's session index (all family members share one login, so one subject).
             sessions.remove(&(kind, hash.clone()));
             if let Some(owner) = owner_subject_hash
                 && let Some(details) = index.get_mut(&(kind, owner.to_owned()))
             {
-                details.retain(|detail| detail.session_hash != hash);
+                details.retain(|detail| detail.session_hash != *hash);
             }
         }
-        Ok(())
+        Ok(hashes.into_iter().collect())
     }
 
     async fn blacklist_access(
@@ -1235,6 +1283,38 @@ impl SessionStore for InMemoryStores {
 
     async fn is_blacklisted(&self, jti_or_hash: &str) -> Result<bool, AuthError> {
         Ok(lock(&self.blacklist).contains(jti_or_hash))
+    }
+
+    async fn revoke_session_access(
+        &self,
+        kind: SessionKind,
+        session_id: &str,
+        ttl_secs: u64,
+    ) -> Result<(), AuthError> {
+        {
+            let mut armed = lock(&self.forced_session_access_write_failures);
+            if *armed > 0 {
+                *armed -= 1;
+                return Err(crate::services::internal_error(
+                    "forced session access write failure",
+                ));
+            }
+        }
+        lock(&self.ended_sessions).insert((kind, session_id.to_owned()), ttl_secs);
+        Ok(())
+    }
+
+    async fn is_session_access_revoked(
+        &self,
+        kind: SessionKind,
+        session_id: &str,
+    ) -> Result<bool, AuthError> {
+        if *lock(&self.forced_session_access_read_failure) {
+            return Err(crate::services::internal_error(
+                "forced session access read failure",
+            ));
+        }
+        Ok(lock(&self.ended_sessions).contains_key(&(kind, session_id.to_owned())))
     }
 
     async fn current_epoch(&self, kind: SessionKind, subject_hash: &str) -> Result<u64, AuthError> {
@@ -2253,12 +2333,10 @@ mod tests {
             store.find_family_owner(kind, "famA").await,
             Ok(Some(owner)) if owner.user_id == "u1"
         ));
-        assert!(
-            store
-                .revoke_family(kind, "famA", Some(&subject("u1")))
-                .await
-                .is_ok()
-        );
+        assert!(matches!(
+            store.revoke_family(kind, "famA", Some(&subject("u1"))).await,
+            Ok(removed) if removed == ["h2"]
+        ));
         assert!(matches!(store.find_session(kind, "h2").await, Ok(None)));
         assert!(matches!(store.list_sessions(kind, &subject("u1")).await, Ok(v) if v.is_empty()));
         // A family with nothing left readable names nobody rather than someone, and revoking it
@@ -2268,8 +2346,10 @@ mod tests {
             Ok(None)
         ));
         assert!(matches!(store.find_family_owner(kind, "").await, Ok(None)));
-        assert!(store.revoke_family(kind, "famA", None).await.is_ok());
-        assert!(store.revoke_family(kind, "", None).await.is_ok());
+        assert!(
+            matches!(store.revoke_family(kind, "famA", None).await, Ok(none) if none.is_empty())
+        );
+        assert!(matches!(store.revoke_family(kind, "", None).await, Ok(none) if none.is_empty()));
 
         // A member whose record carries no owner is skipped rather than reported: an event
         // naming the empty string is worse than no event, because a consumer would act on it.
@@ -2792,6 +2872,7 @@ mod tests {
             jti: "jti-1".into(),
             epoch: 0,
             exp: None,
+            sid: None,
         };
         let ticket = store.mint(&snapshot, 30).await;
         // Same shape the real store mints — 64 lower-case hex — because the engine

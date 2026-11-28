@@ -610,6 +610,7 @@ impl AuthEngineBuilder {
             hooks.clone(),
             session_config,
             refresh_ttl_secs,
+            access_ttl,
             zeroize::Zeroizing::new(*config.hmac_key()),
         ));
 

@@ -54,7 +54,7 @@ pub static SESSION_PRUNE_DEAD: LazyLock<LuaScript> =
 pub static INVALIDATE_USER_SESSIONS: LazyLock<LuaScript> =
     LazyLock::new(|| LuaScript::new(include_str!("lua/invalidate_user_sessions.lua")));
 
-/// `revoke_family` — revoke every live session in a refresh-token family on reuse detection
+/// `revoke_family` — revoke every live session in a refresh-token family
 /// (section 12.5.2).
 pub static REVOKE_FAMILY: LazyLock<LuaScript> =
     LazyLock::new(|| LuaScript::new(include_str!("lua/revoke_family.lua")));

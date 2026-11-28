@@ -87,3 +87,5 @@ pub use workspace_invitation_store::{
 };
 #[doc(inline)]
 pub use workspace_repository::WorkspaceRepository;
+
+pub(crate) use store::session_id_or_absent;

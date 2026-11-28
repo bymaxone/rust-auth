@@ -36,6 +36,7 @@ use crate::services::logout_pending::{
     marker_ttl_secs, remember_failed_attempt, resolve_owner, settle_completed,
 };
 use crate::services::password::PasswordService;
+use crate::services::session_access::end_logout_access;
 use crate::services::token_manager::TokenManagerService;
 use crate::services::{is_refresh_token_shape, note_logout_failure, now_unix, to_hex};
 use crate::traits::{
@@ -298,7 +299,8 @@ impl PlatformAuthService {
 
     /// Revoke the current platform session: blacklist the access token's `jti` for its
     /// remaining lifetime — only when the token actually verifies as a platform token — and
-    /// delete BOTH the primary refresh session and any rotation grace pointer for it.
+    /// delete BOTH the primary refresh session and any rotation grace pointer for it. The
+    /// whole sign-in ends with it: every session of its family, and their access tokens.
     ///
     /// # Errors
     ///
@@ -328,6 +330,8 @@ impl PlatformAuthService {
             self.revoke_logout_session(raw_refresh, admin_id, &mut failure)
                 .await;
         }
+        self.end_logout_sign_in(resolved.owner.as_ref(), &mut failure)
+            .await;
         if let Some(error) = failure {
             let ttl = marker_ttl_secs(self.tokens.access_ttl());
             remember_failed_attempt(store, SessionKind::Platform, hash, &resolved, ttl).await;
@@ -348,6 +352,20 @@ impl PlatformAuthService {
             ));
         }
         Ok(admin_id.to_owned())
+    }
+
+    /// End the rest of the sign-in `owner` names: every platform refresh session of its family,
+    /// then its access tokens.
+    async fn end_logout_sign_in(
+        &self,
+        owner: Option<&LogoutOwner>,
+        failure: &mut Option<AuthError>,
+    ) {
+        let subject = self.session_subject(owner.map_or("", |owner| owner.user_id.as_str()));
+        let store = self.session_store.as_ref();
+        let ttl = self.tokens.access_ttl();
+        let ended = end_logout_access(store, SessionKind::Platform, owner, &subject, ttl).await;
+        note_logout_failure(failure, "logout: session access revocation failed", ended);
     }
 
     /// The admin the live platform refresh session names, or `None` when the session is gone.
@@ -375,6 +393,7 @@ impl PlatformAuthService {
         Ok(found.map(|record| LogoutOwner {
             user_id: record.user_id,
             tenant_id: None,
+            family_id: crate::services::session_id(&record.family_id).map(str::to_owned),
         }))
     }
 

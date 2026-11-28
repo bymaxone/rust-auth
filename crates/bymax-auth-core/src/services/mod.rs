@@ -62,6 +62,7 @@ mod reauthentication;
 #[cfg(test)]
 mod recent_auth_tests;
 pub mod session;
+mod session_access;
 mod tenant_binding;
 pub mod token_manager;
 mod verifier;

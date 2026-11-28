@@ -246,6 +246,7 @@ fn every_record_encoding_is_read_or_pending() {
                 "invitationIndex",
                 "wsTicket",
                 "logoutPending",
+                "sessionRevocation",
                 "passwordResetContext",
                 "oauthState",
                 "emailChangeContext",

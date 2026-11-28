@@ -27,6 +27,8 @@ const GRACE_TAG: &str = "GRACE:";
 /// consumed token past its grace window), carrying the compromised family id. Matches the
 /// literal in `lua/refresh_rotate.lua`.
 const REUSED_TAG: &str = "REUSED:";
+/// How many times a family is read while no member read has a record naming an owner.
+const OWNER_READS: usize = 3;
 
 /// The stored `sd:`/`psd:` per-session detail value. The `session_hash` lives in the key, so
 /// it is absent here; the field set is byte-identical to nest-auth.
@@ -129,6 +131,14 @@ pub(super) fn kind_prefixes(kind: SessionKind) -> KindPrefixes {
             sess: Prefix::Psess,
             sd: Prefix::Psd,
         },
+    }
+}
+
+/// The prefix of the entry that ends the access tokens of one session, by plane.
+fn session_revocation_prefix(kind: SessionKind) -> Prefix {
+    match kind {
+        SessionKind::Dashboard => Prefix::Rvs,
+        SessionKind::Platform => Prefix::Prvs,
     }
 }
 
@@ -412,16 +422,16 @@ impl RedisStores {
     /// The owner's index key is supplied by the caller rather than derived here: it is
     /// `{sess|psess}:{hmac_sha256(identifier_key, user_subject)}`, and this crate deliberately
     /// holds no hashing key. An empty `ARGV[4]` tells the script there is no index to prune,
-    /// which is what an unreadable owner means — every descendant has already expired.
+    /// which is what an unknown owner means: no read of the family found a record naming one.
     async fn revoke_family_inner(
         &self,
         kind: SessionKind,
         family_id: &str,
         owner_subject_hash: Option<&str>,
-    ) -> Result<(), RedisStoreError> {
+    ) -> Result<Vec<String>, RedisStoreError> {
         // An empty family id has no index key; nothing to revoke.
         if family_id.is_empty() {
-            return Ok(());
+            return Ok(Vec::new());
         }
         let prefixes = kind_prefixes(kind);
         let keys = self.keys();
@@ -429,21 +439,32 @@ impl RedisStores {
         let owner_index =
             owner_subject_hash.map_or_else(String::new, |hash| keys.key(prefixes.sess, hash));
         let mut conn = self.connection().await?;
-        script::REVOKE_FAMILY
+        // A member that rotates between this read and the script leaves the set under a new
+        // hash, so a caller counting the old one has to be told both.
+        let mut family: Vec<String> = conn.smembers(&fam_key).await?;
+        let removed = script::REVOKE_FAMILY
             .prepare()
             .key(&fam_key)
             .arg(keys.namespace())
             .arg(prefixes.rt.as_str())
             .arg(prefixes.sd.as_str())
             .arg(&owner_index)
-            .invoke_async::<i64>(&mut conn)
+            .invoke_async::<Vec<String>>(&mut conn)
             .await?;
-        Ok(())
+        for hash in removed {
+            if !family.contains(&hash) {
+                family.push(hash);
+            }
+        }
+        Ok(family)
     }
 
-    /// The record of any one live member of a family, or `None` when no member record is
-    /// readable — every member may have already expired, in which case there is no index left
-    /// to prune and nobody left to name.
+    /// The record of any one live member of a family, or `None` when no read of the family finds
+    /// a readable member record.
+    ///
+    /// A rotation deletes the record of the member it replaces, so one that lands between the read
+    /// of the set and the read of its records can leave none to name the owner: the set is read
+    /// again, up to [`OWNER_READS`] times.
     ///
     /// The whole record rather than the id alone: the caller needs the `tenant_id` too, because
     /// the session index it prunes is keyed by the tenant-scoped subject and an id on its own no
@@ -459,15 +480,18 @@ impl RedisStores {
         let prefixes = kind_prefixes(kind);
         let keys = self.keys();
         let mut conn = self.connection().await?;
-        let members: Vec<String> = conn.smembers(keys.key(prefixes.fam, family_id)).await?;
-        for hash in &members {
-            let raw: Option<String> = conn.get(keys.key(prefixes.rt, hash)).await?;
-            let Some(raw) = raw else { continue };
-            let Ok(record) = serde_json::from_str::<SessionRecord>(&raw) else {
-                continue;
-            };
-            if !record.user_id.is_empty() {
-                return Ok(Some(record));
+        let family = keys.key(prefixes.fam, family_id);
+        for _ in 0..OWNER_READS {
+            let members: Vec<String> = conn.smembers(&family).await?;
+            for hash in &members {
+                let raw: Option<String> = conn.get(keys.key(prefixes.rt, hash)).await?;
+                let Some(raw) = raw else { continue };
+                let Ok(record) = serde_json::from_str::<SessionRecord>(&raw) else {
+                    continue;
+                };
+                if !record.user_id.is_empty() {
+                    return Ok(Some(record));
+                }
             }
         }
         Ok(None)
@@ -669,6 +693,31 @@ impl RedisStores {
         conn.set_ex::<_, _, ()>(&key, "1", remaining_ttl_secs)
             .await?;
         Ok(())
+    }
+
+    /// Write the entry that refuses every access token of one session.
+    async fn revoke_session_access_inner(
+        &self,
+        kind: SessionKind,
+        session_id: &str,
+        ttl_secs: u64,
+    ) -> Result<(), RedisStoreError> {
+        let key = self.keys().key(session_revocation_prefix(kind), session_id);
+        let mut conn = self.connection().await?;
+        conn.set_ex::<_, _, ()>(&key, "1", ttl_secs).await?;
+        Ok(())
+    }
+
+    /// Whether the entry of this session exists.
+    async fn is_session_access_revoked_inner(
+        &self,
+        kind: SessionKind,
+        session_id: &str,
+    ) -> Result<bool, RedisStoreError> {
+        let key = self.keys().key(session_revocation_prefix(kind), session_id);
+        let mut conn = self.connection().await?;
+        let present: bool = conn.exists(&key).await?;
+        Ok(present)
     }
 
     /// Whether an access `jti`/JWT hash is on the `rv:` blacklist.
@@ -936,7 +985,7 @@ impl SessionStore for RedisStores {
         kind: SessionKind,
         family_id: &str,
         owner_subject_hash: Option<&str>,
-    ) -> Result<(), AuthError> {
+    ) -> Result<Vec<String>, AuthError> {
         self.revoke_family_inner(kind, family_id, owner_subject_hash)
             .await
             .map_err(AuthError::from)
@@ -954,6 +1003,27 @@ impl SessionStore for RedisStores {
 
     async fn is_blacklisted(&self, jti_or_hash: &str) -> Result<bool, AuthError> {
         self.is_blacklisted_inner(jti_or_hash)
+            .await
+            .map_err(AuthError::from)
+    }
+
+    async fn revoke_session_access(
+        &self,
+        kind: SessionKind,
+        session_id: &str,
+        ttl_secs: u64,
+    ) -> Result<(), AuthError> {
+        self.revoke_session_access_inner(kind, session_id, ttl_secs)
+            .await
+            .map_err(AuthError::from)
+    }
+
+    async fn is_session_access_revoked(
+        &self,
+        kind: SessionKind,
+        session_id: &str,
+    ) -> Result<bool, AuthError> {
+        self.is_session_access_revoked_inner(kind, session_id)
             .await
             .map_err(AuthError::from)
     }

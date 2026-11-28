@@ -202,6 +202,7 @@ async fn a_store_that_keeps_no_logout_marker_stores_reads_and_claims_nothing() {
     let owner = crate::traits::LogoutOwner {
         user_id: "u1".to_owned(),
         tenant_id: None,
+        family_id: None,
     };
     let store = super::FailingRevokeStore;
     let put = store

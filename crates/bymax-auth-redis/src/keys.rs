@@ -28,6 +28,10 @@ pub enum Prefix {
     Rt,
     /// Access-JWT revocation blacklist (`rv`).
     Rv,
+    /// Entry that ends the access tokens of one dashboard session (`rvs`), suffixed by its `sid`.
+    Rvs,
+    /// Entry that ends the access tokens of one platform session (`prvs`), suffixed by its `sid`.
+    Prvs,
     /// Dashboard per-account token epoch / generation counter (`ep`).
     ///
     /// Suffixed by `hmac_sha256(hmacKey, userSubject)`, not by a user id: an epoch on the bare
@@ -160,6 +164,8 @@ impl Prefix {
         match self {
             Self::Rt => "rt",
             Self::Rv => "rv",
+            Self::Rvs => "rvs",
+            Self::Prvs => "prvs",
             Self::Ep => "ep",
             Self::Pep => "pep",
             Self::Rp => "rp",
@@ -278,7 +284,7 @@ mod tests {
     }
 
     /// Every name `redisKeyPrefixes` carries and the prefix this crate writes for it.
-    fn modelled_prefixes() -> [(&'static str, Prefix); 44] {
+    fn modelled_prefixes() -> [(&'static str, Prefix); 46] {
         [
             ("dashboardRefreshSession", Prefix::Rt),
             ("dashboardGracePointer", Prefix::Rp),
@@ -297,6 +303,8 @@ mod tests {
             ("platformSessionDetail", Prefix::Psd),
             ("platformTokenEpoch", Prefix::Pep),
             ("accessTokenBlacklist", Prefix::Rv),
+            ("dashboardSessionRevocation", Prefix::Rvs),
+            ("platformSessionRevocation", Prefix::Prvs),
             ("failedLoginCounter", Prefix::Lf),
             ("oneTimePassword", Prefix::Otp),
             ("otpResendCooldown", Prefix::Resend),

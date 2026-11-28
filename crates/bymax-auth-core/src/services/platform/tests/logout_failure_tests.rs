@@ -17,10 +17,20 @@ async fn signed_in() -> Option<(PlatformHarness, bymax_auth_types::PlatformAuthR
     Some((h, *auth))
 }
 
+/// Whether the token `jti` is on the blacklist.
+pub(super) async fn blacklisted(h: &PlatformHarness, jti: &str) -> bool {
+    let store: &dyn crate::traits::SessionStore = h.stores.as_ref();
+    matches!(store.is_blacklisted(jti).await, Ok(true))
+}
+
 #[tokio::test]
 async fn a_refused_blacklist_write_fails_the_logout_and_a_retry_finishes_it() {
     let Some((h, auth)) = signed_in().await else { unreachable!() };
     let Some(svc) = h.engine.platform_auth() else { unreachable!() };
+    let tokens = h.engine.tokens();
+    let Ok(claims) = tokens.verify_platform_access(&auth.access_token).await else {
+        unreachable!()
+    };
 
     h.stores.fail_next_blacklist_writes(1);
     let outcome = svc.logout(&auth.access_token, &auth.refresh_token).await;
@@ -29,16 +39,10 @@ async fn a_refused_blacklist_write_fails_the_logout_and_a_retry_finishes_it() {
         "{outcome:?}"
     );
 
-    // The refresh session was still revoked, and the access token still authenticates.
+    // The refresh session was still revoked; the token itself is not on the blacklist.
     let rotated = svc.refresh(&auth.refresh_token, "1.2.3.4", "agent").await;
     assert!(matches!(rotated, Err(AuthError::RefreshTokenInvalid)));
-    let tokens = h.engine.tokens();
-    assert!(
-        tokens
-            .verify_platform_access(&auth.access_token)
-            .await
-            .is_ok()
-    );
+    assert!(!blacklisted(&h, &claims.jti).await);
 
     // The retry finishes the blacklist write.
     assert!(
@@ -46,6 +50,7 @@ async fn a_refused_blacklist_write_fails_the_logout_and_a_retry_finishes_it() {
             .await
             .is_ok()
     );
+    assert!(blacklisted(&h, &claims.jti).await);
     let after = tokens.verify_platform_access(&auth.access_token).await;
     assert!(matches!(after, Err(AuthError::TokenRevoked)));
 }
