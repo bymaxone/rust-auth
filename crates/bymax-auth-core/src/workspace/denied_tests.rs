@@ -138,7 +138,10 @@ impl World {
             accepted: &owners,
             allow_pending: false,
         };
-        let answer = self.engine.authorize_workspace("t1", user, request).await;
+        let answer = self
+            .engine
+            .authorize_workspace("t1", user, None, request)
+            .await;
         settle().await;
         answer.map(drop)
     }
@@ -302,7 +305,7 @@ async fn an_admitted_caller_and_a_request_refused_before_the_decision_touch_noth
     };
     let answer = world
         .engine
-        .authorize_workspace("t1", "owner", request)
+        .authorize_workspace("t1", "owner", None, request)
         .await;
     assert!(matches!(answer, Err(AuthError::Forbidden)));
     settle().await;
