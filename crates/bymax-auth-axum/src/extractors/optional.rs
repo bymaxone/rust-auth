@@ -81,7 +81,7 @@ mod tests {
     }
 
     #[test]
-    fn only_a_missing_token_degrades_to_none_and_every_other_failure_is_the_rejection() {
+    fn only_a_missing_token_degrades_to_none_and_other_failures_keep_their_variant() {
         assert!(matches!(degrade(Err(AuthError::TokenMissing)), Ok(None)));
         for error in [
             AuthError::TokenInvalid,
@@ -90,9 +90,10 @@ mod tests {
             AuthError::ServiceUnavailable("store unavailable".into()),
             AuthError::Internal("defect".into()),
         ] {
+            let sent = std::mem::discriminant(&error);
             let rejected = degrade(Err(error));
             assert!(
-                matches!(rejected, Err(AuthRejection(_))),
+                matches!(&rejected, Err(AuthRejection(kept)) if std::mem::discriminant(kept) == sent),
                 "got {rejected:?}"
             );
         }
