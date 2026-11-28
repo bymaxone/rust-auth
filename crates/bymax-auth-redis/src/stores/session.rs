@@ -437,6 +437,9 @@ impl RedisStores {
         let owner_index =
             owner_subject_hash.map_or_else(String::new, |hash| keys.key(prefixes.sess, hash));
         let mut conn = self.connection().await?;
+        // A member that rotates between this read and the script leaves the set under a new
+        // hash, so a caller counting the old one has to be told both.
+        let mut family: Vec<String> = conn.smembers(&fam_key).await?;
         let removed = script::REVOKE_FAMILY
             .prepare()
             .key(&fam_key)
@@ -446,7 +449,12 @@ impl RedisStores {
             .arg(&owner_index)
             .invoke_async::<Vec<String>>(&mut conn)
             .await?;
-        Ok(removed)
+        for hash in removed {
+            if !family.contains(&hash) {
+                family.push(hash);
+            }
+        }
+        Ok(family)
     }
 
     /// The record of any one live member of a family, or `None` when no member record is

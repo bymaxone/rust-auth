@@ -705,7 +705,8 @@ pub trait SessionStore: Send + Sync {
     /// reuse-detection ([`RotateOutcome::Reused`]) to lock out a stolen token's whole chain, and
     /// when one session of a sign-in is ended (a logout, an eviction, a single revocation), which
     /// ends the whole sign-in. Once it returns, no session of the family may rotate or be
-    /// recovered. Returns the hashes of the members it removed. Idempotent: an unknown or
+    /// recovered. Returns each hash it removed, and each it saw in the family before removing it,
+    /// once: a member that rotates meanwhile is named under both. Idempotent: an unknown or
     /// already-cleared family is a no-op that returns none.
     ///
     /// `owner_subject_hash` names the session index to prune each revoked member from, and is

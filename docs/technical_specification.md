@@ -5303,6 +5303,7 @@ Kills every live session of one family in one transaction, forcing each holder t
 - **ARGV** — `[1]` namespace, `[2]` live prefix (`rt`/`prt`), `[3]` detail prefix (`sd`/`psd`), `[4]` the owner's session-index key, already namespaced, or `''` when no member record was readable.
 - **Contract:** `SMEMBERS KEYS[1]`; if empty → `DEL KEYS[1]`, return the empty list. Otherwise, for each member hash: `DEL {ns}:{rt}:{hash}`, `DEL {ns}:{sd}:{hash}`, and — when an owner index was supplied — `SREM {ownerIndex} {rt}:{hash}` (the index stores full key **suffixes**, so pruning the bare hash would leave the revoked session listed until the index expired). Finally `DEL KEYS[1]`; return the member hashes.
 - **Owner resolution:** every member of one family descends from the same login, so the caller reads the first readable member record and passes the owner's index key in. That keeps the script free of `cjson`; the membership is still re-read inside the script, so a member added between the two steps is revoked too.
+- **Rust mapping:** the store reads the set before the script and returns that read together with the script's list, each hash once: a member that rotates in between is named under both.
 
 #### 12.5.3 `session_revoke` — ownership-checked single revoke
 

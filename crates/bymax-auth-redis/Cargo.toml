@@ -64,7 +64,7 @@ rustdoc-args = ["--cfg", "docsrs"]
 testcontainers = { version = "0.27", default-features = false }
 testcontainers-modules = { version = "0.15", default-features = false, features = ["redis"] }
 # The async test runtime for the integration tests.
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "net", "io-util"] }
 # The in-memory repository + a real `AuthEngine` for the end-to-end flow test against Redis.
 bymax-auth-core = { workspace = true, features = ["testing"] }
 # Recomputing a refresh token's `sha256` hash to assert the persisted session in the
